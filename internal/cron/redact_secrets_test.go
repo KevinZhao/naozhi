@@ -5,58 +5,69 @@ import (
 	"testing"
 )
 
-// TestRedactSecretsInResult_Patterns verifies each well-known secret-prefix
-// gets swapped for [REDACTED] while surrounding text stays intact.
-// R234-SEC-7 (#1006).
-func TestRedactSecretsInResult_Patterns(t *testing.T) {
+// The pure secret-redactor table tests now live in internal/textutil
+// (secrets_test.go) since the scan logic moved there in
+// R20260602-091302-ARCH-1 (#1571). What remains here is the cron-specific
+// integration coverage: the scheduler sanitise paths must scrub secrets
+// before persistence / WS broadcast / log-injection passes.
+
+// TestRedactSecretsInResult_R20260602SEC4 verifies the four prefixes added in
+// R20260602-SEC-4: Databricks (dapi), HCP Vault (hvs.), Stripe live
+// (sk_live_), and Stripe test (sk_test_). Also confirms short tails below
+// minTail are left intact, and that the fast-path mayContainSecretPrefix
+// recognises the new 'd' first byte.
+func TestRedactSecretsInResult_R20260602SEC4(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
 		want string
 	}{
 		{
-			name: "Anthropic API key",
-			in:   "found token sk-ant-api03-abcDEF123_xyz-456 trailing",
-			want: "found token [REDACTED] trailing",
+			name: "Databricks PAT",
+			in:   "token dapi1234567890abcdef1234567890ab done",
+			want: "token [REDACTED] done",
 		},
 		{
-			name: "GitHub PAT",
-			in:   "git remote: ghp_abcdef0123456789 access denied",
-			want: "git remote: [REDACTED] access denied",
+			name: "Databricks short tail not redacted",
+			in:   "see dapishort for details",
+			want: "see dapishort for details",
 		},
 		{
-			name: "GitHub OAuth",
-			in:   "header X-Token: gho_qrstuv0123456789",
-			want: "header X-Token: [REDACTED]",
+			name: "HCP Vault service token",
+			in:   "auth hvs.AAAAABBBBBCCCCCDDDDDEEEEEFFFFFF1234 ok",
+			want: "auth [REDACTED] ok",
 		},
 		{
-			name: "AWS access key",
-			in:   "key=AKIAIOSFODNN7EXAMPLE region=us-east-1",
-			want: "key=[REDACTED] region=us-east-1",
+			name: "HCP Vault short tail not redacted",
+			in:   "see hvs.short here",
+			want: "see hvs.short here",
 		},
 		{
-			name: "AWS STS access key",
-			in:   "ASIAQRSTUVWXYZ012345 used by role",
-			want: "[REDACTED] used by role",
+			name: "Stripe live key",
+			in:   "STRIPE_SECRET_KEY=sk_live_abcdefghij0123456789 used",
+			want: "STRIPE_SECRET_KEY=[REDACTED] used",
 		},
 		{
-			name: "GitLab PAT",
-			in:   "token=glpat-abcdefghij0123456789 push",
-			want: "token=[REDACTED] push",
+			name: "Stripe test key",
+			in:   "STRIPE_TEST_KEY=sk_test_abcdefghij0123456789 used",
+			want: "STRIPE_TEST_KEY=[REDACTED] used",
 		},
 		{
-			name: "Slack bot",
-			in:   "secret xoxb-1234567890-abcdefghij and",
-			want: "secret [REDACTED] and",
+			name: "Stripe key short tail not redacted",
+			in:   "sk_live_short is not a key",
+			want: "sk_live_short is not a key",
 		},
 		{
-			name: "multiple in one line",
-			in:   "ghp_abcdef0123456789 and AKIAIOSFODNN7EXAMPLE",
-			want: "[REDACTED] and [REDACTED]",
+			name: "dapi first-byte fast-path detected",
+			in:   "dapi1234567890abcdef1234567890ab",
+			want: "[REDACTED]",
 		},
 	}
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := redactSecretsInResult(tc.in)
 			if got != tc.want {
 				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
@@ -65,43 +76,77 @@ func TestRedactSecretsInResult_Patterns(t *testing.T) {
 	}
 }
 
-// TestRedactSecretsInResult_Negative ensures benign Claude output is
-// returned aliased (no allocation, no spurious matches). R234-SEC-7
-// (#1006).
-func TestRedactSecretsInResult_Negative(t *testing.T) {
-	cases := []string{
-		"",
-		"plain ascii output",
-		"日本語のテキスト出力", // unicode w/o secrets
-		"go test ./...",
-		"writing to disk",
-		// Short literals that are NOT secrets — minTail floor blocks
-		// these so doc/help text mentioning the prefix is not corrupted.
-		"the prefix sk-ant- is reserved",
-		"see ghp_ for personal access tokens",
-		"AKIA is the AWS marker",
+// TestRedactSecretsInResult_StripeRestrictedKey verifies that Stripe restricted
+// keys (rk_live_/rk_test_) are scrubbed by RedactSecrets. These keys can
+// initiate Stripe API calls and are equally sensitive to secret keys.
+// [R164029-SEC-5].
+func TestRedactSecretsInResult_StripeRestrictedKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "Stripe restricted live key",
+			in:   "STRIPE_KEY=rk_live_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe restricted test key",
+			in:   "STRIPE_KEY=rk_test_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "rk_live_ short tail not redacted",
+			in:   "rk_live_short is not a key",
+			want: "rk_live_short is not a key",
+		},
+		{
+			name: "rk_test_ short tail not redacted",
+			in:   "rk_test_short is not a key",
+			want: "rk_test_short is not a key",
+		},
+		{
+			name: "rk_live_ first-byte fast-path detected",
+			in:   "rk_live_abcdefghij0123456789",
+			want: "[REDACTED]",
+		},
+		{
+			name: "rk_ alongside sk_live_ in one line",
+			in:   "live=sk_live_abcdefghij0123456789 restricted=rk_live_abcdefghij0123456789",
+			want: "live=[REDACTED] restricted=[REDACTED]",
+		},
 	}
-	for _, in := range cases {
-		got := redactSecretsInResult(in)
-		if got != in {
-			t.Errorf("redactSecretsInResult(%q) altered benign input → %q", in, got)
-		}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
-// TestRedactSecretsInResult_Idempotent confirms re-running the redactor on
-// already-scrubbed output is a no-op so finishRun's persistence pipeline
-// (sanitiseRunResult → file write → re-read → re-sanitise) cannot drift.
-// R234-SEC-7 (#1006).
-func TestRedactSecretsInResult_Idempotent(t *testing.T) {
-	src := "leaked sk-ant-api03-abcdef0123456789 inside ghp_abcdef0123456789 mid-line"
-	once := redactSecretsInResult(src)
-	twice := redactSecretsInResult(once)
-	if once != twice {
-		t.Fatalf("not idempotent:\n  once  = %q\n  twice = %q", once, twice)
+// TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
+// error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
+// leaked token in an error string (LastError) never lands on disk or the
+// dashboard WS broadcast. [R20260531-SEC-8].
+func TestSanitiseRunErrMsg_RedactsSecrets(t *testing.T) {
+	cases := []string{
+		"exec failed: auth header sk-ant-api03-abcdef0123456789 rejected",
+		"git push denied with ghp_abcdef0123456789 token",
 	}
-	if strings.Contains(once, "sk-ant-") || strings.Contains(once, "ghp_") {
-		t.Fatalf("redactor left a known prefix intact: %q", once)
+	for _, in := range cases {
+		got := sanitiseRunErrMsg(in)
+		if strings.Contains(got, "sk-ant-") || strings.Contains(got, "ghp_") {
+			t.Errorf("sanitiseRunErrMsg left token intact for %q → %q", in, got)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("sanitiseRunErrMsg did not insert [REDACTED] for %q → %q", in, got)
+		}
 	}
 }
 
@@ -117,5 +162,14 @@ func TestSanitiseRunResult_RedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(got, "[REDACTED]") {
 		t.Errorf("sanitiseRunResult did not insert [REDACTED]: %q", got)
+	}
+}
+
+// TestRedactSecrets_AliasDelegates confirms the deprecated cron.RedactSecrets
+// alias still scrubs (it now delegates to textutil.RedactSecrets). #1571.
+func TestRedactSecrets_AliasDelegates(t *testing.T) {
+	got := RedactSecrets("token sk-ant-api03-abcdef0123456789 here")
+	if got != "token [REDACTED] here" {
+		t.Errorf("cron.RedactSecrets alias diverged: %q", got)
 	}
 }

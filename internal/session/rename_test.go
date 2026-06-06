@@ -25,9 +25,9 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	s.lastActive.Store(time.Now().UnixNano())
 
 	r.mu.Lock()
-	r.sessions[oldKey] = s
+	r.ss.sessions[oldKey] = s
 	r.indexAdd(oldKey)
-	r.sessionIDToKey["sess-promote-1"] = oldKey
+	r.ss.idToKey["sess-promote-1"] = oldKey
 	r.mu.Unlock()
 
 	if !r.RenameSession(oldKey, newKey) {
@@ -54,7 +54,7 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	}
 	// Reverse index must point at the new key.
 	r.mu.RLock()
-	idxKey := r.sessionIDToKey["sess-promote-1"]
+	idxKey := r.ss.idToKey["sess-promote-1"]
 	r.mu.RUnlock()
 	if idxKey != newKey {
 		t.Errorf("sessionIDToKey = %q, want %q", idxKey, newKey)
@@ -76,8 +76,8 @@ func TestRenameSession_CollisionRefused(t *testing.T) {
 	const newKey = "feishu:direct:alice:general"
 
 	r.mu.Lock()
-	r.sessions[oldKey] = &ManagedSession{key: oldKey}
-	r.sessions[newKey] = &ManagedSession{key: newKey}
+	r.ss.sessions[oldKey] = &ManagedSession{key: oldKey}
+	r.ss.sessions[newKey] = &ManagedSession{key: newKey}
 	r.indexAdd(oldKey)
 	r.indexAdd(newKey)
 	r.mu.Unlock()
@@ -104,7 +104,7 @@ func TestRenameSession_InvalidNewKey(t *testing.T) {
 	const oldKey = "scratch:abc:general:general"
 
 	r.mu.Lock()
-	r.sessions[oldKey] = &ManagedSession{key: oldKey}
+	r.ss.sessions[oldKey] = &ManagedSession{key: oldKey}
 	r.indexAdd(oldKey)
 	r.mu.Unlock()
 
@@ -131,9 +131,9 @@ func TestRenameSession_PreservesCreatedAt(t *testing.T) {
 	s.lastActive.Store(stamp + int64(time.Hour))
 
 	r.mu.Lock()
-	r.sessions[oldKey] = s
+	r.ss.sessions[oldKey] = s
 	r.indexAdd(oldKey)
-	r.sessionIDToKey["sess-rename-ca"] = oldKey
+	r.ss.idToKey["sess-rename-ca"] = oldKey
 	r.mu.Unlock()
 
 	if !r.RenameSession(oldKey, newKey) {
@@ -164,9 +164,9 @@ func TestRenameSession_StampsCreatedAtWhenSourceUnstamped(t *testing.T) {
 	// createdAt left at 0 to simulate the pre-feature pathological case.
 
 	r.mu.Lock()
-	r.sessions[oldKey] = s
+	r.ss.sessions[oldKey] = s
 	r.indexAdd(oldKey)
-	r.sessionIDToKey["sess-rename-zero"] = oldKey
+	r.ss.idToKey["sess-rename-zero"] = oldKey
 	r.mu.Unlock()
 
 	before := time.Now().UnixNano()

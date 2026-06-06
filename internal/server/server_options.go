@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
@@ -102,6 +103,15 @@ type ServerOptions struct {
 	// profile, then flip it back. R244-SEC-P3-1 [REPEAT-3].
 	DebugMode bool
 
+	// Headless declares that this Server is wired without a dashboard Hub on
+	// purpose (test harnesses, headless tools that drive the send path
+	// directly). It makes the nil-hub send fallback an explicit mode rather
+	// than something inferred from `s.hub == nil`: with Headless=false (the
+	// production default) Server.sendWithBroadcast fails loud when the hub is
+	// missing, so a wiring regression panics at the send site instead of
+	// silently routing through the no-broadcast fallback. R248-ARCH-9 (#379).
+	Headless bool
+
 	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (R237-SEC-5,
 	// #646). When false (default) requests for that pseudo-project fall
 	// through to the regular "project not found" surface — closes the
@@ -110,7 +120,24 @@ type ServerOptions struct {
 	// flip it on via `server.public_tmp_enabled: true` in config.yaml so
 	// chat-mentioned /tmp/... paths still resolve without first
 	// registering /tmp as a real project.
+	//
+	// SECURITY (R20260603-SEC-4, #1678): MUST stay false on any shared or
+	// multi-operator deployment, and on any deployment where the dashboard
+	// token is shared between people. When enabled, every authenticated
+	// dashboard user can read non-credential files anywhere under /tmp —
+	// other users' editor swap files, build artefacts, etc. (the credential
+	// allowlist and foreign-private-UID gate block secrets/sockets, but not
+	// general /tmp content). Access to publicTmpProject files is now audit-
+	// logged (slog.Info "public_tmp file access" with path/mode/remote_addr)
+	// so an operator can reconstruct reads after the fact.
 	PublicTmpEnabled bool
+
+	// ProjectStableKeyEnabled toggles the per-project StableKey field in the
+	// /api/projects list response (RFC docs/rfc/project-stable-session-key.md
+	// §4.2). When false the field is omitted and the dashboard falls back to
+	// the legacy timestamp-key path for "continue". Wired from
+	// cfg.Session.ProjectStableKey.ResolvedEnabled(true).
+	ProjectStableKeyEnabled bool
 
 	// === Core dependencies (previously positional args of New) ===
 	//
@@ -141,4 +168,31 @@ type ServerOptions struct {
 	// the user's "recent sessions" list. Empty disables the filter
 	// (matches the behaviour when sysession is disabled). R245-ARCH.
 	SysWorkDir string
+
+	// Logger is the component logger the Server derives all of its
+	// structured logging from. When nil the Server falls back to
+	// slog.Default() so existing callers (and the slog.SetDefault contract
+	// in cmd/naozhi/main.go) keep working unchanged. Injecting a logger
+	// here is the first concrete step of R247-ARCH-4 (#620): packages take
+	// a *slog.Logger in their constructor and derive a component-scoped
+	// child via slog.With("component", ...) instead of reading the process
+	// global directly, which is what blocks t.Parallel across tests that
+	// swap the default. SetDefault stays in main only for legacy callers.
+	Logger *slog.Logger
+
+	// === Image auto-orientation (docs: image_orient config) ===
+	//
+	// ImageOrientEnabled gates the feature. When true AND ImageOrientRunner
+	// is non-nil, POST /api/sessions/orient asks a vision model which way is
+	// up and the backend rotates the stored upload before send. Default
+	// false leaves the endpoint a benign no-op (returns rotated:false).
+	ImageOrientEnabled bool
+	// ImageOrientModel overrides --model on the side vision call. Empty uses
+	// the CLI's default Haiku-class model. Vendor-neutral; validated by
+	// config.validateModelString before reaching here.
+	ImageOrientModel string
+	// ImageOrientRunner is the image-capable one-off runner (a
+	// sysession.VisionRunner). nil disables the feature regardless of the
+	// Enabled flag — the endpoint stays a no-op.
+	ImageOrientRunner VisionOrienter
 }

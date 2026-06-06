@@ -16,13 +16,14 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/cronview"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -189,8 +190,8 @@ type nodeStatusEntry struct {
 // before. R226-PERF-7.
 type sessionListLocalResp struct {
 	Sessions        []sessionpkg.SessionSnapshot `json:"sessions"`
-	Stats           sessionStats              `json:"stats"`
-	HistorySessions []discovery.RecentSession `json:"history_sessions,omitempty"`
+	Stats           sessionStats                 `json:"stats"`
+	HistorySessions []discovery.RecentSession    `json:"history_sessions,omitempty"`
 }
 
 // sessionListMultiResp is the /api/sessions response shape for multi-node
@@ -282,18 +283,19 @@ func isUnknownRPCMethodErr(err error) bool {
 // `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
 // ambiguity is documented here so a future caller doesn't accidentally
 // add a bug-prone reason-by-deduction branch over the bool.
-type CronView interface {
-	EnsureStub(key string) bool
-	SetJobPrompt(jobID, prompt string) error
-	KnownSessionIDs() map[string]bool
-}
+//
+// R20260531070014-ARCH-2 (#1536): the interface body was byte-identical to
+// internal/server/cronview.go. Both now alias the single canonical
+// definition in the leaf package internal/dashboard/cronview, so the shape
+// can no longer drift between the two consumers.
+type CronView = cronview.CronView
 
 // historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
 // constructs each scan.  Snapshots the cron-known set + sys workspace
 // once per call so the in-loop predicate is O(1) per session.
 type historyFilter struct {
-	skipWorkspace string          // sys-sessions absolute path; "" disables
-	skipSessions  map[string]bool // cron known IDs; nil disables
+	skipWorkspace string              // sys-sessions absolute path; "" disables
+	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY: shared cache snapshot (#1544).
 }
 
 func (f historyFilter) SkipWorkspace(ws string) bool {
@@ -301,7 +303,11 @@ func (f historyFilter) SkipWorkspace(ws string) bool {
 }
 
 func (f historyFilter) SkipSessionID(sid string) bool {
-	return f.skipSessions != nil && f.skipSessions[sid]
+	if f.skipSessions == nil {
+		return false
+	}
+	_, ok := f.skipSessions[sid]
+	return ok
 }
 
 // Handlers groups the session list, events, delete, and resume API endpoints.
@@ -1036,11 +1042,32 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			// miss events it just streamed through.
 			entries = entries[len(entries)-limit:]
 		}
-	case beforeStr != "" || limit > 0:
+	case beforeStr == "" && limit > 0:
+		// Initial page (limit only, no `before` cursor): mirror the WS
+		// subscribe handshake's visible-aware read. A plain tail-N could be
+		// entirely internal events (parallel agent team) and render to the
+		// blank "该会话最近仅有 agent 活动" placeholder. Walk ring-then-disk
+		// until the page carries enough real chat bubbles. This branch is the
+		// HTTP-fallback twin of completeSubscribe's msg.Limit>0 case.
+		visTarget := limit
+		if visTarget > sessionpkg.DefaultVisibleTarget {
+			visTarget = sessionpkg.DefaultVisibleTarget
+		}
+		// maxTotal=0 lets the reader use its own ceiling (ring size) rather
+		// than the client's page-size hint, so visible bubbles sitting beyond
+		// `limit` positions under an internal flood are still surfaced. The
+		// result is still bounded by maxEventsPageLimit (== ring size).
+		entries = sess.EventLastNVisibleCtx(r.Context(), visTarget, 0)
+	case beforeStr != "":
 		pageLimit := limit
 		if pageLimit == 0 {
 			pageLimit = maxEventsPageLimit
 		}
+		// "Load earlier" pagination: walk strictly backward by time. This must
+		// stay a plain time-ordered page — applying the visible-aware reader
+		// here would skip past internal events the operator is paging toward,
+		// breaking the load-earlier cursor contract.
+		//
 		// EventEntriesBeforeCtx falls back to the backend's history.Source
 		// (JSONL for claude) when the in-memory log no longer contains entries
 		// older than `before`. The request context propagates into disk I/O
@@ -1126,7 +1153,13 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.router.Remove(req.Key) {
+	// RemoveAsync (not Remove): the session leaves the router synchronously
+	// under r.mu — so a 200 here truthfully means "the session is gone from
+	// the list and accepts no more messages" — while the slow teardown
+	// (proc.Close up to 8s + socket wait + event-log/attachment cleanup)
+	// runs in a detached goroutine. The dashboard does an optimistic delete
+	// and no longer blocks on the worst-case ~15s teardown.
+	if !h.router.RemoveAsync(req.Key) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -1775,8 +1808,8 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 		}
 	}
 
+	now := time.Now() // R20260603-PERF-12: compute outside lock to keep vDSO off the critical section
 	h.historyCacheMu.Lock()
-	now := time.Now()
 	h.historyCache = all
 	h.historyCacheTime = now
 	// R040034-PERF-5 (#1404): mirror update under the lock so wait-free

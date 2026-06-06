@@ -308,7 +308,15 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// must agree, otherwise the loop would append into a nil slice or the
 	// post-unlock dispatch would receive an empty copy from a non-replay
 	// batch.
-	sinkAttached := l.persistSinkPtr.Load() != nil
+	// R20260530-COR-1 (#1482): replay-phase batches (AppendBatchReplay,
+	// InjectHistory) must NEVER be captured into sinkCopy nor pushed to the
+	// persist sink. The persister only drops them while sinkReady==false; if
+	// a reattach flips sinkReady=true *before* a late InjectHistory runs
+	// (reconnect/reattach ordering), every replayed historical entry would be
+	// re-persisted, duplicating already-written JSONL turns. Gate on
+	// !isReplay here so the replay contract holds regardless of sinkReady —
+	// this mirrors the unconditional applyEntryStateLocked skip at :398.
+	sinkAttached := !isReplay && l.persistSinkPtr.Load() != nil
 	captureForSink := sinkAttached && l.sinkReady.Load()
 	// R225-PERF-11 + R249-PERF-16: single pre-lock pass that stamps UUIDs,
 	// applies the default Time, and sanitises image URIs. The N
@@ -322,56 +330,113 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// entry — the ring-buffer write inside the lock simply assigns the
 	// pre-prepared struct without re-running sanitize/default-time logic.
 	//
-	// Fast path (!captureForSink): sinkCopy stays nil and the inner loop
-	// falls back to the historical "stamp inside lock" path. Test harnesses
-	// and the InjectHistory phase before the persister attaches don't pay
-	// for the extra 200KB allocation, but UUID stamping still runs here.
-	var sinkCopy []EventEntry
+	// Fast path (!captureForSink): sinkCopy stays nil, but the per-entry
+	// preprocessing (default Time + image sanitize) still runs here in a
+	// `prepared` buffer so the write-lock section only assigns pre-built
+	// structs. R103901-PERF-7: the prior shape left the !captureForSink
+	// branch running sanitizeImagesAligned (a string scan) + the Time
+	// assignment *inside* l.mu, bloating lock-hold time for test harnesses
+	// and the InjectHistory replay phase before the persister attaches —
+	// exactly the 500-entry replay hot path the captureForSink branch was
+	// already optimised for. We mirror that optimisation here. The prepared
+	// buffer (rather than mutating `entries[i]` in place) preserves the
+	// historical contract that the caller's slice is untouched beyond the
+	// UUID stamp that stampUUID already applies in place.
+	// R20260602190132-PERF-3: len==1 fast path for the captureForSink branch.
+	// AppendBatch is frequently called with a single entry (e.g. live
+	// dispatch of one-block assistant events). make([]EventEntry, 1) for
+	// sinkCopy allocates a heap slice even though the entry will be passed
+	// to the persist sink immediately after unlock. When len==1 and
+	// captureForSink is true we instead use a stack-allocated EventEntry
+	// (sinkOne) and route through invokePersistSinkOne (pass-by-value, zero
+	// slice alloc) or fall back to []EventEntry{sinkOne} when only the
+	// batch sink is wired. sinkCopy stays nil for this path.
+	//
+	// The historical contract from comments 342-344 is fully preserved:
+	// stampUUID(&entries[i]) still runs in-place on the caller's slice for
+	// every entry before e := entries[i] copies the value — only the
+	// prepared/sinkCopy destination changes for the len==1 path.
+	var (
+		sinkCopy       []EventEntry
+		prepared       []EventEntry
+		sinkOne        EventEntry
+		sinkOneSet     bool
+		preparedOne    EventEntry
+		preparedOneSet bool
+	)
 	if captureForSink {
-		sinkCopy = make([]EventEntry, len(entries))
+		if len(entries) == 1 {
+			sinkOneSet = true // use sinkOne scalar; sinkCopy stays nil
+		} else {
+			sinkCopy = make([]EventEntry, len(entries))
+		}
+	} else if len(entries) == 1 {
+		// R20260603-PERF-4: mirror the sinkOne fast path for the no-sink
+		// case. make([]EventEntry, 1) is a heap alloc even for a single
+		// entry; use a stack scalar instead. prepared stays nil.
+		preparedOneSet = true
+	} else {
+		prepared = make([]EventEntry, len(entries))
 	}
 	for i := range entries {
+		// R20260602190132-PERF-12: stamp the UUID in place on the caller's
+		// slice (historical contract, see comments above), then copy the
+		// stamped entry ONCE into its prepared destination and apply the
+		// default-Time + image-sanitize preprocessing through a pointer to
+		// that slot. The prior shape did `e := entries[i]` into a loop local
+		// and then `dest[i] = e`, a second full EventEntry struct copy
+		// (~240 B) per entry on top of the in-place stamp.
 		stampUUID(&entries[i])
-		if !captureForSink {
-			continue
+		var dst *EventEntry
+		if sinkOneSet {
+			sinkOne = entries[i]
+			dst = &sinkOne
+		} else if preparedOneSet {
+			preparedOne = entries[i]
+			dst = &preparedOne
+		} else if captureForSink {
+			sinkCopy[i] = entries[i]
+			dst = &sinkCopy[i]
+		} else {
+			prepared[i] = entries[i]
+			dst = &prepared[i]
 		}
-		e := entries[i]
-		if e.Time == 0 {
-			e.Time = defaultTime
+		if dst.Time == 0 {
+			dst.Time = defaultTime
 		}
 		// S15 (Round 174): same enforcement as Append. Replays from
 		// history (InjectHistory → AppendBatch) should never contain
 		// non-image data URIs today, but defense-in-depth is trivially
 		// cheap and locks the contract to a single sink.
-		if len(e.Images) > 0 {
-			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+		if len(dst.Images) > 0 {
+			dst.Images, dst.ImagePaths = sanitizeImagesAligned(dst.Images, dst.ImagePaths)
 		}
-		sinkCopy[i] = e
 	}
 	l.mu.Lock()
-	for idx, e := range entries {
-		// R20260527122801-PERF-7: when captureForSink is true the entry
-		// has already been fully prepared in sinkCopy[idx] above. Write
-		// it directly into the ring slot and rebind ePtr to that slot
-		// so the downstream state-tracking code reads from the canonical
-		// store without paying a second per-entry struct copy through
-		// the range-loop local. The prior shape (`e = sinkCopy[idx];
-		// l.entries[l.head] = e`) cost two EventEntry value copies on
-		// the InjectHistory hot path (500× per shim reconnect).
+	for idx := range entries {
+		// R20260527122801-PERF-7 + R103901-PERF-7: both branches have
+		// already fully prepared the entry (UUID stamp, default Time, image
+		// sanitize) in the pre-lock loop — sinkCopy[idx] when capturing for
+		// the persist sink, prepared[idx] otherwise. Write it directly into
+		// the ring slot and rebind ePtr to that slot so the downstream
+		// state-tracking code reads from the canonical store without paying a
+		// second per-entry struct copy through a range-loop local, and
+		// without running sanitizeImagesAligned (a string scan) inside l.mu.
 		var ePtr *EventEntry
-		if captureForSink {
+		if sinkOneSet {
+			// len==1 fast path: sinkOne holds the pre-prepared entry;
+			// sinkCopy is nil (allocation skipped). R20260602190132-PERF-3.
+			l.entries[l.head] = sinkOne
+		} else if preparedOneSet {
+			// len==1 no-sink fast path: preparedOne holds the pre-prepared
+			// entry; prepared slice alloc skipped. R20260603-PERF-4.
+			l.entries[l.head] = preparedOne
+		} else if captureForSink {
 			l.entries[l.head] = sinkCopy[idx]
-			ePtr = &l.entries[l.head]
 		} else {
-			if e.Time == 0 {
-				e.Time = defaultTime
-			}
-			if len(e.Images) > 0 {
-				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-			}
-			l.entries[l.head] = e
-			ePtr = &l.entries[l.head]
+			l.entries[l.head] = prepared[idx]
 		}
+		ePtr = &l.entries[l.head]
 		ringIdx := l.head
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
@@ -382,7 +447,20 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// on the replay path too — InjectHistory replays agent/task_start
 		// entries that may still be linker-pending after shim reconnect,
 		// and the next live SetAgentInternalID call needs to reach them.
-		l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
+		//
+		// R20260601-PERF-9 (#1549): gate the call inline. A 500-entry
+		// InjectHistory replay is dominated by assistant_text/tool_use rows;
+		// recordAgentRingPosLocked early-returns for those, but the
+		// unconditional call still costs 500 function-call frames + the
+		// type compare under l.mu, stalling concurrent Append (readLoop hot
+		// path). Hoisting the agent/task_start test out front lets the
+		// common case skip the call entirely while preserving the replay
+		// sidecar contract for the rare agent/task_start rows. The map is
+		// only mutable under l.mu, so the write must stay inside the lock —
+		// only the now-rare entries pay for it.
+		if ePtr.Type == "agent" || ePtr.Type == "task_start" {
+			l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
+		}
 
 		// Skip applyEntryStateLocked for entries whose Type is not one of
 		// the 6 cases the function actually handles. InjectHistory's
@@ -447,7 +525,24 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// post-stamp, post-sanitize entries in the SAME order they were
 	// committed to the ring buffer — critical for the Persister's
 	// write-order guarantees.
-	l.invokePersistSink(sinkCopy)
+	//
+	// R20260530-COR-1 (#1482): replay batches never feed the persist sink
+	// (sinkCopy is nil because captureForSink gates on !isReplay above).
+	// Skip the call outright so a late InjectHistory cannot re-persist
+	// already-written history even if sinkReady has already flipped true.
+	//
+	// R20260602190132-PERF-3: sinkOneSet is the len==1 captureForSink fast
+	// path. Try invokePersistSinkOne first (pass-by-value, zero slice alloc);
+	// fall back to the slice form only when the batch-only sink is wired.
+	if !isReplay {
+		if sinkOneSet {
+			if !l.invokePersistSinkOne(sinkOne) {
+				l.invokePersistSink([]EventEntry{sinkOne})
+			}
+		} else {
+			l.invokePersistSink(sinkCopy)
+		}
+	}
 
 	l.notifySubscribers()
 }

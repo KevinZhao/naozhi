@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // setupReverseConnPair creates a ReverseServer + test HTTP server and dials in
@@ -21,7 +20,7 @@ import (
 func setupReverseConnPair(t *testing.T) (*ReverseConn, *websocket.Conn, func()) {
 	t.Helper()
 
-	rs := NewReverseServer(map[string]config.ReverseNodeEntry{
+	rs := NewReverseServer(map[string]ReverseNodeAuth{
 		"worker": {Token: "tok", DisplayName: "Worker"},
 	}, false)
 

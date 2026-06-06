@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // dialReverseNode dials the /ws-node endpoint and returns the connection.
@@ -45,7 +44,7 @@ func reverseAuth(t *testing.T, conn *websocket.Conn, nodeID, token, hostname str
 
 // newTestReverseServer creates a ReverseServer with a single authorized node.
 func newTestReverseServer(nodeID, token string, trustedProxy bool) *ReverseServer {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		nodeID: {Token: token, DisplayName: "Test Node"},
 	}
 	return NewReverseServer(auth, trustedProxy)
@@ -167,7 +166,7 @@ func TestReverseServer_Register_originRejected(t *testing.T) {
 // ---- AllNodes returns configured nodes ----
 
 func TestReverseServer_AllNodes(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-a": {Token: "t1", DisplayName: "Node A"},
 		"node-b": {Token: "t2", DisplayName: "Node B"},
 	}
@@ -187,7 +186,7 @@ func TestReverseServer_AllNodes(t *testing.T) {
 // ---- AllNodes includes disconnected nodes ----
 
 func TestReverseServer_AllNodes_includesDisconnected(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-1": {Token: "tok"},
 	}
 	rs := NewReverseServer(auth, false)
@@ -269,6 +268,70 @@ func TestReverseServer_OnDeregister_calledOnDisconnect(t *testing.T) {
 	}
 }
 
+// ---- Stale deregister of a replaced conn must NOT fire OnDeregister ----
+//
+// R20260605B-CORR-14: when a node reconnects under the same node_id, the
+// registration handler closes the OLD conn and installs the NEW one, then
+// calls OnRegister(new). The old conn's deregister goroutine later unblocks
+// and previously called OnDeregister(node_id) UNCONDITIONALLY — which, in
+// server.go, deletes the live node from Server.nodes and purges its cache,
+// making the freshly reconnected node invisible. The fix gates OnDeregister
+// with the same ownership check (s.conns[id] == rc) used for the map delete,
+// so a stale deregister of a replaced conn is a no-op. OnDeregister must
+// fire exactly once, only when the LIVE conn finally drops.
+func TestReverseServer_StaleDeregister_doesNotFireForReplacedConn(t *testing.T) {
+	rs := newTestReverseServer("node-1", "tok", false)
+
+	deregistered := make(chan string, 4)
+	rs.OnDeregister = func(id string) { deregistered <- id }
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws-node", rs)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	conn1 := dialReverseNode(t, srv)
+	if resp := reverseAuth(t, conn1, "node-1", "tok", "host"); resp.Type != "registered" {
+		t.Fatalf("conn1: expected registered, got %q", resp.Type)
+	}
+
+	conn2 := dialReverseNode(t, srv)
+	if resp := reverseAuth(t, conn2, "node-1", "tok", "host"); resp.Type != "registered" {
+		t.Fatalf("conn2: expected registered, got %q", resp.Type)
+	}
+
+	// conn1 is closed by the server on reconnect; its deregister goroutine
+	// unblocks. The stale deregister must NOT fire because conn2 (the live
+	// conn) now owns s.conns["node-1"].
+	conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, _ = conn1.ReadMessage() // drain the server-side close
+
+	select {
+	case id := <-deregistered:
+		t.Fatalf("stale OnDeregister fired for replaced conn (id=%q); live node would be wiped", id)
+	case <-time.After(300 * time.Millisecond):
+		// Good: no deregister while conn2 is live.
+	}
+
+	// Now drop the LIVE conn — OnDeregister must fire exactly once.
+	conn2.Close()
+	select {
+	case id := <-deregistered:
+		if id != "node-1" {
+			t.Errorf("expected deregister for node-1, got %q", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for OnDeregister after live conn dropped")
+	}
+
+	// Ensure no spurious second deregister arrives.
+	select {
+	case id := <-deregistered:
+		t.Fatalf("unexpected extra OnDeregister for %q", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // ---- Rate limiter rejects rapid reconnects from same IP ----
 
 func TestReverseServer_RateLimiter_rejectsRapidConnects(t *testing.T) {
@@ -304,7 +367,7 @@ func TestReverseServer_RateLimiter_rejectsRapidConnects(t *testing.T) {
 // ---- Display name capping ----
 
 func TestReverseServer_DisplayNameCapping(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-1": {Token: "tok"}, // no configured display name
 	}
 	rs := NewReverseServer(auth, false)

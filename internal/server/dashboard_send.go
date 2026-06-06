@@ -91,6 +91,7 @@ type SendHandler struct {
 	sendLimiter   *ipLimiter     // per-IP send rate limiter (30/min)
 	auth          *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
 	trustedProxy  bool           // whether to trust X-Forwarded-For for client IP
+	orient        *orientConfig  // image auto-orientation; nil = feature off
 }
 
 // uploadOwner derives a stable owner key from auth cookie, Bearer token, or
@@ -624,6 +625,73 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": string(status), "key": key})
+}
+
+// handleBind eagerly persists the per-chat workspace override for a freshly
+// created dashboard session, WITHOUT spawning a CLI turn. POST /api/sessions/bind.
+//
+// Why: the dashboard used to carry the chosen workspace only on the first send.
+// If the page was reloaded before that first send (or the session was opened in
+// another browser), the workspace was lost, no override was ever written, and
+// the spawn fell through to defaultCWD = workspace root — the session landed in
+// the wrong directory. Binding at creation time writes the override up-front so
+// any later spawn resolves the right cwd regardless of which client sends first.
+//
+// Security parity with handleSend: shares the same send rate limiter (so /bind
+// is not a cheaper override-flood vector), validates the session key, validates
+// the workspace against allowedRoot before persisting, and refuses an empty
+// chat-key prefix so a ":agent" key cannot install the empty-string override.
+// Remote-node sessions are a no-op: they resolve their workspace on their own
+// node, so a local override would be meaningless.
+func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
+	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "send rate limit exceeded"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req struct {
+		Key       string `json:"key"`
+		Node      string `json:"node"`
+		Workspace string `json:"workspace"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		slog.Debug("dashboard bind: invalid JSON", "err", err)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := session.ValidateSessionKey(req.Key); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
+		return
+	}
+	// Remote sessions resolve their workspace on their own node — never write a
+	// local-router override for them. Ack so the fire-and-forget client is happy.
+	if req.Node != "" && req.Node != "local" {
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
+	if req.Workspace == "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "workspace required"})
+		return
+	}
+	wsPath, err := validateWorkspace(req.Workspace, h.hub.allowedRoot)
+	if err != nil {
+		// Mirror handleSend: scrub the attacker-influenced path before logging
+		// and never echo the resolved filesystem path back to the client.
+		slog.Warn("bind: workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(req.Workspace, 200))
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
+		return
+	}
+	// Persist under the 3-segment chat-key prefix (strip the trailing
+	// ":agentID"), matching the SetWorkspace contract used by handleSend. A
+	// key whose only colon is at index 0 (":agent") would persist the empty
+	// chat key — refuse it.
+	idx := strings.LastIndexByte(req.Key, ':')
+	if idx <= 0 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
+		return
+	}
+	h.hub.router.SetWorkspace(req.Key[:idx], wsPath)
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // attachmentDirPrefix is the workspace-relative prefix every path served

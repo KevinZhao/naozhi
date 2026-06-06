@@ -17,6 +17,16 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
+// Voice-pipeline user-facing notices. Centralised as named constants
+// (R247-ARCH-19, #631) so the platform layer no longer scatters inline
+// user-facing literals across the audio handler — a single source of
+// truth here is the seam the future i18n catalog (internal/i18n) hooks
+// into without re-grepping the adapter body.
+const (
+	msgVoiceDownloadFailed   = "[语音消息下载失败，请重试]"
+	msgVoiceTranscribeFailed = "[语音消息转写失败，请发送文字消息]"
+)
+
 // parsedEvent holds the result of parsing a Feishu SDK event.
 type parsedEvent struct {
 	Msg       platform.IncomingMessage
@@ -188,7 +198,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 		// content (file_key in audio messages). Sanitize before slog.
 		slog.Error("feishu download audio failed", "err", err,
 			"key", osutil.SanitizeForLog(fileKey, 128))
-		f.replyError(ctx, msg.ChatID, "[语音消息下载失败，请重试]")
+		f.replyError(ctx, msg.ChatID, msgVoiceDownloadFailed)
 		return
 	}
 
@@ -198,7 +208,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 	text, err := f.transcriber.Transcribe(transcribeCtx, data, mime)
 	if err != nil {
 		slog.Error("feishu transcribe failed", "err", err, "mime", mime, "size", len(data))
-		f.replyError(ctx, msg.ChatID, "[语音消息转写失败，请发送文字消息]")
+		f.replyError(ctx, msg.ChatID, msgVoiceTranscribeFailed)
 		return
 	}
 
@@ -311,9 +321,20 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 				"size", len(text))
 			return parsedEvent{}, false
 		}
-		for _, m := range msg.Mentions {
-			if m.Key != nil {
-				text = strings.ReplaceAll(text, *m.Key, "")
+		// Strip all @-mention tokens in a single pass, mirroring the
+		// webhook path in transport_hook.go. Previously each ReplaceAll
+		// allocated a fresh string and copied the whole text; a group
+		// message with multiple @ users did that N times. WS is the
+		// default transport, so it carries the bulk of inbound traffic.
+		if len(msg.Mentions) > 0 {
+			pairs := make([]string, 0, len(msg.Mentions)*2)
+			for _, m := range msg.Mentions {
+				if m.Key != nil {
+					pairs = append(pairs, *m.Key, "")
+				}
+			}
+			if len(pairs) > 0 {
+				text = strings.NewReplacer(pairs...).Replace(text)
 			}
 		}
 		text = strings.TrimSpace(text)

@@ -855,3 +855,54 @@ var _ = atomic.Int64{}
 // stubPath ensures filepath is referenced so the dependency doesn't
 // get trimmed after a refactor.
 var _ = filepath.Join
+
+// TestSinkFor_RoutesByBoundKey pins R249-PERF-29 (#997): SinkFor now returns
+// a *sessionSink method value rather than a multi-variable closure. Two sinks
+// built from the same persister must each route their batches to the file
+// stem derived from their own bound key — i.e. the per-key binding survives
+// the closure→method-value refactor. Regression guard against accidentally
+// sharing key/stem state across sinks.
+func TestSinkFor_RoutesByBoundKey(t *testing.T) {
+	p, dir := newTestPersister(t)
+
+	const keyA = "feishu:group:aaa"
+	const keyB = "feishu:p2p:bbb"
+	sinkA := p.SinkFor(keyA)
+	sinkB := p.SinkFor(keyB)
+
+	sinkA([]Entry{entry(t, 1, "a1")}, false)
+	sinkB([]Entry{entry(t, 2, "b1")}, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if KeyHash(keyA) == KeyHash(keyB) {
+		t.Fatalf("test precondition: distinct keys hashed to same stem")
+	}
+
+	assertSingleEntryFile(t, LogPath(dir, keyA), keyA)
+	assertSingleEntryFile(t, LogPath(dir, keyB), keyB)
+}
+
+// assertSingleEntryFile verifies a freshly-written per-session log holds
+// exactly one header (carrying wantKey) plus one entry — confirming the
+// sessionSink routed its batch to the file bound to its own key.
+func assertSingleEntryFile(t *testing.T, path, wantKey string) {
+	t.Helper()
+	recs := readAllRecords(t, path)
+	if len(recs) != 2 {
+		t.Fatalf("file %s: got %d records, want 2 (header+entry)", path, len(recs))
+	}
+	if recs[0].Type != schema.TypeHeader || recs[0].Header == nil {
+		t.Fatalf("file %s: record[0] is not a header: %+v", path, recs[0])
+	}
+	if recs[0].Header.Key != wantKey {
+		t.Errorf("file %s: header key = %q, want %q", path, recs[0].Header.Key, wantKey)
+	}
+	if recs[1].Type != schema.TypeEntry {
+		t.Errorf("file %s: record[1] is not an entry: %+v", path, recs[1])
+	}
+}

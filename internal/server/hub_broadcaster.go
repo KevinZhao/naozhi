@@ -6,7 +6,7 @@ import "github.com/naozhi/naozhi/internal/runtelemetry"
 // Cron and sysession both register one of these at construction so
 // their run lifecycle events fan out through a single seam, replacing
 // the legacy SetOnExecute / SetOnRunStarted / SetOnRunEnded trio for
-// cron and the per-Manager SetCallbacks pair for sysession.
+// cron and the per-Manager SetTelemetry seam for sysession (#1723).
 //
 // The dispatch is keyed on RunStartedEvent.Subsystem /
 // RunEndedEvent.Subsystem so a future producer (planner, system) can

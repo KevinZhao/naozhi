@@ -31,7 +31,7 @@ func TestStartBackgroundHistoryLoaders_NoOpOnEmptyRouter(t *testing.T) {
 	defer cancel()
 
 	r := &Router{
-		sessions:   map[string]*ManagedSession{},
+		ss:         sessionStore{sessions: map[string]*ManagedSession{}},
 		historyCtx: ctx,
 	}
 

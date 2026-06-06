@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -74,6 +75,7 @@ type SessionRouter interface {
 //     ctx but be cancelled at process shutdown
 type Handlers struct {
 	appCtx          context.Context // server lifecycle context, set via SetAppContext
+	bg              sync.WaitGroup  // tracks background takeover/close goroutines for graceful drain
 	cache           CacheView
 	nodeAccess      NodeAccessor
 	nodeCache       *node.CacheManager
@@ -84,6 +86,10 @@ type Handlers struct {
 	broadcast       func()            // hub.BroadcastSessionsUpdate
 	validateWS      func(ws, root string) (string, error)
 	verifyProcIdent func(pid int, expectedStartTime uint64) bool
+	// procStartTime reads the current /proc start_time for a pid (injected
+	// discovery.ProcStartTime). Feeds the atomic pidfd-based SendTermVerified
+	// identity guard so the SIGTERM cannot leak to a recycled PID. (#1670)
+	procStartTime func(pid int) (uint64, error)
 }
 
 // Deps bundles all wiring. Constructor takes a single struct so future
@@ -99,6 +105,9 @@ type Deps struct {
 	Broadcast    func()
 	ValidateWS   func(ws, root string) (string, error)
 	VerifyProcID func(pid int, expectedStartTime uint64) bool
+	// ProcStartTime reads /proc/<pid> start_time (discovery.ProcStartTime).
+	// Used by the atomic SendTermVerified identity guard. (#1670)
+	ProcStartTime func(pid int) (uint64, error)
 }
 
 // New constructs a Handlers from injected deps.
@@ -114,7 +123,30 @@ func New(d Deps) *Handlers {
 		broadcast:       d.Broadcast,
 		validateWS:      d.ValidateWS,
 		verifyProcIdent: d.VerifyProcID,
+		procStartTime:   d.ProcStartTime,
 	}
+}
+
+// sendTermVerified routes the SIGTERM through osutil.SendTermVerified, which
+// on Linux pins the target via pidfd so the kill cannot leak to a recycled PID
+// (#1670). The injected procStartTime (discovery.ProcStartTime) supplies the
+// identity guard; when it is nil (older wiring / test doubles) the guard is
+// skipped and SendTermVerified relies on the pidfd pin alone, but the
+// verifyProcIdent pre-check below preserves the previous behaviour so no caller
+// loses defence-in-depth.
+func (h *Handlers) sendTermVerified(pid int, expectedStartTime uint64) error {
+	stFn := h.procStartTime
+	if stFn == nil && h.verifyProcIdent != nil {
+		// Adapt the legacy bool verifier into the (uint64, error) shape the
+		// atomic primitive expects: a passing verify means start_time matches.
+		stFn = func(p int) (uint64, error) {
+			if h.verifyProcIdent(p, expectedStartTime) {
+				return expectedStartTime, nil
+			}
+			return 0, osutil.ErrPidReused
+		}
+	}
+	return osutil.SendTermVerified(pid, expectedStartTime, stFn)
 }
 
 // SetAppContext is called once after the server context is available.
@@ -122,6 +154,15 @@ func New(d Deps) *Handlers {
 // request and only die at process shutdown.
 func (h *Handlers) SetAppContext(ctx context.Context) {
 	h.appCtx = ctx
+}
+
+// Wait blocks until all background takeover/close goroutines have exited.
+// Called from the server shutdown sequence after srv.Shutdown returns (no
+// new requests can spawn goroutines at that point), so a graceful shutdown
+// drains in-flight WaitAndCleanup work instead of leaving goroutines parked
+// on FindProcess/exit waits after the HTTP server goroutine has gone away.
+func (h *Handlers) Wait() {
+	h.bg.Wait()
 }
 
 // SetClaudeDirForTest swaps claudeDir for tests that previously poked the
@@ -196,7 +237,30 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := discovery.LoadHistory(h.claudeDir, sessionID, "")
+	// cwd is an optional optimisation hint. When present and valid it lets
+	// LoadHistory resolve the JSONL via an O(1) os.Stat on the CWD-derived
+	// path, bypassing the findSessionJSONL fallback scan AND its 60s
+	// negative-result cache. The negative cache is what made interactive
+	// preview flake: a single miss (card shown during the noJSONLGrace window
+	// before the JSONL flushed, or while claude renamed it during history
+	// compaction) poisons every preview for that session for 60s, rendering a
+	// blank "暂无会话历史" splash that "fixes itself" only once the TTL
+	// expires. The CWD direct-stat lookup runs before the cache check, so a
+	// fresh poll picks the conversation up the instant it lands on disk.
+	//
+	// A stale/invalid hint degrades to "" (full scan) rather than erroring —
+	// cwd never widens the result set, it only short-circuits the lookup.
+	// Reject traversal / control-byte payloads so a crafted cwd cannot probe
+	// arbitrary projDirName slugs (defense-in-depth; matches the takeover path
+	// which validates CWD the same way).
+	cwd := r.URL.Query().Get("cwd")
+	if cwd != "" {
+		if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
+			cwd = ""
+		}
+	}
+
+	entries, err := discovery.LoadHistory(h.claudeDir, sessionID, cwd)
 	if err != nil {
 		slog.Warn("preview load history", "session_id", sessionID, "err", err)
 		entries = nil
@@ -303,18 +367,20 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
-	alive := osutil.PidAlive(req.PID)
-	if alive {
-		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
+	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
+	// process instance via pidfd before signalling so the old
+	// PidAlive→verify→SendTerm window — through which a recycled PID could be
+	// killed — no longer exists. ESRCH (process already gone) is success;
+	// ErrPidReused is the 409 the frontend expects.
+	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
+		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := osutil.SendTerm(req.PID); err != nil {
-			if !errors.Is(err, syscall.ESRCH) {
-				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
-				return
-			}
+		if !errors.Is(err, syscall.ESRCH) {
+			slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+			http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -326,7 +392,6 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	// Capture locals for the background goroutine.
 	pid := req.PID
 	sessionID := req.SessionID
-	reqCWD := req.CWD
 	procStartTime := req.ProcStartTime
 	agentOpts := h.defaultAgent
 
@@ -334,9 +399,15 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	claudeDir := h.claudeDir
 	router := h.router
 
+	h.bg.Add(1)
 	go func() {
-		// Wait, SIGKILL, and remove stale session files.
-		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
+		defer h.bg.Done()
+		// Wait, SIGKILL, and remove stale session files. Use the cleaned
+		// cwd (filepath.Clean, trailing-slash/"." normalised) so the lock-dir
+		// path WaitAndCleanup derives via projDirName matches the same cwd
+		// router.Takeover spawns under below — passing the raw req.CWD here
+		// would compute a different projDirName slug and miss the cleanup. (#1786)
+		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
@@ -427,23 +498,22 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the process is already dead, skip identity check and signal —
-	// just do cleanup.  Otherwise verify PID identity and send SIGTERM.
-	alive := osutil.PidAlive(req.PID)
-	if alive {
-		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
+	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
+	// process instance via pidfd, re-checks start_time through that pinned
+	// identity, then signals — closing the PID-reuse TOCTOU window that the
+	// old PidAlive→verifyProcIdent→SendTerm sequence left open. A recycled
+	// PID can no longer be killed: pidfd refers to the exact original
+	// instance or fails ESRCH. ESRCH (already dead) falls through to cleanup.
+	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
+		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := osutil.SendTerm(req.PID); err != nil {
-			// ESRCH = process disappeared between alive check and kill — treat as success.
-			if !errors.Is(err, syscall.ESRCH) {
-				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
-				return
-			}
+		if !errors.Is(err, syscall.ESRCH) {
+			slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+			http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+			return
 		}
-	} else {
 		slog.Info("discovered session already dead, cleaning up", "pid", req.PID)
 	}
 
@@ -456,7 +526,9 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 	claudeDir := h.claudeDir
 	broadcast := h.broadcast
 
+	h.bg.Add(1)
 	go func() {
+		defer h.bg.Done()
 		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 		slog.Info("discovered session closed", "pid", pid, "session_id", sessionID)
 		if broadcast != nil {

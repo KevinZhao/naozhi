@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -173,34 +174,77 @@ func newAutoTitler(deps DaemonDeps) (Daemon, error) {
 	return a, nil
 }
 
-func (a *autoTitler) Name() string        { return "auto-titler" }
+func (a *autoTitler) Name() string        { return DaemonAutoTitler }
 func (a *autoTitler) Description() string { return "根据对话内容自动提炼 session 标题" }
 
 // Configure reads the daemon-specific knobs from a DaemonConfig.
 // Unknown keys are ignored (forward-compat).  Sane defaults apply when
 // the value is missing or zero.
 func (a *autoTitler) Configure(cfg DaemonConfig) error {
-	if v, ok := cfg["min_user_turns"].(int); ok && v > 0 {
-		a.minUserTurns = v
-	}
-	if v, ok := cfg["min_rename_interval"].(time.Duration); ok && v > 0 {
-		a.minRenameInterval = v
-	}
-	if v, ok := cfg["batch_per_tick"].(int); ok && v > 0 {
-		// R236-QA-09: clamp to autoTitlerMaxBatchPerTick so a
-		// misconfigured cfg cannot let a single Tick monopolise the
-		// shared Runner. The slice still pre-allocates batchPerTick*4
-		// for candidate collection, so an unbounded value would also
-		// blow the visit memory budget.
-		if v > autoTitlerMaxBatchPerTick {
-			v = autoTitlerMaxBatchPerTick
+	// R250531-ARCH-01 (#1505): a present-but-mistyped knob used to fall
+	// through the type assertion silently and retain the default, making
+	// "I set batch_per_tick: 50 but nothing changed" undiagnosable without
+	// reading source. We now distinguish key-absent (forward-compat, no
+	// log) from key-present-wrong-type (operator error, slog.Warn). Each
+	// knob still applies its existing validation (>0 / clamp) after the
+	// type check.
+	if raw, present := cfg["min_user_turns"]; present {
+		if v, ok := raw.(int); ok {
+			if v > 0 {
+				a.minUserTurns = v
+			}
+		} else {
+			warnMistypedKnob("min_user_turns", "int", raw)
 		}
-		a.batchPerTick = v
 	}
-	if v, ok := cfg["include_group_chat"].(bool); ok {
-		a.includeGroupChat = v
+	if raw, present := cfg["min_rename_interval"]; present {
+		if v, ok := raw.(time.Duration); ok {
+			if v > 0 {
+				a.minRenameInterval = v
+			}
+		} else {
+			warnMistypedKnob("min_rename_interval", "time.Duration", raw)
+		}
+	}
+	if raw, present := cfg["batch_per_tick"]; present {
+		if v, ok := raw.(int); ok {
+			if v > 0 {
+				// R236-QA-09: clamp to autoTitlerMaxBatchPerTick so a
+				// misconfigured cfg cannot let a single Tick monopolise the
+				// shared Runner. The slice still pre-allocates batchPerTick*4
+				// for candidate collection, so an unbounded value would also
+				// blow the visit memory budget.
+				if v > autoTitlerMaxBatchPerTick {
+					v = autoTitlerMaxBatchPerTick
+				}
+				a.batchPerTick = v
+			}
+		} else {
+			warnMistypedKnob("batch_per_tick", "int", raw)
+		}
+	}
+	if raw, present := cfg["include_group_chat"]; present {
+		if v, ok := raw.(bool); ok {
+			a.includeGroupChat = v
+		} else {
+			warnMistypedKnob("include_group_chat", "bool", raw)
+		}
 	}
 	return nil
+}
+
+// warnMistypedKnob surfaces a daemon-config key that was supplied with the
+// wrong dynamic type. The producer (cmd/naozhi/main_helpers.go) and this
+// consumer coordinate key name + value type only by cross-package
+// convention; a type drift (e.g. int64 vs int) would otherwise silently
+// retain the default. We log the daemon name, key, expected type and the
+// actual %T so the misconfiguration is diagnosable from logs alone.
+func warnMistypedKnob(key, wantType string, got any) {
+	slog.Warn("sysession auto-titler: ignoring mistyped daemon knob (retaining default)",
+		"daemon", "auto-titler",
+		"key", key,
+		"want_type", wantType,
+		"got_type", fmt.Sprintf("%T", got))
 }
 
 // Tick selects up to batchPerTick eligible sessions and renames each
@@ -353,7 +397,15 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			// ctx cancelled mid-batch — stop, return what we have.
+			// [R053116-CR-4] Prefer firstErr over ctx.Err(): a real upstream
+			// Runner failure captured in firstErr must not be overwritten by
+			// context.Canceled, which classifyError treats as DaemonErrorClassCanceled
+			// (not DaemonErrorClassUpstream) — hiding the true failure from the
+			// circuit breaker.
 			a.commitHighwater(pendingWrites, observed, earlyStop)
+			if firstErr != nil {
+				return report, firstErr
+			}
 			return report, err
 		}
 		entries := a.router.EventEntriesForKey(c.key)
@@ -485,6 +537,12 @@ func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
 // usage past the daemon's budget.  We stop appending once the cap is
 // reached and tag the truncation with a single "…" marker so a
 // downstream operator reviewing the prompt can tell content was clipped.
+// R20260602-PERF-1 (#1578): in production the routerAdapter already drops
+// non-user / blank-summary entries before this runs, so the type/blank
+// guards below are usually no-ops on a pre-shrunk slice. They are retained
+// because this helper is also called directly with raw mixed-type slices in
+// unit tests, and keeping it self-contained costs only a cheap compare per
+// (already user-only) entry.
 func buildExcerptFromHistory(entries []SystemEventEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -498,12 +556,13 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 		if s == "" {
 			continue
 		}
-		// Reserve 1 byte for the leading newline (when sb is non-empty)
-		// plus the rune width of the trailing "…" marker so the cap is
-		// never exceeded on the wire.  We compare against the projected
-		// post-write size to avoid the off-by-one where a single
-		// oversized entry would slip through because the pre-write
-		// length was still under the cap.
+		// Project the post-write size of *this* entry (its bytes plus the
+		// leading newline when sb is non-empty).  We do NOT pre-charge the
+		// "…" marker here: an entry that fits on its own must be appended in
+		// full.  Charging the 3-byte marker against every entry made the cap
+		// fire ~30 entries early on typical 100-byte turns (R20260602141221-CR-4,
+		// #1586).  The marker is only relevant when we actually truncate, and
+		// it is reserved at that point below.
 		need := len(s)
 		if sb.Len() > 0 {
 			need++ // newline
@@ -511,11 +570,18 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 		if sb.Len()+need > autoTitlerExcerptSoftCapBytes {
 			// Tag truncation with a single ellipsis so the LLM sees a
 			// visible cut.  The line-cap pass downstream tolerates the
-			// "…" rune (it's not a control character).
+			// "…" rune (it's not a control character).  The marker is
+			// "\n…" (4 bytes) when sb is non-empty, "…" (3 bytes) otherwise.
+			// Append it only if it still fits; if a prior in-budget entry
+			// filled the buffer to within <markerLen> of the cap, omit the
+			// marker rather than overshoot — the cap is a hard upper bound.
+			marker := "…"
 			if sb.Len() > 0 {
-				sb.WriteByte('\n')
+				marker = "\n…"
 			}
-			sb.WriteString("…")
+			if sb.Len()+len(marker) <= autoTitlerExcerptSoftCapBytes {
+				sb.WriteString(marker)
+			}
 			break
 		}
 		if sb.Len() > 0 {
@@ -611,35 +677,58 @@ const (
 // invalid byte sequence yields (RuneError, width=1) and we skip the
 // offending byte without a separate utf8.ValidString pre-scan + re-decode
 // round-trip on the hot path.
+//
+// R20260602-PERF-1 (#1578): the EXCERPT-delimiter neutralisation is folded
+// INTO this single walk instead of the previous 2×Contains + 2×ReplaceAll
+// pre-pass over the whole seed (up to 4 extra full scans of a 1 MiB seed).
+// When the walk reaches a byte position that begins a literal marker, it
+// emits the inert placeholder and advances past the entire marker — so the
+// per-line cap can never split a marker (the R235-GO-4 / #1004 invariant)
+// because a marker is consumed atomically, never byte-by-byte.
 func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
-	}
-	// R235-GO-4 (#1004): neutralise the EXCERPT delimiters BEFORE the
-	// per-line truncation pass below. If we deferred this to a
-	// post-truncation ReplaceAll on the output (the previous shape),
-	// the autoTitlerLineCapBytes cap could split a literal
-	// "---BEGIN CONVERSATION EXCERPT---" across two lines:
-	//
-	//   prefix ...---BEGIN CONVERS<cap>…
-	//   ATION EXCERPT---...
-	//
-	// neither half matches the full marker string, so the post-pass
-	// ReplaceAll silently misses both fragments and the LLM sees
-	// what looks like a real BEGIN delimiter spliced into the user
-	// content. Pre-replacing on the raw seed ensures no truncation
-	// boundary can land mid-marker — the placeholder is shorter than
-	// either marker (16 vs 32/30 bytes), so this only ever shrinks
-	// the seed and the cap math below stays conservative.
-	if strings.Contains(seed, excerptBeginMarker) || strings.Contains(seed, excerptEndMarker) {
-		seed = strings.ReplaceAll(seed, excerptBeginMarker, excerptMarkerSafe)
-		seed = strings.ReplaceAll(seed, excerptEndMarker, excerptMarkerSafe)
 	}
 	var b strings.Builder
 	b.Grow(len(seed))
 	lineWritten := 0
 	lineTruncated := false
+	// writeRune applies the per-line cap + truncation-ellipsis accounting
+	// to a single already-sanitised rune (no control-char / newline cases:
+	// callers handle those). Used for both the seed runes and the marker
+	// placeholder runes so both honour the same cap.
+	writeRune := func(r rune, w int) {
+		if lineWritten+w > autoTitlerLineCapBytes {
+			if !lineTruncated {
+				b.WriteString("…")
+				lineTruncated = true
+			}
+			return
+		}
+		b.WriteRune(r)
+		lineWritten += w
+	}
 	for i := 0; i < len(seed); {
+		// R235-GO-4 (#1004): neutralise EXCERPT delimiters in-walk. We
+		// must match BEFORE decoding a single rune so a literal marker is
+		// replaced atomically and no truncation boundary can land
+		// mid-marker. The placeholder is ASCII (no control chars) and
+		// shorter than either marker (16 vs 32/30 bytes), so it only ever
+		// shrinks the output and the cap math stays conservative.
+		if strings.HasPrefix(seed[i:], excerptBeginMarker) {
+			i += len(excerptBeginMarker)
+			for _, pr := range excerptMarkerSafe {
+				writeRune(pr, utf8.RuneLen(pr))
+			}
+			continue
+		}
+		if strings.HasPrefix(seed[i:], excerptEndMarker) {
+			i += len(excerptEndMarker)
+			for _, pr := range excerptMarkerSafe {
+				writeRune(pr, utf8.RuneLen(pr))
+			}
+			continue
+		}
 		r, w := utf8.DecodeRuneInString(seed[i:])
 		if r == utf8.RuneError && w == 1 {
 			// Invalid UTF-8 byte: skip it. Matches the prior
@@ -661,19 +750,7 @@ func buildExcerpt(seed string) string {
 		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			continue
 		}
-		if lineWritten+w > autoTitlerLineCapBytes {
-			// Once a line hits the cap, drop the rest of the line so the
-			// LLM doesn't see a silently-spliced prefix+suffix.  An
-			// ellipsis marks the truncation point so a downstream
-			// reviewer can tell the line was cut.
-			if !lineTruncated {
-				b.WriteString("…")
-				lineTruncated = true
-			}
-			continue
-		}
-		b.WriteRune(r)
-		lineWritten += w
+		writeRune(r, w)
 	}
 	return strings.TrimSpace(b.String())
 }

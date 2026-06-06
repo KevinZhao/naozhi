@@ -1,8 +1,10 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +35,23 @@ func TestHandleHealth_Unauthenticated_RateLimited(t *testing.T) {
 			saw429 = true
 			if got := w.Header().Get("Retry-After"); got != "60" {
 				t.Errorf("Retry-After = %q, want 60", got)
+			}
+			// #451 / R247-ARCH-3: the 429 now carries the unified JSON
+			// envelope (not text/plain) so the front-end can branch on a
+			// stable code and drive a countdown from retry_after even when a
+			// fetch wrapper drops the Retry-After header.
+			if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			var env errEnvelope
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				t.Fatalf("429 body is not JSON: %v (body=%q)", err, w.Body.String())
+			}
+			if env.Code != "rate_limited" {
+				t.Errorf("error code = %q, want rate_limited", env.Code)
+			}
+			if env.RetryAfter != 60 {
+				t.Errorf("retry_after = %d, want 60", env.RetryAfter)
 			}
 			break
 		}

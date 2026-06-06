@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"log/slog"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
@@ -127,8 +127,7 @@ const (
 //	                                                   wshub_eventpush.go,
 //	                                                   wshub_subscribe.go,
 //	                                                   wshub_eventpush_cache.go
-//	                     userSendLimitersMu            wshub_send.go (per-user rate)
-//	                     userSendLimiters              wshub_send.go
+//	                     userSendLimiters              wshub_send.go (per-user rate; atomic.Pointer)
 //	                     connCountByOwnerMu            wshub_upgrade.go (per-owner cap)
 //	                     connCountByOwner              wshub_upgrade.go
 //
@@ -138,6 +137,25 @@ const (
 // 只 WRITE broadcast block + READ shared deps；其余同理）。CI lint
 // rule 3 (field_block) 验证此约束。lifecycle 块跨块写豁免（v0.6.1 §五）：
 // NewHub / Shutdown / Start 用 LIFECYCLE-METHOD godoc 关键词显式标注。
+//
+// NEEDS-DESIGN R248-ARCH-6 (#376) — struct extraction anchor:
+// PR #327 split wshub.go into per-block files but kept the god-struct with
+// every method on *Hub. The next modularization stage extracts three
+// cohesive sub-structs out of the field-block map above (one issue each):
+//
+//	SubscriberRegistry  ← subscriber block (clients / connCount /
+//	                      subscriberCount / clientWG) — register/unregister
+//	                      fanout surface.
+//	BroadcastDispatcher ← broadcast block (debounceMu/Timer/First/Closed/
+//	                      ClosedFast/Fire) + droppedTotal — debounce-throttled
+//	                      sessions:update fanout.
+//	SendCoordinator     ← send block (queue / sendWG / sendTrackMu /
+//	                      sendClosed) — owner-loop + TrackSend lifecycle.
+//
+// Receivers stay on *Hub until each extraction lands; this anchor exists so
+// future PRs widen the same map instead of reinventing the boundary. Do NOT
+// extract opportunistically — each carries its own lock-ordering contract
+// (see shutdown_lock_order_test.go) and must land as a reviewed issue.
 type Hub struct {
 	mu sync.RWMutex
 	// connCount mirrors len(h.clients) for the unauthenticated connection
@@ -197,6 +215,23 @@ type Hub struct {
 	// always removes regardless of state. authenticated is monotonic
 	// (only ever true→true; no logout path) so we never need a "remove
 	// on deauth" hook.
+	//
+	// R200109-PERF-4 (#1621): authClients is guarded by its own authMu
+	// (a dedicated RWMutex) rather than the Hub-wide h.mu. broadcastTo-
+	// Authenticated fans out on every session_state / sessions_update /
+	// cron run event — N sessions × multiple events/s — and previously held
+	// h.mu.RLock for the whole snapshot scan, serialising behind every
+	// register / unregister / markAuthenticated h.mu.Lock. Splitting the
+	// mirror onto authMu means the hot read side only contends with the
+	// (cheap) authClients writes, not with the full subscription-lifecycle
+	// lock. Lock-ordering: the three writers (register / markAuthenticated /
+	// unregister) and Shutdown already hold h.mu when they touch authClients
+	// — they nest authMu INSIDE h.mu (acquire h.mu first, then authMu). The
+	// broadcast read side takes authMu ALONE and never reaches for h.mu, so
+	// there is no inverse acquisition and no deadlock. The legacy fallback
+	// loop (hand-rolled hubs with nil authClients) still scans h.clients
+	// under h.mu because that map is h.mu-owned.
+	authMu      sync.RWMutex
 	authClients map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
 	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
@@ -207,6 +242,26 @@ type Hub struct {
 	// the two stay consistent. Read-only outside of subscribe/unsubscribe
 	// paths; cleared on Shutdown.
 	subscriberCount map[string]int
+	// subscriberCountFast mirrors subscriberCount as a lock-free
+	// sync.Map[string]*atomic.Int32 so the WS event-push hot path
+	// (singleSubscriber, called once per EventLog notify wave per
+	// subscribed client) can read the per-key population WITHOUT taking
+	// h.mu. R20260531A-PERF-1 (#1522): the prior singleSubscriber took
+	// h.mu.RLock on every push, contending with subscribe/unsubscribe
+	// writers on the same mutex at 5-50 events/s × N sessions.
+	//
+	// The map[string]int above stays the source of truth (it backs the
+	// AST-pinned per-key cap check and the unsubscribe drop-cache gate,
+	// both of which already run under h.mu). Every mutation of
+	// subscriberCount goes through bumpSubscriberCountLocked /
+	// decSubscriberCountLocked / the Shutdown bulk-clear, each of which
+	// keeps this mirror in step under h.mu. The lock-free reader may
+	// observe a value that is at most one writer-critical-section stale,
+	// which is acceptable for a fast-path heuristic: a wrong "single"
+	// verdict only routes a push through (or around) the marshal cache,
+	// never affecting correctness — the multi-tab fan-out still produces
+	// byte-identical frames either way.
+	subscriberCountFast sync.Map // key string -> *atomic.Int32
 	// enforceCaps is the explicit gate for the per-key subscriber cap
 	// (maxSubscribersPerKey, gates wshub_subscribe.go:111 and the
 	// dropMarshalCache early-out at wshub_subscribe.go:346). NewHub sets
@@ -253,9 +308,13 @@ type Hub struct {
 	// test signature keeps compiling without a getter dependency.
 	cookieMAC func() string
 	guard     *session.Guard
-	// NEEDS-DESIGN R242-GO-10: 与其他 Hub 依赖一致改抽 MessageEnqueuer interface；
-	// 当前直接耦合 *dispatch.MessageQueue 具体类型。
-	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	// R242-GO-10 (#377): Hub depends on the MessageEnqueuer interface, not the
+	// concrete *dispatch.MessageQueue, so the dashboard send path is decoupled
+	// from dispatch internals and swappable in tests. *dispatch.MessageQueue
+	// satisfies it implicitly (var _ binding in wshub_types.go). NewHub guards
+	// the assignment so a nil concrete Queue stays a nil interface — the
+	// `h.queue == nil` legacy-fallback gate in send.go must keep working.
+	queue      MessageEnqueuer // per-key FIFO queue for dashboard sends
 	nodes      map[string]node.Conn
 	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr *project.Manager
@@ -336,8 +395,24 @@ type Hub struct {
 	auth     *auth.Handlers
 	upgrader websocket.Upgrader
 
-	debounceMu    sync.Mutex
+	debounceMu sync.Mutex
+	// debounceTimer is allocated ONCE in NewHub (via time.AfterFunc bound to
+	// debounceFire, then immediately Stopped so it starts idle). Each arming
+	// re-uses it with Reset(debounceInterval) rather than allocating a fresh
+	// *time.Timer per call — R200109-PERF-14 (#1624). The previous design
+	// recreated the timer with time.AfterFunc on every idle→armed transition,
+	// allocating a runtime timer struct on the high-frequency sidebar-refresh
+	// path. The armed/idle state is now tracked by debounceArmed (below)
+	// instead of timer==nil, since the timer object is now Hub-lifetime.
+	// Hand-rolled hubs that skip NewHub leave debounceTimer nil and fall back
+	// to the per-call time.AfterFunc path in BroadcastSessionsUpdate.
 	debounceTimer *time.Timer
+	// debounceArmed is the idle/armed sentinel that replaced the old
+	// timer==nil check (R200109-PERF-14 #1624): true while a debounce window
+	// is pending (a Reset has scheduled the fire callback and clientWG holds
+	// the matching Add(1)), false once the callback has run or before the
+	// first arm. Written only under debounceMu.
+	debounceArmed bool
 	debounceFirst time.Time // first trigger in the current debounce window
 	// debounceClosed is set under debounceMu during Shutdown so any post-close
 	// BroadcastSessionsUpdate caller does not register a new AfterFunc + Add
@@ -417,17 +492,17 @@ type Hub struct {
 	// guarded by a single sync.Mutex to a sync.Map so the steady-state
 	// path (limiter already exists for owner) is a lock-free Load. The
 	// previous shape serialised every WS send across all owners through
-	// userSendLimitersMu — at 500 conns × 5 sends/s = 2500 acquisitions/s
+	// userSendLimitersMu (removed) — at 500 conns × 5 sends/s = 2500 acquisitions/s
 	// the map lookup itself was on the hot path under one mutex, blocking
 	// concurrent sends from unrelated users.
 	//
 	// nil pointer == "not enabled" preserves the legacy nil-guard
-	// behaviour for hand-built Hubs that bypass NewHub. Shutdown swaps
-	// the pointer to nil under userSendLimitersStoreMu so in-flight
-	// allowSendForOwner callers either observe the live map or the nil
-	// fall-through; no torn state.
-	userSendLimitersStoreMu sync.RWMutex
-	userSendLimiters        *sync.Map // map[string]*rate.Limiter
+	// behaviour for hand-built Hubs that bypass NewHub. Shutdown stores
+	// nil atomically so in-flight allowSendForOwner callers either observe
+	// the live map or the nil fall-through; no torn state.
+	// R20260603-PERF-1: atomic.Pointer[sync.Map] replaces the RWMutex guard
+	// so the hot send path (allowSendForOwner) is fully lock-free on reads.
+	userSendLimiters atomic.Pointer[sync.Map] // map[string]*rate.Limiter; R20260603-PERF-1
 
 	// connCountByOwnerMu + connCountByOwner enforce a per-uploadOwner WS
 	// connection sub-cap (maxConnsPerOwner) on top of the global
@@ -469,7 +544,18 @@ type HubOptions struct {
 	// WS subscribe / send paths share the same planner-binding
 	// precedence as the IM dispatch path. Nil falls back to the legacy
 	// inlined merge.
-	Resolver         *session.KeyResolver
+	Resolver *session.KeyResolver
+	// Scheduler is the optional cron-side hook (CronView) wired at
+	// construction. Production callers pass s.scheduler here; nil keeps the
+	// auto-save-prompt / stub-revival hooks dormant for tests. R176-ARCH-M3
+	// (#431): moved into HubOptions so the prior SetScheduler post-construction
+	// setter (and its call-order-vs-Start race) is gone.
+	Scheduler CronView
+	// ScratchPool lets sessionOptsFor resolve AgentOpts for ephemeral scratch
+	// keys. Constructed in Server.New (before NewHub), so it is wired at
+	// construction rather than via a post-hoc SetScratchPool setter.
+	// R176-ARCH-M3 (#431).
+	ScratchPool      *session.ScratchPool
 	AllowedRoot      string
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
@@ -527,11 +613,12 @@ func NewHub(opts HubOptions) *Hub {
 		dashToken:        opts.DashToken,
 		cookieMAC:        cookieMACFn,
 		guard:            opts.Guard,
-		queue:            opts.Queue,
 		nodes:            opts.Nodes,
 		nodesMu:          opts.NodesMu,
 		projectMgr:       opts.ProjectMgr,
 		resolver:         opts.Resolver,
+		scheduler:        opts.Scheduler,
+		scratchPool:      opts.ScratchPool,
 		allowedRoot:      opts.AllowedRoot,
 		trustedProxy:     opts.TrustedProxy,
 		wsAuthLimiter:    opts.WSAuthLimiter,
@@ -562,7 +649,7 @@ func NewHub(opts HubOptions) *Hub {
 	// here so allowSendForOwner can lookup-or-create without a sync.Once.
 	// R260528-PERF-18 (#1357): sync.Map keyed by owner string lets the
 	// steady-state Allow() path skip a global mutex on every WS send.
-	h.userSendLimiters = &sync.Map{}
+	h.userSendLimiters.Store(&sync.Map{})
 	// R229-SEC-8 / #1022: per-uploadOwner connection counter so a single
 	// token cannot monopolise the global maxWSConns pool.
 	h.connCountByOwner = make(map[string]int)
@@ -572,7 +659,7 @@ func NewHub(opts HubOptions) *Hub {
 	h.debounceFire = func() {
 		defer h.clientWG.Done()
 		h.debounceMu.Lock()
-		h.debounceTimer = nil
+		h.debounceArmed = false
 		closed := h.debounceClosed
 		h.debounceMu.Unlock()
 		if closed {
@@ -580,6 +667,17 @@ func NewHub(opts HubOptions) *Hub {
 		}
 		h.doBroadcastSessionsUpdate()
 	}
+	// R200109-PERF-14 (#1624): pre-allocate the debounce timer ONCE here,
+	// bound to the pre-bound fire callback, then Stop it so it starts idle.
+	// BroadcastSessionsUpdate arms it with Reset(debounceInterval) on each
+	// idle→armed transition instead of calling time.AfterFunc per call, which
+	// allocated a fresh runtime *time.Timer every time the window reopened.
+	// Stop() may return false if the just-created timer were already pending,
+	// but AfterFunc(MaxInt64) cannot fire within this window, so draining its
+	// channel is unnecessary (AfterFunc timers have no observable C). The
+	// timer stays idle until the first Reset.
+	h.debounceTimer = time.AfterFunc(time.Duration(math.MaxInt64), h.debounceFire)
+	h.debounceTimer.Stop()
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
@@ -593,27 +691,23 @@ func NewHub(opts HubOptions) *Hub {
 	// and sessionSendLegacy can be deleted.
 	if opts.Queue == nil {
 		slog.Error("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
+	} else {
+		// Assign through the concrete-nil guard: storing a typed-nil
+		// *dispatch.MessageQueue straight into the interface field would make
+		// `h.queue == nil` (the send.go legacy-fallback gate) read false. Only
+		// wrap a non-nil queue so the gate keeps its original meaning.
+		h.queue = opts.Queue
 	}
 	return h
 }
 
-// SetScheduler sets the cron scheduler for auto-saving prompts on first send.
-// Accepts the concrete *cron.Scheduler (production wiring) — the field type
-// is the narrower CronView interface so the Hub never sees the rest of the
-// scheduler API. R242-ARCH-13 (#754): the previous file-local cronHubOps
-// interface has been collapsed into the package-level CronView (see
-// dashboard_session.go) shared with SessionHandlers — fewer micro-interfaces
-// to learn, identical method-set against *cron.Scheduler.
-func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
-
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
-// that were pre-uploaded via POST /api/sessions/upload.
+// that were pre-uploaded via POST /api/sessions/upload. Kept as a
+// post-construction setter (unlike Scheduler/ScratchPool which moved into
+// HubOptions in R176-ARCH-M3 #431) because the upload store's cleanup loop is
+// bound to the app-lifecycle ctx and is therefore created after the Hub exists
+// — see registerDashboard's R215-ARCH-P2-3 (#579) note.
 func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
-
-// SetScratchPool wires the ephemeral-session pool so sessionOptsFor can
-// resolve AgentOpts for scratch keys without touching the sidebar-visible
-// router state.
-func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 
 // allowSendForOwner returns whether the per-user (uploadOwner-keyed) send
 // budget admits another "send" message. The per-connection
@@ -641,9 +735,7 @@ func (h *Hub) allowSendForOwner(owner string) bool {
 	if h == nil || owner == "" {
 		return true
 	}
-	h.userSendLimitersStoreMu.RLock()
-	m := h.userSendLimiters
-	h.userSendLimitersStoreMu.RUnlock()
+	m := h.userSendLimiters.Load()
 	if m == nil {
 		return true
 	}
@@ -670,7 +762,12 @@ func (h *Hub) register(c *wsClient) {
 	// test hubs that allocate &Hub{} directly leave authClients nil; the
 	// nil-guard preserves the legacy behaviour.
 	if h.authClients != nil && c.authenticated.Load() {
+		// R200109-PERF-4 (#1621): authClients writes nest authMu inside
+		// h.mu so the broadcast read side (authMu alone) sees a consistent
+		// mirror without contending on the Hub-wide lock.
+		h.authMu.Lock()
 		h.authClients[c] = struct{}{}
+		h.authMu.Unlock()
 	}
 	h.mu.Unlock()
 }
@@ -692,7 +789,10 @@ func (h *Hub) markAuthenticated(c *wsClient) {
 	// source of truth for "this client is alive enough to broadcast to".
 	if h.authClients != nil {
 		if _, ok := h.clients[c]; ok {
+			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
+			h.authMu.Lock()
 			h.authClients[c] = struct{}{}
+			h.authMu.Unlock()
 		}
 	}
 	h.mu.Unlock()
@@ -722,7 +822,10 @@ func (h *Hub) unregister(c *wsClient) {
 		// well-defined no-op so the unconditional delete handles both the
 		// authenticated and (rare) never-authenticated disconnect paths.
 		if h.authClients != nil {
+			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
+			h.authMu.Lock()
 			delete(h.authClients, c)
+			h.authMu.Unlock()
 		}
 		if n := len(c.subscriptions); n > 0 {
 			unsubs = make([]func(), 0, n)
@@ -744,7 +847,12 @@ func (h *Hub) unregister(c *wsClient) {
 		// the counter into negative territory.
 		h.connCount.Add(-1)
 		// R229-SEC-8 / #1022: free the per-uploadOwner sub-cap slot too.
-		h.releaseOwnerSlot(c.uploadOwner)
+		// R20260605B-CORR-4 (#1808): read c.uploadOwnerKey() under
+		// connCountByOwnerMu (via releaseOwnerSlotForClient) so a concurrent
+		// handleAuth re-key (rekeyOwnerSlot) cannot expose the half-applied
+		// window where the field still reads the old owner but the new owner's
+		// slot is already reserved — which used to leak that slot.
+		h.releaseOwnerSlotForClient(c)
 		// Drop any agent_subscribe refs this client was holding so refCount
 		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
 		// would leave the tailer in broadcasting mode forever, wedging a
@@ -853,7 +961,14 @@ func (h *Hub) reserveOwnerSlot(owner string) bool {
 	}
 	h.connCountByOwnerMu.Lock()
 	defer h.connCountByOwnerMu.Unlock()
-	if h.connCountByOwner == nil {
+	return h.reserveOwnerSlotLocked(owner)
+}
+
+// reserveOwnerSlotLocked is the connCountByOwnerMu-held body of
+// reserveOwnerSlot. owner=="" is handled by the callers (it never reaches
+// here from reserveOwnerSlot, and rekeyOwnerSlot guards "" explicitly).
+func (h *Hub) reserveOwnerSlotLocked(owner string) bool {
+	if owner == "" || h.connCountByOwner == nil {
 		return true
 	}
 	if h.connCountByOwner[owner] >= maxConnsPerOwner {
@@ -873,7 +988,13 @@ func (h *Hub) releaseOwnerSlot(owner string) {
 	}
 	h.connCountByOwnerMu.Lock()
 	defer h.connCountByOwnerMu.Unlock()
-	if h.connCountByOwner == nil {
+	h.releaseOwnerSlotLocked(owner)
+}
+
+// releaseOwnerSlotLocked is the connCountByOwnerMu-held body of
+// releaseOwnerSlot.
+func (h *Hub) releaseOwnerSlotLocked(owner string) {
+	if owner == "" || h.connCountByOwner == nil {
 		return
 	}
 	n := h.connCountByOwner[owner]
@@ -882,6 +1003,61 @@ func (h *Hub) releaseOwnerSlot(owner string) {
 		return
 	}
 	h.connCountByOwner[owner] = n - 1
+}
+
+// rekeyOwnerSlot atomically swaps c's per-owner connection slot from oldOwner
+// to newOwner, publishing c.setUploadOwner(newOwner) under the SAME
+// connCountByOwnerMu critical section that mutates the counter. This closes
+// the R20260605B-CORR-4 (#1808) race: a concurrent unregister (writePump
+// teardown) releases its slot via releaseOwnerSlotForClient, which reads
+// c.uploadOwnerKey() under the same lock — so it observes either the pre-rekey
+// owner (with oldOwner's slot still held) or the post-rekey owner (with
+// newOwner's slot held), never the half-applied window where the field still
+// reads oldOwner but newOwner's slot is already reserved.
+//
+// Returns false (no state changed) when newOwner is at the per-owner ceiling,
+// so the caller can refuse the auth with the connection still keyed to
+// oldOwner.
+func (h *Hub) rekeyOwnerSlot(c *wsClient, oldOwner, newOwner string) bool {
+	if h == nil {
+		c.setUploadOwner(newOwner)
+		return true
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	// If the connection has already torn down (pump defer closed c.done before
+	// calling unregister, which releases the slot under THIS lock), do not
+	// reserve a fresh slot for it — that slot would never be released because
+	// unregister's `removed` gate fires exactly once and has already passed.
+	// Observing c.done not-yet-closed here, under the lock, guarantees any
+	// later unregister release reads the newOwner we publish below.
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	h.releaseOwnerSlotLocked(oldOwner)
+	if !h.reserveOwnerSlotLocked(newOwner) {
+		// Re-claim the old slot so a later releaseOwnerSlotForClient(oldOwner)
+		// stays balanced; leave the field on oldOwner (no setUploadOwner).
+		h.reserveOwnerSlotLocked(oldOwner)
+		return false
+	}
+	c.setUploadOwner(newOwner)
+	return true
+}
+
+// releaseOwnerSlotForClient releases the slot for c's CURRENT upload owner,
+// reading c.uploadOwnerKey() under connCountByOwnerMu so it cannot interleave
+// with a concurrent rekeyOwnerSlot (R20260605B-CORR-4 / #1808). Used by the
+// unregister teardown path in place of releaseOwnerSlot(c.uploadOwnerKey()).
+func (h *Hub) releaseOwnerSlotForClient(c *wsClient) {
+	if h == nil {
+		return
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	h.releaseOwnerSlotLocked(c.uploadOwnerKey())
 }
 
 // TrackSend reserves a sendWG slot for a background send goroutine and
@@ -940,11 +1116,20 @@ func (h *Hub) Shutdown() {
 	// (callers can also observe it lock-free via the atomic-only fast path).
 	h.debounceClosed = true
 	h.debounceClosedFast.Store(true)
-	if h.debounceTimer != nil {
+	// R200109-PERF-14 (#1624): the timer is now Hub-lifetime (pre-allocated
+	// in NewHub), so the "is a broadcast pending?" question is answered by
+	// debounceArmed, not by timer==nil. Only an armed timer holds a clientWG
+	// slot worth releasing. When Stop() returns true the callback was
+	// cancelled before running, so we Done() the slot it reserved; when it
+	// returns false the callback already fired and its deferred Done()
+	// balances the Add(). The timer object itself is left intact (not nilled)
+	// so it can be reused — Stop() leaves it idle. Hand-rolled hubs that
+	// never went through NewHub leave debounceTimer nil; guard for that.
+	if h.debounceArmed && h.debounceTimer != nil {
 		if h.debounceTimer.Stop() {
 			h.clientWG.Done()
 		}
-		h.debounceTimer = nil
+		h.debounceArmed = false
 	}
 	h.debounceMu.Unlock()
 
@@ -989,6 +1174,8 @@ func (h *Hub) Shutdown() {
 	// above so the per-key counts are mechanically zero. R246-PERF-4 (#716).
 	for k := range h.subscriberCount {
 		delete(h.subscriberCount, k)
+		// R20260531A-PERF-1 (#1522): keep the lock-free mirror in step.
+		h.subscriberCountFast.Delete(k)
 	}
 	// R040034-PERF-23 (#1409): drain authClients alongside h.clients so a
 	// post-Shutdown broadcast (already racing the cancel/Wait barrier)
@@ -996,9 +1183,14 @@ func (h *Hub) Shutdown() {
 	// nilling) so any straggler markAuthenticated call goes through the
 	// h.clients membership check above and short-circuits on the empty
 	// clients map.
+	// R200109-PERF-4 (#1621): authMu nested inside h.mu (Shutdown holds
+	// h.mu here); broadcast readers blocked on authMu drain to an empty
+	// mirror.
+	h.authMu.Lock()
 	for c := range h.authClients {
 		delete(h.authClients, c)
 	}
+	h.authMu.Unlock()
 	h.mu.Unlock()
 	for _, unsub := range unsubs {
 		unsub()
@@ -1061,12 +1253,10 @@ func (h *Hub) Shutdown() {
 	// rate.Limiter values can be GC'd after Hub teardown (test harnesses
 	// that build and tear down many Hubs in one process).
 	// R260528-PERF-18 (#1357): the map is a sync.Map; nilling the pointer
-	// under userSendLimitersStoreMu serialises with in-flight
-	// allowSendForOwner callers — they observe either the live map or the
-	// nil fall-through, never a torn pointer.
-	h.userSendLimitersStoreMu.Lock()
-	h.userSendLimiters = nil
-	h.userSendLimitersStoreMu.Unlock()
+	// via atomic.Pointer.Store serialises with in-flight allowSendForOwner
+	// callers — they observe either the live map or the nil fall-through,
+	// never a torn pointer. R20260603-PERF-1: RWMutex removed.
+	h.userSendLimiters.Store(nil)
 
 	// Drop the per-uploadOwner conn-count map so test harnesses that
 	// build/teardown many Hubs in one process don't accumulate stale

@@ -134,12 +134,14 @@ var processEUID = uint32(os.Geteuid())
 func isPublicTmpForeignPrivate(info os.FileInfo) bool {
 	uid, ok := fileOwnerUID(info)
 	if !ok {
-		// Non-Unix or stub FileInfo (test fakes); be conservative and
-		// allow — the production build is always Linux where the
-		// assertion holds. A unit test that wants to assert the deny
-		// path supplies a real *syscall.Stat_t via os.Lstat on a
-		// fixture file.
-		return false
+		// Non-Unix or stub FileInfo (test fakes): we cannot read the
+		// owner UID, so this security gate fails closed — treat the
+		// file as foreign-private and refuse it (deny by default).
+		// The production build is always Linux where ok is always true,
+		// so this branch never fires in production. A unit test that
+		// wants to exercise the deny path supplies a real *syscall.Stat_t
+		// via os.Lstat on a fixture file.
+		return true
 	}
 	if uid == processEUID {
 		return false
@@ -174,8 +176,15 @@ var publicTmpDeniedSuffixes = []string{
 // suffix (e.g. `ssh-agent.<pid>`, `core.1234`, `crash.report`). The
 // match is case-insensitive on the basename. See publicTmpDeniedSuffixes
 // for the rationale.
+//
+// "gpg" covers gpg-agent socket artefacts (e.g. `S.gpg-agent`, `S.gpg-agent.extra`).
+// ".xauthority" covers the X11 authority file that holds MIT-MAGIC-COOKIE tokens.
+// ".dbus" covers D-Bus session socket artefacts (e.g. `.dbus-keyrings`).
 var publicTmpDeniedSubstrings = []string{
 	"ssh",
+	"gpg",
+	".xauthority",
+	".dbus",
 }
 
 // publicTmpDeniedPrefixes catches dump/crash artefacts whose names start
@@ -210,6 +219,27 @@ func isPublicTmpDeniedName(resolved string) bool {
 		}
 	}
 	return false
+}
+
+// isPublicTmpIrregularType reports whether the file is a non-regular type
+// (Unix socket, named pipe/FIFO, or device node) that must never be served
+// through the __public_tmp__ pseudo-project. R090031-SEC-7 (#1688): the
+// name-based deny-list (isPublicTmpDeniedName) and the foreign-private mode
+// gate (isPublicTmpForeignPrivate) both miss a world-readable Unix socket
+// whose name doesn't match any deny-list entry (e.g. a custom-named agent
+// IPC socket or a non-standard postgres/redis socket alias). Such a file
+// would pass both gates. Linux DAC checks the naozhi *process*, so its UID
+// can read()/connect() those endpoints transparently; reflecting their bytes
+// through the dashboard discloses IPC payload (auth state, query traffic).
+// Device nodes and FIFOs are likewise never legitimate dashboard content and
+// reading them can block or leak kernel/process state. This is a
+// defence-in-depth type check independent of name and permission bits.
+//
+// The mode is read from the FileInfo we already Lstat'd, so this is a
+// zero-syscall check on the hot path.
+func isPublicTmpIrregularType(info os.FileInfo) bool {
+	const irregular = os.ModeSocket | os.ModeNamedPipe | os.ModeDevice | os.ModeCharDevice
+	return info.Mode()&irregular != 0
 }
 
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
@@ -411,7 +441,7 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 	// prefix check below is defence-in-depth, but collapsing `a/../x` up
 	// front avoids calling os.Stat on obviously hostile paths at all.
 	cleaned := filepath.Clean(rel)
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", errors.New("path escapes workspace")
 	}
 	full := filepath.Join(rootResolved, cleaned)
@@ -710,7 +740,11 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 				// when their mode bits are world-readable.
 				if isPublicTmpDeniedName(abs) {
 					entry = existsEntry{Exists: false}
-				} else if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
+				} else if info, lerr := os.Lstat(abs); lerr == nil &&
+					(isPublicTmpForeignPrivate(info) || isPublicTmpIrregularType(info)) {
+					// R090031-SEC-7 (#1688): existence-probe parity with
+					// HandleFileGet's non-regular-type gate — a world-readable
+					// Unix socket must not be enumerable via the batch API either.
 					entry = existsEntry{Exists: false}
 				}
 			}
@@ -922,6 +956,31 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	if project == publicTmpProject && isPublicTmpDeniedName(resolved) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
+	}
+
+	// R090031-SEC-7 (#1688): defence-in-depth type gate. A world-readable
+	// Unix socket whose name matches neither the deny-list nor the
+	// foreign-private mode gate (e.g. a custom-named agent IPC socket)
+	// would otherwise be served. Refuse any non-regular file type.
+	if project == publicTmpProject && isPublicTmpIrregularType(info) {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// R20260603-SEC-4 (#1678): the __public_tmp__ pseudo-project lets any
+	// authenticated dashboard user read non-credential files anywhere under
+	// /tmp. That is acceptable only for single-operator deployments; on a
+	// shared/multi-operator host it can expose another user's artefacts.
+	// Since the flag's threat model assumes a single trusted operator, the
+	// minimum bar is an audit trail: emit one structured log line per served
+	// /tmp file so an operator who later switches to a shared deployment can
+	// reconstruct who read what. RemoteAddr is logged (not request headers)
+	// to avoid echoing attacker-controlled values into the log stream.
+	if project == publicTmpProject {
+		slog.Info("public_tmp file access",
+			"path", resolved,
+			"mode", mode,
+			"remote_addr", r.RemoteAddr)
 	}
 
 	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
@@ -1532,6 +1591,33 @@ var sensitiveBaseSuffixes = []string{
 	".env.save",
 }
 
+// sensitiveNameSubstrings is a defence-in-depth pattern scan layered on top of
+// the exact-name / extension / suffix rules. R20260603-SEC-5 (#1680): the
+// enumerated tables only catch known filenames, but Claude routinely generates
+// ad-hoc credential dumps with non-canonical names — `db-password.txt`,
+// `aws_credentials.txt` (the underscore form misses the exact `credentials`
+// entry), `api_token.log`, `slack_secret.md`. Any basename containing one of
+// these tokens is treated as credential-bearing regardless of extension.
+//
+// Each token is matched case-insensitively as a substring of the basename.
+// The set is deliberately narrow (only words that almost always denote a
+// secret) to avoid over-blocking legitimate workspace files — e.g. there is no
+// "key" token here because *.key is already handled by sensitiveDownloadExts
+// and a bare "key" substring would block "keyboard.go" / "monkey.png".
+var sensitiveNameSubstrings = []string{
+	"password",
+	"passwd",
+	"secret",
+	"credential", // matches credential / credentials, hyphen/underscore forms
+	"token",
+	"apikey",
+	"api-key",
+	"api_key",
+	"private-key",
+	"private_key",
+	"privatekey",
+}
+
 // sensitiveDownloadExts lists extensions that strongly imply key material.
 var sensitiveDownloadExts = map[string]struct{}{
 	".key": {},
@@ -1626,6 +1712,14 @@ func isSensitiveDownloadName(base string) bool {
 	// archive names that the exact-name + ext scans miss.
 	for _, suffix := range sensitiveBaseSuffixes {
 		if strings.HasSuffix(low, suffix) {
+			return true
+		}
+	}
+	// R20260603-SEC-5 (#1680): defence-in-depth substring scan. Catches
+	// ad-hoc credential dumps (db-password.txt, aws_credentials.txt,
+	// api_token.log) whose names match no enumerated table entry.
+	for _, sub := range sensitiveNameSubstrings {
+		if strings.Contains(low, sub) {
 			return true
 		}
 	}

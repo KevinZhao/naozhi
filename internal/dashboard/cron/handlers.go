@@ -6,10 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -417,6 +418,27 @@ type cronNotifyDefaultView struct {
 	ChatID   string `json:"chat_id"`
 }
 
+// maskNotifyChatID redacts the global cron.notify_default chat_id before it is
+// surfaced in the list response.
+//
+// R243-SEC-7 (#789): the raw chat_id was previously sent verbatim to every
+// authenticated dashboard user. In a multi-operator deployment that leaks the
+// notification target (e.g. a private Feishu chat open_id) to operators who
+// have no business knowing it. We still want the UI to render helpful copy
+// like "notifications go to feishu (oc_…1234)", so we keep a short prefix and
+// suffix hint and replace the middle with an ellipsis. Short IDs (<=8 runes)
+// are fully masked since there is nothing left to hint with safely.
+func maskNotifyChatID(id string) string {
+	if id == "" {
+		return ""
+	}
+	r := []rune(id)
+	if len(r) <= 8 {
+		return strings.Repeat("•", len(r))
+	}
+	return string(r[:4]) + "…" + string(r[len(r)-4:])
+}
+
 // cronRunsListResp is the wire shape returned by GET /api/cron/runs —
 // per-job paginated history. NextBefore is omitted when the page is
 // partial, matching the previous map[string]any behaviour.
@@ -651,6 +673,20 @@ type Handlers struct {
 	missedCacheMu sync.Mutex
 	missedCache   map[string]missedVerdict
 
+	// tzLabelMu guards the memoised timezone label below. HandleList runs
+	// at the dashboard's 1 Hz poll cadence × parallel tabs and re-rendered
+	// formatTZOffset (an fmt.Sprintf) on every request even though the
+	// label only changes when the zone offset changes. The scheduler's
+	// *time.Location is fixed at construction, but the offset returned by
+	// now.In(loc).Zone() still flips across DST transitions, so the cache
+	// is keyed on (locName, offset) — NOT on loc.String() alone — to stay
+	// correct across DST boundaries. R103901-PERF-10.
+	tzLabelMu     sync.Mutex
+	tzLabelLoc    string
+	tzLabelOffset int
+	tzLabelCached string
+	tzLabelHasVal bool
+
 	// transcriptSem caps concurrent /api/cron/runs/{run_id}/transcript
 	// requests across the whole process. R243-SEC-12 (#798): each
 	// in-flight transcript holds a 256 KB bufio.Scanner buffer plus
@@ -797,8 +833,8 @@ func evictOldestMissedCache(m map[string]missedVerdict) {
 	for k, v := range m {
 		entries = append(entries, kt{k: k, t: v.computedAt})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].t.Before(entries[j].t)
+	slices.SortFunc(entries, func(a, b kt) int {
+		return a.t.Compare(b.t)
 	})
 	for i := 0; i < drop; i++ {
 		delete(m, entries[i].k)
@@ -851,15 +887,14 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 		return nil
 	}
 	out := make([][]cronpkg.CronRunSummary, len(jobs))
-	// Tasks queue: each worker pulls the next index and fans out to the
-	// scheduler. Channel-of-int keeps the work distribution self-balancing
-	// — a slow per-job lookup (cold cache, slow disk) does not pin a
-	// single worker on a single job while its peers idle.
-	tasks := make(chan int, len(jobs))
-	for i := range jobs {
-		tasks <- i
-	}
-	close(tasks)
+	// Work distribution: each worker atomically claims the next index and
+	// fans out to the scheduler. An atomic counter keeps the distribution
+	// self-balancing — a slow per-job lookup (cold cache, slow disk) does
+	// not pin a single worker on a single job while its peers idle. Unlike
+	// the previous channel-of-int, no per-call len(jobs)-sized buffer is
+	// allocated (R250-PERF-… / #1847): at 1 Hz on a 50-job install this
+	// drops a fresh 50-int buffered channel every poll.
+	var next atomic.Int64
 	workers := batchRecentRunsWorkers
 	if workers > len(jobs) {
 		workers = len(jobs)
@@ -869,7 +904,11 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for idx := range tasks {
+			for {
+				idx := int(next.Add(1)) - 1
+				if idx >= len(jobs) {
+					break
+				}
 				out[idx] = h.scheduler.RecentRuns(jobs[idx].Job.ID, n)
 			}
 		}()
@@ -977,7 +1016,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Paused:          j.Paused,
 			WorkDir:         j.WorkDir,
 			NotifyPlatform:  j.NotifyPlatform,
-			NotifyChatID:    j.NotifyChatID,
+			NotifyChatID:    maskNotifyChatID(j.NotifyChatID),
 			LastResult:      j.LastResult,
 			LastError:       j.LastError,
 			LastErrorClass:  string(j.LastErrorClass),
@@ -1064,7 +1103,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// syscall on every list request.
 	name, offset := now.In(loc).Zone()
 	locName := loc.String()
-	tzLabel := formatTZOffset(locName, offset)
+	tzLabel := h.cachedTZLabel(locName, offset)
 
 	// R230B-CR-3: named struct in place of map[string]any keeps the json
 	// encoder on the cached reflect path (one-time alloc) and lets the wire
@@ -1077,12 +1116,18 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	if def := h.scheduler.NotifyDefault(); def.IsSet() {
 		// Expose the configured default so the UI can render helpful copy
-		// like "notifications go to feishu (oc_xxx)" instead of just a
-		// blank toggle. chat_id is already considered semi-public (appears
-		// in message metadata) so surfacing it here is not a leak.
+		// like "notifications go to feishu (oc_…1234)" instead of just a
+		// blank toggle.
+		//
+		// R243-SEC-7 (#789): the raw chat_id is NOT semi-public — in a
+		// multi-operator deployment it is the private notification target
+		// of whoever configured cron.notify_default, and every authenticated
+		// dashboard user previously received it verbatim. Mask it down to a
+		// prefix/suffix hint so the UI affordance survives without leaking
+		// the full identifier cross-tenant.
 		resp.NotifyDefault = &cronNotifyDefaultView{
 			Platform: def.Platform,
-			ChatID:   def.ChatID,
+			ChatID:   maskNotifyChatID(def.ChatID),
 		}
 	}
 	httputil.WriteJSON(w, resp)
@@ -1115,8 +1160,28 @@ func httpErrPersistFailed(w http.ResponseWriter, op string) {
 	})
 }
 
+// writeCronErr writes a cron mutation error as the JSON envelope
+// {"error": msg} with the given status. R20260531-SEC-8 (#1518): the cron
+// create/update validation paths previously mixed http.Error (text/plain)
+// with httputil.WriteJSONStatus (JSON) for their 4xx responses, forcing
+// dashboard.js to branch on Content-Type to read the error. Routing every
+// cron mutation error through this helper lets the client read body.error
+// uniformly. Matches the existing {"error": ...} shape already used by the
+// rate-limit and persist-failure replies.
+func writeCronErr(w http.ResponseWriter, status int, msg string) {
+	httputil.WriteJSONStatus(w, status, map[string]string{"error": msg})
+}
+
 // POST /api/cron — create a new cron job from dashboard.
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1138,15 +1203,15 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if req.Schedule == "" {
-		http.Error(w, "schedule is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
 	if err := validateCronTitle(req.Title); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Cap schedule length before handing to validateSchedule → robfig/cron
@@ -1154,19 +1219,19 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// envelope a single 63 KB schedule field would still reach the parser
 	// and force per-field regex work. Mirrors HandlePreview (line 381).
 	if len(req.Schedule) > maxCronScheduleBytesDashboard {
-		http.Error(w, "schedule too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
 	if err := validateCronScheduleChars(req.Schedule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validateCronPrompt(req.Prompt); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := ValidateCronBackend(req.Backend); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1175,18 +1240,18 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// status code for boundary violations rather than ambiguous 400s.
 	if req.WorkDir != "" {
 		if err := validateCronWorkDir(req.WorkDir); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if h.validateWS == nil {
-			http.Error(w, "cron work_dir validation not wired", http.StatusInternalServerError)
+			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
 		}
 		validated, err := h.validateWS(req.WorkDir, h.allowedRoot)
 		if err != nil {
 			status, msg := h.classifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
-			http.Error(w, msg, status)
+			writeCronErr(w, status, msg)
 			return
 		}
 		req.WorkDir = validated
@@ -1205,20 +1270,20 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// disk and silently route notifications to the global fallback target.
 	if req.NotifyPlatform != "" || req.NotifyChatID != "" {
 		if req.NotifyPlatform == "" || req.NotifyChatID == "" {
-			http.Error(w, "notify_platform and notify_chat_id must be set together", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify_platform and notify_chat_id must be set together")
 			return
 		}
 	}
 	if req.Notify != nil && *req.Notify {
 		perJobSet := req.NotifyPlatform != "" && req.NotifyChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
-			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return
 		}
 	}
 
 	if err := validateNotifyTarget(req.NotifyPlatform, req.NotifyChatID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1244,7 +1309,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// gap instead of the dashboard silently treating the create as a
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
-			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
+			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "created")
 			return
 		}
@@ -1252,38 +1317,47 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// parsed expressions; log the full detail for operator triage but
 		// return a sanitized message to the dashboard client.
 		slog.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
-		http.Error(w, "invalid schedule or job fields", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid schedule or job fields")
 		return
 	}
 
-	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
+	slog.Info("cron job created via dashboard", "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen), "schedule", job.Schedule)
 	httputil.WriteJSON(w, cronCreateResp{ID: job.ID})
 }
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		// [R112714-SEC-1] Use writeCronErr so all error paths emit JSON.
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	// Reject obviously-oversized ids before reaching the scheduler so slog
 	// attrs in the error path aren't dragged up to multi-MB strings.
 	// maxCronIDLen (64) matches the IM-side guard in dispatch/commands.go.
 	if len(id) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog: keeps log
 	// attributes free of newlines/control bytes that would inject forged
 	// records into the operator log when the lookup misses.
 	if !cronpkg.IsValidID(id) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
@@ -1291,29 +1365,38 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			// In-memory + cron entry deletion already happened, but the
 			// store write failed — a restart would replay the deleted job.
 			// 500 alerts the operator to inspect logs instead of treating
 			// the delete as quietly successful. R51-QUAL-001.
-			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
+			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "deleted")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron delete failed", "err", err)
-			http.Error(w, "delete failed", http.StatusBadRequest)
+			writeCronErr(w, code.HTTPStatus(), "delete failed")
 		}
 		return
 	}
 
-	slog.Info("cron job deleted via dashboard", "id", j.ID)
+	slog.Info("cron job deleted via dashboard", "id", osutil.SanitizeForLog(j.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
 // POST /api/cron/pause — pause a cron job by exact ID.
 func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1322,45 +1405,54 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	// Mirror HandleDelete's guard so oversized IDs don't drag slog attrs up
 	// to KB-scale strings on failure/success paths. R64-SEC-1.
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobAlreadyPaused):
-			http.Error(w, "job already paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job already paused")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
+			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "paused")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron pause failed", "err", err)
-			http.Error(w, "pause failed", http.StatusBadRequest)
+			writeCronErr(w, code.HTTPStatus(), "pause failed")
 		}
 		return
 	}
 
-	slog.Info("cron job paused via dashboard", "id", req.ID)
+	slog.Info("cron job paused via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
 func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1369,36 +1461,37 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobNotPaused):
-			http.Error(w, "job not paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job not paused")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
+			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "resumed")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron resume failed", "err", err)
-			http.Error(w, "resume failed", http.StatusBadRequest)
+			writeCronErr(w, code.HTTPStatus(), "resume failed")
 		}
 		return
 	}
 
-	slog.Info("cron job resumed via dashboard", "id", req.ID)
+	slog.Info("cron job resumed via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1413,7 +1506,7 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1422,39 +1515,40 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobPaused):
-			http.Error(w, "job is paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job is paused")
 		case errors.Is(err, cronpkg.ErrJobNoPrompt):
-			http.Error(w, "job has no prompt", http.StatusUnprocessableEntity)
+			writeCronErr(w, http.StatusUnprocessableEntity, "job has no prompt")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron trigger failed", "err", err)
-			http.Error(w, "trigger failed", http.StatusBadRequest)
+			writeCronErr(w, code.HTTPStatus(), "trigger failed")
 		}
 		return
 	}
 
-	slog.Info("cron job triggered manually", "id", req.ID)
+	slog.Info("cron job triggered manually", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteJSON(w, map[string]string{"status": "triggered"})
 }
 
@@ -1471,20 +1565,22 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
+	// [R112714-SEC-6] All validation error paths use writeCronErr so the
+	// client reads body.error uniformly (previously http.Error text/plain).
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
-		http.Error(w, "schedule is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
 	// Cap schedule length so the cron parser (regex + split) cannot be DoS'd
 	// with a megabyte-scale query parameter. Real cron expressions are far
 	// below this limit; robfig/cron rejects extremely long descriptors anyway.
 	if len(schedule) > maxCronScheduleBytesDashboard {
-		http.Error(w, "schedule too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
 	if err := validateCronScheduleChars(schedule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1493,12 +1589,12 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		// Reject obviously huge inputs before Atoi so an attacker cannot force
 		// us to decode a multi-kilobyte digit string.
 		if len(raw) > 3 {
-			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
 			return
 		}
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
 			return
 		}
 		if n > 10 {
@@ -1560,6 +1656,26 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 // The integer-division approach would produce "UTC-05:-30" for fractional
 // negative offsets because the sub-hour remainder inherits the sign;
 // abs() the minute component to keep the format well-formed.
+// cachedTZLabel returns formatTZOffset(locName, offset), memoising the result
+// so the dashboard's 1 Hz HandleList poll does not re-run fmt.Sprintf on every
+// request. The cache is keyed on (locName, offset): the scheduler location is
+// fixed at construction, but a fixed location's offset still flips across DST
+// transitions, so keying on the offset (not locName alone) keeps the label
+// correct across DST boundaries. R103901-PERF-10.
+func (h *Handlers) cachedTZLabel(locName string, offset int) string {
+	h.tzLabelMu.Lock()
+	defer h.tzLabelMu.Unlock()
+	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
+		return h.tzLabelCached
+	}
+	label := formatTZOffset(locName, offset)
+	h.tzLabelLoc = locName
+	h.tzLabelOffset = offset
+	h.tzLabelCached = label
+	h.tzLabelHasVal = true
+	return label
+}
+
 func formatTZOffset(ianaName string, offsetSeconds int) string {
 	hours := offsetSeconds / 3600
 	minutes := (offsetSeconds % 3600) / 60

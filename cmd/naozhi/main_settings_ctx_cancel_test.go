@@ -16,9 +16,9 @@ import (
 
 // TestReadJSONWithRetry_CtxCancelMidRetry_ReturnsCtxErr pins R241-GO-4 (#490)
 // at the underlying helper: when ctx is canceled mid-retry, readJSONWithRetry
-// must propagate context.Canceled so the writeClaudeSettingsOverride /
-// applyClaudeEnvSettings dispatch can downgrade the slog severity to Warn
-// rather than misclassify the cancel as a corruption Error.
+// must propagate context.Canceled so the applyClaudeEnvSettings dispatch can
+// downgrade the slog severity to Warn rather than misclassify the cancel as a
+// corruption Error.
 func TestReadJSONWithRetry_CtxCancelMidRetry_ReturnsCtxErr(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.json")
 	// Seed with invalid JSON so retry goroutine is forced to sleep.

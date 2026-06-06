@@ -136,27 +136,30 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_attachment_ref_clear_total` | OnSessionRemoved 走 workspace 清 keyhash 的 .meta 重写次数 | 仅在 session 被删时短时涨,平时 0 |
 | `naozhi_attachment_ref_meta_error_total` | tracker UpdateMetaFile 失败数(缺 sidecar / ENOSPC / perm) | 稳态 0;非零 = attachment 将回退到仅 uploaded_at TTL GC |
 | `naozhi_attachment_ref_drop_total` | tracker 非阻塞 enqueue 满 channel 丢弃数 | 稳态 0;非零 = 调用方提交过快或磁盘 latency 异常,同 Persister 运维 |
+| `naozhi_attachment_gc_reaped_total` | attachment-gc daemon 真删的附件 payload 数(dry-run 不计) | 随老附件被回收平稳涨;长期 0 而磁盘涨 = daemon 未开或枚举不到 workspace |
+| `naozhi_attachment_gc_would_reap_legacy_total` | dry-run/live 拟删:无 .meta 走 date-dir TTL 判定(较安全) | 观察 dry-run 风险构成用;开真删前看占比 |
+| `naozhi_attachment_gc_would_reap_no_refs_total` | dry-run/live 拟删:有 .meta 但无引用 —— **可能是 tracker 尚未 bump 的活跃引用** | 高风险桶;占比高时延长 dry-run 观察期再开真删 |
+| `naozhi_attachment_gc_would_reap_expired_total` | dry-run/live 拟删:被引用过但最后引用超 refTTL(较安全) | 观察 dry-run 风险构成用 |
+| `naozhi_attachment_gc_sweep_total` | attachment-gc daemon Tick 执行次数(成功+失败) | 按 tick 周期平稳涨;停滞 = daemon 未跑,核对 enabled / 进程是否重启过频 |
+| `naozhi_attachment_gc_error_total` | workspace 级 GC 错误数(单 root 的 ReadDir 失败;**不含**文件级 remove 失败) | 非零 = 某 workspace 根权限/IO 异常,对照 slog.Warn "attachment-gc: sweep failed" 的 root |
 | `naozhi_cron_execution_slow_total` | cron job 成功执行但耗时超过 `cronSlowThreshold`（当前 30s）的累计次数（R208-OBS1 的 MVP histogram 替身） | 持续增长 = 某些 job 长期压线超时；对照 job id（slog.Warn "cron execution slow"）确认是 prompt 设计问题还是 backend 退化 |
 | `naozhi_cron_send_budget_doubled_total` | spawn 阶段已耗 >50% jobTimeout 后才进入 sendCtx 的次数（R240-GO-4 / R230B-GO-1 wall-clock 翻倍信号） | 持续增长 = GetOrCreate / Spawn 慢路径在挤压 Send 预算，单次 run 实际 wall clock 接近 2×jobTimeout；对照 slog.Warn "cron send budget exceeds job/2" 找具体 job_id 排查 spawn 慢因 |
 | `naozhi_cron_stop_budget_exceeded_gc_total` | Scheduler.Stop() 冷启动 GC 等待超过 `gcWaitBudget`（5s）的累计次数（R250-GO-20 / #1083） | 非零 = trimAll 卡在文件系统层；接近 systemd TimeoutStopSec=30s 时报警，参考 slog.Warn "cron: gc goroutine wait timeout" |
 | `naozhi_cron_stop_budget_exceeded_drain_total` | Scheduler.Stop() cron drain 阶段超过 `stopBudget`（30s）的累计次数（R250-GO-20 / #1083） | 非零 = 在途 cron tick 没在预算内退出；持续增长说明热点 job 在 shutdown 路径占用太久，参考 slog.Warn "cron scheduler: stop deadline exceeded before cron.Stop drained" |
 | `naozhi_cron_stop_budget_exceeded_trigger_total` | Scheduler.Stop() triggerWG 等待阶段超过剩余预算的累计次数（R250-GO-20 / #1083） | 非零 = 手动 TriggerNow 引发的 goroutine 拖到 stopBudget 末尾；对照 slog.Warn "cron scheduler: stop deadline exceeded during triggerWG wait" 排查 webhook / notify 阻塞 |
+| `naozhi_cron_notify_partial_total` | cron 完成通知未发完全部 chunk 的累计次数：要么 replyCtx 超时（cronNotifyTimeout 30s）中途中断，要么某 chunk ReplyWithRetry 失败后 abort（R249-CR-26 / #966） | 持续增长 = IM 收件端在看截断的 cron 输出（webhook 慢/失败）；对照 slog.Warn "cron notify ... dropped" 找 platform/chat，建议引导用户改看 dashboard run-detail 面板 |
 | `naozhi_cron_run_started_total` | cron run 开始计数（CAS gate 通过后；docs/rfc/cron-run-history.md P0） | 与 `_ended_total` 差值远大于 inflight gauge = 进程崩溃打断在途 run；查 panic 日志 |
 | `naozhi_cron_run_ended_total` | cron run 终态计数（聚合 succeeded/failed/skipped/timed_out/canceled） | 与 `_started_total` 配合判断"开了但没收尾"的 run 数 |
+| `naozhi_sysession_run_started_total` | sysession daemon run 开始计数（CAS gate 通过后；#1723 RFC §6 Phase 1.5，对称于 cron 的 `_started_total`） | 与 `naozhi_sysession_run_ended_total` 差值远大于在途 = 进程崩溃打断在途 run；查 panic 日志 |
+| `naozhi_sysession_run_ended_total` | sysession daemon run 终态计数（聚合所有终态） | 与 `naozhi_sysession_run_started_total` 配合判断"开了但没收尾"的 run 数 |
 | `naozhi_cron_run_succeeded_total` | succeeded 终态计数 | 比例骤降 = backend / prompt 退化；对比 failed/timed_out 看根因 |
 | `naozhi_cron_run_failed_total` | failed 终态计数（session_error / send_error / workdir_* 等非超时错误） | 持续涨 = job 配置或目标不可达；按 LastErrorClass 分组排查 |
 | `naozhi_cron_run_skipped_total` | skipped 终态计数（overlap_skipped / paused_concurrent） | 持续涨 = 上一轮没跑完下一轮就来了；调长 schedule 或缩 prompt |
 | `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
 | `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
 | `naozhi_cron_watchdog_interrupt_timeout_total` | cron deadline-watchdog 触发后 `InterruptViaControl` 在 `watchdogInterruptTimeoutDefault`（3s）内未返回的累计次数（R20260527122801-SEC-3 / #1327） | 非零 = stdin 写入 wedged，inner goroutine 卡到下次 `session.Reset` 才放行；和 `naozhi_shim_restart_total` 对照判断 reconcile 是否清理；持续涨需要排查 shim 健康 |
-| `naozhi_auto_chain_spawn_attach_total` | 新建 session 路径自动接 chain 的次数（docs/rfc/auto-workspace-chain.md） | 上线初期会随每次新会话上涨；稳态后跟随用户开新会话节奏 |
-| `naozhi_auto_chain_backfill_attach_total` | 启动一次性回填给 prev 为空的 session 接 chain 的次数 | 仅在进程启动后短时涨；持续非零 = backfill 被错误重入 |
-| `naozhi_auto_chain_backfill_skipped_no_workspace_total` | 回填阶段因 workspace 字段为空跳过的 session 数 | 高 = sessions.json 大量 legacy 条目缺 workspace；考虑迁移 |
-| `naozhi_auto_chain_backfill_skipped_no_candidates_total` | 回填阶段 pickWorkspaceChain 返回空的 session 数 | 高 = window/exclusion 太严，调整 `session.auto_chain.window_hours` |
-| `naozhi_auto_chain_backfill_skipped_toctou_drop_total` | 回填 Phase 3 二次校验把候选全部丢光的 session 数 | 高 = cron / sys 启动期高频抢 sessionID；查 cron job 配置 |
-| `naozhi_auto_chain_backfill_skipped_already_filled_total` | Phase 3 lock 下发现 prev 已被并发路径填了 | 稳态 0；非零 = 与 cron stub 注册路径同时启动 |
-| `naozhi_auto_chain_toctou_collision_total` | 两次 lock 间隙发现冲突丢弃的 sessionID 累计数（spawn + backfill 合计） | 稳态接近 0；持续涨 = cron / sys session 注册节奏与 spawn 高度并发 |
 | `naozhi_auto_chain_origins_length_mismatch_total` | `prev_session_origins` 与 `prev_session_ids` 长度漂移检测命中（自动兜底重建） | **必须稳态 0**；非零 = 某写路径违反 prev_session_ids append-only 不变量（RFC §4.6） |
+| `naozhi_auto_chain_retired_on_startup_total` | 启动时一次性剥离 auto-spawn / auto-backfill 脏 chain 段的 session 数（RFC docs/rfc/project-stable-session-key.md §9.2，替代旧 backfill） | 首次升级到本版本后会一次性上涨（清理历史脏数据）；之后**稳态 0**，重启幂等不再涨。持续非零 = 仍有路径写入 auto-* origin（不应发生，auto-chain 已下线） |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 

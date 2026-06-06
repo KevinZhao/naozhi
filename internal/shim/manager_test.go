@@ -539,6 +539,14 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"RUSTUP_HOME=/home/user/.rustup", true},
 		{"NODE_ENV=production", true},
 		{"NPM_TOKEN=abc", true},
+		{"NPM_CONFIG_REGISTRY=https://registry.npmjs.org", true},
+		// Blocked — R112714-ARCH-2: NPM_CONFIG_* can redirect global-root /
+		// prefix / cache (RCE-class module-hijack). Only REGISTRY and TOKEN
+		// are allowed; everything else must be blocked.
+		{"NPM_CONFIG_PREFIX=/tmp/evil", false},
+		{"NPM_CONFIG_GLOBALCONFIG=/tmp/evil/.npmrc", false},
+		{"NPM_CONFIG_CACHE=/tmp/evil-cache", false},
+		{"NPM_LIFECYCLE_EVENT=install", false}, // hook execution context leak
 		{"PYTHONDONTWRITEBYTECODE=1", true},
 		{"PYTHONUNBUFFERED=1", true},
 		{"CONDA_PREFIX=/opt/conda", true},

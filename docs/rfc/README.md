@@ -15,7 +15,9 @@
 | [agent-team-ui.md](agent-team-ui.md) | Ready for implementation (v4) | 2026-05-10 | 并行 agent/team 可视化与内部过程查看（dashboard） |
 | [askuser-question.md](askuser-question.md) | Proposal | 2026-05-10 | CC `AskUserQuestion` 工具在 `-p` 模式下的替代交互方案 |
 | [auto-workspace-chain.md](auto-workspace-chain.md) | Draft v3（双独立评审通过） | 2026-05-23 | 同 workspace 多 session 自动接 prev_session_ids 让 dashboard 翻历史能跨 sessionID；启动一次性回填 + spawn 自动接，默认开启可配置 |
+| [attachment-gc-daemon.md](attachment-gc-daemon.md) | 已实现（v2.1 设计落地；默认 enabled:false + dry_run 待运维启用） | 2026-05-31 | 接活死代码:把 `GCWithRefs` 接进 sysession `attachment-gc` daemon（非 cron），删 legacy `GC`，修复附件磁盘无限增长（#1198）。v2 补三项框架增强（ctx + per-root cap + startup-tick）+ 枚举改扫已知 workspace 根 + 默认 enabled:false/dry-run + 先删 .meta 防孤儿 + refcount best-effort。v2.1 修枚举完整性:root 集合补 project workspace（E1）、规范化去重防 symlink（E2）、per-root cap + round-robin 防饥饿（E3）、dry-run 按原因分桶（E4）、附最小止血版（E5） |
 | [attachment-refcount.md](attachment-refcount.md) | v1 MVP 已落地（GC cron 待启用） | 2026-05-10 | 大图跨 TTL 可见：attachment 引用计数与双 TTL GC |
+| [direct-user-settings.md](direct-user-settings.md) | Draft v2（architect 评审通过修订；security 评审中） | 2026-05-30 | naozhi spawn cc 改 `--setting-sources user` 直接加载 `~/.claude/settings.json`，删 override 副本 + env 白名单，使 naozhi cc 与命令行 cc 行为一致、单一配置源；保留 `applyClaudeEnvSettings`（父进程 Bedrock 鉴权）与 sysession Runner 的 `--setting-sources ""`（防 AutoTitler 死循环） |
 | [codex-backend.md](codex-backend.md) | 设计提案 Draft v1（未实测） | 2026-05-20 | OpenAI Codex CLI 作为第三个 backend：走 `codex app-server` JSON-RPC 2.0 over stdio（**非** `codex proto` / `exec --json` / `mcp-server`），新增 `protocol_codex.go` + `profile_codex.go` + `codexjsonl` 历史 source；待跑 Phase 0 V1-V12 实测后升 v2 |
 | [consumer-interfaces.md](consumer-interfaces.md) | Proposal v2 | 2026-05-11 | ARCH-CONSUMER-IF：dispatch/hub/upstream 以消费端小接口替换 `*session.Router` 具体指针（v1 因方法清单虚构已重写） |
 | [cron-v2-polish.md](cron-v2-polish.md) | 设计提案（未实现） | 2026-05-09 | Cron 面板 5 项增量打磨（name/jitter/missed/sort/next-run） |
@@ -38,6 +40,16 @@
 | [process-split.md](process-split.md) | Proposal v2 | 2026-05-11 | ARCH-PROCESS-SPLIT：`cli/process.go` 2464 行按职责拆 7 份，纯文件移动零语义改动（v2 修正 shimMsg 归属、EventCallback 跨包使用、测试文件数） |
 | [system-session.md](system-session.md) | 设计提案 Draft v2.1（已过三路 review + OQ 决议） | 2026-05-20 | naozhi 内置后台线程（System Session）统一抽象：`sys:` 命名空间、`internal/sysession/` Daemon+Manager+Runner（派生 transient system session 调 LLM）、AutoTitler MVP（中英双语 prompt、默认跳群聊、跟随 default backend）、`LabelOrigin` + ClearUserLabelOrigin、二段式 structured prompt + sweepOldJSONL on startup、cron/sys 共享 ExemptStub 注册路径。Phase 2 仅承诺浅归并不做接口归并 |
 | [todo-to-issues-migration.md](todo-to-issues-migration.md) | 已实施（PR #370/#464/#1063/#1064） | 2026-05-26 | docs/TODO.md 1054 finding 迁移到 GitHub Issues：`triage-findings` skill 三桶分流 + 21 label 体系 + 4 cron prompt 改造（v8 GitHub Issues 单源 + v3 PR Merge cron-mergeable + verify Closes #N） + 6 并行 agent 处理 1042 Round dump finding + 581 issue 落地 / 200 cosmetic-backlog / 372 audit-trail discarded |
+| [envpolicy-consolidation.md](envpolicy-consolidation.md) | Draft v1（待评审） | 2026-06-04 | #891：抽 `internal/envpolicy` 收敛三处分散的 Claude env 过滤策略；Phase 1 可落地（共享叶子校验器 + per-backend 凭据矩阵，行为零变化） |
+| [cron-runstore-facade.md](cron-runstore-facade.md) | Draft v1（待评审） | 2026-06-04 | #509/#978：补全 runStore 半facade，4 个 scheduler 文件经 `*Scheduler` wrapper 访问 + AST gate 测试；Phase 1 可落地（包内 behavior-preserving forwarding） |
+| [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | Draft v1（待评审） | 2026-06-04 | #1723/#1169/#1055：sysession 收敛到 `runtelemetry.Broadcaster` seam（复刻 cron 范式，删镜像结构体/hook_holders）；Phase 1 可落地；hard-fail 统一留后续 |
+| [eventlog-subsystem-unify.md](eventlog-subsystem-unify.md) | Draft v1（待评审） | 2026-06-04 | #737/#1369：统一 eventlog 5-包散落 / 三层影子；Phase 1 仅 additive 编译期接口断言闸门 |
+| [cron-config-and-structs.md](cron-config-and-structs.md) | Draft v1（待评审） | 2026-06-04 | #776/#764/#1282/#1278/#837：cron config functional-options + Job god-struct 拆分 + 大文件拆 + Outbox saga；仅 #776 docstring+parity 测试可落地，余须先评审 |
+| [cron-notify-sender.md](cron-notify-sender.md) | Draft v1（待评审） | 2026-06-04 | #725：抽 NotifySender 接口斩 cron→platform 反向依赖；通知协议（chunk/retry/telemetry/stopCtx）迁移须先评审 |
+| [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（待评审） | 2026-06-04 | #1738：自更新二进制加密签名（cosign keyless vs 自管 ed25519）；须先评审密钥信任模型，本轮不落地 |
+| [dashboard-csp-strict.md](dashboard-csp-strict.md) | Draft v1（待评审） | 2026-06-04 | #1734/#922：dashboard CSP 去 unsafe-inline（nonce/strict-dynamic）；前端+CSP+鉴权联动 high risk，须先评审 |
+| [router-god-object-split.md](router-god-object-split.md) | Draft v1（待评审） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）；纯设计本轮不落地 |
+| [lifecycle-policy-and-naming.md](lifecycle-policy-and-naming.md) | Draft v1（待评审） | 2026-06-04 | #870/#463/#729：lifecycle policy 接口（须等 restart RFC）/ Get*Fetch*Load* 165处 rename ADR / AutoTitler 持久进程（撞 SharedCLI 决策）；均须先评审 |
 
 ## 已废弃 / 已被取代
 

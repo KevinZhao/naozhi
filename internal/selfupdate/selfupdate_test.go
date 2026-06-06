@@ -125,6 +125,11 @@ func TestReplace_And_Rollback(t *testing.T) {
 	if string(got) != "new binary" {
 		t.Errorf("after Replace, installPath = %q, want %q", got, "new binary")
 	}
+	if fi, err := os.Stat(installPath); err != nil {
+		t.Fatalf("stat installPath: %v", err)
+	} else if fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("installed binary is not executable: mode %o", fi.Mode().Perm())
+	}
 	bak, _ := os.ReadFile(backupPath)
 	if string(bak) != "old binary" {
 		t.Errorf("backup = %q, want %q", bak, "old binary")
@@ -139,6 +144,49 @@ func TestReplace_And_Rollback(t *testing.T) {
 	}
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Errorf("backup file should be removed after Rollback")
+	}
+}
+
+// TestReplace_ForcesExecutableFromNonExecutableSource is the regression test
+// for the v0.0.27 upgrade outage: when the source binary is NOT executable
+// (0600 — the mode fetchFile writes before Download's post-verify chmod, a
+// state that has been observed to reach Replace on a loaded host), Replace
+// must still leave the installed binary executable. copyFile clones the
+// source mode, so without the explicit success-path chmod the install lands
+// at 0600 and systemd fails with 203/EXEC.
+//
+// On the pre-fix code this fails (installed mode is 0600); on the fixed code
+// the install is 0755.
+func TestReplace_ForcesExecutableFromNonExecutableSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	installPath := filepath.Join(dir, "naozhi")
+	if err := os.WriteFile(installPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Source binary is owner-only, non-executable — mimics the downloaded
+	// asset before (or without) the post-checksum chmod.
+	newBin := filepath.Join(dir, "naozhi-new")
+	if err := os.WriteFile(newBin, []byte("new binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath, err := Replace(newBin, installPath)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(backupPath) })
+
+	fi, err := os.Stat(installPath)
+	if err != nil {
+		t.Fatalf("stat installPath: %v", err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("installed binary not executable despite non-exec source: mode %o (regression: 203/EXEC)", fi.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(installPath); string(got) != "new binary" {
+		t.Errorf("installPath content = %q, want %q", got, "new binary")
 	}
 }
 
@@ -398,6 +446,74 @@ func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
 				t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
 			}
 		})
+	}
+}
+
+// TestBlockPrivateDialContext_RejectsReservedIPs verifies R20260603-SEC-1:
+// blockPrivateDialContext returns a DialContext function that refuses
+// connections to loopback, link-local, private (RFC-1918), and unspecified
+// addresses after DNS resolution, closing the DNS rebinding / SSRF path
+// targeting 169.254.169.254 (IMDS) and similar reserved ranges.
+//
+// The test forces testHTTPTransport=nil so blockPrivateDialContext operates in
+// production mode (returns a real guard, not nil).  Each reserved IP is tested
+// by routing the dial to a literal address — net.DefaultResolver.LookupIPAddr
+// on a numeric host returns that IP directly, which hits the guard before any
+// TCP connection is attempted.
+func TestBlockPrivateDialContext_RejectsReservedIPs(t *testing.T) {
+	// Ensure production mode (guard enabled) by clearing the test transport.
+	prev := testHTTPTransport
+	testHTTPTransport = nil
+	t.Cleanup(func() { testHTTPTransport = prev })
+
+	dialCtx := blockPrivateDialContext()
+	if dialCtx == nil {
+		t.Fatal("blockPrivateDialContext() returned nil in production mode (testHTTPTransport=nil)")
+	}
+
+	cases := []struct {
+		name string
+		addr string // host:port passed to dialCtx
+	}{
+		{"loopback_v4", "127.0.0.1:443"},
+		{"loopback_v6", "[::1]:443"},
+		{"link_local_IMDS", "169.254.169.254:80"},
+		{"link_local_v6", "[fe80::1]:443"},
+		{"rfc1918_10", "10.0.0.1:443"},
+		{"rfc1918_172", "172.16.0.1:443"},
+		{"rfc1918_192", "192.168.1.1:443"},
+		{"unspecified_v4", "0.0.0.0:443"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			conn, err := dialCtx(ctx, "tcp", tc.addr)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Errorf("dialCtx(%q) expected error (reserved IP), got nil", tc.addr)
+				return
+			}
+			if !strings.Contains(err.Error(), "reserved IP") {
+				t.Errorf("dialCtx(%q) error = %q; want 'reserved IP' in message", tc.addr, err.Error())
+			}
+		})
+	}
+}
+
+// TestBlockPrivateDialContext_NilInTestMode verifies that blockPrivateDialContext
+// returns nil when testHTTPTransport is non-nil (test mode), so httptest
+// servers running on loopback are not blocked.
+func TestBlockPrivateDialContext_NilInTestMode(t *testing.T) {
+	prev := testHTTPTransport
+	testHTTPTransport = http.DefaultTransport // any non-nil value signals test mode
+	t.Cleanup(func() { testHTTPTransport = prev })
+
+	if got := blockPrivateDialContext(); got != nil {
+		t.Error("blockPrivateDialContext() should return nil in test mode (testHTTPTransport != nil)")
 	}
 }
 

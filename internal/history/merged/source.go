@@ -161,15 +161,20 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 // to seen on emit). Empty UUIDs bypass dedup entirely and are kept
 // as-is; see the package-level comment on "Missing UUID".
 func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
-	// Step 1: seed `seen` with every UUID from local in one pass so
-	// the merge can check fallback entries against the full local
-	// set, not just those already emitted. Sizing at len(local) is a
-	// safe upper bound — empty-UUID entries simply won't populate a
-	// slot, but over-allocating a few map buckets is cheaper than
-	// a rehash when the map grows during the fallback tail flush.
+	// Step 1: seed `seen` with the UUID of every local entry that the
+	// merge will actually emit so fallback entries are checked against
+	// the full *visible* local set, not just those already emitted. The
+	// `beforeMS <= 0 || e.Time < beforeMS` guard mirrors emit's cutoff
+	// (line below): a local entry that emit would drop (Time >= beforeMS)
+	// must NOT seed `seen`, otherwise a same-UUID fallback entry that is
+	// below the cutoff — and therefore a legitimately visible backfill —
+	// would be silently deduped away. Sizing at len(local) is a safe
+	// upper bound — guarded-out and empty-UUID entries simply won't
+	// populate a slot, but over-allocating a few map buckets is cheaper
+	// than a rehash when the map grows during the fallback tail flush.
 	seen := make(map[string]struct{}, len(local))
 	for _, e := range local {
-		if e.UUID != "" {
+		if e.UUID != "" && (beforeMS <= 0 || e.Time < beforeMS) {
 			seen[e.UUID] = struct{}{}
 		}
 	}

@@ -137,6 +137,25 @@ func (w *Wrapper) Manager() *shim.Manager {
 	return w.ShimManager
 }
 
+// WithManager injects the transport (today *shim.Manager) and returns the
+// receiver for fluent construction: `cli.NewWrapperLazy(...).WithManager(m)`.
+//
+// R214-ARCH-9 (#405): the long-term direction is an unexported transport
+// field set only at construction, with the public ShimManager field
+// retired. Until the cli.Transport interface (R242-ARCH-3 / #721) lands and
+// the cross-package readers in internal/session migrate to Manager(), this
+// setter is the forward-compatible write path: new wiring should call
+// WithManager instead of assigning the public field directly, so when the
+// field finally goes unexported only this method body changes. Nil-safe on
+// a nil receiver (returns nil) to compose with the lazy constructors.
+func (w *Wrapper) WithManager(m *shim.Manager) *Wrapper {
+	if w == nil {
+		return nil
+	}
+	w.ShimManager = m
+	return w
+}
+
 // Probe runs `<cli> --version` under the caller's context and stores
 // the parsed result on the receiver. Safe to call multiple times; each
 // call overwrites the cached version. Intended for callers that built
@@ -213,24 +232,31 @@ func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 // single source of truth for "what backends this cli build supports".
 // R225-CR-9.
 func isKnownBackendID(id string) bool {
-	for _, b := range knownBackends {
-		if b.ID == id {
-			return true
-		}
-	}
-	return false
+	_, ok := lookupBackend(id)
+	return ok
 }
 
 // backendDisplayName maps a backend config value to its user-facing name.
+//
+// R239-ARCH-K (#907): the display label is sourced from detect.go's
+// knownBackends slice — the single source of truth for "what backends this
+// cli build supports" — instead of a parallel hardcoded switch that drifts
+// out of sync the moment someone edits one table but not the other. Adding
+// a backend (e.g. gemini) is now a single knownBackends edit; this function
+// needs no change. (The fully-decoupled backend.Register registry the issue
+// proposes is still blocked on the cli/backend import cycle #1034; collapsing
+// this in-package mirror is the non-breaking step available today.)
+//
+// The input is normalized first so case variants ("Kiro"/"KIRO") and the
+// empty/legacy alias (""→"claude") resolve to the same canonical entry,
+// preserving the R228-ARCH-15 contract. Unknown ids fall back to the raw
+// (normalized) value, matching the previous default arm.
 func backendDisplayName(backend string) string {
-	switch backend {
-	case "kiro":
-		return "kiro"
-	case "", "claude":
-		return "claude-code"
-	default:
-		return backend
+	id := normalizeBackendID(backend)
+	if b, ok := lookupBackend(id); ok {
+		return b.DisplayName
 	}
+	return id
 }
 
 // normalizeBackendID collapses empty/legacy aliases to the canonical ID.
@@ -309,9 +335,22 @@ func validateCLIPath(cliPath string) {
 // this helper is to refuse the file-type-confusion attack vector
 // (cli.path = /dev/fuse / /tmp/fifo) at the last hop before exec, even
 // when upstream config validation regresses. R20260527122801-SEC-1.
+//
+// R20260603040203-SEC-2: spawn-time also HARD-REJECTS a non-absolute
+// cliPath. By the time we reach here an attacker-controllable IM session
+// key has triggered the spawn, and a relative name (e.g. "claude" or
+// "../bin/evil") would be re-resolved against the live PATH / CWD by
+// exec.Command — a PATH-poisoning argv-injection vector. Construction-time
+// validateCLIPath stays warn-only (test fixtures / uninstalled CLI rely on
+// construction succeeding); the hard refusal belongs at the last hop. Empty
+// path still passes through here — the downstream shim spawn surfaces the
+// uninstalled-CLI error.
 func enforceCLIPathSafe(cliPath string) error {
 	if cliPath == "" {
 		return nil
+	}
+	if !filepath.IsAbs(cliPath) {
+		return fmt.Errorf("cliPath must be absolute, got %q (PATH-injection guard)", cliPath)
 	}
 	fi, err := os.Lstat(cliPath)
 	if err != nil {
@@ -377,7 +416,7 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 
 // detectCLI finds the CLI binary by checking known install paths then PATH.
 //
-// The backend → binary mapping is sourced from knownBackendBinaries (see
+// The backend → binary mapping is sourced from the knownBackends table (see
 // detect.go) rather than an inline switch so adding a future backend (e.g.
 // gemini-cli) is a single registry edit. Unknown backend ids fall back to
 // "claude" for the historical default-launcher behaviour. R225-CR-2.
@@ -394,8 +433,8 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 // surfaces a clear error at spawn time instead of silently launching
 // whatever happens to be on PATH at that moment.
 func detectCLI(backend string) string {
-	name, ok := knownBackendBinaries[backend]
-	if !ok {
+	name, ok := knownBackendBinary(backend)
+	if !ok || name == "" {
 		name = "claude"
 	}
 
@@ -446,6 +485,12 @@ func candidatePaths(name string) []string {
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
 	if w.ShimManager == nil {
 		return nil, fmt.Errorf("shim manager not configured")
+	}
+
+	// R164029-SEC-6: reject cwd containing NUL bytes. The OS silently
+	// truncates at the NUL, which can redirect the working directory.
+	if strings.ContainsRune(opts.WorkingDir, 0) {
+		return nil, fmt.Errorf("cwd contains NUL byte")
 	}
 
 	// R20260527122801-SEC-1: enforce argv hygiene at spawn time. The
@@ -623,19 +668,28 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 		proc.sessionID = handle.Hello.SessionID
 	}
 
-	proc.startReadLoop()
-
 	// Detect mid-turn: if the last replayed event is not a turn-complete marker,
 	// the CLI is actively processing and state should be Running (not Ready).
 	// Also arm reconnectedMidTurn so readLoop's stray-result handler will
 	// transition State back to Ready when the CLI finishes without anyone
 	// calling Send() on this reattached process.
+	//
+	// Arm BEFORE startReadLoop (#1778): isMidTurn only inspects the already-
+	// drained `replays`, so it is safe to evaluate before the loop starts.
+	// Doing the State=Running + reconnectedMidTurn.Store ahead of startReadLoop
+	// closes the window where readLoop is already consuming the live socket and
+	// could process the turn's terminating result before the flag is armed —
+	// which would leave the stray-result handler disabled and the session stuck
+	// in StateRunning forever. startReadLoop preserves this pre-armed
+	// StateRunning instead of forcing StateReady (see its godoc).
 	if isMidTurn(replays, proto) {
 		proc.mu.Lock()
 		proc.state = StateRunning
 		proc.mu.Unlock()
 		proc.reconnectedMidTurn.Store(true)
 	}
+
+	proc.startReadLoop()
 
 	return proc, replays, nil
 }

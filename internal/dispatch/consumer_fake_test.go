@@ -2,11 +2,102 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// Compile-time pin (ARCH-DISP-1, #457): the production *project.Manager
+// must satisfy the ProjectStore consumer interface. If a method signature
+// drifts on either side, this line fails to compile in the dispatch
+// package's own test build, before any consumer wiring runs.
+var _ ProjectStore = (*project.Manager)(nil)
+
+// fakeProjectStore is a minimal ProjectStore for slash-command handler
+// tests. Like fakeSessionRouter, unconfigured methods panic so an
+// unexpected code path surfaces immediately.
+type fakeProjectStore struct {
+	get            func(name string) *project.Project
+	all            func() []*project.Project
+	projectForChat func(platform, chatType, chatID string) *project.Project
+	bindChat       func(projectName, platform, chatType, chatID string) error
+	unbindAllChat  func(platform, chatType, chatID string) error
+}
+
+func (f *fakeProjectStore) Get(name string) *project.Project {
+	if f.get == nil {
+		panic("fakeProjectStore.Get not configured")
+	}
+	return f.get(name)
+}
+
+func (f *fakeProjectStore) All() []*project.Project {
+	if f.all == nil {
+		panic("fakeProjectStore.All not configured")
+	}
+	return f.all()
+}
+
+func (f *fakeProjectStore) ProjectForChat(platform, chatType, chatID string) *project.Project {
+	if f.projectForChat == nil {
+		panic("fakeProjectStore.ProjectForChat not configured")
+	}
+	return f.projectForChat(platform, chatType, chatID)
+}
+
+func (f *fakeProjectStore) BindChat(projectName, platform, chatType, chatID string) error {
+	if f.bindChat == nil {
+		panic("fakeProjectStore.BindChat not configured")
+	}
+	return f.bindChat(projectName, platform, chatType, chatID)
+}
+
+func (f *fakeProjectStore) UnbindAllChat(platform, chatType, chatID string) error {
+	if f.unbindAllChat == nil {
+		panic("fakeProjectStore.UnbindAllChat not configured")
+	}
+	return f.unbindAllChat(platform, chatType, chatID)
+}
+
+// TestDispatcher_AcceptsFakeProjectStore proves the ProjectStore seam
+// (ARCH-DISP-1, #457) lets slash-command tests inject a fake binding
+// store without standing up a real project.Manager (projects.root dir +
+// binding file). It exercises the read path (ProjectForChat) end-to-end
+// through the interface field.
+func TestDispatcher_AcceptsFakeProjectStore(t *testing.T) {
+	t.Parallel()
+
+	want := &project.Project{Name: "demo", Path: "/tmp/demo"}
+	fake := &fakeProjectStore{
+		projectForChat: func(_, _, _ string) *project.Project { return want },
+	}
+	var _ ProjectStore = fake
+
+	d := &Dispatcher{projectMgr: fake}
+	if got := d.projectMgr.ProjectForChat("im", "direct", "u1"); got != want {
+		t.Errorf("expected injected project %v, got %v", want, got)
+	}
+}
+
+// TestNewDispatcher_NilProjectMgrStaysUntypedNil pins the typed-nil fix
+// for ProjectStore (ARCH-DISP-1, #457): cfg.ProjectMgr is a concrete
+// *project.Manager, so a nil value boxed into the interface field would
+// be != nil and defeat every `d.projectMgr == nil` gate. NewDispatcher
+// must collapse it to untyped nil.
+func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
+	t.Parallel()
+	d, err := NewDispatcher(DispatcherConfig{ProjectMgr: nil, AllowMissingSender: true})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	if d.projectMgr != nil {
+		t.Fatal("Dispatcher.projectMgr should be untyped nil when cfg.ProjectMgr is nil; typed-nil trap reintroduced")
+	}
+}
 
 // fakeSessionRouter is a minimal SessionRouter implementation for
 // Dispatcher tests. Methods marked "not configured" panic so a test
@@ -18,9 +109,9 @@ import (
 type fakeSessionRouter struct {
 	getOrCreateCalls atomic.Int64
 
-	getOrCreate func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	getSession  func(key string) *session.ManagedSession
-	notifyIdle  func()
+	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	notifyIdle                func()
+	discardPassthroughPending func(key string, reason error)
 }
 
 func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
@@ -31,11 +122,10 @@ func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts se
 	return f.getOrCreate(ctx, key, opts)
 }
 
-func (f *fakeSessionRouter) GetSession(key string) *session.ManagedSession {
-	if f.getSession == nil {
-		return nil
+func (f *fakeSessionRouter) DiscardPassthroughPending(key string, reason error) {
+	if f.discardPassthroughPending != nil {
+		f.discardPassthroughPending(key, reason)
 	}
-	return f.getSession(key)
 }
 
 func (f *fakeSessionRouter) Reset(string)     { panic("fakeSessionRouter.Reset not configured") }
@@ -74,17 +164,57 @@ func (f *fakeSessionRouter) NotifyIdle() {
 func TestDispatcher_AcceptsFakeSessionRouter(t *testing.T) {
 	t.Parallel()
 
+	var notified int
 	fake := &fakeSessionRouter{
-		getSession: func(string) *session.ManagedSession { return nil },
+		notifyIdle: func() { notified++ },
 	}
 	// Compile-time: fake satisfies SessionRouter.
 	var _ SessionRouter = fake
 
 	d := &Dispatcher{router: fake}
 
-	// Runtime: routing calls reach the fake.
-	if got := d.router.GetSession("any:key:foo:general"); got != nil {
-		t.Errorf("expected nil session from fake, got %v", got)
+	// Runtime: a routing call reaches the fake through the interface seam.
+	// (GetSession was dropped from SessionRouter in #1587 once its only
+	// production caller moved to the DiscardPassthroughPending seam, so we
+	// exercise a method that remains on the interface.)
+	d.router.NotifyIdle()
+	if notified != 1 {
+		t.Errorf("expected NotifyIdle to reach fake once, got %d", notified)
+	}
+}
+
+// TestDispatcher_DiscardQueueRoutesThroughSeam proves discardQueue clears
+// passthrough pending via the SessionRouter interface seam rather than
+// dereferencing a concrete *session.ManagedSession behind a session lookup
+// (R20260602190132-ARCH-4, #1612). The seam means the fake observes the
+// (key, reason) call directly — and is why GetSession no longer needs to be
+// on the dispatch SessionRouter interface (#1587).
+func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
+	t.Parallel()
+
+	var gotKey string
+	var gotReason error
+	called := 0
+	fake := &fakeSessionRouter{
+		discardPassthroughPending: func(key string, reason error) {
+			called++
+			gotKey = key
+			gotReason = reason
+		},
+	}
+	var _ SessionRouter = fake
+
+	d := &Dispatcher{router: fake}
+	d.discardQueue("im:direct:u1:general")
+
+	if called != 1 {
+		t.Fatalf("expected DiscardPassthroughPending called once via seam, got %d", called)
+	}
+	if gotKey != "im:direct:u1:general" {
+		t.Errorf("key not forwarded through seam: got %q", gotKey)
+	}
+	if !errors.Is(gotReason, cli.ErrSessionReset) {
+		t.Errorf("reason not forwarded through seam: got %v, want ErrSessionReset", gotReason)
 	}
 }
 

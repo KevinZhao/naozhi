@@ -10,8 +10,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 )
 
 // Handler serves GET /api/memory/{slug} for the dashboard "wiki link"
@@ -26,6 +29,21 @@ import (
 // Path safety: the slug is validated against memorySlugRE (alphanumeric / _ / -,
 // 1-64 chars) and the resolved path is re-checked with strings.HasPrefix on
 // projectsDir; both gates must pass before we read.
+// negCacheTTL is the duration for which a slug that was not found in any
+// project directory is remembered as "not found", avoiding repeated full
+// ReadDir scans within the same TTL window.
+// R20260602141221-SEC-10.
+const negCacheTTL = 30 * time.Second
+
+// maxNegCacheEntries caps the total number of entries in the negative cache.
+// R220123-SEC-4: defence-in-depth against slug-spray attacks — an authenticated
+// caller that fires unique valid slugs at rate R fills at most
+// R*negCacheTTL entries before the TTL starts evicting them, but without a
+// hard cap the map could grow to O(rate × TTL) unbounded. When the cap is
+// reached we simply skip insertion (no caching, return not-found immediately)
+// rather than maintaining an LRU, keeping the implementation minimal.
+const maxNegCacheEntries = 4096
+
 type Handler struct {
 	projectsDir    string
 	currentProject string
@@ -46,6 +64,13 @@ type Handler struct {
 	// stays accepted exactly as before.
 	resolvedPrefix      string
 	resolvedPrefixNoSep string
+
+	// R20260602141221-SEC-10: short-TTL negative cache keyed on slug. When a
+	// full ReadDir scan finds no match, we record the deadline here so
+	// subsequent requests within the TTL skip the expensive disk scan and
+	// return "not found" immediately, preventing DoS via repeated cache-miss.
+	negCacheMu sync.RWMutex
+	negCache   map[string]time.Time
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
@@ -206,6 +231,16 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		}
 	}
 
+	// R20260602141221-SEC-10: check negative cache before doing a full ReadDir.
+	// A miss within the TTL means we already scanned all project dirs and found
+	// nothing; skip the expensive scan and return "not found" immediately.
+	h.negCacheMu.RLock()
+	if deadline, ok := h.negCache[slug]; ok && time.Now().Before(deadline) {
+		h.negCacheMu.RUnlock()
+		return memoryResponse{Found: false, Slug: slug}, nil
+	}
+	h.negCacheMu.RUnlock()
+
 	entries, err := os.ReadDir(h.projectsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -241,6 +276,29 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 			return *hit, nil
 		}
 	}
+
+	// Nothing found in full scan — record negative cache entry.
+	// Sweep expired entries first (sweep-on-write) so the map cannot grow
+	// without bound when an attacker sprays unique valid slugs.
+	h.negCacheMu.Lock()
+	if h.negCache == nil {
+		h.negCache = make(map[string]time.Time)
+	} else {
+		now := time.Now()
+		for k, dl := range h.negCache {
+			if now.After(dl) {
+				delete(h.negCache, k)
+			}
+		}
+	}
+	// R220123-SEC-4: after sweeping expired entries, only insert if the map is
+	// still below the hard cap. This prevents unbounded memory growth when a
+	// caller sprays unique valid slugs faster than the TTL evicts them.
+	if len(h.negCache) < maxNegCacheEntries {
+		h.negCache[slug] = time.Now().Add(negCacheTTL)
+	}
+	h.negCacheMu.Unlock()
+
 	return memoryResponse{Found: false, Slug: slug}, nil
 }
 
@@ -321,13 +379,16 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 		return nil, err
 	}
 	meta, body := parseMemoryFrontmatter(raw)
+	// R103901-SEC-4: memory files are Claude-CLI-authored and can absorb
+	// attacker-influenced workspace content, so scrub control / bidi runes
+	// out of every free-text field before it reaches the dashboard wire.
 	resp := &memoryResponse{
 		Found:       true,
 		Slug:        slug,
-		Name:        meta.name,
-		Description: meta.description,
+		Name:        sanitizeWireText(meta.name),
+		Description: sanitizeWireText(meta.description),
 		Type:        meta.typ,
-		Body:        body,
+		Body:        sanitizeWireText(body),
 		Truncated:   truncated,
 	}
 	return resp, nil
@@ -339,11 +400,36 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 // truncated=false. Errors (including os.ErrNotExist) propagate unchanged so
 // the caller's existing branches keep working.
 func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
-	f, err := os.Open(path)
+	// R20260531-SEC-5: open with O_NOFOLLOW (via OpenWorkspaceFile) instead
+	// of os.Open. The caller resolves `path` through filepath.EvalSymlinks and
+	// re-checks the projects-dir prefix, but a plain os.Open here leaves a
+	// TOCTOU window in which an attacker swaps the final component for a
+	// symlink between that check and this open. OpenWorkspaceFile refuses a
+	// final-component symlink kernel-atomically. os.ErrNotExist still
+	// propagates unchanged (callers collapse it to "slug not found"); an
+	// ELOOP symlink-swap surfaces as a generic error and fails closed.
+	//
+	// R20260606-SEC-6: Lstat before open so we can do a post-open SameFile
+	// inode recheck. O_NOFOLLOW blocks a symlink swap atomically, but a swap
+	// to a different regular file between EvalSymlinks and OpenWorkspaceFile
+	// is not caught by O_NOFOLLOW alone. SameFile(pre-Lstat, post-Fstat)
+	// verifies the descriptor is bound to the exact inode validated above.
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, err
+	}
+	f, err := dashproject.OpenWorkspaceFile(path)
 	if err != nil {
 		return nil, false, err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !os.SameFile(li, fi) {
+		return nil, false, os.ErrNotExist
+	}
 	// Read capBytes+1 to detect overflow without a separate Stat — Stat may
 	// race with the read on a live FS (file growing/shrinking) and an extra
 	// syscall is wasteful for the common small-file path.

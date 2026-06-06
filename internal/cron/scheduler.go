@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,249 +16,41 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
-// Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
-var ErrJobNotFound = errors.New("cron: job not found")
-
-// ErrAmbiguousPrefix is returned by findByPrefixLocked when an ID prefix matches more
-// than one job in the same chat scope. Callers (CLI/HTTP) should use
-// errors.Is(err, cron.ErrAmbiguousPrefix) to surface a "please disambiguate"
-// hint instead of treating it as a generic not-found. [R247-GO-2]
-var ErrAmbiguousPrefix = errors.New("cron: ambiguous job prefix")
-
-// ErrJobAlreadyPaused is returned by PauseJob when the target job is already
-// paused. Callers (especially HTTP handlers) should map this to 409 Conflict
-// rather than 400, since the request was well-formed but the target state is
-// incompatible.
-var ErrJobAlreadyPaused = errors.New("cron: job already paused")
-
-// ErrJobNotPaused is returned by ResumeJob when the target job is not paused.
-var ErrJobNotPaused = errors.New("cron: job not paused")
-
-// ErrJobPaused is returned by TriggerNow when the target job is paused, so a
-// manual trigger from the dashboard is rejected instead of silently running
-// against the operator's pause intent.
-var ErrJobPaused = errors.New("cron: job is paused")
-
-// ErrJobNoPrompt is returned by TriggerNow when the target job has no prompt
-// configured. Sentinel form so dashboard handlers can errors.Is and emit an
-// HTTP 422 (vs 400) instead of relying on string matching.
-var ErrJobNoPrompt = errors.New("cron: job has no prompt")
-
-// ErrPersistFailed is returned by mutation APIs (AddJob/DeleteJob/Update/
-// Pause/Resume/SetJobPrompt) when the post-mutation JSON serialisation fails.
-// The in-memory state has already been changed and cannot be rolled back —
-// marshal failure is observationally unrecoverable (OOM / type-system bug),
-// so the caller MUST surface this as a 500-class error so the operator can
-// intervene (restart the process or rebuild the job). R51-QUAL-001: prior
-// to this sentinel, persistJobsLocked returned a silent no-op func on
-// marshal error, causing DeleteJob to "succeed" via the API while the
-// deletion never reached disk — a restart replayed the deleted job.
-var ErrPersistFailed = errors.New("cron: persist jobs failed")
-
-// SessionRouter is the subset of session.Router that the cron Scheduler
-// actually consumes. Declaring it here (consumer-side interface, Go idiom)
-// inverts the historical cron → session dependency: a future Router refactor
-// only has to preserve these three method shapes to stay scheduler-
-// compatible, and tests can inject a fake without pulling the whole router
-// graph. Any new s.router.X() call requires extending this interface, which
-// makes accidental surface-area growth a compile error instead of a silent
-// regression.
-//
-// R238-ARCH-7 (#752) is closed by the current shape: GetOrCreate already
-// returns cron-local types (Session interface + SessionStatus) — see
-// agent_opts.go for the Send/SessionID/InterruptViaControl method set —
-// so cron does NOT transitively depend on *session.ManagedSession. The
-// production wireup wraps the concrete session in cronSessionAdapter
-// (cmd/naozhi/cron_router_adapter.go); the InterruptOutcome ordinal pin
-// + the SessionRouter compile-time guard live there too. The cron
-// package no longer imports internal/session in production code (last
-// reverse import eliminated by R20260527122801-ARCH-1).
-type SessionRouter interface {
-	// RegisterCronStubWithChain creates (or refreshes) a suspended exempt
-	// session entry so the cron job shows up in the dashboard sidebar before
-	// its first run. Key is always "cron:<jobID>".
-	//
-	// chainIDs 注入一组 session-ID 链给 stub 的 prevSessionIDs，让
-	// fresh_context cron 每次 Reset 后新建的 stub 仍能通过 historySource
-	// 查到上一次成功运行留下的 JSONL 历史
-	// （~/.claude/projects/<cwd>/<id>.jsonl）。chainIDs 为空 / nil 时
-	// 等同于无链 stub 注册。
-	//
-	// R242-ARCH-26 (#768): from cron's side every caller (registerStubByValue
-	// at scheduler.go) builds at most a 1-element slice — `[]string{lastSessionID}`
-	// when lastSessionID != "" else nil. The slice signature is preserved for two
-	// reasons:
-	//
-	//  1. session.Router (the implementer) consumes chainIDs as a generic
-	//     prevSessionIDs link to support non-cron callers in the future
-	//     (e.g. workspace-chain bind on user sessions). Collapsing the cron
-	//     interface to (chainID string) would force a parallel signature on
-	//     the session side or a slice rebuild at every cross-package call —
-	//     net zero ergonomics improvement, plus a wider API surface.
-	//  2. The empty / nil branch is a meaningful "no chain" signal that a
-	//     scalar string would have to overload onto "" (which is also
-	//     ambiguous with "lastSessionID was set but is empty" — a state we
-	//     never want to enter, but couldn't structurally rule out).
-	//
-	// If a future cron caller legitimately needs a multi-step chain (e.g.
-	// daisy-chained fresh_context resets that want to preserve N>1 generations
-	// of JSONL history), the slice already supports it — no signature change.
-	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
-	// Reset discards the session for the given key (used by fresh-mode
-	// cron jobs and by Delete/Rename flows).
-	//
-	// Concurrency contract (R249-CR-14):
-	//   - Reset MUST NOT block on in-flight turns. Implementations must
-	//     short-circuit (or asynchronously complete) any active Send so
-	//     callers — notably the cron run goroutine that calls Reset
-	//     between two ticks — see bounded latency. A blocking Reset
-	//     would let one slow CLI turn pin the entire scheduler tick
-	//     loop and starve subsequent jobs.
-	//   - Callers MUST NOT hold scheduler.mu (or any lock the router's
-	//     notifyChange callback might re-acquire) when invoking Reset.
-	//     The router's Reset path may synchronously fan out a
-	//     notifyChange that re-enters scheduler state (e.g. to refresh
-	//     the dashboard projections), and re-entrant lock acquisition
-	//     would deadlock. Reset is invoked only from execute-time call
-	//     sites that have already released scheduler.mu.
-	Reset(key string)
-	// GetOrCreate returns an existing session or spawns a new one at
-	// execute time. Returns cron-local Session / SessionStatus types so
-	// the scheduler does not transitively depend on internal/session.
-	// The production wireup (cmd/naozhi/cron_router_adapter.go) wraps
-	// *session.ManagedSession in a cron.Session adapter.
-	GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error)
-}
-
-// SchedulerConfig holds configuration for the cron scheduler.
-type SchedulerConfig struct {
-	// Router is the session router the scheduler talks to. Accepts the
-	// SessionRouter interface so tests can pass a minimal fake; production
-	// passes a *session.Router which satisfies it transparently.
-	Router        SessionRouter
-	Platforms     map[string]platform.Platform
-	Agents        map[string]AgentOpts
-	AgentCommands map[string]string
-	// Telemetry receives RunStartedEvent / RunEndedEvent for every cron
-	// run via the shared runtelemetry shape. nil = no broadcast (tests /
-	// no-WS deployments). Replaces the legacy SetOnRunStarted /
-	// SetOnRunEnded / SetOnExecute setter trio. Late injection is also
-	// supported via SetTelemetry — cmd/naozhi builds the Scheduler before
-	// the Hub exists, then wires the broadcaster from dashboard.go. (RFC §3.5)
-	Telemetry runtelemetry.Broadcaster
-	StorePath string
-	MaxJobs   int
-	// MaxJobsPerChat overrides DefaultMaxJobsPerChat when > 0. Zero (and
-	// negative) values fall back to the default — this is deliberate so
-	// operators cannot accidentally disable the cap and let one chat
-	// starve the exempt-session pool (see DefaultMaxJobsPerChat's BL2
-	// note). R208-BL2.
-	MaxJobsPerChat int
-	ExecTimeout    time.Duration
-	// Location is the timezone in which schedule expressions are evaluated.
-	// nil defaults to time.Local so cron expressions match wall-clock time
-	// on the host (respects $TZ / /etc/localtime).
-	//
-	// DST caveats (inherited from robfig/cron v3):
-	//   - Spring-forward (hour skipped): a schedule whose expression lands in
-	//     the missing hour fires zero times that day.
-	//   - Fall-back (hour repeated): a schedule whose expression lands in the
-	//     repeated hour may fire twice within the same wall-clock hour. Fast
-	//     jobs that complete before the second trigger are not protected by
-	//     SkipIfStillRunning.
-	// For time-critical periodic work (billing, audit snapshots) prefer a UTC
-	// Location so the schedule is immune to DST transitions.
-	Location *time.Location
-	// NotifyDefault provides a fallback IM target for jobs that opt into
-	// notifications (Job.Notify == true) but have no per-job target set.
-	// Empty Platform or ChatID disables the default.
-	NotifyDefault NotifyTarget
-	// ParentCtx, if set, is used as the parent for the scheduler's internal stop context.
-	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
-	// interrupted promptly.
-	//
-	// R245-GO-6 (#846): NewScheduler reads ParentCtx once and passes it to
-	// context.WithCancel; the SchedulerConfig itself is taken by value and
-	// not retained on *Scheduler. The only long-lived reference is the
-	// derived stopCtx (held internally and cancelled by Stop()). Callers
-	// can therefore set ParentCtx to a request-scoped or test-scoped ctx
-	// without leaking the parent's value-tree past the Scheduler's
-	// lifetime — the parent is "derived-only" from the Scheduler's
-	// perspective and the caller-supplied ctx may be discarded
-	// immediately after NewScheduler returns.
-	ParentCtx context.Context
-	// AllowedRoot mirrors Server.allowedRoot: the only directory tree under
-	// which cron jobs may execute. Persisted jobs whose WorkDir falls outside
-	// this root are refused at Start() load time — otherwise an attacker who
-	// tampers with cron_jobs.json on disk (or a job persisted before the
-	// operator configured AllowedRoot) could escape the sandbox at replay.
-	// Empty disables the check (back-compat for tests and legacy deployments).
-	AllowedRoot string
-	// JitterMax is the upper bound of the randomized delay applied before
-	// each scheduled tick. 0 disables jitter (preserves legacy behavior).
-	// The per-job window is clamped to min(JitterMax, period/4) so short
-	// schedules are not swallowed. TriggerNow bypasses jitter.
-	// See docs/rfc/cron-v2-polish.md §3.2.
-	JitterMax time.Duration
-	// RunsKeepCount overrides DefaultRunsKeepCount when > 0. Sets the
-	// per-job cap on retained run-history records (newest N kept). Zero
-	// (and negative) values fall back to the default — additive: existing
-	// callers that omit the field keep the prior behaviour.
-	RunsKeepCount int
-	// RunsKeepWindow overrides DefaultRunsKeepWindow when > 0. Records
-	// older than the window are trimmed at GC time. Zero (and negative)
-	// values fall back to the default; additive (callers that omit it
-	// keep prior behaviour). R250-GO-3.
-	RunsKeepWindow time.Duration
-	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0.
-	// A successful cron execution exceeding this wall-clock budget is
-	// counted as "slow" (metrics.CronExecutionSlowTotal +
-	// "cron execution slow" warn). 30s suits typical interactive-agent
-	// jobs but flags every long batch run when ExecTimeout is set to
-	// 300s+; raising SlowThreshold to align with ExecTimeout silences
-	// the daily false-alarm without losing the metric for jobs that
-	// truly tip over the operator's expectation. Zero (and negative)
-	// values fall back to defaultCronSlowThreshold so callers that omit
-	// the field keep the prior behaviour. R241-ARCH-11 (#519).
-	SlowThreshold time.Duration
-	// AllowNilRouter opts the constructor out of the boot-time
-	// "router required" slog.Error contract added in R241-ARCH-6 (#510).
-	// Production wiring (cmd/naozhi) always sets Router; this flag exists
-	// so the in-package test suite — which constructs Schedulers for
-	// narrowly scoped paths (AddJob validation, persist failure injection,
-	// stop-budget timing) that never reach executeOpt or registerStub —
-	// can opt into silence without coupling those tests to a fakeRouter
-	// dependency. When unset (the default) and Router is nil,
-	// NewScheduler emits a slog.Error so misconfigurations surface at
-	// boot rather than as an opaque empty-sidebar at runtime; the
-	// registerStubByValue sync.Once log adds a second loud signal the
-	// first time the missing router would have refreshed a stub.
-	AllowNilRouter bool
-}
-
-// chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
-// counter. R237-PERF-5 (#661): replaces the O(N) scan over s.jobs that
-// addJobAcquiringLock used to enforce maxJobsPerChat. The scan held s.mu
-// across maxJobs entries on every AddJob — a direct hot-path block on
-// the dashboard 1Hz add path. With this counter map the per-chat
-// capacity check is one map lookup. Updates piggy-back on the already-
-// locked s.mu sections in addJobAcquiringLock / deleteJobLocked / Start
-// so the counter never drifts from len-by-chat(s.jobs).
-type chatJobKey struct {
-	Platform string
-	ChatID   string
-}
-
 // Scheduler manages cron jobs and executes them on schedule.
+//
+// Field-access discipline (mirrors the `// 读写:` annotation pattern from
+// session/router_core.go, whose absence here was flagged by R250-ARCH-4
+// / #1167): the fields below fall into four lifetime classes —
+//   - Lifecycle: cron / stopCtx / stopCancel / started / stopped /
+//     startedAtNanos / triggerWG / gcWG — written once at NewScheduler /
+//     Start / Stop, otherwise read-only or atomic.
+//   - Immutable-after-construction config: router / notifySender / agents /
+//     agentCommands / location / notifyDefault / allowedRoot* /
+//     jitterMax / slowThreshold / execTimeout / maxJobs / maxJobsPerChat
+//     / storePath / stopBudget — set in NewScheduler, never reassigned, so
+//     reads are lock-free.
+//   - mu-guarded mutable state: jobs / chatJobCount / jobsByChat — all
+//     reads and writes hold s.mu (RLock for reads, Lock for writes); the
+//     three maps are mutated together so they never drift.
+//   - Independently-synchronised state: runningJobs (sync.Map) /
+//     telemetry (atomic.Pointer) / store* (storeMu / storeDirOnce /
+//     saveSeq) / routerNilOnce — each carries its own primitive and does
+//     NOT rely on s.mu.
+//
+// Per-field godoc below stays authoritative; this block is the index.
 type Scheduler struct {
 	cron *robfigcron.Cron
-	mu   sync.RWMutex
+	// mu guards the jobs / chatJobCount / jobsByChat trio (RLock reads,
+	// Lock writes). It does NOT cover the immutable-config fields (read
+	// lock-free) nor the independently-synchronised fields (runningJobs /
+	// telemetry / store* / *Once), each of which carries its own primitive.
+	mu sync.RWMutex
+	// 读写: 全部读写持 s.mu（读 RLock / 写 Lock）。jobs / chatJobCount /
+	// jobsByChat 三者在同一把锁下同步变更，不会相互漂移。
 	jobs map[string]*Job
 	// chatJobCount tracks the number of jobs per (Platform, ChatID) chat.
 	// Maintained synchronously with s.jobs writes under s.mu so the
@@ -280,34 +71,58 @@ type Scheduler struct {
 	// rejects both via JobUpdate field absence), so an entry never moves
 	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
 	jobsByChat map[chatJobKey][]*Job
+	// sortedJobIDs mirrors the keys of s.jobs in ascending ID order. It is
+	// maintained incrementally (binary-search insert on add, binary-search
+	// delete on remove) at the same s.mu-guarded seams that mutate s.jobs
+	// (addToChatIndexLocked / deleteJobLocked), so the per-mutation persist
+	// path no longer runs an O(N log N) slices.SortFunc inside the s.mu
+	// critical section — it iterates this already-sorted slice instead.
+	// R164029-PERF-9 (#1598).
+	//
+	// CORRECTNESS NOTE: s.jobs remains the single source of truth.
+	// marshalJobsLocked treats sortedJobIDs as a hint: it validates that the
+	// slice still matches s.jobs (same length, every ID present) and falls
+	// back to building+sorting from the map if it drifted. Production
+	// mutations all go through the two seams so the hint is always valid;
+	// the fallback only fires for test helpers that poke s.jobs directly
+	// (e.g. `s.jobs[id] = &Job{...}` without addToChatIndexLocked), which
+	// must never silently drop a job from the on-disk snapshot.
+	sortedJobIDs []string
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
-	// platforms / agents / agentCommands are populated from SchedulerConfig
+	// notifySender / agents / agentCommands are populated from SchedulerConfig
 	// at NewScheduler and treated as immutable thereafter — notifyTarget
-	// reads platforms without s.mu and executeOpt reads agents without
-	// s.mu. A future caller must NOT mutate these maps in place; if
+	// reads notifySender without s.mu and executeOpt reads agents without
+	// s.mu. A future caller must NOT mutate the maps in place; if
 	// dynamic backend/agent registration ever lands, switch to
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
 	// racing the writer.
 	//
-	// R219-ARCH-8 (#670) proposed replacing this map with a `Notifier
-	// interface { Notify(ctx, plat, chatID, text) error }` so cron stops
-	// calling platform.Reply / MaxReplyLength / SplitText directly and
-	// goes through dispatch.replyText's unified error handling. Deferred:
-	// the refactor entangles with deliverNotice's chunked send loop
-	// (SplitText needs MaxReplyLength → per-chunk Reply), the per-target
-	// retry budget, and the four call sites in scheduler_notify.go +
-	// scheduler_run.go that compose the chunk loop with formatCronNotice
-	// + per-target ctx. Wrapping in a Notifier without breaking
-	// per-chunk error reporting requires either pushing chunking into
-	// the Notifier (adds a per-platform-config dependency the dispatch
-	// layer doesn't have today) or surfacing chunk metadata back to cron
-	// (multi-error contract). RFC cron-sysession-merge Phase E covers
-	// this within the larger dispatch unification — leaving #670 to
-	// land alongside that work rather than fragmenting the contract.
-	platforms     map[string]platform.Platform
-	agents        map[string]AgentOpts
-	agentCommands map[string]string
+	// #725: notifyTarget now resolves its send surface through the cron-local
+	// NotifySender / PlatformReplier interfaces (notify_sender.go) instead of
+	// indexing a map[string]platform.Platform and calling platform.SplitText /
+	// platform.ReplyWithRetry directly. This severs the internal/cron →
+	// internal/platform import edge (the wireup layer owns the adapter,
+	// mirroring the cronSessionAdapter precedent R20260527122801-ARCH-1 /
+	// #1318) and supersedes the deferred R219-ARCH-8 (#670) Notifier proposal:
+	// the chunked send loop (SplitText → MaxReplyLength → per-chunk Reply),
+	// the per-target retry budget, and the partial-delivery telemetry stay in
+	// notifyTarget — only the concrete platform calls move behind the
+	// interface, so per-chunk error reporting is unchanged.
+	// R249-ARCH-27 (#991): notifySender / agents / agentCommands are bundled
+	// behind a single atomic.Pointer[cronConfigMaps] instead of three bare
+	// map fields. They are write-once at NewScheduler today and read
+	// lock-free by notifyTarget / executeOpt; the prior shape leaned on a
+	// documentation-only "do not mutate in place" contract that a future
+	// dynamic-backend / hot-reload caller could silently break (data race
+	// vs the lock-free readers). Wrapping the trio in one immutable struct
+	// behind atomic.Pointer pre-pays that retrofit: a hot-reload writer
+	// Store()s a freshly built *cronConfigMaps (copy-on-write) while readers
+	// Load() a consistent snapshot of all three maps together — no torn read
+	// across the platforms/agents/agentCommands boundary, no per-field lock.
+	// Until that writer lands the pointer is set once and never swapped, so
+	// the runtime cost is one extra pointer indirection on the read path.
+	configMapsPtr atomic.Pointer[cronConfigMaps]
 	storePath     string
 	maxJobs       int
 	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
@@ -393,6 +208,26 @@ type Scheduler struct {
 	// a callback from robfig/cron whose signature has no ctx parameter, so
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
+	//
+	// R249-ARCH-4 (#972) — ctx-as-arg exception is confined: real reads of
+	// s.stopCtx are allowed ONLY on robfig/cron callback-derived paths
+	// (scheduler_run.go execute/jitter/spawn, scheduler_notify.go reply
+	// ctx, and the cold-start GC here) where no ctx parameter exists to
+	// thread. TestStopCtx_ReadsConfinedToCallbackPaths enforces that an
+	// unrelated method which already receives a ctx must NOT reach for this
+	// field instead.
+	//
+	// R249-ARCH-8 (#974) — single authoritative cancel signal. There appear
+	// to be two ways to cancel cron work (SchedulerConfig.ParentCtx being
+	// cancelled by the host's shutdown, vs an explicit Stop() call), but they
+	// are NOT independent cancel paths: stopCtx is derived from ParentCtx via
+	// context.WithCancel (NewScheduler line ~983), so a ParentCtx cancel
+	// propagates INTO stopCtx, and Stop() cancels stopCtx directly via
+	// stopCancel. Every in-flight read (execute()/trimAllCtx/notifyTarget)
+	// observes exactly one signal — stopCtx.Done() — regardless of which
+	// upstream fired it. stopCtx is therefore the authoritative signal;
+	// ParentCtx is only a derive-time parent and must never be read for
+	// cancellation after NewScheduler returns.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	// telemetry receives the cron-run lifecycle events. Phase D (RFC §3.5)
@@ -437,6 +272,14 @@ type Scheduler struct {
 	// RunID/StartedAt/Phase/SessionID/Trigger to list handlers.
 	runningJobs sync.Map // map[jobID]*runInflight
 
+	// jobGates shards a fixed pool of mutexes (indexed by hashed jobID) that
+	// serialise executeOpt's jobInflight-load→CAS pair against
+	// cleanupRunningJobIfIdle's load→CompareAndDelete pair for the same job.
+	// Closes the TOCTOU window where a DeleteJob racing TriggerNow orphans the
+	// CAS gate and permits double execution. See jobGateLock (job_gate.go) for
+	// the full rationale. R20260603140013-GO-2 (#1706).
+	jobGates [jobGateShards]sync.Mutex
+
 	// storeMu serialises saveSnapshot writes so the last-writer-wins order
 	// matches the order snapshots were marshaled under s.mu. WriteFileAtomic
 	// now uses os.CreateTemp so the underlying .tmp file is unique per call
@@ -478,6 +321,14 @@ type Scheduler struct {
 	// notify-budget worth of time. R247-PERF-24.
 	workDirCache workDirResolveCache
 
+	// workDirReachableCache memoises positive workDirReachable() results so
+	// fresh-mode jobs whose allowedRoot=="" (and thus never touch
+	// workDirCache) do not issue a bare os.Stat every tick. Same 30s TTL
+	// and positive-only semantics as workDirCache: a negative (unreachable)
+	// result bypasses the cache so a restored workspace surfaces on the
+	// next tick. Keyed by raw workDir. R20260604064416-PERF-3 (#1731).
+	workDirReachableCache workDirResolveCache
+
 	// knownSessionsCache memoises KnownSessionIDs() output for up to
 	// knownSessionsCacheTTL. The dashboard polls KnownSessionIDs at 1Hz
 	// per tab; rebuilding the set walks every job's runStore.Recent (up
@@ -500,373 +351,17 @@ type Scheduler struct {
 	// TestMarshalJobs_PerSchedulerIsolation in
 	// marshal_jobs_per_scheduler_test.go.
 	marshalJobs atomic.Pointer[marshalJobsFn]
-}
 
-// knownSessionsCache holds a TTL-bounded snapshot of KnownSessionIDs
-// output. Set is read-only after publication so callers can hand out
-// the map directly without copying. R250-PERF-7.
-type knownSessionsCache struct {
-	mu          sync.Mutex
-	generatedAt time.Time
-	set         map[string]struct{}
-}
-
-// knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
-// snapshot may be. 30s matches the godoc claim and is well below the
-// auto-workspace-chain spawn cadence (one spawn per user message);
-// dashboard 1Hz pollers see at most one rebuild per cache cycle. R250-PERF-7.
-const knownSessionsCacheTTL = 30 * time.Second
-
-// maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
-// overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
-// scale, but higher values tend to indicate a config mistake.
-// See docs/rfc/cron-v2-polish.md for sizing rationale.
-const maxJobsHardCap = 500
-
-// defaultMaxJobs is the fallback for SchedulerConfig.MaxJobs when the operator
-// leaves it zero/negative. Sized for typical single-tenant deployments; the
-// hard cap above protects against runaway configs.
-// See docs/rfc/cron-v2-polish.md for sizing rationale.
-const defaultMaxJobs = 50
-
-// defaultExecTimeout bounds a single job execution when the operator leaves
-// SchedulerConfig.ExecTimeout zero. 5 min covers nearly all CLI turn budgets
-// without leaving runaway jobs holding the per-job overlap gate forever.
-// See docs/rfc/cron-v2-polish.md for sizing rationale.
-const defaultExecTimeout = 5 * time.Minute
-
-// DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
-// chat_id pair) may own. Prevents one loud group from consuming the
-// global MaxJobs quota. Exported so tests and docs can reference the
-// value; operators can override per deployment via
-// SchedulerConfig.MaxJobsPerChat (zero / unset falls back to this
-// default — no way to "disable" the cap without rebuilding).
-//
-// Relationship to exempt pool:
-// Every cron job calls session.Router.RegisterCronStubWithChain at scheduler
-// Start / AddJob time and consumes 1 slot from session.maxCronExempt — a
-// dedicated cron-only sub-quota inside the global maxExemptSessions pool
-// (R242-ARCH-2). Planner and sys daemon stubs have their own sub-quotas
-// (maxProjectExempt / maxSysExempt) and can no longer be starved by a
-// noisy cron chat. DefaultMaxJobsPerChat still bounds per-chat usage so
-// one loud group cannot saturate the cron quota by itself.
-// See docs/rfc/cron-v2-polish.md for sizing rationale.
-const DefaultMaxJobsPerChat = 10
-
-// workDirReachable reports whether workDir exists and resolves to a
-// directory right now. Used before fresh-mode Reset so a job whose
-// workspace has been deleted by an operator does not destroy the
-// existing session just to fail on a GetOrCreate / spawn-shim call.
-// Empty workDir means "use router default" and is always reachable.
-// CRON2.
-//
-// 注意：workDirReachable 仅做 stat 可达性 + IsDir 检查，**不**强制
-// allowedRoot 内含。任何依赖"必须在工作根之内"的调用者必须额外调
-// workDirUnderRoot。当前调用点 (freshContextPreflightP0) 依赖
-// loadJobs 阶段已做过 root-containment 校验；不要在不调
-// workDirUnderRoot 的新调用点直接复用本函数。R234-CR-11。
-func workDirReachable(workDir string) bool {
-	if workDir == "" {
-		return true
-	}
-	info, err := os.Stat(workDir)
-	if err != nil {
-		return false
-	}
-	return info.IsDir()
-}
-
-// workDirUnderRoot reports whether workDir resolves (after symlink evaluation)
-// to a path at or under allowedRoot. EvalSymlinks is done per-call for both
-// sides so the check reflects current filesystem state — this closes the
-// TOCTOU window between creation-time validateWorkspace and execute-time
-// workspace binding AND the separate window where allowedRoot itself (if a
-// symlink) could be retargeted after construction. Both arguments must be
-// absolute; relative workDir is rejected. allowedRootResolved, when
-// non-empty, is a best-effort prior resolution of allowedRoot that is used
-// as a fallback only if the per-call EvalSymlinks on allowedRoot itself
-// fails (e.g. the path was temporarily unmounted). This preserves the
-// security contract while still avoiding most of the syscall cost of a
-// cold re-resolution on the happy path.
-func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
-	_, ok := workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved)
-	return ok
-}
-
-// workDirResolveCacheTTL caps how long a positive workDirResolveUnderRoot
-// result may be reused before re-running EvalSymlinks. R247-PERF-24
-// (#572): long-lived schedulers re-evaluate the same per-job workDir every tick;
-// each call costs Lstat+Readlink per path component plus the same chain
-// for allowedRoot. A short TTL collapses the hot-path syscall load on
-// fast-firing jobs while still bounding the TOCTOU window the per-call
-// EvalSymlinks was added to close. 30s matches the cronNotifyTimeout
-// budget — an operator who retargets a workspace symlink and immediately
-// fires a job will see the next tick re-resolve, not the same tick. Only
-// "ok" results are cached: a negative answer means we just refused to
-// run, and we want a re-resolve on the next call to surface a workspace
-// that has been restored.
-const workDirResolveCacheTTL = 30 * time.Second
-
-// workDirResolveCacheEntry captures one cached resolution. Stored value-
-// typed in sync.Map so the read path does no allocation.
-type workDirResolveCacheEntry struct {
-	resolved  string
-	expiresAt time.Time
-}
-
-// workDirResolveCacheMaxEntries caps the number of resolved (workDir,
-// allowedRoot, allowedRootResolved) tuples retained in memory. A workDir
-// is operator-controlled (cron job WorkDir) and entries expire only on
-// read of the same key. Without a cap a buggy or hostile job-creation
-// path that varies WorkDir slightly per call (e.g. trailing slash, NFC vs
-// NFD, /./ insertion) would grow the map indefinitely. R20260527-SEC-4
-// (#1273): once the cap is hit, store sweeps expired entries first; if
-// that fails to free room (every entry still within TTL), the new write
-// is dropped — the cache is a hot-path optimisation, not a correctness
-// path, so missing a cache slot just defers to workDirResolveUnderRoot.
-//
-// 4096 sized to comfortably exceed defaultMaxJobs (256) × a few distinct
-// allowedRoots even with restart-time churn, while bounding worst-case
-// memory at ~1.5 MB (avg key+value ~ 384 bytes).
-const workDirResolveCacheMaxEntries = 4096
-
-// workDirResolveCache memoises positive workDirResolveUnderRoot results
-// keyed by raw (workDir,allowedRoot,allowedRootResolved) tuple. Negative
-// results bypass the cache. Concurrent-safe via sync.Map; entries expire
-// lazily on read so a wedged job does not pin stale resolutions
-// indefinitely. R247-PERF-24.
-type workDirResolveCache struct {
-	m     sync.Map     // map[string]workDirResolveCacheEntry
-	count atomic.Int64 // approximate live entries; allowed to drift slightly
-}
-
-// nowFn is overridable for tests so the TTL boundary can be exercised
-// deterministically. Production always reads time.Now.
-func (c *workDirResolveCache) lookup(key string, now time.Time) (string, bool) {
-	if c == nil {
-		return "", false
-	}
-	v, ok := c.m.Load(key)
-	if !ok {
-		return "", false
-	}
-	e := v.(workDirResolveCacheEntry)
-	if !now.Before(e.expiresAt) {
-		// Expired — drop so the next miss path doesn't keep observing it.
-		// LoadAndDelete keeps c.count in sync iff the entry was actually
-		// present (concurrent expirers won't double-decrement).
-		if _, deleted := c.m.LoadAndDelete(key); deleted {
-			c.count.Add(-1)
-		}
-		return "", false
-	}
-	return e.resolved, true
-}
-
-// sweepExpired walks the map once dropping any entry whose expiresAt has
-// passed. Called only on the over-cap branch of store; sync.Map.Range is
-// O(N) but bounded by workDirResolveCacheMaxEntries. Concurrent lookups
-// remain race-free — Range observes a consistent snapshot per Go's docs.
-func (c *workDirResolveCache) sweepExpired(now time.Time) {
-	c.m.Range(func(k, v any) bool {
-		e, ok := v.(workDirResolveCacheEntry)
-		if !ok || !now.Before(e.expiresAt) {
-			if _, deleted := c.m.LoadAndDelete(k); deleted {
-				c.count.Add(-1)
-			}
-		}
-		return true
-	})
-}
-
-func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
-	if c == nil {
-		return
-	}
-	// Cap enforcement: when the map is at or above the cap, sweep expired
-	// entries first to make room. If sweep didn't free anything (every
-	// entry still warm), drop the new write — the cache is a perf
-	// optimisation; missing a slot only costs one extra
-	// workDirResolveUnderRoot call on the next tick.
-	if c.count.Load() >= workDirResolveCacheMaxEntries {
-		c.sweepExpired(now)
-		if c.count.Load() >= workDirResolveCacheMaxEntries {
-			return
-		}
-	}
-	if _, loaded := c.m.LoadOrStore(key, workDirResolveCacheEntry{
-		resolved:  resolved,
-		expiresAt: now.Add(workDirResolveCacheTTL),
-	}); !loaded {
-		c.count.Add(1)
-		return
-	}
-	// Existing entry — overwrite without changing the count.
-	c.m.Store(key, workDirResolveCacheEntry{
-		resolved:  resolved,
-		expiresAt: now.Add(workDirResolveCacheTTL),
-	})
-}
-
-// workDirResolveCacheKey concatenates the three inputs with separators
-// that are not valid in absolute paths (`\x00`) so distinct triples
-// cannot collide on a single key. R247-PERF-24.
-func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) string {
-	return workDir + "\x00" + allowedRoot + "\x00" + allowedRootResolved
-}
-
-// workDirResolveUnderRoot is the variant of workDirUnderRoot that also
-// returns the symlink-resolved workDir on success. R246-GO-12: callers
-// that subsequently hand workDir to a CLI (cli wrapper / claude spawn)
-// should use the resolved path so the open-time view matches the
-// validation-time view. Without this the workDir we just validated may
-// resolve differently when the CLI re-runs EvalSymlinks (TOCTOU window),
-// re-introducing the symlink-swap escape that EvalSymlinks-on-validate
-// was meant to close.
-//
-// Returned path is filepath.Clean'd (EvalSymlinks already does that).
-// On the empty-workDir / empty-root short-circuit returns ("", true)
-// so the caller leaves opts.Workspace untouched (router default applies).
-//
-// SHARED-ALGORITHM-WITH-SERVER (R20260527122801-ARCH-4 / #1316):
-// internal/server/server.go's validateWorkspace mirrors this exact algorithm
-// (EvalSymlinks(workDir) → EvalSymlinks(allowedRoot) → equality-or-prefix
-// check). The two implementations diverge only in error shape: server
-// returns sentinel errors so the HTTP layer can map status codes; cron
-// returns (resolved, ok) because the dispatcher path treats both
-// "rejected" and "no constraint" as "leave opts.Workspace untouched".
-// Both must move together if the algorithm changes — a fix on one side
-// silently re-opens the symlink-swap escape on the other. The next
-// dedup pass should hoist this to internal/osutil or a new
-// internal/workspace package; until then the cron→server cross-reference
-// here and in server.go's validateWorkspace godoc is the contract.
-// workDirResolveUnderRootCached is the Scheduler-scoped variant that
-// memoises positive results in s.workDirCache. The pure
-// workDirResolveUnderRoot below stays the canonical correctness path —
-// cold callers (loadJobs / UpdateJob) keep using it because they run
-// once per operator action and a stale-cached resolve would mask a
-// deliberate retarget. R247-PERF-24.
-func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool) {
-	if s == nil {
-		return workDirResolveUnderRoot(workDir, "", "")
-	}
-	now := time.Now()
-	// R20260526-PERF-002 (#1225): use precomputed suffix to avoid the
-	// three-segment concat allocation each tick. Equivalent to
-	// workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved).
-	key := workDir + s.workDirCacheKeySuffix
-	if resolved, ok := s.workDirCache.lookup(key, now); ok {
-		return resolved, true
-	}
-	resolved, ok := workDirResolveUnderRoot(workDir, s.allowedRoot, s.allowedRootResolved)
-	if ok {
-		s.workDirCache.store(key, resolved, now)
-	}
-	return resolved, ok
-}
-
-func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (string, bool) {
-	if workDir == "" || allowedRoot == "" {
-		return "", true // empty WorkDir uses router default; empty root = disabled
-	}
-	if !filepath.IsAbs(workDir) {
-		return "", false
-	}
-	resolved, err := filepath.EvalSymlinks(workDir)
-	if err != nil {
-		// Missing directory / permission denied — refuse to execute rather
-		// than silently re-create the sandbox escape.
-		return "", false
-	}
-	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
-	if err != nil {
-		// Fall back to the construction-time cached resolution. If neither
-		// the per-call EvalSymlinks nor the cache produced a resolved path,
-		// hard-reject — comparing the symlink-resolved workDir against the
-		// raw allowedRoot string opens a TOCTOU/symlink escape window:
-		// allowedRoot="/data/workspace" might resolve to
-		// "/mnt/disk0/workspace", in which case a raw-prefix compare against
-		// "/data/workspace" would either reject every legitimate child OR
-		// (if a subsequent rename swapped the symlink target) admit a
-		// path under an attacker-controlled tree. R243-SEC-9 (#795).
-		if allowedRootResolved == "" {
-			return "", false
-		}
-		rootResolved = allowedRootResolved
-	}
-	if resolved == rootResolved {
-		return resolved, true
-	}
-	if strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
-		return resolved, true
-	}
-	return "", false
+	// clock is the time source for lifecycle timestamps (run finish endedAt,
+	// synthetic-skipped startedAt). Defaults to realClock (time.Now) in
+	// NewScheduler; tests inject a fake to pin a deterministic now without
+	// sleeping. R247-ARCH-11 / R245-ARCH-34 (#643) — minimal injection point;
+	// see clock.go. Read via s.now() so a zero-value Scheduler still falls back
+	// to wall-clock time rather than nil-panicking.
+	clock cronClock
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin.
-// applyDefaults fills in zero-valued fields with their package-level
-// defaults and clamps oversized values. R232-ARCH-14: extracted from
-// NewScheduler so callers (especially tests that build SchedulerConfig
-// directly) can see the full default set in one place rather than tracing
-// through the constructor body.
-//
-// Idempotent — calling it on an already-defaulted config is a no-op.
-//
-// R246-GO-21: pointer receiver mutates in place to avoid copying ~280 bytes
-// of SchedulerConfig on every call. Callers that need to preserve the
-// original should copy before invoking.
-func (cfg *SchedulerConfig) applyDefaults() {
-	if cfg.MaxJobs <= 0 {
-		cfg.MaxJobs = defaultMaxJobs
-	}
-	if cfg.MaxJobs > maxJobsHardCap {
-		cfg.MaxJobs = maxJobsHardCap
-	}
-	// Resolve per-chat cap: <= 0 maps to the default so a zero struct
-	// field cannot silently disable the cap. R208-BL2.
-	if cfg.MaxJobsPerChat <= 0 {
-		cfg.MaxJobsPerChat = DefaultMaxJobsPerChat
-	}
-	if cfg.ExecTimeout <= 0 {
-		cfg.ExecTimeout = defaultExecTimeout
-	}
-	if cfg.Location == nil {
-		cfg.Location = time.Local
-	}
-}
-
-// resolveAllowedRoot sanitises cfg.AllowedRoot (clearing NUL-bearing values
-// loud) and returns the EvalSymlinks-resolved form for the sanitised root.
-// Empty result on either side means "no root constraint" — the empty-string
-// branch in workDirResolveUnderRoot then short-circuits the per-call check.
-//
-// Split out from NewScheduler under R241-ARCH-10 (#517) so the constructor
-// body reads as a near-flat field mirror. Kept off of applyDefaults because
-// EvalSymlinks is a syscall and applyDefaults is documented as pure /
-// idempotent / safe to call from tests.
-//
-// R20260527-PERF-14 (#1297) (preserved): an operator-set NUL byte in
-// AllowedRoot would tokenise workDirCacheKeySuffix incorrectly and cause
-// workDirResolveUnderRootCached to alias unrelated workDir inputs onto the
-// same cache slot. NUL also has no legitimate place in a filesystem path on
-// POSIX or Windows. The AllowedRoot is cleared so workDir checks fall
-// through to "no root constraint", with a loud slog.Error to surface the
-// misconfig.
-func (cfg *SchedulerConfig) resolveAllowedRoot() string {
-	if strings.ContainsRune(cfg.AllowedRoot, 0) {
-		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
-			"allowed_root_len", len(cfg.AllowedRoot))
-		cfg.AllowedRoot = ""
-	}
-	if cfg.AllowedRoot == "" {
-		return ""
-	}
-	if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
-		return r
-	}
-	return ""
-}
-
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
 	// at construction so the misconfiguration shows up at boot rather than
@@ -935,32 +430,35 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		chatJobCount: make(map[chatJobKey]int),
 		jobsByChat:   make(map[chatJobKey][]*Job),
 		router:       cfg.Router,
-		// R241-ARCH-3 (#506): platforms / agents / agentCommands are documented
-		// as immutable after NewScheduler so notifyTarget + executeOpt can
-		// read them lock-free, but the constructor previously aliased the
-		// caller-supplied maps verbatim — leaving the immutability contract
-		// dependent on the caller's discipline. A late-binding wireup that
-		// re-assigned cfg.Platforms[plat] (legitimate at boot, dangerous
-		// post-Start) would race the lock-free reads in cron-package hot
-		// paths. maps.Clone severs the alias at construction so the
-		// post-Start contract is enforced by the receiver, not by caller
-		// trust. Cost: O(N) copy at construction (N ≤ 8 backends, ≤ 32
-		// agents, ≤ 32 commands in production); zero runtime overhead since
-		// the cron-package readers see the same map shape they always did.
-		// maps.Clone returns nil for nil input so callers that omit any of
-		// these fields (test fixtures, narrow integration tests) keep the
-		// prior nil-map semantics.
-		platforms:      maps.Clone(cfg.Platforms),
-		agents:         maps.Clone(cfg.Agents),
-		agentCommands:  maps.Clone(cfg.AgentCommands),
+		// R241-ARCH-3 (#506) + R249-ARCH-27 (#991): notifySender / agents /
+		// agentCommands are documented as immutable after NewScheduler so
+		// notifyTarget + executeOpt can read them lock-free. The constructor
+		// previously aliased the caller-supplied maps verbatim — leaving the
+		// immutability contract dependent on the caller's discipline. A
+		// late-binding wireup that re-assigned cfg.Agents[name]
+		// (legitimate at boot, dangerous post-Start) would race the lock-free
+		// reads in cron-package hot paths. maps.Clone severs the alias at
+		// construction so the contract is enforced by the receiver, not by
+		// caller trust; the cloned maps + the (interface-valued) NotifySender
+		// are then published as one immutable *cronConfigMaps via
+		// configMapsPtr.Store below so readers Load() a consistent cross-field
+		// snapshot. maps.Clone returns nil for nil input so callers that omit
+		// any map field (test fixtures, narrow integration tests) keep the
+		// prior nil-map semantics — indexing a nil map is a safe zero-value
+		// read. #725: NotifySender carries no backing array, so it is stored
+		// directly (no clone).
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
 		execTimeout:    cfg.ExecTimeout,
-		// R249-CR-3 (#947): snapshot the package-level default into a
-		// per-instance field so tests in t.Parallel can override their
-		// own Scheduler's budget without racing each other on a global.
-		stopBudget:          stopBudget,
+		// R249-CR-3 (#947): seed the per-instance field so tests in
+		// t.Parallel can override their own Scheduler's budget without
+		// racing each other on a global.
+		// R20260603150052-GO-2 (#1712): seed directly from the
+		// defaultStopBudget const instead of a package-level var. Tests
+		// inject a short budget via WithStopBudgetField on the instance,
+		// so the global var (and the Stop() fallback that read it) is gone.
+		stopBudget:          defaultStopBudget,
 		location:            loc,
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
@@ -976,11 +474,28 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		// R247-ARCH-11 (#643): install the real-time clock by default. Tests
+		// swap a fake via the withClock seam to pin lifecycle timestamps
+		// (run DurationMS, skipped-run startedAt) without sleeping.
+		clock: defaultClock,
 	}
 	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R249-ARCH-27 (#991): publish the cloned config maps as one immutable
+	// snapshot. maps.Clone severs the alias to the caller-supplied maps so
+	// post-Start mutation of cfg.* cannot race the lock-free readers; the
+	// atomic.Pointer makes a future hot-reload swap race-free without
+	// retrofitting every read site. Set once here, never swapped today.
+	s.configMapsPtr.Store(&cronConfigMaps{
+		// #725: NotifySender is an interface value, not a map — write it once
+		// into the snapshot (no maps.Clone: there is no backing array to alias
+		// away from a late-binding wireup writer).
+		notifySender:  cfg.NotifySender,
+		agents:        maps.Clone(cfg.Agents),
+		agentCommands: maps.Clone(cfg.AgentCommands),
+	})
 	// R20260527-GO-1: install the broadcaster via atomic.Pointer so
 	// later SetTelemetry calls are race-free vs the cron-dispatch read
 	// path in emitRunStarted / emitRunEnded. nil cfg.Telemetry leaves
@@ -1060,12 +575,62 @@ func (s *Scheduler) NotifyDefault() NotifyTarget {
 
 // StartedAt 返回 Scheduler 最近一次 Start() 的时刻。用于 missed-schedule
 // 检测的启动抑制窗口。未 Start 前返回零值。
+//
+// Safe to call on a nil *Scheduler: returns the zero time. R249-CR-11
+// (#955): NotifyDefault()'s godoc already advertised StartedAt() as part
+// of the nil-safe read-accessor family used by the dashboard during the
+// bootstrap window, but the method dereferenced s.startedAtNanos with no
+// nil guard — a documented-but-unenforced contract. The dashboard reads
+// these three accessors (Location / NotifyDefault / StartedAt) together to
+// render a placeholder before the scheduler is wired, so a nil receiver on
+// one of them must not panic while the other two return safely.
 func (s *Scheduler) StartedAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
 	ns := s.startedAtNanos.Load()
 	if ns == 0 {
 		return time.Time{}
 	}
 	return time.Unix(0, ns)
+}
+
+// StartContext binds ctx to the scheduler's lifecycle and then calls Start.
+//
+// R250-ARCH-5 (#1168): this is the idiomatic Go entry point (Start(ctx) /
+// Stop(ctx)) that callers should prefer over stashing a lifecycle ctx in
+// SchedulerConfig.ParentCtx. The ParentCtx field remains supported for
+// back-compat, but a non-nil ctx passed here is wired so that its
+// cancellation propagates INTO stopCtx exactly like ParentCtx does — when
+// ctx is cancelled (app shutdown), running cron jobs are interrupted via the
+// same stopCtx.Done() signal Stop() drives. This avoids forcing operators to
+// construct a full SchedulerConfig literal just to thread the app ctx and
+// keeps cron's startup contract off the ctx-on-struct anti-pattern
+// (golang/go#36363).
+//
+// Semantics:
+//   - A nil ctx is treated as "no extra parent" and behaves identically to
+//     calling Start() directly.
+//   - The watcher goroutine exits when EITHER ctx or stopCtx is done, so it
+//     never outlives the scheduler (Stop() cancels stopCtx and unblocks it).
+//   - StartContext is safe to call instead of Start; it is NOT meant to be
+//     combined with a separate Start() call. Like Start() it is idempotent
+//     via the same started/stopped CAS guards.
+func (s *Scheduler) StartContext(ctx context.Context) error {
+	if ctx != nil {
+		// Mirror ParentCtx's "cancel propagates into stopCtx" contract
+		// without re-parenting stopCtx (which is created eagerly in
+		// NewScheduler). A lightweight watcher cancels stopCtx when ctx
+		// fires; it also drains on stopCtx so it cannot leak past Stop().
+		go func() {
+			select {
+			case <-ctx.Done():
+				s.stopCancel()
+			case <-s.stopCtx.Done():
+			}
+		}()
+	}
+	return s.Start()
 }
 
 // Start loads persisted jobs and starts the cron scheduler.
@@ -1077,6 +642,20 @@ func (s *Scheduler) StartedAt() time.Time {
 // double-Start does not reshape the missed-schedule suppression
 // window mid-flight.
 func (s *Scheduler) Start() error {
+	// R249-ARCH-19 (#984): refuse to (re)start once Stop() has latched. The
+	// Stop() godoc documents that triggerWG / gcWG / runDeadlineWatchdog
+	// wrapper goroutines are intentionally leaked on budget-exceed precisely
+	// because "Scheduler is not reusable". A Stop-then-Start sequence would
+	// re-enter loadJobs + cron.Start + cold-start GC on an instance whose
+	// stopCtx is already cancelled, accumulating those orphan goroutines
+	// across lifecycles until OOM. The started CAS below blocks the common
+	// double-Start, but it does NOT block Start-after-Stop when a prior
+	// Start failed at loadJobs and reset started=false. Gate on stopped here
+	// so a Stopped instance can never be revived. ErrSchedulerStopped lets
+	// callers distinguish "already stopped" from a transient load failure.
+	if s.stopped.Load() {
+		return ErrSchedulerStopped
+	}
 	if !s.started.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -1151,9 +730,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-			s.chatJobCount[key]++
-			s.jobsByChat[key] = append(s.jobsByChat[key], j)
+			s.addToChatIndexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -1162,9 +739,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-		s.chatJobCount[key]++
-		s.jobsByChat[key] = append(s.jobsByChat[key], j)
+		s.addToChatIndexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)
@@ -1185,14 +760,14 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore != nil {
+	if s.runStoreEnabled() {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
 			// R234-GO-3 / #1019: 传 stopCtx 进 trimAll，Stop 可在 job 入口
 			// 之间中断长时间的 GC 扫描，避免 Stop 等到 gcWaitBudget。
-			s.runStore.trimAllCtx(s.stopCtx, time.Now())
+			s.trimAllRuns(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}
@@ -1264,7 +839,15 @@ func (s *Scheduler) registerStubFromJob(j *Job) bool {
 // would otherwise hit "session not found" because the WS subscribe path
 // has nothing to attach to. This method is the idempotent recovery hook
 // wired into handleSubscribe and /api/sessions/events.
+// EnsureStub is safe to call on a nil *Scheduler: it returns false, matching
+// the nil-safe pattern of NotifyDefault / StartedAt. This matters because a
+// nil *Scheduler stored in a CronView interface is non-nil at the interface
+// level, so a dashboard handler's `h.scheduler != nil` guard does not prevent
+// calls on a typed-nil receiver. R20260603-ARCH-1.
 func (s *Scheduler) EnsureStub(key string) bool {
+	if s == nil {
+		return false
+	}
 	if !sessionkey.IsCronKey(key) {
 		return false
 	}
@@ -1293,65 +876,6 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	return s.registerStubByValue(id, workDir, prompt, lastSessionID)
 }
 
-// StopPolicy is the documented Stop-overflow strategy this Scheduler
-// honours: when the per-call wait budget elapses with goroutines still
-// in flight, Stop logs a warning and proceeds to the final persist,
-// leaving any orphaned goroutines for the OS to reap on process exit.
-//
-// Why this is a string constant rather than a typed enum: cron and
-// sysession independently document their Stop-overflow strategies
-// (sysession uses StopPolicyForceExit — see
-// internal/sysession/manager.go) and the divergence is a deliberate
-// security decision (Sec-LOW-2: sysession daemons run user-prompt-
-// derived strings through a CLI subprocess, so a stuck goroutine
-// touching a torn-down router could echo conversation excerpts back
-// to a different session's reply path; cron deliveries do not have
-// that surface). Mechanically unifying the two via a shared enum
-// would invite the wrong "harmonise the strategies" intuition. Each
-// package exposes its own string constant operators can grep.
-//
-// Closes #1060 (R244-ARCH-7) — promotes the implicit decision (live
-// only in comments inside Stop's godoc + R49-REL-CRON-STOP-BUDGET
-// linkage) to a typed constant operators can reference in alerts /
-// runbooks. NOT used in cron's control flow today; intentionally
-// doc-only so future "let's check policy at runtime" callers must
-// add the comparison and its tests deliberately.
-const StopPolicyBudgetThenLeak = "budget_then_leak"
-
-// defaultStopBudget is the production overall deadline Scheduler.Stop()
-// will spend waiting on cron.Stop + triggerWG before proceeding to save.
-// Shared between both waits (not doubled per wait) so a production
-// deployment with execTimeout=3600s cannot pin restart for ≈2 h — the
-// prior two-budget design had a worst case of 2×(execTimeout+5s).
-// Aligned with session.ShutdownTimeout (30s) so both subsystems agree on
-// the upper bound systemd sees. R49-REL-CRON-STOP-BUDGET.
-const defaultStopBudget = 30 * time.Second
-
-// gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller
-// than defaultStopBudget because trimAll's IO is short-lived
-// (ReadDir + N Removes); a wedge here means a stuck filesystem and we'd
-// rather skip the wait than pin systemd TimeoutStopSec.
-//
-// R247-CR-18: kept as a const because no production / test path needs to
-// shorten it. If you find yourself wanting to override per-test, use a
-// `*time.Timer` injected via a Scheduler field instead of reintroducing
-// a package-level var — package vars under t.Parallel races silently.
-const gcWaitBudget = 5 * time.Second
-
-// stopBudget is the active stop budget used by Scheduler.Stop(). Tests
-// MUST mutate it only through the WithStopBudget seam in
-// scheduler_testutil_test.go so the var swap is paired with a
-// t.Cleanup restore — direct writes from t.Parallel tests would race
-// a concurrent Stop on another Scheduler instance with real
-// wall-clock timeouts.
-var stopBudget = defaultStopBudget
-
-// (R248-DEADCODE-24 / #1216) WithStopBudget moved to
-// scheduler_testutil_test.go: it is test-only and previously living in
-// production scheduler.go pinned dead surface area in the production
-// binary. Same-package _test.go retains access to the unexported
-// stopBudget without changing test call sites.
-
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
@@ -1369,8 +893,8 @@ var stopBudget = defaultStopBudget
 // Reply webhook that refuses to honour its own timeout) cannot hold us
 // past stopBudget. A stuck trimAll cannot hold us past gcWaitBudget. The
 // final saveJobs runs regardless so a stuck drain does not cost the
-// state file. Tests overriding budgets via WithStopBudget /
-// WithGCWaitBudget on the *Scheduler instance see the same composition.
+// state file. Tests overriding budgets via WithStopBudgetField on the
+// *Scheduler instance see the same composition.
 //
 // CONTRACT: Stop assumes the naozhi process terminates shortly after it
 // returns. When triggerWG.Wait is cut off by the budget, the wrapper
@@ -1411,6 +935,30 @@ var stopBudget = defaultStopBudget
 // MUST also be migrated under triggerWG so its lifetime is bounded by
 // the same stopBudget the Send-spawning code is.
 func (s *Scheduler) Stop() {
+	s.stopWithCtx(nil)
+}
+
+// StopContext is the idiomatic Stop(ctx) entry point (golang/go#36363):
+// callers thread a shutdown-scoped context — e.g. one derived from systemd's
+// TimeoutStopSec — so the drain phases short-circuit on ctx cancellation
+// instead of waiting out their internal budgets. This complements
+// StartContext(ctx) so the lifecycle reads Start(ctx) / Stop(ctx) rather than
+// stashing a ParentCtx field.
+//
+// R250-ARCH-5 (#1168): ctx is advisory and additive. A nil ctx behaves exactly
+// like Stop() (each phase honours only its internal per-phase budget). When
+// ctx fires, each drain wait returns promptly with the same Warn + budget
+// counter it logs on its own deadline; the orphaned wrapper goroutines die
+// with the process exactly as the Stop() CONTRACT block documents. The final
+// persistOnShutdown ALWAYS runs (even on a cancelled ctx) so mutations that
+// already returned 2xx are never lost.
+func (s *Scheduler) StopContext(ctx context.Context) {
+	s.stopWithCtx(ctx)
+}
+
+// stopWithCtx is the shared body of Stop / StopContext. ctx may be nil
+// (Stop's path) — the drain helpers treat a nil ctx as "no extra cancel".
+func (s *Scheduler) stopWithCtx(ctx context.Context) {
 	// R20260526-GO-007: idempotent CAS guard. Without this, repeat calls
 	// re-enter the timer-allocating + persist branches below — wasting
 	// time.NewTimer slots, double-running persistJobsLocked, and racing the
@@ -1427,12 +975,22 @@ func (s *Scheduler) Stop() {
 	// budget; Stop() orchestrates them in order. Each helper logs a Warn +
 	// bumps its CronStopBudgetExceeded* counter on its own deadline; Stop
 	// itself contains no budget arithmetic.
-	s.waitGCDrain()
-	deadlineHit, stopStart := s.drainCronStop()
+	s.waitGCDrain(ctx)
+	deadlineHit, stopStart := s.drainCronStop(ctx)
 	if !deadlineHit {
-		s.drainTriggerWG(stopStart)
+		s.drainTriggerWG(ctx, stopStart)
 	}
 	s.persistOnShutdown()
+}
+
+// ctxDone returns ctx.Done() or a nil channel when ctx is nil. A receive from
+// a nil channel blocks forever, so a nil-ctx select case is inert — letting
+// the drain helpers add an optional ctx-cancel arm without branching.
+func ctxDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Done()
 }
 
 // waitGCDrain blocks until the cold-start GC goroutine spawned in Start()
@@ -1440,7 +998,7 @@ func (s *Scheduler) Stop() {
 // tree from trimAll race the upcoming persist + Append-from-triggerWG
 // paths if we don't drain first; the budget keeps a wedged trimAll from
 // pinning systemd TimeoutStopSec. R236-GO-01 (origin) / R247-CR-4 (extract).
-func (s *Scheduler) waitGCDrain() {
+func (s *Scheduler) waitGCDrain(ctx context.Context) {
 	gcDone := make(chan struct{})
 	go func() {
 		s.gcWG.Wait()
@@ -1450,6 +1008,13 @@ func (s *Scheduler) waitGCDrain() {
 	defer gcTimer.Stop()
 	select {
 	case <-gcDone:
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): caller's shutdown ctx pre-empts the internal
+		// budget. Account it like a budget breach so dashboards alert
+		// identically whether the cap came from gcWaitBudget or the
+		// operator's TimeoutStopSec ctx.
+		metrics.CronStopBudgetExceededGCTotal.Add(1)
+		slog.Warn("cron: gc goroutine wait cancelled by stop ctx", "budget", gcWaitBudget)
 	case <-gcTimer.C:
 		// R250-GO-20 (#1083): pair the per-phase Warn with a counter so
 		// dashboards can alert on shutdown-budget breaches without
@@ -1466,7 +1031,7 @@ func (s *Scheduler) waitGCDrain() {
 // is true (the budget is shared across both phases). stopStart anchors the
 // remaining-budget arithmetic in drainTriggerWG so both phases account
 // against the same wall clock. R246-GO-13 / R247-CR-4.
-func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
+func (s *Scheduler) drainCronStop(ctx context.Context) (deadlineHit bool, stopStart time.Time) {
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
@@ -1486,17 +1051,32 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 	// the NewTimer so we can defer-Stop it on the early-drain path.
 	stopStart = time.Now()
 	// R249-CR-3 (#947): read the per-instance budget. Falls back to the
-	// package-level default when the field is the zero value — e.g. tests
-	// that hand-construct *Scheduler without going through NewScheduler.
+	// const default when the field is the zero value — e.g. tests that
+	// hand-construct *Scheduler without going through NewScheduler.
+	// R20260603150052-GO-2 (#1712): fall back to the defaultStopBudget
+	// const, NOT a package-level var. NewScheduler now seeds the field
+	// from the const directly, so the only var swap (test budget
+	// injection) lives on the per-instance field via WithStopBudgetField;
+	// reading a package var here would re-race a concurrent Stop on a
+	// hand-built Scheduler against that swap.
 	budget := s.stopBudget
 	if budget <= 0 {
-		budget = stopBudget
+		budget = defaultStopBudget
 	}
 	deadline := time.NewTimer(budget)
 	defer deadline.Stop()
 
 	select {
 	case <-cronDoneCtx.Done():
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): shutdown ctx pre-empts the drain budget. Set
+		// deadlineHit so the caller skips drainTriggerWG — the single overall
+		// ceiling contract (one budget across both phases) extends to the ctx
+		// cancel edge the same way the timer deadline does.
+		deadlineHit = true
+		metrics.CronStopBudgetExceededDrainTotal.Add(1)
+		slog.Warn("cron scheduler: stop cancelled by ctx before cron.Stop drained, proceeding",
+			"budget", budget)
 	case <-deadline.C:
 		deadlineHit = true
 		// R250-GO-20 (#1083): see GC counter rationale above.
@@ -1536,7 +1116,7 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // TimeoutStopSec.
 //
 // R247-CR-4: extracted from Stop().
-func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
+func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 	triggerDone := make(chan struct{})
 	go func() {
 		s.triggerWG.Wait()
@@ -1562,9 +1142,11 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 	// R249-CR-3 (#947): same per-instance budget read as drainCronStop;
 	// must match — keeping a single overall ceiling across both halves
 	// of Stop is the contract drainCronStop's godoc pins.
+	// R20260603150052-GO-2 (#1712): fall back to the defaultStopBudget
+	// const, mirroring drainCronStop — never the removed package var.
 	budget := s.stopBudget
 	if budget <= 0 {
-		budget = stopBudget
+		budget = defaultStopBudget
 	}
 	remaining := budget - time.Since(stopStart)
 	if remaining < time.Millisecond {
@@ -1574,6 +1156,11 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 	defer triggerTimer.Stop()
 	select {
 	case <-triggerDone:
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): shutdown ctx pre-empts the remaining budget.
+		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
+		slog.Warn("cron scheduler: stop cancelled by ctx during triggerWG wait, proceeding",
+			"budget", budget, "remaining_ms", remaining.Milliseconds())
 	case <-triggerTimer.C:
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
@@ -1659,60 +1246,4 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 		return
 	}
 	s.router.Reset(sessionkey.CronKey(jobID))
-}
-
-// slogPrintfLogger satisfies the Printf interface that robfig/cron's
-// PrintfLogger expects, routing every emitted line through slog instead of
-// the standard log package.
-//
-// Observability note: robfig/cron wraps this via non-verbose PrintfLogger
-// (logger.go:28 in the vendored lib) which compiles Info() out entirely
-// when logInfo=false. SkipIfStillRunning calls Info (chain.go:88) and
-// therefore never reaches Printf at all; only Error() lines do — i.e.
-// recover-panic recoveries and schedule parse failures. Panic recoveries
-// are logged at Error (a real fault); anything else stays at Warn so
-// upstream library changes that route new events through Error remain
-// visible without silently demoting them.
-type slogPrintfLogger struct{}
-
-// cronPanicMarker is the substring scanned in robfig/cron-emitted log
-// lines to escalate to slog.Error rather than slog.Warn. Pulled out as a
-// named const (R247-CR-23) so call-site readers see WHAT we look for and
-// WHY in one place — the previous inline `strings.Contains(msg, "panic")`
-// read as a negative assertion ("if this is a panic line") that obscured
-// the upstream-stability rationale baked into the comment.
-//
-// robfig/cron's Recover wrapper invokes logger.Error(err, "panic",
-// "stack", ...) (chain.go ~line 50); the printfLogger Error formatter
-// renders the msg argument verbatim, so the literal substring "panic"
-// is guaranteed to appear in every recover-emitted line. No other Error
-// path through the library carries this token.
-//
-// R249-CR-24: dropped the historical cronRecoveredMarker = "recovered"
-// fallback. It existed as a forward-compat hedge for a hypothetical
-// upstream rename of the Recover message but never matched real output:
-// robfig/cron 3.0.x emits "panic" only, and a future rename would arrive
-// in a Go module bump where we'd update the marker alongside any other
-// breakage. Single Contains scan is enough — keeping a no-op fallback
-// added a strings.Contains call per emitted line for no observed signal.
-const cronPanicMarker = "panic"
-
-func (slogPrintfLogger) Printf(format string, args ...any) {
-	// R250-CR-15 (#1148): skip fmt.Sprintf when there are no args. Saves
-	// an alloc per emitted line and avoids passing untrusted format
-	// verbs through the formatter (robfig/cron's PrintfLogger.Error and
-	// Info both call Printf with the message as the first arg, which
-	// can contain user-controlled content like cron spec strings).
-	var msg string
-	if len(args) == 0 {
-		msg = format
-	} else {
-		msg = fmt.Sprintf(format, args...)
-	}
-	msg = strings.TrimRight(msg, "\n")
-	if strings.Contains(msg, cronPanicMarker) {
-		slog.Error("cron logger", "msg", msg)
-		return
-	}
-	slog.Warn("cron logger", "msg", msg)
 }

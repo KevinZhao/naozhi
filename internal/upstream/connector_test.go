@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -148,7 +147,7 @@ func TestMarshalResult_PoolReuseDoesNotShareBacking(t *testing.T) {
 // ---- Connector.New ----
 
 func TestNew_CreatesConnector(t *testing.T) {
-	cfg := &config.UpstreamConfig{
+	cfg := &Config{
 		URL:    "wss://example.com/ws-node",
 		NodeID: "node1",
 		Token:  "secret",
@@ -167,7 +166,7 @@ func TestNew_CreatesConnector(t *testing.T) {
 }
 
 func TestNew_SetDiscoverFunc(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	called := false
 	c.SetDiscoverFunc(func() (json.RawMessage, error) {
@@ -183,7 +182,7 @@ func TestNew_SetDiscoverFunc(t *testing.T) {
 }
 
 func TestNew_SetPreviewFunc(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	var gotID string
 	c.SetPreviewFunc(func(id string) (json.RawMessage, error) {
@@ -211,7 +210,7 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "node1", Token: "badtoken"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "badtoken"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -229,7 +228,7 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 // ---- Dial failure path ----
 
 func TestRunOnce_DialFailure(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "ws://127.0.0.1:1", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "ws://127.0.0.1:1", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -247,7 +246,7 @@ func TestRunOnce_DialFailure(t *testing.T) {
 // ---- handleRequest: fetch_sessions ----
 
 func TestHandleRequest_FetchSessions(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{
@@ -268,7 +267,7 @@ func TestHandleRequest_FetchSessions(t *testing.T) {
 // ---- handleRequest: fetch_projects (no projMgr) ----
 
 func TestHandleRequest_FetchProjects_NilMgr(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil) // projMgr = nil
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
@@ -286,7 +285,7 @@ func TestHandleRequest_FetchProjects_NilMgr(t *testing.T) {
 // ---- handleRequest: fetch_discovered ----
 
 func TestHandleRequest_FetchDiscovered_NoFunc(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered"}
@@ -302,7 +301,7 @@ func TestHandleRequest_FetchDiscovered_NoFunc(t *testing.T) {
 }
 
 func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	c.SetDiscoverFunc(func() (json.RawMessage, error) {
 		return json.RawMessage(`[{"session_id":"abc"}]`), nil
@@ -321,7 +320,7 @@ func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
 // ---- handleRequest: fetch_discovered_preview ----
 
 func TestHandleRequest_FetchDiscoveredPreview_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: json.RawMessage(`not-json`)}
@@ -332,7 +331,7 @@ func TestHandleRequest_FetchDiscoveredPreview_BadParams(t *testing.T) {
 }
 
 func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	c.SetPreviewFunc(func(sid string) (json.RawMessage, error) {
 		return json.RawMessage(`[{"session_id":"` + sid + `"}]`), nil
@@ -356,7 +355,7 @@ func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 // boundary validator rejects path-traversal / non-UUID inputs before calling
 // previewFunc. R65-SEC-M-1.
 func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	var called bool
 	c.SetPreviewFunc(func(sid string) (json.RawMessage, error) {
@@ -378,7 +377,7 @@ func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
 // ---- handleRequest: fetch_events ----
 
 func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "fetch_events", Params: json.RawMessage(`not-json`)}
@@ -389,7 +388,7 @@ func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
 }
 
 func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"key": "no:such:key", "after": 0})
@@ -403,7 +402,7 @@ func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
 // ---- handleRequest: send (no wrapper — session creation fails) ----
 
 func TestHandleRequest_Send_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "send", Params: json.RawMessage(`not-json`)}
@@ -419,7 +418,7 @@ func TestHandleRequest_Send_BadParams(t *testing.T) {
 // straight into CLI stdin with only the shim's 12 MB line ceiling as a
 // backstop. R68-SEC-H1.
 func TestHandleRequest_Send_TextTooLong(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	// 5 MB > maxCoalescedTextBytes (4 MB). Valid JSON that would otherwise
@@ -448,7 +447,7 @@ func TestHandleRequest_Send_TextTooLong(t *testing.T) {
 // compromised primary could spawn CLI sessions rooted at /etc or anywhere
 // else by submitting `/home/../etc`.
 func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	if c.defaultWorkspace != "" {
 		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
@@ -469,7 +468,7 @@ func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T
 }
 
 func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	params, _ := json.Marshal(map[string]string{
 		"key":       "feishu:direct:alice:general",
@@ -492,7 +491,7 @@ func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
 // `if c.defaultWorkspace != ""`, so an empty default opened the door to
 // arbitrary CLI-session rooting. R68-SEC-M2.
 func TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 	if c.defaultWorkspace != "" {
 		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
@@ -535,7 +534,7 @@ func TestValidateRemoteWorkspacePath_SharedByConnector(t *testing.T) {
 // ---- handleRequest: unknown method ----
 
 func TestHandleRequest_UnknownMethod(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "totally_unknown"}
@@ -551,7 +550,7 @@ func TestHandleRequest_UnknownMethod(t *testing.T) {
 // ---- handleRequest: restart_planner (no projMgr) ----
 
 func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]string{"project_name": "myproj"})
@@ -563,7 +562,7 @@ func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
 }
 
 func TestHandleRequest_RestartPlanner_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "restart_planner", Params: json.RawMessage(`not-json`)}
@@ -576,7 +575,7 @@ func TestHandleRequest_RestartPlanner_BadParams(t *testing.T) {
 // ---- handleRequest: update_config (no projMgr) ----
 
 func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -591,7 +590,7 @@ func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
 }
 
 func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "update_config", Params: json.RawMessage(`not-json`)}
@@ -604,7 +603,7 @@ func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
 // ---- handleRequest: takeover / close_discovered (invalid params) ----
 
 func TestHandleRequest_Takeover_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "takeover", Params: json.RawMessage(`not-json`)}
@@ -615,7 +614,7 @@ func TestHandleRequest_Takeover_BadParams(t *testing.T) {
 }
 
 func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0, "session_id": "sess-abc"})
@@ -627,7 +626,7 @@ func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
 }
 
 func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{Method: "close_discovered", Params: json.RawMessage(`not-json`)}
@@ -638,7 +637,7 @@ func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
 }
 
 func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0})
@@ -650,7 +649,7 @@ func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
 }
 
 func TestHandleRequest_CloseDiscovered_MissingProcStartTime(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 12345, "proc_start_time": 0})
@@ -692,7 +691,7 @@ func TestHandleConn_PingPong(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -743,7 +742,7 @@ func TestHandleConn_RequestFetchSessions(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -780,7 +779,7 @@ func TestRun_CancelContext(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -816,7 +815,7 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{
+	cfg := &Config{
 		URL:         wsURL(srv),
 		NodeID:      "my-node",
 		Token:       "my-token",
@@ -866,7 +865,7 @@ func TestHandleConn_Subscribe_SessionNotFound(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -914,7 +913,7 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -934,6 +933,68 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestRun_BackoffGauge_TracksReconnectState verifies the R172-ARCH-D10
+// gauge (connectorBackoffMillis) is published and advances as the Run()
+// loop walks the reconnect backoff schedule on repeated dial failures.
+// The gauge starts at 1000ms (1s floor) and doubles after each failed
+// attempt's sleep, so after at least two failed attempts the gauge must
+// have moved above the initial 1s floor.
+func TestRun_BackoffGauge_TracksReconnectState(t *testing.T) {
+	connSeen := make(chan struct{}, 20)
+	srv := newFakeServer(t, func(conn *websocket.Conn) {
+		defer conn.Close()
+		select {
+		case connSeen <- struct{}{}:
+		default:
+		}
+		// Close immediately to force the next attempt onto the backoff path.
+	})
+	defer srv.Close()
+
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	go c.Run(ctx)
+
+	// The gauge is published under its expvar name and seeded to the 1s
+	// floor on Run() entry. Confirm the var is registered and non-zero
+	// (the exact value races with the backoff doubling below, so we only
+	// assert it has been Set at all).
+	deadline0 := time.Now().Add(2 * time.Second)
+	for connectorBackoffMillis.Value() == 0 && time.Now().Before(deadline0) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if connectorBackoffMillis.Value() == 0 {
+		t.Fatalf("backoff gauge never published a non-zero value")
+	}
+
+	// Wait for at least two dial attempts so the loop has doubled the
+	// backoff past the 1s floor at least once.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-connSeen:
+		case <-time.After(4 * time.Second):
+			t.Fatalf("timeout waiting for connection attempt %d", i+1)
+		}
+	}
+
+	// After the second failed attempt the gauge should have advanced
+	// beyond the 1s floor (1000 → 2000 → ...). Poll briefly since the
+	// Set happens after the sleep timer fires.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectorBackoffMillis.Value() > 1000 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("backoff gauge = %d, want > 1000 after repeated failures",
+		connectorBackoffMillis.Value())
 }
 
 // ---- handleRequest: update_config with real project manager ----
@@ -957,7 +1018,7 @@ func TestHandleRequest_UpdateConfig_WithMgr(t *testing.T) {
 		t.Fatalf("Scan: %v", err)
 	}
 
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), mgr, nil)
 
 	newCfg := project.ProjectConfig{GitSync: true, GitRemote: "upstream"}
@@ -983,7 +1044,7 @@ func TestHandleRequest_UpdateConfig_ProjectNotFound(t *testing.T) {
 	mgr, _ := project.NewManager(root, project.PlannerDefaults{})
 	mgr.Scan()
 
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), mgr, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -1004,7 +1065,7 @@ func TestHandleRequest_RestartPlanner_ProjectNotFound(t *testing.T) {
 	mgr, _ := project.NewManager(root, project.PlannerDefaults{})
 	mgr.Scan()
 
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), mgr, nil)
 
 	params, _ := json.Marshal(map[string]string{"project_name": "ghost"})
@@ -1026,7 +1087,7 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 	mgr, _ := project.NewManager(root, project.PlannerDefaults{})
 	mgr.Scan()
 
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), mgr, nil)
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
@@ -1044,7 +1105,7 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 // ---- handleRequest: takeover with invalid session ID format ----
 
 func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	// Valid-looking PID but invalid session ID format
@@ -1061,7 +1122,7 @@ func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
 }
 
 func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -1079,7 +1140,7 @@ func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
 // ---- handleRequest: close_discovered with invalid session ID format ----
 
 func TestHandleRequest_CloseDiscovered_InvalidSessionID(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -1116,7 +1177,7 @@ func TestHandleConn_Unsubscribe(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1148,7 +1209,7 @@ func TestHandleRequest_FetchEvents_ExistingSession(t *testing.T) {
 	// Register a session with no process (history-only stub)
 	router.RegisterForResume("feishu:group:chat1:general", "sess-abc123", "/tmp", "test prompt")
 
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, router, nil, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -1191,7 +1252,7 @@ func TestHandleConn_RequestErrorResponse(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1239,7 +1300,7 @@ func TestHandleConn_WSPingPong(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1263,7 +1324,7 @@ func TestHandleConn_WSPingPong(t *testing.T) {
 // ---- handleRequest: set_session_label ----
 
 func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	router := makeRouter()
 	// Seed a session so the dispatch path has something to mutate.
 	proc := session.NewTestProcess()
@@ -1291,7 +1352,7 @@ func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
 }
 
 func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{
@@ -1312,7 +1373,7 @@ func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
 }
 
 func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	req := node.ReverseMsg{
@@ -1325,7 +1386,7 @@ func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
 }
 
 func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	label := strings.Repeat("a", 129)
@@ -1355,7 +1416,7 @@ func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
 // the test as a whole runs cleanly under -race.
 func TestSetDiscoverFunc_ConcurrentSwap(t *testing.T) {
 	t.Parallel()
-	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	// Seed an initial value so loadDiscoverFunc is non-nil for the

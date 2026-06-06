@@ -2,6 +2,13 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// activeView is the root view-router state: which top-level view owns the
+// viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
+// 'cron' / 'settings' are full-screen peers driven by setActivityView() and
+// the matching body.nz-view-* CSS classes. Cron rendering is gated on
+// activeView==='cron' (was selectedKey===null) so async cron repaints never
+// clobber the chat DOM and vice-versa.
+let activeView = 'chat';
 // _activeCardEl caches the currently-.active session card element so the
 // selector switch doesn't have to O(N) scan every card each time. Stays in
 // sync via setActiveSessionCard(); after renderSidebar rebuilds the list the
@@ -25,6 +32,12 @@ let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
+// Keys (sid(key,node)) optimistically removed by dismissSession before the
+// DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
+// poll or sessions_update WS event that still lists the session cannot
+// resurrect a card the operator already dismissed. Cleared when DELETE
+// confirms (success/404) or fails — see dismissSession's normal-session branch.
+let _optimisticDeleteKeys = new Set();
 // Collapsed project sections: Set of "node:name" keys. Persisted in
 // localStorage so a user's fold state survives reloads. Toggled via the
 // chevron button in the project section-header; the renderer skips emitting
@@ -75,6 +88,7 @@ let _lastSidebarHtml = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
+let lastDiscoveredJSON = ''; // #1770: last /api/discovered payload, to skip forced re-render when unchanged
 let previewTimer = null;
 let previewEventCount = 0;
 let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
@@ -154,6 +168,77 @@ function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch
 // persisted state across 17 call sites is riskier than the double-prefix
 // quirk it would fix. Revisit when LS_SCHEMA is bumped.
 
+// Pending-session persistence (#cwd-fallback fix). The three pending maps
+// (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
+// memory, so a page reload before the first send dropped the chosen workspace.
+// The next send then carried no `workspace`, the backend never wrote a
+// per-chat override (send.go gates SetWorkspace on a non-empty workspace), and
+// the spawn fell through to defaultCWD = workspace root — the session landed in
+// the wrong directory. We mirror the maps into localStorage so a reload (or
+// even a never-sent session) rehydrates the workspace and the first send still
+// carries it. This only re-hydrates state the user authored in THIS browser —
+// no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
+const PENDING_LS_KEY = 'pending_sessions';
+const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
+let _pendingRestored = false;
+
+// persistPending snapshots the in-memory pending maps to localStorage. Called
+// after every mutation of the three maps. lsSet swallows quota/disabled errors.
+function persistPending() {
+  const keys = Object.keys(sessionWorkspaces).slice(0, PENDING_LS_MAX);
+  const obj = {};
+  for (const k of keys) {
+    const entry = { ws: sessionWorkspaces[k] };
+    if (sessionNodes[k] && sessionNodes[k] !== 'local') entry.node = sessionNodes[k];
+    if (sessionBackends[k]) entry.backend = sessionBackends[k];
+    obj[k] = entry;
+  }
+  lsSet(PENDING_LS_KEY, obj);
+}
+
+// restorePending rehydrates the in-memory pending maps from localStorage at
+// boot, BEFORE the first fetchSessions/send. Idempotent via _pendingRestored
+// (multiple DOMContentLoaded listeners exist). Every entry is shape-validated:
+// a hand-edited blob cannot inject a non-string key or a non-absolute ws path
+// (defense in depth — the server still re-validates the workspace on send).
+function restorePending() {
+  if (_pendingRestored) return;
+  _pendingRestored = true;
+  const saved = lsGet(PENDING_LS_KEY, {});
+  if (!saved || typeof saved !== 'object') return;
+  for (const [k, v] of Object.entries(saved)) {
+    if (typeof k !== 'string' || !k) continue;
+    if (!v || typeof v !== 'object' || typeof v.ws !== 'string' || !v.ws) continue;
+    if (v.ws[0] !== '/' && v.ws[0] !== '~') continue; // reject relative / junk
+    sessionWorkspaces[k] = v.ws;
+    if (v.node && v.node !== 'local') sessionNodes[k] = v.node;
+    if (v.backend) sessionBackends[k] = v.backend;
+  }
+}
+
+// eagerBindWorkspace tells the backend the chosen workspace the moment a
+// session is created, instead of waiting for the first send to carry it. This
+// writes the per-chat override eagerly (server-side validateWorkspace +
+// SetWorkspace), so even a session opened in another browser/device — or one
+// reloaded before its first send — spawns into the right directory. Local
+// nodes only: remote sessions resolve their workspace on their own node.
+// Fire-and-forget — never blocks or fails the creation flow (matches the
+// pushRecentProject swallow convention).
+function eagerBindWorkspace(key, workspace, node) {
+  if (!key || !workspace) return;
+  const nd = node || 'local';
+  if (nd !== 'local') return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    fetch('/api/sessions/bind', {
+      method: 'POST', headers,
+      body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
+    }).catch(() => {});
+  } catch (_) { /* never break creation over a bind */ }
+}
+
 // THEME-1 (#453) — theme cycler. The dashboard was GitHub-Dark hardcoded
 // before this; users with a light-mode preference (or who want to follow
 // OS) now get a 3-state toggle in the sidebar header. State is persisted
@@ -204,13 +289,90 @@ function cycleTheme() {
 // handlers; goal in #441 / #479 / #922 is to drive the count to 0 so
 // script-src 'unsafe-inline' can be dropped).
 document.addEventListener('DOMContentLoaded', function () {
+  // Rehydrate pending-session workspaces from localStorage BEFORE the first
+  // fetchSessions/send so a reload-before-first-send still carries the chosen
+  // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
+  restorePending();
   applyTheme(getCurrentTheme());
   const btn = document.getElementById('btn-theme');
   if (btn) btn.addEventListener('click', cycleTheme);
+  // Activity-bar view switch (codex-style rail). Wired here (not inline
+  // onclick) to keep the script-src inline-handler surface from growing
+  // (R236-SEC-02 cap). Each abnav-* routes through the top-level
+  // setActivityView() which toggles the matching body.nz-view-* class and
+  // swaps the chat sidebar/main for the target view's panels in place.
+  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-settings'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
+  });
+  // Bottom-rail connection status doubles as the settings entry.
+  const connBtn = document.getElementById('ab-conn-status');
+  if (connBtn) connBtn.addEventListener('click', function () { setActivityView('settings'); });
+  renderRailConnStatus();
+
+  // Header/sidebar controls (#922 / #479 / #441): migrated from inline
+  // `onclick=`/`onsubmit=` attributes to addEventListener so the dashboard's
+  // script-src no longer needs `'unsafe-inline'` on account of these handlers.
+  // Each bind is guarded so a missing element is a no-op (defensive parity
+  // with the theme/nav binds above). Keeps R236-SEC-02 inline-handler count
+  // trending to 0.
+  const bindClick = function (id, fn) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });
+  bindClick('btn-history', function () { toggleHistory(); });
+  bindClick('btn-new-session', function () { createNewSession(); });
+  bindClick('btn-cron', function () { openCronPanel(); });
+  bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
+  bindClick('ns-trigger', function (e) { toggleNodeSelector(e); });
+  bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
+  // NOTE: the quick-ask form submit is NOT bound here. That form lives in
+  // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
+  // handler is (re)bound in wireQuickAskInput() — the designated re-wire hook.
 });
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
+
+// setActivityView is the root view-router. It is the single owner of the
+// mutually-exclusive body.nz-view-* classes and the rail button active state.
+// Top-level (not closured) so openCronPanel / selectSession / openCronDetail
+// can re-assert the active view.
+//
+// Recursion note: entering 'cron' calls openCronPanel(), which itself calls
+// setActivityView('cron') when not already in cron view. We set activeView
+// BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
+// already false on the re-entry and the loop terminates after one hop.
+const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'settings'];
+function setActivityView(view) {
+  if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
+  if (view === activeView) return;
+  const prev = activeView;
+  activeView = view;
+  // Rail button active / aria-pressed state.
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-settings', 'settings']]
+    .forEach(function (pair) {
+      const el = document.getElementById(pair[0]);
+      if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
+    });
+  // Mutually-exclusive view classes. 'chat' clears all three.
+  document.body.classList.toggle('nz-view-assets', view === 'assets');
+  document.body.classList.toggle('nz-view-cron', view === 'cron');
+  document.body.classList.toggle('nz-view-settings', view === 'settings');
+  // Keep the [hidden] attr in sync with CSS for the always-resident containers
+  // (asset_browser.js manages its own hidden flags on show/hide).
+  const cm = document.getElementById('cron-main');
+  if (cm) cm.hidden = view !== 'cron';
+  const sm = document.getElementById('settings-main');
+  if (sm) sm.hidden = view !== 'settings';
+  // Tear down the previous view if it owns external state.
+  if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  // Enter the target view.
+  if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
+  else if (view === 'cron') { openCronPanel(); }
+  else if (view === 'settings') { renderSettingsView(); }
+}
 
 // RNEW-UX-003: fetchJSON wraps fetch with an AbortController + timeout.
 // NAT-dropped TCP connections can leave the browser in a "pending" state
@@ -246,6 +408,8 @@ async function fetchJSON(url, opts = {}) {
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
   delete sessionNodes[key];
+  delete sessionBackends[key];
+  persistPending();
 }
 
 async function fetchSessions() {
@@ -288,6 +452,17 @@ async function fetchSessions() {
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
+    // Drop sessions the operator just dismissed but whose DELETE hasn't been
+    // confirmed yet. A lagging poll / sessions_update event would otherwise
+    // re-add the card (and re-populate sessionsData) after we optimistically
+    // removed it. The key is cleared from _optimisticDeleteKeys once DELETE
+    // resolves, so a genuinely-still-present session (failed delete) reappears
+    // on the next fetch.
+    if (_optimisticDeleteKeys.size > 0) {
+      data = Object.assign({}, data, {
+        sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
+      });
+    }
     (data.sessions || []).forEach(s => {
       const n = s.node || 'local';
       const sKey = sid(s.key, n);
@@ -302,13 +477,22 @@ async function fetchSessions() {
       backendKeys.add(s.key);
     });
 
-    // Remove pending sessions that now exist in backend
+    // Remove pending sessions that now exist in backend, then persist ONCE.
+    // The durable localStorage blob must drop the now-real keys so a stale
+    // pending entry can't re-inject a ghost card on the next reload — but
+    // routing each key through removePendingSession would re-serialize the
+    // whole blob per key (M full JSON writes converging to one final state).
+    // Delete in-memory here and call persistPending() a single time after.
+    let reconciledAny = false;
     for (const key of Object.keys(sessionWorkspaces)) {
       if (backendKeys.has(key)) {
         delete sessionWorkspaces[key];
         delete sessionNodes[key];
+        delete sessionBackends[key];
+        reconciledAny = true;
       }
     }
+    if (reconciledAny) persistPending();
 
     // Merge pending dashboard sessions into data for sidebar rendering
     const pendingKeys = Object.keys(sessionWorkspaces);
@@ -732,6 +916,11 @@ function toggleSidebarSearch() {
     // sidebar immediately re-renders without a lingering filter. Render
     // locally against the cached payload (if any) to avoid an extra
     // /api/sessions round-trip — the data is already authoritative.
+    // #1772: cancel any pending debounced keystroke render first, so a timer
+    // queued just before close can't fire after we've already cleared and
+    // re-rendered (which, when _lastSidebarData is null, would also trigger a
+    // spurious debouncedFetchSessions()).
+    if (_sidebarSearchDebounce) { clearTimeout(_sidebarSearchDebounce); _sidebarSearchDebounce = null; }
     const input = document.getElementById('sidebar-search-input');
     if (input) input.value = '';
     if (_lastSidebarData) {
@@ -753,6 +942,7 @@ function closeSidebarSearch() {
 // shortcuts. Call once at startup. The input's oninput handler triggers
 // a debounced sidebar re-fetch so each keystroke re-applies the filter
 // against the canonical sessions data — no client-side cache desync.
+let _sidebarSearchDebounce = null;
 function initSidebarSearch() {
   const input = document.getElementById('sidebar-search-input');
   if (input) {
@@ -761,11 +951,24 @@ function initSidebarSearch() {
       // rapid typing doesn't DoS the server with per-keystroke requests.
       // When no data has landed yet (first load), fall through to a
       // debounced fetch as a degraded bootstrap.
-      if (_lastSidebarData) {
-        renderSidebar(_lastSidebarData);
-      } else {
-        debouncedFetchSessions();
-      }
+      //
+      // #1772: debounce the local re-render too. renderSidebar does a full
+      // sort + filter + sessionCardHtml map+join over every session on each
+      // keystroke; the _lastSidebarHtml guard skips the DOM write only when
+      // the output is byte-identical, which is rare while a filter narrows.
+      // 120ms collapses a typing burst into one render. The periodic
+      // sessions_update repaint reuses the current query via
+      // readSidebarSearchQuery, so debouncing the keystroke render loses no
+      // filter state.
+      if (_sidebarSearchDebounce) clearTimeout(_sidebarSearchDebounce);
+      _sidebarSearchDebounce = setTimeout(() => {
+        _sidebarSearchDebounce = null;
+        if (_lastSidebarData) {
+          renderSidebar(_lastSidebarData);
+        } else {
+          debouncedFetchSessions();
+        }
+      }, 120);
     });
     input.addEventListener('keydown', e => {
       if (e.key === 'Escape') { e.preventDefault(); closeSidebarSearch(); }
@@ -872,7 +1075,7 @@ function sectionHeaderFallbackHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
   const nameTitle = workspace ? escAttr(p.name + ' — ' + workspace) : escAttr(p.name);
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -893,14 +1096,14 @@ function sectionHeaderHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
 
   // No longer pass `data-fav` — the handler derives current state from the
   // authoritative `projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
   // redundant or wrong-polarity toggle.
-  const starBtn = '<button type="button" class="' + starCls + '" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '" onclick="event.stopPropagation();toggleFavorite(this.dataset.name,this.dataset.node)">' + STAR_SVG + '</button>';
+  const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
 
   let ghBtn = '';
   if (p.github) {
@@ -910,7 +1113,7 @@ function sectionHeaderHtml(p) {
     // "在 GitHub 打开仓库" so the affordance is explicit; append the URL so
     // operators can still eyeball the remote for the common case where
     // they're verifying the repo match before clicking.
-    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
+    ghBtn = '<button type="button" class="sh-btn github-on" data-action="project-github" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '">' + GITHUB_SVG + '</button>';
   }
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -931,6 +1134,40 @@ function sectionHeaderHtml(p) {
     countBadge +
     ghBtn +
     '</div>';
+}
+
+// SIDEBAR_PROJECT_ACTIONS maps the `data-action` token on a project-header
+// control to the handler it invokes, reading arguments from the button's
+// own dataset. This is the data-action dispatch idiom already used by the
+// cron menu (CRON_MENU_ACTIONS / handleCronMenuClick) — it lets the section
+// header buttons drop their inline click attributes, shrinking the
+// script-src 'unsafe-inline' surface (#922 / #1734) without changing
+// behaviour. Keys must match the data-action values emitted in
+// sectionHeaderHtml / sectionHeaderFallbackHtml.
+const SIDEBAR_PROJECT_ACTIONS = {
+  'project-collapse': (btn) => toggleProjectCollapsed(btn.dataset.key),
+  'project-favorite': (btn) => toggleFavorite(btn.dataset.name, btn.dataset.node),
+  'project-github': (btn) => showGitRemote(btn.dataset.url),
+};
+
+// initSidebarProjectActions attaches ONE delegated click listener to the
+// stable #session-list container (not document — scoped delegation, mirroring
+// the cron-menu listener). It dispatches project-header button clicks via
+// SIDEBAR_PROJECT_ACTIONS. stopPropagation preserves the prior inline
+// `event.stopPropagation()` so a click on a header control never bubbles to
+// an ancestor handler. The capture-phase long-press swallow installed by
+// initSwipeDelete is orthogonal (it only fires on _longPressFired).
+function initSidebarProjectActions() {
+  const list = document.getElementById('session-list');
+  if (!list) return;
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || !list.contains(btn)) return;
+    const fn = SIDEBAR_PROJECT_ACTIONS[btn.getAttribute('data-action')];
+    if (!fn) return;
+    e.stopPropagation();
+    fn(btn);
+  });
 }
 
 // toggleProjectCollapsed flips a project section's fold state, persists
@@ -1026,8 +1263,10 @@ function showGitRemote(url) {
 // --- History Popover ---
 
 let activePopover = null;
+let activePopoverBackdrop = null;
 
 function closeHistoryPopover() {
+  if (activePopoverBackdrop) { activePopoverBackdrop.remove(); activePopoverBackdrop = null; }
   if (activePopover) { activePopover.remove(); activePopover = null; }
 }
 
@@ -1085,6 +1324,17 @@ function toggleHistory() {
   if (isMobile()) {
     popover.innerHTML = '<div class="sheet-handle"></div>' + popover.innerHTML;
   }
+  // Backdrop: captures outside clicks explicitly (so clicking a covered
+  // control like the node switcher dismisses the popover cleanly instead of
+  // being silently swallowed) and gives a "a layer is open" cue. The mobile
+  // sheet gets a dimmed variant; the desktop popover stays transparent so it
+  // reads as a lightweight popover, not a blocking modal. R20260605.
+  const backdrop = document.createElement('div');
+  backdrop.className = isMobile() ? 'history-backdrop is-sheet' : 'history-backdrop';
+  backdrop.addEventListener('click', closeHistoryPopover);
+  activePopoverBackdrop = backdrop;
+  document.body.appendChild(backdrop);
+
   activePopover = popover;
   document.body.appendChild(popover);
 
@@ -1613,22 +1863,26 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
     await fetchSessions();
 
     selectSession(key, 'local');
-    previewRecentSession(key, sessionId);
+    previewRecentSession(key, sessionId, workspace);
   } catch (e) {
     showNetworkError('恢复会话', e);
   }
 }
 
-async function previewRecentSession(expectedKey, sessionId) {
+async function previewRecentSession(expectedKey, sessionId, cwd) {
   try {
     const headers = {};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
+    // Pass cwd (the resumed session's workspace) so the backend hits the
+    // O(1) CWD-derived path lookup and skips the findSessionJSONL negative
+    // cache — see previewDiscovered for the full rationale.
+    const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     // RNEW-UX-003: 5s timeout — this is a best-effort snapshot after
     // resume; if the backend stalls, drop the preview rather than hang.
     let entries;
     try {
-      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId), { headers, timeoutMs: 5000 });
+      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + cwdParam, { headers, timeoutMs: 5000 });
     } catch (err) {
       if (err.status) return;
       throw err;
@@ -1643,7 +1897,7 @@ async function previewRecentSession(expectedKey, sessionId) {
 
 const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'HTTP fallback', disconnected_retry: 'reconnecting...' };
 const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
-const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
+const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating', unreachable: 'unreachable' };
 
 // formatOutageDuration turns an elapsed millisecond count into a Chinese
 // label suitable for the sidebar-status hint. Pure function so a contract
@@ -1681,6 +1935,7 @@ function updateStatusBar() {
   // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
   // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
   // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
+  renderRailConnStatus();
   if (!container) { updateNodeSelector(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
@@ -1904,6 +2159,11 @@ function selectSession(key, node) {
     }
   }
   pendingDiscovered = null;
+  // Picking a session returns to the chat view from any other top-level view
+  // (assets / cron / settings). This restores the chat sidebar+main, hides the
+  // other view's panels, and flips activeView back to 'chat' so renderMainShell
+  // (which writes #main) is visible and any in-flight cron repaint is suppressed.
+  if (activeView !== 'chat') setActivityView('chat');
   const prevKey = selectedKey;
   const prevNode = selectedNode;
   selectedKey = key;
@@ -1924,6 +2184,7 @@ function selectSession(key, node) {
   lastEventTime = 0;
   lastRenderedEventTime = 0;
   oldestFetchedEventTime = 0;
+  _autoPageBackCount = 0; // reset the blank-page recovery budget per session
   mobileEnterChat();
   stopPreviewPolling();
   const activeCard = setActiveSessionCard(key, node);
@@ -2037,31 +2298,52 @@ async function dismissSession(key, node, opts) {
     return;
   }
 
-  const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  const body = {key: key};
-  if (node && node !== 'local') body.node = node;
-  try {
-    await fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)});
-  } catch (err) {
-    // 404 means session already gone — treat as success so the local cache
-    // catches up with the server without surfacing an error to the operator.
-    if (!err || err.status !== 404) {
-      if (err && err.status) showAPIError('删除会话', err.status, err.message || '');
-      else showNetworkError('删除会话', err);
-      return;
-    }
-  }
-  delete sessionsData[sid(key, node)];
+  // Optimistic delete: the card vanishes immediately rather than freezing
+  // for the server's teardown round-trip. The backend's DELETE /api/sessions
+  // now unregisters the session synchronously and runs the slow teardown
+  // (proc.Close up to 8s + event-log/attachment cleanup) in a detached
+  // goroutine (RemoveAsync), so 200 means "gone from the list" and arrives
+  // fast — but we don't even wait for it to update the UI.
+  const skey = sid(key, node);
+  // Mark dismissed so an in-flight poll / sessions_update event can't
+  // resurrect the card before DELETE confirms (cleared in finally below).
+  _optimisticDeleteKeys.add(skey);
+  delete sessionsData[skey];
   if (selectedKey === key) {
     selectedKey = null;
     if (wsm.subscribedKey === key) wsm.unsubscribe();
     document.getElementById('main').innerHTML = mainEmptyHtml();
     wireQuickAskInput();
   }
-  lastVersion = 0;
-  debouncedFetchSessions();
+  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  if (card) card.remove();
+
+  const headers = {'Content-Type': 'application/json'};
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const body = {key: key};
+  if (node && node !== 'local') body.node = node;
+  // Fire-and-forget: do NOT await — the UI is already updated. On failure we
+  // re-sync from the server so a genuinely-undeleted session reappears.
+  fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
+    .catch(err => {
+      // 404 means the session was already gone — that's the outcome we want,
+      // so swallow it. Any other error means the delete may not have landed:
+      // surface it and let the re-sync below pull the real list back.
+      if (err && err.status !== 404) {
+        if (err.status) showAPIError('删除会话', err.status, err.message || '');
+        else showNetworkError('删除会话', err);
+      }
+    })
+    .finally(() => {
+      // Stop suppressing this key so the next fetch reflects server truth:
+      // if the delete stuck, the session stays gone; if it failed, the card
+      // comes back (operator must re-select it — we intentionally don't
+      // restore the cleared main panel to avoid masking a failed delete).
+      _optimisticDeleteKeys.delete(skey);
+      lastVersion = 0;
+      debouncedFetchSessions();
+    });
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input
@@ -2508,6 +2790,45 @@ async function fetchEvents(full) {
 //
 // Idempotent: calls bail out while a prior fetch is in flight.
 let _earlierLoading = false;
+
+// _autoPageBackCount bounds the frontend safety net for the "parallel agent
+// team ate my history" bug. The server's visible-aware initial read
+// (EventLastNVisibleCtx) already keeps the first page non-blank for local
+// sessions, but a few paths still can't guarantee it — remote nodes (their
+// reverse-RPC fetch predates the visible-aware read), disk-exhausted sessions,
+// or a precision gap where a visible-typed entry still renders to empty HTML.
+// When the rendered page is blank despite events existing, maybeAutoPageBack
+// transparently pages backward (reusing loadEarlierEvents + the
+// oldestFetchedEventTime cursor) up to AUTO_PAGEBACK_MAX times so the operator
+// sees real messages instead of the "该会话最近仅有 agent 活动" placeholder.
+// The counter resets on every session switch (selectSession).
+let _autoPageBackCount = 0;
+const AUTO_PAGEBACK_MAX = 3;
+
+// maybeAutoPageBack fires one bounded loadEarlierEvents when the events pane
+// rendered blank (every event was internal-filtered). Stops once a real bubble
+// appears, the cap is reached, or pagination reports it's exhausted. Safe to
+// call when no placeholder is showing — it no-ops unless the scroller has zero
+// `.event` children.
+function maybeAutoPageBack() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  // A visible bubble already rendered — nothing to recover.
+  if (el.querySelector('.event')) { _autoPageBackCount = 0; return; }
+  if (_autoPageBackCount >= AUTO_PAGEBACK_MAX) return;
+  if (_earlierLoading) return;
+  if (!oldestFetchedEventTime) return; // no cursor → cannot page back
+  _autoPageBackCount++;
+  // loadEarlierEvents prepends older events and, when they include a visible
+  // bubble, the placeholder is removed by prependEvents. If the new page is
+  // still all-internal, chain another attempt (still bounded by the counter).
+  Promise.resolve(loadEarlierEvents()).then(() => {
+    const ev = document.getElementById('events-scroll');
+    if (ev && !ev.querySelector('.event')) maybeAutoPageBack();
+    else _autoPageBackCount = 0;
+  });
+}
+
 async function loadEarlierEvents() {
   if (_earlierLoading || !selectedKey) return;
   const el = document.getElementById('events-scroll');
@@ -2706,6 +3027,11 @@ function renderEvents(events) {
   if (!restoreScrollPos(selectedKey, selectedNode)) {
     stickEventsBottom();
   }
+  // Safety net: if the page rendered to the all-internal placeholder (no
+  // visible bubble) but events exist, transparently page back to real
+  // messages. Bounded by AUTO_PAGEBACK_MAX. Covers the paths the server-side
+  // visible-aware read can't (remote nodes, disk-exhausted sessions).
+  if (!html && events.length > 0) maybeAutoPageBack();
 }
 
 // trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
@@ -3616,6 +3942,11 @@ async function sendMessage() {
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
+      // Confirmed send: the workspace/node/backend were consumed above (and
+      // deleted from the in-memory maps), so rewrite the durable blob without
+      // this key. Only on the success path — a failed wsm.send falls through to
+      // HTTP below and must keep the entry for that retry.
+      persistPending();
       // Optimistic running flip already applied above — no-op if unchanged.
       sending = false;
       if (btn) btn.classList.remove('sending');
@@ -3680,6 +4011,10 @@ async function sendMessage() {
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
+    // Confirmed send: the pending maps were consumed above; rewrite the durable
+    // blob without this key. Only on this 2xx path so a failed send keeps the
+    // entry for retry.
+    persistPending();
     if (ackStatus === 'reset') {
       // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
       // so the running banner doesn't hang on a no-op command.
@@ -4156,6 +4491,12 @@ function stickEventsBottom() {
 // --- Message navigation ---
 let navUserEls = [];
 let navPopoverCloseHandler = null;
+// #1772: synchronous "is the nav popover mounted" flag. Set true the moment the
+// popover is appended, false when dismissed. Lets the per-scroll-tick handler
+// skip a getElementById on the common (no-popover) path without the race of
+// reading navPopoverCloseHandler, which is only assigned in a deferred
+// setTimeout(0) after mount.
+let navPopoverOpen = false;
 let navIdx = -1; // -1 = not navigating
 
 function navRebuild() {
@@ -4237,6 +4578,7 @@ function navUpdatePill() {
 function navDismissPopover() {
   const pop = document.getElementById('nav-list-popover');
   if (pop) pop.remove();
+  navPopoverOpen = false;
   if (navPopoverCloseHandler) {
     document.removeEventListener('click', navPopoverCloseHandler);
     navPopoverCloseHandler = null;
@@ -4261,6 +4603,7 @@ function navShowList() {
   popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:rgba(22,27,34,.95);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
   popover.innerHTML = items.join('');
   pill.appendChild(popover);
+  navPopoverOpen = true;
   popover.querySelectorAll('.nav-list-item').forEach(item => {
     item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     item.onmouseenter = () => item.style.background = '#1f2937';
@@ -4301,7 +4644,10 @@ function navShowList() {
     // so the next arrow-key press re-seeds from what the user actually sees.
     let scrollResetTimer = null;
     el.addEventListener('scroll', () => {
-      navDismissPopover();
+      // #1772: only touch the DOM to dismiss the nav popover when one is
+      // actually open, skipping a per-scroll-tick getElementById on the
+      // overwhelmingly common path (no popover) during inertial scrolling.
+      if (navPopoverOpen) navDismissPopover();
       if (scrollResetTimer) clearTimeout(scrollResetTimer);
       scrollResetTimer = setTimeout(() => {
         if (navIdx < 0 || !navUserEls[navIdx]) return;
@@ -4554,12 +4900,24 @@ function openFilePicker() {
 // above the 1568 px knee where Anthropic's vision models stop gaining
 // accuracy. HEIC is also handled here — createImageBitmap decodes it on
 // Safari 17+ and we re-encode to JPEG.
+//
+// Orientation: phone cameras tag photos with an EXIF orientation flag
+// instead of rotating the pixels. Re-encoding through canvas drops that
+// flag, so we must bake the rotation into the pixels at decode time via
+// `imageOrientation: 'from-image'` — without it a portrait iPhone shot
+// arrives at the backend sideways. With the flag, the returned bitmap's
+// width/height are ALREADY the visually-correct (post-rotation) dimensions,
+// so the scaling math below needs no orientation branching and we must NOT
+// apply any extra ctx.rotate (that would double-correct). The option is the
+// modern default on Chrome/Firefox and is honored by Safari/iOS 16+; older
+// engines silently ignore the unknown member and fall back to their default
+// decode, which is the best we can do client-side.
 // Falls back to the original file if decoding fails so the server's
 // content-type check still produces a real error message.
 async function normalizeImage(file) {
   const MAX_EDGE = 1600;
   try {
-    const bmp = await createImageBitmap(file);
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const { width: sw, height: sh } = bmp;
     let dw = sw, dh = sh;
     const m = Math.max(sw, sh);
@@ -4676,6 +5034,22 @@ async function uploadEntry(entry) {
     // via file_ref, not inline base64).
     const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
     entry.normalizedSize = file.size;
+    // Swap the preview thumbnail to the normalized image so what the user
+    // sees matches what the backend receives, pixel-for-pixel. The original
+    // blobUrl points at the raw picked file, which still carries the EXIF
+    // orientation flag — and browsers (notably some WebViews) don't reliably
+    // apply it to <img>, so a portrait phone photo previewed sideways. The
+    // canvas re-encode in normalizeImage bakes the rotation into the pixels
+    // and strips EXIF, so this blob renders upright everywhere. Guard on
+    // identity: normalizeImage falls back to the original File on decode
+    // failure, in which case there's nothing new to show. PDFs keep their
+    // icon card (no blobUrl) untouched.
+    if (entry.kind === 'image' && file !== entry.file) {
+      const upright = URL.createObjectURL(file);
+      if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+      entry.blobUrl = upright;
+      renderFilePreviews();
+    }
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
@@ -4698,11 +5072,50 @@ async function uploadEntry(entry) {
     if (j.kind) entry.serverKind = j.kind;
     if (j.name) entry.serverName = j.name;
     entry.status = 'ready';
+    // Fire-and-forget auto-orientation: for an image with no EXIF flag (a
+    // sideways document photo), ask the backend's vision side-call which way
+    // is up. We DON'T await it — the upload is already 'ready' and sendable;
+    // the rotation, if any, lands silently a few seconds later and refreshes
+    // the thumbnail. Never blocks send. Images only; the server no-ops for
+    // PDFs and when the feature is disabled.
+    if (entry.kind === 'image') maybeAutoOrient(entry);
   } catch (e) {
     entry.status = 'error';
     entry.error = e.message || 'upload failed';
   }
   renderFilePreviews();
+}
+
+// maybeAutoOrient asks the backend to auto-rotate a just-uploaded image that
+// lacks an EXIF orientation flag. Best-effort and silent: any failure leaves
+// the image as-is (it's already 'ready' and sendable). On a confirmed
+// rotation it refetches the corrected bytes via the attachment endpoint and
+// swaps the preview thumbnail so the user sees the upright result that will
+// be sent. The entry's `id` is unchanged by rotation (server replaces bytes
+// in place), so send still references the same file_id.
+async function maybeAutoOrient(entry) {
+  if (!entry || !entry.id || entry.kind !== 'image') return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/sessions/orient', {
+      method: 'POST', headers, body: JSON.stringify({ id: entry.id }),
+    });
+    if (!r.ok) return; // 404/expired/etc — nothing to do
+    const j = await r.json().catch(() => null);
+    if (!j || !j.rotated || !j.image) return; // no rotation applied
+    // The server rotated the stored bytes in place (same file_id) and echoed
+    // the corrected JPEG inline as a data URL. Swap the preview to it so the
+    // thumbnail matches what gets sent. The entry may have been removed while
+    // the orient call was in flight — guard before touching it.
+    if (!pendingFiles.includes(entry)) return;
+    if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+    entry.blobUrl = j.image; // data: URL, no object URL to revoke later
+    renderFilePreviews();
+  } catch (_) {
+    // Best-effort: swallow. The image is already sendable as-is.
+  }
 }
 
 function retryUpload(idx) {
@@ -5565,6 +5978,37 @@ function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
   return 'dashboard:direct:' + timestamp + '-' + slug + ':' + agent;
 }
 
+// resolveSessionKey decides the session key for opening a project
+// (RFC docs/rfc/project-stable-session-key.md §4.4). Two modes:
+//
+//   'continue' — reuse the backend-provided project-stable key
+//     (dashboard:pj:<wshash>:<agent>) so the conversation precisely
+//     continues the same key's sessionID-rotation chain. The hash is
+//     OWNED BY THE BACKEND (stableKey arg); the frontend only swaps the
+//     trailing agent segment for the selected agent — a plain string op
+//     that never touches the hash, so there is no sha256 to drift.
+//
+//   'new' — generate a fresh timestamp key (legacy path) so the user
+//     gets an independent parallel conversation in the same project.
+//
+// Falls back to a timestamp key when continue mode is requested but no
+// stableKey is available (feature disabled server-side, or a remote /
+// path-less project), preserving the pre-feature behaviour. Pure: no
+// side effects, unit-testable.
+function resolveSessionKey(mode, stableKey, projectOrFolder, agentID, timestamp) {
+  const agent = agentID && String(agentID).trim() ? sanitizeKeySlug(agentID) : 'general';
+  if (mode === 'continue' && stableKey) {
+    const parts = String(stableKey).split(':');
+    // Expect dashboard:pj:<hash>:<agent>. Swap parts[3] for the selected
+    // agent; if the shape is unexpected, fall through to a timestamp key
+    // rather than emit a malformed key.
+    if (parts.length === 4 && parts[0] === 'dashboard' && parts[1] === 'pj' && parts[2]) {
+      return 'dashboard:pj:' + parts[2] + ':' + agent;
+    }
+  }
+  return buildDashboardSessionKey(timestamp, projectOrFolder, agent);
+}
+
 // keyTailDisplay returns the most informative human-readable fallback for a
 // session key's trailing display label. Historically dashboard.js used
 // `parts[parts.length - 1]` directly, which made sense when the last segment
@@ -5898,7 +6342,9 @@ function pickPaletteQuick() {
   const node = selectedNode || 'local';
   const workspace = node === 'local' ? (defaultWorkspace || '') : '';
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
-  doCreateInProject(workspace, folderName, node);
+  // Quick sessions are intentionally one-off (RFC §4.4): always a fresh
+  // timestamp key, never a project-stable continuation.
+  doCreateInProject(workspace, folderName, node, undefined, undefined, { mode: 'new' });
 }
 
 function buildCustomRow(query, idx) {
@@ -5964,7 +6410,11 @@ function handlePaletteKey(e, state, input) {
 function pickPaletteProject(p) {
   const backend = getSelectedBackend();
   const agent = getSelectedAgent();
-  doCreateInProject(p.path, p.name, p.node || 'local', backend, agent);
+  // Default project open = continue the project-stable conversation. p.stableKey
+  // is supplied by /api/projects when the feature is enabled (empty otherwise,
+  // in which case resolveSessionKey falls back to a timestamp key).
+  doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
+    { mode: 'continue', stableKey: p.stableKey || '' });
 }
 
 function pickPaletteCustom(initialValue) {
@@ -6018,26 +6468,37 @@ function pickPaletteCustom(initialValue) {
   }, 50);
 }
 
-function doCreateInProject(projectPath, projectName, nodeId, backend, agent) {
+function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opts) {
   // Read the backend/agent from the still-mounted overlay BEFORE removing it,
   // so callers that omit the explicit argument still get the user's pick.
   if (backend === undefined) backend = getSelectedBackend();
   if (agent === undefined) agent = getSelectedAgent();
+  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'continue'
+  // so a plain project click resumes the project-stable conversation
+  // (RFC docs/rfc/project-stable-session-key.md §4.4). The "+ 新会话" entry
+  // passes mode:'new' for an independent parallel session.
+  opts = opts || {};
+  const mode = opts.mode || 'continue';
+  const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
     now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  // R110-P3 key schema: 4 segments (platform:chatType:chatID:agentID).
-  // Merges ts + projectName into the chatID segment so parts[3] is the
-  // agentID (buildSessionOpts reads parts[3]). See buildDashboardSessionKey
-  // godoc for the contract.
-  const key = buildDashboardSessionKey(ts, projectName, agent);
+  // Continue → backend-provided stable key (precise continuation); new →
+  // fresh timestamp key (independent parallel session). resolveSessionKey
+  // also falls back to a timestamp key when no stableKey is available.
+  const key = resolveSessionKey(mode, stableKey, projectName, agent, ts);
 
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
   if (backend) sessionBackends[key] = backend;
+  // Durably persist the pending workspace and eagerly bind it server-side so a
+  // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
+  // the workspace. This is the primary fix path (project palette open).
+  persistPending();
+  eagerBindWorkspace(key, projectPath, nodeId);
 
   // R110-P3 recent-projects: every successful project-scoped session
   // creation bumps the (name,node) pair to the top of the palette's
@@ -6131,6 +6592,9 @@ function doCreateSession() {
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
   if (targetNode !== 'local') sessionNodes[key] = targetNode;
+  // Persist + eager-bind so the custom workspace survives a reload-before-send.
+  persistPending();
+  if (workspace) eagerBindWorkspace(key, workspace, targetNode);
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -6189,6 +6653,9 @@ function createQuickSession(initialText, onTextStranded) {
 
   if (workspace) sessionWorkspaces[key] = workspace;
   // Backend left unset → router falls back to the configured default.
+  // Persist so a reload-before-send keeps the workspace. No eager-bind: quick
+  // sessions use defaultWorkspace, so the override would just mirror defaultCWD.
+  persistPending();
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -6270,6 +6737,21 @@ function submitQuickAsk(e) {
 // because the user may already be mid-click on the sidebar to switch to
 // another session — grabbing focus 50ms later would intercept keystrokes.
 function wireQuickAskInput(autofocus) {
+  // Submit binding (#922 / #479): the empty-state form was migrated off the
+  // inline `onsubmit=` attribute so script-src no longer needs it. The form is
+  // (re)painted via innerHTML on cold start AND on every mainEmptyHtml()
+  // repaint, so the DOMContentLoaded header-button binder cannot catch it —
+  // wireQuickAskInput is the designated re-wire hook called on all those
+  // paths, so the submit handler is bound here. Guarded by a dataset marker
+  // to stay idempotent across repeated calls on the same node.
+  const form = document.getElementById('quick-ask-form');
+  if (form && form.dataset.wired !== '1') {
+    form.dataset.wired = '1';
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      submitQuickAsk(e);
+    });
+  }
   const ta = document.getElementById('quick-ask-input');
   if (!ta || ta.dataset.wired === '1') return;
   ta.dataset.wired = '1';
@@ -6321,7 +6803,7 @@ function mainEmptyHtml() {
   return '<div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">' +
     '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
     '<div style="color:var(--nz-text);font-size:17px">问点什么？</div>' +
-    '<form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">' +
+    '<form class="quick-ask-form" id="quick-ask-form">' +
       '<textarea id="quick-ask-input" class="quick-ask-input" rows="1" ' +
         'placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" ' +
         'aria-label="快速提问输入框"></textarea>' +
@@ -6355,9 +6837,17 @@ function mainEmptyHtml() {
 //   totalCost   — sum of s.total_cost across all cached sessions (not gated
 //                 by today, because a cron-heavy workspace accumulates cost
 //                 overnight and wiping at midnight would hide it).
+//   totalPrompts — sum of s.message_count across all cached sessions. The
+//                 SessionSnapshot already ships message_count (the cumulative
+//                 "user" turn count observed by the live process event log),
+//                 so the "已处理 prompt 数" card (R110-P1 #445) is derivable
+//                 client-side without the deferred /api/stats/aggregate
+//                 backend scan. Cumulative tokens still need that backend
+//                 endpoint (no per-session token field exists yet), so the
+//                 token card stays out of scope here.
 //
-// Input shape tolerant: missing last_active / total_cost on a session
-// contributes zero / is skipped rather than NaN-poisoning the totals.
+// Input shape tolerant: missing last_active / total_cost / message_count on a
+// session contributes zero / is skipped rather than NaN-poisoning the totals.
 function computeHomeStats(items, nowMs) {
   const arr = Array.isArray(items) ? items : [];
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
@@ -6365,12 +6855,14 @@ function computeHomeStats(items, nowMs) {
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
   let todayActive = 0;
   let totalCost = 0;
+  let totalPrompts = 0;
   for (const s of arr) {
     if (!s) continue;
     if (typeof s.last_active === 'number' && s.last_active >= dayStart) todayActive++;
     if (typeof s.total_cost === 'number' && isFinite(s.total_cost)) totalCost += s.total_cost;
+    if (typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0) totalPrompts += s.message_count;
   }
-  return { todayActive: todayActive, totalCost: totalCost };
+  return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };
 }
 
 // formatHomeCost keeps the $/precision format close to the session card's
@@ -6408,12 +6900,32 @@ function buildHomeHealthLines(stats) {
   let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
   if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
+  // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
+  // /api/sessions stats static block already, so surface live-vs-capacity
+  // without the deferred /api/stats backend scan. Only when max_procs > 0
+  // (a 0/missing cap means "uncapped" — no ratio to show). Warn when the
+  // pool is saturated so operators notice spawn back-pressure.
+  const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;
+  if (maxProcs > 0) {
+    lines.push({
+      text: 'claude 子进程 ' + running + '/' + maxProcs,
+      kind: running >= maxProcs ? 'warn' : 'info',
+    });
+  }
   // Line 2: CLI identity. Helpful when operators have multiple naozhi
   // deployments on different CLI versions.
   if (stats.cli_name) {
     let cli = stats.cli_name;
     if (stats.cli_version) cli += ' ' + stats.cli_version;
     lines.push({ text: cli, kind: 'info' });
+  }
+  // naozhi build tag (R110-P1 #445 service-health): version_tag already ships
+  // in the /api/sessions stats block (omitempty when the -X ldflag is unset)
+  // and the backend struct doc promises a "naozhi v1.2.3-dirty" footer that
+  // was never wired client-side. Surface it so operators can confirm the
+  // running build straight from the Home health strip.
+  if (stats.version_tag) {
+    lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });
   }
   // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
   // one-liner summarizing per-backend availability + version. The rich
@@ -6476,15 +6988,21 @@ function renderRecentSessionsPanel() {
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
-  // R110-P1 Home stats strip (Round 147): today-active + total cost. Rendered
-  // above the list so operators see a cumulative signal before scanning the
-  // session rows. Prompts and tokens need backend aggregation — omitted here.
+  // R110-P1 Home stats strip (Round 147 + #445): today-active + processed
+  // prompts + total cost. Rendered above the list so operators see a
+  // cumulative signal before scanning the session rows. The prompt count
+  // sums per-session message_count (already in the snapshot); cumulative
+  // tokens still need the deferred /api/stats/aggregate backend scan.
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
         '<div class="recent-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + stats.totalPrompts + '</div>' +
+        '<div class="recent-stat-label">已处理 prompt</div>' +
       '</div>' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
@@ -6765,7 +7283,18 @@ const _codeLangBareName = {
 
 function _codeBlockInfo(btn) {
   const wrap = btn.closest('.md-code-wrap');
-  const codeEl = wrap && wrap.querySelector('code');
+  if (!wrap) return { code: '', lang: '' };
+  // Path-list blocks (.md-pathlist) render one <code> per line instead of a
+  // single <pre><code>, so copy must join every row's text — querySelector
+  // alone would copy just the first path. file-ref button injection may also
+  // nest extra <code> inside .fr-slot, so scope to the row's first <code>.
+  if (wrap.classList.contains('md-pathlist')) {
+    const code = Array.from(wrap.querySelectorAll('.md-pathline'))
+      .map(row => { const c = row.querySelector('code'); return c ? c.textContent : ''; })
+      .join('\n');
+    return { code, lang: '' };
+  }
+  const codeEl = wrap.querySelector('code');
   const code = codeEl ? codeEl.textContent : '';
   const lang = (codeEl && codeEl.getAttribute('data-lang') || '').toLowerCase();
   return { code, lang };
@@ -7175,6 +7704,13 @@ const MAX_LIVE_DOM_EVENTS = 600;
 // truncatedCount 并用容器顶部的提示告知操作员。
 const CRON_LIVE_MAX_EVENTS = 200;
 
+// 当 cron live 收到的事件全被 INTERNAL_EVENT_TYPES 过滤光（parallel agent
+// team 整段是 agent / task_* / tool_use），渲这条占位而非留空 innerHTML，
+// 否则 CSS .cdl-events:empty::before 会误报"暂无事件"。.cdl-agent-only 类名
+// 供 appendEventsToContainer 在追加真实事件前识别并清除占位。
+const CRON_LIVE_AGENT_ONLY_HTML =
+  '<div class="empty-state cdl-agent-only">本轮仅有 agent / 工具活动，正文消息请在任务结束后查看历史详情</div>';
+
 // formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
 // yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
 // different year -> "YYYY-M-D HH:MM".
@@ -7522,6 +8058,73 @@ function isFileRefCandidate(text) {
   return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
 }
 
+// Every path-list line's basename must carry a file extension (a `.ext` tail).
+// isFileRefCandidate alone is too loose for whole-block classification:
+// dependency lists (`@angular/core`), module paths (`github.com/gin-gonic/gin`),
+// REST routes (`/api/v1/users`), and fractions/dates (`1/2`, `2024/01/02`) all
+// match the slash-shaped path regex line-for-line and would hijack a legit
+// no-language code block. Real file paths — including every case this fix
+// targets — end in an extension, so this is a cheap high-signal gate that drops
+// those false positives without losing the screenshot scenario (`.html` lists).
+// Trailing `:line` suffixes are stripped by splitPathLine before this runs.
+const FILE_REF_HAS_EXT = /\.[A-Za-z0-9]+$/;
+
+// splitPathNote separates a fenced path line into its path candidate and a
+// trailing human annotation. AI replies commonly tag path lines with inline
+// notes — `语文/...诊断.md   ← 待生成`, `bar.html  # 答案`, `foo.go (new)` —
+// where the note is set off from the path by whitespace. A real file path never
+// contains whitespace (isFileRefCandidate rejects spaces), so the first
+// whitespace-delimited token IS the path candidate and everything after the gap
+// is a note we preserve for display but exclude from the <code> body (so copy +
+// the file-ref scanner see the bare path). Returns {path, note}; note is '' when
+// the line is a lone path.
+function splitPathNote(line) {
+  const m = line.match(/^(\S+)(?:\s+(.*\S))?\s*$/);
+  if (!m) return { path: line, note: '' };
+  return { path: m[1], note: m[2] || '' };
+}
+
+// fencedPathList decides whether a language-less fenced code block is in fact
+// a plain list of file paths (one per line). AI replies frequently dump
+// generated/affected files inside a ``` fence — those paths are invisible to
+// the inline file-ref scanner because it skips <pre> content. When EVERY
+// non-empty line is a path candidate whose basename has an extension we return
+// the parsed rows ({path, note}) so the caller can render them as clickable
+// rows. Returns null otherwise, leaving the verbatim-code path untouched.
+// Requiring all lines to match keeps real code blocks out: any block with one
+// prose/code/extension-less line fails the test.
+//
+// A single path line is accepted (one generated file inside a ``` fence is a
+// very common AI shape). The isFileRefCandidate + FILE_REF_HAS_EXT double gate
+// plus the server-side existence check (a non-file that slips through resolves
+// to {exists:false} and silently gets no button) make a lone-line list safe;
+// the old "≥2 lines" guard left every single-file fence button-less.
+//
+// Trailing annotations (`foo.md   ← 待生成`) are stripped via splitPathNote so
+// the note no longer breaks isFileRefCandidate (which rejects whitespace). The
+// note is carried through for display but kept out of the path.
+//
+// Known non-goal: lines with trailing punctuation glued to the path
+// (`foo.md。`) or inline backtick wrapping are not normalized here — they'd
+// resolve to a non-existent path and silently get no button.
+function fencedPathList(code) {
+  const lines = code.split('\n');
+  const paths = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === '') continue;        // blank lines are tolerated as spacing
+    if (line.length > 512) return null;
+    const { path, note } = splitPathNote(line);
+    if (!isFileRefCandidate(path)) return null;
+    const { path: bare } = splitPathLine(path);
+    const base = bare.slice(bare.lastIndexOf('/') + 1);
+    if (!FILE_REF_HAS_EXT.test(base)) return null; // no extension → not a file list
+    paths.push({ path, note });
+  }
+  if (paths.length < 1) return null;  // empty fence: nothing to render
+  return paths;
+}
+
 // expandBraces expands a single `{a,b,c}` group in a path candidate into its
 // concrete variants so AI output like `foo-{x86,graviton}.yaml:9` resolves to
 // `foo-x86.yaml:9` / `foo-graviton.yaml:9`. Only the first group is expanded
@@ -7646,6 +8249,30 @@ function _fileRefCacheSet(key, value) {
     _filePathCache.delete(firstKey);
   }
   _filePathCache.set(key, { v: value, t: Date.now() });
+}
+
+// fileRefCode produces the inline <code> element that the file-ref scanner
+// (scanEventForFileRefs, which walks `code, .md-code`) recognises as a path so
+// it can attach [↗ preview][↓ download] buttons. Centralising the markup here
+// keeps the three callsites (markdown-link rescue, CODE-token restore,
+// fencedPathList row) in lockstep: a future change to the tag/class/attrs (e.g.
+// adding data-file-ref) lands in one place instead of three divergent string
+// literals where missing one would silently drop that path shape's buttons.
+//
+// Escaping contract: this helper does NOT escape `inner` — every callsite is
+// responsible for its own escaping/guarding (esc(), tokenizer guards, or the
+// `<`/`\x00` rejection in the link rescue). The helper only owns the wrapper.
+//
+// className: defaults to "md-code" (the inline-code pill used by backtick spans
+// and the link rescue). fencedPathList passes "" to keep a bare <code>: the
+// `.md-pathline code` CSS deliberately omits the .md-code pill background/
+// padding/border-radius, so tagging those rows with .md-code would visibly turn
+// each clean path row into a pill. Both shapes are still caught by the scanner's
+// `code, .md-code` selector, so the buttons attach either way.
+function fileRefCode(inner, className) {
+  const cls = className === undefined ? 'md-code' : className;
+  return cls ? '<code class="' + cls + '">' + inner + '</code>'
+             : '<code>' + inner + '</code>';
 }
 
 // scanEventForFileRefs walks .event-content <code> descendants of a freshly-
@@ -8331,6 +8958,34 @@ function renderMdUncached(s) {
       if (lang === 'math' || lang === 'latex' || lang === 'tex') {
         return '<div class="md-math-display">' + renderKatex(code, true) + '</div>';
       }
+      // Path-list fence: a language-less block whose every non-empty line is a
+      // file-path literal (the shape AI emits when it lists generated files,
+      // e.g. a "here are the files I created" reply). Inside <pre><code> these
+      // paths are invisible to scanEventForFileRefs (which deliberately skips
+      // fenced blocks — see its `code.closest('pre')` guard), so they never get
+      // preview/download buttons. Render each line as its own non-<pre> <code>
+      // inside the wrap so the file-ref scanner can attach buttons, while the
+      // whole block keeps a single copy button. Requiring EVERY line to be a
+      // path candidate keeps real code blocks (which always carry at least one
+      // non-path line) on the verbatim path.
+      const pathLines = lang === '' ? fencedPathList(code) : null;
+      if (pathLines) {
+        // Each row is {path, note}. The path goes in <code> so the file-ref
+        // scanner + copy see only the bare path; the optional note renders as
+        // a dimmed sibling span outside the <code> so it is visible but never
+        // folded into the path the exists-check queries.
+        const rows = pathLines.map(p => {
+          const noteHtml = p.note
+            ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
+            : '';
+          return '<div class="md-pathline">' + fileRefCode(esc(p.path), '') + noteHtml + '</div>';
+        }).join('');
+        return '<div class="md-code-wrap md-pathlist">' + rows +
+          '<div class="md-code-actions">' +
+            '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
+          '</div>' +
+          '</div>';
+      }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +
@@ -8641,7 +9296,48 @@ function inlineMd(s) {
     // behaviour) because the substituted tags are naozhi-controlled and
     // cannot contain unescaped attacker content (each bold/italic/code
     // substitution already used `esc()`'d capture groups).
-    if (safe === '#') return text;
+    if (safe === '#') {
+      // Local-file link: claude CLI routinely emits generated files as
+      // markdown links `[数学/专题/foo.html](数学/专题/foo.html)` rather than
+      // backtick code. safeUrl rejects the non-http target (→ '#'), so the
+      // anchor branch is skipped and the link would collapse to plain text —
+      // invisible to scanEventForFileRefs (which only walks <code>/.md-code).
+      // Re-render a path-shaped target as inline <code> so the file-ref
+      // scanner attaches the same [↗ preview][↓ download] buttons it gives
+      // backtick paths. `url` is already esc()'d (esc ran above), so embed it
+      // directly; scanEventForFileRefs reads code.textContent (browser-decoded
+      // back to the real path) when calling the exists API. Display uses the
+      // path itself rather than `text` so the user sees which file resolves —
+      // and so the scanner's textContent is the path, not a friendly label.
+      //
+      // The `url` capture is NOT raw text — earlier inlineMd passes have already
+      // tokenized it. Two classes of contamination must be rejected before the
+      // target can be embedded in <code>:
+      //   1. naozhi-injected markup: the bold/italic passes run before this and
+      //      splice <strong>/<em> spans into the capture when the target itself
+      //      contains `**`/`*` (e.g. `[a](**x**/y.html)`). A real file path
+      //      never contains `<`, so reject any `<`-bearing target.
+      //   2. tokenizer placeholders: the backtick-code and inline-math passes
+      //      replace `` `x` ``/`$x$` with \x00CODE<n>\x00 / \x00KTX<n>\x00
+      //      sentinels. \x00 is non-whitespace/non-colon so it slips through
+      //      isFileRefCandidate, and the restore passes that run AFTER this one
+      //      would rewrite the sentinel into a nested <code>/<span> inside our
+      //      new <code> — malformed HTML plus a corrupted path for the scanner.
+      //      Reject any \x00-bearing target.
+      // Finally require a real extension (the same FILE_REF_HAS_EXT gate
+      // fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
+      // fractions `1/2`, doc slugs without an extension — don't hijack the link
+      // into a bogus file ref with the author's label discarded.
+      const target = url.trim();
+      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+        const { path: bare } = splitPathLine(target);
+        const base = bare.slice(bare.lastIndexOf('/') + 1);
+        if (FILE_REF_HAS_EXT.test(base)) {
+          return fileRefCode(target);
+        }
+      }
+      return text;
+    }
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
@@ -8663,7 +9359,7 @@ function inlineMd(s) {
   // Restore code tokens last — their contents were esc()'d at capture time.
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return '<code class="md-code">' + codeTokens[+idx] + '</code>';
+      return fileRefCode(codeTokens[+idx]);
     });
   }
   return s;
@@ -8832,6 +9528,73 @@ function statusLabelForNode(status) {
     error: 'error', disconnected: 'disconnected',
   };
   return m[status] || status;
+}
+
+// RAIL_CONN_LABELS maps a normalized node status to a short Chinese label for
+// the bottom-rail connection indicator + the settings view. Distinct from the
+// English statusLabelForNode (used in the multi-node dropdown for parity with
+// existing tests) — the rail wants compact CJK so it fits the 56px column.
+const RAIL_CONN_LABELS = {
+  ok: '已连接', connected: '已连接',
+  connecting: '连接中', authenticating: '鉴权中',
+  offline: '离线', unreachable: '不可达',
+  error: '错误', disconnected: '已断开', off: '离线',
+};
+function railConnLabel(status) { return RAIL_CONN_LABELS[status] || status; }
+
+// renderRailConnStatus paints the bottom-rail connection indicator (dot +
+// label). Reuses getNodeStatus so it tracks the WS state machine for local and
+// the server health snapshot for the selected remote. Called from
+// updateStatusBar (every WS state change + auth-countdown tick) and once at
+// DOMContentLoaded. Cheap + idempotent — safe to call on every tick.
+function renderRailConnStatus() {
+  const dot = document.getElementById('ab-conn-dot');
+  const label = document.getElementById('ab-conn-label');
+  if (!dot && !label) return;
+  const status = getNodeStatus((typeof selectedNode !== 'undefined' && selectedNode) || 'local');
+  if (dot) dot.className = 'ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
+  if (label) label.textContent = railConnLabel(status);
+}
+
+// renderSettingsView paints the standalone settings top-level view into
+// #settings-main. Two sections: theme (tri-state, reusing applyTheme/
+// THEME_ORDER/THEME_LABELS) and connection (read-only, reusing getNodeStatus/
+// getNodeDisplayName). Theme buttons are wired via event delegation — no inline
+// onclick (the HTML inline-handler cap is 0). Re-rendered on each theme click
+// to refresh the active state.
+function renderSettingsView() {
+  const root = document.getElementById('settings-main');
+  if (!root) return;
+  const cur = getCurrentTheme();
+  const themeBtns = THEME_ORDER.map(function (t) {
+    return '<button type="button" class="settings-theme-opt' + (t === cur ? ' active' : '') +
+      '" data-theme="' + esc(t) + '" aria-pressed="' + (t === cur ? 'true' : 'false') + '">' +
+      esc(THEME_LABELS[t]) + '</button>';
+  }).join('');
+  const status = getNodeStatus('local');
+  const connMeta = isMultiNode()
+    ? '<div class="settings-conn-meta">多节点：点击侧栏顶部的节点选择器切换。</div>'
+    : '';
+  root.innerHTML =
+    '<div class="settings-head"><h1>设置</h1></div>' +
+    '<div class="settings-body">' +
+      '<section class="settings-sec"><h2>主题</h2>' +
+        '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
+      '</section>' +
+      '<section class="settings-sec"><h2>连接</h2>' +
+        '<div class="settings-conn">' +
+          '<span class="ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline') + '"></span>' +
+          '<span>' + esc(getNodeDisplayName('local')) + ' · ' + esc(railConnLabel(status)) + '</span>' +
+        '</div>' + connMeta +
+      '</section>' +
+    '</div>';
+  const grp = document.getElementById('settings-theme-group');
+  if (grp) grp.addEventListener('click', function (e) {
+    const b = e.target.closest('.settings-theme-opt');
+    if (!b) return;
+    applyTheme(b.dataset.theme);
+    renderSettingsView(); // refresh active state
+  });
 }
 
 // updateNodeSelector is the single render entry point for the node-selector
@@ -9495,6 +10258,10 @@ const wsm = {
       if (!restoreScrollPos(selectedKey, selectedNode)) {
         stickEventsBottom();
       }
+      // Safety net: blank page despite events existing → page back to real
+      // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
+      // covers remote nodes whose subscribe predates the visible-aware read.
+      if (!html && events.length > 0) maybeAutoPageBack();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       // Remove stale "no events yet" before processing incremental events
@@ -9523,6 +10290,9 @@ const wsm = {
         }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
+      // Bound the live DOM on the incremental WS history path too (#398);
+      // mirror appendEvents — trim before the scrollHeight reads below.
+      trimEventsScroll(el);
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
       runPendingAsync();
@@ -9658,6 +10428,13 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
+    // Bound the live DOM before scroll/scan so a long streaming session over
+    // the WS push path (the default real-time channel) can't grow
+    // #events-scroll without limit and OOM the tab (#398). Without this the
+    // MAX_LIVE_DOM_EVENTS cap only fired on the HTTP-poll fallback
+    // (appendEvents), so #398 was effectively a no-op while WS was live.
+    // Must run before the scrollHeight reads below, matching appendEvents.
+    trimEventsScroll(el);
     // User events always force-bottom; AI output only sticks when already at bottom.
     if (isUser) stickEventsBottom();
     else if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -10076,6 +10853,15 @@ async function scanDiscovered() {
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON('/api/discovered', { headers, timeoutMs: 10000 });
     discoveredItems = data || [];
+    // #1770: only force a full sidebar re-render when the discovered set
+    // actually changed. Previously every 30s (connected) / 5s (disconnected)
+    // scan unconditionally set lastVersion=0, defeating fetchSessions' version
+    // short-circuit and rebuilding the whole sidebar DOM even when nothing
+    // changed — wasted CPU/layout on low-end phones. Mirror the
+    // nodesHash/historyHash pattern fetchSessions already uses.
+    const discoveredHash = JSON.stringify(discoveredItems);
+    if (discoveredHash === lastDiscoveredJSON) return;
+    lastDiscoveredJSON = discoveredHash;
     // Trigger sidebar re-render to merge discovered into project groups
     lastVersion = 0;
     debouncedFetchSessions();
@@ -10133,6 +10919,13 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
+    // Pass cwd so the backend resolves the JSONL via an O(1) os.Stat on the
+    // CWD-derived path instead of the fallback scan + its 60s negative cache.
+    // Without this hint a single transient miss (card shown before the JSONL
+    // flushed, or while claude renamed it during compaction) poisons preview
+    // for the full TTL, leaving a blank splash that only "fixes itself" once
+    // the cache expires.
+    const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
@@ -10141,7 +10934,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     // "加载中..." splash indefinitely.
     let events;
     try {
-      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam, { headers, timeoutMs: 10000 });
+      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
     } catch (err) {
       const errText = err.message || '';
       const el0 = document.getElementById('events-scroll');
@@ -10161,12 +10954,19 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     navRebuild();
     previewEventCount = events.length;
     const capturedSid = sessionId;
+    // #1770: guard against overlapping ticks. Each tick re-fetches the full
+    // preview event list; on a slow link a fetch can outlast the 2s interval,
+    // so without this flag consecutive ticks pile up concurrent requests.
+    // Mirrors _fetchEventsInFlight on the main events poll.
+    let previewInFlight = false;
     previewTimer = setInterval(async () => {
+      if (previewInFlight) return;
+      previewInFlight = true;
       try {
         const headers2 = {};
         const t2 = getToken();
         if (t2) headers2['Authorization'] = 'Bearer ' + t2;
-        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam, { headers: headers2 });
+        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
         if (all.length <= previewEventCount) return;
@@ -10191,7 +10991,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
         navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
         navUpdatePill();
-      } catch (_) {}
+      } catch (_) {
+      } finally {
+        previewInFlight = false;
+      }
     }, 2000);
   } catch (e) {
     showNetworkError('预览会话', e);
@@ -10461,7 +11264,7 @@ function openSessionContextMenu(card, x, y) {
 function initSwipeDelete() {
   const list = document.getElementById('session-list');
   if (!list) return;
-  let card = null, startX = 0, startY = 0, tracking = false;
+  let card = null, startX = 0, startY = 0, tracking = false, cardW = 0;
   // cancelLongPress clears the in-flight long-press timer + any visual
   // target state. Called from every exit path so a jittery touch cannot
   // leave the card stuck in the .long-pressing style.
@@ -10509,11 +11312,18 @@ function initSwipeDelete() {
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
       if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
       tracking = true;
+      // #1772: cache the card width once, here — before any transform write
+      // this gesture. Reading card.offsetWidth inside the per-frame transform
+      // write below is a getter that the browser must keep coherent with
+      // pending style writes; caching it (the width can't change mid-swipe)
+      // keeps the touchmove hot loop free of layout reads. Read now while the
+      // card is still in its untransformed layout position (cheap).
+      cardW = card.offsetWidth || 1;
     }
     if (dx >= 0) return;
     card.classList.add('swiping');
     card.style.transform = 'translateX(' + dx + 'px)';
-    card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / card.offsetWidth * 0.6) + ')';
+    card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / cardW * 0.6) + ')';
   }, {passive:true});
   list.addEventListener('touchend', e => {
     cancelLongPress();
@@ -11597,6 +12407,12 @@ async function doCreateCronJob() {
 }
 
 function openCronPanel() {
+  // Cron is its own top-level view now. Ensure it's active before painting.
+  // setActivityView('cron') sets activeView='cron' first, then calls back
+  // into openCronPanel — so the guard below is already satisfied on re-entry
+  // and we don't recurse. Direct callers (legacy #btn-cron, openCronDetail)
+  // route through here and get the view switch for free.
+  if (activeView !== 'cron') { setActivityView('cron'); return; }
   // Deselect managed session via selectedKey only — selectedNode is the
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
@@ -11604,7 +12420,10 @@ function openCronPanel() {
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   setActiveSessionCard(null);
-  mobileEnterChat();
+  // NOTE: no mobileEnterChat() here. Cron is a standalone view, not a chat
+  // session — entering chat view would hide the bottom tab bar (the only nav
+  // surface on mobile) and strand the user. The cron view is full-screen via
+  // body.nz-view-cron CSS and the tab bar stays visible.
   // Paint immediately from the cache primed at page load (line ~5982) so the
   // click feels instant. If the cache is empty we still render the panel —
   // renderCronPanel handles the zero-job "empty state" branch. A background
@@ -12026,7 +12845,18 @@ function repaintCronLive() {
   }
   const events = wsm.cronLive.events || [];
   const display = processEventsForDisplay(events);
-  el.innerHTML = renderEventsWithDividers(display, 0);
+  const html = renderEventsWithDividers(display, 0);
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length > 0) {
+    // 事件到了但全被 INTERNAL_EVENT_TYPES 过滤光（典型 parallel agent team：
+    // 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
+    // .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
+    // 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
+    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
+  } else {
+    el.innerHTML = '';
+  }
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
   setCronLiveStatus(wsm.cronLive.status);
@@ -12038,6 +12868,9 @@ function repaintCronLive() {
 function appendEventsToContainer(el, events) {
   if (!el) return;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
+  // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
+  if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
   let prevT = lastDividerTime(el);
   events.forEach(e => {
     if (isInternalEvent(e)) return;
@@ -13663,12 +14496,15 @@ function renderCronTimelineForJob(jobId) {
 }
 
 function renderCronPanel() {
-  // Guard against an async race: fetchCronJobs().then(renderCronPanel) fires
-  // after the user may have already clicked a cron card and opened a session.
-  // Re-rendering the cron list would clobber renderMainShell's DOM and make
-  // the chat history "disappear". Only paint when no session is selected.
-  if (selectedKey) return;
-  const main = document.getElementById('main');
+  // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
+  // WS cron_run_ended handler fire after the user may have switched away from
+  // the cron view. Painting then would be wasted (the container is hidden) or
+  // could fight the active view. Only paint when cron is the active view.
+  // (Was `if (selectedKey) return` when cron borrowed #main; now cron has its
+  // own #cron-main container and is gated purely on activeView.)
+  if (activeView !== 'cron') return;
+  const main = document.getElementById('cron-main');
+  if (!main) return;
   // Shell-preserving repaint: when the cron panel is already mounted (user
   // is just typing in the search box or toggling a chip), we only want to
   // repaint the list + drawer. Rebuilding the shell would wipe the input
@@ -14021,13 +14857,13 @@ async function fetchCronJobs() {
     }
     cronJobs = data.jobs || [];
     cronNotifyDefault = data.notify_default || null;
+    // Badge surfaces jobs needing attention (paused or last run errored),
+    // not the raw total — avoids a persistent red dot on healthy setups.
+    // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
+    // 纳入 attention，与 filterCronJobs 判定对齐。
+    const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
     const cronBadge = document.getElementById('cron-badge');
     if (cronBadge) {
-      // Badge surfaces jobs needing attention (paused or last run errored),
-      // not the raw total — avoids a persistent red dot on healthy setups.
-      // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
-      // 纳入 attention，与 filterCronJobs 判定对齐。
-      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
       cronBadge.textContent = attention;
       cronBadge.style.display = attention > 0 ? '' : 'none';
       // Attention badge is semantically an alert (paused / errored jobs), so
@@ -14035,6 +14871,12 @@ async function fetchCronJobs() {
       // History badge stays neutral grey because it is a cumulative count, not
       // an unread/failure signal.
       cronBadge.classList.toggle('is-alert', attention > 0);
+    }
+    // Mirror the attention dot onto the rail's 自动化 icon so the alert is
+    // visible from any view (the header cron-badge is only shown in chat view).
+    const railBadge = document.getElementById('abnav-cron-badge');
+    if (railBadge) {
+      railBadge.hidden = attention === 0;
     }
   } catch (e) { console.error('fetch cron:', e); }
 }
@@ -14780,6 +15622,12 @@ wsm.connect();
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
     if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    // #1770: also pause the WS keep-alive ping while the tab is hidden. The
+    // 30s app-level ping wakes the mobile radio every 30s for nothing —
+    // connection liveness is independently maintained by the server's
+    // protocol-level Ping/Pong (writePump, wsPingPeriod≈54s), so dropping the
+    // app ping loses no liveness detection. Re-armed in startPollers on resume.
+    if (wsm && wsm.pingTimer) wsm.cleanup();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
@@ -14795,6 +15643,12 @@ wsm.connect();
     if (!eventTimer && selectedKey && wsm && wsm.state !== WS_STATES.CONNECTED) {
       fetchEvents(false);
       eventTimer = setInterval(() => fetchEvents(false), 1000);
+    }
+    // #1770: re-arm the WS ping we paused in stopPollers, but only when the
+    // socket is actually live — a dropped/offline socket has no ping to keep
+    // and will re-arm via auth_ok on reconnect.
+    if (wsm && !wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
+      wsm.startPing();
     }
   };
   document.addEventListener('visibilitychange', () => {
@@ -14851,6 +15705,7 @@ wsm.connect();
 initMobile();
 initViewportTracking();
 initSwipeDelete();
+initSidebarProjectActions();
 initSwipeBack();
 initSidebarSearch();
 (function(){
@@ -15017,6 +15872,16 @@ initSidebarSearch();
   let state = null;            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, lastEventTime, pendingUserEchoes}
   let pollTimer = null;
   let sending = false;
+  // Self-scheduling poll cadence. A brand-new scratch session has no
+  // persisted events yet, so /api/sessions/events returns 404 ("session not
+  // found") until the first turn lands. The old fixed setInterval(…,1000)
+  // hammered that 404 at 1Hz forever, flooding the browser network log and
+  // wasting requests. We instead back off 1s→2s→4s→…→POLL_MAX_MS while the
+  // session is still empty/unreachable, and snap back to POLL_BASE_MS the
+  // moment a real poll succeeds. R20260605.
+  const POLL_BASE_MS = 1000;
+  const POLL_MAX_MS = 8000;
+  let pollDelayMs = POLL_BASE_MS;
 
   function authHeaders(extra) {
     const h = Object.assign({}, extra || {});
@@ -15038,7 +15903,7 @@ initSidebarSearch();
   function hideDrawer() { drawer.classList.remove('visible'); }
 
   function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
   async function closeScratch(silent) {
@@ -15191,7 +16056,18 @@ initSidebarSearch();
       if (state.lastEventTime > 0) url += '&after=' + state.lastEventTime;
       else url += '&limit=50';
       const r = await fetch(url, { headers: authHeaders() });
-      if (!r.ok) return;
+      if (!r.ok) {
+        // 404 = the scratch session has no persisted events yet (brand-new,
+        // first turn not landed). That is an expected empty state, not an
+        // error: back off so we stop hammering it at 1Hz. Other non-OK
+        // statuses get the same treatment — a transient server hiccup
+        // shouldn't busy-loop either.
+        pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+        return;
+      }
+      // A successful poll means the session is reachable; snap cadence back
+      // to the responsive base so newly-arriving events render promptly.
+      pollDelayMs = POLL_BASE_MS;
       const evs = await r.json();
       if (Array.isArray(evs) && evs.length > 0) {
         renderNewEvents(evs);
@@ -15200,12 +16076,26 @@ initSidebarSearch();
           elLoading.classList.remove('visible');
         }
       }
-    } catch (_) { /* swallow */ }
+    } catch (_) {
+      // Network error: back off too, same rationale as a non-OK response.
+      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+    }
   }
 
   function startPolling() {
     stopPolling();
-    pollTimer = setInterval(pollOnce, 1000);
+    pollDelayMs = POLL_BASE_MS;
+    // Self-scheduling loop (not setInterval) so each tick's delay can grow
+    // with the backoff set inside pollOnce. stopPolling()'s clearTimeout
+    // cancels the next scheduled tick.
+    const tick = async () => {
+      await pollOnce();
+      // stopPolling() nulls pollTimer; if that happened during the await we
+      // must not reschedule (the drawer closed mid-flight).
+      if (pollTimer === null) return;
+      pollTimer = setTimeout(tick, pollDelayMs);
+    };
+    pollTimer = setTimeout(tick, pollDelayMs);
   }
 
   async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
@@ -15328,6 +16218,13 @@ initSidebarSearch();
         const txt = await r.text().catch(() => '');
         if (typeof showAPIError === 'function') showAPIError('发送消息', r.status, txt);
         elLoading.classList.remove('visible');
+      } else {
+        // The user just sent a turn, so the session is now live and events
+        // are imminent. Restart polling at the responsive base so the reply
+        // renders fast — without this, a tick already scheduled at the
+        // backed-off delay (up to POLL_MAX_MS from the pre-first-turn 404
+        // phase) could stall the first reply by several seconds.
+        if (pollTimer !== null) startPolling();
       }
     } catch (e) {
       console.error('scratch send', e);

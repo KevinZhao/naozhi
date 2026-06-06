@@ -18,7 +18,7 @@ func TestValidateScheduleChars(t *testing.T) {
 	}{
 		{"every", "@every 30m", false},
 		{"cron expr", "0 9 * * 1-5", false},
-		{"empty ok", "", false}, // emptiness is enforced by the prompt path, not schedule
+		{"empty rejected", "", true}, // R20260531-QUAL-2: empty schedule is invalid, aligns with godoc
 		{"too long", strings.Repeat("a", MaxScheduleBytes+1), true},
 		{"null byte", "@every \x00 30m", true},
 		{"newline", "0 9 * *\n1-5", true},
@@ -40,5 +40,20 @@ func TestValidateScheduleChars(t *testing.T) {
 				t.Errorf("ValidateScheduleChars(%q) error %v not wrapping ErrInvalidSchedule", tt.in, err)
 			}
 		})
+	}
+}
+
+// TestValidateScheduleChars_EmptyRejected pins R20260531-QUAL-2: the godoc
+// promises "Empty schedule is rejected here", so an empty string must return a
+// wrapped ErrInvalidSchedule rather than passing every char check and returning
+// nil.
+func TestValidateScheduleChars_EmptyRejected(t *testing.T) {
+	t.Parallel()
+	err := ValidateScheduleChars("")
+	if err == nil {
+		t.Fatal("ValidateScheduleChars(\"\") = nil, want ErrInvalidSchedule")
+	}
+	if !errors.Is(err, ErrInvalidSchedule) {
+		t.Errorf("ValidateScheduleChars(\"\") error %v not wrapping ErrInvalidSchedule", err)
 	}
 }

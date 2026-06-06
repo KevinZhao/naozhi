@@ -60,7 +60,7 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 		origin = "user"
 	}
 	r.mu.Lock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	if s == nil {
 		r.mu.Unlock()
 		return false
@@ -81,8 +81,8 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	}
 	s.SetUserLabel(label)
 	s.setLabelOrigin(origin)
-	r.storeDirty = true
-	r.storeGen.Add(1)
+	r.ss.dirty = true
+	r.ss.gen.Add(1)
 	r.mu.Unlock()
 	// Match every other mutator (Reset/Remove/ResetChat/spawnSession...): the
 	// dashboard's onChange WebSocket broadcast needs a kick so the sidebar
@@ -105,7 +105,7 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 // Returns false when the session key is unknown.
 func (r *Router) ClearUserLabelOrigin(key string) bool {
 	r.mu.Lock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	if s == nil {
 		r.mu.Unlock()
 		return false
@@ -116,8 +116,8 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 	}
 	s.SetUserLabel("")
 	s.setLabelOrigin("")
-	r.storeDirty = true
-	r.storeGen.Add(1)
+	r.ss.dirty = true
+	r.ss.gen.Add(1)
 	r.mu.Unlock()
 	r.notifyChange()
 	return true
@@ -137,11 +137,16 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 // Note: fn must not call back into Router methods that take r.mu (it runs
 // under RLock). Idiomatic usage is to copy the SessionSnapshot fields the
 // daemon needs and resume work after VisitSessions returns.
+//
+// R20260602-PERF-3 (#1577): this uses snapshotReadOnly, NOT Snapshot, so
+// the per-session view computed under RLock is strictly side-effect free
+// (no SetModel mirror write on the read path). The dashboard poll path
+// keeps the mirroring Snapshot() so live model still reaches sessions.json.
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.sessions {
-		if !fn(s.Snapshot()) {
+	for _, s := range r.ss.sessions {
+		if !fn(s.snapshotReadOnly()) {
 			return
 		}
 	}
@@ -158,7 +163,7 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 // inner historyMu acquisition does not nest under r.mu.
 func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
 	r.mu.RLock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if s == nil {
 		return nil
@@ -177,7 +182,7 @@ func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
 // teardown) or for the fallback branch inside InterruptSessionSafe itself.
 func (r *Router) InterruptSession(key string) bool {
 	r.mu.RLock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if s == nil {
 		return false
@@ -255,7 +260,7 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 // InterruptNoSession — logging "aborted turn" in that case would be a lie).
 func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	r.mu.RLock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if s == nil {
 		return InterruptNoSession
@@ -286,8 +291,8 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ids := make(map[string]bool, len(r.sessions))
-	for _, s := range r.sessions {
+	ids := make(map[string]bool, len(r.ss.sessions))
+	for _, s := range r.ss.sessions {
 		if s.loadProcess() == nil {
 			continue
 		}
@@ -317,29 +322,29 @@ func (r *Router) trackSessionID(id string) {
 	if id == "" {
 		return
 	}
-	if r.knownIDs[id] {
+	if r.kid.ids[id] {
 		return
 	}
-	if len(r.knownIDs) >= maxKnownIDs {
-		// Drop the oldest entry; r.knownIDsOrder invariant is that it holds
-		// exactly the keys of r.knownIDs in insertion order. Shift in-place
-		// rather than reslicing: `knownIDsOrder[1:]` keeps the backing array
+	if len(r.kid.ids) >= maxKnownIDs {
+		// Drop the oldest entry; r.kid.order invariant is that it holds
+		// exactly the keys of r.kid.ids in insertion order. Shift in-place
+		// rather than reslicing: `order[1:]` keeps the backing array
 		// pinned from the original data pointer, so after many evictions the
 		// slice header drifts rightward and the leading, now-unused portion
 		// of the array can't be reused — eventually forcing re-allocation.
 		// The copy + clear tail approach keeps the header stable and lets the
 		// allocator reuse the same buffer indefinitely.
-		oldest := r.knownIDsOrder[0]
-		delete(r.knownIDs, oldest)
-		n := len(r.knownIDsOrder)
-		copy(r.knownIDsOrder, r.knownIDsOrder[1:])
-		r.knownIDsOrder[n-1] = ""
-		r.knownIDsOrder = r.knownIDsOrder[:n-1]
+		oldest := r.kid.order[0]
+		delete(r.kid.ids, oldest)
+		n := len(r.kid.order)
+		copy(r.kid.order, r.kid.order[1:])
+		r.kid.order[n-1] = ""
+		r.kid.order = r.kid.order[:n-1]
 	}
-	r.knownIDs[id] = true
-	r.knownIDsOrder = append(r.knownIDsOrder, id)
-	r.knownIDsGen++
-	r.knownIDsDirty = true
+	r.kid.ids[id] = true
+	r.kid.order = append(r.kid.order, id)
+	r.kid.gen++
+	r.kid.dirty = true
 }
 
 // RegisterForResume creates a suspended session entry so that the next
@@ -348,18 +353,18 @@ func (r *Router) trackSessionID(id string) {
 // is returned (deduplication) and no new entry is created.
 func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
 	r.mu.Lock()
-	if _, exists := r.sessions[key]; exists {
+	if _, exists := r.ss.sessions[key]; exists {
 		r.mu.Unlock()
 		return key // already exists with this exact key
 	}
 	// Deduplicate: if another session already targets this sessionID, reuse it.
-	if existingKey, ok := r.sessionIDToKey[sessionID]; ok {
-		if _, exists := r.sessions[existingKey]; exists {
+	if existingKey, ok := r.ss.idToKey[sessionID]; ok {
+		if _, exists := r.ss.sessions[existingKey]; exists {
 			r.mu.Unlock()
 			return existingKey
 		}
 		// Stale index entry; clean up and continue.
-		delete(r.sessionIDToKey, sessionID)
+		delete(r.ss.idToKey, sessionID)
 	}
 	s := &ManagedSession{
 		key:    key,
@@ -374,14 +379,14 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	}
 	r.trackSessionID(sessionID)
 	if sessionID != "" {
-		r.sessionIDToKey[sessionID] = key
+		r.ss.idToKey[sessionID] = key
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
 	// R215-ARCH-P2-2: single publish funnel.
 	r.publishSessionLocked(key, s, false)
-	r.storeDirty = true
-	r.storeGen.Add(1)
+	r.ss.dirty = true
+	r.ss.gen.Add(1)
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -458,7 +463,7 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 // 安全可以在 r.mu 下调。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
 	r.mu.Lock()
-	if existing, ok := r.sessions[key]; ok {
+	if existing, ok := r.ss.sessions[key]; ok {
 		changed := false
 		// Refresh workspace/prompt on existing stub; don't touch live process.
 		if existing.loadProcess() == nil {
@@ -471,7 +476,14 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 				changed = true
 			}
 			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
-				existing.prevSessionIDs = slices.Clone(chainIDs)
+				// R230C-GO-1 hardening (#1777): route the chain swap through
+				// the historyMu-guarded setter rather than a bare write under
+				// r.mu alone. existing is already published, so SnapshotChainIDs
+				// (invoked from cli history-source factories that do NOT hold
+				// r.mu, only historyMu.RLock) can race this refresh; writing
+				// under historyMu makes that RLock a real happens-before instead
+				// of the "defensive rope" the SnapshotChainIDs doc describes.
+				existing.ReplacePrevSessionIDs(chainIDs)
 				// workspace 变了 historySource 里也要刷（cwd 变化会导致
 				// projDirName 命中不同的 claude 项目目录）；一并重装最省心。
 				r.attachHistorySource(existing)
@@ -484,8 +496,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 			// each reload forced a saveIfDirty fsync (2-5 ms on SSD) and a
 			// sessions_update fanout with no observable effect.
 			if changed {
-				r.storeDirty = true
-				r.storeGen.Add(1)
+				r.ss.dirty = true
+				r.ss.gen.Add(1)
 			}
 		}
 		r.mu.Unlock()
@@ -496,6 +508,22 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 		// just guarded above.
 		r.notifyChange()
 		return
+	}
+	// R242-ARCH-2 (#720): the per-namespace exempt sub-quota gate lives in
+	// spawnSession, but stub registration creates an exempt entry WITHOUT
+	// spawning a process, so it never crosses that gate. A misbehaving cron
+	// scheduler (or a config with many jobs / projects) could therefore grow
+	// r.ss.sessions with exempt stubs past the bucket's intended ceiling and
+	// silently starve the other namespaces' alive-spawn budget. We do not
+	// hard-reject here (dropping a cron/sys stub would lose its history-chain
+	// and break dashboard panels), but we surface the over-quota condition so
+	// the exhaustion the issue flags is observable instead of invisible.
+	if kind := exemptKind(key); kind != "" {
+		if existing := r.countExemptByKind(kind); existing >= exemptCapFor(kind) {
+			slog.Warn("exempt stub registration exceeds namespace sub-quota",
+				"key", key, "namespace", kind,
+				"existing", existing, "cap", exemptCapFor(kind))
+		}
 	}
 	s := &ManagedSession{
 		key:    key,
@@ -514,8 +542,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	s.initCreatedAtIfUnset()
 	// R215-ARCH-P2-2: single publish funnel.
 	r.publishSessionLocked(key, s, false)
-	r.storeDirty = true
-	r.storeGen.Add(1)
+	r.ss.dirty = true
+	r.ss.gen.Add(1)
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -529,7 +557,7 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 	pids = make(map[int]bool)
 	sessionIDs = make(map[string]bool)
 	cwds = make(map[string]bool)
-	for _, s := range r.sessions {
+	for _, s := range r.ss.sessions {
 		if id := s.getSessionID(); id != "" {
 			sessionIDs[id] = true
 		}
@@ -560,7 +588,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	}
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
-	if s, ok := r.sessions[key]; ok {
+	if s, ok := r.ss.sessions[key]; ok {
 		// Decrement deltas mirror the resetLocked pattern: only sessions
 		// that were non-exempt AND alive contributed to activeCount, so
 		// only those need a -1. R220-PERF-1 fast path: replaces an O(n)
@@ -583,13 +611,13 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// Only delete if no concurrent goroutine replaced this session.
 			// keepBackendOverride=true: Takeover re-spawns on the same key
 			// and spawnSession below consumes the override atomically.
-			if cur, ok := r.sessions[key]; ok && cur == oldSession {
+			if cur, ok := r.ss.sessions[key]; ok && cur == oldSession {
 				r.unregisterSessionLocked(key, cur, true)
-				r.storeDirty = true
-				r.storeGen.Add(1)
+				r.ss.dirty = true
+				r.ss.gen.Add(1)
 				if !oldExempt {
-					if r.activeCount.Add(-1) < 0 {
-						r.activeCount.Store(0)
+					if r.ss.activeCount.Add(-1) < 0 {
+						r.ss.activeCount.Store(0)
 					}
 					metrics.RecordSessionActive(oldBackend, -1)
 				}
@@ -600,27 +628,27 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 			}
 			// Implicit else: concurrent goroutine replaced the session with an exited
-			// one. Leave r.sessions[key] as-is — spawnSession below will overwrite
+			// one. Leave r.ss.sessions[key] as-is — spawnSession below will overwrite
 			// it and call indexAdd, keeping the index consistent. No indexDel here
-			// because we are not removing from r.sessions. The activeCount delta
+			// because we are not removing from r.ss.sessions. The activeCount delta
 			// is also skipped because spawnSession will Store(+1) for the new
 			// process if applicable.
 		} else {
 			// Dead session branch: same keepBackendOverride=true rationale.
 			// Dead sessions weren't in activeCount, so no decrement is needed.
 			r.unregisterSessionLocked(key, s, true)
-			r.storeDirty = true
-			r.storeGen.Add(1)
+			r.ss.dirty = true
+			r.ss.gen.Add(1)
 		}
 	}
 	// Set workspace override for the chat key prefix. Must bump the dirty
 	// flag so the override is persisted; otherwise a crash before another
 	// flushing path fires would lose the takeover's chosen workspace.
 	if chatKey := chatKeyFor(key); chatKey != key {
-		if prev, ok := r.workspaceOverrides[chatKey]; !ok || prev != workspace {
-			r.workspaceOverrides[chatKey] = workspace
-			r.wsOverridesDirty = true
-			r.wsOverridesGen.Add(1)
+		if prev, ok := r.wsStore.overrides[chatKey]; !ok || prev != workspace {
+			r.wsStore.overrides[chatKey] = workspace
+			r.wsStore.dirty = true
+			r.wsStore.gen.Add(1)
 		}
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)

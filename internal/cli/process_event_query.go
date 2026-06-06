@@ -137,7 +137,12 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 // EventEntry so persistHistory flushes a self-contained record.
 func (p *Process) InitLinker(cwd string) {
 	p.cwd = cwd
+	p.cachedProjectDir = resolveProjectDir(cwd)
 	p.linker = NewSubagentLinker()
+	// R20260603030037-GO-2 (#1661): bind the resolve worker-pool lifetime to
+	// the process-scoped ctx up front, so it never captures the per-request
+	// ctx of whichever DispatchResolve caller happens to fire first.
+	p.linker.SetPoolContext(p.lifecycleContext())
 	log := p.eventLog
 	p.linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
 		if toolUseID == "" || log == nil {
@@ -176,6 +181,7 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	}
 	p.cwd = cwd
 	projectDir := resolveProjectDir(cwd)
+	p.cachedProjectDir = projectDir
 	p.linker.mu.RLock()
 	session := p.linker.parentSessionID
 	p.linker.mu.RUnlock()
@@ -206,9 +212,25 @@ func (p *Process) EventLastN(n int) []EventEntry {
 	return p.eventLog.LastN(n)
 }
 
+// EventLastNVisible returns a contiguous tail of the event log carrying at
+// least visibleTarget visible entries (or up to maxTotal entries, whichever
+// trips first). See EventLog.LastNVisible for the full contract — this is the
+// thin Process-level forwarder used by the dashboard initial-subscribe path.
+func (p *Process) EventLastNVisible(visibleTarget, maxTotal int) []EventEntry {
+	return p.eventLog.LastNVisible(visibleTarget, maxTotal)
+}
+
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
+}
+
+// EventEntriesSinceAppend is the buffer-reusing variant of EventEntriesSince:
+// it forwards to EventLog.EntriesSinceAppend so the live-session WS backfill
+// path can reuse a per-subscription buffer instead of allocating a fresh
+// []EventEntry per notify wave. R20260604-PERF-25 (#1740).
+func (p *Process) EventEntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
+	return p.eventLog.EntriesSinceAppend(dst, afterMS)
 }
 
 // EventEntriesBefore returns up to `limit` event log entries strictly older

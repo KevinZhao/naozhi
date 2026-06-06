@@ -2,6 +2,7 @@ package shim
 
 import (
 	"log/slog"
+	"sort"
 	"sync"
 )
 
@@ -136,13 +137,29 @@ func (b *RingBuffer) LinesSince(afterSeq int64) []bufLine {
 		return nil
 	}
 
-	var result []bufLine
+	// Stored lines are in strictly-increasing seq order along the logical
+	// window [0, count) — Push assigns seq monotonically and appends at
+	// head, so even after the ring wraps (oldest physical index > head) the
+	// logical index walk via the modulo below visits entries in ascending
+	// seq. That lets us binary-search the first matching logical index
+	// instead of scanning and per-element comparing all `count` entries,
+	// then copy the matching tail in one pre-sized append. On a full
+	// 10k-line ring serving an almost-caught-up reconnect this turns an
+	// O(count) hot scan (held under the mutex against every concurrent
+	// Push) into O(log count) + a single contiguous copy.
 	start := (b.head - b.count + b.maxLines) % b.maxLines
-	for i := 0; i < b.count; i++ {
+	first := sort.Search(b.count, func(i int) bool {
 		idx := (start + i) % b.maxLines
-		if b.lines[idx].seq > afterSeq {
-			result = append(result, b.lines[idx])
-		}
+		return b.lines[idx].seq > afterSeq
+	})
+	matches := b.count - first
+	if matches <= 0 {
+		return nil
+	}
+	result := make([]bufLine, 0, matches)
+	for i := first; i < b.count; i++ {
+		idx := (start + i) % b.maxLines
+		result = append(result, b.lines[idx])
 	}
 	return result
 }

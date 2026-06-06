@@ -232,6 +232,35 @@ var (
 	// same: investigate disk latency / writer stall.
 	AttachmentRefDropTotal = expvar.NewInt("naozhi_attachment_ref_drop_total")
 
+	// AttachmentGCReapedTotal counts attachment payloads actually
+	// deleted by the attachment-gc daemon (live mode only; dry-run
+	// increments AttachmentGCWouldReap* instead). See
+	// docs/rfc/attachment-gc-daemon.md §6.
+	AttachmentGCReapedTotal = expvar.NewInt("naozhi_attachment_gc_reaped_total")
+
+	// AttachmentGCWouldReapLegacyTotal / NoRefs / Expired bucket the
+	// would-remove decisions by reason so operators can read the risk
+	// composition of a dry-run before flipping dry_run off (RFC §6 E4):
+	//   - legacy_no_meta: no sidecar, decided by date-dir TTL (safe-ish)
+	//   - meta_no_refs:   sidecar but no refs — MAY be a not-yet-bumped
+	//                     active reference (high-risk bucket)
+	//   - refs_expired:   referenced once, last ref past refTTL (safe)
+	// Populated in both dry-run and live mode for observability.
+	AttachmentGCWouldReapLegacyTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_legacy_total")
+	AttachmentGCWouldReapNoRefsTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_no_refs_total")
+	AttachmentGCWouldReapExpiredTotal = expvar.NewInt("naozhi_attachment_gc_would_reap_expired_total")
+
+	// AttachmentGCSweepTotal counts attachment-gc daemon Tick
+	// invocations (success + error). A flat counter is the operator's
+	// proof the GC is actually running on its cadence.
+	AttachmentGCSweepTotal = expvar.NewInt("naozhi_attachment_gc_sweep_total")
+
+	// AttachmentGCErrorTotal counts WORKSPACE-LEVEL GC errors (a single
+	// root's GCWithRefs returned err, i.e. ReadDir failed). Per-FILE
+	// remove failures are logged but NOT counted here — they do not
+	// abort the sweep. RFC §6.
+	AttachmentGCErrorTotal = expvar.NewInt("naozhi_attachment_gc_error_total")
+
 	// CronExecutionSlowTotal counts cron executions that exceeded
 	// cronSlowThreshold wall-clock — a poor-man's histogram for R208-OBS1
 	// residual. Counter is monotonic (never resets); correlate with
@@ -254,6 +283,20 @@ var (
 	// alert on either rising delta or grep journalctl for the specific job.
 	// R240-GO-4.
 	CronSendBudgetDoubledTotal = expvar.NewInt("naozhi_cron_send_budget_doubled_total")
+
+	// CronNotifyPartialTotal counts cron completion-notice deliveries that
+	// stopped before all chunks were sent — either because the per-target
+	// replyCtx deadline (cronNotifyTimeout, default 30s) was reached
+	// mid-loop, or because a chunk's ReplyWithRetry failed and the loop
+	// aborted to avoid interleaving the remaining chunks with foreign
+	// messages. Monotonic; pairs with the existing per-event slog.Warn in
+	// scheduler_notify.go's notifyTarget. A rising delta tells operators
+	// that IM recipients are seeing truncated cron output (slow/failing
+	// webhook) so they should lean on the dashboard run-detail panel as the
+	// surface of record. Distinct from the hard chunk-cap WARN
+	// (cronNotifyMaxChunks), which is a deterministic truncation rather than
+	// a delivery-time failure. R249-CR-26 (#966).
+	CronNotifyPartialTotal = expvar.NewInt("naozhi_cron_notify_partial_total")
 
 	// CronStopBudgetExceededGCTotal / CronStopBudgetExceededDrainTotal /
 	// CronStopBudgetExceededTriggerTotal count Scheduler.Stop() phases that
@@ -295,6 +338,20 @@ var (
 	CronRunSkippedTotal   = expvar.NewInt("naozhi_cron_run_skipped_total")
 	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
+
+	// SysessionRunStartedTotal counts sysession daemon run starts (after the
+	// per-daemon CAS gate, before tick IO). Mirrors CronRunStartedTotal for
+	// the sysession subsystem (#1723 RFC §6 Phase 1.5). Bumped unconditionally
+	// inside emitRunStarted — before the nil-broadcaster early return — so the
+	// counter never drifts from the broadcast path (cron R230C-GO-15 rationale).
+	SysessionRunStartedTotal = expvar.NewInt("naozhi_sysession_run_started_total")
+
+	// SysessionRunEndedTotal counts sysession daemon run terminal transitions
+	// across all states. Pairs with SysessionRunStartedTotal — the difference
+	// (modulo inflight) approximates "runs interrupted by panic / process
+	// crash". Mirrors CronRunEndedTotal; bumped unconditionally inside
+	// emitRunEnded before the nil-broadcaster early return.
+	SysessionRunEndedTotal = expvar.NewInt("naozhi_sysession_run_ended_total")
 
 	// CronRunInflight is a gauge of currently executing cron runs. Bumped
 	// on CAS-gate success, decremented on terminal transition. Naming uses
@@ -382,41 +439,18 @@ var (
 	// systemd's START_USEC to cross-check TimeoutStartSec margin.
 	StartupPhaseReadyMs = expvar.NewInt("naozhi_startup_phase_ready_ms")
 
-	// AutoChainSpawnAttachTotal counts spawnSession invocations that
-	// auto-attached one or more prev_session_ids via the workspace
-	// auto-chain feature (docs/rfc/auto-workspace-chain.md). Each
-	// increment is one session newly receiving a chain.
-	AutoChainSpawnAttachTotal = expvar.NewInt("naozhi_auto_chain_spawn_attach_total")
-
-	// AutoChainBackfillAttachTotal counts sessions that received a
-	// chain via the one-shot startup backfill (NewRouter →
-	// runAutoChainBackfillOnce). Steady-state delta should be 0 —
-	// the counter only ticks at startup.
-	AutoChainBackfillAttachTotal = expvar.NewInt("naozhi_auto_chain_backfill_attach_total")
-
-	// AutoChainBackfillSkippedNoWorkspace / NoCandidates / TOCTOUDrop /
-	// AlreadyFilled — per-reason skip breakdown for the startup backfill.
-	// Together they account for every candidate session inspected by
-	// runAutoChainBackfillOnce that did not result in an attach. expvar
-	// has no native label support, so split counters are the idiomatic
-	// alternative (see naozhi_cron_run_<state>_total above).
-	AutoChainBackfillSkippedNoWorkspace   = expvar.NewInt("naozhi_auto_chain_backfill_skipped_no_workspace_total")
-	AutoChainBackfillSkippedNoCandidates  = expvar.NewInt("naozhi_auto_chain_backfill_skipped_no_candidates_total")
-	AutoChainBackfillSkippedTOCTOUDrop    = expvar.NewInt("naozhi_auto_chain_backfill_skipped_toctou_drop_total")
-	AutoChainBackfillSkippedAlreadyFilled = expvar.NewInt("naozhi_auto_chain_backfill_skipped_already_filled_total")
-
-	// AutoChainTOCTOUCollisionTotal counts the number of sessionIDs that
-	// were dropped by the spawn-path or backfill-path phase-3 re-check
-	// (after pickWorkspaceChain returned them but before the lock-held
-	// apply). Steady non-zero values mean cron / sys / sibling spawns
-	// are racing chain attach frequently — investigate scheduler
-	// throughput.
-	AutoChainTOCTOUCollisionTotal = expvar.NewInt("naozhi_auto_chain_toctou_collision_total")
-
 	// AutoChainOriginsLengthMismatch counts ManagedSession.SetPrevSessionOrigins
 	// invocations that observed a length drift between prevSessionIDs and
 	// prevSessionOrigins (RFC v3 Arch-MINOR-1). Steady-state must be 0;
 	// any increment indicates a code path violated the append-only
 	// invariant on prev_session_ids.
 	AutoChainOriginsLengthMismatch = expvar.NewInt("naozhi_auto_chain_origins_length_mismatch_total")
+
+	// AutoChainRetiredOnStartup counts sessions whose prev_session_ids chain
+	// had auto-spawn / auto-backfill segments stripped by the one-time startup
+	// cleanup that replaced the auto-workspace-chain backfill (RFC
+	// docs/rfc/project-stable-session-key.md §9.2). One increment per session
+	// touched; idempotent across restarts (a cleaned chain has no auto-*
+	// origins left, so a second startup is a no-op and does not increment).
+	AutoChainRetiredOnStartup = expvar.NewInt("naozhi_auto_chain_retired_on_startup_total")
 )

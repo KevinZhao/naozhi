@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
 // osExit was previously the default Stop deadline-exceeded exit hook,
@@ -77,12 +78,13 @@ type Config struct {
 	// tick interval + daemon-specific knobs.
 	Daemons map[string]DaemonRuntimeConfig
 
-	// OnRunStarted / OnRunEnded receive run lifecycle events for
-	// dashboard WS broadcast.  Both nil-safe; either may be nil
-	// independently.  Manager invokes them outside any Manager-internal
-	// lock so handlers may take their own locks freely.
-	OnRunStarted func(DaemonRunStartedEvent)
-	OnRunEnded   func(DaemonRunEndedEvent)
+	// WorkspaceRoots enumerates the distinct workspace roots the
+	// attachment-gc daemon sweeps. Optional — only the attachment-gc
+	// daemon consumes it; nil disables that daemon's work (it logs and
+	// no-ops). Wired in cmd/naozhi from router default workspace +
+	// per-chat overrides + project paths (docs/rfc/attachment-gc-daemon.md
+	// §4.4). Kept out of Router because it spans router + project manager.
+	WorkspaceRoots WorkspaceRootLister
 
 	// NewTicker is an optional injection point for tests.  nil means
 	// time.NewTicker.  Test usage:
@@ -109,9 +111,18 @@ type Config struct {
 // every built-in daemon understands.  Daemon-specific fields are
 // passed via Daemons[name].Specific (DaemonConfig).
 type DaemonRuntimeConfig struct {
-	Enabled  bool
-	Tick     time.Duration
-	Specific DaemonConfig
+	Enabled bool
+	Tick    time.Duration
+	// RunOnStart makes runDaemonLoop fire one Tick immediately at
+	// startup, BEFORE the initial jitter + ticker loop. Without it a
+	// daemon's first Tick lands one full tick interval later (plus
+	// jitter), and a process that restarts more often than the tick
+	// interval may never tick at all. Low-frequency sweeper daemons
+	// (e.g. attachment-gc at 6h) need this; high-frequency daemons
+	// (auto-titler at 30s) generally don't. See
+	// docs/rfc/attachment-gc-daemon.md §4.6-3.
+	RunOnStart bool
+	Specific   DaemonConfig
 }
 
 const (
@@ -171,6 +182,21 @@ type daemonRecord struct {
 
 	// runs holds the per-daemon ring buffer of completed DaemonRuns.
 	runs *runRing
+
+	// runOnStart mirrors DaemonRuntimeConfig.RunOnStart: fire one Tick
+	// at startup before the jitter+ticker loop. See DaemonRuntimeConfig.
+	runOnStart bool
+}
+
+// ctxCancel bundles the daemon-loop context with its cancel function so
+// both are published through a single atomic.Pointer store. Folding them
+// together (R20260603-GO-4, #1653) eliminates the window that existed when
+// ctx was a plain struct field written before the cancel pointer was
+// atomically stored: a concurrent Stop could observe the cancel pointer as
+// nil while the freshly-written ctx was already driving spawned goroutines.
+type ctxCancel struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Manager runs all daemons.  Lifecycle:
@@ -188,35 +214,35 @@ type Manager struct {
 	// without taking a lock.
 	daemons []*daemonRecord
 	wg      sync.WaitGroup
-	ctx     context.Context
-	// cancelP holds the daemon-loop cancel function once Start has
-	// installed ctx + spawned goroutines. nil pointer ⇒ Start has not
-	// run; non-nil ⇒ ctx is live and cancellable. R242-GO-6 replaces
-	// the previous "started atomic.Bool + plain cancel field" pair —
-	// the bool/field happened-before contract was carried by a comment
-	// on Start; collapsing both signals into a single atomic.Pointer
-	// store makes the contract a property of the type rather than a
-	// load-bearing comment.
-	cancelP atomic.Pointer[context.CancelFunc]
+	// lifeP holds the daemon-loop ctx + its cancel function once Start
+	// has installed them and spawned goroutines. nil pointer ⇒ Start has
+	// not run; non-nil ⇒ ctx is live and cancellable. R242-GO-6 replaced
+	// the previous "started atomic.Bool + plain cancel field" pair with a
+	// single atomic.Pointer; R20260603-GO-4 (#1653) further folds the
+	// plain `ctx` field into the same atomic so there is no window between
+	// the ctx field write and the cancel publish — a concurrent Stop that
+	// observes a non-nil pointer is guaranteed to see a fully-populated
+	// ctx+cancel, and runDaemonLoop reads the same single source of truth.
+	// The atomic store/load is the single happens-before edge between
+	// Start, Stop, and the daemon goroutines.
+	lifeP atomic.Pointer[ctxCancel]
 
-	// Lifecycle hooks.  Held under atomic.Pointer so SetCallbacks
-	// (called late during startup wiring, after Hub is built) doesn't
-	// race recordRun callers. Reads happen on every Tick (twice — once
-	// at run start, once at run end); writes are once or twice during
-	// init.
+	// telemetry holds the runtelemetry.Broadcaster registered by the host
+	// (server.Hub) so Manager produces run-lifecycle events directly onto
+	// the shared seam cron also uses (#1723 Phase 1). Held under
+	// atomic.Pointer because SetTelemetry (called late during startup
+	// wiring, after the Hub is built) can race the emitRun{Started,Ended}
+	// reads on every Tick. nil pointer ⇒ no broadcaster registered yet
+	// (tests / no-WS) and emit* is a silent no-op.
 	//
-	// R242-GO-16 + R246-ARCH-6 alignment: previously held under a
-	// sync.RWMutex with plain function fields. Switched to
-	// atomic.Pointer[holder] to (a) drop the lock-acquire pair on every
-	// Tick read, (b) match the upstream/connector.go pattern where
-	// SetDiscoverFunc / SetPreviewFunc already use atomic.Pointer for
-	// the identical "wired late, read often" lifecycle, and (c) let
-	// the race detector enforce the invariant rather than relying on a
-	// "main is single-threaded" doc comment. See holder type docs in
-	// hook_holders.go for why we wrap the function values in a struct
-	// (atomic.Pointer needs a concrete pointee type).
-	onRunStarted atomic.Pointer[onRunStartedHolder]
-	onRunEnded   atomic.Pointer[onRunEndedHolder]
+	// R20260527-GO-1 alignment: identical atomic.Pointer[Broadcaster]
+	// shape to cron.Scheduler.telemetry — one pattern across both
+	// schedulers for the "wired late, read often" lifecycle, and the race
+	// detector enforces the invariant rather than a "main is
+	// single-threaded" doc comment. Replaces the previous
+	// atomic.Pointer[onRun*Holder] callback-pair + SetCallbacks API
+	// (deleted with hook_holders.go).
+	telemetry atomic.Pointer[runtelemetry.Broadcaster]
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -258,14 +284,9 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		tickFn:  cfg.NewTicker,
 	}
-	// Route initial callbacks through SetCallbacks so onRunStarted /
-	// onRunEnded have a single write path (R242-GO-16). The constructor
-	// is the only caller before publication, so the lock acquired by
-	// SetCallbacks is uncontended; the symmetry vs the late re-bind from
-	// main.go (when Hub is finally available) avoids the previous
-	// "constructor writes plain field, runtime writes via mutex" race
-	// shape that left the lock contract one-sided.
-	m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded)
+	// telemetry starts nil (no broadcaster). The host wires it late via
+	// SetTelemetry once the Hub exists (#1723 Phase 1) — same late-inject
+	// shape cron uses. Until then emit* is a silent no-op.
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
 		return m, nil
@@ -290,9 +311,10 @@ func NewManager(cfg Config) (*Manager, error) {
 			continue
 		}
 		deps := DaemonDeps{
-			Router: daemonRouter,
-			Runner: cfg.Runner,
-			Cfg:    runtime.Specific,
+			Router:         daemonRouter,
+			Runner:         cfg.Runner,
+			Cfg:            runtime.Specific,
+			WorkspaceRoots: cfg.WorkspaceRoots,
 		}
 		d, err := factory.Build(deps)
 		if err != nil {
@@ -315,6 +337,7 @@ func NewManager(cfg Config) (*Manager, error) {
 			tick:             tick,
 			processStartedAt: now,
 			runs:             newRunRing(),
+			runOnStart:       runtime.RunOnStart,
 		})
 	}
 	return m, nil
@@ -345,7 +368,7 @@ func NewManager(cfg Config) (*Manager, error) {
 // helper layers would crash with an unhelpful stack. Fall back to
 // context.Background() with a Warn so the misuse is loud but the daemon
 // goroutines still come up — the eventual Stop(stopCtx) cancels via
-// m.cancelP regardless of which parent was used at Start.
+// m.lifeP regardless of which parent was used at Start.
 func (m *Manager) Start(parent context.Context) {
 	if !m.enabled {
 		return
@@ -357,17 +380,22 @@ func (m *Manager) Start(parent context.Context) {
 	}
 	startedThisCall := false
 	m.startOnce.Do(func() {
-		var cancel context.CancelFunc
-		m.ctx, cancel = context.WithCancel(parent)
+		ctx, cancel := context.WithCancel(parent)
+		life := &ctxCancel{ctx: ctx, cancel: cancel}
+		// Publish ctx+cancel as one atomic store BEFORE spawning the
+		// daemon goroutines (R20260603-GO-4, #1653). The store is the
+		// single happens-before edge for Start↔Stop and Start↔daemon:
+		// a concurrent Stop now either observes nil (no goroutines exist
+		// yet, nothing to cancel) or a fully-populated life (ctx is live
+		// and cancellable). The goroutines receive `life` by value at
+		// spawn, so each daemon's ctx read is ordered after this store
+		// via goroutine-creation happens-before. There is no longer a
+		// window where ctx is live but cancel is unpublished.
+		m.lifeP.Store(life)
 		for _, rec := range m.daemons {
 			m.wg.Add(1)
-			go m.runDaemonLoop(rec)
+			go m.runDaemonLoop(rec, life)
 		}
-		// Publish cancel AFTER ctx/goroutines are installed so a
-		// concurrent Stop that observes a non-nil cancelP is guaranteed
-		// to see m.ctx populated. The atomic store is the single
-		// happens-before edge between Start and Stop (R242-GO-6).
-		m.cancelP.Store(&cancel)
 		slog.Info("sysession: manager started", "daemons", len(m.daemons))
 		startedThisCall = true
 	})
@@ -412,11 +440,12 @@ func (m *Manager) Stop(stopCtx context.Context) {
 	if !m.enabled {
 		return
 	}
-	// R232-GO-3 / R242-GO-6: short-circuit when Start was never called.
-	// cancelP is published inside startOnce.Do AFTER ctx/goroutines are
-	// installed, so the only way to observe nil here is "Start has not
-	// entered its critical section yet" — in that case there are no
-	// daemons to cancel and no wg slots to drain.
+	// R232-GO-3 / R242-GO-6 / R20260603-GO-4: short-circuit when Start was
+	// never called. lifeP (ctx+cancel) is published inside startOnce.Do as a
+	// single atomic store BEFORE goroutines spawn, so the only way to observe
+	// nil here is "Start has not entered its critical section yet" — in that
+	// case there are no goroutines in flight and no daemons to cancel and
+	// no wg slots to drain.
 	//
 	// R20260527122801-GO-003: do NOT consume stopOnce on this early path.
 	// Burning stopOnce here would silently disarm a later legitimate Stop:
@@ -425,15 +454,17 @@ func (m *Manager) Stop(stopCtx context.Context) {
 	// daemon goroutines until process exit. Returning without touching
 	// stopOnce keeps the early path a true no-op so a real Stop after a
 	// successful Start still cancels the daemon ctx exactly once.
-	cancel := m.cancelP.Load()
-	if cancel == nil {
+	life := m.lifeP.Load()
+	if life == nil {
 		return
 	}
 	m.stopOnce.Do(func() {
-		// cancel was loaded above and is published only after ctx is
-		// installed — the load is the happens-before pair for the
-		// store inside Start.
-		(*cancel)()
+		// life was loaded above and is published as a single atomic
+		// store inside Start (ctx+cancel together) — the load is the
+		// happens-before pair for that store. R20260603-GO-4 (#1653):
+		// observing non-nil life guarantees cancel is valid, so there
+		// is no window where we could see a live ctx but a nil cancel.
+		life.cancel()
 		done := make(chan struct{})
 		// R234-GO-5: this watcher goroutine is intentionally not tracked
 		// in any WaitGroup. The only termination path on the stopCtx
@@ -513,47 +544,6 @@ func (m *Manager) Inspector() []DaemonStatus {
 	return out
 }
 
-// SetCallbacks installs (or replaces) the OnRunStarted / OnRunEnded
-// hooks.  Safe to call after Start — main.go uses this so the WS hub
-// (which is built after the Manager) can wire daemon_run_* broadcasts.
-//
-// Pass nil to clear a hook.  Either argument may be nil independently.
-//
-// R246-ARCH-6 alignment: implemented via atomic.Pointer.Store so
-// concurrent Set / load sequences are well-defined without a mutex.
-// The two hook fields are stored independently — passing one nil and
-// one non-nil clears one without affecting the other.
-func (m *Manager) SetCallbacks(onRunStarted func(DaemonRunStartedEvent), onRunEnded func(DaemonRunEndedEvent)) {
-	if onRunStarted == nil {
-		m.onRunStarted.Store(nil)
-	} else {
-		m.onRunStarted.Store(&onRunStartedHolder{fn: onRunStarted})
-	}
-	if onRunEnded == nil {
-		m.onRunEnded.Store(nil)
-	} else {
-		m.onRunEnded.Store(&onRunEndedHolder{fn: onRunEnded})
-	}
-}
-
-// loadOnRunStarted returns the currently installed start hook, or nil
-// if none is set. Lock-free; safe from any goroutine.
-func (m *Manager) loadOnRunStarted() func(DaemonRunStartedEvent) {
-	if h := m.onRunStarted.Load(); h != nil {
-		return h.fn
-	}
-	return nil
-}
-
-// loadOnRunEnded returns the currently installed end hook, or nil if
-// none is set. Lock-free; safe from any goroutine.
-func (m *Manager) loadOnRunEnded() func(DaemonRunEndedEvent) {
-	if h := m.onRunEnded.Load(); h != nil {
-		return h.fn
-	}
-	return nil
-}
-
 // DaemonStatus is the public read-only view of a daemon's state.
 // Mirrors the JSON shape the dashboard endpoint emits (see RFC §9.2).
 type DaemonStatus struct {
@@ -574,8 +564,28 @@ type DaemonStatus struct {
 //
 // time.NewTimer + Stop on the jitter (NOT time.After) so a fast-shutdown
 // case doesn't leak the timer past goroutine exit.  RFC v2.1 §5.1.
-func (m *Manager) runDaemonLoop(rec *daemonRecord) {
+func (m *Manager) runDaemonLoop(rec *daemonRecord, life *ctxCancel) {
 	defer m.wg.Done()
+	// life is passed by Start at spawn time (R20260603-GO-4, #1653); reading
+	// life.ctx here is ordered after Start's atomic store via goroutine-
+	// creation happens-before, so no atomic load is needed on this hot path.
+	ctx := life.ctx
+
+	// RunOnStart: fire one Tick immediately, before the jitter+ticker
+	// loop. Low-frequency sweepers (attachment-gc) need a deterministic
+	// startup run so a process that restarts more often than its tick
+	// interval still makes progress. Honour ctx + breaker first so a
+	// cancelled/disabled daemon doesn't tick. See DaemonRuntimeConfig.
+	if rec.runOnStart {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if !rec.disabled.Load() {
+			m.runOnce(ctx, rec, DaemonTriggerScheduled)
+		}
+	}
 
 	// Jitter range = [0, tick).  Done before the first tick so daemons
 	// with similar tick periods (e.g. two daemons both at 30s) don't
@@ -586,7 +596,7 @@ func (m *Manager) runDaemonLoop(rec *daemonRecord) {
 		delay := time.Duration(mrand.Int64N(int64(rec.tick)))
 		jitter := time.NewTimer(delay)
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			jitter.Stop()
 			return
 		case <-jitter.C:
@@ -598,13 +608,13 @@ func (m *Manager) runDaemonLoop(rec *daemonRecord) {
 
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ch:
 			if rec.disabled.Load() {
 				continue // silently skip disabled (post-breaker) ticks
 			}
-			m.runOnce(rec, DaemonTriggerScheduled)
+			m.runOnce(ctx, rec, DaemonTriggerScheduled)
 		}
 	}
 }
@@ -618,7 +628,7 @@ func (m *Manager) runDaemonLoop(rec *daemonRecord) {
 // creates an ordering bug where panic-recover may run before
 // inflight.Store(false), potentially leaving the daemon's CAS gate
 // stuck open.  Keep this in one place.  RFC v2.1 §5.1.
-func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
+func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger DaemonTriggerKind) {
 	if !rec.inflight.CompareAndSwap(false, true) {
 		slog.Debug("sysession: skipping overlapping tick",
 			"daemon", rec.daemon.Name())
@@ -627,14 +637,7 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 	runID := newRunID()
 	startedAt := time.Now()
 
-	if cb := m.loadOnRunStarted(); cb != nil {
-		cb(DaemonRunStartedEvent{
-			Name:      rec.daemon.Name(),
-			RunID:     runID,
-			Trigger:   trigger,
-			StartedAt: startedAt,
-		})
-	}
+	m.emitRunStarted(rec.daemon.Name(), runID, trigger, startedAt)
 
 	var (
 		report  TickReport
@@ -649,7 +652,7 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 	// Reversing the order leaves any goroutine reading tickCtx during
 	// recordRun observing a context that was already cancelled by the
 	// inner defer — easy to misclassify as DaemonErrorClassCanceled.
-	tickCtx, cancel := context.WithTimeout(m.ctx, m.cfg.TickTimeout)
+	tickCtx, cancel := context.WithTimeout(ctx, m.cfg.TickTimeout)
 	defer cancel()
 
 	defer func() {
@@ -672,7 +675,7 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 }
 
 // recordRun writes the DaemonRun to the per-daemon ring, updates the
-// failure counters, trips the breaker if needed, and fires OnRunEnded.
+// failure counters, trips the breaker if needed, and fires emitRunEnded.
 //
 // Failure-class counters (RFC §7.4):
 //
@@ -742,16 +745,7 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		// success streak is not nuked by an orderly shutdown). R236-QA-05.
 	}
 
-	if cb := m.loadOnRunEnded(); cb != nil {
-		cb(DaemonRunEndedEvent{
-			Name:       rec.daemon.Name(),
-			RunID:      runID,
-			State:      dr.State,
-			DurationMS: dr.DurationMS,
-			ErrorClass: dr.ErrorClass,
-			Trigger:    dr.Trigger,
-		})
-	}
+	m.emitRunEnded(rec.daemon.Name(), runID, dr.State, dr.DurationMS, dr.ErrorClass, dr.Trigger)
 }
 
 // flattenTickReport converts a TickReport into the Stats map shape

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/naozhi/naozhi/internal/assets"
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
@@ -112,24 +113,27 @@ type Profile struct {
 	// Missing key == false. Adding a new feature: extend the keys list in
 	// dashboard.js featureForCurrent + every Profile that supports it.
 	Features map[string]bool
+
+	// AssetProvider, when non-nil, exposes this backend's installed assets
+	// (skills/plugins/agents/...) to the dashboard asset browser read-only.
+	// The on-disk layout is fully encapsulated in the implementation —
+	// Profile stays a capability description, unaware of any backend's
+	// directory shape. nil = no asset view (dashboard hides the entry).
+	// Injected post-registration via AttachAssetProvider from the neutral
+	// server layer (the lightweight backend package must not import the
+	// file-scanning ccassets package). RFC docs/rfc/cc-asset-browser.md §3.1.
+	AssetProvider assets.Provider
 }
 
 // ProtocolDeps bundles dependencies needed to construct certain protocols.
-// Most fields are claude-specific (settings file plumbing); ACP profiles
-// can ignore them.
-type ProtocolDeps struct {
-	// SettingsFile is the path to a filtered claude settings.json override
-	// (with hooks calling back into naozhi stripped). Empty for protocols
-	// that don't honor it.
-	SettingsFile string
-
-	// RefreshSettings, when non-nil, is invoked at the start of every
-	// BuildArgs call. Returning a non-empty path swaps SettingsFile for
-	// the next spawn; returning "" means "keep the prior value, refresh
-	// transiently failed" — the caller must NOT clear an existing path
-	// just because refresh failed (Bedrock auth would break).
-	RefreshSettings func() string
-}
+//
+// It is currently empty: the claude backend used to carry a filtered
+// settings-override file path here, but PR1 of
+// docs/rfc/direct-user-settings.md switched claude to `--setting-sources user`
+// (cc reads ~/.claude/settings.json directly), removing the override plumbing.
+// The struct is retained as the NewProtocol parameter so adding future
+// per-spawn dependencies does not change every backend's factory signature.
+type ProtocolDeps struct{}
 
 // registryEntry pairs a Profile with its registration order so All()
 // can return profiles in the order Register was called.
@@ -173,6 +177,24 @@ func Get(id string) (Profile, bool) {
 		return Profile{}, false
 	}
 	return e.profile, true
+}
+
+// AttachAssetProvider sets the AssetProvider on an already-registered Profile.
+// Returns false if id is unknown. Deliberate post-registration mutator: the
+// lightweight backend package must NOT import the file-scanning ccassets
+// package (that would re-create an import cycle). A neutral top-level layer
+// (server wiring) that legitimately imports both calls this after
+// RegisterDefaults. RFC docs/rfc/cc-asset-browser.md §3.0/§3.1.
+func AttachAssetProvider(id string, p assets.Provider) bool {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	e, ok := registry[id]
+	if !ok {
+		return false
+	}
+	e.profile.AssetProvider = p
+	registry[id] = e
+	return true
 }
 
 // All returns every registered Profile in registration order. The slice

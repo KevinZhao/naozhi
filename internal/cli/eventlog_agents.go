@@ -536,6 +536,30 @@ func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx
 // distinct internal_agent_id for the same tool_use_id overwrites (Resolve
 // should never produce divergent values for the same tool_use_id, but the
 // guard keeps the state machine simple if it ever does).
+// backfillSubagentInternalID writes internalAgentID into the live
+// SubagentInfo for toolUseID via the O(1) toolUseIndex sidecar. Returns true
+// when the indexed slot validated and was written; false (caller falls back to
+// the linear scan) when the sidecar lacks the key or the indexed slot no longer
+// matches the ToolUseID. Callers must hold l.mu. R164029-PERF-7 (#1597).
+func (l *EventLog) backfillSubagentInternalID(toolUseID, internalAgentID string) bool {
+	ref, ok := l.toolUseIndex[toolUseID]
+	if !ok {
+		return false
+	}
+	slice := l.turnAgents
+	if ref.background {
+		slice = l.bgAgents
+	}
+	if ref.index < 0 || ref.index >= len(slice) {
+		return false
+	}
+	if slice[ref.index].ToolUseID != toolUseID {
+		return false
+	}
+	slice[ref.index].InternalAgentID = internalAgentID
+	return true
+}
+
 func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID string) {
 	if toolUseID == "" {
 		return
@@ -544,16 +568,27 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	defer l.mu.Unlock()
 
 	// Backfill live SubagentInfo first (hot read path for Snapshot).
-	for i := range l.turnAgents {
-		if l.turnAgents[i].ToolUseID == toolUseID {
-			l.turnAgents[i].InternalAgentID = internalAgentID
-			break
+	//
+	// R164029-PERF-7 (#1597): the toolUseIndex sidecar (keyed by ToolUseID,
+	// populated on the "agent" Append) gives an O(1) slot lookup, so a
+	// TeamCreate fan-out's per-resolve OnResolve callback no longer walks
+	// turnAgents+bgAgents linearly under wlock while readLoop's hot Append
+	// path queues behind it. Re-validate ToolUseID at the indexed slot (the
+	// slices only grow within a turn and the sidecar is reset on the same
+	// turn boundary, but the guard keeps a stale index from corrupting an
+	// unrelated row) and fall back to the linear scan on any miss.
+	if !l.backfillSubagentInternalID(toolUseID, internalAgentID) {
+		for i := range l.turnAgents {
+			if l.turnAgents[i].ToolUseID == toolUseID {
+				l.turnAgents[i].InternalAgentID = internalAgentID
+				break
+			}
 		}
-	}
-	for i := range l.bgAgents {
-		if l.bgAgents[i].ToolUseID == toolUseID {
-			l.bgAgents[i].InternalAgentID = internalAgentID
-			break
+		for i := range l.bgAgents {
+			if l.bgAgents[i].ToolUseID == toolUseID {
+				l.bgAgents[i].InternalAgentID = internalAgentID
+				break
+			}
 		}
 	}
 
@@ -652,13 +687,21 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	total := len(l.turnAgents) + len(l.bgAgents)
-	if total == 0 {
+	nTurn := len(l.turnAgents)
+	nBg := len(l.bgAgents)
+	if nTurn == 0 && nBg == 0 {
 		return nil
 	}
-	out := make([]SubagentInfo, total)
+	// Single-side fast paths: only one copy needed, no merge allocation.
+	if nBg == 0 {
+		return append([]SubagentInfo(nil), l.turnAgents...)
+	}
+	if nTurn == 0 {
+		return append([]SubagentInfo(nil), l.bgAgents...)
+	}
+	out := make([]SubagentInfo, nTurn+nBg)
 	copy(out, l.turnAgents)
-	copy(out[len(l.turnAgents):], l.bgAgents)
+	copy(out[nTurn:], l.bgAgents)
 	return out
 }
 

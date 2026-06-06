@@ -382,12 +382,41 @@ func TestRunStore_DeleteJobRemovesSubtree(t *testing.T) {
 	}
 }
 
+// TestRunStore_DeleteJobReclaimsJobLock pins R249-ARCH-3 (#971): DeleteJob
+// must drop the per-job *sync.Mutex from jobLocks so a long-lived deployment
+// that creates and deletes many jobs does not grow the map without bound.
+// Before the fix jobLocks entries were "never reclaimed", contradicting the
+// claimed maxJobsHardCap bound.
+func TestRunStore_DeleteJobReclaimsJobLock(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := mustGenerateID()
+
+	s.Append(makeRun(jobID, time.Now()))
+	// Appending takes jobLock, so the entry must exist now.
+	if _, ok := s.jobLocks.Load(jobID); !ok {
+		t.Fatalf("expected jobLocks entry after Append")
+	}
+
+	s.DeleteJob(jobID)
+	if _, ok := s.jobLocks.Load(jobID); ok {
+		t.Fatalf("jobLocks entry still present after DeleteJob; per-job mutex leaked")
+	}
+
+	// Also confirm no entries linger in aggregate.
+	count := 0
+	s.jobLocks.Range(func(_, _ any) bool { count++; return true })
+	if count != 0 {
+		t.Fatalf("jobLocks has %d residual entries after deleting the only job; want 0", count)
+	}
+}
+
 // TestRunStore_DeleteJobIdempotent — DeleteJob on a non-existent ID must
 // not panic or return an error.
 func TestRunStore_DeleteJobIdempotent(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	// The lock entry will be created; the rmdir is a no-op.
+	// The lock entry is created then reclaimed; the rmdir is a no-op.
 	s.DeleteJob(mustGenerateID())
 	// And again — still fine.
 	s.DeleteJob(mustGenerateID())
@@ -487,6 +516,55 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	}
 	if got[0].RunID != good.RunID {
 		t.Fatalf("List returned wrong run: %s", got[0].RunID)
+	}
+}
+
+// TestRunStore_DecodeParallel_UnreadableCountedSeparately pins R20260603-CR-1
+// (#1693): a slot whose file is unreadable (EACCES) must NOT be reflected in
+// corruptCount — it must be tracked in the separate unreadableCount return so
+// warmCache can log a distinct message for I/O errors vs data corruption.
+// We use chmod 0000 to simulate a transient IO barrier.
+//
+// diskDecodeParallelThreshold == 16, so we need > 16 candidates to reach
+// decodeRunsParallel. We append 18 runs and make one unreadable.
+func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chmod 0000 does not deny access")
+	}
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
+	jobID := mustGenerateID()
+
+	// Append 18 runs (> diskDecodeParallelThreshold=16) so that
+	// diskListNewestFirst fans out via decodeRunsParallel.
+	const total = 18
+	now := time.Now()
+	runIDs := make([]string, total)
+	for i := 0; i < total; i++ {
+		r := makeRun(jobID, now.Add(time.Duration(i)*time.Second))
+		s.Append(r)
+		runIDs[i] = r.RunID
+	}
+
+	// Make the last (newest) run unreadable — permission error, not corruption.
+	unreadablePath := filepath.Join(s.root, jobID, runIDs[total-1]+".json")
+	if err := os.Chmod(unreadablePath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadablePath, 0o600) })
+
+	// Call diskListNewestFirst directly — bypasses the in-memory cache and
+	// exercises the decodeRunsParallel worker path.
+	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, 100, time.Time{})
+	if corruptCount != 0 {
+		t.Fatalf("corruptCount=%d want 0 (EACCES is not ErrCorruptRun)", corruptCount)
+	}
+	if unreadableCount != 1 {
+		t.Fatalf("unreadableCount=%d want 1 (unreadable file must be counted separately)", unreadableCount)
+	}
+	if len(rows) != total-1 {
+		t.Fatalf("rows len=%d want %d (all readable files returned)", len(rows), total-1)
 	}
 }
 
@@ -750,6 +828,41 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 	}
 }
 
+// TestRunStore_ListHonoursConfiguredKeepCount is the regression test for
+// R249-ARCH-1 (#969): once SchedulerConfig.RunsKeepCount is plumbed into
+// s.keepCount, List / RecentSessionIDs must clamp the requested limit to the
+// configured retention cap rather than the hardcoded DefaultRunsKeepCount
+// (200). An operator who raised retention above 200 previously could never
+// page the extra rows because the read side silently truncated at 200.
+func TestRunStore_ListHonoursConfiguredKeepCount(t *testing.T) {
+	t.Parallel()
+	const keep = DefaultRunsKeepCount + 50 // 250 — above the old hardcoded clamp
+	s := newTestStore(t, keep, 30*24*time.Hour)
+	s.enableTrimGC = false // keep every append so the read clamp is the only limiter
+	jobID := mustGenerateID()
+
+	const total = DefaultRunsKeepCount + 10 // 210 — more than the old clamp, fewer than keep
+	now := time.Now()
+	for i := 0; i < total; i++ {
+		run := makeRun(jobID, now.Add(time.Duration(i)*time.Second))
+		run.SessionID = run.RunID // distinct non-empty session per run
+		s.Append(run)
+	}
+
+	// Request more than DefaultRunsKeepCount; the clamp must now allow up to
+	// s.keepCount, so all `total` rows come back.
+	got := s.List(jobID, keep, time.Time{})
+	if len(got) != total {
+		t.Fatalf("List(limit=%d) returned %d rows; want %d (clamp must honour keepCount, not DefaultRunsKeepCount)", keep, len(got), total)
+	}
+
+	// RecentSessionIDs mirrors the same clamp.
+	sids := s.RecentSessionIDs(jobID, keep)
+	if len(sids) != total {
+		t.Fatalf("RecentSessionIDs(n=%d) returned %d ids; want %d", keep, len(sids), total)
+	}
+}
+
 // newEntryFromRows builds a warm recentCacheEntry whose ring is seeded
 // from rows (newest-first). appendsSinceTrim sets the bookkeeping
 // counter for skipAppendTrim test cases. Pure test helper for R242-GO-8
@@ -876,6 +989,39 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			wantSkip:    false,
 			wantCounter: 0,
 		},
+		{
+			// R090031-CR-3: capSafe used < instead of <=; when
+			// count+appendTrimBatch == keepCount the cache can still
+			// prove no removal is needed (trimJobLocked only removes
+			// when len(items) > keepCount), so we must skip.
+			name: "count+appendTrimBatch == keepCount: capSafe boundary skip",
+			entry: newEntryFromRows(func() []CronRunSummary {
+				// keepCount=10, appendTrimBatch=10 → count=0: 0+10==10 → capSafe
+				r := make([]CronRunSummary, 0)
+				return r
+			}(), 0),
+			keepCount:   appendTrimBatch,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 0,
+		},
+		{
+			// count+appendTrimBatch exactly == keepCount with rows present.
+			// With <= semantics capSafe=true; windowSafe=true → skip.
+			name: "count+appendTrimBatch == keepCount with fresh rows: skip",
+			entry: newEntryFromRows(func() []CronRunSummary {
+				// keepCount=15, count=5: 5+10==15 → capSafe with <=
+				r := make([]CronRunSummary, 5)
+				for i := range r {
+					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i+1) * time.Minute)}
+				}
+				return r
+			}(), 0),
+			keepCount:   15,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -890,7 +1036,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			// here so the assertJobLockHeld guard inside doesn't fire.
 			lock := s.jobLock("job")
 			lock.Lock()
-			got := s.skipAppendTrim("job")
+			got := s.skipAppendTrim("job", now)
 			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
@@ -912,7 +1058,7 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 	lock := s.jobLock("never-seen")
 	lock.Lock()
 	defer lock.Unlock()
-	if s.skipAppendTrim("never-seen") {
+	if s.skipAppendTrim("never-seen", time.Now()) {
 		t.Error("expected false for unknown jobID")
 	}
 }
@@ -1111,7 +1257,7 @@ func TestRunStore_DiskList_BeforeStartedAtFilter(t *testing.T) {
 	}
 
 	before := now.Add(-time.Hour)
-	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	rows, corruptCount, _ := s.diskListNewestFirst(jobID, 100, before)
 	// The two corrupt newer entries are read+rejected (corruptCount bumps).
 	// Pre-fix this was 0 (coarse gate skipped them); post-fix it's 2 because
 	// the strict StartedAt filter is the sole truth — we MUST read each
@@ -1155,7 +1301,7 @@ func TestRunStore_DiskList_BeforeStartedAtMtimeDivergence(t *testing.T) {
 	}
 
 	before := now.Add(-time.Hour)
-	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	rows, corruptCount, _ := s.diskListNewestFirst(jobID, 100, before)
 	if corruptCount != 0 {
 		t.Fatalf("unexpected corruptCount=%d", corruptCount)
 	}

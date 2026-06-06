@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -149,6 +150,15 @@ var pinSha256HexRe = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 // against a leaked GitHub token swapping both files in lock-step. The pin
 // is a TOFU stopgap pending a proper signing flow (cosign / Sigstore).
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
+	// R20260606-SEC-2 (#1823): if the operator demanded strict integrity
+	// (NAOZHI_UPGRADE_REQUIRE_PIN) but no strong-trust anchor exists — no
+	// embedded signing key and no out-of-band checksums pin — refuse before
+	// touching the network rather than silently trusting the same-channel
+	// checksums.txt that a leaked release token could swap in lock-step.
+	if err := enforceStrongTrust(); err != nil {
+		return "", err
+	}
+
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
 
@@ -281,12 +291,41 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 		}
 		return "", errors.Join(errs...)
 	}
+
+	// Success path: force the installed binary executable. Do NOT rely on
+	// copyFile having preserved 0755 — copyFile opens the staging file with
+	// the *source* mode, and the downloaded binary can legitimately be 0600
+	// (fetchFile writes 0600; Download chmods it 0755 only after checksum
+	// verification, and on a loaded host that chmod has been observed not to
+	// stick before the stage copy reads st.Mode()). A umask can also strip
+	// bits off the OpenFile request. Either way an un-executable install
+	// makes systemd fail with 203/EXEC — the v0.0.27 upgrade outage. One
+	// explicit chmod here removes all of that dependence.
+	if err := os.Chmod(installPath, 0o755); err != nil {
+		// The new binary is in place but not executable. Restore the backup
+		// so the service keeps running the old (working) binary.
+		errs := []error{fmt.Errorf("chmod installed binary 0755: %w", err)}
+		if rerr := copyFile(backupPath, installPath); rerr != nil {
+			errs = append(errs, fmt.Errorf("restore backup after chmod failure: %w", rerr))
+		} else {
+			if cerr := os.Chmod(installPath, 0o755); cerr != nil {
+				errs = append(errs, fmt.Errorf("chmod restored binary: %w", cerr))
+			}
+			_ = os.Remove(backupPath)
+		}
+		return "", errors.Join(errs...)
+	}
 	return backupPath, nil
 }
 
 // Rollback restores backupPath → installPath and removes the backup file.
 // The backup is created with 0600 mode (see copyFileBackup) so we chmod
 // the restored binary back to 0755 to keep it executable for systemd.
+//
+// As of the v0.0.27 fix the upgrade flow no longer auto-rolls-back on a
+// restart-confirmation timeout (a slow Type=notify cold start is not a bad
+// binary). Rollback is retained as the explicit recovery primitive an
+// operator can invoke when an upgrade genuinely needs reverting.
 func Rollback(installPath, backupPath string) error {
 	if err := copyFile(backupPath, installPath); err != nil {
 		return fmt.Errorf("rollback restore: %w", err)
@@ -366,6 +405,58 @@ func isGitHubAssetHost(host string) bool {
 		strings.HasSuffix(host, ".githubusercontent.com")
 }
 
+// blockPrivateDialContext returns a DialContext function that resolves the
+// target hostname and rejects any IP address that belongs to a reserved range
+// (loopback, link-local, private, unspecified).  This closes the DNS
+// rebinding / SSRF vector where a hostname that passes the github.com
+// allowlist check later resolves to an internal address such as
+// 169.254.169.254 (AWS/GCP IMDS) or an RFC-1918 address.  (R20260603-SEC-1)
+//
+// The function is injected into http.Transport.DialContext so every TCP
+// connection made by fetchFile goes through the IP guard after DNS
+// resolution, before any bytes are exchanged.
+//
+// The guard is skipped (nil is returned) when testHTTPTransport is set,
+// because test servers run on loopback and would be incorrectly rejected.
+func blockPrivateDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if testHTTPTransport != nil {
+		// Test mode: do not block loopback so httptest servers work.
+		return nil
+	}
+	dialer := &net.Dialer{}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("selfupdate: malformed dial address %q: %w", addr, err)
+		}
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("selfupdate: DNS lookup %q: %w", host, err)
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("selfupdate: DNS lookup %q returned no addresses", host)
+		}
+		// Require every resolved address to be non-reserved (any one private
+		// IP rejects the whole dial).
+		for _, ia := range addrs {
+			ip := ia.IP
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsUnspecified() {
+				return nil, fmt.Errorf("selfupdate: refused connection to reserved IP %s (DNS rebinding guard)", ip)
+			}
+		}
+		// R20260603-SEC-13: dial the *validated* IP directly rather than the
+		// hostname. Passing host back to DialContext would trigger a second DNS
+		// resolution that an attacker controlling the authoritative server can
+		// answer with a private IP this time (classic TOCTOU DNS rebinding) —
+		// the bytes-on-wire connection would then reach the rebound address even
+		// though the address we vetted was public. Pinning addrs[0].IP closes
+		// that window. TLS SNI / cert verification still uses the URL host via
+		// the Transport's TLSClientConfig.ServerName, so name-based TLS is
+		// unaffected.
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+	}
+}
+
 // checkPlatform returns ErrUnsupportedPlatform on operating systems that have
 // no entry in the release matrix (currently Windows only).
 func checkPlatform() error {
@@ -420,9 +511,20 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// host. Without this guard the SHA-256 verification is no longer
 	// load-bearing — both files travel the same path and could be replaced
 	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
+	//
+	// R20260603-SEC-1: inject a DialContext that rejects reserved IPs after
+	// DNS resolution to close the DNS rebinding / SSRF path (169.254.169.254,
+	// RFC-1918, loopback).  In test mode blockPrivateDialContext() returns nil
+	// and testHTTPTransport is used as-is so httptest servers on loopback work.
+	var transport http.RoundTripper
+	if dialCtx := blockPrivateDialContext(); dialCtx != nil {
+		transport = &http.Transport{DialContext: dialCtx}
+	} else {
+		transport = testHTTPTransport // nil in production falls back to http.DefaultTransport
+	}
 	client := &http.Client{
 		Timeout:   defaultTimeout,
-		Transport: testHTTPTransport, // nil in production → http.DefaultTransport
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")
@@ -562,6 +664,16 @@ func copyFile(src, dst string) error {
 // of src's mode bits. Use for the .naozhi-upgrade.bak path on shared
 // install directories so the brief window before the backup is removed
 // does not expose the prior binary copy as world-readable / executable.
+//
+// R20260603-SEC-9: dst is opened with O_CREATE|O_EXCL|O_WRONLY so a hostile
+// UID on a shared install dir cannot pre-place a symlink at the (predictable)
+// .naozhi-upgrade.bak path and have the backup write follow it onto an
+// arbitrary file. A normal upgrade leaves a stale .bak from the previous run,
+// which would make O_EXCL fail spuriously, so we first os.Remove(dst) (a
+// regular unlink that also breaks any pre-placed symlink without following
+// it). O_EXCL then still guards the TOCTOU window between the unlink and the
+// open: an attacker who re-creates a symlink in that gap is rejected rather
+// than followed.
 func copyFileBackup(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -569,7 +681,14 @@ func copyFileBackup(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Clear any leftover backup (or pre-placed symlink) from a prior run.
+	// os.Remove unlinks the path itself; it never follows a symlink to its
+	// target, so a malicious link is severed rather than written through.
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale backup %s: %w", dst, err)
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open destination %s: %w", dst, err)
 	}

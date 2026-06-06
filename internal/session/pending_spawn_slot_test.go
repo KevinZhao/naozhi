@@ -1,7 +1,7 @@
 package session
 
 // R215-ARCH-P1-2 regression tests. spawnSession used to manage
-// r.pendingSpawns via 4 manually-paired ++ / -- segments. panicSafeSpawn
+// r.pp.pendingSpawns via 4 manually-paired ++ / -- segments. panicSafeSpawn
 // covered only one of them. Any panic in the other 3 (or any future
 // early-return added without a manual --) would strand the counter and
 // every subsequent GetOrCreate would refuse with ErrMaxProcs until the
@@ -27,20 +27,20 @@ func TestPendingSpawnSlot_ReleaseLockedIsIdempotent(t *testing.T) {
 	r := &Router{}
 	r.mu.Lock()
 	slot := r.acquirePendingSpawnSlotLocked()
-	if r.pendingSpawns != 1 {
-		t.Fatalf("pendingSpawns=%d after acquire, want 1", r.pendingSpawns)
+	if r.pp.pendingSpawns != 1 {
+		t.Fatalf("pendingSpawns=%d after acquire, want 1", r.pp.pendingSpawns)
 	}
 	slot.releaseLocked()
-	if r.pendingSpawns != 0 {
-		t.Fatalf("pendingSpawns=%d after releaseLocked, want 0", r.pendingSpawns)
+	if r.pp.pendingSpawns != 0 {
+		t.Fatalf("pendingSpawns=%d after releaseLocked, want 0", r.pp.pendingSpawns)
 	}
 	r.mu.Unlock()
 
 	// Defer-style release must be a no-op (idempotent).
 	slot.release()
 	r.mu.Lock()
-	if r.pendingSpawns != 0 {
-		t.Fatalf("pendingSpawns=%d after redundant release, want 0 (idempotent)", r.pendingSpawns)
+	if r.pp.pendingSpawns != 0 {
+		t.Fatalf("pendingSpawns=%d after redundant release, want 0 (idempotent)", r.pp.pendingSpawns)
 	}
 	r.mu.Unlock()
 }
@@ -74,7 +74,7 @@ func TestPendingSpawnSlot_DeferReleaseAbsorbsPanic(t *testing.T) {
 	}()
 
 	r.mu.Lock()
-	got := r.pendingSpawns
+	got := r.pp.pendingSpawns
 	r.mu.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after panic-then-defer-release, want 0 (counter would otherwise strand permanently and every GetOrCreate would refuse with ErrMaxProcs until restart)", got)
@@ -94,7 +94,7 @@ func TestPendingSpawnSlot_ReleaseTakesLock(t *testing.T) {
 	slot.release() // must self-lock + decrement
 
 	r.mu.Lock()
-	got := r.pendingSpawns
+	got := r.pp.pendingSpawns
 	r.mu.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after release(), want 0", got)
@@ -140,7 +140,7 @@ func TestPendingSpawnSlot_DoubleReleasePathsAreSafe(t *testing.T) {
 	slot.release()
 
 	r.mu.Lock()
-	got := r.pendingSpawns
+	got := r.pp.pendingSpawns
 	r.mu.Unlock()
 	if got != 0 {
 		t.Fatalf("pendingSpawns=%d after happy-path releaseLocked + defer release, want 0", got)

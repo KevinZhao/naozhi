@@ -34,6 +34,12 @@
 //     R230B-ARCH-17 / R226-ARCH-14 track the eventual move of
 //     the in-memory layer to internal/eventlog so the schema
 //     types are not anchored to a CLI-specific package.
+//     The cross-tier EventStore contract (Appender / Reader /
+//     Subscriber) is now a real, CI-gated package at
+//     internal/eventlog/api (PR #1755); cli.EventLog satisfies
+//     its Appender+Subscriber halves with no shim. The api
+//     contract is consumed by assertion only — nothing in this
+//     package imports it yet (registry injection is #1570).
 //
 //     # "eventlog" is three packages, not one (R237-ARCH-13)
 //
@@ -105,7 +111,7 @@
 //
 // # process_*.go file map (R243-ARCH-21)
 //
-// The Process state machine is split across 6 non-test
+// The Process state machine is split across 7 non-test
 // process_*.go files; a 2026-04 review (R243-ARCH-21,
 // REPEAT-3) flagged this as "拆得过细" and noted stale
 // "Deprecated" / TODO anchors that no longer reflected current
@@ -129,10 +135,17 @@
 //   - process_shim_io.go — shim transport framing helpers
 //     (shimWriter / shimLineReader); pure I/O, no semantics.
 //   - process_event_format.go — Event → EventEntry pure
-//     conversion + FormatToolInput. Earlier "Deprecated"
-//     header noise has been cleared (R243-ARCH-21); the
-//     EventEntriesFromEvent test-helper variant was retired
-//     in DEADCODE-7 (only EventEntriesFromEventAt remains).
+//     conversion. Earlier "Deprecated" header noise has been
+//     cleared (R243-ARCH-21); the EventEntriesFromEvent
+//     test-helper variant was retired in DEADCODE-7 (only
+//     EventEntriesFromEventAt remains). The orthogonal
+//     tool-input formatting concern was split out to
+//     process_tool_format.go (#866) so this file owns only the
+//     conversion slice.
+//   - process_tool_format.go — pure tool-input → label
+//     formatting (FormatToolInput, parseAgentInput, shortPath
+//     and the per-tool input shapes). No *Process dependency;
+//     the "payload/format" slice extracted per #866.
 //   - process_event_query.go — read-only EventLog accessors
 //     (EventEntries / EventLastN / EventEntriesSince /
 //     EventEntriesBefore) + Linker lifecycle + InjectHistory.

@@ -166,9 +166,20 @@ func TestServer_AppCtxWiredToHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
-	if !strings.Contains(string(serverSrc), "s.appCtx = ctx") {
-		t.Error("server.go: Start must assign s.appCtx = ctx before registerDashboard " +
+	// R20260531-GO-001: appCtx is now the serveCtx — a context.WithCancel
+	// child of the caller ctx — so a srv.Serve error (not just SIGTERM)
+	// cancels the hub's sessions and the background loops, letting the
+	// shutdown goroutine's discoveryCache.Wait() return instead of
+	// deadlocking. The CTX1 invariant (appCtx set before registerDashboard,
+	// a cancelable child of the caller ctx) is preserved; only the source
+	// it derives from changed from ctx to serveCtx.
+	if !strings.Contains(string(serverSrc), "s.appCtx = serveCtx") {
+		t.Error("server.go: Start must assign s.appCtx = serveCtx before registerDashboard " +
 			"(CTX1 requires appCtx to be set when NewHub reads it)")
+	}
+	if !regexp.MustCompile(`serveCtx,\s*serveCancel\s*:=\s*context\.WithCancel\(ctx\)`).Match(serverSrc) {
+		t.Error("server.go: serveCtx must derive from the caller ctx via context.WithCancel(ctx) " +
+			"(R20260531-GO-001: Serve-error path needs a cancelable child to wake the shutdown goroutine)")
 	}
 	// Match `appCtx ... context.Context` allowing arbitrary whitespace
 	// between the name and the type. gofmt aligns struct fields when
@@ -178,12 +189,12 @@ func TestServer_AppCtxWiredToHub(t *testing.T) {
 		t.Error("server.go: Server struct must declare appCtx context.Context field")
 	}
 
-	dashSrc, err := os.ReadFile(filepath.Join(dir, "dashboard.go"))
+	dashSrc, err := os.ReadFile(filepath.Join(dir, "routes.go"))
 	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+		t.Fatalf("read routes.go: %v", err)
 	}
 	if !strings.Contains(string(dashSrc), "ParentCtx: s.appCtx") {
-		t.Error("dashboard.go: registerDashboard must forward s.appCtx into " +
+		t.Error("routes.go: registerDashboard must forward s.appCtx into " +
 			"HubOptions.ParentCtx (CTX1 wiring)")
 	}
 }

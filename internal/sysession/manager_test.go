@@ -287,6 +287,102 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 	}
 }
 
+// TestManager_RunOnStartFiresWithoutPulse pins the startup-tick
+// contract (docs/rfc/attachment-gc-daemon.md §4.6-3): a daemon with
+// RunOnStart=true must Tick once immediately at startup, BEFORE any
+// ticker pulse. We deliberately never send on `pulse` — the only way
+// calls>0 is the startup tick.
+func TestManager_RunOnStartFiresWithoutPulse(t *testing.T) {
+	pulse, tickFn := pulseTicker()
+	_ = pulse // intentionally never pulsed
+
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Long tick so a scheduled pulse would never arrive in the
+			// test window; RunOnStart is the only path to a Tick.
+			"auto-titler": {Enabled: true, Tick: time.Hour, RunOnStart: true},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for d.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := d.calls.Load(); got == 0 {
+		t.Fatal("RunOnStart daemon never ticked at startup")
+	}
+}
+
+// TestManager_NoRunOnStartWaitsForPulse is the negative control: with
+// RunOnStart=false (default) and a long tick, no Tick happens until a
+// pulse arrives.
+func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
+	pulse, tickFn := pulseTicker()
+
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Short tick so the [0,tick) startup jitter elapses quickly
+			// and the loop reaches its ticker select; the manual pulse
+			// channel (pulseTicker) never fires on its own, so no pulse
+			// means no tick.
+			"auto-titler": {Enabled: true, Tick: 20 * time.Millisecond, RunOnStart: false},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop(context.Background())
+
+	// Give the loop time to clear jitter ([0,20ms)) and reach the ticker
+	// select. No pulse, no RunOnStart ⇒ no tick.
+	time.Sleep(200 * time.Millisecond)
+	if got := d.calls.Load(); got != 0 {
+		t.Fatalf("daemon ticked %d times without pulse or RunOnStart", got)
+	}
+
+	// A pulse now should produce exactly one tick.
+	pulse <- time.Now()
+	deadline := time.Now().Add(2 * time.Second)
+	for d.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := d.calls.Load(); got == 0 {
+		t.Fatal("daemon never ticked after pulse")
+	}
+}
+
 func TestManager_OverlappingTicksAreSkipped(t *testing.T) {
 	pulse, tickFn := pulseTicker()
 
@@ -599,6 +695,87 @@ func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
 		// ok — daemon ctx was cancelled and goroutine returned.
 	case <-time.After(2 * time.Second):
 		t.Fatal("m.wg did not drain after Stop — daemon ctx was never cancelled, suggesting stopOnce was consumed by the pre-Start Stop")
+	}
+}
+
+// TestManager_StartPublishesCtxAndCancelAtomically pins the invariant that
+// R20260603-GO-4 (#1653) restored: Start publishes the daemon ctx and its
+// cancel func through a single atomic.Pointer[ctxCancel] store, so there is
+// no observable state where a non-nil pointer carries a live ctx but a nil
+// cancel (the pre-fix window between the plain m.ctx field write and the
+// separate cancel publish). After Start, lifeP.Load() must yield a fully
+// populated, live, cancellable ctxCancel; Stop must then cancel that exact
+// ctx and drain the daemon goroutine.
+func TestManager_StartPublishesCtxAndCancelAtomically(t *testing.T) {
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) {
+			return &signalDaemon{name: "auto-titler"}, nil
+		}},
+	})
+
+	_, tickFn := pulseTicker()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      newFakeRouter(),
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Long tick so the daemon parks in its ticker select; only the
+			// ctx-cancel path can make it return.
+			"auto-titler": {Enabled: true, Tick: time.Hour},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Before Start: lifeP is nil (Stop would early-return as a no-op).
+	if m.lifeP.Load() != nil {
+		t.Fatal("lifeP must be nil before Start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+
+	// After Start: the single atomic store published a fully populated
+	// ctxCancel — ctx live, cancel non-nil. Pre-fix, a torn read could see
+	// a live ctx with a nil cancel; folding them into one pointer makes that
+	// state unrepresentable.
+	life := m.lifeP.Load()
+	if life == nil {
+		t.Fatal("lifeP must be non-nil after Start")
+	}
+	if life.ctx == nil {
+		t.Fatal("published ctxCancel.ctx must be non-nil")
+	}
+	if life.cancel == nil {
+		t.Fatal("published ctxCancel.cancel must be non-nil")
+	}
+	select {
+	case <-life.ctx.Done():
+		t.Fatal("published ctx must be live (not already cancelled) right after Start")
+	default:
+	}
+
+	// Stop must cancel that exact ctx and drain the daemon goroutine.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	m.Stop(stopCtx)
+
+	select {
+	case <-life.ctx.Done():
+		// ok — Stop cancelled the published ctx.
+	default:
+		t.Fatal("Stop did not cancel the published ctx")
+	}
+
+	done := make(chan struct{})
+	go func() { m.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("m.wg did not drain after Stop — daemon goroutine left uncancelled")
 	}
 }
 

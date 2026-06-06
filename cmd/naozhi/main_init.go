@@ -3,11 +3,19 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
+	"sort"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/upstream"
 )
 
 // File: main_init.go
@@ -20,6 +28,162 @@ import (
 // (returns wrappers / logs / etc.) — bigger sub-systems (router init,
 // platform init, scheduler init) keep their existing entry points and
 // will be lifted in follow-up rounds.
+
+// resolveLogLevel maps a config.Log.Level string to a slog.Level. Unknown
+// or empty values fall back to Info. Extracted from main() (R237-ARCH-8 /
+// #590) so the level mapping is unit-testable in isolation.
+func resolveLogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// newLogHandler builds the slog.Handler for the configured log format and
+// level, writing to w. "text" selects a TextHandler; everything else (incl.
+// the default "json") selects a JSONHandler. Extracted from main() so the
+// handler-selection branch is testable without touching the process-global
+// default logger (R237-ARCH-8 / #590).
+func newLogHandler(w *os.File, cfg *config.Config) slog.Handler {
+	opts := &slog.HandlerOptions{Level: resolveLogLevel(cfg.Log.Level)}
+	if cfg.Log.Format == "text" {
+		return slog.NewTextHandler(w, opts)
+	}
+	return slog.NewJSONHandler(w, opts)
+}
+
+// setupLogging installs the process-global slog default logger from cfg,
+// writing to stdout. Thin wrapper over newLogHandler kept in main_init so
+// main() stays a single SetDefault call (R237-ARCH-8 / #590).
+func setupLogging(cfg *config.Config) {
+	slog.SetDefault(slog.New(newLogHandler(os.Stdout, cfg)))
+}
+
+// startWatchdogLoop launches the systemd liveness heartbeat goroutine.
+// WATCHDOG=1 is sent unconditionally every 30s (its purpose is OS-level
+// liveness); the router HealthCheck result is logged as a diagnostic only
+// and never suppresses the heartbeat — normal write-lock activity (cleanup,
+// spawn) would otherwise cause false negatives. Returns when ctx is done.
+// Extracted from main() (R237-ARCH-8 / #590) so the heartbeat cadence and
+// HealthCheck-does-not-gate contract are exercisable in isolation.
+func startWatchdogLoop(ctx context.Context, hc func() bool) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if hc != nil && !hc() {
+					slog.Warn("router mutex contended at watchdog tick")
+				}
+				_ = osutil.SdNotify("WATCHDOG=1")
+			}
+		}
+	}()
+}
+
+// buildRemoteNodes constructs the multi-node aggregation client map from
+// cfg.Nodes. Returns nil when no nodes are configured (the server treats a
+// nil and an empty map identically). Extracted from main() (R237-ARCH-8 /
+// #590) so the per-node HTTP client construction is testable without the
+// rest of startup; the slog "multi-node configured" line stays in main()
+// to keep startup-log output byte-stable.
+func buildRemoteNodes(cfg *config.Config) map[string]node.Conn {
+	if len(cfg.Nodes) == 0 {
+		return nil
+	}
+	nodes := make(map[string]node.Conn, len(cfg.Nodes))
+	for id, nc := range cfg.Nodes {
+		nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
+	}
+	return nodes
+}
+
+// buildReverseNodeAuth translates cfg.ReverseNodes (config.ReverseNodeEntry)
+// into the node-package's zero-dependency node.ReverseNodeAuth shape, so
+// internal/node no longer imports internal/config (R040034-ARCH-1 / #1411).
+// The translation lives at the cmd boundary — the only place that already
+// depends on both packages. Returns nil when no reverse nodes are configured
+// so the caller's len()>0 guard stays meaningful.
+func buildReverseNodeAuth(cfg *config.Config) map[string]node.ReverseNodeAuth {
+	if len(cfg.ReverseNodes) == 0 {
+		return nil
+	}
+	auth := make(map[string]node.ReverseNodeAuth, len(cfg.ReverseNodes))
+	for id, e := range cfg.ReverseNodes {
+		auth[id] = node.ReverseNodeAuth{Token: e.Token, DisplayName: e.DisplayName}
+	}
+	return auth
+}
+
+// buildUpstreamConfig translates config.UpstreamConfig into the upstream
+// package's zero-dependency upstream.Config value, so internal/upstream no
+// longer imports internal/config (R040034-ARCH-1 / #1411). Returns nil when
+// cfg.Upstream is nil so the caller's nil guard stays meaningful.
+func buildUpstreamConfig(cfg *config.Config) *upstream.Config {
+	if cfg.Upstream == nil {
+		return nil
+	}
+	return &upstream.Config{
+		URL:         cfg.Upstream.URL,
+		NodeID:      cfg.Upstream.NodeID,
+		Token:       cfg.Upstream.Token,
+		DisplayName: cfg.Upstream.DisplayName,
+		Insecure:    cfg.Upstream.Insecure,
+	}
+}
+
+// buildAgentOpts translates cfg.Agents into the two views main() needs: the
+// session.AgentOpts map (operator-trusted shape consumed by the router spawn
+// path) and the cron.AgentOpts map (the internal/cron-import-free projection
+// produced by toCronAgentOpts). Extracted from main() (R237-ARCH-8 / #590)
+// so the model/args copy and the cron translation are unit-testable without
+// booting the router. Both maps are always non-nil (possibly empty).
+func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[string]cron.AgentOpts) {
+	agents := make(map[string]session.AgentOpts, len(cfg.Agents))
+	for id, ac := range cfg.Agents {
+		agents[id] = session.AgentOpts{
+			Model:     ac.Model,
+			ExtraArgs: ac.Args,
+		}
+	}
+	cronAgents := make(map[string]cron.AgentOpts, len(agents))
+	for id, a := range agents {
+		cronAgents[id] = toCronAgentOpts(a)
+	}
+	return agents, cronAgents
+}
+
+// firstUndefinedAgentCommand reports the first agent_commands entry whose
+// target agent id is not present in agents. ok=true means every command
+// resolves (cmd is then ""); ok=false surfaces the offending command so
+// main() can emit the operator-actionable os.Exit log unchanged. Extracted
+// from main() (R237-ARCH-8 / #590) so the cross-reference validation is
+// testable independent of process exit. Keys are sorted lexicographically
+// before iteration so that, when multiple commands are misconfigured, the
+// returned command is always the lexicographically smallest one — making
+// the startup abort message deterministic and reproducible across runs.
+func firstUndefinedAgentCommand(agentCommands map[string]string, agents map[string]session.AgentOpts) (string, bool) {
+	cmds := make([]string, 0, len(agentCommands))
+	for cmd := range agentCommands {
+		cmds = append(cmds, cmd)
+	}
+	sort.Strings(cmds)
+	for _, cmd := range cmds {
+		if _, ok := agents[agentCommands[cmd]]; !ok {
+			return cmd, false
+		}
+	}
+	return "", true
+}
 
 // logConfigValidationDiagnostics surfaces every config.Validate() finding
 // to the structured log at the appropriate level. docs/rfc/multi-backend.md
@@ -72,8 +236,6 @@ func initBackendWrappers(
 	ctx context.Context,
 	cfg *config.Config,
 	shimMgr *shim.Manager,
-	settingsFile string,
-	refreshSettings func() string,
 ) (backendWrappers, bool) {
 	backendsCfg := cfg.EnabledBackends()
 	defaultBackend := cfg.DefaultBackendID()
@@ -98,10 +260,7 @@ func initBackendWrappers(
 				continue
 			}
 		}
-		proto := profile.NewProtocol(backend.ProtocolDeps{
-			SettingsFile:    settingsFile,
-			RefreshSettings: refreshSettings,
-		})
+		proto := profile.NewProtocol(backend.ProtocolDeps{})
 		// DEADCODE-6 / R241-ARCH-1: use NewWrapperLazy + Probe(ctx) so a hung
 		// `<cli> --version` cannot pin startup for the full 5 s when SIGTERM
 		// arrives mid-init. NewWrapper is the legacy synchronous form (still
@@ -109,9 +268,8 @@ func initBackendWrappers(
 		// the cancellable variant — same field shape, so downstream readers of
 		// w.CLIVersion (the "backend X version Y" banner below at line 123-124)
 		// see identical values.
-		w := cli.NewWrapperLazy(b.Path, proto, b.ID)
+		w := cli.NewWrapperLazy(b.Path, proto, b.ID).WithManager(shimMgr)
 		w.Probe(ctx)
-		w.ShimManager = shimMgr
 		out.Wrappers[w.BackendID] = w
 		if b.Model != "" {
 			out.Models[w.BackendID] = b.Model

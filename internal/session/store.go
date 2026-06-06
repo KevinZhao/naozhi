@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -50,6 +51,24 @@ func readCappedFile(path string, label string) ([]byte, error) {
 		return nil, fmt.Errorf("%s %s exceeds %d-byte cap", label, path, maxStoreFileBytes)
 	}
 	return data, nil
+}
+
+// preserveCorruptFile renames a file that failed to JSON-parse to a
+// timestamped ".corrupt.<ts>" sibling so the next atomic save does not
+// silently overwrite it, keeping the bad bytes available for forensic
+// analysis. parseErr is the original unmarshal error (logged for context).
+// Used by every loader in this package — sessions.json, known IDs, and
+// workspace overrides — so a partial-write / disk-corruption event leaves a
+// consistent, recoverable breadcrumb across all three sidecar stores (#673).
+func preserveCorruptFile(path, label string, parseErr error) {
+	corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
+	if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+		slog.Warn("parse "+label+" failed; could not rename corrupt file",
+			"err", parseErr, "rename_err", renameErr, "path", path)
+		return
+	}
+	slog.Warn("parse "+label+" failed; corrupt file preserved",
+		"err", parseErr, "corrupt_path", corruptPath)
 }
 
 type storeEntry struct {
@@ -140,7 +159,7 @@ func storeMetaPath(storePath string) string {
 // with SetPrevSessionOrigins) and reads all other fields via accessor methods
 // (Workspace / UserLabel / etc.) which each take their own per-field atomic
 // or mutex. Holding r.mu during this call would invert the documented
-// (r.mu → s.historyMu) order from auto_chain_router.go.
+// (r.mu → s.historyMu) order from router_lifecycle.go.
 func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// Scratch (ephemeral aside) sessions are deliberately volatile: they
 	// must not persist across restarts, or loadStore would resurrect a
@@ -216,10 +235,147 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	}, true
 }
 
+// equalStoreEntry reports whether two storeEntry values are field-for-field
+// identical, including the slice fields that make `==` illegal. Used by the
+// per-session marshal cache (R20260531A-PERF-2) to decide whether the cached
+// JSON encoding can be reused.
+func equalStoreEntry(a, b storeEntry) bool {
+	return a.Key == b.Key &&
+		a.SessionID == b.SessionID &&
+		a.TotalCost == b.TotalCost &&
+		a.Workspace == b.Workspace &&
+		a.Backend == b.Backend &&
+		a.LastActive == b.LastActive &&
+		a.CreatedAt == b.CreatedAt &&
+		a.UserLabel == b.UserLabel &&
+		a.LabelOrigin == b.LabelOrigin &&
+		a.Model == b.Model &&
+		slices.Equal(a.PrevSessionIDs, b.PrevSessionIDs) &&
+		slices.Equal(a.PrevSessionOrigins, b.PrevSessionOrigins)
+}
+
+// encodeStoreEntryCached returns the JSON object encoding for s's current
+// storeEntry, reusing the per-session memo when the entry is unchanged since
+// the last save. Returns (_, false) when the session is skipped from
+// persistence (delegating to sessionToStoreEntry). The returned slice is owned
+// by the cache and must NOT be mutated by the caller (marshalStoreEntries only
+// appends a copy of the bytes into the output buffer).
+//
+// CONTRACT mirrors sessionToStoreEntry: callers MUST hold no Router-level lock.
+// The cache pointer itself is only touched on the save path, which is
+// single-goroutine (cleanup loop), so no synchronisation is needed for it.
+func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
+	entry, ok := sessionToStoreEntry(s)
+	if !ok {
+		return nil, false
+	}
+	if c := s.storeMarshalCache.Load(); c != nil && equalStoreEntry(c.entry, entry) {
+		return c.data, true
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		// A storeEntry is plain JSON-safe scalars + string slices; Marshal
+		// cannot fail in practice. Drop the cache and signal skip rather than
+		// poison the whole save with one bad entry. [R103901-CODE-6] Log the
+		// drop so an operator can see that this session has silently stopped
+		// being persisted instead of it vanishing without a trace.
+		slog.Error("encodeStoreEntryCached: marshal failed, session dropped from persistence", "key", s.key, "err", err)
+		s.storeMarshalCache.Store(nil)
+		return nil, false
+	}
+	s.storeMarshalCache.Store(&storeEntryCache{entry: entry, data: data})
+	return data, true
+}
+
+// marshalStoreEntries builds the sessions.json array body by concatenating
+// each persisted session's cached object encoding. Equivalent on-the-wire to
+// json.Marshal([]storeEntry{...}) but skips re-encoding sessions whose
+// persisted state is unchanged (R20260531A-PERF-2 / #1523).
+//
+// Iteration order is non-deterministic (Go map), matching the previous
+// json.Marshal(entries) behaviour where entries were appended in map-range
+// order; loadStore is order-insensitive (keys into a map).
+func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
+	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
+		for _, s := range sessions {
+			yield(s)
+		}
+	})
+}
+
+// marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries. It
+// lets the periodic save path snapshot r.ss.sessions into a single []*ManagedSession
+// rather than re-allocating a whole map[string]*ManagedSession every tick
+// (R20260602190132-PERF-4 / #1606). The on-the-wire output is identical — both
+// just range the session set and concatenate each session's cached encoding.
+func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
+	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
+		for _, s := range sessions {
+			yield(s)
+		}
+	})
+}
+
+// marshalStoreEntriesFunc assembles the JSON array from each session's cached
+// object encoding, driven by an iteration closure so both the map- and
+// slice-shaped snapshots share one code path.
+func marshalStoreEntriesFunc(n int, iter func(yield func(*ManagedSession))) ([]byte, error) {
+	buf := make([]byte, 0, 256*n)
+	buf = append(buf, '[')
+	first := true
+	iter(func(s *ManagedSession) {
+		data, ok := encodeStoreEntryCached(s)
+		if !ok {
+			return
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, data...)
+	})
+	buf = append(buf, ']')
+	return buf, nil
+}
+
 func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
+	// R20260531A-PERF-2 (#1523): assemble the JSON array from per-session
+	// cached object encodings instead of re-marshalling the whole []storeEntry
+	// every 30s tick. Each session memoizes its last (entry → JSON) pair; a
+	// session whose persisted fields are unchanged since the previous save
+	// reuses its cached bytes and pays zero marshal cost. On a steady-state
+	// deployment only the sessions that saw traffic in the last window are
+	// re-encoded, turning the per-tick marshal from O(N) into O(changed).
+	data, err := marshalStoreEntries(sessions)
+	if err != nil {
+		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreData(path, data)
+}
+
+// saveStoreSlice persists a slice snapshot of sessions. The periodic Cleanup /
+// saveIfDirty paths use this so they can copy r.ss.sessions into a single
+// []*ManagedSession under the lock instead of re-allocating a whole map every
+// tick (R20260602190132-PERF-4 / #1606). On-disk output is identical to
+// saveStore.
+func saveStoreSlice(path string, sessions []*ManagedSession) error {
+	if path == "" {
+		return nil
+	}
+	data, err := marshalStoreEntriesSlice(sessions)
+	if err != nil {
+		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreData(path, data)
+}
+
+// writeStoreData ensures the store directory exists, atomically writes the
+// pre-marshalled bytes, then writes the advisory version sidecar. Shared by
+// saveStore (map input) and saveStoreSlice (slice input).
+func writeStoreData(path string, data []byte) error {
 	if dir := filepath.Dir(path); dir != "" {
 		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
 		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
@@ -228,20 +384,6 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		if err := datadir.EnsureDir(dir); err != nil {
 			return fmt.Errorf("create store directory: %w", err)
 		}
-	}
-
-	entries := make([]storeEntry, 0, len(sessions))
-	for _, s := range sessions {
-		entry, ok := sessionToStoreEntry(s)
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-
-	data, err := json.Marshal(entries)
-	if err != nil {
-		return fmt.Errorf("marshal session store: %w", err)
 	}
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)
@@ -343,16 +485,7 @@ func loadStore(path string) map[string]*storeEntry {
 
 	var entries []storeEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		// Preserve the corrupt file for forensic analysis so the next save
-		// does not silently overwrite it.
-		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
-		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-			slog.Warn("parse session store failed; could not rename corrupt file",
-				"err", err, "rename_err", renameErr, "path", path)
-		} else {
-			slog.Warn("parse session store failed; corrupt file preserved",
-				"err", err, "corrupt_path", corruptPath)
-		}
+		preserveCorruptFile(path, "session store", err)
 		return nil
 	}
 
@@ -391,7 +524,8 @@ func loadKnownIDs(storePath string) map[string]bool {
 	}
 	var ids []string
 	if err := json.Unmarshal(data, &ids); err != nil {
-		slog.Warn("parse known session IDs failed", "err", err)
+		// #673: preserve the corrupt file (see loadStore / loadWorkspaceOverrides).
+		preserveCorruptFile(path, "known session IDs", err)
 		return nil
 	}
 	m := make(map[string]bool, len(ids))
@@ -403,7 +537,15 @@ func loadKnownIDs(storePath string) map[string]bool {
 }
 
 // saveKnownIDs persists the set of all session IDs ever used by naozhi.
-func saveKnownIDs(storePath string, ids map[string]bool) error {
+//
+// The caller passes a slice that is ALREADY sorted ascending (see
+// Router.snapshotKnownIDsSortedLocked, which caches the sort across throttled
+// save ticks — R220123-PERF-19 / #1638). The sort is the R180-GO-P2
+// stable-bytes contract: a deterministic on-disk order keeps backups / audit
+// diffs noise-free across saves of the same logical set. saveKnownIDs does
+// NOT re-sort; it trusts the precondition so the O(N log N) cost is paid once
+// per mutation generation rather than on every 5-minute save tick.
+func saveKnownIDs(storePath string, sortedIDs []string) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
@@ -414,16 +556,7 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 			return fmt.Errorf("create known IDs directory: %w", err)
 		}
 	}
-	list := make([]string, 0, len(ids))
-	for id := range ids {
-		list = append(list, id)
-	}
-	// R180-GO-P2: Go map iteration is randomised per run; without this
-	// sort each saveKnownIDs write produces different byte output for the
-	// same logical set, which adds pointless diff noise to backups / audit
-	// tooling and makes on-disk regression testing harder.
-	slices.Sort(list)
-	data, err := json.Marshal(list)
+	data, err := json.Marshal(sortedIDs)
 	if err != nil {
 		return fmt.Errorf("marshal known IDs: %w", err)
 	}
@@ -431,6 +564,162 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		return fmt.Errorf("save known IDs: %w", err)
 	}
 	return nil
+}
+
+// sessionStore groups the seven correlated session-table fields (Router P4
+// facet, #383): the primary session table, its two secondary indices
+// (chat→keys, keyhash→key), the reverse session-ID→key index, the alive-process
+// counter, the store-dirty flag, and the store mutation generation. It is a
+// value field on Router, carries NO lock of its own, and is read/written ONLY
+// under Router.mu — the lock topology is unchanged (RFC §3 candidate A: single
+// r.mu retained).
+//
+// CRITICAL — TRIPLE-INDEX ATOMIC SYNCHRONIZATION (RFC §5, highest-risk
+// invariant): sessions + byChat + keyhash + idToKey are a four-way correlated
+// index that MUST mutate together inside ONE r.mu write critical section.
+// indexAdd / indexDel remain the keyhash+byChat funnel; the five direct
+// r.ss.sessions[key]=s / delete(r.ss.sessions, key) sites stay paired with
+// indexAdd / indexDel (and with the idToKey set/clear helpers) in UNCHANGED
+// order. Any reordering or split between these mutations would let a reader
+// observe a torn index (e.g. a session present in the primary table but missing
+// from byChat, or a stale keyhash pointing at an evicted key). P4 only renames
+// field references — install/unregister/rename ordering stays byte-identical.
+//
+// CRITICAL — LOCK-FREE READER FIELDS STAY ATOMIC: activeCount (read by Stats())
+// and gen (read by Version()) are accessed lock-free from the dashboard hot
+// path, so they remain atomic.Int64 / atomic.Uint64 INSIDE this sub-struct
+// (access r.ss.activeCount.Load() / r.ss.gen.Add(1) etc). They are deliberately
+// NOT demoted to plain ints. dirty is a plain bool (always under r.mu).
+//
+// The annotation on the Router embed line covers the UNION of all accessing
+// domains; the lint recurses one level so each inner field below ALSO carries
+// its own per-domain `// 读写:` annotation, copied verbatim from the original
+// router_core.go field docs.
+type sessionStore struct {
+	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register), capacity (reconcile active-gauge scan)
+	sessions map[string]*ManagedSession
+	// byChat is a secondary index: chat key → set of session keys.
+	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
+	// Inner type is a set (map[string]struct{}) so indexAdd does O(1) dedupe
+	// and indexDel does O(1) removal — the prior []string variant scanned the
+	// slice on every Add/Del. R225-PERF-18.
+	// Nil in test-created routers; all helpers below are nil-safe.
+	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
+	byChat map[string]map[string]struct{}
+	// keyhash is a secondary index: persist.KeyHash(sessionKey) → sessionKey.
+	// #1646: the attachment tracker's workspace resolver runs on every
+	// persisted image-bearing event (potentially several per Send) and used to
+	// hold r.mu.RLock while linearly scanning r.ss.sessions, recomputing a SHA-256
+	// KeyHash for every session, to find the one whose hash matched. This index
+	// turns that O(N)-hashes scan into an O(1) lookup. Maintained at the publish
+	// funnel + indexDel; the resolver self-heals on miss (it re-verifies the
+	// hit against r.ss.sessions and falls back to a one-off scan that re-populates
+	// this map), so a delete site that bypasses indexDel only costs one extra
+	// scan rather than returning a wrong workspace.
+	// Nil in test-created routers; helpers are nil-safe.
+	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
+	keyhash map[string]string
+	// idToKey is a reverse index from session ID to session key.
+	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
+	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
+	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume), shim (reconnectShims index write)
+	idToKey map[string]string
+	// activeCount tracks currently alive processes (non-exempt only).
+	// Writes happen under r.mu (write lock); atomic access lets Stats()
+	// read lock-free so the dashboard /api/sessions hot path does not
+	// take a second r.mu RLock right after ListSessions() released one.
+	// R58-PERF-F1.
+	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install), capacity (reconcile Store), cleanup (remove/reconcile Add/Store), discovery (Takeover orphan Add), shim (reconnect Add)
+	activeCount atomic.Int64
+	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume), capacity (evictOldest mutation)
+	dirty bool // true when sessions changed since last save
+	// gen increments on each mutation. Writes happen under r.mu (write
+	// lock) but atomic.Uint64 also lets Version() read lock-free — the
+	// dashboard polls Version() every few seconds from the /api/sessions
+	// hot path, and the previous RLock layered on top of ListSessions'
+	// RLock made each poll take two contended trips through r.mu.
+	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
+	gen atomic.Uint64
+}
+
+// knownIDsStore groups the seven correlated known-session-ID fields (Router P2
+// facet, #600). It is a value field on Router, carries NO lock of its own, and
+// is read/written ONLY under Router.mu — the lock topology is unchanged (RFC §3
+// candidate A: single r.mu retained).
+//
+// The gen-invalidation chain lives entirely inside this struct under one lock:
+// trackSessionID bumps gen (the SOLE mutator) and snapshotKnownIDsSortedLocked
+// rebuilds + re-sorts only when sortedGen != gen, then sets sortedGen = gen.
+// Because all seven fields move together under r.mu, the bump and the recompute
+// stay in the same struct/lock/order and the invalidation cannot tear.
+//
+// CRITICAL: gen and sortedGen are PLAIN uint64, NOT atomic — every access is
+// under r.mu (no lock-free reader), unlike wsStore.gen which Version() reads
+// without the lock. Converting them to atomic.Uint64 would be an unnecessary
+// semantic change.
+type knownIDsStore struct {
+	// ids tracks ALL session IDs ever used by naozhi, including
+	// sessions that have been removed/reset/evicted. Used by the
+	// discovered-session scanner to match CLI processes to naozhi keys,
+	// and as a secondary filter for filesystem-based recent sessions.
+	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
+	ids map[string]bool
+	// order preserves insertion order so overflow eviction drops the
+	// oldest (FIFO) rather than picking randomly via map iteration — random
+	// eviction could drop a still-active session ID, causing discovery to
+	// misclassify its CLI process as an external (non-naozhi) session.
+	// 读写: core (init), discovery (trackSessionID)
+	order []string
+	// 读写: discovery, cleanup
+	dirty bool
+	// 读写: discovery, cleanup
+	gen uint64 // incremented on each ids mutation (add/evict)
+	// sortedCache caches the deterministic (sorted) serialization
+	// input for saveKnownIDs so the O(N log N) sort is paid once per
+	// mutation generation rather than on every throttled save tick.
+	// R220123-PERF-19 (#1638): the known-IDs set is append-only-ish and the
+	// save is throttled to knownIDsSaveInterval (5 min), so the common case
+	// is "save N unchanged IDs again" — for which a full re-sort is pure
+	// waste. sortedGen records the gen the cache was built
+	// at; snapshotKnownIDsSortedLocked rebuilds + re-sorts only on a gen
+	// mismatch, otherwise returning the cached sorted slice (which the
+	// caller copies under the lock). The sorted output preserves the
+	// R180-GO-P2 stable-bytes-on-disk contract.
+	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via gen)
+	sortedCache []string
+	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
+	sortedGen uint64 // gen the cache slice was sorted at; 0 = unbuilt
+	// 读写: cleanup (Cleanup/saveIfDirty)
+	savedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
+}
+
+// snapshotKnownIDsSortedLocked returns a sorted copy of the known-session-ID
+// set suitable for handing to saveKnownIDs. Caller MUST hold r.mu.
+//
+// R220123-PERF-19 (#1638): the prior save path copied r.knownIDs into a
+// map[string]bool under the lock and saveKnownIDs then re-ranged + sorted it
+// on every throttled tick — O(N log N) per save for an append-only-ish set
+// that rarely changes between the 5-minute save windows. This memoises the
+// sort: the sorted slice is rebuilt only when r.knownIDsGen advanced since
+// the last build (any add/evict bumps the gen), otherwise the cached slice is
+// returned. We always hand back a fresh copy so the returned slice can be
+// serialized outside the lock without aliasing the cache (a concurrent
+// trackSessionID would otherwise mutate it via a future rebuild). The common
+// "nothing changed" tick is now an O(N) copy with no sort.
+func (r *Router) snapshotKnownIDsSortedLocked() []string {
+	if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
+		sorted := make([]string, 0, len(r.kid.ids))
+		for id := range r.kid.ids {
+			sorted = append(sorted, id)
+		}
+		// R180-GO-P2: deterministic on-disk order — see saveKnownIDs.
+		slices.Sort(sorted)
+		r.kid.sortedCache = sorted
+		r.kid.sortedGen = r.kid.gen
+	}
+	// Return a copy: callers serialize outside r.mu, and a later rebuild
+	// would otherwise replace the cache slice's backing array under them.
+	return slices.Clone(r.kid.sortedCache)
 }
 
 // workspaceOverridesPath returns the path to the workspace overrides file,
@@ -458,7 +747,11 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
-		slog.Warn("parse workspace overrides failed", "err", err)
+		// #673: preserve the corrupt file rather than silently discarding it.
+		// The next saveWorkspaceOverrides would otherwise overwrite the bad
+		// bytes, hiding a partial-write / corruption event an operator needs
+		// to investigate — and matching the sessions.json loader's behaviour.
+		preserveCorruptFile(path, "workspace overrides", err)
 		return nil
 	}
 	if len(m) > 0 {
@@ -475,8 +768,24 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 		return nil
 	}
 	if len(overrides) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
+		removed := true
+		if err := os.Remove(path); err != nil {
+			removed = false
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
+			}
+		}
+		// Crash-durability parity with the WriteFileAtomic path below
+		// (#673): the rename path fsyncs the parent directory so the new
+		// state survives a crash, but an unlink left the directory entry
+		// un-fsynced — after a power loss the deleted overrides file could
+		// resurrect, re-applying overrides the user just cleared. fsync the
+		// parent so the removal is as durable as a write. SyncDir already
+		// degrades gracefully on EPERM/EINVAL (FUSE/older fs).
+		if removed {
+			if err := osutil.SyncDir(filepath.Dir(path)); err != nil {
+				slog.Warn("fsync dir after workspace overrides removal", "path", path, "err", err)
+			}
 		}
 		return nil
 	}

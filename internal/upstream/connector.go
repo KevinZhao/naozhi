@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -98,10 +97,24 @@ type discoverFn func() (json.RawMessage, error)
 // Same atomic.Pointer rationale as discoverFn above.
 type previewFn func(sessionID string) (json.RawMessage, error)
 
+// Config is the upstream-local, zero-dependency value shape that New
+// consumes. It mirrors the fields this package actually reads from the
+// upstream config block so internal/upstream no longer imports
+// internal/config — a config.yaml schema change no longer ripples down into
+// this bottom-of-DAG package (R040034-ARCH-1 / #1411). The cmd boundary
+// translates config.UpstreamConfig → upstream.Config.
+type Config struct {
+	URL         string
+	NodeID      string
+	Token       string
+	DisplayName string
+	Insecure    bool
+}
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
-	cfg *config.UpstreamConfig
+	cfg *Config
 	// router is the SessionRouter subset used by Connector (consumer.go).
 	// *session.Router satisfies this interface implicitly. Kept as an
 	// interface so future Router sub-aggregation and connector tests
@@ -134,7 +147,7 @@ type Connector struct {
 // pass a non-nil resolver (built from session.NewKeyResolver +
 // project.NewDataSource). Nil resolver keeps the legacy inlined merge
 // for backward compatibility with existing tests.
-func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
+func New(cfg *Config, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -231,6 +244,7 @@ func (c *Connector) loadPreviewFunc() previewFn {
 // fire so operators can still see each failure reason.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
+	connectorBackoffMillis.Set(backoff.Milliseconds())
 	consecutiveFailures := 0
 	circuitTripped := false
 	for {
@@ -254,6 +268,7 @@ func (c *Connector) Run(ctx context.Context) {
 			// Reset backoff after a successful session so reconnect
 			// after sleep/restart is fast (1s) rather than up to 30s.
 			backoff = time.Second
+			connectorBackoffMillis.Set(backoff.Milliseconds())
 		} else {
 			consecutiveFailures++
 			if consecutiveFailures >= circuitBreakerThreshold {
@@ -266,6 +281,7 @@ func (c *Connector) Run(ctx context.Context) {
 				}
 				if backoff < circuitBreakerBackoff {
 					backoff = circuitBreakerBackoff
+					connectorBackoffMillis.Set(backoff.Milliseconds())
 				}
 			}
 		}
@@ -284,8 +300,24 @@ func (c *Connector) Run(ctx context.Context) {
 			// clears it.
 			if backoff < circuitBreakerBackoff {
 				backoff = min(backoff*2, reconnectBackoffCeiling)
+				connectorBackoffMillis.Set(backoff.Milliseconds())
 			}
 		}
+	}
+}
+
+// connectorTLSConfig builds the TLS config used for the wss:// dial. The TLS
+// floor (1.2) is always pinned so a compromised segment cannot force a weaker
+// protocol. When insecure is true the operator has explicitly opted out of
+// certificate verification (config validation requires upstream.insecure=true
+// to even reach a ws:// / self-signed wss:// host), so we honour the flag by
+// setting InsecureSkipVerify. Previously the flag was carried through config
+// and copied into Config.Insecure but never consumed here, silently violating
+// the operator's contract. R20260603150052-GO-3 (#1711).
+func connectorTLSConfig(insecure bool) *tls.Config {
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: insecure, //nolint:gosec // gated by upstream.insecure config flag (validated)
 	}
 }
 
@@ -294,8 +326,10 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		HandshakeTimeout: 10 * time.Second,
 		// Pin TLS floor so downgraded clients can't be forced onto a weaker
 		// protocol via a compromised network segment. wss:// is already
-		// required by config validation.
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		// required by config validation. When operators opt into insecure
+		// mode the floor is kept but certificate verification is skipped —
+		// see connectorTLSConfig. R20260603150052-GO-3 (#1711).
+		TLSClientConfig: connectorTLSConfig(c.cfg.Insecure),
 	}
 	conn, _, dialErr := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if dialErr != nil {
@@ -308,6 +342,12 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// journal on reconnect loops.
 	if strings.HasPrefix(c.cfg.URL, "ws://") {
 		slog.Warn("upstream connector: transmitting token over plaintext ws:// — set upstream.insecure=false and use wss:// for production")
+	}
+	// R20260603150052-GO-3 (#1711): when insecure mode skips certificate
+	// verification on a wss:// dial, surface it the same way as the ws://
+	// warning so a forgotten insecure flag is visible in ops journals.
+	if c.cfg.Insecure && strings.HasPrefix(c.cfg.URL, "wss://") {
+		slog.Warn("upstream connector: TLS certificate verification disabled (upstream.insecure=true) — set upstream.insecure=false for production")
 	}
 	// Bound inbound frame size so a malicious or buggy primary cannot
 	// exhaust memory with a single huge message. 16 MB matches the primary

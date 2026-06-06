@@ -3,19 +3,37 @@ package node
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"expvar"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
+
+// insecureReverseUpgradeTotal counts reverse-node WS upgrades accepted
+// over plain HTTP from a non-loopback host — i.e. connections where the
+// bearer token rides the first frame in cleartext, observable to any
+// passive on-path party (R226-SEC-3 / R229-SEC-5, #1026).
+//
+// The existing warnInsecureReverseUpgradeOnce log fires at most once per
+// process to avoid reconnect-storm log floods, which means an operator
+// who tails the journal after the first event sees nothing further and
+// has no way to gauge ongoing exposure. This monotonic expvar gauge fills
+// that gap: it is published on /debug/vars (the dashboard's existing
+// expvar endpoint) so a sustained non-zero delta is an actionable signal
+// that TLS is still missing in front of /ws-node. Counter semantics
+// (Add(1)) match the metric's "how many cleartext-token upgrades have we
+// accepted" question; a zero value means every reverse upgrade arrived
+// over TLS or from loopback.
+var insecureReverseUpgradeTotal = expvar.NewInt("naozhi_node_insecure_reverse_upgrade_total")
 
 // truncateLabelUTF8 truncates s to at most max bytes while preserving UTF-8
 // validity and stripping log-injection codepoints. Raw byte truncation is
@@ -92,12 +110,34 @@ var reverseUpgrader = websocket.Upgrader{
 		if isLoopbackHost(r.Host) {
 			return true
 		}
-		// Plain-HTTP non-loopback: log once-per-process and allow so
-		// existing private-network deployments don't break, but make the
-		// origin-spoof exposure visible in logs. Operators who want to
-		// silence this should put TLS in front of /ws-node.
+		// Plain-HTTP, non-loopback. Bump the monotonic counter on every such
+		// upgrade (not just the first) so /debug/vars reflects ongoing
+		// cleartext-token exposure even after the once-guarded warn has
+		// already fired (#1026).
+		insecureReverseUpgradeTotal.Add(1)
+		// R20260606-SEC-4 (#1824): split by host class with DIFFERENT outcomes.
+		//
+		// A bearer token sent in cleartext over a private LAN (RFC1918 / ULA /
+		// link-local) is exposed only to passive listeners on that segment —
+		// the documented no-TLS private-network / sidecar topology. Keep
+		// allowing it (bearer-token first-frame auth remains the primary gate)
+		// but warn once so operators know TLS is still recommended.
+		//
+		// A public/routable Host means the first-frame token traverses the open
+		// internet, observable to any passive on-path party who can then
+		// authenticate as the node and drive every session on the hub. There is
+		// no legitimate plain-HTTP-over-public-internet reverse-node topology,
+		// so HARD-REJECT the upgrade rather than log-and-continue: returning
+		// false makes websocket.Upgrade fail with a 403 before any frame (and
+		// thus the token) is read. Operators who terminate TLS in front of
+		// /ws-node are unaffected (r.TLS check above), and private/loopback
+		// wiring is unaffected (handled above / here).
+		if isPrivateHost(r.Host) {
+			warnInsecureReversePrivateOnce(r.Host)
+			return true
+		}
 		warnInsecureReverseUpgradeOnce(r.Host)
-		return true
+		return false
 	},
 }
 
@@ -107,9 +147,48 @@ var insecureReverseWarnOnce sync.Once
 
 func warnInsecureReverseUpgradeOnce(host string) {
 	insecureReverseWarnOnce.Do(func() {
-		slog.Warn("reverse upgrade arrived over plain HTTP without Origin and not from loopback; deploy TLS in front of /ws-node to harden against Origin-strip proxies",
+		slog.Warn("reverse upgrade over plain HTTP from a public/routable host REJECTED; the bearer token would ride the first frame in cleartext over the open network — deploy TLS in front of /ws-node (loopback/private-LAN topologies are unaffected)",
 			"host", truncateLabelUTF8(host, 128))
 	})
+}
+
+// insecureReversePrivateWarnOnce mirrors insecureReverseWarnOnce for the
+// RFC1918 / ULA / link-local case, kept separate so the two host classes each
+// surface their own once-per-process line rather than racing for a single
+// sync.Once (whichever fires first would otherwise mask the other).
+var insecureReversePrivateWarnOnce sync.Once
+
+func warnInsecureReversePrivateOnce(host string) {
+	insecureReversePrivateWarnOnce.Do(func() {
+		slog.Warn("reverse upgrade arrived over plain HTTP without Origin from a private LAN address; the bearer token is sent in cleartext and readable by passive listeners on the same segment — put TLS in front of /ws-node if the segment is not fully trusted",
+			"host", truncateLabelUTF8(host, 128))
+	})
+}
+
+// isPrivateHost reports whether host (Host header value, may include port)
+// refers to an RFC1918 private, IPv6 unique-local, or link-local address.
+// Used to classify cleartext-token exposure on /ws-node: a private-segment
+// upgrade is a lower (but non-zero) exposure than a public/routable one.
+// Hostnames that are not IP literals are treated as non-private since their
+// resolution is not known at this layer.
+func isPrivateHost(host string) bool {
+	h := host
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		if strings.HasPrefix(host, "[") {
+			if rb := strings.IndexByte(host, ']'); rb >= 0 {
+				h = host[1:rb]
+			}
+		} else {
+			h = host[:i]
+		}
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		h = host[1 : len(host)-1]
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // isLoopbackHost reports whether host (Host header value, may include
@@ -158,11 +237,24 @@ type ReverseServer struct {
 	OnDeregister func(id string)
 }
 
+// ReverseNodeAuth is the node-local, zero-dependency value shape that
+// NewReverseServer consumes for one allowed reverse-connecting node. It
+// mirrors the two fields this package actually needs (token + display
+// name) so internal/node no longer imports internal/config — a config.yaml
+// schema change no longer ripples down into this bottom-of-DAG package
+// (R040034-ARCH-1 / #1411). The cmd boundary translates
+// config.ReverseNodeEntry → ReverseNodeAuth.
+type ReverseNodeAuth struct {
+	Token       string
+	DisplayName string
+}
+
 // NewReverseServer creates a server that accepts /ws-node connections.
-// auth is the reverse_nodes config from config.yaml.
+// auth maps node_id → ReverseNodeAuth (translated from the reverse_nodes
+// config block at the cmd boundary).
 // trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
 // rate limiting works correctly when deployed behind ALB/CloudFront.
-func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool) *ReverseServer {
+func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
 	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare
@@ -385,12 +477,23 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		<-rc.done
 		s.mu.Lock()
-		if s.conns[msg.NodeID] == rc {
+		// R20260605B-CORR-14: only this connection's deregister may tear
+		// down shared state. On a quick reconnect under the same node_id,
+		// the registration handler closes the old conn, installs the NEW
+		// rc into s.conns, and calls OnRegister(new). The old conn's done
+		// channel then unblocks here. If OnDeregister(old) ran
+		// unconditionally it could race-win after OnRegister(new) and wipe
+		// the freshly reconnected, live node from Server.nodes + purge its
+		// cache, leaving it invisible until a full disconnect/reconnect.
+		// Gate the side effect with the same ownership check as the map
+		// delete so a stale deregister of a replaced conn is a no-op.
+		owns := s.conns[msg.NodeID] == rc
+		if owns {
 			delete(s.conns, msg.NodeID)
 		}
 		s.mu.Unlock()
 		slog.Info("reverse node disconnected", "node_id", safeNodeID)
-		if s.OnDeregister != nil {
+		if owns && s.OnDeregister != nil {
 			s.OnDeregister(msg.NodeID)
 		}
 	}()

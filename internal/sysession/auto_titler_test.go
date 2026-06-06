@@ -1,8 +1,10 @@
 package sysession
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -174,6 +176,61 @@ func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
 	}
 	if !strings.Contains(gotShort, excerptMarkerSafe) {
 		t.Errorf("expected placeholder %q in output, got: %q", excerptMarkerSafe, gotShort)
+	}
+}
+
+// TestBuildExcerpt_MarkerFoldedIntoWalk pins R20260602-PERF-1 (#1578):
+// folding the delimiter neutralisation into the single rune walk (instead
+// of the prior 2×Contains + 2×ReplaceAll pre-pass) must stay
+// behaviour-equivalent — every literal marker becomes the inert
+// placeholder, surrounding content is preserved verbatim, and multiple
+// / adjacent markers are all neutralised.
+func TestBuildExcerpt_MarkerFoldedIntoWalk(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"inline begin marker with surrounding text",
+			"before " + excerptBeginMarker + " after",
+			"before " + excerptMarkerSafe + " after",
+		},
+		{
+			"inline end marker with surrounding text",
+			"x" + excerptEndMarker + "y",
+			"x" + excerptMarkerSafe + "y",
+		},
+		{
+			"both markers on one line",
+			excerptBeginMarker + "mid" + excerptEndMarker,
+			excerptMarkerSafe + "mid" + excerptMarkerSafe,
+		},
+		{
+			"adjacent identical markers",
+			excerptBeginMarker + excerptBeginMarker,
+			excerptMarkerSafe + excerptMarkerSafe,
+		},
+		{
+			"marker across newlines preserves line structure",
+			"a\n" + excerptBeginMarker + "\nb",
+			"a\n" + excerptMarkerSafe + "\nb",
+		},
+		{
+			"no marker is untouched",
+			"plain content 你好",
+			"plain content 你好",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := buildExcerpt(c.in); got != c.want {
+				t.Errorf("buildExcerpt(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 
@@ -429,16 +486,115 @@ func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
 		})
 	}
 	got := buildExcerptFromHistory(entries)
-	// Cap is a soft cap: result MUST NOT exceed cap + ellipsis bytes
-	// (the marker is appended once when the cap fires).
-	maxLen := autoTitlerExcerptSoftCapBytes + len("\n…")
-	if len(got) > maxLen {
-		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), maxLen)
+	// The result must stay within the soft cap exactly.
+	if len(got) > autoTitlerExcerptSoftCapBytes {
+		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), autoTitlerExcerptSoftCapBytes)
 	}
 	// Truncation marker must be present so downstream review can spot
 	// the cut.  Confirms the break-on-cap branch fired.
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("expected truncation ellipsis at tail, got tail %q", got[max(0, len(got)-32):])
+	}
+}
+
+// TestBuildExcerptFromHistory_NoEarlyCap locks #1586: the per-entry "need"
+// must NOT pre-charge the 3-byte "…" marker, which previously fired the cap
+// ~one entry early for every entry that fit on its own.  We fill the buffer
+// with entries whose newline-joined bytes land just under the cap and assert
+// that every fitting entry is appended in full — i.e. truncation does NOT
+// trigger when the real content (entries + joining newlines) fits.
+func TestBuildExcerptFromHistory_NoEarlyCap(t *testing.T) {
+	t.Parallel()
+	const cap = autoTitlerExcerptSoftCapBytes
+	// 100-byte entries, the typical-turn size called out in the issue.
+	const perEntry = 100
+	chunk := strings.Repeat("a", perEntry)
+	// Each appended entry costs perEntry bytes plus one joining newline
+	// (except the first). Pick a count whose total content fits strictly
+	// under the cap so NOTHING should be truncated.
+	//   total = n*perEntry + (n-1) newlines = n*(perEntry+1) - 1
+	// Solve for the largest n with total <= cap, then back off by a few
+	// to stay comfortably inside.
+	count := cap/(perEntry+1) - 4
+	if count <= 0 {
+		t.Fatalf("test misconfigured: count=%d", count)
+	}
+	entries := make([]SystemEventEntry, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, SystemEventEntry{Type: "user", Summary: chunk})
+	}
+	got := buildExcerptFromHistory(entries)
+	// Expected full content: all entries joined by newlines, no marker.
+	wantLen := count*perEntry + (count - 1)
+	if len(got) != wantLen {
+		t.Errorf("expected all %d entries appended (len %d), got len %d", count, wantLen, len(got))
+	}
+	if strings.HasSuffix(got, "…") {
+		t.Errorf("cap fired early: content fit under cap but result was truncated")
+	}
+	// Sanity: confirm we genuinely exercised the regime where the OLD
+	// per-entry 3-byte reserve would have truncated. The old need formula
+	// added 3 bytes per entry, so old projected size was wantLen + 3*count,
+	// which must exceed the cap for this test to be meaningful.
+	if wantLen+3*count <= cap {
+		t.Fatalf("test not exercising the early-cap regime: wantLen=%d count=%d cap=%d", wantLen, count, cap)
+	}
+}
+
+// TestBuildExcerptFromHistory_SoftCapBoundary locks the hard upper bound: the
+// builder must never write past autoTitlerExcerptSoftCapBytes, and when an
+// entry would push past the cap the result is truncated with a visible "…".
+// First entry fills the buffer to exactly cap; the second entry cannot fit
+// (newline+byte would overflow) so truncation fires.  Because the buffer is
+// already at the cap there is no room for the "\n…" marker, so the builder
+// omits it rather than overshoot — the cap is a hard bound (#1586).
+func TestBuildExcerptFromHistory_SoftCapBoundary(t *testing.T) {
+	t.Parallel()
+
+	const cap = autoTitlerExcerptSoftCapBytes
+	// First entry fills the buffer to exactly cap bytes.
+	fill := strings.Repeat("x", cap)
+	// Second entry would require newline + byte = 2 more bytes, overflowing.
+	entries := []SystemEventEntry{
+		{Type: "user", Summary: fill},
+		{Type: "user", Summary: "y"},
+	}
+
+	got := buildExcerptFromHistory(entries)
+
+	if len(got) > cap {
+		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
+	}
+	// Buffer was at the cap, so the marker is correctly omitted to stay
+	// within bounds; only the first entry survives.
+	if len(got) != cap {
+		t.Errorf("expected result pinned at cap %d, got %d", cap, len(got))
+	}
+}
+
+// TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker verifies that when the
+// buffer has room for the "\n…" marker at truncation time, the marker IS
+// written and the result still stays within the cap.
+func TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker(t *testing.T) {
+	t.Parallel()
+
+	const cap = autoTitlerExcerptSoftCapBytes
+	// First entry fills to cap-8, leaving 8 bytes of headroom.
+	fill := strings.Repeat("x", cap-8)
+	// Second entry is 16 bytes: newline+16 = 17 > 8 headroom → truncates.
+	// At truncation sb.Len()=cap-8, marker "\n…" is 4 bytes, fits within cap.
+	entries := []SystemEventEntry{
+		{Type: "user", Summary: fill},
+		{Type: "user", Summary: strings.Repeat("y", 16)},
+	}
+
+	got := buildExcerptFromHistory(entries)
+
+	if len(got) > cap {
+		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation ellipsis at tail, got %q", got[max(0, len(got)-16):])
 	}
 }
 
@@ -738,4 +894,205 @@ func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAutoTitler_MistypedKnobWarnsAndKeepsDefault asserts R250531-ARCH-01
+// (#1505): a daemon knob supplied with the wrong dynamic type (e.g. int64
+// vs the expected int) must NOT silently retain the default — it logs a
+// slog.Warn naming the key + want/got types so the misconfiguration is
+// diagnosable from logs. The default value is still retained (we never
+// coerce an attacker/operator-controlled wrong type).
+func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     DaemonConfig
+		wantKey string // substring expected in the warn log
+	}{
+		{
+			name:    "min_user_turns int64 instead of int",
+			cfg:     DaemonConfig{"min_user_turns": int64(7)},
+			wantKey: "min_user_turns",
+		},
+		{
+			name:    "batch_per_tick float64 instead of int",
+			cfg:     DaemonConfig{"batch_per_tick": float64(50)},
+			wantKey: "batch_per_tick",
+		},
+		{
+			name:    "min_rename_interval int instead of Duration",
+			cfg:     DaemonConfig{"min_rename_interval": 30},
+			wantKey: "min_rename_interval",
+		},
+		{
+			name:    "include_group_chat string instead of bool",
+			cfg:     DaemonConfig{"include_group_chat": "true"},
+			wantKey: "include_group_chat",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(prev)
+
+			d, err := newAutoTitler(DaemonDeps{
+				Router: wrapRouter(newFakeRouter()),
+				Runner: &capturingRunner{},
+			})
+			if err != nil {
+				t.Fatalf("newAutoTitler: %v", err)
+			}
+			a := d.(*autoTitler)
+
+			// Snapshot defaults so we can assert the mistyped value did
+			// not get applied.
+			gotMinTurns := a.minUserTurns
+			gotInterval := a.minRenameInterval
+			gotBatch := a.batchPerTick
+			gotGroup := a.includeGroupChat
+
+			if err := a.Configure(tc.cfg); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+
+			if a.minUserTurns != gotMinTurns || a.minRenameInterval != gotInterval ||
+				a.batchPerTick != gotBatch || a.includeGroupChat != gotGroup {
+				t.Fatalf("mistyped knob mutated config: %+v", a)
+			}
+
+			logged := buf.String()
+			if !strings.Contains(logged, "mistyped daemon knob") {
+				t.Fatalf("expected mistyped-knob warning, got log: %q", logged)
+			}
+			if !strings.Contains(logged, tc.wantKey) {
+				t.Fatalf("warning missing key %q, got log: %q", tc.wantKey, logged)
+			}
+		})
+	}
+}
+
+// TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn is the negative companion
+// to TestAutoTitler_MistypedKnobWarnsAndKeepsDefault: correctly-typed
+// knobs must apply AND emit no mistyped-knob warning.
+func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	d, err := newAutoTitler(DaemonDeps{
+		Router: wrapRouter(newFakeRouter()),
+		Runner: &capturingRunner{},
+	})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+	a := d.(*autoTitler)
+
+	cfg := DaemonConfig{
+		"min_user_turns":      9,
+		"min_rename_interval": 42 * time.Minute,
+		"batch_per_tick":      7,
+		"include_group_chat":  true,
+	}
+	if err := a.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if a.minUserTurns != 9 {
+		t.Fatalf("minUserTurns = %d, want 9", a.minUserTurns)
+	}
+	if a.minRenameInterval != 42*time.Minute {
+		t.Fatalf("minRenameInterval = %v, want 42m", a.minRenameInterval)
+	}
+	if a.batchPerTick != 7 {
+		t.Fatalf("batchPerTick = %d, want 7", a.batchPerTick)
+	}
+	if !a.includeGroupChat {
+		t.Fatalf("includeGroupChat = false, want true")
+	}
+	if strings.Contains(buf.String(), "mistyped daemon knob") {
+		t.Fatalf("unexpected mistyped-knob warning for valid cfg: %q", buf.String())
+	}
+}
+
+// TestAutoTitler_CtxCancelPreservesFirstErr pins R053116-CR-4: when the first
+// renameOne in a batch fails with an upstream error (firstErr ≠ nil) and ctx
+// is cancelled before the second candidate is processed, Tick MUST return
+// firstErr — not ctx.Err(). The upstream error must reach classifyError so it
+// counts toward the circuit breaker; returning context.Canceled would silently
+// mis-classify the failure as DaemonErrorClassCanceled and hide it from the
+// breaker.
+//
+// Scenario:
+//   - 2 candidates in the batch (2 sessions with enough turns)
+//   - runner.Run returns a non-validation error on the first call (→ firstErr)
+//     and also cancels the context after doing so
+//   - ctx.Err() is non-nil before the second iteration
+//   - Tick must return firstErr, not context.Canceled
+func TestAutoTitler_CtxCancelPreservesFirstErr(t *testing.T) {
+	t.Parallel()
+
+	// errUpstream simulates a real upstream runner failure (not wrapped in
+	// ErrValidation) so classifyError yields DaemonErrorClassUpstream.
+	errUpstream := errors.New("runner: model overloaded")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// cancelAfterFirstRunner cancels ctx on the first Run call, then
+	// returns errUpstream so the caller records it as firstErr.
+	// On any subsequent call it would return ctx.Err(), but the
+	// ctx.Err() check at the top of the loop fires before a second
+	// Run, so only one call should ever happen.
+	cancellingRunner := &cancelAfterFirstRunnerHelper{
+		cancel:    cancel,
+		errReturn: errUpstream,
+	}
+
+	snap1 := session.SessionSnapshot{
+		Key: "feishu:direct:u1:general", MessageCount: 5,
+		LastPrompt: "first prompt",
+	}
+	snap2 := session.SessionSnapshot{
+		Key: "feishu:direct:u2:general", MessageCount: 5,
+		LastPrompt: "second prompt",
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap1, snap2})
+
+	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: cancellingRunner})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+
+	_, tickErr := a.Tick(ctx)
+
+	if tickErr == nil {
+		t.Fatal("Tick returned nil error; expected upstream error")
+	}
+	// The returned error MUST be the upstream error, not context.Canceled.
+	if errors.Is(tickErr, context.Canceled) {
+		t.Fatalf("Tick returned context.Canceled; want upstream firstErr — R053116-CR-4 fix may be missing")
+	}
+	if !errors.Is(tickErr, errUpstream) {
+		t.Fatalf("Tick returned %v; want errUpstream (%v) — R053116-CR-4 fix may be missing", tickErr, errUpstream)
+	}
+}
+
+// cancelAfterFirstRunnerHelper cancels its context on the first Run call and
+// returns a caller-supplied error.  Subsequent calls (should not occur in the
+// test scenario) return context.Canceled to surface any accidental second call.
+type cancelAfterFirstRunnerHelper struct {
+	cancel    context.CancelFunc
+	errReturn error
+	called    atomic.Int32
+}
+
+func (c *cancelAfterFirstRunnerHelper) Run(_ context.Context, _ string) (string, error) {
+	n := c.called.Add(1)
+	if n == 1 {
+		c.cancel()        // cancel the outer ctx so next iteration's ctx.Err() fires
+		return "", c.errReturn
+	}
+	return "", context.Canceled
 }

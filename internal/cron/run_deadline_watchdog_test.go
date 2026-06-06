@@ -35,7 +35,7 @@ func TestRunDeadlineWatchdog_FiresOnDeadlineExceeded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	ch := runDeadlineWatchdog(ctx, ci)
+	ch, _ := runDeadlineWatchdog(ctx, ci)
 	abort := <-ch
 	if !abort.fired {
 		t.Fatalf("abort.fired = false, want true on DeadlineExceeded")
@@ -58,7 +58,7 @@ func TestRunDeadlineWatchdog_SkipsOnExplicitCancel(t *testing.T) {
 	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ch := runDeadlineWatchdog(ctx, ci)
+	ch, _ := runDeadlineWatchdog(ctx, ci)
 	cancel()
 	abort := <-ch
 	if abort.fired {
@@ -79,7 +79,11 @@ func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
 	t.Run("nil ctx", func(t *testing.T) {
 		t.Parallel()
 		ci := &countingInterrupter{outcome: InterruptSent}
-		abort := <-runDeadlineWatchdog(nil, ci) //nolint:staticcheck // intentional nil for guard test
+		ch, stop := runDeadlineWatchdog(nil, ci) //nolint:staticcheck // intentional nil for guard test
+		if stop() {
+			t.Fatalf("nil-guard stop() = true; want false (result already on channel)")
+		}
+		abort := <-ch
 		if abort.fired {
 			t.Fatalf("abort.fired = true with nil ctx; want false")
 		}
@@ -91,7 +95,8 @@ func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		abort := <-runDeadlineWatchdog(ctx, nil)
+		ch, _ := runDeadlineWatchdog(ctx, nil)
+		abort := <-ch
 		if abort.fired {
 			t.Fatalf("abort.fired = true with nil sess; want false")
 		}
@@ -109,7 +114,8 @@ func TestRunDeadlineWatchdog_PropagatesUnsupportedOutcome(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	ch, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-ch
 	if !abort.fired {
 		t.Fatal("abort.fired = false; ACP path should still record an attempt")
 	}

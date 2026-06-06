@@ -269,6 +269,48 @@ func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	}
 }
 
+// TestParseRunPathParams_JSONErrorContentType asserts R20260606-SEC-13: param
+// validation errors from parseRunPathParams must carry application/json
+// Content-Type (not text/plain), matching the rest of the cron endpoint error
+// envelope.
+func TestParseRunPathParams_JSONErrorContentType(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+	cases := []struct {
+		name  string
+		runID string
+		jobID string
+	}{
+		{"empty run_id", "", "aaaaaaaaaaaaaaaa"},
+		{"run_id too long", strings.Repeat("a", 200), "aaaaaaaaaaaaaaaa"},
+		{"invalid run_id", "ZZZZ", "aaaaaaaaaaaaaaaa"},
+		{"empty job_id", "aaaaaaaaaaaaaaaa", ""},
+		{"job_id too long", "aaaaaaaaaaaaaaaa", strings.Repeat("b", 200)},
+		{"invalid job_id", "aaaaaaaaaaaaaaaa", "ZZZZ"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			w := callTranscript(h, c.jobID, c.runID)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+			ct := w.Result().Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json; got text/plain would break frontend JSON parse", ct)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Errorf("response is not valid JSON: %v; body=%s", err, w.Body.String())
+			}
+			if body["error"] == "" {
+				t.Errorf("JSON error field missing; body=%v", body)
+			}
+		})
+	}
+}
+
 func TestTranscript_TimeWindowFilter_DropsOlderTurns(t *testing.T) {
 	t.Parallel()
 	// fresh=false simulation: the JSONL contains turns from before the
@@ -512,7 +554,6 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	}
 }
 
-
 // TestFlattenUserEvent_PreallocCapacity pins R241-PERF-7: per-line slice
 // allocation must match the actual turn count exactly. The prior
 // implementation hard-coded `make([]transcriptTurn, 0, 2)` which over-
@@ -729,11 +770,39 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 	if len(out2[0].Input) > maxToolInputBytes {
 		t.Errorf("big input: Input bytes=%d, must be <= maxToolInputBytes=%d after truncation", len(out2[0].Input), maxToolInputBytes)
 	}
-	// Summary derives from a probe-Unmarshal of the original Input bytes
-	// before truncation (capped to 200 chars by SanitizeForLog), so the
-	// timeline label still surfaces even though raw Input was dropped.
-	if out2[0].Summary == "" {
-		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
+	// R20260602141221-SEC-9 (#1584): an Input this large (> summariseInputCap)
+	// is now rejected before json.Unmarshal, so the timeline label is dropped
+	// rather than driving the parser through the attacker-influenced blob. The
+	// wire payload is independently [truncated] above.
+	if out2[0].Summary != "" {
+		t.Errorf("big input: summary=%q, want empty (oversize Input must short-circuit the unmarshal cap)", out2[0].Summary)
+	}
+
+	// An Input between summariseInputCap and maxToolInputBytes: the wire
+	// payload is preserved (not truncated, since < maxToolInputBytes) but the
+	// summary is dropped (summariseToolInput short-circuits at summariseInputCap
+	// to bound json.Unmarshal amplification — R20260602141221-SEC-9 / #1584).
+	if maxToolInputBytes > summariseInputCap {
+		midPad := strings.Repeat("z", maxToolInputBytes/2)
+		midInput := `{"command":"` + midPad + `"}`
+		midEv := &claudeJSONLEvent{
+			Type: "assistant",
+			Message: json.RawMessage(`{"role":"assistant","content":[` +
+				`{"type":"tool_use","id":"tu_c","name":"Bash","input":` + midInput + `}` +
+				`]}`),
+		}
+		out3, _, _, parsed3 := flattenAssistantEvent(midEv, 0, 0)
+		if !parsed3 || len(out3) != 1 {
+			t.Fatalf("mid input: parsed=%v len(out)=%d (want true / 1)", parsed3, len(out3))
+		}
+		// summariseToolInput rejects inputs > summariseInputCap, so summary must be empty.
+		if out3[0].Summary != "" {
+			t.Errorf("mid input: summary=%q; must be empty for Input between summariseInputCap and maxToolInputBytes", out3[0].Summary)
+		}
+		// Wire payload must NOT be replaced (input is still < maxToolInputBytes).
+		if string(out3[0].Input) == `"[truncated]"` {
+			t.Errorf("mid input: Input was truncated; must be preserved when < maxToolInputBytes")
+		}
 	}
 }
 
@@ -793,8 +862,8 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	//    rejected before json.Unmarshal so a hostile/malformed transcript
 	//    line cannot drive the parser through a deeply-nested megabyte
 	//    blob just to populate a 200-byte label that the wire layer
-	//    truncates anyway. Build a 64 KB+1 byte payload (one byte over
-	//    the cap) shaped as valid JSON with a recognised priority field;
+	//    truncates anyway. Build a summariseInputCap+1 byte payload (one
+	//    byte over the cap) shaped as valid JSON with a recognised priority field;
 	//    the cap must short-circuit BEFORE the priority path runs, so
 	//    even a recognised key returns empty here.
 	oversize := make([]byte, summariseInputCap+1)
@@ -814,7 +883,7 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 
 	// 6. Inputs exactly at the cap are still summarised (boundary off-by-one
-	//    guard). A 64 KB payload that fits within summariseInputCap should
+	//    guard). A payload that fits exactly within summariseInputCap should
 	//    produce the priority label.
 	atCap := make([]byte, summariseInputCap)
 	atCap[0] = '{'
@@ -825,6 +894,19 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	atCap[len(atCap)-1] = '}'
 	if got := summariseToolInput("Bash", atCap); !strings.Contains(got, "ls") {
 		t.Errorf("at-cap input (%d bytes == cap): summary=%q, want to contain priority label", len(atCap), got)
+	}
+
+	// 7. R20260602141221-SEC-9 (#1584): the unmarshal cap must stay well
+	//    below the wire payload limit so a hostile transcript cannot
+	//    amplify json.Unmarshal cost. The probe only needs a few KB to
+	//    surface a label, so guard against a future bump that re-inflates
+	//    the attacker-influenced JSON fed to the parser.
+	if summariseInputCap > maxToolInputBytes {
+		t.Errorf("summariseInputCap=%d must be <= maxToolInputBytes=%d to bound json.Unmarshal amplification (#1584)",
+			summariseInputCap, maxToolInputBytes)
+	}
+	if summariseInputCap > 16*1024 {
+		t.Errorf("summariseInputCap=%d exceeds the 16 KB ceiling set by #1584; a one-line label never needs more", summariseInputCap)
 	}
 }
 
@@ -906,6 +988,61 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 				if out[i].Kind != want {
 					t.Errorf("out[%d].Kind=%q, want %q", i, out[i].Kind, want)
 				}
+			}
+		})
+	}
+}
+
+// TestFlattenSystemEvent_EarlyReturn pins R200109-GO-7 and R200109-GO-10:
+// unmarshal failure must return early (parsed=false, nil slice) rather than
+// falling through to the error-turn branch; non-error subtypes must also
+// return nil (no pre-allocated slice wasted).
+func TestFlattenSystemEvent_EarlyReturn(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		msg       string // raw JSON for ev.Message
+		wantNil   bool   // expect nil (not empty) slice
+		wantParse bool
+	}{
+		{
+			name:      "unmarshal_fail_returns_early",
+			msg:       "not-json",
+			wantNil:   true,
+			wantParse: false,
+		},
+		{
+			name:      "non_error_subtype_nil_slice",
+			msg:       `{"subtype":"init"}`,
+			wantNil:   true,
+			wantParse: false,
+		},
+		{
+			name:      "error_subtype_allocates_slice",
+			msg:       `{"subtype":"error","message":"boom"}`,
+			wantNil:   false,
+			wantParse: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(tc.msg),
+			}
+			out, _, _, parsed := flattenSystemEvent(ev, 0, 0)
+			if parsed != tc.wantParse {
+				t.Errorf("parsed=%v, want %v", parsed, tc.wantParse)
+			}
+			if tc.wantNil && out != nil {
+				t.Errorf("expected nil slice, got len=%d", len(out))
+			}
+			if !tc.wantNil && out == nil {
+				t.Errorf("expected non-nil slice, got nil")
 			}
 		})
 	}
@@ -1135,35 +1272,28 @@ func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T)
 }
 
 // TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy pins R243-SEC-12 (#798):
-// when transcriptSem is saturated (every transcriptConcurrencyCap slot
-// held by an in-flight handler), arriving requests must receive 503
-// "transcript busy" immediately — NOT 200 with a partial payload, and
-// NOT a queued wait. The non-blocking acquire is the load-shedding gate
-// that bounds peak resident bytes (cap × 8 MB LimitReader + cap ×
-// 256 KB Scanner buffer) under multi-operator load.
+// when the per-Handlers transcriptSem is saturated (every slot held by
+// an in-flight handler), arriving requests must receive 503 "transcript
+// busy" immediately — NOT 200 with a partial payload, and NOT a queued
+// wait. The non-blocking acquire is the load-shedding gate that bounds
+// peak resident bytes (cap × 8 MB LimitReader + cap × 256 KB Scanner
+// buffer) under multi-operator load.
 //
-// Test approach: directly fill the package-level transcriptSem channel
-// to the cap, then call the handler with a known-good fixture and
-// verify it returns 503. We restore the channel state via defer so
-// subsequent parallel tests don't observe a saturated semaphore. NOT
-// t.Parallel() because this test mutates package-global state.
+// Test approach: wire a cap-1 instance semaphore on the fixture handler,
+// fill its single slot, then call the handler with a known-good fixture
+// and verify it returns 503 instead of the real 200 payload. The
+// semaphore is per-Handlers so this no longer mutates package-global
+// state — kept non-parallel only for symmetry with the sibling tests.
 func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
-	// Saturate the package-level semaphore so the handler's non-blocking
-	// acquire takes the default branch.
-	for i := 0; i < transcriptConcurrencyCap; i++ {
-		transcriptSem <- struct{}{}
-	}
-	// Drain on exit so other tests aren't blocked by leaked slots.
-	defer func() {
-		for i := 0; i < transcriptConcurrencyCap; i++ {
-			<-transcriptSem
-		}
-	}()
-
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
 	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
 		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"x"}}`,
 	})
+
+	// Wire a cap-1 instance gate and saturate it so the handler's
+	// non-blocking acquire takes the default (busy) branch.
+	h.transcriptSem = make(chan struct{}, 1)
+	h.transcriptSem <- struct{}{}
 
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusServiceUnavailable {
@@ -1182,29 +1312,21 @@ func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
 
 // TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn pins the defer-release
 // contract: HandleRunTranscript must release its semaphore slot on every
-// return path so a transient burst doesn't permanently shrink the
-// transcriptConcurrencyCap budget. We acquire cap-1 slots manually,
-// run a real request through the handler (which acquires the last slot
-// and must release it on return), then verify a follow-up request can
-// still acquire — i.e. the slot count returned to capacity. NOT
-// t.Parallel() because this test mutates package-global state.
+// return path so a transient burst doesn't permanently shrink the gate's
+// budget. We run a real request through a cap-1 instance gate (the
+// handler acquires the only slot and must release it on return), then
+// verify a follow-up acquire still succeeds — i.e. the slot returned to
+// the pool. Per-Handlers gate, so no package-global mutation.
 func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
-	// Hold cap-1 slots so the handler under test takes the LAST slot.
-	for i := 0; i < transcriptConcurrencyCap-1; i++ {
-		transcriptSem <- struct{}{}
-	}
-	defer func() {
-		for i := 0; i < transcriptConcurrencyCap-1; i++ {
-			<-transcriptSem
-		}
-	}()
-
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
 	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
 		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"hi"}}`,
 	})
 
-	// First request must succeed (cap-1 held + 1 acquired = cap, no overflow).
+	// Cap-1 gate: the handler under test must take and release the only slot.
+	h.transcriptSem = make(chan struct{}, 1)
+
+	// First request must succeed (acquires the slot, releases on return).
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("first call status = %d body=%s", w.Code, w.Body.String())
@@ -1214,12 +1336,90 @@ func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
 	// Confirm by attempting a non-blocking acquire — if the slot is
 	// available, this select takes the case branch.
 	select {
-	case transcriptSem <- struct{}{}:
-		// Got the released slot back. Return it so we don't leak across
-		// tests; the deferred drain above only counts cap-1 receives.
-		<-transcriptSem
+	case h.transcriptSem <- struct{}{}:
+		<-h.transcriptSem
 	default:
-		t.Errorf("handler did not release its semaphore slot on return — "+
-			"defer release contract broken; transcriptSem at cap=%d", len(transcriptSem))
+		t.Errorf("handler did not release its semaphore slot on return — " +
+			"defer release contract broken")
+	}
+}
+
+// TestSameFileAncestor_SymlinkMidPath pins R112714-SEC-2: sameFileAncestor
+// must use os.Lstat (not os.Stat) when walking the ancestor chain so a
+// symlink planted at an intermediate path component cannot redirect the
+// inode comparison to an attacker-controlled directory.
+//
+// Scenario: root = /tmp/.../allowed
+//
+//	target = /tmp/.../allowed/real/file
+//	mid symlink: /tmp/.../allowed/real -> /tmp/.../outside
+//
+// With os.Stat the loop would stat the symlink target (/tmp/.../outside)
+// and compare it against rootInfo — a false-ancestor match if the attacker
+// owns 'outside'. With os.Lstat the loop stats the symlink node itself,
+// which differs from rootInfo, so it climbs to the next parent (allowed/)
+// and correctly returns true (or false when the symlink points outside).
+//
+// We use a symlink pointing OUTSIDE the allowed root to confirm that
+// sameFileAncestor still returns true when the file path is legitimately
+// under the root (symlink only affects the intermediate traversal, not
+// the terminal containment decision), and to confirm sameFileAncestor
+// does NOT follow the symlink to the outside directory.
+func TestSameFileAncestor_SymlinkMidPath(t *testing.T) {
+	if os.Getenv("CI_SKIP_SYMLINK") != "" {
+		t.Skip("symlink tests disabled")
+	}
+	tmp := t.TempDir()
+	allowed := filepath.Join(tmp, "allowed")
+	outside := filepath.Join(tmp, "outside")
+
+	// Create directories.
+	if err := os.MkdirAll(filepath.Join(allowed, "real"), 0o755); err != nil {
+		t.Fatalf("mkdir allowed/real: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+
+	// Write a real file under allowed/real.
+	realFile := filepath.Join(allowed, "real", "file.jsonl")
+	if err := os.WriteFile(realFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+
+	// Symlink: allowed/link -> ../outside (points outside the allowed root).
+	linkPath := filepath.Join(allowed, "link")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	// A file path through the symlink component (allowed/link/x.jsonl).
+	// Even though 'link' resolves outside, the lexical path starts under allowed/.
+	// sameFileAncestor walks the LEXICAL parents of the input, not symlink targets.
+	// So it will Lstat allowed/link/x.jsonl (no-exist→err), climb to
+	// allowed/link (exists as symlink inode ≠ rootInfo), then to allowed/
+	// (inode == rootInfo → true). With Stat, 'allowed/link' would resolve
+	// to 'outside' which has a different inode from 'allowed' → still
+	// returns false on the wrong reason.  The important regression is that
+	// os.Stat FOLLOWS the symlink and could match an attacker-planted inode;
+	// os.Lstat does not.
+	symlinkChildPath := filepath.Join(linkPath, "x.jsonl")
+	// The symlink child does not exist on disk. sameFileAncestor should
+	// climb past it and reach 'allowed/' → true.
+	got := sameFileAncestor(symlinkChildPath, allowed)
+	if !got {
+		t.Errorf("sameFileAncestor(%q, %q) = false; expected true because the "+
+			"lexical path is under 'allowed/' even though an intermediate "+
+			"component is a symlink pointing outside", symlinkChildPath, allowed)
+	}
+
+	// Confirm that a path genuinely outside the root is still rejected.
+	outsideFile := filepath.Join(outside, "secret.jsonl")
+	if err := os.WriteFile(outsideFile, []byte("y"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if sameFileAncestor(outsideFile, allowed) {
+		t.Errorf("sameFileAncestor(%q, %q) = true; path outside root must be rejected",
+			outsideFile, allowed)
 	}
 }

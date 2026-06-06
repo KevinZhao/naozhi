@@ -1,14 +1,40 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"unsafe"
 )
+
+// readEventPool recycles the scratch *Event that ReadEvent unmarshals each
+// shim stdout frame into. R220123-PERF-13 (#1637): json.Unmarshal forces
+// its `&ev` argument to escape to the heap (reflection retains internal
+// pointer state into the destination), so the obvious `var ev Event` local
+// produced one heap allocation of the ~300-byte Event header per frame —
+// 5-50 events/s × N sessions. Pooling the header eliminates that steady
+// per-frame allocation. The returned []Event{*ev} carries a value COPY, so
+// the pooled struct is safe to reuse the instant ReadEvent returns; its
+// nested pointer fields (Message, Metadata, ...) are owned by the copy and
+// must be cleared on Put so the pool does not pin a turn's content graph.
+//
+// This is the *Event header survivor noted as out of scope by
+// R222-PERF-3 (#700), which only removed the []byte(line) input copy.
+var readEventPool = sync.Pool{New: func() any { return new(Event) }}
+
+// resetEvent zeroes every field of a pooled Event before it re-enters the
+// pool so no stale pointer (which would keep a prior frame's AssistantMessage
+// / Metadata / RawParams graph alive) or stale scalar leaks into the next
+// Unmarshal. A whole-struct assignment is the cheapest correct reset and is
+// resilient to new fields being added to Event.
+func resetEvent(ev *Event) {
+	*ev = Event{}
+}
 
 // stringToBytesUnsafe aliases s's backing storage as a []byte without
 // allocating. The returned slice MUST be treated as read-only — Go strings
@@ -42,40 +68,24 @@ func stringToBytesUnsafe(s string) []byte {
 var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
-type ClaudeProtocol struct {
-	// SettingsFile is passed to --settings <file>. When non-empty, standard setting
-	// sources are disabled (--setting-sources "") and this file is loaded instead.
-	// Use writeClaudeSettingsOverride() to generate a filtered copy of user settings
-	// that strips hooks calling back into naozhi.
-	SettingsFile string
-
-	// RefreshSettings, when non-nil, is invoked at the start of every BuildArgs
-	// call and its return value (if non-empty) replaces SettingsFile for that
-	// spawn. This lets the override file track edits to ~/.claude/settings.json
-	// at session-spawn granularity, instead of being frozen at naozhi startup.
-	// Returning "" indicates "refresh failed; keep the existing SettingsFile" —
-	// callers that hit a read race or IO error should not nuke the prior path
-	// because the last known-good override still authenticates Bedrock.
-	//
-	// Clone propagates this field so per-spawn copies retain refresh ability.
-	RefreshSettings func() string
-}
+//
+// The spawned claude reads ~/.claude/settings.json directly via
+// `--setting-sources user` (see BuildArgs), so naozhi-spawned cc behaves
+// identically to a command-line cc: single config source, zero extra
+// naozhi-side config, no settings-override copy to maintain. The historical
+// `--setting-sources "" + --settings <override>` path (writeClaudeSettingsOverride
+// / filterHooks) was removed in docs/rfc/direct-user-settings.md PR1. Hook
+// feedback-loop protection now lives at naozhi's HTTP entry auth (webhook
+// signing + dashboard token), not by filtering the user's settings file.
+type ClaudeProtocol struct{}
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
 func (p *ClaudeProtocol) Clone() Protocol {
-	return &ClaudeProtocol{
-		SettingsFile:    p.SettingsFile,
-		RefreshSettings: p.RefreshSettings,
-	}
+	return &ClaudeProtocol{}
 }
 
 func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
-	if p.RefreshSettings != nil {
-		if path := p.RefreshSettings(); path != "" {
-			p.SettingsFile = path
-		}
-	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -87,7 +97,12 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		// Safe to always enable: replay events are filtered out of EventLog
 		// (see filterReplayEvent).
 		"--replay-user-messages",
-		"--setting-sources", "", // disable standard settings to avoid hook loops
+		// Load the user's ~/.claude/settings.json directly so naozhi-spawned
+		// cc matches command-line cc (single config source, no override copy).
+		// docs/rfc/direct-user-settings.md PR1. Note: sysession Runner keeps
+		// `--setting-sources ""` (it has no entry-auth and AutoTitler could
+		// dead-loop on host hooks — see runner.go).
+		"--setting-sources", "user",
 	}
 	// R215-SEC-P1-1 / #531: --dangerously-skip-permissions used to be
 	// hard-coded above. It is required by naozhi's `-p` long-lived process
@@ -99,9 +114,6 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// first permission prompt.
 	if opts.PermissionMode == PermissionModeDefault {
 		args = append(args, "--dangerously-skip-permissions")
-	}
-	if p.SettingsFile != "" {
-		args = append(args, "--settings", p.SettingsFile)
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -189,13 +201,17 @@ var deniedExtraFlags = map[string]struct{}{
 	"--dangerously-skip-permissions": {}, // BuildArgs already controls this
 	"--append-system-prompt":         {}, // router/scratch own this site
 	"--system-prompt":                {}, // hard override of system prompt
-	"--setting-sources":              {}, // BuildArgs pins "" to disable hooks
-	"--settings":                     {}, // BuildArgs owns settings file
+	"--setting-sources":              {}, // BuildArgs pins "user" (load ~/.claude/settings.json)
+	"--settings":                     {}, // naozhi no longer injects a settings override file
 	"--resume":                       {}, // BuildArgs owns ResumeID validation
 	"--allowed-tools":                {}, // permission allowlist override
 	"--disallowed-tools":             {}, // permission allowlist override
 	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
 	"--permission-prompt-tool":       {}, // permission gate plumbing
+	"--output-format":                {}, // BuildArgs pins stream-json; operator override breaks the NDJSON parser
+	"--input-format":                 {}, // same protocol-framing concern
+	"--verbose":                      {}, // stream-json verbosity is BuildArgs-controlled
+	"--replay-user-messages":         {}, // protocol replay flag owned by BuildArgs
 }
 
 // filterDeniedFlags returns extra with any deniedExtraFlags occurrences (and
@@ -267,6 +283,44 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 	return p.WriteUserMessageLocked(w, "", text, images, "")
 }
 
+// userMsgEnc bundles a *bytes.Buffer + *json.Encoder so WriteUserMessageLocked
+// can encode each user message into a pooled buffer instead of paying a fresh
+// json.Marshal encodeState + output []byte allocation per send (R20260606-PERF-2
+// / #1826). Mirrors process_shim_io.go's shimSendBufPool, but this encoder keeps
+// the default HTML escaping (escape ON) so the produced bytes are byte-identical
+// to the previous json.Marshal(msg) path — the shimSendBufPool encoder disables
+// HTML escaping and could not be reused here without changing the wire payload
+// for messages containing '<', '>', or '&'.
+type userMsgEnc struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+// userMsgEncPool recycles encoder/buffer pairs across user-message sends. The
+// Encoder holds the *bytes.Buffer by pointer, so a Reset between uses is safe.
+var userMsgEncPool = sync.Pool{
+	New: func() any {
+		buf := new(bytes.Buffer)
+		// Default escaping (HTML escape ON) — matches encoding/json.Marshal so
+		// the output stays byte-for-byte identical to the prior Marshal path.
+		enc := json.NewEncoder(buf)
+		return &userMsgEnc{buf: buf, enc: enc}
+	},
+}
+
+// userMsgEncMaxCap caps the pooled buffer capacity. Image-bearing user messages
+// (base64 thumbnails up to ~400KB) inflate the buffer; oversized entries are
+// dropped on Put so the pool does not retain large backing arrays. Mirrors
+// shimSendBufMaxCap / acpEncBufMaxCap.
+const userMsgEncMaxCap = 64 * 1024
+
+func putUserMsgEnc(e *userMsgEnc) {
+	if e.buf.Cap() > userMsgEncMaxCap {
+		return
+	}
+	userMsgEncPool.Put(e)
+}
+
 // WriteUserMessageLocked writes a user message with optional uuid + priority.
 // Caller must already hold Process.shimWMu (see protocol.go interface doc).
 //
@@ -275,12 +329,21 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 // safe for tests and ACP-backed stream-json paths that never set them.
 func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error {
 	msg := NewUserMessageWithMeta(text, images, uuid, priority)
-	data, err := json.Marshal(msg)
-	if err != nil {
+	// R20260606-PERF-2 (#1826): encode through a pooled json.Encoder +
+	// bytes.Buffer instead of json.Marshal, dropping the per-send encodeState
+	// + output []byte allocation. json.Encoder.Encode appends a trailing '\n'
+	// itself — exactly the newline the old json.Marshal path appended manually
+	// — so the written bytes are unchanged.
+	em := userMsgEncPool.Get().(*userMsgEnc)
+	em.buf.Reset()
+	if err := em.enc.Encode(msg); err != nil {
+		// A failed Encode may leave the encoder/buffer in an undefined state;
+		// drop this entry (let GC reclaim it) rather than returning it to the
+		// pool, matching encodeShimMsg's failure handling.
 		return err
 	}
-	data = append(data, '\n')
-	_, err = w.Write(data)
+	_, err := w.Write(em.buf.Bytes())
+	putUserMsgEnc(em)
 	return err
 }
 
@@ -309,20 +372,14 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 // caller rather than reintroducing orphan types.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
-	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
-	// variable requestID, mirroring the ACP WriteInterrupt fast-path
-	// (R226-PERF-9). encoding/json takes a fast-path for plain string values
-	// (no struct reflection) and yields a properly escaped JSON string with
-	// surrounding quotes — identical to what the previous struct-based
-	// Marshal produced for the request_id field.
-	idJSON, err := json.Marshal(requestID)
-	if err != nil {
-		return fmt.Errorf("marshal control_request: %w", err)
-	}
+	// R20260606-PERF-10: use appendJSONStringBytes (same package) to quote
+	// requestID directly into a stack buffer, avoiding the json.Marshal heap
+	// alloc. appendJSONStringBytes escapes only `"`, `\`, C0 controls, and
+	// U+2028/U+2029 — identical output to json.Marshal for a UUID string.
 	var buf [256]byte
 	out := buf[:0]
 	out = append(out, `{"type":"control_request","request_id":`...)
-	out = append(out, idJSON...)
+	out = appendJSONStringBytes(out, []byte(requestID))
 	out = append(out, `,"request":{"subtype":"interrupt"}}`...)
 	out = append(out, '\n')
 	if _, err := w.Write(out); err != nil {
@@ -349,6 +406,22 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 // accepted (~200 B-4 KiB per event, dwarfed by the json.Unmarshal value
 // graph it feeds).
 func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
+	return p.ReadEventInto(line, nil)
+}
+
+// ReadEventInto is the allocation-aware variant of ReadEvent. When buf has
+// spare capacity the (single) parsed Event is appended into it, letting the
+// readLoop hand in a reused stack-allocated array instead of forcing a fresh
+// 1-element backing slice on every frame — R20260603-PERF-10 (#1676). Claude
+// stream-json always yields at most one Event per line, so a buf of cap ≥1 is
+// never re-grown on the hot path. Passing buf=nil reproduces the original
+// allocating behaviour for callers that don't care.
+//
+// The returned slice always uses buf[:0] as its base, so the caller's array is
+// the backing store; callers must not retain the slice beyond the next
+// ReadEventInto call sharing the same buf (the readLoop iterates and drops it
+// within the same frame).
+func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
 	// R20260527122801-PERF-3 (#1334): substring fast-path skip for the
 	// dominant 99%-share frame types — hook_started / hook_response /
 	// control_response — before paying for the full Event reflect-unmarshal
@@ -366,17 +439,30 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// the match to the JSON key boundary; assistant text content can
 	// still mention the word verbatim and round-trips through
 	// json.Unmarshal as before.
-	if strings.Contains(line, `:"hook_started"`) ||
-		strings.Contains(line, `:"hook_response"`) ||
+	// :"hook_ covers both :"hook_started" and :"hook_response" while
+	// keeping the colon-anchor that prevents false positives in user text
+	// (R260528-GO-16). control_response has no common prefix with hook_ so
+	// it is checked separately. [R250531-PERF-9]
+	if strings.Contains(line, `:"hook_`) ||
 		strings.Contains(line, `:"control_response"`) {
 		return nil, false, nil
 	}
-	var ev Event
+	// R220123-PERF-13 (#1637): unmarshal into a pooled *Event so the Event
+	// header is not heap-allocated per frame. The pooled struct is returned
+	// to the pool on EVERY exit path (incl. the skip / cap-error early
+	// returns) and reset so it pins no prior frame's pointer graph. The
+	// success path copies the value out (`*ev`) into the returned slice
+	// before the deferred Put, so callers own an independent Event.
+	ev := readEventPool.Get().(*Event)
+	defer func() {
+		resetEvent(ev)
+		readEventPool.Put(ev)
+	}()
 	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy that
 	// the obvious []byte(line) cast would force. json.Unmarshal only reads
 	// its input, so aliasing the immutable string's storage is safe.
 	// R222-PERF-3 (#700).
-	if err := json.Unmarshal(stringToBytesUnsafe(line), &ev); err != nil {
+	if err := json.Unmarshal(stringToBytesUnsafe(line), ev); err != nil {
 		return nil, false, err
 	}
 	// Defence-in-depth: keep the structural skip in case the substring
@@ -421,7 +507,13 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 			ev.AskQuestion = aq
 		}
 	}
-	return []Event{ev}, ev.Type == "result", nil
+	// Copy the value out of the pooled *Event so the caller owns an
+	// independent Event; the deferred Put then resets and recycles the
+	// pooled header. The nested pointer fields (Message, AskQuestion, ...)
+	// are freshly allocated by this frame's Unmarshal and travel with the
+	// copy — resetEvent only clears the pooled struct's view of them, not
+	// the graph the returned copy points at.
+	return append(buf[:0], *ev), ev.Type == "result", nil
 }
 
 // askUserQuestionInput matches the `input` field of an AskUserQuestion tool_use

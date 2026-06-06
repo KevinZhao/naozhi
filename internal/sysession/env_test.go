@@ -79,7 +79,7 @@ func TestFilterEnv_ExactAllowlist(t *testing.T) {
 func TestFilterEnv_PrefixMatchesTrailingUnderscore(t *testing.T) {
 	t.Setenv("PATH", "/foo")
 	t.Setenv("HOME", "/h")
-	t.Setenv("ANTHROPIC_BEDROCK_BASE_URL", "http://gateway")
+	t.Setenv("ANTHROPIC_BEDROCK_BASE_URL", "https://gateway")
 	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "global.anthropic.claude-opus-4-7")
 	t.Setenv("ANTHROPIC", "bare-key-should-not-match-prefix")
 	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
@@ -89,7 +89,7 @@ func TestFilterEnv_PrefixMatchesTrailingUnderscore(t *testing.T) {
 	env := filterEnv([]string{"ANTHROPIC_", "CLAUDE_", "AWS_"})
 
 	for _, want := range []struct{ k, v string }{
-		{"ANTHROPIC_BEDROCK_BASE_URL", "http://gateway"},
+		{"ANTHROPIC_BEDROCK_BASE_URL", "https://gateway"},
 		{"ANTHROPIC_DEFAULT_OPUS_MODEL", "global.anthropic.claude-opus-4-7"},
 		{"CLAUDE_CODE_USE_BEDROCK", "1"},
 		{"AWS_REGION", "us-west-2"},
@@ -113,7 +113,7 @@ func TestFilterEnv_MixedExactAndPrefix(t *testing.T) {
 	t.Setenv("PATH", "/foo")
 	t.Setenv("HOME", "/h")
 	t.Setenv("HTTP_PROXY", "http://proxy")
-	t.Setenv("ANTHROPIC_BEDROCK_BASE_URL", "http://gateway")
+	t.Setenv("ANTHROPIC_BEDROCK_BASE_URL", "https://gateway")
 	t.Setenv("FOO_BAR", "no")
 
 	env := filterEnv([]string{"HTTP_PROXY", "ANTHROPIC_"})
@@ -121,7 +121,7 @@ func TestFilterEnv_MixedExactAndPrefix(t *testing.T) {
 	if !envContains(env, "HTTP_PROXY", "http://proxy") {
 		t.Errorf("exact HTTP_PROXY must pass")
 	}
-	if !envContains(env, "ANTHROPIC_BEDROCK_BASE_URL", "http://gateway") {
+	if !envContains(env, "ANTHROPIC_BEDROCK_BASE_URL", "https://gateway") {
 		t.Errorf("ANTHROPIC_ prefix must pass")
 	}
 	if envHasKey(env, "FOO_BAR") {
@@ -148,6 +148,7 @@ func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION",
 		"AWS_PROFILE",
+		"AWS_DEFAULT_PROFILE",
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"CLOUD_ML_REGION",
 		"ANTHROPIC_MODEL",
@@ -159,13 +160,23 @@ func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 	// CLAUDE_CODE_USE_BEDROCK="marker-..." is truthy, so the gate selects
 	// the Bedrock backend; that's irrelevant here since we only assert
 	// non-secret keys, which pass under every backend.
+	//
+	// Base-URL keys are SSRF-guarded (R090031-SEC-1 / #1687) and only pass
+	// through with a valid https:// (or loopback http) value, so use one
+	// for those instead of a bare marker.
+	markerFor := func(k string) string {
+		if _, isURL := envBaseURLKeys[k]; isURL {
+			return "https://marker-" + k
+		}
+		return "marker-" + k
+	}
 	for _, k := range keys {
-		t.Setenv(k, "marker-"+k)
+		t.Setenv(k, markerFor(k))
 	}
 
 	got := filterEnv(nil)
 	for _, k := range keys {
-		want := k + "=marker-" + k
+		want := k + "=" + markerFor(k)
 		if !containsKV(got, want) {
 			t.Errorf("backend selector %s missing from passthrough; got=%v", k, got)
 		}
@@ -260,6 +271,96 @@ func TestFilterEnv_CredsGatedByBackend(t *testing.T) {
 	}
 }
 
+// TestIsSafeProfileValue covers the allow/deny boundary for AWS profile names.
+// R20260603000023-SEC-1 (#1617).
+func TestIsSafeProfileValue(t *testing.T) {
+	valid := []string{
+		"default",
+		"my-profile",
+		"my_profile_1",
+		"ALLCAPS",
+		"a",
+		"abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE", // 44 chars
+	}
+	for _, v := range valid {
+		if !isSafeProfileValue(v) {
+			t.Errorf("isSafeProfileValue(%q) = false, want true", v)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"has space",
+		"semi;colon",
+		"new\nline",
+		"../../etc/passwd",
+		"$(cmd)",
+		"profile|pipe",
+		"profile`backtick`",
+		strings.Repeat("a", 65), // too long
+	}
+	for _, v := range invalid {
+		if isSafeProfileValue(v) {
+			t.Errorf("isSafeProfileValue(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestFilterEnv_AWSProfileValidation verifies that a safe AWS_PROFILE passes
+// through while a malformed one is stripped. R20260603000023-SEC-1 (#1617).
+func TestFilterEnv_AWSProfileValidation(t *testing.T) {
+	t.Run("safe profile passes", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_PROFILE must pass through")
+		}
+	})
+
+	t.Run("unsafe profile stripped", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("unsafe AWS_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("empty profile stripped", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("empty AWS_PROFILE must be stripped")
+		}
+	})
+
+	// R100110-LEAK-4: a profile value carrying control / bidi-override chars
+	// must still be rejected, and the warn-then-reject path must not panic
+	// when sanitizing the value for the log.
+	t.Run("control-char profile stripped without panic", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "evil‮\r\nname")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("unsafe AWS_PROFILE with control chars must be stripped")
+		}
+	})
+
+	t.Run("AWS_DEFAULT_PROFILE unsafe stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("AWS_DEFAULT_PROFILE safe passes", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
+		}
+	})
+}
+
 // TestFilterEnv_DropsSecretsByDefault ensures we still strip
 // non-allowlisted secrets — the regression fix must not turn the
 // runner into a wide-open env tunnel.
@@ -275,5 +376,123 @@ func TestFilterEnv_DropsSecretsByDefault(t *testing.T) {
 				t.Errorf("secret %s leaked through filterEnv: %s", k, kv)
 			}
 		}
+	}
+}
+
+// TestFilterEnv_AWSDefaultProfileValidation verifies that AWS_DEFAULT_PROFILE
+// obeys the same profile-name validation as AWS_PROFILE — the fix for
+// R20260603040203-CODE-001 which added it to envAlwaysPassthrough so the
+// envProfileKeys gate can actually fire for it.
+func TestFilterEnv_AWSDefaultProfileValidation(t *testing.T) {
+	t.Run("safe AWS_DEFAULT_PROFILE passes", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
+		}
+	})
+
+	t.Run("unsafe AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("empty AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("empty AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+}
+
+// TestFilterEnv_PassesAWSDefaultProfile guards the R20260603040203-CODE-001
+// fix: AWS_DEFAULT_PROFILE must appear in the always-passthrough list so it
+// reaches the profile-validation gate, and a valid value flows through.
+func TestFilterEnv_PassesAWSDefaultProfile(t *testing.T) {
+	t.Setenv("AWS_DEFAULT_PROFILE", "default")
+	got := filterEnv(nil)
+	if !envContains(got, "AWS_DEFAULT_PROFILE", "default") {
+		t.Errorf("AWS_DEFAULT_PROFILE=default must pass through envAlwaysPassthrough")
+	}
+}
+
+// TestValidateBaseURLValue covers the allow/deny boundary for base-URL env
+// values. R090031-SEC-1 (#1687).
+func TestValidateBaseURLValue(t *testing.T) {
+	ok := []string{
+		"",
+		"https://api.anthropic.com",
+		"https://bedrock.example.com/v1",
+		"http://localhost:8080",
+		"http://127.0.0.1:9000",
+		"http://[::1]:8080",
+	}
+	for _, v := range ok {
+		if err := validateBaseURLValue(v); err != nil {
+			t.Errorf("validateBaseURLValue(%q) = %v, want nil", v, err)
+		}
+	}
+	bad := []string{
+		"http://169.254.169.254/latest/meta-data/", // IMDS SSRF
+		"http://10.0.0.1",                          // private network plaintext
+		"http://example.com",                       // remote plaintext
+		"ftp://example.com",                        // disallowed scheme
+		"file:///etc/passwd",                       // disallowed scheme
+	}
+	for _, v := range bad {
+		if err := validateBaseURLValue(v); err == nil {
+			t.Errorf("validateBaseURLValue(%q) = nil, want error", v)
+		}
+	}
+}
+
+// TestFilterEnv_BaseURLSSRFGuard is the R090031-SEC-1 (#1687) gate: a base-URL
+// env var inherited from a tampered parent process must NOT pass through to the
+// Runner subprocess when it points at a plaintext-http non-loopback host (e.g.
+// IMDS), even though the key is in envAlwaysPassthrough. A safe https value for
+// the same key still flows through.
+func TestFilterEnv_BaseURLSSRFGuard(t *testing.T) {
+	for _, key := range []string{
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_BEDROCK_BASE_URL",
+		"ANTHROPIC_VERTEX_BASE_URL",
+	} {
+		t.Run(key+"/rejects_imds", func(t *testing.T) {
+			t.Setenv(key, "http://169.254.169.254/latest/meta-data/")
+			got := filterEnv(nil)
+			if envHasKey(got, key) {
+				t.Errorf("%s pointing at IMDS over http must be stripped", key)
+			}
+		})
+		t.Run(key+"/allows_https", func(t *testing.T) {
+			t.Setenv(key, "https://gateway.example.com")
+			got := filterEnv(nil)
+			if !envContains(got, key, "https://gateway.example.com") {
+				t.Errorf("%s with safe https value must pass through", key)
+			}
+		})
+		t.Run(key+"/allows_loopback_http", func(t *testing.T) {
+			t.Setenv(key, "http://127.0.0.1:8080")
+			got := filterEnv(nil)
+			if !envContains(got, key, "http://127.0.0.1:8080") {
+				t.Errorf("%s with loopback http value must pass through", key)
+			}
+		})
+	}
+}
+
+// TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist ensures a broad
+// "ANTHROPIC_" prefix allowlist cannot re-admit a tampered base-URL value:
+// envAlwaysPassthrough is consulted (and the guard applied) before the prefix
+// branch. R090031-SEC-1 (#1687).
+func TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "http://169.254.169.254/")
+	got := filterEnv([]string{"ANTHROPIC_"})
+	if envHasKey(got, "ANTHROPIC_BASE_URL") {
+		t.Error("prefix allowlist must not bypass the base-URL SSRF guard")
 	}
 }

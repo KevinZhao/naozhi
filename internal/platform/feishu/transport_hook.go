@@ -50,6 +50,18 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 
 		slog.Debug("feishu webhook received", "body_len", len(body))
 
+		// #1724: when running in token-only mode (encrypt_key absent, opted in
+		// via allow_insecure_webhook), surface a SECURITY error on the FIRST
+		// live delivery rather than relying solely on the startup Warn. A
+		// traffic-correlated signal is far harder for operators to miss than a
+		// single line buried in boot logs. sync.Once bounds this to one emit per
+		// process so a request flood cannot amplify it into a log-spam DoS.
+		if f.cfg.EncryptKey == "" && f.cfg.AllowInsecureWebhook {
+			f.insecureWebhookWarnOnce.Do(func() {
+				slog.Error("SECURITY: feishu webhook is processing live traffic in verification_token-only mode (no encrypt_key/HMAC) — events are replay/forgery-prone if the token leaks. Configure encrypt_key to disable allow_insecure_webhook posture.")
+			})
+		}
+
 		// Parse the outer envelope
 		var envelope struct {
 			Challenge string `json:"challenge"`
@@ -126,6 +138,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			timestamp := r.Header.Get("X-Lark-Request-Timestamp")
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			sig := r.Header.Get("X-Lark-Signature")
+			// Real Feishu signatures are 64-byte hex strings (SHA-256).
+			// Cap at maxWebhookSigLen to prevent an oversized header from
+			// amplifying the string concatenation inside verifySignature.
+			if len(sig) > maxWebhookSigLen {
+				slog.Warn("feishu webhook signature header too long", "len", len(sig))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			if !verifySignature(timestamp, nonce, f.cfg.EncryptKey, body, sig) {
 				slog.Warn("feishu signature verification failed", "remote", r.RemoteAddr)
 				w.WriteHeader(http.StatusUnauthorized)
@@ -136,14 +156,11 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.
 		// Any authenticated webhook mode (EncryptKey or VerificationToken)
 		// requires a nonce — a stolen webhook otherwise replays freely inside
-		// the 5min timestamp window. url_verification challenges still pass
-		// the format/length checks below but skip seenNonces insertion: each
-		// challenge is one-shot from Feishu's verification endpoint and
-		// adding them to the dedup map would let an attacker who can
-		// authenticate fill seenNonces with unique-nonce challenge requests
-		// up to maxSeenNonces, after which legitimate event webhooks return
-		// 429 until the TTL sweep catches up. The challenge reflection path
-		// itself is still rate-limited by hookSem.
+		// the 5min timestamp window. url_verification challenges go through the
+		// same seenNonces dedup as event webhooks (R164029-SEC-2 / #1594): the
+		// eviction self-heal below means a leaked-token attacker can no longer
+		// pin the map at cap, so the previous exemption is removed and a
+		// replayed challenge with a fixed ts:nonce is rejected.
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
@@ -176,10 +193,19 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 						return
 					}
 				}
-				// url_verification challenges skip the seenNonces map (see
-				// godoc above the timestamp gate). Format checks above still
-				// run so a malformed nonce is still rejected.
-				if !isURLVerification {
+				// R164029-SEC-2 (#1594): url_verification challenges no longer
+				// skip the seenNonces map. The original exemption existed to stop
+				// an attacker with a leaked verification_token from pinning the
+				// map at maxSeenNonces with unique-nonce challenges, but the
+				// eviction self-heal below (R20260527122801-SEC-8 / #1332) makes
+				// that pin impossible — the oldest entries are evicted on every
+				// cap hit. Including challenges in the dedup set closes the replay
+				// gap: in token-only mode (allowInsecureWebhook), a captured
+				// url_verification challenge with a fixed ts:nonce could otherwise
+				// be replayed for the full nonceTTL window, repeatedly reflecting
+				// the challenge and consuming hookSem with no nonce-level
+				// backpressure. Format checks above still run regardless.
+				{
 					// Global cap: refuse new nonces once the map hits maxSeenNonces
 					// so a flood of unique-nonce requests cannot bloat heap.
 					// Reserve-then-check pattern: increment first, then attempt
@@ -198,8 +224,32 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					// or a sync.Map quirk under contention), fall back to the
 					// 429 surface so memory stays bounded.
 					if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
-						evicted := f.evictOldestNonces()
-						if evicted == 0 || f.seenNoncesCount.Load() >= maxSeenNonces {
+						// R20260531070014-SEC-4 (#1534): evictOldestNonces resyncs
+						// seenNoncesCount to the map's actual live size under a
+						// mutex, which discards this goroutine's speculative +1
+						// reservation. Re-apply the +1 AFTER eviction returns so the
+						// counter still reserves a slot for the LoadOrStore below
+						// and the post-evict cap re-check sees this in-flight insert.
+						// Doing the recount inside evict (rather than a racy relative
+						// Add) is what keeps the counter from dipping below the real
+						// map size under concurrent cap-hit goroutines.
+						evicted := f.evictNonces()
+						if evicted == 0 {
+							// evictOldestNonces resynced the counter to the live
+							// map size only when it actually deleted something
+							// (deleted>0); on a zero-eviction return our line-226
+							// speculative +1 is still live, so roll it back here.
+							// Do NOT Add(1) again first — that second reservation
+							// would leak +1 on every evicted==0 request and ratchet
+							// the counter toward the cap permanently.
+							f.seenNoncesCount.Add(-1)
+							slog.Warn("feishu webhook nonce map at cap, dropping request",
+								"cap", maxSeenNonces, "evicted", evicted)
+							w.WriteHeader(http.StatusTooManyRequests)
+							return
+						}
+						postEvict := f.seenNoncesCount.Add(1)
+						if postEvict > maxSeenNonces {
 							f.seenNoncesCount.Add(-1)
 							slog.Warn("feishu webhook nonce map at cap, dropping request",
 								"cap", maxSeenNonces, "evicted", evicted)

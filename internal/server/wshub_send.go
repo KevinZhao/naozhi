@@ -18,11 +18,31 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
+// owning peer node before the dashboard goroutine gives up. R244-ARCH-16
+// (#1054): named so the value is greppable and tunable in one place instead
+// of being a bare `10*time.Second` literal duplicated across the proxy sites.
+const remoteNodeProxyTimeout = 10 * time.Second
+
+// lookupNode resolves a node ID to its Conn under the shared nodes mutex.
+// R176-ARCH-M3 / ARCH4 (#384): the Hub's only access to the Server-shared
+// nodes map is this single read-locked by-ID lookup, repeated verbatim at the
+// remote interrupt / subscribe / unsubscribe sites. Funnelling all three
+// through one helper keeps the raw `h.nodesMu.RLock(); h.nodes[id]; RUnlock()`
+// triple in exactly one place — the prerequisite shape for swapping the shared
+// *sync.RWMutex for a real node-registry abstraction without re-touching every
+// call site. Callers MUST still validate the ID with isValidNodeID first.
+func (h *Hub) lookupNode(id string) (node.Conn, bool) {
+	h.nodesMu.RLock()
+	nc, ok := h.nodes[id]
+	h.nodesMu.RUnlock()
+	return nc, ok
+}
 
 // File: wshub_send.go
 //
@@ -94,7 +114,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})
 			return
 		}
-		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwner)
+		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwnerKey())
 		if err != nil {
 			// Never echo fids (user-controlled) back in the error; log internally.
 			slog.Debug("ws send: one or more file_ids not found or expired", "count", len(msg.FileIDs))
@@ -124,7 +144,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid workspace"})
 			return
 		}
-		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwner)
+		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwnerKey())
 		if perr != nil {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: perr.msg})
 			return
@@ -224,14 +244,17 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
-	h.nodesMu.RLock()
-	nc, ok := h.nodes[nodeID]
-	h.nodesMu.RUnlock()
+	conn, ok := h.lookupNode(nodeID)
 	if !ok {
 		slog.Debug("ws interrupt: unknown node", "node", nodeID)
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
+	// H6 (#435): this path only forwards a single proxy RPC, so depend on
+	// the narrow node.NodeProxy role rather than the full 26-method Conn.
+	// Documents the exact capability this goroutine exercises and keeps a
+	// future mock for this site minimal.
+	var nc node.NodeProxy = conn
 
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
@@ -248,7 +271,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// reply "error" so the dashboard surfaces the failure.
 		defer func() {
 			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
+				serverMetrics.PanicRecovered()
 				// Panic cause at Error, verbose stack at Debug — stack
 				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
@@ -262,7 +285,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
@@ -283,6 +306,16 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 				errMsg = "remote node needs upgrade to support this action"
 			}
 			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg})
+			// R176-ARCH-NX (#433): same parity gap as handleRemoteSend — the
+			// interrupt_ack reaches only the originating tab, so a second
+			// operator who pressed stop on the same remote session sees no
+			// signal that the interrupt never reached the node. Fan the
+			// failure out to every dashboard subscribed to this session over
+			// the shared `event` frame. The remote session's EventLog lives
+			// on the node so we cannot append locally; the summary is
+			// re-sanitised here (same redaction as the slog above) because it
+			// is broadcast verbatim to dashboards.
+			h.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
 			return
 		}
 		status := "ok"
@@ -379,7 +412,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// node) would otherwise take the whole naozhi service down.
 		defer func() {
 			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
+				serverMetrics.PanicRecovered()
 				// Same split as handleRemoteInterrupt: cause at Error,
 				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",
@@ -393,7 +426,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
 			// R217-CR-5 (#641): symmetric sanitisation with the interrupt
@@ -407,6 +440,17 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
+			// R176-ARCH-NX (#433): parity with the remote→primary direction
+			// (upstream/connector_rpc.go injects LogSystemEvent on send
+			// failure). The send_ack above reaches only the originating tab;
+			// fan the failure out to every dashboard subscribed to this
+			// remote session so a second operator watching the conversation
+			// sees the message did not land instead of a silent stall. The
+			// remote session's EventLog lives on the node, so we cannot append
+			// locally — broadcast over the same `event` frame remote events
+			// already use. The summary is re-sanitised here (same redaction as
+			// the slog above) because it is broadcast verbatim to dashboards.
+			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
 			// Refresh the remote subscription so the connector re-creates

@@ -1,7 +1,6 @@
 // Package session — eventlog_bridge.go
 //
-// NEEDS-DESIGN (R243-ARCH-12, REPEAT-5): three eventlog tiers shadow
-// each other today.
+// R243-ARCH-12 (#737/#1369): four eventlog tiers shadow each other today.
 //
 //   - cli.EventLog.ring — in-memory bounded ring shared with the WS
 //     subscriber tier. Pure RAM, lossy on process exit.
@@ -10,36 +9,44 @@
 //   - naozhilog.Source.replay — read-side replay that re-hydrates the
 //     ring from the spool when sessions reattach (history panel,
 //     dashboard rewind).
+//   - history/merged.Source — the composed-read tier that fronts the
+//     naozhi-native replay over the Claude-JSONL fallback.
 //
-// Each tier owns its own append/read/subscribe primitives; the four
-// concrete backends (memory ring, persist spool, naozhilog source,
-// scratch event store) each expose a slightly different API even
-// though their conceptual contract is identical: "append, read by
-// range, subscribe to tail."
+// Each tier owns its own append/read/subscribe primitives even though
+// their conceptual contract is identical: "append, read by range,
+// subscribe to tail."
 //
-// The unification plan tracked under R243-ARCH-12 is to publish a
-// single `EventStore` interface in (likely) internal/eventlog/api/:
+// The unification plan is now partly landed: internal/eventlog/api
+// publishes the single `EventStore` interface (Appender + Reader +
+// Subscriber), CI-gated by api_backends_test.go (PR #1755). The
+// behaviour-free contract, expressed against cli.EventEntry, is:
 //
 //	type EventStore interface {
-//	    Append(ctx, []EventEntry) error
-//	    Read(ctx, ReadRange) ([]EventEntry, error)
-//	    Subscribe(ctx, SubFilter) (<-chan EventEntry, error)
+//	    Append(e cli.EventEntry)         // Appender
+//	    AppendBatch(entries []cli.EventEntry)
+//	    LoadBefore(...)                  // Reader = cli.HistorySource
+//	    SubscribeNew() cli.EventSubscription // Subscriber
 //	}
 //
-// plus a central registry that the four backends register with. This
-// bridge stays in place — its job is exactly the EventEntry⇄persist
-// .Entry hop — but the cli/persist/naozhilog import edges collapse to
-// "everyone implements EventStore" and the session layer can swap the
-// backend (e.g. for a tests-only no-disk mode) without re-plumbing
-// the spawnSession site. The migration is staged because each tier
-// has accumulated its own performance hot path (see R215-PERF-P1-1
+// Three of the four tiers already satisfy it with no shim: cli.EventLog
+// is Appender+Subscriber, and naozhilog.Source / merged.Source are
+// Reader. persist.Persister deliberately satisfies NONE of the api
+// interfaces — it is fed via a per-key PersistSink callback (sink model)
+// and read back via persist.Recover, so an adapter is intentionally
+// deferred to the #1570 registry-injection round (see
+// api_backends_test.go for the documented gap).
+//
+// A central registry that the backends register with is still future
+// work. This bridge stays in place regardless — its job is exactly the
+// EventEntry⇄persist.Entry hop. The migration is staged because each
+// tier has accumulated its own performance hot path (see R215-PERF-P1-1
 // pooling below, R228-PERF-1 single-entry fast path, R240-PERF-4
 // escape analysis); a naive interface-everywhere refactor would
 // regress those without an evals pass.
 //
-// Until the api/ subpackage lands, the bridge contract here is the
-// only place EventEntry → persist.Entry conversion lives. Adding new
-// backends should follow the registry path, not bolt on alongside.
+// The bridge contract here remains the only place EventEntry →
+// persist.Entry conversion lives. Adding new backends should follow
+// the registry path, not bolt on alongside.
 package session
 
 import (
@@ -51,7 +58,45 @@ import (
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/history/merged"
+	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
+
+// newEventLogLocalSource builds the naozhi-native, in-process event-log
+// history source for a session key. This is tier-1 of the history stack
+// and is NOT backend-specific: the naozhilog spool is written for every
+// backend (claude / kiro / future) via the eventlog persist sink above,
+// so the constructor lives here in the bridge — the single place the
+// naozhilog import edge is allowed — rather than scattered across
+// router_core.go (background loader) and router_lifecycle.go
+// (attachHistorySource). Consolidating the two call sites here is the
+// minimal step of R214-ARCH-3 / R215-ARCH-P1-5 (#403, #567): the generic
+// session layer no longer hand-builds backend history sources inline.
+func newEventLogLocalSource(eventLogDir, key string) *naozhilog.Source {
+	return naozhilog.New(eventLogDir, key)
+}
+
+// mergeWithEventLog composes the naozhi event-log local tier in front of
+// a backend-provided fallback source. When eventLogDir is empty the
+// event-log tier is opted out and the fallback is returned unchanged, so
+// callers get a single source without branching on eventLogDir at the
+// call site. fallback may be nil; the caller is responsible for replacing
+// a nil fallback with history.Noop before invoking when it wants the
+// "never nil" guarantee, but mergeWithEventLog itself tolerates nil by
+// substituting history.Noop so the merged source's read path stays safe.
+func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history.Source {
+	if fallback == nil {
+		fallback = history.Noop{}
+	}
+	if eventLogDir == "" {
+		return fallback
+	}
+	return &merged.Source{
+		Local:    newEventLogLocalSource(eventLogDir, key),
+		Fallback: fallback,
+	}
+}
 
 // bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so eventlog
 // bridge hot path (≥5 events/s × N sessions) avoids the encodeState
@@ -80,6 +125,41 @@ var bridgeEncPool = sync.Pool{
 // bridgeEncMaxCap caps buffer reuse so a one-off oversized event does
 // not permanently pin large heap.
 const bridgeEncMaxCap = 64 * 1024
+
+// span records a [start,end) byte range inside the shared pooled encode
+// buffer for one EventEntry plus that entry's TimeMS. Hoisted to package
+// scope (was a func-local type) so batchScratch can carry a reusable []span
+// across AppendBatch calls. R20260602-PERF-2 (#1629).
+//
+// R200109-PERF-3 (#1619): timeMS folded into span so the separate `times`
+// helper slice is gone — one fewer pooled slice and one fewer append per
+// entry. TimeMS is captured at span-record time and read back during the
+// persist.Entry assembly pass.
+type span struct {
+	start, end int
+	timeMS     int64
+}
+
+// batchScratch pools the two per-AppendBatch helper slices the multi-entry
+// sink path used to `make` on every call (out / spans). In steady state
+// (≥5 events/s × N sessions) those heap allocations escaped per call;
+// carrying them in a sync.Pool keeps the backing arrays alive across calls
+// and reuses their capacity. Mirrors the bridgeEncPool idiom right above.
+// R20260602-PERF-2 (#1629).
+type batchScratch struct {
+	out   []persist.Entry
+	spans []span
+}
+
+var batchScratchPool = sync.Pool{
+	New: func() any { return &batchScratch{} },
+}
+
+// batchScratchMaxCap caps slice reuse so a one-off huge batch does not pin
+// large backing arrays in the pool forever (same rationale as
+// bridgeEncMaxCap for the encode buffer). A batch wider than this is served
+// once and dropped on return instead of being recycled.
+const batchScratchMaxCap = 4096
 
 // newEventLogSink translates a per-key persist.PersistSink (which
 // accepts persist.Entry batches) into the cli.PersistSink contract
@@ -142,29 +222,46 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 
-		out := make([]persist.Entry, 0, len(entries))
+		// R20260602-PERF-2 (#1629): borrow the helper slices from a
+		// pool instead of make-ing them per call. They are reset to [:0]
+		// (keeping their capacity) and returned at every exit path below.
+		// Both are consumed entirely before persisterSink returns —
+		// `out`'s persist.Entry values alias the pooled encode buffer, but
+		// the slice header itself is fully drained by persisterSink (it
+		// copies the bytes into its own arena, see comment below), so the
+		// backing array is free to recycle once persisterSink returns.
+		bs := batchScratchPool.Get().(*batchScratch)
+		out := bs.out[:0]
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
 		// R240-PERF-7: explicit Put before each return path avoids the
 		// ~10ns/call defer frame setup cost on the multi-entry hot path
 		// (5-20 entries × N sessions × ≥5/s). The pool-cap guard is the
 		// same as the single-entry fast path above.
+		//
+		// R20260531A-PERF-3 (#1524): the persist sink now copies the
+		// bytes it retains (it owns a pooled per-batch arena), so the
+		// bridge no longer pays a make([]byte)+copy per entry. We encode
+		// every entry into ONE pooled buffer (without Resetting between
+		// entries) and hand persist a borrowed sub-slice per entry. The
+		// sub-slices stay valid until persisterSink returns, after which
+		// eb goes back to the pool. Offsets are resolved after the encode
+		// pass because the buffer may grow (and move) mid-loop.
+		eb.buf.Reset()
+		spans := bs.spans[:0]
 		for _, e := range entries {
-			eb.buf.Reset()
+			start := eb.buf.Len()
 			if err := eb.enc.Encode(e); err != nil {
 				slog.Warn("eventlog bridge: marshal entry failed",
 					"uuid", e.UUID, "type", e.Type, "err", err)
+				eb.buf.Truncate(start) // drop the partial encode
 				continue
 			}
-			raw := eb.buf.Bytes()
-			if n := len(raw); n > 0 && raw[n-1] == '\n' {
-				raw = raw[:n-1]
+			end := eb.buf.Len()
+			// json.Encoder appends a trailing '\n'; strip it from the span.
+			if end > start && eb.buf.Bytes()[end-1] == '\n' {
+				end--
 			}
-			// Copy out of the pooled buffer so caller can hold the
-			// bytes past Put. PersistSink contract permits sink to
-			// retain entries.
-			buf := make([]byte, len(raw))
-			copy(buf, raw)
-			out = append(out, persist.Entry{JSON: buf, TimeMS: e.Time})
+			spans = append(spans, span{start: start, end: end, timeMS: e.Time})
 
 			// Refcount bump for every attachment path the entry
 			// carries. Replay batches are excluded — replay happens
@@ -176,13 +273,36 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
+		// putScratch returns the three helper slices to the pool, writing the
+		// (possibly reallocated) headers back first so a grown capacity is
+		// preserved for the next call. Slices wider than batchScratchMaxCap
+		// are dropped (left for GC) instead of pinning an outsized array.
+		putScratch := func() {
+			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
+				bs.out = out[:0]
+				bs.spans = spans[:0]
+				batchScratchPool.Put(bs)
+			}
+		}
+		if len(spans) == 0 {
+			putScratch()
+			if eb.buf.Cap() <= bridgeEncMaxCap {
+				bridgeEncPool.Put(eb)
+			}
+			return
+		}
+		all := eb.buf.Bytes()
+		for _, sp := range spans {
+			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: sp.timeMS})
+		}
+		// persisterSink copies the borrowed bytes synchronously (it owns a
+		// pooled arena), so eb and the scratch slices are safe to return only
+		// AFTER it returns (out's persist.Entry JSON fields alias eb.buf).
+		persisterSink(out, replayPhase)
+		putScratch()
 		if eb.buf.Cap() <= bridgeEncMaxCap {
 			bridgeEncPool.Put(eb)
 		}
-		if len(out) == 0 {
-			return
-		}
-		persisterSink(out, replayPhase)
 	}
 }
 
@@ -209,17 +329,20 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 	if n := len(raw); n > 0 && raw[n-1] == '\n' {
 		raw = raw[:n-1]
 	}
-	buf := make([]byte, len(raw))
-	copy(buf, raw)
-	if eb.buf.Cap() <= bridgeEncMaxCap {
-		bridgeEncPool.Put(eb)
-	}
+	// R20260531A-PERF-3 (#1524): persisterSink copies the bytes it
+	// retains (it owns a pooled per-batch arena), so we hand it the
+	// borrowed pooled-encoder slice directly instead of make([]byte)+copy.
+	// eb is returned to the pool only AFTER persisterSink returns, because
+	// raw aliases eb.buf's backing array until then.
 	var stackArr [1]persist.Entry
-	out := append(stackArr[:0], persist.Entry{JSON: buf, TimeMS: e.Time})
+	out := append(stackArr[:0], persist.Entry{JSON: raw, TimeMS: e.Time})
 	if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
 		attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 	}
 	persisterSink(out, replayPhase)
+	if eb.buf.Cap() <= bridgeEncMaxCap {
+		bridgeEncPool.Put(eb)
+	}
 }
 
 // newEventLogSinkOne is the cli.PersistSinkOne counterpart to

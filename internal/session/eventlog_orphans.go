@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -58,7 +60,7 @@ func sweepOrphanEventLogs(dir string, knownKeys map[string]struct{}, now time.Ti
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return 0, nil
 		}
 		return 0, err
@@ -133,8 +135,8 @@ func (r *Router) runOrphanSweep() {
 	// Snapshot known keys under the read lock so we don't race with
 	// concurrent session spawns.
 	r.mu.RLock()
-	known := make(map[string]struct{}, len(r.sessions))
-	for k := range r.sessions {
+	known := make(map[string]struct{}, len(r.ss.sessions))
+	for k := range r.ss.sessions {
 		known[k] = struct{}{}
 	}
 	r.mu.RUnlock()

@@ -213,7 +213,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 		rctx, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
-		if sender, ok := platform.AsQuestionCardSender(p); ok {
+		if sender, ok := platform.AsCapability[platform.QuestionCardSender](p); ok {
 			card := platform.QuestionCard{
 				ToolUseID: aq.ToolUseID,
 				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),

@@ -59,23 +59,41 @@ func TestWithJobByPrefix_CollapsesDeletePauseResume(t *testing.T) {
 		}
 	}
 
-	// 3. The helper must reference findByPrefixLocked (the lookup phase) so
-	// the 3-phase contract documented on its godoc — find → op → persist —
-	// is observable from the source. This catches a partial revert that
-	// keeps the helper but inlines the lookup back into each caller.
+	// 3. The locked find → op → persist phase must live inside the shared
+	// helper layer (lockedJobPrefixOp, extracted from withJobByPrefix's IIFE
+	// in R249-CR-7 / #951) so the 3-phase contract is observable from the
+	// source. This catches a partial revert that inlines the lookup/persist
+	// back into each caller. withJobByPrefix must delegate to
+	// lockedJobPrefixOp, and lockedJobPrefixOp must own the find + persist.
 	{
 		idx := strings.Index(body, sig)
 		rest := body[idx:]
 		if next := strings.Index(rest[len(sig):], "\nfunc "); next >= 0 {
 			rest = rest[:len(sig)+next]
 		}
-		if !strings.Contains(rest, "findByPrefixLocked(") {
-			t.Error("withJobByPrefix must call findByPrefixLocked under " +
+		if !strings.Contains(rest, "lockedJobPrefixOp(") {
+			t.Error("withJobByPrefix must delegate to lockedJobPrefixOp — " +
+				"R249-CR-7 / #951 moved the s.mu critical section into that " +
+				"named helper; inlining it back undoes the IIFE cleanup.")
+		}
+
+		const opSig = "func (s *Scheduler) lockedJobPrefixOp("
+		opIdx := strings.Index(body, opSig)
+		if opIdx < 0 {
+			t.Fatalf("lockedJobPrefixOp helper missing — R249-CR-7 / #951 " +
+				"extraction reverted.")
+		}
+		opRest := body[opIdx:]
+		if next := strings.Index(opRest[len(opSig):], "\nfunc "); next >= 0 {
+			opRest = opRest[:len(opSig)+next]
+		}
+		if !strings.Contains(opRest, "findByPrefixLocked(") {
+			t.Error("lockedJobPrefixOp must call findByPrefixLocked under " +
 				"s.mu — moving the lookup back into callers undoes the DRY " +
 				"collapse R247-CR-2 / #583 chases.")
 		}
-		if !strings.Contains(rest, "persistJobsLocked()") {
-			t.Error("withJobByPrefix must call persistJobsLocked() so the " +
+		if !strings.Contains(opRest, "persistJobsLocked()") {
+			t.Error("lockedJobPrefixOp must call persistJobsLocked() so the " +
 				"persist phase stays inside the helper rather than spread " +
 				"across the 3 callers.")
 		}

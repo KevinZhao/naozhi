@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -285,6 +286,75 @@ func TestRelease_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// TestRelease_StrandHandlerDrains locks in the R37-REL1 (#769) fix: when a
+// strand handler is registered, the plain SessionGuard Release path must
+// recover messages that landed via a concurrent IM-side Enqueue rather than
+// parking them until a (possibly never-arriving) next Enqueue.
+func TestRelease_StrandHandlerDrains(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	var recovered []string
+	q.SetStrandHandler(func(key string, m QueuedMsg) {
+		if key != "k1" {
+			t.Errorf("strand handler key = %q, want k1", key)
+		}
+		recovered = append(recovered, m.Text)
+	})
+
+	// Dashboard Guard path holds the session while two IM messages land.
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
+		t.Fatal("B should be enqueued during busy window")
+	}
+
+	// Plain Release (the SessionGuard contract) must now drain via the handler.
+	q.Release("k1")
+
+	if len(recovered) != 2 || recovered[0] != "A" || recovered[1] != "B" {
+		t.Fatalf("recovered = %v, want [A B]", recovered)
+	}
+	if d := q.Depth("k1"); d != 0 {
+		t.Fatalf("Depth = %d, want 0 after strand drain", d)
+	}
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed after strand drain")
+	}
+}
+
+// TestRelease_NoStrandHandlerParks confirms the legacy contract still holds
+// when no handler is registered: messages stay parked (not lost, not drained)
+// and a later Enqueue owner sweeps them via DoneOrDrain.
+func TestRelease_NoStrandHandlerParks(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+
+	q.Release("k1") // no handler → park in place
+
+	// Message is still queued, key is idle. A new Enqueue becomes owner and
+	// DoneOrDrain hands back the parked message.
+	isOwner, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	if !isOwner {
+		t.Fatal("post-Release Enqueue should become owner on idle key")
+	}
+	drained := q.DoneOrDrain("k1", gen)
+	if len(drained) != 1 || drained[0].Text != "A" {
+		t.Fatalf("drained = %v, want [A] (parked message recovered by new owner)", drained)
+	}
+}
+
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(10, 0)
@@ -312,6 +382,60 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 
 	if !q.ShouldNotify("k1") {
 		t.Fatal("lastNotify should be cleaned after Discard")
+	}
+}
+
+// TestShouldNotify_PoolRecyclesEvictedEntry verifies that the dropNotifyEntry
+// pool (#1694) preserves correctness across LRU saturation: once the LRU is
+// full, inserting new cold keys must evict the oldest, recycle its struct, and
+// still maintain per-key cooldown for the surviving keys. A recycled entry
+// must not carry over a stale key/ts.
+func TestShouldNotify_PoolRecyclesEvictedEntry(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(0, 0) // maxDepth<=0 forces the drop/LRU path
+
+	// Saturate the LRU with dropNotifyMaxKeys distinct cold keys. Each first
+	// call fires; immediate second call on the same key is cooled down.
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		k := fmt.Sprintf("k%d", i)
+		if !q.ShouldNotify(k) {
+			t.Fatalf("first ShouldNotify(%q) should fire", k)
+		}
+		if q.ShouldNotify(k) {
+			t.Fatalf("second ShouldNotify(%q) should be cooled down", k)
+		}
+	}
+
+	// LRU is now full. Insert one more cold key; this evicts the oldest (k0)
+	// and must reuse its struct.
+	overflow := fmt.Sprintf("k%d", dropNotifyMaxKeys)
+	if !q.ShouldNotify(overflow) {
+		t.Fatalf("overflow key %q should fire", overflow)
+	}
+	if q.ShouldNotify(overflow) {
+		t.Fatalf("overflow key %q should be cooled down after first fire", overflow)
+	}
+
+	// The evicted key (k0) has no remaining entry, so it should fire again as
+	// a fresh cold key — proving the recycled struct did not retain k0's ts.
+	if !q.ShouldNotify("k0") {
+		t.Fatal("evicted key k0 should fire again (entry was recycled, not stale)")
+	}
+}
+
+// BenchmarkShouldNotify_ColdKeyChurn measures the steady-state cold-key insert
+// path that #1694 optimizes. After the LRU saturates, each iteration evicts a
+// tail entry and inserts a new one; with the pool this should allocate nothing.
+func BenchmarkShouldNotify_ColdKeyChurn(b *testing.B) {
+	q := NewMessageQueue(0, 0)
+	// Pre-saturate so every benchmarked call hits the evict+recycle path.
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("warm%d", i))
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.ShouldNotify(fmt.Sprintf("cold%d", i))
 	}
 }
 

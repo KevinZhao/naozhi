@@ -37,7 +37,9 @@ const (
 // via a previously-leaf package that started importing session) flips
 // this test red on the next CI run. The error message lists the offending
 // import edge so the author can either (a) move the new dependency through
-// the cmd/naozhi adapter boundary, or (b) revert.
+// the wireup adapter boundary (internal/wireup/cron_router_adapter.go, the
+// layer that imports both cron and session — R260528-ARCH-23 / #1382 moved it
+// there from cmd/naozhi), or (b) revert.
 //
 // `go list -deps` walks the build's actual dependency graph (not just
 // declared imports), so build-tag tricks cannot bypass it. The test runs
@@ -60,7 +62,7 @@ func TestCron_NoReverseImport_Session(t *testing.T) {
 		if strings.TrimSpace(line) == sessionPkg {
 			t.Fatalf("internal/cron transitively imports %s — RFC cron-sysession-merge Phase B (#1318) "+
 				"requires cron→session inversion. Move new session types through "+
-				"cmd/naozhi/cron_router_adapter.go (cron-local mirror + adapter cast) "+
+				"internal/wireup/cron_router_adapter.go (cron-local mirror + adapter cast) "+
 				"instead of importing session directly.", sessionPkg)
 		}
 	}

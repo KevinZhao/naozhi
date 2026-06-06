@@ -129,6 +129,32 @@ func (f *fakeProcess) EventLastN(n int) []cli.EventEntry {
 	copy(cp, entries)
 	return cp
 }
+func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(f.entries)
+	if n == 0 {
+		return nil
+	}
+	limit := maxTotal
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	visible := 0
+	start := n
+	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
+		start = i
+		if cli.IsVisibleEntry(f.entries[i]) {
+			visible++
+			if visibleTarget > 0 && visible >= visibleTarget {
+				break
+			}
+		}
+	}
+	cp := make([]cli.EventEntry, n-start)
+	copy(cp, f.entries[start:])
+	return cp
+}
 func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -140,6 +166,21 @@ func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		}
 	}
 	return nil
+}
+func (f *fakeProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.entries {
+		if e.Time > afterMS {
+			return append(dst, f.entries[i:]...)
+		}
+	}
+	// Preserve the "nil when empty" contract for nil dst; append-mode callers
+	// passing a pooled dst[:0] get their buffer back length-zero.
+	if dst == nil {
+		return nil
+	}
+	return dst[:0]
 }
 func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
 	if limit <= 0 {
@@ -234,13 +275,14 @@ func (f *fakeProcess) setRunning(v bool) {
 
 // newTestRouter creates a Router with a failing wrapper so Spawn always errors.
 func newTestRouter(maxProcs int) *Router {
-	return &Router{
-		sessions: make(map[string]*ManagedSession),
-		wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+	r := &Router{
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: maxProcs,
 		ttl:      30 * time.Minute,
 		pruneTTL: 72 * time.Hour,
 	}
+	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	return r
 }
 
 // injectSession inserts a fake session directly into the router's session map.
@@ -251,9 +293,9 @@ func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	}
 	s.storeProcess(proc)
 	s.touchLastActive()
-	r.sessions[key] = s
+	r.ss.sessions[key] = s
 	if !s.IsExempt() && proc != nil && proc.Alive() {
-		r.activeCount.Add(1)
+		r.ss.activeCount.Add(1)
 	}
 	return s
 }
@@ -362,20 +404,20 @@ func TestRouterSetUserLabel(t *testing.T) {
 	// without running a full spawnSession — the contract under test is
 	// atomic.Value round-trip + storeGen/storeDirty bookkeeping.
 	r.mu.Lock()
-	r.sessions["k1"] = &ManagedSession{key: "k1"}
+	r.ss.sessions["k1"] = &ManagedSession{key: "k1"}
 	r.mu.Unlock()
 
-	before := r.storeGen.Load()
+	before := r.ss.gen.Load()
 	if ok := r.SetUserLabel("k1", "我的会话"); !ok {
 		t.Fatalf("SetUserLabel on existing session returned false")
 	}
 	if got := r.GetSession("k1").UserLabel(); got != "我的会话" {
 		t.Errorf("UserLabel = %q, want %q", got, "我的会话")
 	}
-	if gen := r.storeGen.Load(); gen <= before {
+	if gen := r.ss.gen.Load(); gen <= before {
 		t.Errorf("storeGen did not advance: before=%d after=%d", before, gen)
 	}
-	if !r.storeDirty {
+	if !r.ss.dirty {
 		t.Errorf("storeDirty should be true after SetUserLabel")
 	}
 
@@ -388,11 +430,11 @@ func TestRouterSetUserLabel(t *testing.T) {
 	}
 
 	// Unknown key returns false and does not bump storeGen.
-	genBefore := r.storeGen.Load()
+	genBefore := r.ss.gen.Load()
 	if ok := r.SetUserLabel("missing", "x"); ok {
 		t.Errorf("SetUserLabel on unknown key returned true")
 	}
-	if r.storeGen.Load() != genBefore {
+	if r.ss.gen.Load() != genBefore {
 		t.Errorf("storeGen advanced on unknown-key call")
 	}
 }
@@ -452,7 +494,7 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	s1 := r.sessions["feishu:direct:alice:general"]
+	s1 := r.ss.sessions["feishu:direct:alice:general"]
 	r.mu.Unlock()
 	if s1 == nil || s1.getSessionID() != "sess-111" {
 		t.Errorf("alice session not restored: %+v", s1)
@@ -538,7 +580,7 @@ func TestStatsWithDeadSession(t *testing.T) {
 func TestStatsNilProcessSession(t *testing.T) {
 	r := newTestRouter(3)
 	// Simulates a session restored from store (no live process yet).
-	r.sessions["restored-key"] = newSessionWithID("restored-key", "sess-restore")
+	r.ss.sessions["restored-key"] = newSessionWithID("restored-key", "sess-restore")
 
 	active, total := r.Stats()
 	if active != 0 || total != 1 {
@@ -551,7 +593,7 @@ func TestStatsMixedSessions(t *testing.T) {
 	injectSession(r, "alive1", newIdleProc())
 	injectSession(r, "alive2", newRunningProc())
 	injectSession(r, "dead1", newDeadProc())
-	r.sessions["restored"] = newSessionWithID("restored", "sess-x")
+	r.ss.sessions["restored"] = newSessionWithID("restored", "sess-x")
 
 	active, total := r.Stats()
 	if active != 2 || total != 4 {
@@ -574,8 +616,8 @@ func TestResetNonExistentKey(t *testing.T) {
 
 func TestResetNilProcessSession(t *testing.T) {
 	r := newTestRouter(3)
-	r.sessions["key1"] = &ManagedSession{key: "key1"}
-	r.sessions["key1"].setSessionID("sess-1")
+	r.ss.sessions["key1"] = &ManagedSession{key: "key1"}
+	r.ss.sessions["key1"].setSessionID("sess-1")
 
 	r.Reset("key1")
 
@@ -619,15 +661,15 @@ func TestResetRunningSession(t *testing.T) {
 // under -race to catch any lock regression.
 func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	r := newTestRouter(3)
-	r.workspaceOverrides = make(map[string]string)
-	r.workspace = "/default"
+	r.wsStore.overrides = make(map[string]string)
+	r.defaultCWD = "/default"
 	injectSession(r, "key1", newIdleProc())
 	r.SetWorkspace("key1", "/tmp/override")
 	if got := r.GetWorkspace("key1"); got != "/tmp/override" {
 		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
 	}
 	r.ResetAndDiscardOverride("key1")
-	if _, ok := r.workspaceOverrides["key1"]; ok {
+	if _, ok := r.wsStore.overrides["key1"]; ok {
 		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
 	}
 	if got := r.GetWorkspace("key1"); got != "/default" {
@@ -664,17 +706,17 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 // entry point.
 func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	r := newTestRouter(3)
-	r.workspaceOverrides = make(map[string]string)
-	r.workspace = "/default"
+	r.wsStore.overrides = make(map[string]string)
+	r.defaultCWD = "/default"
 
 	r.SetWorkspace("", "/tmp/attacker")
 
 	// 1) Empty-key slot must not be installed.
-	if _, ok := r.workspaceOverrides[""]; ok {
+	if _, ok := r.wsStore.overrides[""]; ok {
 		t.Error("workspaceOverrides[\"\"] was installed; expected empty-chatKey reject")
 	}
 	// 2) Map cap must not have been consumed.
-	if got := len(r.workspaceOverrides); got != 0 {
+	if got := len(r.wsStore.overrides); got != 0 {
 		t.Errorf("len(workspaceOverrides) = %d after empty-chatKey SetWorkspace; want 0", got)
 	}
 	// 3) GetWorkspace("") must fall through to the configured default,
@@ -719,7 +761,7 @@ func TestWaitSocketGoneForKey_NoSocketReturnsFast(t *testing.T) {
 
 func TestCleanupNoExpiredSessions(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Hour,
 		pruneTTL: 72 * time.Hour,
@@ -737,7 +779,7 @@ func TestCleanupNoExpiredSessions(t *testing.T) {
 
 func TestCleanupExpiredSession(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 		pruneTTL: 72 * time.Hour,
@@ -761,7 +803,7 @@ func TestCleanupExpiredSession(t *testing.T) {
 // streamed tool_use / thinking / assistant event proves the turn is alive.
 func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,
@@ -789,7 +831,7 @@ func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
 // AND LastEventAt stale (or zero) means the turn is not making progress.
 func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,
@@ -816,7 +858,7 @@ func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
 
 func TestCleanupSkipsRunningSession(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 		pruneTTL: 72 * time.Hour,
@@ -837,7 +879,7 @@ func TestCleanupSkipsRunningSession(t *testing.T) {
 
 func TestCleanupSkipsNilProcess(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -845,7 +887,7 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 	s := &ManagedSession{key: "key1"}
 	s.setSessionID("sess-1")
 	s.lastActive.Store(time.Now().UnixNano()) // recent → within pruneTTL window
-	r.sessions["key1"] = s
+	r.ss.sessions["key1"] = s
 
 	r.Cleanup() // must not panic
 
@@ -857,7 +899,7 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 
 func TestCleanupSkipsDeadProcess(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -876,35 +918,35 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 }
 
 // TestCleanup_PrunesBackendOverride verifies R70-ARCH-MED: a nil-process
-// session that ages past pruneTTL is removed from r.sessions AND its entry
-// in r.backendOverrides is freed. A previous version of shouldPrune-branch
-// only touched r.sessions, so a session that was SetSessionBackend'd and
+// session that ages past pruneTTL is removed from r.ss.sessions AND its entry
+// in r.bkStore.backendOverrides is freed. A previous version of shouldPrune-branch
+// only touched r.ss.sessions, so a session that was SetSessionBackend'd and
 // then never spawned (e.g. config error at spawn time) would leave a
 // backendOverride live forever. R71-TEST-M1.
 func TestCleanup_PrunesBackendOverride(t *testing.T) {
 	r := &Router{
-		sessions:         make(map[string]*ManagedSession),
-		backendOverrides: map[string]string{},
-		maxProcs:         3,
-		ttl:              1 * time.Minute,
-		pruneTTL:         1 * time.Hour,
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
 	}
+	r.bkStore.backendOverrides = map[string]string{}
 	// nil-process session past pruneTTL — shouldPrune returns true.
 	s := &ManagedSession{key: "k1"}
 	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
-	r.sessions["k1"] = s
-	r.backendOverrides["k1"] = "kiro"
-	r.backendOverrides["other"] = "claude" // unrelated, must survive
+	r.ss.sessions["k1"] = s
+	r.bkStore.backendOverrides["k1"] = "kiro"
+	r.bkStore.backendOverrides["other"] = "claude" // unrelated, must survive
 
 	r.Cleanup()
 
-	if _, ok := r.sessions["k1"]; ok {
-		t.Error("pruned session should be gone from r.sessions")
+	if _, ok := r.ss.sessions["k1"]; ok {
+		t.Error("pruned session should be gone from r.ss.sessions")
 	}
-	if _, ok := r.backendOverrides["k1"]; ok {
+	if _, ok := r.bkStore.backendOverrides["k1"]; ok {
 		t.Error("pruned session's backendOverride should be freed")
 	}
-	if got := r.backendOverrides["other"]; got != "claude" {
+	if got := r.bkStore.backendOverrides["other"]; got != "claude" {
 		t.Errorf("unrelated backendOverride should survive, got %q", got)
 	}
 }
@@ -932,21 +974,21 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Router{
-				sessions:         make(map[string]*ManagedSession),
-				backendOverrides: map[string]string{"k1": "kiro"},
+				ss: sessionStore{sessions: make(map[string]*ManagedSession)},
 			}
+			r.bkStore.backendOverrides = map[string]string{"k1": "kiro"}
 			s := &ManagedSession{key: "k1"}
 			s.setSessionID("sess-1")
-			r.sessions["k1"] = s
+			r.ss.sessions["k1"] = s
 
 			r.mu.Lock()
 			r.unregisterSessionLocked("k1", s, tc.keep)
 			r.mu.Unlock()
 
-			if _, ok := r.sessions["k1"]; ok {
-				t.Error("session must be removed from r.sessions regardless of keepBackendOverride")
+			if _, ok := r.ss.sessions["k1"]; ok {
+				t.Error("session must be removed from r.ss.sessions regardless of keepBackendOverride")
 			}
-			got, ok := r.backendOverrides["k1"]
+			got, ok := r.bkStore.backendOverrides["k1"]
 			if tc.wantOverride == "" {
 				if ok {
 					t.Errorf("backendOverride must be freed, got %q", got)
@@ -960,7 +1002,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 
 func TestCleanupMultipleSessions(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 5,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -1037,7 +1079,7 @@ func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 	r := newTestRouter(3)
 	s := newSessionWithID("feishu:direct:user1:general", "old-sess-id")
 	s.storeProcess(newDeadProc())
-	r.sessions["feishu:direct:user1:general"] = s
+	r.ss.sessions["feishu:direct:user1:general"] = s
 
 	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err == nil {
@@ -1051,7 +1093,7 @@ func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 	r := newTestRouter(3)
 	// Restored session with no process (like after restart).
-	r.sessions["key1"] = newSessionWithID("key1", "restored-sess")
+	r.ss.sessions["key1"] = newSessionWithID("key1", "restored-sess")
 
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
 	if err == nil {
@@ -1064,13 +1106,13 @@ func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 
 func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 	r := &Router{
-		sessions:  make(map[string]*ManagedSession),
-		wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
-		maxProcs:  3,
-		ttl:       30 * time.Minute,
-		model:     "default-model",
-		extraArgs: []string{"--base-arg"},
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
+		maxProcs: 3,
+		ttl:      30 * time.Minute,
 	}
+	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	r.bkStore.model = "default-model"
+	r.bkStore.extraArgs = []string{"--base-arg"}
 
 	// Even with overrides, spawn will still fail — we just verify no panic.
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
@@ -1140,7 +1182,7 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEvictOldestEmptyRouter(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1152,12 +1194,12 @@ func TestEvictOldestEmptyRouter(t *testing.T) {
 }
 
 func TestEvictOldestReturnsTrue(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession), maxProcs: 1}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}, maxProcs: 1}
 	proc := newIdleProc()
 	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
-	r.sessions["key1"] = s
+	r.ss.sessions["key1"] = s
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1172,12 +1214,12 @@ func TestEvictOldestReturnsTrue(t *testing.T) {
 }
 
 func TestEvictOldestSkipsRunning(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
 	proc := newRunningProc()
 	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
-	r.sessions["key1"] = s
+	r.ss.sessions["key1"] = s
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1192,12 +1234,12 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 }
 
 func TestEvictOldestSkipsDead(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
 	proc := newDeadProc()
 	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
-	r.sessions["key1"] = s
+	r.ss.sessions["key1"] = s
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1209,7 +1251,7 @@ func TestEvictOldestSkipsDead(t *testing.T) {
 }
 
 func TestEvictOldestPicksOldest(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
 
 	oldProc := newIdleProc()
 	recentProc := newIdleProc()
@@ -1222,8 +1264,8 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	recentSession.storeProcess(recentProc)
 	recentSession.lastActive.Store(time.Now().Add(-1 * time.Minute).UnixNano())
 
-	r.sessions["old-key"] = oldSession
-	r.sessions["recent-key"] = recentSession
+	r.ss.sessions["old-key"] = oldSession
+	r.ss.sessions["recent-key"] = recentSession
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1241,8 +1283,8 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 }
 
 func TestEvictOldestSkipsNilProcess(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
-	r.sessions["nil-key"] = newSessionWithID("nil-key", "sess-1")
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
+	r.ss.sessions["nil-key"] = newSessionWithID("nil-key", "sess-1")
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -1295,12 +1337,12 @@ func TestShutdownSavesStore(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		sessions:  make(map[string]*ManagedSession),
+		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		storePath: storePath,
 	}
-	r.sessions["feishu:direct:user1:general"] = newSessionWithID("feishu:direct:user1:general", "sess-abc")
+	r.ss.sessions["feishu:direct:user1:general"] = newSessionWithID("feishu:direct:user1:general", "sess-abc")
 
 	r.Shutdown()
 
@@ -1379,7 +1421,7 @@ func TestShutdownIdempotent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
-	r := &Router{sessions: make(map[string]*ManagedSession)}
+	r := &Router{ss: sessionStore{sessions: make(map[string]*ManagedSession)}}
 	injectSession(r, "alive1", newIdleProc())
 	injectSession(r, "alive2", newRunningProc())
 	injectSession(r, "dead1", newDeadProc())
@@ -1388,7 +1430,7 @@ func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
 	r.countActive()
 	r.mu.Unlock()
 
-	if got := r.activeCount.Load(); got != 2 {
+	if got := r.ss.activeCount.Load(); got != 2 {
 		t.Errorf("activeCount = %d, want 2", got)
 	}
 }
@@ -1561,8 +1603,8 @@ func TestStats_ActiveNeverExceedsTotal(t *testing.T) {
 			s := &ManagedSession{key: key}
 			s.storeProcess(newIdleProc())
 			s.touchLastActive()
-			r.sessions[key] = s
-			r.activeCount.Add(1)
+			r.ss.sessions[key] = s
+			r.ss.activeCount.Add(1)
 			r.mu.Unlock()
 		}
 	}()
@@ -1589,7 +1631,7 @@ func TestStats_ActiveNeverExceedsTotal(t *testing.T) {
 
 func TestConcurrentCleanup_Race(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 5,
 		ttl:      1 * time.Millisecond, // very short so sessions expire quickly
 		pruneTTL: 1 * time.Millisecond,
@@ -1616,7 +1658,7 @@ func TestConcurrentCleanup_Race(t *testing.T) {
 
 func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 3,
 		ttl:      1 * time.Millisecond,
 		pruneTTL: 1 * time.Millisecond,
@@ -1756,7 +1798,7 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	_, stillMarked := r.spawningKeys["key1"]
+	_, stillMarked := r.pp.spawningKeys["key1"]
 	r.mu.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys still contains key1 after failed spawn")
@@ -1775,16 +1817,16 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// Simulate being inside spawnSession: caller enters with r.mu held,
 	// writes the marker, releases the lock for the Spawn() call.
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys["cron:abc"] = doneCh
+	r.pp.spawningKeys["cron:abc"] = doneCh
 	r.mu.Unlock()
 
 	// Reconcile's view: lock, snapshot, unlock.
 	r.mu.Lock()
-	_, spawning := r.spawningKeys["cron:abc"]
+	_, spawning := r.pp.spawningKeys["cron:abc"]
 	r.mu.Unlock()
 	if !spawning {
 		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
@@ -1794,11 +1836,11 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// delete mirror the production defer order in spawnSession).
 	r.mu.Lock()
 	close(doneCh)
-	delete(r.spawningKeys, "cron:abc")
+	delete(r.pp.spawningKeys, "cron:abc")
 	r.mu.Unlock()
 
 	r.mu.Lock()
-	_, stillMarked := r.spawningKeys["cron:abc"]
+	_, stillMarked := r.pp.spawningKeys["cron:abc"]
 	r.mu.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys leaked after cleanup")
@@ -2121,26 +2163,27 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	// Router with one default backend "claude" plus a secondary "kiro" so
 	// backend-override cases have a real target.
 	mkRouter := func() *Router {
-		return &Router{
-			sessions: make(map[string]*ManagedSession),
-			wrappers: map[string]*cli.Wrapper{
-				"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-				"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-			},
-			defaultBackend:     "claude",
-			model:              "sonnet-default",
-			extraArgs:          []string{"--flag-a"},
-			backendModels:      map[string]string{"kiro": "kiro-model"},
-			backendExtraArgs:   map[string][]string{"kiro": {"--kiro-arg"}},
-			workspace:          "/default/ws",
-			workspaceOverrides: make(map[string]string),
-			backendOverrides:   make(map[string]string),
+		r := &Router{
+			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+			defaultCWD: "/default/ws",
 		}
+		r.bkStore.wrappers = map[string]*cli.Wrapper{
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		}
+		r.bkStore.defaultBackend = "claude"
+		r.bkStore.model = "sonnet-default"
+		r.bkStore.extraArgs = []string{"--flag-a"}
+		r.bkStore.backendModels = map[string]string{"kiro": "kiro-model"}
+		r.bkStore.backendExtraArgs = map[string][]string{"kiro": {"--kiro-arg"}}
+		r.bkStore.backendOverrides = make(map[string]string)
+		r.wsStore.overrides = make(map[string]string)
+		return r
 	}
 
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
 		r := mkRouter()
-		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
@@ -2152,14 +2195,14 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
 		}
 		// Override is consumed (one-shot).
-		if _, still := r.backendOverrides["feishu:user:bob:agent1"]; still {
+		if _, still := r.bkStore.backendOverrides["feishu:user:bob:agent1"]; still {
 			t.Error("backendOverride was not consumed")
 		}
 	})
 
 	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
@@ -2169,7 +2212,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("workspaceOverride (chatKey) wins when opts.Workspace empty", func(t *testing.T) {
 		r := mkRouter()
-		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		r.wsStore.overrides["feishu:user:alice"] = "/override/ws"
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "", AgentOpts{})
 		if sp.Workspace != "/override/ws" {
 			t.Errorf("Workspace = %q, want /override/ws", sp.Workspace)
@@ -2178,7 +2221,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("opts.Workspace beats workspaceOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		r.wsStore.overrides["feishu:user:alice"] = "/override/ws"
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "",
 			AgentOpts{Workspace: "/opts/ws"})
 		if sp.Workspace != "/opts/ws" {
@@ -2228,8 +2271,8 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	})
 
 	// Regression: a session whose process exited but whose entry is still
-	// in r.sessions must resume against the SAME backend it ran on. Before
-	// this fix, resolveSpawnParamsLocked fell through to r.defaultBackend
+	// in r.ss.sessions must resume against the SAME backend it ran on. Before
+	// this fix, resolveSpawnParamsLocked fell through to r.bkStore.defaultBackend
 	// when opts.Backend was empty AND backendOverrides[key] was already
 	// consumed (one-shot). For a kiro session that meant the second turn
 	// silently respawned under claude with the kiro session_id, which then
@@ -2241,7 +2284,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		key := "feishu:user:bob:agent1"
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
-		r.sessions[key] = old
+		r.ss.sessions[key] = old
 		sp := r.resolveSpawnParamsLocked(key,
 			"00000000-0000-0000-0000-000000000000", AgentOpts{})
 		if sp.BackendID != "kiro" {
@@ -2266,7 +2309,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		key := "feishu:user:bob:agent1"
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
-		r.sessions[key] = old
+		r.ss.sessions[key] = old
 		sp := r.resolveSpawnParamsLocked(key, "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
@@ -2282,8 +2325,8 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		key := "feishu:user:bob:agent1"
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
-		r.sessions[key] = old
-		r.backendOverrides[key] = "claude"
+		r.ss.sessions[key] = old
+		r.bkStore.backendOverrides[key] = "claude"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)
@@ -2504,7 +2547,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 // guarantee: when the in-flight spawn for a key fails, every concurrent
 // GetOrCreate goroutine parked on the same key wakes immediately rather
 // than tick-polling. The test simulates the in-flight window by manually
-// installing a doneCh in r.spawningKeys (mirroring spawnSession's prologue),
+// installing a doneCh in r.pp.spawningKeys (mirroring spawnSession's prologue),
 // launches N concurrent GetOrCreate callers, and then performs the failure-
 // path defer (close + delete under r.mu) by hand. Every waiter must return
 // within 100ms (the historical poll interval was 20ms; instantaneous wakeup
@@ -2522,11 +2565,11 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// the inflight wait path. spawnSession uses the same pattern in its
 	// prologue (router_lifecycle.go ~line 549).
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	r.pp.spawningKeys[key] = doneCh
 	r.mu.Unlock()
 
 	const N = 10
@@ -2552,7 +2595,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	start := time.Now()
 	r.mu.Lock()
 	close(doneCh)
-	delete(r.spawningKeys, key)
+	delete(r.pp.spawningKeys, key)
 	r.mu.Unlock()
 
 	// All waiters should observe the close + retry the loop. With
@@ -2580,7 +2623,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 
 // TestSpawningKeys_CloseBeforeDelete_Order pins the documented ordering
 // inside markSpawnDoneLocked: `close(ch)` must run BEFORE
-// `delete(r.spawningKeys, key)`. The helper godoc above the body in
+// `delete(r.pp.spawningKeys, key)`. The helper godoc above the body in
 // router_lifecycle.go (~line 530) explains why: a caller dispatched between
 // "lock acquired" and "delete returned" must observe the closed channel from
 // the still-present map entry, not a fresh nil from a re-arrived
@@ -2605,12 +2648,12 @@ func TestSpawningKeys_CloseBeforeDelete_Order(t *testing.T) {
 	if closeIdx < 0 {
 		t.Fatal("close(ch) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
-	deleteIdx := strings.Index(body, "delete(r.spawningKeys, key)")
+	deleteIdx := strings.Index(body, "delete(r.pp.spawningKeys, key)")
 	if deleteIdx < 0 {
-		t.Fatal("delete(r.spawningKeys, key) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
+		t.Fatal("delete(r.pp.spawningKeys, key) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
 	if closeIdx >= deleteIdx {
-		t.Errorf("close(ch) at byte %d is not before delete(r.spawningKeys, key) at byte %d; "+
+		t.Errorf("close(ch) at byte %d is not before delete(r.pp.spawningKeys, key) at byte %d; "+
 			"the order in markSpawnDoneLocked is load-bearing for R243-ARCH-4 / R248-ARCH-10",
 			closeIdx, deleteIdx)
 	}
@@ -2633,16 +2676,16 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 	// Install an in-flight marker that we never close, so the doneCh arm
 	// stays not-ready. ctx.Done() must therefore be the first ready arm.
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	r.pp.spawningKeys[key] = doneCh
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		close(doneCh)
-		delete(r.spawningKeys, key)
+		delete(r.pp.spawningKeys, key)
 		r.mu.Unlock()
 	}()
 

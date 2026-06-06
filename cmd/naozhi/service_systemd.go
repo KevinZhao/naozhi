@@ -47,6 +47,8 @@ func generateSystemdUnit(binary, configPath, user, home string) string {
 Description=naozhi - Claude Code IM Gateway
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -56,8 +58,6 @@ ExecStart="%s" --config "%s"
 WorkingDirectory=%s
 Restart=always
 RestartSec=5
-StartLimitInterval=60s
-StartLimitBurst=5
 User=%s
 Environment=HOME=%s
 KillMode=process
@@ -322,4 +322,3 @@ func uninstallSystemd() {
 
 	fmt.Println("naozhi service removed.")
 }
-

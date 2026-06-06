@@ -56,14 +56,24 @@ type Platform interface {
 	MaxReplyLength() int
 }
 
+// InterimMessageCapable is an optional capability: platforms that can deliver
+// interim notifications (e.g. "thinking...", "new session") before the final
+// reply implement it. Platforms like WeChat iLink use single-use reply tokens
+// and deliberately omit it.
+//
+// R214-ARCH-2 (#402): promoted from an inline anonymous interface to a named
+// capability so it discovers through the same AsCapability[T] discriminator
+// (R239-ARCH-H) as Reactor / QuestionCardSender — one capability-extension
+// pattern instead of a bespoke per-capability type-assert.
+type InterimMessageCapable interface {
+	SupportsInterimMessages() bool
+}
+
 // SupportsInterimMessages reports whether a platform can handle interim
-// notifications (e.g. "thinking...", "new session") before the final reply.
-// Platforms like WeChat iLink use single-use reply tokens and should return false.
+// notifications before the final reply. Defaults to false (opt-in) for
+// platforms that do not implement InterimMessageCapable.
 func SupportsInterimMessages(p Platform) bool {
-	type interim interface {
-		SupportsInterimMessages() bool
-	}
-	if i, ok := p.(interim); ok {
+	if i, ok := AsCapability[InterimMessageCapable](p); ok {
 		return i.SupportsInterimMessages()
 	}
 	return false // default: not supported (opt-in)
@@ -129,11 +139,12 @@ func DecodeMessageRef(ref string) (chatID, msgID string, ok bool) {
 // callers query support via AsCapability[T](p). Adding a new
 // capability is now a single interface declaration in this package
 // and a typed call at the use-site — no per-capability AsX helper
-// required (R239-ARCH-H).
+// required (R214-ARCH-2 #402 / R239-ARCH-H).
 //
-// Existing AsReactor / AsQuestionCardSender remain as thin wrappers
-// for back-compat with current call sites; new capabilities should
-// use AsCapability directly.
+// All call sites query capabilities via AsCapability[T](p) directly;
+// the former per-capability AsReactor / AsQuestionCardSender wrappers
+// were removed once their last callers migrated, so a new capability
+// adds zero new helper functions.
 func AsCapability[T any](p Platform) (T, bool) {
 	c, ok := p.(T)
 	return c, ok
@@ -149,13 +160,6 @@ func AsCapability[T any](p Platform) (T, bool) {
 type Reactor interface {
 	AddReaction(ctx context.Context, messageID string, reaction ReactionType) error
 	RemoveReaction(ctx context.Context, messageID string, reaction ReactionType) error
-}
-
-// AsReactor returns p as a Reactor if it implements the interface.
-// Equivalent to AsCapability[Reactor](p); kept as a named helper for
-// existing call-site readability.
-func AsReactor(p Platform) (Reactor, bool) {
-	return AsCapability[Reactor](p)
 }
 
 // QuestionCard is the platform-agnostic payload for an AskUserQuestion prompt.
@@ -200,13 +204,6 @@ type QuestionOption struct {
 // so dispatch can later edit it to "✅ 已回答 …" once the user selects.
 type QuestionCardSender interface {
 	SendQuestionCard(ctx context.Context, chatID string, card QuestionCard) (msgID string, err error)
-}
-
-// AsQuestionCardSender returns p as a QuestionCardSender if supported.
-// Equivalent to AsCapability[QuestionCardSender](p); kept as a named
-// helper for existing call-site readability.
-func AsQuestionCardSender(p Platform) (QuestionCardSender, bool) {
-	return AsCapability[QuestionCardSender](p)
 }
 
 // RunnablePlatform extends Platform for platforms needing background goroutines.

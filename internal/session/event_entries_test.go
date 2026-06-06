@@ -309,6 +309,220 @@ func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_EquivalentToSince verifies that the append
+// variant returns the same entries as EventEntriesSince (dead-session path).
+// R112714-PERF-11.
+func TestEventEntriesSinceAppend_EquivalentToSince(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+
+	want := s.EventEntriesSince(150)
+	got := s.EventEntriesSinceAppend(nil, 150)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
+				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+// TestEventEntriesSinceAppend_ReusesBuffer verifies the append variant
+// appends into a pre-allocated slice so callers can reuse capacity.
+func TestEventEntriesSinceAppend_ReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	}
+	s.persistedHistorySorted = true
+
+	pool := make([]cli.EventEntry, 0, 8)
+	got := s.EventEntriesSinceAppend(pool, 0)
+	if len(got) != 2 {
+		t.Fatalf("len = %d want 2", len(got))
+	}
+	// Buffer was reused if cap is still 8 (no new backing allocation needed).
+	if cap(got) != 8 {
+		t.Errorf("cap = %d want 8 (buffer should have been reused)", cap(got))
+	}
+}
+
+// TestEventEntriesSinceAppend_EmptyHistory mirrors the nil-return contract of
+// EventEntriesSince: nil dst + empty history = nil result.
+func TestEventEntriesSinceAppend_EmptyHistory(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistorySorted = true
+	if got := s.EventEntriesSinceAppend(nil, 0); got != nil {
+		t.Errorf("empty history with nil dst: got %v want nil", got)
+	}
+}
+
+// TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy verifies the
+// #1701 fast path: on the live-process path with a nil/empty dst, the append
+// variant hands back proc.EventEntriesSince's slice directly (no extra append
+// copy) while still returning the correct entries.
+func TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	s.storeProcess(proc)
+
+	want := proc.EventEntriesSince(150)
+	got := s.EventEntriesSinceAppend(nil, 150)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
+				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+// TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst verifies that
+// on the live-process path a non-empty dst still has the entries appended
+// after its existing contents (#1701 only short-circuits the empty-dst case;
+// a non-empty dst must keep its prefix).
+func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	})
+	s.storeProcess(proc)
+
+	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	got := s.EventEntriesSinceAppend(dst, 0)
+	if len(got) != 3 {
+		t.Fatalf("len = %d want 3 (prefix + 2 entries)", len(got))
+	}
+	if got[0].Summary != "prefix" {
+		t.Errorf("got[0]=%q want prefix (existing dst contents must be preserved)", got[0].Summary)
+	}
+	if got[1].Summary != "a" || got[2].Summary != "b" {
+		t.Errorf("appended entries wrong: got %q,%q want a,b", got[1].Summary, got[2].Summary)
+	}
+}
+
+// TestEventEntriesSinceAppend_LiveProcessReusesBuffer pins R20260604-PERF-25
+// (#1740): on the live-process path an empty (cap>0) dst must have its backing
+// array reused rather than a fresh slice allocated per call. Before the fix the
+// live branch always called proc.EventEntriesSince (fresh alloc); now it
+// forwards into the EventLog append-mode query.
+func TestEventEntriesSinceAppend_LiveProcessReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	s.storeProcess(proc)
+
+	// Pre-grow a buffer, then poll with buf[:0]. The returned slice must share
+	// the same backing array (no allocation) AND carry the correct entries.
+	buf := make([]cli.EventEntry, 0, 8)
+	got := s.EventEntriesSinceAppend(buf[:0], 150)
+	if len(got) != 2 {
+		t.Fatalf("len=%d want 2 (entries after Time=150)", len(got))
+	}
+	if got[0].Summary != "b" || got[1].Summary != "c" {
+		t.Errorf("entries wrong: got %q,%q want b,c", got[0].Summary, got[1].Summary)
+	}
+	if &got[:1][0] != &buf[:1][0] {
+		t.Errorf("live path did not reuse the caller's buffer backing array (#1740 regression)")
+	}
+}
+
+// TestEventEntriesBefore_SortedFlagSkipsSort verifies the R20260603000023-PERF-3
+// / #1623 fast path: when persistedHistorySorted=true, EventEntriesBefore must
+// return entries in strict Time-ascending order using only slices.Reverse (O(n))
+// rather than a full sort. Correctness is the primary invariant tested here.
+func TestEventEntriesBefore_SortedFlagSkipsSort(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+		{Time: 400, Summary: "d"},
+		{Time: 500, Summary: "e"},
+	}
+	s.persistedHistorySorted = true
+
+	// Request entries before Time=450 — should get times 100..400 ascending.
+	got := s.EventEntriesBefore(450, 10)
+	if len(got) != 4 {
+		t.Fatalf("len=%d want 4", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time <= got[i-1].Time {
+			t.Errorf("not strictly ascending at index %d: Time %d <= %d",
+				i, got[i].Time, got[i-1].Time)
+		}
+	}
+	if got[0].Time != 100 || got[3].Time != 400 {
+		t.Errorf("wrong range: got [%d..%d] want [100..400]", got[0].Time, got[3].Time)
+	}
+}
+
+// TestEventEntriesBefore_UnsortedFlagFallsBackToSort verifies that when
+// persistedHistorySorted=false, the full stable sort is still applied and
+// the result is correct.
+func TestEventEntriesBefore_UnsortedFlagFallsBackToSort(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	// Out-of-order insertion order.
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 300, Summary: "c"},
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	}
+	s.persistedHistorySorted = false
+
+	got := s.EventEntriesBefore(350, 10)
+	if len(got) != 3 {
+		t.Fatalf("len=%d want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time <= got[i-1].Time {
+			t.Errorf("not strictly ascending at index %d: Time %d <= %d",
+				i, got[i].Time, got[i-1].Time)
+		}
+	}
+}
+
+// TestEventEntriesBefore_SortedEmptyReturnsNil checks the nil-return contract
+// for an empty sorted history.
+func TestEventEntriesBefore_SortedEmptyReturnsNil(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistorySorted = true
+	if got := s.EventEntriesBefore(500, 10); got != nil {
+		t.Errorf("empty sorted: got %v want nil", got)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

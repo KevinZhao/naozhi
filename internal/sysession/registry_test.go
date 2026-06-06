@@ -36,6 +36,38 @@ func TestValidateDaemonName(t *testing.T) {
 	}
 }
 
+// TestBuiltinDaemonNameConstants pins the daemon-name constants to the
+// registry factory entries AND to each constructed daemon's Name(), so a
+// rename of one site without the others fails compilation/this test
+// rather than silently drifting (#1634). The config-translation wiring in
+// cmd/naozhi references the same constants, closing the third site.
+func TestBuiltinDaemonNameConstants(t *testing.T) {
+	registryTestMu.Lock()
+	defer registryTestMu.Unlock()
+
+	// Constant -> the factory expected to carry it.
+	byName := make(map[string]builtinDaemonFactory, len(builtinDaemons))
+	for _, f := range builtinDaemons {
+		byName[f.Name] = f
+	}
+	for _, want := range []string{DaemonAutoTitler, DaemonAttachmentGC} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("builtinDaemons missing factory for constant %q", want)
+		}
+	}
+
+	deps := DaemonDeps{Router: wrapRouter(newFakeRouter()), Runner: &capturingRunner{}}
+	for _, f := range builtinDaemons {
+		d, err := f.Build(deps)
+		if err != nil {
+			t.Fatalf("Build(%q): %v", f.Name, err)
+		}
+		if got := d.Name(); got != f.Name {
+			t.Errorf("daemon Name() = %q, factory Name = %q (constant drift)", got, f.Name)
+		}
+	}
+}
+
 // TestValidateBuiltinDaemonNames verifies the compiled-in registry is
 // healthy at process start.  This test failing means a future
 // contributor added a daemon with a malformed or duplicate name; fix
@@ -53,4 +85,36 @@ func TestValidateBuiltinDaemonNames(t *testing.T) {
 		}
 	}()
 	validateBuiltinDaemonNames()
+}
+
+// TestBuiltinDaemonsSliceLiteralInvariant pins the R244-ARCH-18 (#1055)
+// decision documented above builtinDaemons in registry.go: sysession keeps a
+// static, eagerly-populated slice literal rather than cli/history's
+// blank-import + init()-driven registry.  It asserts the registry is fully
+// populated at package init (not via late init() registration), every entry
+// carries a non-nil Build factory, and every Name passes validateDaemonName.
+//
+// If a future change (e.g. the R244-ARCH-4/#1058 unified-Registry[T] work in
+// internal/wireup) deliberately moves sysession onto an init()-based or
+// blank-import registry, update this test alongside the registry.go anchor
+// comment — do not silently relax it.
+//
+// NOT t.Parallel(): like the sibling registry pins, Manager tests swap
+// builtinDaemons via withRegistry() under registryTestMu, so we take that
+// mutex to give the race detector a happens-before edge with those swaps.
+func TestBuiltinDaemonsSliceLiteralInvariant(t *testing.T) {
+	registryTestMu.Lock()
+	defer registryTestMu.Unlock()
+
+	if len(builtinDaemons) == 0 {
+		t.Fatal("builtinDaemons is empty: expected an eagerly-populated static slice literal, not init()-driven late registration")
+	}
+	for i, f := range builtinDaemons {
+		if f.Build == nil {
+			t.Errorf("builtinDaemons[%d] (%q): Build factory is nil", i, f.Name)
+		}
+		if err := validateDaemonName(f.Name); err != nil {
+			t.Errorf("builtinDaemons[%d] (%q): invalid name: %v", i, f.Name, err)
+		}
+	}
 }

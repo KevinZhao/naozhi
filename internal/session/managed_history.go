@@ -176,6 +176,72 @@ func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
 	s.prevSessionIDs = slices.Clone(ids)
 }
 
+// RebuildChainFiltered atomically rebuilds prevSessionIDs and
+// prevSessionOrigins under a SINGLE historyMu write hold, keeping only the
+// indices where keepMask is true. Both parallel slices are filtered with the
+// same mask so they stay positionally aligned — no reader can observe an
+// intermediate state where the two slices differ in length.
+//
+// Why a dedicated method (RFC §9.2 v2.1, Go-BLOCKING-2): composing
+// ReplacePrevSessionIDs + SetPrevSessionOrigins cannot achieve this — each
+// takes historyMu independently, so between the two calls a reader running
+// SnapshotPrevSessionOrigins would see len(prevSessionIDs) != len(origins)
+// and synthesise wrong "manual" labels. Doing both mutations in one lock
+// hold closes that window.
+//
+// keepMask must have len == len(prevSessionIDs); a mismatched mask is a
+// caller bug and is treated as "keep nothing changed" (no-op) to avoid
+// corrupting the chain. Returns the number of entries removed.
+//
+// Origins shorter than the ID chain (legacy / untracked prefix) are treated
+// as "manual" for the surviving entries, matching SnapshotPrevSessionOrigins'
+// positional fallback, so the rebuilt origins slice is exactly len(newIDs).
+func (s *ManagedSession) RebuildChainFiltered(keepMask []bool) int {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+
+	n := len(s.prevSessionIDs)
+	if len(keepMask) != n {
+		// Length mismatch — refuse to touch the chain rather than risk
+		// misaligning the parallel slices.
+		return 0
+	}
+	if n == 0 {
+		return 0
+	}
+
+	newIDs := make([]string, 0, n)
+	newOrigins := make([]string, 0, n)
+	removed := 0
+	for i := 0; i < n; i++ {
+		if !keepMask[i] {
+			removed++
+			continue
+		}
+		newIDs = append(newIDs, s.prevSessionIDs[i])
+		origin := "manual"
+		if i < len(s.prevSessionOrigins) && s.prevSessionOrigins[i] != "" {
+			origin = s.prevSessionOrigins[i]
+		}
+		newOrigins = append(newOrigins, origin)
+	}
+
+	if removed == 0 {
+		// Nothing dropped — leave the slices untouched so we don't perturb
+		// a possibly-shorter origins slice that callers tolerate.
+		return 0
+	}
+
+	if len(newIDs) == 0 {
+		s.prevSessionIDs = nil
+		s.prevSessionOrigins = nil
+		return removed
+	}
+	s.prevSessionIDs = newIDs
+	s.prevSessionOrigins = newOrigins
+	return removed
+}
+
 // SnapshotPersistedHistory returns a defensive copy of the persistedHistory
 // ring. The result is safe to mutate without affecting the session. Returns
 // nil when the ring is empty so callers don't pay a zero-length alloc.
@@ -193,18 +259,22 @@ func (s *ManagedSession) SnapshotPersistedHistory() []cli.EventEntry {
 }
 
 // persistedHistoryBefore collects up to `limit` entries from persistedHistory
-// strictly older than beforeMS. Returns entries in insertion order — the
-// caller is responsible for the final sort. Only relevant when proc is nil;
-// live-process sessions go through proc.EventEntriesBefore directly.
-func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli.EventEntry {
+// strictly older than beforeMS. Returns entries in reverse-walk order (newest
+// first). The second return value is true when persistedHistorySorted is set,
+// meaning the history is Time-ascending and the backward walk therefore
+// produces a strictly Time-descending result — the caller can obtain ascending
+// order by a cheap slices.Reverse instead of a full sort. Only relevant when
+// proc is nil; live-process sessions go through proc.EventEntriesBefore directly.
+func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cli.EventEntry, bool) {
 	if limit <= 0 {
-		return nil
+		return nil, false
 	}
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	if len(s.persistedHistory) == 0 {
-		return nil
+		return nil, false
 	}
+	sorted := s.persistedHistorySorted
 	// Walk backward collecting up to `limit` entries strictly older than
 	// beforeMS. persistedHistory is not guaranteed to be sorted, so a full
 	// linear walk is the conservative choice.
@@ -217,19 +287,37 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, false
 	}
-	// Order does not matter: the only caller (EventEntriesBefore) pipes
-	// this through sortEntriesByTimeStable, which overrides whatever
-	// order we produce here. The prior code reversed `out` to restore
-	// insertion order, but stable-sort-by-Time then re-orders by Time
-	// making the reversal pure waste. Leave the reverse-walk order.
-	return out
+	// When sorted==true the backward walk produced a Time-descending sequence.
+	// Leave the order as-is; the caller decides whether to Reverse or full-sort.
+	return out, sorted
 }
 
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
+	s.injectHistory(entries, false)
+}
+
+// InjectHistoryIfEmpty atomically injects entries only when persistedHistory is
+// currently empty, returning true if the injection happened. The emptiness
+// check and the append run under a single historyMu hold so concurrent startup
+// loaders (router_core.go Tier1/Tier2, #1812) and ReconnectShims cannot both
+// pass a separate hasInjectedHistory() check and double-append the same
+// conversation. Callers that previously did `if !s.hasInjectedHistory() { … ;
+// s.InjectHistory(…) }` have a check-then-act TOCTOU; this collapses it into
+// one critical section.
+func (s *ManagedSession) InjectHistoryIfEmpty(entries []cli.EventEntry) bool {
+	return s.injectHistory(entries, true)
+}
+
+// injectHistory is the shared implementation behind InjectHistory /
+// InjectHistoryIfEmpty. When onlyIfEmpty is true it returns false without
+// mutating state if persistedHistory already holds entries (checked under the
+// same lock that performs the append). When onlyIfEmpty is false it always
+// injects and returns true.
+func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty bool) bool {
 	if len(entries) > maxPersistedHistory {
 		slog.Debug("inject history: batch exceeds cap, truncating oldest",
 			"key", s.key,
@@ -269,6 +357,15 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// The orphan ring is GC'd when the last reference (this closure)
 	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
+	// #1812: atomic check-then-act. When onlyIfEmpty is set the caller wants
+	// to inject exclusively — bail under the lock if another loader already
+	// populated persistedHistory, so two concurrent startup goroutines that
+	// both observed an empty session cannot both append (duplicated turns in
+	// the sidebar until restart).
+	if onlyIfEmpty && len(s.persistedHistory) > 0 {
+		s.historyMu.Unlock()
+		return false
+	}
 	// Monotonicity check (R237-PERF-12): when persistedHistory is empty
 	// or already known sorted AND the appended batch is internally sorted
 	// w.r.t. the existing tail, the flag stays/becomes true and
@@ -296,8 +393,28 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 			s.persistedHistorySorted = false
 		}
 	}
+	// #1644 / R20260603140013-PERF-2: maintain persistedUserTurns incrementally
+	// instead of an O(n) full rescan after every InjectHistory. The cached count
+	// equals oldCount + usersInBatch - usersInTrimmedPrefix, computed entirely
+	// from the batch (O(batch)) and the dropped prefix (O(trimmed)) — never the
+	// whole 500-entry slice. The proc==nil sort branch below permutes order only
+	// and leaves the user total unchanged, so it does not touch the count.
+	// Equivalence with recountPersistedUserTurnsLocked is asserted in
+	// persisted_user_turns_incremental_test.go across append/trim/over-cap/mixed
+	// scenarios.
+	userTurns := s.persistedUserTurns.Load()
+	for i := range entries {
+		if entries[i].Type == "user" {
+			userTurns++
+		}
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
+		for i := 0; i < trimmed; i++ {
+			if s.persistedHistory[i].Type == "user" {
+				userTurns--
+			}
+		}
 		s.persistedHistory = s.persistedHistory[trimmed:]
 		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
 		// pointing at "tail-end of what proc has already seen" rather than
@@ -372,6 +489,13 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		s.persistedHistory = sorted
 		s.persistedHistorySorted = true
 	}
+	// #1644: commit the incrementally-maintained user-turn count so the
+	// proc==nil snapshot branch can feed AutoTitler's min-turn gate. Stored
+	// under historyMu after every persistedHistory mutation (append / cap-trim;
+	// the sort branch does not change the total) so the count stays consistent
+	// with the slice the dead-session readers see — equivalent to a full
+	// recountPersistedUserTurnsLocked but O(batch+trimmed) instead of O(n).
+	s.persistedUserTurns.Store(userTurns)
 	s.historyMu.Unlock()
 
 	if len(tail) > 0 {
@@ -400,4 +524,5 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if response != "" && loadAtomicString(&s.lastResponse) == "" {
 		storeAtomicString(&s.lastResponse, response)
 	}
+	return true
 }

@@ -89,14 +89,15 @@ func WriteRecordRaw(w io.Writer, body []byte) (int64, error) {
 // actually needed — the bufio buffer serializes us just fine, and
 // the four tiny Writes coalesce inside bufio at zero cost.
 func writeFramedBody(w io.Writer, body []byte) (int64, error) {
-	lenStr := strconv.Itoa(len(body))
+	var lenBuf [20]byte
+	lenBytes := strconv.AppendInt(lenBuf[:0], int64(len(body)), 10)
 	var total int64
 
 	// Four Writes, not one: bufio.Writer absorbs them into its
 	// internal buffer. A non-bufio writer would still see the frame
 	// in order, just as four separate syscalls — but Persister owns
 	// the only path here and provides the bufio.
-	n, err := io.WriteString(w, lenStr)
+	n, err := w.Write(lenBytes)
 	total += int64(n)
 	if err != nil {
 		return total, err

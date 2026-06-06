@@ -21,9 +21,31 @@ import (
 	"time"
 )
 
-// maxClientLineBytes limits the size of a single line read from the naozhi client,
-// preventing unbounded memory allocation from malformed or malicious input.
-const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
+// defaultMaxClientLineBytes is the compiled-in per-line size limit.
+// Tests may override via setMaxClientLineBytes; production always sees this value.
+const defaultMaxClientLineBytes = 16 * 1024 * 1024 // 16MB
+
+// maxClientLineBytes is held in an atomic so tests can dial it down
+// without racing the runCommandLoop reader. A zero stored value resolves
+// to defaultMaxClientLineBytes. Mirrors the pattern used by maxWriteLineBytes
+// (R237-CR-4 / #701).
+var maxClientLineBytesAtomic atomic.Int64
+
+// maxClientLineBytes returns the active per-line read limit.
+func maxClientLineBytes() int {
+	v := maxClientLineBytesAtomic.Load()
+	if v == 0 {
+		return defaultMaxClientLineBytes
+	}
+	return int(v)
+}
+
+// setMaxClientLineBytes overrides the per-line limit for tests.
+// Returns the previous value so callers can restore it via defer.
+// A value of zero resets to the compiled-in default.
+func setMaxClientLineBytes(v int) int {
+	return int(maxClientLineBytesAtomic.Swap(int64(v)))
+}
 
 // defaultMaxClientSessionBytes is the cumulative post-auth byte budget per
 // client connection. R216-SEC-3 (#541): without it, a client holding a
@@ -34,7 +56,7 @@ const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 // CLI, or downstream readers feel it. The cap is generous on purpose —
 // the goal is catching pathological abuse, not throttling well-behaved
 // clients.
-const defaultMaxClientSessionBytes int64 = int64(maxClientLineBytes) * 1000
+const defaultMaxClientSessionBytes int64 = defaultMaxClientLineBytes * 1000
 
 // maxClientSessionBytes is held in an atomic so tests can dial it down
 // without racing the runCommandLoop reader on the hot recv path. Mirrors
@@ -809,7 +831,7 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	}
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
-	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
+	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(lr, 4096)
 
 	// Read attach message
@@ -853,7 +875,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 
 	// Switch to bounded reader for the authenticated command loop.
 	// LimitedReader prevents a single oversized line from exhausting memory.
-	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
+	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(postAuthLR, 64*1024)
 
 	// Send hello directly (before becoming the active client, so no live events interleave)
@@ -877,7 +899,14 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// Replay buffered lines directly (still not the active client, no duplication)
 	lines := s.buffer.LinesSince(attachMsg.Seq)
 	for _, l := range lines {
-		writeMsg(conn, ServerMsg{Type: "replay", Seq: l.seq, Line: string(l.data)})
+		// MarshalReplayLine aliases l.data (stable for the entry's life, see
+		// RingBuffer.Push/LinesSince) only across the synchronous marshal, and
+		// writeRaw writes the frame before the next iteration — no copy needed.
+		data, err := MarshalReplayLine(l.seq, l.data)
+		if err != nil {
+			continue
+		}
+		writeRaw(conn, data)
 	}
 	writeMsg(conn, ServerMsg{Type: "replay_done", Count: len(lines)})
 
@@ -971,10 +1000,28 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		}
 	}()
 
+	// sendCliExited carries the runCommandLoop signal into the teardown defer:
+	// when the live CLI died, the terminal cli_exited frame is written
+	// synchronously to conn AFTER the async writer goroutine has drained and
+	// exited (so there is no interleave with its buffered output and no race
+	// with conn.Close losing the frame). #1783.
+	var sendCliExited bool
+	var cliExitCode int
 	defer func() {
+		// Close clientDone (clearClient) so the writer goroutine flushes its
+		// pending buffer and exits; wait for it before touching conn directly.
 		s.clearClient(conn)
-		conn.Close() // unblock any in-progress write in the writer goroutine
 		<-writerDone
+		// Now that the writer goroutine is gone, conn is exclusively ours:
+		// deliver the terminal cli_exited frame synchronously (writeRaw sets a
+		// 10s write deadline + flushes to the socket) so it cannot be dropped.
+		if sendCliExited {
+			resp := ServerMsg{Type: "cli_exited", Code: intPtr(cliExitCode)}
+			if data, err := resp.MarshalLine(); err == nil {
+				writeRaw(conn, data)
+			}
+		}
+		conn.Close()
 		// Only re-arm watchdog/idle if no new client took over
 		s.mu.Lock()
 		noNewClient := s.clientConn == nil
@@ -992,7 +1039,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	s.mu.Unlock()
 	s.saveState()
 
-	s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
+	sendCliExited, cliExitCode = s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
 }
 
 // runCommandLoop is the post-auth, post-replay client message dispatch loop.
@@ -1008,12 +1055,21 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 //   - cliWasAlive: snapshot of cli.alive() taken at attach time. Drives
 //     the cli.exited dedup so a dead-CLI replay path doesn't re-emit
 //     cli_exited (closed channel is always selectable).
+//
+// Returns sendCliExited=true (with the CLI exit code) when the loop exited
+// because the live CLI died and the terminal cli_exited control frame still
+// needs to reach the client. The caller (handleClient) delivers that frame
+// synchronously AFTER the async writer goroutine has drained and exited, so it
+// cannot be dropped on a transiently-full writeCh nor lost to a conn.Close()
+// racing the writer's flush — the #1783 correctness bug. All other exit paths
+// (client disconnect, command-driven disconnect, shutdown) return
+// sendCliExited=false.
 func (s *shimServer) runCommandLoop(
 	reader *bufio.Reader,
 	postAuthLR *io.LimitedReader,
 	clientDone <-chan struct{},
 	cliWasAlive bool,
-) {
+) (sendCliExited bool, exitCode int) {
 	// Command loop: reads from client, also watches for CLI exit and shutdown
 	lineCh := make(chan []byte, 1)
 	go func() {
@@ -1025,11 +1081,15 @@ func (s *shimServer) runCommandLoop(
 		// sustained 16-MB payload churn through the post-auth path.
 		var sessionBytes int64
 		for {
-			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
+			postAuthLR.N = int64(maxClientLineBytes()) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
-				if postAuthLR.N == 0 {
-					slog.Warn("post-auth line limit exceeded, disconnecting")
+				// Distinguish oversize (per-line limit exhausted) from normal EOF/disconnect.
+				// When postAuthLR.N reaches 0 the LimitedReader stops feeding the bufio
+				// reader, which surfaces as an unexpected error rather than a clean close.
+				if postAuthLR.N <= 0 {
+					slog.Warn("client line exceeded per-line byte limit, disconnecting",
+						"limit", maxClientLineBytes())
 				}
 				return
 			}
@@ -1037,7 +1097,7 @@ func (s *shimServer) runCommandLoop(
 			// Disconnect on oversize lines: a misbehaving/malicious client that flood-sends
 			// large lines would otherwise burn CPU in a tight loop while holding the
 			// single-client semaphore slot — better to sever and let them reconnect.
-			if len(line) > maxClientLineBytes {
+			if len(line) > maxClientLineBytes() {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
 				return
 			}
@@ -1058,36 +1118,46 @@ func (s *shimServer) runCommandLoop(
 		}
 	}()
 
+	// cliExited is nil when the CLI was already dead at attach time:
+	// cli_exited was emitted during replay, and a nil channel is never
+	// selectable, so the loop won't busy-return on the perpetually-closed
+	// s.cli.exited. When the CLI was alive, this aliases s.cli.exited so a
+	// real exit still notifies the client. [R20260603-CR-7]
+	cliExited := s.cli.exited
+	if !cliWasAlive {
+		cliExited = nil
+	}
+
 	for {
 		select {
 		case line, ok := <-lineCh:
 			if !ok {
-				return // client disconnected
+				return false, 0 // client disconnected
 			}
 			msg, err := ParseClientMsg(bytes.TrimSpace(line))
 			if err != nil {
 				continue
 			}
 			if disconnect := s.handleClientCommand(msg); disconnect {
-				return
+				return false, 0
 			}
 
-		case <-s.cli.exited:
-			if !cliWasAlive {
-				// CLI was already dead at connection time; cli_exited sent during replay.
-				// Closed channel fires immediately — ignore to avoid double delivery.
-				return
-			}
-			// Send cli_exited to the connected client.
-			code := s.cli.exitCode
-			resp := ServerMsg{Type: "cli_exited", Code: intPtr(code)}
-			if data, err := resp.MarshalLine(); err == nil {
-				s.enqueueWrite(data)
-			}
-			return
+		case <-cliExited:
+			// Reachable only when cliWasAlive==true: when CLI was already dead at
+			// attach time cliExited is set to nil (see above), and a nil channel is
+			// never selected, preventing double delivery of cli_exited.
+			//
+			// Do NOT enqueue cli_exited on writeCh here: it is the final control
+			// frame before teardown, and returning immediately closes clientDone
+			// (handleClient defer) and then conn — which races the async writer's
+			// flush and could lose the frame, leaving the client to discover the
+			// death only via a later reconnect+replay (#1783). Instead we hand the
+			// exit code back to handleClient, which delivers cli_exited
+			// synchronously after the writer goroutine has drained and exited.
+			return true, s.cli.exitCode
 
 		case <-s.done:
-			return
+			return false, 0
 		}
 	}
 }
@@ -1184,6 +1254,14 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	if err != nil {
 		return
 	}
+	writeRaw(conn, data)
+}
+
+// writeRaw writes a pre-marshaled NDJSON frame with the same 10s write
+// deadline guard as writeMsg. Split out so the reconnect replay loop can feed
+// MarshalReplayLine's zero-copy output without re-stringifying each buffered
+// line through a ServerMsg.
+func writeRaw(conn net.Conn, data []byte) {
 	// If SetWriteDeadline fails (conn already closed by defer teardown), skip
 	// the write. Without a deadline, a stalled client could pin the single-
 	// client semaphore slot indefinitely — the point of the deadline is to

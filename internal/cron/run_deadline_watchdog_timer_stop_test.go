@@ -32,7 +32,8 @@ func TestRunDeadlineWatchdog_FastPathReleasesTimerSlot(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	ch, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-ch
 	elapsed := time.Since(start)
 
 	if !abort.fired {

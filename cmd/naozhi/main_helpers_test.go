@@ -60,6 +60,24 @@ func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
 	}
 }
 
+// TestKnownWorkspaceRoots_SkipsEmptyPaths pins the R20260601-CR-5 fix:
+// KnownWorkspaceRoots must not emit an empty string when raw contains "".
+// filepath.Abs("") succeeds (returns cwd), so without the explicit guard
+// an empty input would be canonicalised to cwd and appear in the output.
+// The nil-router nil-projectMgr lister returns no entries, so we verify
+// the guard is present in source rather than wiring up a full router stub.
+func TestKnownWorkspaceRoots_SkipsEmptyPaths(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("main_helpers.go")
+	if err != nil {
+		t.Fatalf("read main_helpers.go: %v", err)
+	}
+	src := string(data)
+	if !strings.Contains(src, `if p == "" {`) {
+		t.Error(`main_helpers.go KnownWorkspaceRoots missing empty-path guard 'if p == "" { continue }' — filepath.Abs("") returns cwd and would pollute the result`)
+	}
+}
+
 // TestDashboardWiring_RegistersPprof pins that the server startup path
 // still calls registerPprof — the pprof endpoints are defense-in-depth
 // for memory / goroutine leak triage and the runbook at
@@ -67,17 +85,17 @@ func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
 // that collapses or renames the wiring would silently break those
 // commands; this test catches it.
 //
-// Reading dashboard.go source instead of reflection keeps the
+// Reading routes.go source instead of reflection keeps the
 // contract narrow: a caller that moves the wiring elsewhere just
 // needs to update the test's expected file/token pair.
 func TestDashboardWiring_RegistersPprof(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../../internal/server/dashboard.go")
+	data, err := os.ReadFile("../../internal/server/routes.go")
 	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+		t.Fatalf("read routes.go: %v", err)
 	}
 	src := string(data)
 	if !strings.Contains(src, "s.registerPprof()") {
-		t.Error("internal/server/dashboard.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
+		t.Error("internal/server/routes.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
 	}
 }

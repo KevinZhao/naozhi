@@ -49,7 +49,21 @@ func (s *Server) registerExpvar() {
 	})
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackRemote(r.RemoteAddr) {
+		// Defense-in-depth (R20260602-SEC-10): with no dashboard token the
+		// loopback gate is the only protection, and a UDS reverse-proxy
+		// misconfig that strips RemoteAddr would expose /debug/vars to any
+		// same-host process. Refuse entirely when there is no token to enforce.
+		if s.dashboardToken == "" {
+			slog.Warn("rejecting expvar request: no dashboard token configured",
+				"path", osutil.SanitizeForLog(r.URL.Path, 256))
+			http.Error(w, "expvar disabled: set a dashboard token to enable", http.StatusForbidden)
+			return
+		}
+		// R20260604-SEC-5: gate on the real client IP, not r.RemoteAddr —
+		// in trustedProxy mode RemoteAddr is the proxy's loopback IP for every
+		// forwarded request, which would defeat the loopback-only gate. See
+		// isLoopbackClient.
+		if !isLoopbackClient(r, s.auth.TrustedProxy) {
 			// R186-SEC-L1: r.URL.Path is URL-decoded from the client-supplied
 			// request line; it can carry bidi / C1 / LS/PS code points that
 			// corrupt downstream terminal log viewers. Sanitize before it

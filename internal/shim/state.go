@@ -24,9 +24,9 @@ import (
 //   - SchemaVersion (canonical forward-compat marker) is the advisory schema
 //     version reported on disk. Starts at 1 and increments only on
 //     major-breaking layout changes; additive fields use omitempty without a
-//     bump. Readers that see SchemaVersion > theirMax SHOULD log a warning
-//     and refuse to reconnect — contract documented here, enforcement lands
-//     in a follow-up lane. A zero value on read (omitempty default on older
+//     bump. Readers that see SchemaVersion > theirMax log a warning and
+//     refuse to reconnect — enforced in ReadStateFile against
+//     maxSupportedSchemaVersion. A zero value on read (omitempty default on older
 //     writers) MUST be interpreted as v1.
 type State struct {
 	Version int `json:"version"`
@@ -127,14 +127,35 @@ func ReadStateFile(path string) (State, error) {
 		return State{}, fmt.Errorf("unsupported state version %d (want %d) in %s", state.Version, stateVersion, path)
 	}
 	if state.SchemaVersion > maxSupportedSchemaVersion {
+		// Honour the struct-level "Versioning contract" godoc: readers that
+		// see SchemaVersion > theirMax SHOULD log a warning *and* refuse to
+		// reconnect. The refuse half was already implemented; without the
+		// warn an operator running a downgraded binary against newer state
+		// gets a silent reconnect failure with no breadcrumb. Mirror the
+		// insecure-permissions branch above, which already logs before it
+		// returns its error.
+		slog.Warn("shim state was written by a newer naozhi; refusing to reconnect",
+			"path", path,
+			"observed_schema_version", state.SchemaVersion,
+			"max_supported_schema_version", maxSupportedSchemaVersion)
 		return State{}, fmt.Errorf("shim state schema_version %d > max supported %d (newer naozhi wrote it)", state.SchemaVersion, maxSupportedSchemaVersion)
 	}
 	return state, nil
 }
 
 // RemoveStateFile removes the state file and ignores not-found errors.
+//
+// The write path (WriteStateFile → osutil.WriteFileAtomic) fsyncs the parent
+// directory so a freshly-written state survives a crash; the removal path must
+// be symmetric (#406). Without the directory fsync, an unlink that purges a
+// stale/zombie record could be lost on power loss, so restart discovery would
+// re-find the same dead shim. fsync the parent after a successful removal;
+// osutil.SyncDir degrades gracefully on EPERM/EINVAL (FUSE/older fs / tmpfs).
 func RemoveStateFile(path string) {
-	_ = os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return // not-found or other error: nothing durably changed to fsync
+	}
+	_ = osutil.SyncDir(filepath.Dir(path))
 }
 
 // GenerateToken creates a cryptographically random token for shim authentication.

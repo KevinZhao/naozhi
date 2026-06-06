@@ -47,3 +47,25 @@ var reqSemReqInflight = expvar.NewInt("naozhi_upstream_reqsem_inflight")
 // handleRequest paths (typically sess.Send blocked on the CLI
 // watchdog, see R51-REL-005).
 var reqSemReqWaitTotal = expvar.NewInt("naozhi_upstream_reqsem_wait_total")
+
+// connectorBackoffMillis is a gauge (R172-ARCH-D10) exposing the
+// connector's CURRENT reconnect backoff in milliseconds — a point-in-time
+// value, not a cumulative total. It is the 5th observability candidate
+// from the R191/R193 group; the prior four landed as expvar.Int counters,
+// while backoff is gauge-semantics. The reqSemReqInflight precedent above
+// settled the open "doesn't fit the expvar.Int template" question: a gauge
+// is a *expvar.Int whose stored value is replaced via Set rather than
+// accumulated via Add. We expose milliseconds (an int) instead of a
+// duration string so /debug/vars consumers can chart it numerically.
+//
+// Reading the value tells operators where in the reconnect schedule a
+// connector sits without parsing logs: a steady 1000 means healthy
+// reconnects (each success resets backoff to 1s); a value pinned at
+// circuitBreakerBackoff (300000) means the breaker tripped and the
+// connector is in slow-retry mode against a mis-configured primary.
+//
+// Single-connector scope: naozhi runs one Connector per process (one
+// upstream URL), so a process-global gauge is unambiguous. Multi-node
+// aggregation, if ever needed, is a primary-side concern and out of scope
+// here — matching how reqSem gauges are also per-process.
+var connectorBackoffMillis = expvar.NewInt("naozhi_upstream_connector_backoff_millis")

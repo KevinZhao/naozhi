@@ -6,18 +6,24 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// DaemonRunState is the terminal state of a single Tick run.  Mirrors
-// cron.RunState semantics so a future Phase 2 dashboard can reuse the
-// same widget for both subsystems.
-type DaemonRunState string
+// DaemonRunState is the terminal state of a single Tick run. It is a type
+// alias to the cross-subsystem runtelemetry.RunState so cron + sysession
+// share one wire vocabulary (R260528-ARCH-2 / #1363, R244-ARCH-18 / #1055
+// direction). The alias keeps the sysession-local Daemon* constant names
+// for call-site readability while the underlying values come from the
+// single runtelemetry source of truth. Adding a new state must happen in
+// runtelemetry/state.go, not here.
+type DaemonRunState = runtelemetry.RunState
 
 const (
-	DaemonRunSucceeded DaemonRunState = "succeeded"
-	DaemonRunFailed    DaemonRunState = "failed"
-	DaemonRunTimedOut  DaemonRunState = "timed_out"
-	DaemonRunCanceled  DaemonRunState = "canceled"
+	DaemonRunSucceeded = runtelemetry.RunStateSucceeded
+	DaemonRunFailed    = runtelemetry.RunStateFailed
+	DaemonRunTimedOut  = runtelemetry.RunStateTimedOut
+	DaemonRunCanceled  = runtelemetry.RunStateCanceled
 )
 
 // DaemonErrorClass classifies the failure mode of a run.  Phase 1
@@ -32,14 +38,24 @@ const (
 //     timeouts shouldn't shut the daemon down for hours.
 //   - Panic always trips the breaker after the same limit; a daemon
 //     that panics deterministically is broken.
-type DaemonErrorClass string
+//
+// DaemonErrorClass is type-aliased to runtelemetry.ErrorClass so cron +
+// sysession share one error-class type (R260528-ARCH-18 / #1379). Five of
+// the six sysession values map 1:1 onto runtelemetry constants; the lone
+// exception is DaemonErrorClassTimeout, whose pre-merge wire string
+// "timeout" deliberately differs from runtelemetry's canonical
+// ErrClassDeadlineExceeded ("deadline_exceeded"). sysession's
+// mapSysessionErrorClass (in telemetry.go) owns that normalisation before
+// broadcast, so the literal stays here verbatim to preserve the existing
+// wire shape.
+type DaemonErrorClass = runtelemetry.ErrorClass
 
 const (
-	DaemonErrorClassNone       DaemonErrorClass = ""
-	DaemonErrorClassValidation DaemonErrorClass = "validation"
-	DaemonErrorClassUpstream   DaemonErrorClass = "upstream"
+	DaemonErrorClassNone                        = runtelemetry.ErrClassNone
+	DaemonErrorClassValidation                  = runtelemetry.ErrClassSysessionValidation
+	DaemonErrorClassUpstream                    = runtelemetry.ErrClassSysessionUpstream
 	DaemonErrorClassTimeout    DaemonErrorClass = "timeout"
-	DaemonErrorClassPanic      DaemonErrorClass = "panic"
+	DaemonErrorClassPanic                       = runtelemetry.ErrClassPanic
 	// DaemonErrorClassCanceled tags runs that returned context.Canceled
 	// (e.g. naozhi shutting down mid-tick or operator-driven Stop).
 	// Distinct from DaemonErrorClassNone so dashboards / log analytics
@@ -53,22 +69,23 @@ const (
 	// daemon bug. recordRun's switch keeps it on the "no counter
 	// change" branch (default case) so we don't reset success counters
 	// either.
-	DaemonErrorClassCanceled DaemonErrorClass = "canceled"
+	DaemonErrorClassCanceled = runtelemetry.ErrClassCanceled
 )
 
 // DaemonTriggerKind distinguishes scheduled ticks from manual triggers.
 // Phase 1 only produces "scheduled"; "manual" is reserved for the Phase 2
-// dashboard "trigger now" button.
-type DaemonTriggerKind string
+// dashboard "trigger now" button. Type-aliased to runtelemetry.TriggerKind
+// so cron + sysession share one trigger vocabulary (R260528-ARCH-2 / #1363).
+type DaemonTriggerKind = runtelemetry.TriggerKind
 
 const (
-	DaemonTriggerScheduled DaemonTriggerKind = "scheduled"
+	DaemonTriggerScheduled = runtelemetry.TriggerScheduled
 	// DaemonTriggerManual is RESERVED for the Phase 2 dashboard
 	// "trigger now" button. Phase 1 only produces Scheduled; no
 	// production code path emits this value today, and any DaemonRun
 	// observed with Trigger=manual is either a forward-compat schema
 	// bump or a test fixture. Tracked in docs/TODO.md R232-CR-8.
-	DaemonTriggerManual DaemonTriggerKind = "manual"
+	DaemonTriggerManual = runtelemetry.TriggerManual
 )
 
 // DaemonRun is the in-memory record of a completed Tick.  Manager keeps
@@ -96,26 +113,6 @@ type DaemonRun struct {
 	// Aggregated as a flat map so dashboard widgets can render without
 	// knowing which daemon produced the run.
 	Stats map[string]int64 `json:"stats,omitempty"`
-}
-
-// DaemonRunStartedEvent is published when a Tick begins (post-CAS gate).
-// Dashboard subscribers update the "in-flight" indicator.
-type DaemonRunStartedEvent struct {
-	Name      string            `json:"name"`
-	RunID     string            `json:"run_id"`
-	Trigger   DaemonTriggerKind `json:"trigger,omitempty"`
-	StartedAt time.Time         `json:"started_at"`
-}
-
-// DaemonRunEndedEvent is published on terminal Tick completion.
-// ErrorMsg is omitted by design; subscribers must look at ErrorClass.
-type DaemonRunEndedEvent struct {
-	Name       string            `json:"name"`
-	RunID      string            `json:"run_id"`
-	State      DaemonRunState    `json:"state"`
-	DurationMS int64             `json:"duration_ms,omitempty"`
-	ErrorClass DaemonErrorClass  `json:"error_class,omitempty"`
-	Trigger    DaemonTriggerKind `json:"trigger,omitempty"`
 }
 
 // newRunID generates a 16-hex-char identifier for a single run.  Not a

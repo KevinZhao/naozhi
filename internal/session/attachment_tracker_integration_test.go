@@ -34,7 +34,7 @@ func routerWithWorkspace(t *testing.T, ws string, key string) (*Router, string) 
 	s := &ManagedSession{key: key}
 	s.setWorkspace(ws)
 	r.mu.Lock()
-	r.sessions[key] = s
+	r.ss.sessions[key] = s
 	r.mu.Unlock()
 	return r, eventLogDir
 }
@@ -185,7 +185,7 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 	// Guard: workspace must be non-empty on the registered session
 	// — if setWorkspace didn't stick we'd silently skip clear.
 	r.mu.RLock()
-	ws2 := r.sessions[key].Workspace()
+	ws2 := r.ss.sessions[key].Workspace()
 	r.mu.RUnlock()
 	if ws2 != ws {
 		t.Fatalf("workspace drift: got %q, want %q", ws2, ws)

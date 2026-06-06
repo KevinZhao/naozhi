@@ -114,6 +114,57 @@ func TestHasMissedSchedule_NeverRun_CreatedLongAgo(t *testing.T) {
 	}
 }
 
+// TestHasMissedSchedule_NeverRun_JitterSlack 锁定 R20260603140013-CR-5：
+// never-run 分支必须用与已跑分支相同的 slack（period*3/2），而不是裸
+// `> period`。否则首个 jitter 窗口内（默认最多 30s）的健康 job 会被误报
+// missed —— 刚到第一个周期、还没真正错过就告警。table-driven 覆盖
+// period+ε（健康，不报）和 period*1.5+ε（确实超期，报）两侧边界。
+func TestHasMissedSchedule_NeverRun_JitterSlack(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	// startedAt 放 10h 前，越过 5×period(=2h30m) 的启动抑制窗口。
+	startedAt := now.Add(-10 * time.Hour)
+	const period = 30 * time.Minute // @every 30m → slack = 45m
+
+	cases := []struct {
+		name      string
+		createdAt time.Time
+		want      bool
+	}{
+		{
+			// period + 30s jitter 头：健康 job，绝不能误报。这是 CR-5
+			// 修复前会 false-positive 的关键 case（旧阈值 > period）。
+			name:      "period_plus_jitter_no_miss",
+			createdAt: now.Add(-(period + 30*time.Second)),
+			want:      false,
+		},
+		{
+			// 恰好踩在 slack 阈值内侧（period*1.5 - 1m）：仍不报。
+			name:      "just_under_slack_no_miss",
+			createdAt: now.Add(-(period*3/2 - time.Minute)),
+			want:      false,
+		},
+		{
+			// 超过 slack 阈值（period*1.5 + 1m）：确实错过了首次执行，应报。
+			name:      "beyond_slack_missed",
+			createdAt: now.Add(-(period*3/2 + time.Minute)),
+			want:      true,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			j := &Job{Schedule: "@every 30m", CreatedAt: tc.createdAt}
+			missed, _ := HasMissedSchedule(j, now, startedAt)
+			if missed != tc.want {
+				t.Fatalf("never-run job created %v ago: missed=%v, want %v",
+					now.Sub(tc.createdAt), missed, tc.want)
+			}
+		})
+	}
+}
+
 // TestPreviousTickBefore_IntervalSchedule 验证 previousTickBefore 在
 // 简单 @every N 形态下能正确回推到上一次 tick。
 func TestPreviousTickBefore_IntervalSchedule(t *testing.T) {
@@ -266,5 +317,79 @@ func TestHasMissedScheduleCached_NilJob(t *testing.T) {
 	missed, prev := HasMissedScheduleCached(nil, time.Now(), time.Time{})
 	if missed || !prev.IsZero() {
 		t.Fatalf("nil job should return (false, zero); got (%v, %v)", missed, prev)
+	}
+}
+
+// TestHasMissedScheduleCached_CachedPeriodMatchesRecomputed verifies that when
+// cachedPeriod is set (>0), HasMissedScheduleCached produces the same result as
+// the uncached path (cachedPeriod=0 → recomputes via schedulePeriodFromSched).
+// This guards R20260603040203-PERF-9: the fast path must be behaviourally
+// equivalent to the recompute path across all interesting inputs.
+func TestHasMissedScheduleCached_CachedPeriodMatchesRecomputed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-10 * time.Hour)
+
+	cases := []struct {
+		name string
+		job  *Job
+	}{
+		{
+			"recent_run_no_miss",
+			&Job{Schedule: "@every 30m", CreatedAt: now.Add(-24 * time.Hour), LastRunAt: now.Add(-20 * time.Minute)},
+		},
+		{
+			"stale_run_miss",
+			&Job{Schedule: "@every 30m", CreatedAt: now.Add(-24 * time.Hour), LastRunAt: now.Add(-3 * time.Hour)},
+		},
+		{
+			"never_run_old_creation_miss",
+			&Job{Schedule: "@every 30m", CreatedAt: now.Add(-5 * time.Hour)},
+		},
+		{
+			"never_run_recent_creation_no_miss",
+			&Job{Schedule: "@every 30m", CreatedAt: now.Add(-5 * time.Minute)},
+		},
+		{
+			"daily_recent_run_no_miss",
+			&Job{Schedule: "0 9 * * *", CreatedAt: now.Add(-30 * 24 * time.Hour), LastRunAt: time.Date(2026, 5, 9, 9, 0, 0, 0, time.UTC)},
+		},
+		{
+			"daily_stale_run_miss",
+			&Job{Schedule: "0 9 * * *", CreatedAt: now.Add(-30 * 24 * time.Hour), LastRunAt: now.Add(-3 * 24 * time.Hour)},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Build a warm-cache job: set both cachedSched and cachedPeriod
+			// as registerJob would, but without touching the scheduler.
+			sched, err := cronParser.Parse(tc.job.Schedule)
+			if err != nil {
+				t.Fatalf("parse schedule: %v", err)
+			}
+			period := schedulePeriodFromSched(sched, now)
+			if period <= 0 {
+				t.Skip("schedule produces non-positive period, skipping")
+			}
+
+			warmJob := *tc.job
+			warmJob.cachedSched = sched
+			warmJob.cachedPeriod = period // fast path: skip schedulePeriodFromSched
+
+			// The uncached path recomputes the period from scratch.
+			wantMissed, wantPrev := HasMissedSchedule(tc.job, now, startedAt)
+
+			// The cached path must return an identical result.
+			gotMissed, gotPrev := HasMissedScheduleCached(&warmJob, now, startedAt)
+
+			if gotMissed != wantMissed || !gotPrev.Equal(wantPrev) {
+				t.Fatalf("cachedPeriod fast path diverges from recompute: got=(%v,%v) want=(%v,%v)",
+					gotMissed, gotPrev, wantMissed, wantPrev)
+			}
+		})
 	}
 }

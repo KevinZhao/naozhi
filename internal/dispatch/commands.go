@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // trimUnicodeSpace strips all Unicode whitespace (including full-width
@@ -206,11 +207,19 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
 	// will handle GetOrCreate + reply. The priority field is threaded through
 	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
-	// Use context.WithoutCancel so the platform handler returning early does
-	// not cancel the in-flight LLM turn (matches the regular passthrough
-	// path in dispatch.go:319). Values from ctx (logger fields, tracing)
-	// remain available to the spawned goroutine.
-	go d.sendAndReply(WithUrgent(WithPassthrough(context.WithoutCancel(ctx))), key, text, nil, agentID, opts, msg, log, false)
+	//
+	// R20260531070014-ARCH-3: use mergeStopAndValues(d.stopCtx, ctx) rather
+	// than the bare context.WithoutCancel(ctx) previously used here. The
+	// regular passthrough path (dispatch.go) migrated from WithoutCancel to
+	// mergeStopAndValues in #1320 so that detached goroutines abort on SIGTERM
+	// instead of running through their full internal totalTimeout and causing
+	// systemd TimeoutStopSec breaches. /urgent had re-introduced the old
+	// pattern, meaning /urgent goroutines were the only remaining path that
+	// could not be stopped on graceful shutdown.
+	// cancelSrc = d.stopCtx  → goroutine aborts when the service shuts down.
+	// valuesSrc = ctx         → per-request slog attrs / auth values survive.
+	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
+	d.goSendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
@@ -247,6 +256,35 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 	d.replyText(ctx, msg, help, nil)
 }
 
+// resolveAgentToken maps a user-supplied /new <agent> token to a stored
+// agent ID. agentToReset is expected already lowercased (handleNewCommand
+// normalizes it). Resolution is two-stage:
+//
+//  1. exact lookup against agentCommands keys (keys are pre-normalized to
+//     lowercase in applyDefaults);
+//  2. EqualFold scan over the stored values — operator-supplied agent IDs
+//     may legitimately carry mixed case (e.g. "ReviewerBot"), so a user
+//     typing "/new ReviewerBot" still resolves even though the lookup key
+//     was lowercased (R250-CR-26).
+//
+// R0530-CR-1: both the project-bound and unbound branches of
+// handleNewCommand share this helper so the EqualFold fallback can't drift
+// out of one branch — previously only the unbound branch had stage 2, so
+// "/new ReviewerBot" worked in unbound chats but returned "未知的 agent"
+// in project-bound chats. The linear scan stays — agentCommands is a small
+// operator-curated map, not a hot path.
+func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
+	if id, ok := d.agentCommands[agentToReset]; ok {
+		return id, true
+	}
+	for _, id := range d.agentCommands {
+		if strings.EqualFold(id, agentToReset) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	agentToReset := ""
 	if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
@@ -273,7 +311,10 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			d.discardQueue(plannerKey)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
-			if id, ok := d.agentCommands[agentToReset]; ok {
+			// R0530-CR-1: resolve via the shared helper so this branch gets
+			// the same EqualFold fallback the unbound branch has — otherwise
+			// "/new ReviewerBot" resolves in unbound chats but not here.
+			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
 				d.router.Reset(key)
 				d.discardQueue(key)
@@ -290,41 +331,27 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 
 	agentID := "general"
 	if agentToReset != "" {
-		if id, ok := d.agentCommands[agentToReset]; ok {
+		// R250-CR-26 / R0530-CR-1: resolve via the shared helper (exact key
+		// lookup then EqualFold value scan) so mixed-case operator agent IDs
+		// like "ReviewerBot" resolve regardless of bound/unbound branch.
+		if id, ok := d.resolveAgentToken(agentToReset); ok {
 			agentID = id
 		} else {
-			// R250-CR-26: agentToReset was lowercased above (line 251); the
-			// stored values in agentCommands are operator-supplied agent IDs
-			// which may legitimately carry mixed case (e.g. "ReviewerBot").
-			// Use EqualFold so a user typing "/new ReviewerBot" still resets
-			// the right session even though the lookup-key path normalizes
-			// to lowercase. The linear scan stays — agentCommands is a small
-			// operator-curated map, not a hot path.
-			found := false
-			for _, id := range d.agentCommands {
-				if strings.EqualFold(id, agentToReset) {
-					agentID = id
-					found = true
-					break
+			// R187-SEC-M1: agentToReset is user IM input, sanitize before
+			// echo back to avoid bidi-override visual spoofing.
+			errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
+			if len(d.agentCommands) > 0 {
+				// R190-MAP-L1: sort so the hint line is stable across
+				// calls; otherwise the "可用:" list shuffles randomly.
+				names := make([]string, 0, len(d.agentCommands))
+				for cmd := range d.agentCommands {
+					names = append(names, cmd)
 				}
+				slices.Sort(names)
+				errMsg += "\n可用: " + strings.Join(names, ", ")
 			}
-			if !found {
-				// R187-SEC-M1: agentToReset is user IM input, sanitize before
-				// echo back to avoid bidi-override visual spoofing.
-				errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
-				if len(d.agentCommands) > 0 {
-					// R190-MAP-L1: sort so the hint line is stable across
-					// calls; otherwise the "可用:" list shuffles randomly.
-					names := make([]string, 0, len(d.agentCommands))
-					for cmd := range d.agentCommands {
-						names = append(names, cmd)
-					}
-					slices.Sort(names)
-					errMsg += "\n可用: " + strings.Join(names, ", ")
-				}
-				d.replyText(ctx, msg, errMsg, log)
-				return
-			}
+			d.replyText(ctx, msg, errMsg, log)
+			return
 		}
 	}
 	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
@@ -409,6 +436,20 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		// that can fragment journald structured fields.
 		log.Warn("cron AddJob rejected", "err", err,
 			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+		// AddJob fails for distinct reasons (bad schedule, prompt policy
+		// violation, per-chat/global job limit). Collapsing them all into
+		// "请检查定时表达式格式" misleads a user whose schedule was fine but
+		// whose prompt was rejected — the same class of bug R20260531-ARCH-2
+		// fixed for the del/pause/resume handlers via cronMutationErrReply.
+		// CodeInvalidPrompt is the one cause that carries a sentinel through
+		// AddJob (ValidatePromptStrict → ErrInvalidPrompt); steer those to a
+		// prompt-specific hint. Raw err.Error() is never echoed (it can leak
+		// the normalized schedule / parser internals); the detail is already
+		// logged above for operator triage.
+		if cron.ClassifyError(err) == cron.CodeInvalidPrompt {
+			reply("创建失败：任务内容不合法（为空、过长或含控制字符）")
+			return
+		}
 		reply("创建失败：请检查定时表达式格式")
 		return
 	}
@@ -422,6 +463,36 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		next.Format("01/02 15:04")))
 	log.Info("cron job created", "id", job.ID,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+}
+
+// sanitizeCronDisplay sanitizes a cron job field (Schedule or Prompt) for
+// safe display in IM replies. It strips \n/\t that would break table
+// formatting, truncates to maxRunes runes to prevent layout abuse, applies
+// SanitizeForLog (strips C0/C1/bidi), and replaces markdown link-syntax
+// characters to prevent link-smuggling. R112714-ARCH-1.
+func sanitizeCronDisplay(s string, maxRunes int) string {
+	// Strip newlines and tabs that would break the table row.
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	// Truncate by runes so CJK characters don't cause byte-count overrun.
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+		s = string(runes) + "…"
+	} else {
+		s = string(runes)
+	}
+	// Strip C0/C1 controls, bidi overrides, zero-width chars.
+	s = osutil.SanitizeForLog(s, len(s)*4+16)
+	// Prevent markdown link-smuggling via [text](url) patterns.
+	// R20260603140013-ARCH-1 (#1707): use the leaf textutil helper directly so
+	// the IM display path no longer couples to the cron domain package.
+	s = textutil.EscapeCronMarkdownPunct(s)
+	return s
 }
 
 // handleCronList implements /cron list.
@@ -438,9 +509,36 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 		if j.Paused {
 			status = " [暂停]"
 		}
-		fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, j.Schedule, j.Prompt, status)
+		safeSchedule := sanitizeCronDisplay(j.Schedule, 30)
+		safePrompt := sanitizeCronDisplay(j.Prompt, 30)
+		fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, safeSchedule, safePrompt, status)
 	}
 	reply(sb.String())
+}
+
+// cronMutationErrReply maps a /cron del|pause|resume failure to a specific
+// user-facing reply via cron.ClassifyError. R20260531-ARCH-2: the prior
+// handlers collapsed every error into one "请确认 ID 正确" string, so an
+// ambiguous-prefix match (multiple jobs) misleadingly told the user the ID
+// was wrong instead of "type a longer ID to disambiguate", and a
+// pause/resume state conflict was indistinguishable from a bad ID.
+//
+// Raw err.Error() is never echoed (it leaks normalized ID form / lock
+// annotations); the caller still logs the raw error at Warn. verb is the
+// Chinese action label ("删除" / "暂停" / "恢复") used in the generic fallback.
+func cronMutationErrReply(verb string, err error) string {
+	switch cron.ClassifyError(err) {
+	case cron.CodeAmbiguousPrefix:
+		return "ID 前缀匹配到多个任务，请输入更长的 ID 以消歧。"
+	case cron.CodeJobAlreadyPaused:
+		return "该任务已处于暂停状态。"
+	case cron.CodeJobNotPaused:
+		return "该任务未处于暂停状态，无需恢复。"
+	case cron.CodeJobNotFound:
+		return verb + "失败：未找到该 ID 对应的任务，请确认 ID 正确。"
+	default:
+		return verb + "失败：请确认 ID 正确。"
+	}
 }
 
 // handleCronDel implements /cron del <id>.
@@ -454,7 +552,7 @@ func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string,
 		// (normalized ID form, lock annotations). Dashboard already
 		// sanitises analogous handlers. Log raw, reply generic.
 		log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
-		reply("删除失败：请确认 ID 正确")
+		reply(cronMutationErrReply("删除", err))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已删除。", j.ID))
@@ -469,7 +567,7 @@ func (d *Dispatcher) handleCronPause(msg platform.IncomingMessage, parts []strin
 	j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
-		reply("暂停失败：请确认 ID 正确或任务是否已暂停")
+		reply(cronMutationErrReply("暂停", err))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
@@ -484,7 +582,7 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
-		reply("恢复失败：请确认 ID 正确或任务是否已暂停")
+		reply(cronMutationErrReply("恢复", err))
 		return
 	}
 	next := d.scheduler.NextRun(j)
@@ -688,11 +786,13 @@ var smartQuoteNormalizer = strings.NewReplacer(
 // every existing call site. R216-CR-1.
 //
 // R20260527122801-ARCH-3 (#1315): the prompt/schedule byte caps moved into
-// cron.ValidatePromptStrict / cron.ValidateScheduleChars (which ParseCronAdd
-// now delegates to), so the prior maxCronPromptBytes / maxCronScheduleBytes
-// aliases became dead. Only the ID-length alias survives — it still guards the
-// `/cron <op> <id>` token in validateCronJobIDArg.
-const maxCronIDLen = cron.MaxIDLen
+// textutil.ValidateCronPromptStrict / textutil.ValidateCronScheduleChars (which
+// ParseCronAdd now delegates to), so the prior maxCronPromptBytes /
+// maxCronScheduleBytes aliases became dead. Only the ID-length alias survives —
+// it still guards the `/cron <op> <id>` token in validateCronJobIDArg.
+// R20260603140013-ARCH-1 (#1707): aliased from the leaf textutil package so the
+// `/cron` slash-command edge no longer imports the cron domain package for it.
+const maxCronIDLen = textutil.MaxCronIDLen
 
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
@@ -709,25 +809,35 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	}
 	schedule = rest
 	// R20260527122801-ARCH-3 (#1315): delegate the schedule size + UTF-8 +
-	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidateScheduleChars so the IM
+	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronScheduleChars so the IM
 	// `/cron add` edge and the dashboard validateCronScheduleChars edge share
 	// one policy. Previously this hand-wrote a byte loop + rune loop that
 	// could silently drift from the dashboard copy when a new forbidden
-	// character was added on one side only.
-	if err := cron.ValidateScheduleChars(schedule); err != nil {
+	// character was added on one side only. R20260603140013-ARCH-1 (#1707):
+	// the validator lives in the leaf textutil package so this edge no longer
+	// couples to the cron domain package for it.
+	if err := textutil.ValidateCronScheduleChars(schedule); err != nil {
 		return "", "", err
+	}
+	// R20260603-GEN-4: ValidateScheduleChars only screens the character set, so
+	// an all-whitespace schedule (e.g. /cron add " " run now) passes it and then
+	// surfaces a confusing generic robfig parse error. Reject it here with a
+	// clear message before prompt parsing.
+	if strings.TrimSpace(schedule) == "" {
+		return "", "", fmt.Errorf("定时表达式不能为空")
 	}
 	prompt = strings.TrimSpace(tail)
 	// R20260527122801-ARCH-3 (#1315): delegate the prompt empty/size/UTF-8/
-	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidatePromptStrict — the same helper
-	// the dashboard validateCronPrompt and Scheduler.SetJobPrompt call — so IM
-	// and dashboard ingress can never diverge. Null bytes are truncated by
+	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronPromptStrict — the same
+	// helper the dashboard validateCronPrompt and Scheduler.SetJobPrompt call —
+	// so IM and dashboard ingress can never diverge. Null bytes are truncated by
 	// execve, C1/bidi runes corrupt terminal log viewers; LF and Tab stay
 	// allowed for multi-line / indented playbooks (json.Marshal escapes them
 	// on the stream-json wire). Unlike the dashboard, the IM edge does not
 	// additionally reject CR because IM prompts never surface raw to log
-	// pipelines.
-	if err := cron.ValidatePromptStrict(prompt); err != nil {
+	// pipelines. R20260603140013-ARCH-1 (#1707): validator now lives in leaf
+	// textutil so this edge no longer couples to cron for it.
+	if err := textutil.ValidateCronPromptStrict(prompt); err != nil {
 		return "", "", err
 	}
 	return schedule, prompt, nil

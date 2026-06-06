@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/osutil" //nolint:depguard // only for test assertions
 )
 
 func TestSetupWriteConfig_NewFile(t *testing.T) {
@@ -346,5 +347,51 @@ func TestDefaultConfigTemplate_Minimal(t *testing.T) {
 		if !strings.Contains(defaultConfigTemplate, k) {
 			t.Errorf("defaultConfigTemplate missing anchor %q", k)
 		}
+	}
+}
+
+// TestSetupGetQRCode_ANSIBodySanitized verifies R20260603-SEC-4/SEC-7: the
+// production error path for a non-zero ret calls
+//
+//	osutil.SanitizeForLog(string(data), 256)
+//
+// before embedding the vendor body in the returned error.  A compromised or
+// MITM'd iLink endpoint cannot inject ANSI escape sequences that hijack the
+// operator's terminal.  This test confirms that osutil.SanitizeForLog —
+// the exact guard in place — strips all relevant control sequences.
+//
+// An end-to-end driver via httptest.TLSServer would require patching the
+// package-level const setupBaseURL which Go does not allow; the unit
+// verification of the guard function is equivalent because the production code
+// passes string(data) directly to SanitizeForLog without any intermediate
+// processing.
+func TestSetupGetQRCode_ANSIBodySanitized(t *testing.T) {
+	t.Parallel()
+
+	// ESC CSI sequence (ANSI color / cursor control).
+	rawESC := "\x1b[31mcolor injection\x1b[0m trailing garbage"
+	if strings.ContainsRune(osutil.SanitizeForLog(rawESC, 256), '\x1b') {
+		t.Errorf("SanitizeForLog did not strip ESC byte from API error body: %q",
+			osutil.SanitizeForLog(rawESC, 256))
+	}
+
+	// Newline injection: would split a log line or produce confusing CLI output.
+	rawNL := "line1\ninjected: true"
+	if strings.ContainsRune(osutil.SanitizeForLog(rawNL, 256), '\n') {
+		t.Errorf("SanitizeForLog did not strip newline from API error body: %q",
+			osutil.SanitizeForLog(rawNL, 256))
+	}
+
+	// C0 controls (NUL, BEL).
+	rawC0 := "prefix\x00\x07suffix"
+	if strings.ContainsAny(osutil.SanitizeForLog(rawC0, 256), "\x00\x07") {
+		t.Errorf("SanitizeForLog did not strip C0 controls from API error body: %q",
+			osutil.SanitizeForLog(rawC0, 256))
+	}
+
+	// Length cap: input longer than 256 bytes must be truncated.
+	longBody := strings.Repeat("x", 300)
+	if got := osutil.SanitizeForLog(longBody, 256); len(got) > 256 {
+		t.Errorf("SanitizeForLog did not cap to 256 bytes: got len=%d", len(got))
 	}
 }

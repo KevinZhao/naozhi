@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -32,6 +33,18 @@ func RedactGitRemoteURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" {
+		// url.Parse failed (e.g. invalid port) or SCP-style (no scheme).
+		// SCP-style URLs (git@host:path) carry no credentials — return as-is.
+		// But a URL-form string with "://" that failed to parse may still
+		// embed userinfo (user:pass@) that would leak; strip it defensively.
+		// [R20260603-SEC-8]
+		if i := strings.Index(raw, "://"); i >= 0 {
+			rest := raw[i+3:]
+			if at := strings.IndexByte(rest, '@'); at >= 0 {
+				// Drop the userinfo segment between "://" and "@".
+				return raw[:i+3] + rest[at+1:]
+			}
+		}
 		return raw
 	}
 	if u.User != nil {
@@ -39,12 +52,6 @@ func RedactGitRemoteURL(raw string) string {
 	}
 	return u.String()
 }
-
-// maxProjectNameLen bounds the `name` query param on project endpoints.
-// Kept as an alias of project.MaxProjectNameBytes so existing tests /
-// callers compile unchanged; the two constants were always required to
-// stay in lockstep. R183-REFACTOR-L1.
-const maxProjectNameLen = project.MaxProjectNameBytes
 
 // validateProjectName is a thin wrapper over project.ValidateProjectName.
 //
@@ -113,6 +120,12 @@ type Handlers struct {
 	// (other operators' editor swaps, systemd-private payloads, …) just
 	// because the naozhi process happens to have read access on Linux DAC.
 	publicTmpEnabled bool
+	// projectStableKeyEnabled gates emitting the per-project StableKey in the
+	// list response (RFC docs/rfc/project-stable-session-key.md §4.2). When
+	// false (operator set session.project_stable_key.enabled: false), the
+	// field is omitted so the frontend falls back to the legacy timestamp-key
+	// path for "continue". Default true via cmd wiring.
+	projectStableKeyEnabled bool
 }
 
 // Deps bundles all wiring for New. Phase 2 (server-split-phase4-design.md
@@ -127,6 +140,9 @@ type Deps struct {
 	FilesExistsLimiter IPLimiter
 	ConfigPutLimiter   IPLimiter
 	PublicTmpEnabled   bool
+	// ProjectStableKeyEnabled toggles the StableKey field in the list
+	// response. Production wires cfg.Session.ProjectStableKey.ResolvedEnabled(true).
+	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps.
@@ -140,6 +156,8 @@ func New(d Deps) *Handlers {
 		filesExistsLimiter: d.FilesExistsLimiter,
 		configPutLimiter:   d.ConfigPutLimiter,
 		publicTmpEnabled:   d.PublicTmpEnabled,
+
+		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
 	}
 }
 
@@ -186,6 +204,15 @@ type projectsListEntry struct {
 	Favorite     bool                  `json:"favorite"`
 	GitRemoteURL string                `json:"git_remote_url"`
 	GitHub       bool                  `json:"github"`
+	// StableKey is the project-level stable dashboard session key for the
+	// default (general) agent: dashboard:pj:<workspace-hash>:general
+	// (RFC docs/rfc/project-stable-session-key.md §4.2). The backend is the
+	// SOLE owner of the workspace-hash so the frontend never re-implements
+	// sha256 (no algorithm drift). For a non-general agent the frontend
+	// swaps the trailing :general segment for the selected agent — a plain
+	// string op that does not touch the hash. Empty for remote/path-less
+	// entries.
+	StableKey string `json:"stableKey,omitempty"`
 }
 
 // GET /api/projects — list all projects (local + remote).
@@ -205,6 +232,11 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			plannerState = snap.State
 		}
 
+		var stableKey string
+		if h.projectStableKeyEnabled {
+			stableKey = session.ProjectStableKey(p.Path, "general")
+		}
+
 		result = append(result, projectsListEntry{
 			Name:         p.Name,
 			Path:         p.Path,
@@ -214,6 +246,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Favorite:     p.Config.Favorite,
 			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
+			StableKey:    stableKey,
 		})
 	}
 

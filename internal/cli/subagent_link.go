@@ -93,6 +93,44 @@ type resolveJob struct {
 // step 5 cross-check.
 const staleAgentReuseSlack = 10 * time.Second
 
+// maxNamedLinkHistory caps how many resolved LinkInfo records the linker
+// retains per agent name in byName. byName is only consulted for same-name
+// respawn detection (Resolve step 7b), which needs nothing more than a small
+// window of recent FirstPromptIDs to spot a duplicate-name reuse. Long-lived
+// sessions that reinvoke the same agent type ("orchestrator", …) hundreds of
+// turns over would otherwise grow byName[name] without bound — one LinkInfo
+// per resolved task, leaking ~steady-state memory for the process lifetime.
+// Keeping the most recent N preserves the detection semantics (we still hold
+// the latest distinct promptIDs) while bounding the slice. R250531-PERF-4.
+const maxNamedLinkHistory = 32
+
+// appendNamedLink appends info to the byName slice for name, trimming the
+// slice to at most maxNamedLinkHistory most-recent entries. Trimming reuses
+// the tail in place (copy down) so the backing array does not grow unbounded
+// across the hundreds of appends a long session accumulates. Caller must hold
+// l.mu as a write lock.
+func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
+	cur := l.byName[name]
+	cur = append(cur, info)
+	if len(cur) > maxNamedLinkHistory {
+		// Drop the oldest entries; keep the newest maxNamedLinkHistory.
+		// If the backing array has grown far beyond the cap (e.g. a slice
+		// that ballooned to 256 before this trim), the in-place copy-down
+		// keeps the whole oversized backing array alive for the session's
+		// lifetime. Re-allocate a tightly-sized array in that case so the
+		// oversized backing store can be garbage-collected. R20260531-CR-004.
+		if cap(cur) > maxNamedLinkHistory*2 {
+			trimmed := make([]LinkInfo, maxNamedLinkHistory)
+			copy(trimmed, cur[len(cur)-maxNamedLinkHistory:])
+			cur = trimmed
+		} else {
+			n := copy(cur, cur[len(cur)-maxNamedLinkHistory:])
+			cur = cur[:n]
+		}
+	}
+	l.byName[name] = cur
+}
+
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -119,9 +157,19 @@ type SubagentLinker struct {
 	resolveJobs chan resolveJob
 
 	// resolvePoolOnce guards lazy creation of the worker pool. The pool
-	// inherits the caller's first ctx as its lifetime so workers exit when
-	// the owning Process dies (via Process.lifecycleContext()).
+	// inherits poolCtx (set via SetPoolContext) as its lifetime so workers
+	// exit when the owning Process dies — never the per-request ctx of
+	// whichever caller happened to dispatch first. R20260603030037-GO-2
+	// (#1661): binding worker lifetime to the first caller's ctx meant a
+	// short-lived per-request ctx could cancel all workers, leaving later
+	// jobs (pushed under Process.lifecycleContext()) with no consumer.
 	resolvePoolOnce sync.Once
+
+	// poolCtx governs worker-pool lifetime, decoupled from per-job ctx.
+	// Set once by SetPoolContext(Process.lifecycleContext()). When unset
+	// (legacy &SubagentLinker{} test fixtures), DispatchResolve falls back
+	// to the first caller's ctx to preserve prior behaviour.
+	poolCtx context.Context
 
 	// inflightTasks tracks taskIDs whose Resolve goroutine is already
 	// running (or about to start). Callers (notifyLinker on the readLoop
@@ -182,6 +230,21 @@ func NewSubagentLinker() *SubagentLinker {
 		retryLimit:    12,
 		cacheTTL:      200 * time.Millisecond,
 	}
+}
+
+// SetPoolContext binds the resolve worker-pool lifetime to a long-lived,
+// process-scoped context (Process.lifecycleContext()). R20260603030037-GO-2
+// (#1661): without this, the pool captured the first DispatchResolve caller's
+// ctx, so a short-lived per-request ctx could cancel the workers while later
+// jobs were still being enqueued. Call once, before the first DispatchResolve;
+// later calls are ignored (the pool starts at most once via resolvePoolOnce).
+// Safe to call with a nil ctx (treated as unset).
+func (l *SubagentLinker) SetPoolContext(ctx context.Context) {
+	l.mu.Lock()
+	if l.poolCtx == nil {
+		l.poolCtx = ctx
+	}
+	l.mu.Unlock()
 }
 
 // SetContext installs the on-disk lookup root. Must be called before Resolve
@@ -298,11 +361,12 @@ func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 // emitting task_started faster than the pool can drain — which would only
 // happen under a pathological multi-agent burst far beyond observed loads.
 //
-// First call lazily starts resolveWorkerCount workers tied to ctx. Subsequent
-// callers' ctx values are still honored per-job (each job carries its own
-// ctx for the actual Resolve call); the pool-wide ctx only governs worker
-// lifetime. Callers should pass the same long-lived ctx (Process.
-// lifecycleContext()) to avoid the pool outliving the owning process.
+// First call lazily starts resolveWorkerCount workers tied to poolCtx
+// (SetPoolContext) — the process-scoped lifetime, never this caller's ctx.
+// Each job still carries its own per-request ctx for the actual Resolve
+// call; the pool-wide ctx only governs worker lifetime. R20260603030037-GO-2
+// (#1661): decoupling these prevents a short-lived first caller's ctx from
+// cancelling the workers out from under later jobs.
 //
 // Empty taskID is a no-op — the upstream callers already short-circuit on
 // empty taskID before reaching us, so this is defence in depth.
@@ -314,9 +378,19 @@ func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID,
 		ctx = context.Background()
 	}
 	l.resolvePoolOnce.Do(func() {
+		// Worker lifetime binds to poolCtx (the process-scoped ctx set via
+		// SetPoolContext), NOT the per-request ctx of this first caller —
+		// R20260603030037-GO-2 (#1661). Fall back to the caller's ctx only
+		// when SetPoolContext was never called (legacy test fixtures).
+		l.mu.RLock()
+		lifetime := l.poolCtx
+		l.mu.RUnlock()
+		if lifetime == nil {
+			lifetime = ctx
+		}
 		l.resolveJobs = make(chan resolveJob, resolveQueueDepth)
 		for i := 0; i < resolveWorkerCount; i++ {
-			go l.resolveWorker(ctx)
+			go l.resolveWorker(lifetime)
 		}
 	})
 	job := resolveJob{
@@ -485,34 +559,25 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	// Timeout matches the total retry budget (retryLimit * retryInterval)
 	// so we drop rather than extend the grace window when all slots are busy.
 	if l.resolveSem != nil {
-		t := time.NewTimer(time.Duration(l.retryLimit+1) * l.retryInterval)
+		// Use context.WithTimeout to bound the semaphore-acquire wait
+		// instead of a raw time.NewTimer — the context plumbing handles
+		// timer Stop automatically on cancel/timeout, removing the manual
+		// Stop+drain boilerplate on every exit arm. [R112714-PERF-10]
+		semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
+		semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
 		select {
 		case l.resolveSem <- struct{}{}:
-			// Stop returns false when the timer already fired; drain the
-			// channel so a tied select that picked the semaphore arm does
-			// not leak a runtime timer with a non-empty C.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
-			}
+			cancelSem()
 			defer func() { <-l.resolveSem }()
-		case <-t.C:
-			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
-			return LinkInfo{}, false
-		case <-ctx.Done():
-			// R218B-GO-3 (#644): Process shutdown collapses the retry
-			// budget to near-zero so the parent goroutine can exit
-			// without waiting on a full sem queue. Stop the timer to
-			// drain its goroutine.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
+		case <-semCtx.Done():
+			cancelSem()
+			if ctx.Err() != nil {
+				// Parent ctx canceled (process shutdown).
+				slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
+			} else {
+				// Semaphore timeout.
+				slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
 			}
-			slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
 			return LinkInfo{}, false
 		}
 	}
@@ -520,15 +585,29 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var picked metaEntry
 	var pickedFirst firstLineMeta
 
+	// Step 5 scratch type — hoisted so candidates/filtered slices can be
+	// reused across retry attempts with [:0] instead of re-allocating each
+	// iteration. [R112714-PERF-3]
+	type scored struct {
+		entry   metaEntry
+		first   firstLineMeta
+		modTime time.Time
+		size    int64
+	}
+	var candidates []metaEntry
+	var filtered []scored
+
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
 		entries := l.scanMetaFiles(subagentDir)
-		// Allocate fresh — entries is the cached dirCache slice (see
-		// scanMetaFiles); the prior `entries[:0:0]` trick reused its
-		// header but always re-allocated on first append, so it offered
-		// no advantage and obscured the relationship between the cache
-		// slice and the per-attempt working slice.
-		candidates := make([]metaEntry, 0, len(entries))
+		// Reuse the hoisted slices: reset to zero length, keep backing
+		// array from the previous attempt to avoid re-allocating on each
+		// retry. Grow to len(entries) capacity only on the first pass or
+		// when the directory grew since the last scan.
+		candidates = candidates[:0]
+		if cap(candidates) < len(entries) {
+			candidates = make([]metaEntry, 0, len(entries))
+		}
 		for _, e := range entries {
 			if e.agentType == name {
 				candidates = append(candidates, e)
@@ -546,13 +625,10 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		}
 
 		// Step 5: per-candidate stat + first-line sessionId & timestamp cross-check.
-		type scored struct {
-			entry   metaEntry
-			first   firstLineMeta
-			modTime time.Time
-			size    int64
+		filtered = filtered[:0]
+		if cap(filtered) < len(candidates) {
+			filtered = make([]scored, 0, len(candidates))
 		}
-		filtered := make([]scored, 0, len(candidates))
 		for _, cand := range candidates {
 			st, err := os.Stat(cand.jsonlPath)
 			if err != nil || st.Size() == 0 {
@@ -649,7 +725,7 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	if toolUseID != "" {
 		l.byToolUseID[toolUseID] = info
 	}
-	l.byName[name] = append(l.byName[name], info)
+	l.appendNamedLink(name, info)
 	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	return info, true
 }
@@ -720,7 +796,7 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 		l.byToolUseID[toolUseID] = info
 	}
 	if name != "" {
-		l.byName[name] = append(l.byName[name], info)
+		l.appendNamedLink(name, info)
 	}
 	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	l.mu.Unlock()
@@ -789,7 +865,7 @@ func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
 			}
 		}
 		if e.Subagent != "" {
-			l.byName[e.Subagent] = append(l.byName[e.Subagent], info)
+			l.appendNamedLink(e.Subagent, info)
 		}
 	}
 }
@@ -827,12 +903,15 @@ func claudeProjectsRoot() string {
 // mu acquisition, so the dispatch order is well-defined.
 func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
+	// Skip make+copy when no callbacks are registered — the common case
+	// during early startup and in test linkers. [R112714-PERF-5]
+	if len(l.onResolveFns) == 0 {
+		l.onResolveMu.Unlock()
+		return
+	}
 	fns := make([]func(string, string, string), len(l.onResolveFns))
 	copy(fns, l.onResolveFns)
 	l.onResolveMu.Unlock()
-	if len(fns) == 0 {
-		return
-	}
 	l.mu.Unlock()
 	// Re-acquire l.mu via defer so a panicking callback still leaves
 	// l.mu Locked when the stack unwinds — otherwise the caller's own
@@ -860,27 +939,43 @@ func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentI
 // to the write lock and double-check (another goroutine may have
 // populated the cache between our RUnlock and Lock).
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	// Snapshot now once to avoid two separate time.Now() syscalls for the
+	// TTL check in the RLock fast-path and the write-lock double-check.
+	// [R112714-PERF-9]
+	now := time.Now()
 	l.mu.RLock()
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		entries := l.dirCache.entries
 		l.mu.RUnlock()
 		return entries
 	}
 	l.mu.RUnlock()
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	// Double-check: another goroutine may have populated the cache
-	// between our RUnlock and Lock. The TTL still applies so a stale
-	// entry from before the gap is correctly rejected.
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
-		return l.dirCache.entries
-	}
+	// R164029-PERF-3 (#1595): rawScanSubagentsDir does os.ReadDir + an
+	// os.ReadFile per *.meta.json — blocking disk IO that previously ran
+	// while holding l.mu.Lock, stalling every concurrent Resolve fast-path
+	// (which only needs an RLock for its cache double-check). Do the scan
+	// WITHOUT the lock, then take the write lock just long enough to publish
+	// into the cache. The TTL double-check both before and after the scan
+	// keeps a stampede of concurrent misses cheap and preserves the
+	// "freshest snapshot wins" semantics.
+	// R20260602-GO-002: scannedAt must be captured BEFORE the scan begins so
+	// that a goroutine starting a scan later (with a larger scannedAt) will
+	// win the "freshest snapshot wins" comparison and not be suppressed.
+	scannedAt := time.Now()
 	if l.scanHook != nil {
 		l.scanHook()
 	}
 	entries := rawScanSubagentsDir(dir)
-	l.dirCache.at = time.Now()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Another goroutine may have published a fresher cache while we scanned
+	// unlocked. If so, prefer it and discard our (now-stale-or-equal) result.
+	if !l.dirCache.at.IsZero() && l.dirCache.at.After(scannedAt) {
+		return l.dirCache.entries
+	}
+	l.dirCache.at = scannedAt
 	l.dirCache.entries = entries
 	return entries
 }
@@ -908,7 +1003,7 @@ func rawScanSubagentsDir(dir string) []metaEntry {
 		// 8 KiB. Cap the read so a corrupt/oversized file (or a name collision
 		// with a stray multi-MB JSON) cannot inflate scan latency.
 		const maxMetaBytes = 8 * 1024
-		if st, err := os.Stat(metaPath); err != nil || st.Size() > maxMetaBytes {
+		if info, err := ent.Info(); err != nil || info.Size() > maxMetaBytes {
 			continue
 		}
 		data, err := os.ReadFile(metaPath)

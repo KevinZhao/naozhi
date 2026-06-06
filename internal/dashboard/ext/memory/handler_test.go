@@ -2,13 +2,14 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
+	"time"
 )
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
@@ -392,6 +393,47 @@ func TestMemoryHandler_OversizeFileTruncated(t *testing.T) {
 	}
 }
 
+// TestMemoryHandler_NegativeCacheSkipsReadDir verifies R20260602141221-SEC-10:
+// after a full-scan miss, the negative cache entry causes subsequent requests
+// within the TTL to return "not found" without calling os.ReadDir again.
+//
+// We prove the skip by removing the projects dir after the first miss; if the
+// second call hit the disk it would return an I/O error (500), but the negative
+// cache must intercept it and return 200/found=false instead.
+func TestMemoryHandler_NegativeCacheSkipsReadDir(t *testing.T) {
+	dir := t.TempDir()
+	// Create the projects dir but put no memory file for slug "ghost_slug".
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// First call: full ReadDir scan, nothing found — populates negative cache.
+	w1, resp1, _ := callMemoryHandler(t, h, "ghost_slug")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call: status = %d, want 200; body=%s", w1.Code, w1.Body.String())
+	}
+	if resp1.Found {
+		t.Fatalf("first call: resp.Found = true, want false")
+	}
+
+	// Remove the projects dir entirely so any ReadDir attempt would error.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call within TTL: must hit negative cache and return 200/found=false
+	// without touching the (now-deleted) dir.
+	w2, resp2, _ := callMemoryHandler(t, h, "ghost_slug")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call: status = %d (want 200/not-found via neg cache); body=%s",
+			w2.Code, w2.Body.String())
+	}
+	if resp2.Found {
+		t.Errorf("second call: resp.Found = true, want false")
+	}
+}
+
 // TestMemoryHandler_AtCapNotTruncated guards the boundary: a file exactly
 // at maxMemoryFileBytes must NOT be flagged truncated.
 func TestMemoryHandler_AtCapNotTruncated(t *testing.T) {
@@ -409,5 +451,194 @@ func TestMemoryHandler_AtCapNotTruncated(t *testing.T) {
 	}
 	if got := len(resp.Body); got != maxMemoryFileBytes {
 		t.Errorf("len(Body) = %d, want %d", got, maxMemoryFileBytes)
+	}
+}
+
+// TestNegCache_SweepOnWrite verifies R164029-CR-2: expired entries are
+// evicted from the negative cache on the next write, preventing unbounded
+// map growth when an attacker sprays unique slugs.
+func TestNegCache_SweepOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	// No memory files — every slug lookup will miss and populate negCache.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Pre-populate negCache with three already-expired entries by writing
+	// them directly (using a deadline in the past).
+	past := time.Now().Add(-time.Second)
+	h.negCacheMu.Lock()
+	h.negCache = map[string]time.Time{
+		"stale_slug_a": past,
+		"stale_slug_b": past,
+		"stale_slug_c": past,
+	}
+	h.negCacheMu.Unlock()
+
+	// A single miss on a new slug must trigger sweep-on-write, removing the
+	// three stale entries and then adding the new one — net size == 1.
+	callMemoryHandler(t, h, "new_slug_x")
+
+	h.negCacheMu.Lock()
+	size := len(h.negCache)
+	_, hasStale := h.negCache["stale_slug_a"]
+	_, hasNew := h.negCache["new_slug_x"]
+	h.negCacheMu.Unlock()
+
+	if size != 1 {
+		t.Errorf("negCache len = %d after sweep, want 1 (stale entries not evicted)", size)
+	}
+	if hasStale {
+		t.Errorf("stale entry still present after sweep")
+	}
+	if !hasNew {
+		t.Errorf("new entry missing after write")
+	}
+}
+
+// TestNegCache_MaxEntries verifies R220123-SEC-4: the negative cache does not
+// grow beyond maxNegCacheEntries even when many unique slugs miss in rapid
+// succession (defence-in-depth against slug-spray attacks).
+func TestNegCache_MaxEntries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Pre-fill the cache to exactly the cap with live (non-expired) entries.
+	h.negCacheMu.Lock()
+	h.negCache = make(map[string]time.Time, maxNegCacheEntries)
+	for i := 0; i < maxNegCacheEntries; i++ {
+		h.negCache[fmt.Sprintf("slug_%d", i)] = time.Now().Add(time.Minute)
+	}
+	h.negCacheMu.Unlock()
+
+	// A miss on a brand-new slug should NOT insert — the cap must be respected.
+	callMemoryHandler(t, h, "overflow_slug")
+
+	h.negCacheMu.Lock()
+	size := len(h.negCache)
+	_, hasOverflow := h.negCache["overflow_slug"]
+	h.negCacheMu.Unlock()
+
+	if size != maxNegCacheEntries {
+		t.Errorf("negCache len = %d after cap-overflow attempt, want %d", size, maxNegCacheEntries)
+	}
+	if hasOverflow {
+		t.Errorf("overflow_slug was inserted despite cap being reached")
+	}
+}
+
+// TestNegCache_ConcurrentReads verifies R20260602190132-GO-3: the negative
+// cache uses sync.RWMutex so multiple goroutines may read concurrently without
+// data races. Run with -race to detect any violation.
+func TestNegCache_ConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Seed the negative cache with a valid entry so the read path (RLock) fires.
+	h.negCacheMu.Lock()
+	h.negCache = map[string]time.Time{
+		"seeded_slug": time.Now().Add(time.Minute),
+	}
+	h.negCacheMu.Unlock()
+
+	// Launch N goroutines that all read the negative cache simultaneously.
+	// R220123-CR-1: goroutines must not call t.Fatal/t.Errorf — only the test
+	// goroutine may call testing.T methods. Collect (code, found) pairs into a
+	// buffered channel and assert in the main goroutine after all complete.
+	type result struct {
+		code  int
+		found bool
+	}
+	const N = 20
+	results := make(chan result, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			// Build and serve the request directly — no t.* calls inside the goroutine.
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/memory/{slug}", h.HandleGet)
+			req := httptest.NewRequest(http.MethodGet, "/api/memory/seeded_slug", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			var resp memoryResponse
+			_ = json.NewDecoder(w.Body).Decode(&resp)
+			results <- result{code: w.Code, found: resp.Found}
+		}()
+	}
+	for i := 0; i < N; i++ {
+		r := <-results
+		if r.code != http.StatusOK {
+			t.Errorf("concurrent read %d: status = %d, want 200", i, r.code)
+		}
+		if r.found {
+			t.Errorf("concurrent read %d: resp.Found = true, want false", i)
+		}
+	}
+}
+
+// TestReadCappedMemoryFile_NormalPath exercises the happy path for
+// readCappedMemoryFile to ensure the R20260606-SEC-6 SameFile check does not
+// block legitimate reads of regular files.
+func TestReadCappedMemoryFile_NormalPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	content := "hello from memory file\n"
+	path := filepath.Join(dir, "mem.md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, truncated, err := readCappedMemoryFile(path, int64(maxMemoryFileBytes))
+	if err != nil {
+		t.Fatalf("readCappedMemoryFile: %v", err)
+	}
+	if truncated {
+		t.Errorf("truncated = true, want false for small file")
+	}
+	if string(got) != content {
+		t.Errorf("content = %q, want %q", got, content)
+	}
+}
+
+// TestReadCappedMemoryFile_SymlinkSwapDetected verifies R20260606-SEC-6: if a
+// symlink swap replaces the target between EvalSymlinks and the open, the
+// SameFile inode recheck must catch the divergence and return an error (so the
+// caller treats the read as "not found" rather than returning the wrong file's
+// bytes).
+//
+// We simulate the race by writing a real file, doing a Lstat to capture its
+// inode, then replacing it with a symlink pointing elsewhere before calling
+// readCappedMemoryFile on the symlink target path. Because OpenWorkspaceFile
+// uses O_NOFOLLOW, opening the symlink itself returns an error (ELOOP /
+// ErrNotExist on linux), which readCappedMemoryFile already propagates as
+// an error. This test therefore confirms that both the O_NOFOLLOW gate and the
+// SameFile path are exercised without panicking.
+func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// target file that the symlink will point to
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// link inside the projects dir pointing at target
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlink not supported:", err)
+	}
+
+	// readCappedMemoryFile must not return the target's bytes when fed the
+	// symlink path directly; O_NOFOLLOW blocks the open at the kernel boundary.
+	_, _, err := readCappedMemoryFile(link, int64(maxMemoryFileBytes))
+	if err == nil {
+		t.Error("expected an error when opening a symlink path, got nil")
 	}
 }

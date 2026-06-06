@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -32,12 +34,19 @@ const discordHookConcurrency = 20
 
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
-	cfg        Config
-	session    *discordgo.Session
-	handler    platform.MessageHandler
-	startMu    sync.Mutex
-	started    bool
-	botID      string
+	cfg     Config
+	session *discordgo.Session
+	handler platform.MessageHandler
+	startMu sync.Mutex
+	started bool
+	// botID is the bot's own user ID, set once after the gateway connects in
+	// Start() and read concurrently by onMessageCreate goroutines (discordgo
+	// dispatches each MESSAGE_CREATE on its own goroutine, and the listen
+	// goroutine is live before Open() returns). A plain string field would be
+	// a data race — Go string assignment is two words (ptr+len), not atomic —
+	// so we store it through an atomic.Pointer for a torn-read-free handoff.
+	// #1814.
+	botID      atomic.Pointer[string]
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	handlerWg  sync.WaitGroup
@@ -55,6 +64,16 @@ func New(cfg Config) *Discord {
 		cfg.MaxReplyLen = 2000 // Discord's actual limit
 	}
 	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
+}
+
+// getBotID returns the connected bot's user ID, or "" before the gateway
+// handshake has populated it. Race-free read paired with the atomic store in
+// Start(). #1814.
+func (d *Discord) getBotID() string {
+	if p := d.botID.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -89,6 +108,20 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("create discord session: %w", err)
 	}
 
+	// Inject a no-redirect HTTP client for all REST calls made by the session
+	// (ChannelMessageSend, MessageReactionAdd, ChannelMessageEdit, etc.).
+	// discordgo.New sets sess.Client to &http.Client{Timeout:20s} with the
+	// default transport, which follows 3xx redirects while preserving the
+	// Authorization header — enabling SSRF / token-leakage via a hostile
+	// redirect.  Setting CheckRedirect to http.ErrUseLastResponse stops the
+	// redirect chain at the first hop.  (R20260603-SEC-2)
+	sess.Client = &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
 	sess.Identify.Intents = discordgo.IntentsGuildMessages |
 		discordgo.IntentsDirectMessages |
 		discordgo.IntentMessageContent
@@ -105,9 +138,10 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 	}
 
 	if sess.State != nil && sess.State.User != nil {
-		d.botID = sess.State.User.ID
+		botID := sess.State.User.ID
+		d.botID.Store(&botID)
 		slog.Info("discord gateway connected",
-			"bot_id", d.botID,
+			"bot_id", botID,
 			"bot_name", osutil.SanitizeForLog(sess.State.User.Username, 128))
 	} else {
 		slog.Warn("discord gateway connected but bot identity unavailable")
@@ -250,7 +284,8 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	if m.Author == nil {
 		return
 	}
-	if m.Author.ID == d.botID {
+	botID := d.getBotID()
+	if m.Author.ID == botID {
 		return
 	}
 	if m.Author.Bot {
@@ -261,10 +296,10 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	mentionMe := false
 
 	for _, u := range m.Mentions {
-		if u.ID == d.botID {
+		if u.ID == botID {
 			mentionMe = true
-			text = strings.ReplaceAll(text, "<@"+d.botID+">", "")
-			text = strings.ReplaceAll(text, "<@!"+d.botID+">", "")
+			text = strings.ReplaceAll(text, "<@"+botID+">", "")
+			text = strings.ReplaceAll(text, "<@!"+botID+">", "")
 			break
 		}
 	}
@@ -395,13 +430,66 @@ func isImageContentType(ct string) bool {
 	return false
 }
 
+// discordDialTestBypass disables the private-IP dial guard so httptest servers
+// (which run on loopback) are not rejected. Set ONLY by discord_test.go;
+// production code MUST leave this false so blockPrivateDial enforces the
+// reserved-IP guard. (R20260603-SEC-3)
+var discordDialTestBypass bool
+
+// blockPrivateDial returns a DialContext that resolves the target hostname and
+// refuses any IP in a reserved range (loopback, link-local, private,
+// unspecified). This closes the DNS rebinding / SSRF vector where a host that
+// passed the CDN allowlist check at url.Parse time later resolves to an
+// internal address such as 169.254.169.254 (cloud IMDS). The connection is
+// dialed to the already-validated IP rather than the original host, so the
+// resolver is not consulted a second time. (R20260603-SEC-3)
+func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("discord: malformed dial address %q: %w", addr, err)
+		}
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("discord: DNS lookup %q: %w", host, err)
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("discord: no addresses for %q", host)
+		}
+		for _, ia := range addrs {
+			ip := ia.IP
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsUnspecified() {
+				if discordDialTestBypass {
+					continue
+				}
+				return nil, fmt.Errorf("discord: refused connection to reserved IP %s (DNS rebinding guard)", ip)
+			}
+		}
+		// Dial the first validated IP directly to avoid a second DNS lookup
+		// (TOCTOU) on the original hostname.
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+	}
+}
+
 // discordHTTPClient disables redirects so the CDN host allowlist cannot be
 // bypassed via a 302 to an internal address (SSRF). Discord's CDN serves
-// attachments directly and never requires cross-host redirects.
+// attachments directly and never requires cross-host redirects. The Transport
+// injects blockPrivateDial so a host that resolves to an internal address
+// (DNS rebinding) is refused after resolution, before any bytes are exchanged.
 var discordHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           blockPrivateDial(),
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	},
 }
 
@@ -418,18 +506,15 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	}
 	// Discord legitimate CDN URLs are always https; refuse plaintext so a MITM
 	// or malicious crafted message cannot serve substituted bytes that would
-	// then be forwarded as if they were a trusted Discord attachment.
+	// then be forwarded as if they were a trusted Discord attachment. Also
+	// prevents a future Discord CDN downgrade or a crafted javascript:// URL
+	// from bypassing TLS verification on the attachment download path.
+	// (R227-SEC-13)
 	if u.Scheme != "https" {
 		return nil, "", fmt.Errorf("attachment URL must be https, got %q", u.Scheme)
 	}
 	if !discordCDNHosts[u.Hostname()] {
 		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
-	}
-	// Refuse non-https schemes so a future Discord CDN downgrade or a
-	// crafted javascript:// URL cannot bypass TLS verification on the
-	// attachment download path. (R227-SEC-13)
-	if u.Scheme != "https" {
-		return nil, "", fmt.Errorf("attachment URL must use https: %s", u.Scheme)
 	}
 	resp, err := discordHTTPClient.Get(rawURL)
 	if err != nil {

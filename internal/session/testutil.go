@@ -28,7 +28,7 @@
 // reaches for them.
 //
 // Migration note: a follow-up subpackage carve-out is the canonical fix.
-// The blocker is `Router.InjectSession`, which touches r.mu / r.sessions
+// The blocker is `Router.InjectSession`, which touches r.mu / r.ss.sessions
 // / r.attachHistorySource (all unexported). A clean split would either
 // export a narrow seam (e.g. `Router.injectForTest(processIface)` +
 // matching helper in sessiontest) or move the InjectSession glue here
@@ -107,8 +107,14 @@ func (p *TestProcess) DeathReason() string               { return p.DeathReasonV
 func (p *TestProcess) TotalCost() float64                { return 0 }
 func (p *TestProcess) EventEntries() []cli.EventEntry    { return p.EventLog.Entries() }
 func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.LastN(n) }
+func (p *TestProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+	return p.EventLog.LastNVisible(visibleTarget, maxTotal)
+}
 func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
+}
+func (p *TestProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	return p.EventLog.EntriesSinceAppend(dst, afterMS)
 }
 func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
 	return p.EventLog.EntriesBefore(beforeMS, limit)
@@ -147,7 +153,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	s.touchLastActive()
 	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.activeCount.Add(1)
+	r.ss.sessions[key] = s
+	r.ss.activeCount.Add(1)
 	return s
 }

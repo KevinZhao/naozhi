@@ -368,3 +368,103 @@ func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 			"(panic) or write a misleading 200/202. R248-TEST-5.", w.Code)
 	}
 }
+
+// stubLinker implements agentlink.AgentLinker for tests that need a specific
+// LinkInfo returned from QueryOrResolveFast without going through
+// SeedFromHistory (which has its own path-validation gate).
+type stubLinker struct {
+	info     cli.LinkInfo
+	resolved bool
+}
+
+func (s *stubLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {}
+func (s *stubLinker) Query(taskID string) (cli.LinkInfo, bool) {
+	return s.info, s.resolved
+}
+func (s *stubLinker) QueryOrResolveFast(taskID string) (cli.LinkInfo, bool) {
+	return s.info, s.resolved
+}
+func (s *stubLinker) ProjectSessionDir() string { return "" }
+
+// TestAgentEvents_JSONLPathOutsideAllowedRoot pins R112714-SEC-3: when
+// info.JSONLPath does not live under h.allowedRoot the handler must return
+// 404 rather than opening an unchecked path. We use a stub linker that
+// returns an outside-root JSONLPath directly, bypassing SeedFromHistory's
+// own path gate (which is tested separately in the cli package).
+func TestAgentEvents_JSONLPathOutsideAllowedRoot(t *testing.T) {
+	t.Parallel()
+	allowedRoot := t.TempDir() // acts as the "allowed" root
+
+	// Write a real file OUTSIDE allowedRoot.
+	outsideDir := t.TempDir()
+	secretPath := filepath.Join(outsideDir, "secret.jsonl")
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"secret"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
+	if err := os.WriteFile(secretPath, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	// Stub linker returns the outside-root path directly.
+	linker := &stubLinker{
+		info: cli.LinkInfo{
+			InternalAgentID: "agent-sec3aaaaaaaaaaaa",
+			JSONLPath:       secretPath,
+			Resolved:        true,
+		},
+		resolved: true,
+	}
+
+	h := &Handler{
+		allowedRoot: allowedRoot,
+		linkerFor:   func(k string) agentlink.AgentLinker { return linker },
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tsec3", "", ""))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404 — JSONLPath outside allowedRoot must be rejected [R112714-SEC-3]", w.Code)
+	}
+}
+
+// TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted pins R112714-SEC-3:
+// a legitimate JSONLPath under allowedRoot must NOT be rejected by the
+// path check (regression guard against over-rejection).
+func TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted(t *testing.T) {
+	t.Parallel()
+	// EvalSymlinks to match production: New() stores the resolved root, and
+	// jsonlPathUnderAllowedRoot resolves the request path before comparing.
+	// On macOS t.TempDir() returns an unresolved /var/... path that the
+	// in-handler EvalSymlinks expands to /private/var/..., so the raw
+	// TempDir would spuriously fail the prefix check.
+	allowedRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(TempDir): %v", err)
+	}
+
+	// Write a transcript file INSIDE allowedRoot.
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
+	jsonlPath := filepath.Join(allowedRoot, "agent-ccc.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	linker := &stubLinker{
+		info: cli.LinkInfo{
+			InternalAgentID: "agent-ccccccccccccccccc",
+			JSONLPath:       jsonlPath,
+			Resolved:        true,
+		},
+		resolved: true,
+	}
+
+	h := &Handler{
+		allowedRoot: allowedRoot,
+		linkerFor:   func(k string) agentlink.AgentLinker { return linker },
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tok1", "", ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s — legitimate JSONLPath under allowedRoot must be accepted [R112714-SEC-3]",
+			w.Code, w.Body.String())
+	}
+}

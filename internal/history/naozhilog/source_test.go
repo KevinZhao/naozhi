@@ -230,6 +230,80 @@ func TestSource_LoadBefore_ZeroBeforeMS(t *testing.T) {
 	}
 }
 
+// TestSource_LoadBefore_IdxSeekMatchesFullScan is the R20260530-PERF-1
+// (#1485) regression: the idx-seek fast path must return byte-for-byte the
+// same page as the full-scan fallback. We write a log large enough that the
+// sparse idx (IdxStride=2 from newPersister) has many entries, then compare
+// loadBeforeViaIdx against loadBeforeFullScan across a sweep of (beforeMS,
+// limit) windows. A drift between the two — e.g. an off-by-one in the
+// back-up-by-slots seek math — fails here.
+func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "k")
+	const n = 60
+	for i := 0; i < n; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID:    "uuid-" + rune2hex(i),
+			Time:    int64(1000 + i), // distinct ms so ordering is unambiguous
+			Type:    "user",
+			Summary: rune2hex(i),
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	for _, before := range []int64{1005, 1020, 1037, 1055, 1060, 1100} {
+		for _, limit := range []int{1, 3, 10, 100} {
+			idxGot, ok, err := src.loadBeforeViaIdx(bg, before, limit)
+			if err != nil {
+				t.Fatalf("loadBeforeViaIdx(before=%d,limit=%d): %v", before, limit, err)
+			}
+			fullGot, err := src.loadBeforeFullScan(bg, before, limit)
+			if err != nil {
+				t.Fatalf("loadBeforeFullScan(before=%d,limit=%d): %v", before, limit, err)
+			}
+			// When the idx path declines (ok==false) the public LoadBefore
+			// would use the full scan, so only compare when idx produced a
+			// result. Either way the public result must equal full scan.
+			if ok {
+				if !equalTimes(idxGot, fullGot) {
+					t.Errorf("idx vs full mismatch before=%d limit=%d: idx=%v full=%v",
+						before, limit, times(idxGot), times(fullGot))
+				}
+			}
+			pub, err := src.LoadBefore(bg, before, limit)
+			if err != nil {
+				t.Fatalf("LoadBefore(before=%d,limit=%d): %v", before, limit, err)
+			}
+			if !equalTimes(pub, fullGot) {
+				t.Errorf("public LoadBefore vs full mismatch before=%d limit=%d: pub=%v full=%v",
+					before, limit, times(pub), times(fullGot))
+			}
+		}
+	}
+}
+
+func times(es []cli.EventEntry) []int64 {
+	out := make([]int64, len(es))
+	for i, e := range es {
+		out[i] = e.Time
+	}
+	return out
+}
+
+func equalTimes(a, b []cli.EventEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Time != b[i].Time || a[i].UUID != b[i].UUID {
+			return false
+		}
+	}
+	return true
+}
+
 // TestSource_DisabledConfig: empty dir returns nil without error.
 // Used by deployments that opt out of event-log persistence (e.g.
 // stateless test harnesses).
@@ -265,6 +339,135 @@ func TestSource_ContextCancel(t *testing.T) {
 	_, err := src.LoadLatest(ctx, 100)
 	if err == nil {
 		t.Errorf("expected cancellation error, got nil")
+	}
+}
+
+// TestSource_LoadBefore_BinarySearchBoundary verifies that the binary-search
+// idx boundary (R112714-PERF-12) produces results equivalent to the full-scan
+// path for a range of beforeMS values, including at the exact timestamp of a
+// record (boundary = coincident) and just before/after it.
+func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "k2")
+	// Write 20 records with distinct timestamps so boundary tests are unambiguous.
+	for i := 0; i < 20; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID:    "bsearch-" + rune2hex(i),
+			Time:    int64(2000 + i*10), // 2000, 2010, …, 2190
+			Type:    "user",
+			Summary: rune2hex(i),
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	for _, tc := range []struct {
+		before int64
+		limit  int
+	}{
+		{2000, 5},  // exact lower bound
+		{2001, 5},  // just after lower bound
+		{2050, 5},  // mid range
+		{2099, 5},  // between records
+		{2100, 5},  // exact mid boundary
+		{2191, 10}, // just above all records
+		{9999, 20}, // far future
+	} {
+		fullGot, err := src.loadBeforeFullScan(bg, tc.before, tc.limit)
+		if err != nil {
+			t.Fatalf("loadBeforeFullScan(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+		}
+		idxGot, ok, err := src.loadBeforeViaIdx(bg, tc.before, tc.limit)
+		if err != nil {
+			t.Fatalf("loadBeforeViaIdx(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+		}
+		if ok && !equalTimes(idxGot, fullGot) {
+			t.Errorf("binary-search boundary mismatch before=%d limit=%d: idx=%v full=%v",
+				tc.before, tc.limit, times(idxGot), times(fullGot))
+		}
+	}
+}
+
+// TestLoadBefore_NoSliceAlias_FullScan asserts that loadBeforeFullScan returns a
+// slice that does not share its backing array with the source slice read from
+// disk. Mutating the returned slice must not affect a subsequent full scan
+// result (R20260603-CR-3).
+func TestLoadBefore_NoSliceAlias_FullScan(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "alias-full")
+	for i := 0; i < 5; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID: "u" + rune2hex(i),
+			Time: int64(100 + i),
+			Type: "user",
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	// Read a page that filters entries Time < 103 → entries 100,101,102.
+	got1, err := src.loadBeforeFullScan(bg, 103, 10)
+	if err != nil {
+		t.Fatalf("loadBeforeFullScan: %v", err)
+	}
+	if len(got1) == 0 {
+		t.Fatal("expected at least one entry")
+	}
+	// Mutate the returned slice in place.
+	sentinel := int64(9999)
+	got1[0].Time = sentinel
+
+	// A second call must return the original data, unaffected by the mutation.
+	got2, err := src.loadBeforeFullScan(bg, 103, 10)
+	if err != nil {
+		t.Fatalf("loadBeforeFullScan second call: %v", err)
+	}
+	if len(got2) == 0 {
+		t.Fatal("second call returned empty")
+	}
+	if got2[0].Time == sentinel {
+		t.Errorf("loadBeforeFullScan: mutation of returned slice affected source data — slice alias detected (CR-3)")
+	}
+}
+
+// TestLoadBefore_NoSliceAlias_ViaIdx asserts the same no-alias property for
+// loadBeforeViaIdx (R20260603-CR-3).
+func TestLoadBefore_NoSliceAlias_ViaIdx(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "alias-idx")
+	// Write enough entries that the idx has multiple entries (IdxStride=2).
+	for i := 0; i < 30; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID: "v" + rune2hex(i),
+			Time: int64(200 + i),
+			Type: "user",
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	got1, ok, err := src.loadBeforeViaIdx(bg, 220, 5)
+	if err != nil {
+		t.Fatalf("loadBeforeViaIdx: %v", err)
+	}
+	if !ok || len(got1) == 0 {
+		t.Skip("idx path declined (too few records or stride too large) — skip alias check")
+	}
+	sentinel := int64(8888)
+	got1[0].Time = sentinel
+
+	got2, ok2, err := src.loadBeforeViaIdx(bg, 220, 5)
+	if err != nil {
+		t.Fatalf("loadBeforeViaIdx second call: %v", err)
+	}
+	if !ok2 || len(got2) == 0 {
+		t.Skip("idx path declined on second call — skip alias check")
+	}
+	if got2[0].Time == sentinel {
+		t.Errorf("loadBeforeViaIdx: mutation of returned slice affected source data — slice alias detected (CR-3)")
 	}
 }
 

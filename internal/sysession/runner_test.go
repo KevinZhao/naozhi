@@ -185,3 +185,130 @@ func TestLimitedWriter_StopsCallingFailedInnerWriter(t *testing.T) {
 		t.Errorf("inner writer was called %d times after first failure; want exactly 1", fw.calls)
 	}
 }
+
+// TestRunnerImplBaseArgs_Contract pins the sysession one-shot argv prefix.
+//
+// R241-ARCH-14 (#523): runnerImplBaseArgs is hand-aligned with
+// internal/cli/protocol_claude.go:BuildArgs and the wrapper spawn contract,
+// with the invariants documented only in an inline godoc reminder. Until a
+// shared backend.Profile.OneshotArgs() lands (deliberately deferred until a
+// second backend needs the split), this test is the CI guard that makes the
+// silent-breakage modes the godoc warns about fail loudly:
+//
+//   - "--output-format text": switching to json/stream-json silently breaks
+//     every daemon's Run() string parsing.
+//   - "--setting-sources \"\"" (empty value): disables host hooks so the
+//     AutoTitler cannot dead-loop on naozhi's own learning hooks. A drift to
+//     "user" (BuildArgs' value) would re-enter the hooks.
+//   - "-p": one-shot prompt mode.
+func TestRunnerImplBaseArgs_Contract(t *testing.T) {
+	t.Parallel()
+	want := []string{"-p", "--output-format", "text", "--setting-sources", ""}
+	if len(runnerImplBaseArgs) != len(want) {
+		t.Fatalf("runnerImplBaseArgs = %q, want %q", runnerImplBaseArgs, want)
+	}
+	for i := range want {
+		if runnerImplBaseArgs[i] != want[i] {
+			t.Fatalf("runnerImplBaseArgs[%d] = %q, want %q (full: %q) — "+
+				"this argv prefix is hand-aligned with cli.BuildArgs and the "+
+				"sysession daemon contract; see runner.go godoc before changing",
+				i, runnerImplBaseArgs[i], want[i], runnerImplBaseArgs)
+		}
+	}
+
+	// Belt-and-suspenders on the two highest-risk invariants regardless of
+	// position, so a reorder that keeps the slice the same length but moves
+	// these pairs still surfaces a readable failure.
+	assertFlagValue(t, runnerImplBaseArgs, "--output-format", "text")
+	assertFlagValue(t, runnerImplBaseArgs, "--setting-sources", "")
+}
+
+// assertFlagValue checks that args contains flag immediately followed by want.
+func assertFlagValue(t *testing.T, args []string, flag, want string) {
+	t.Helper()
+	for i, a := range args {
+		if a == flag {
+			if i+1 >= len(args) {
+				t.Fatalf("%s has no value in %q", flag, args)
+			}
+			if args[i+1] != want {
+				t.Fatalf("%s = %q, want %q (in %q)", flag, args[i+1], want, args)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s not found in %q", flag, args)
+}
+
+// TestRunner_Run_CtxCancelReturnsCtxErr pins R20260606-GO-1: when the context
+// is already cancelled before cmd.Run returns, the error returned by Run MUST
+// be ctx.Err() (context.Canceled or context.DeadlineExceeded), NOT the
+// *exec.ExitError that exec.CommandContext produces when it kills the process.
+// The old code combined ctx.Err() != nil with errors.Is(err, context.Canceled)
+// which is always false for the kill path — so cancelled calls fell through to
+// the generic error branch and reported an unhelpful "exit status N".
+func TestRunner_Run_CtxCancelReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+	// Binary that sleeps long enough to be killed by ctx cancellation.
+	bin := filepath.Join(dir, "fake-claude-sleep")
+	script := "#!/bin/sh\nsleep 60\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+
+	r, err := NewRunner(RunnerConfig{BinPath: bin, WorkDir: work})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so cmd.Run immediately receives a killed process
+
+	_, runErr := r.Run(ctx, "ignored prompt")
+	if runErr == nil {
+		t.Fatal("Run with cancelled ctx should return an error")
+	}
+	if !errors.Is(runErr, context.Canceled) {
+		t.Errorf("Run with cancelled ctx: got %v, want errors.Is context.Canceled", runErr)
+	}
+}
+
+// TestRunner_Run_CtxDeadlineReturnsCtxErr is the deadline variant of the same
+// fix: a very short deadline causes cmd.Run to return *exec.ExitError, but the
+// caller must receive context.DeadlineExceeded.
+func TestRunner_Run_CtxDeadlineReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+	bin := filepath.Join(dir, "fake-claude-sleep2")
+	script := "#!/bin/sh\nsleep 60\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+
+	r, err := NewRunner(RunnerConfig{BinPath: bin, WorkDir: work})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1) // 1 ns — already expired
+	defer cancel()
+
+	_, runErr := r.Run(ctx, "ignored prompt")
+	if runErr == nil {
+		t.Fatal("Run with expired deadline should return an error")
+	}
+	if !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Errorf("Run with expired deadline: got %v, want errors.Is context.DeadlineExceeded", runErr)
+	}
+}

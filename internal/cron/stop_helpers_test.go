@@ -7,7 +7,6 @@ package cron
 
 import (
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -51,10 +50,9 @@ func TestPersistOnShutdown_WritesPendingMutation(t *testing.T) {
 // past the remaining budget when triggerWG is held open by a stuck
 // notifier. Bound the helper directly with a tight budget.
 func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
-	withShortStopBudget(t, 30*time.Millisecond)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	withShortStopBudget(t, s, 30*time.Millisecond)
 
 	// Seed a triggerWG holder that outlives the test budget.
 	hold := make(chan struct{})
@@ -67,7 +65,7 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 
 	// stopStart=now means the helper has the full stopBudget remaining.
 	start := time.Now()
-	s.drainTriggerWG(start)
+	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
 	// 30ms budget; allow 4× slack for scheduler jitter on slow CI.
@@ -80,13 +78,12 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 // helper returns essentially instantly even though stopBudget would
 // allow it to wait.
 func TestDrainTriggerWG_FastDrain(t *testing.T) {
-	withShortStopBudget(t, 5*time.Second)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	withShortStopBudget(t, s, 5*time.Second)
 
 	start := time.Now()
-	s.drainTriggerWG(start)
+	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
 	if elapsed > 200*time.Millisecond {
@@ -101,7 +98,7 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
 
 	start := time.Now()
-	s.waitGCDrain()
+	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
 	// Empty WaitGroup → close(gcDone) lands before the timer fires.
@@ -125,23 +122,12 @@ func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 		<-hold
 	}()
 
-	// Capture the metric counter before; the timeout branch must bump it.
-	var seen atomic.Bool
-	go func() {
-		// Sanity: just ensures the helper returns before our test deadline.
-		// gcWaitBudget is 5s in production; we tolerate that here because
-		// changing it would require either a test seam (var override) or
-		// faking gcWG's wait, both of which exceed the scope of this
-		// targeted helper test. Skip if CI is too time-constrained.
-		_ = seen
-	}()
-
 	if testing.Short() {
 		t.Skip("waitGCDrain budget test waits up to gcWaitBudget=5s; skip in -short")
 	}
 
 	start := time.Now()
-	s.waitGCDrain()
+	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
 	// Allow a wide upper bound — gcWaitBudget is currently 5s; if a future

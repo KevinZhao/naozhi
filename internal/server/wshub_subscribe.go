@@ -12,13 +12,45 @@
 package server
 
 import (
+	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// initialHistoryDiskTimeout bounds the disk-tier walk EventLastNVisibleCtx may
+// perform during a subscribe handshake. The visible-aware reader falls back to
+// reverse-scanning JSONL when the in-memory ring is entirely internal events
+// (a parallel agent team flooded the tail); a slow filesystem must not stall
+// the WS first frame, so the disk fallback is capped at this deadline. On
+// timeout the reader returns whatever it gathered so far (memory tier at
+// minimum) and the dashboard's auto-page-back safety net covers the rest.
+const initialHistoryDiskTimeout = 2 * time.Second
+
+// initialVisibleHistory reads the visible-aware initial history slice for a
+// subscribe handshake, bounding the disk-tier fallback with a deadline derived
+// from the Hub context so shutdown still cancels it promptly.
+func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) []cli.EventEntry {
+	target := limit
+	if target <= 0 || target > session.DefaultVisibleTarget {
+		// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, not a
+		// visible-bubble target; clamp the visible goal to DefaultVisibleTarget
+		// so we don't over-walk disk chasing 100 visible bubbles.
+		target = session.DefaultVisibleTarget
+	}
+	// maxTotal=0 → the reader uses its own ceiling (maxVisibleTotal == ring
+	// size). Passing `limit` here would cap the walk at the client's page-size
+	// hint and strand the visible bubbles that sit beyond it under an internal
+	// flood — exactly the bug. The payload can grow to the ring/page ceiling,
+	// which is the pre-existing maxEventsPageLimit bound anyway.
+	ctx, cancel := context.WithTimeout(h.ctx, initialHistoryDiskTimeout)
+	defer cancel()
+	return sess.EventLastNVisibleCtx(ctx, target, 0)
+}
 
 // File: wshub_subscribe.go
 //
@@ -127,6 +159,9 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	c.subscriptions[key] = func() {}
 	if !alreadySub && h.enforceCaps {
 		h.subscriberCount[key]++
+		// Keep the lock-free mirror (read by singleSubscriber off the WS
+		// push hot path) in step with the map. R20260531A-PERF-1 (#1522).
+		h.setSubscriberCountFast(key, h.subscriberCount[key])
 	}
 	h.mu.Unlock()
 
@@ -180,7 +215,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		case msg.After > 0:
 			entries = sess.EventEntriesSince(msg.After)
 		case msg.Limit > 0:
-			entries = sess.EventLastN(msg.Limit)
+			// Visible-aware initial page: a suspended session whose persisted
+			// tail is all internal events (parallel agent team) would otherwise
+			// hand the dashboard a page that renders to the blank placeholder.
+			entries = h.initialVisibleHistory(sess, msg.Limit)
 		default:
 			entries = sess.EventLastN(0)
 		}
@@ -222,6 +260,21 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	// subscriptions, so ctx.Err() being set here is a strong signal that
 	// Shutdown is mid-flight; decline to start a new pushLoop.
 	if c.subscriptions == nil || h.ctx.Err() != nil {
+		// R20260605B-CORR-2 (#1806): release the placeholder reservation
+		// installed by handleSubscribe, symmetric with the two sibling early
+		// returns (HasProcess==false above and the pre-lock ctx fast-fail).
+		// When c.subscriptions == nil Shutdown already cleared both the map and
+		// the subscriberCount bookkeeping, so the guarded delete is a no-op;
+		// when only ctx is cancelled (cancelled in the window since the
+		// fast-fail check) the placeholder + inflated subscriberCount[key]
+		// would otherwise linger, counting toward maxSubscriptionsPerClient /
+		// maxSubscribersPerKey until the client disconnects.
+		if c.subscriptions != nil {
+			if _, ok := c.subscriptions[key]; ok {
+				delete(c.subscriptions, key)
+				h.decSubscriberCountLocked(key)
+			}
+		}
 		h.mu.Unlock()
 		unsub()
 		return
@@ -252,7 +305,14 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// Initial subscribe asks for the last `limit` events only — this is
 		// the dashboard pagination fast path. Clients walk further back via
 		// HTTP /api/sessions/events?before=.. rather than resubscribing.
-		entries = sess.EventLastN(msg.Limit)
+		//
+		// Visible-aware: when a parallel agent team has filled the trailing
+		// `limit` events with internal tool_use / task_progress entries, a
+		// plain EventLastN(limit) returns a page that the dashboard filters
+		// down to nothing and renders as the blank "该会话最近仅有 agent
+		// 活动" placeholder. EventLastNVisibleCtx keeps walking (ring, then
+		// disk) until the page carries real chat bubbles.
+		entries = h.initialVisibleHistory(sess, msg.Limit)
 	default:
 		// Legacy path: send everything the log remembers. Kept so older
 		// clients (and the node-to-node relay) still see full history.
@@ -371,9 +431,27 @@ func (h *Hub) decSubscriberCountLocked(key string) {
 	n := h.subscriberCount[key]
 	if n <= 1 {
 		delete(h.subscriberCount, key)
+		h.subscriberCountFast.Delete(key)
 		return
 	}
 	h.subscriberCount[key] = n - 1
+	h.setSubscriberCountFast(key, n-1)
+}
+
+// setSubscriberCountFast mirrors subscriberCount[key]=n into the lock-free
+// subscriberCountFast map so singleSubscriber can read the per-key
+// population without h.mu. Caller MUST hold h.mu (it is invoked only from
+// the subscriberCount write paths). The mirror is keyed by string and holds
+// *atomic.Int32 so concurrent lock-free readers get a value-consistent load
+// even while a writer is updating a different key. R20260531A-PERF-1 (#1522).
+func (h *Hub) setSubscriberCountFast(key string, n int) {
+	if v, ok := h.subscriberCountFast.Load(key); ok {
+		v.(*atomic.Int32).Store(int32(n))
+		return
+	}
+	var ctr atomic.Int32
+	ctr.Store(int32(n))
+	h.subscriberCountFast.Store(key, &ctr)
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────
@@ -387,9 +465,7 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
-	h.nodesMu.RLock()
-	conn, ok := h.nodes[msg.Node]
-	h.nodesMu.RUnlock()
+	conn, ok := h.lookupNode(msg.Node)
 	if !ok {
 		// Do not echo the client-supplied node ID in the error: a careless
 		// JS consumer rendering the field via innerHTML would turn a crafted
@@ -398,7 +474,10 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
-	conn.Subscribe(c, msg.Key, msg.After)
+	// H6 (#435): subscribe only needs the pub-sub role, so narrow the full
+	// Conn down to node.NodeSubscriber at the call boundary.
+	var sub node.NodeSubscriber = conn
+	sub.Subscribe(c, msg.Key, msg.After)
 }
 
 func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
@@ -408,14 +487,14 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key})
 		return
 	}
-	h.nodesMu.RLock()
-	conn, ok := h.nodes[msg.Node]
-	h.nodesMu.RUnlock()
+	conn, ok := h.lookupNode(msg.Node)
 	if !ok {
 		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
 		return
 	}
-	conn.Unsubscribe(c, msg.Key)
+	// H6 (#435): unsubscribe only needs the pub-sub role.
+	var sub node.NodeSubscriber = conn
+	sub.Unsubscribe(c, msg.Key)
 }
 
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,

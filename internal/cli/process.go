@@ -276,6 +276,15 @@ type Process struct {
 	lastSeq  atomic.Int64  // last received shim seq, for reconnect
 	pongRecv chan struct{} // signaled by readLoop on pong receipt
 
+	// readEventBuf is a reusable backing array handed to ReadEventInto so the
+	// single-event Claude hot path (the dominant frame) no longer allocates a
+	// fresh 1-element []Event per stdout frame — R20260603-PERF-10 (#1676).
+	// Exclusively owned by handleShimStdout, which runs only on the single
+	// readLoop goroutine, so no synchronisation is needed. Cap 2 covers ACP's
+	// max two-event turn-end split without re-growing. The returned slice is
+	// consumed (iterated) within the same frame before the next reuse.
+	readEventBuf [2]Event
+
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send(). This allows
 	// the session layer to broadcast state changes (e.g., after shim reconnect
@@ -345,6 +354,11 @@ type Process struct {
 	// projectDir can be (re)derived on shim reconnect without plumbing
 	// SpawnOptions through every call site.
 	cwd string
+	// cachedProjectDir is resolveProjectDir(cwd) computed once in
+	// InitLinker / SetCwdForLinker. cwd is immutable after spawn so the
+	// encoded path never changes; computing it on every system/init event
+	// wastes a full rune scan + os.UserHomeDir syscall. [R112714-PERF-2]
+	cachedProjectDir string
 }
 
 // sendSlot tracks one in-flight passthrough Send call. The slot is appended
@@ -565,9 +579,20 @@ func (p *Process) shimStdinWriter() io.Writer {
 }
 
 // startReadLoop begins the shim message reader goroutine and heartbeat.
+//
+// Initial state is StateReady EXCEPT on the reconnect-mid-turn path (#1778):
+// SpawnReconnect arms reconnectedMidTurn + sets StateRunning BEFORE calling
+// this so the flag and state are both in place before readLoop can consume the
+// live socket. Forcing StateReady here would clobber that, reopening the race
+// where the turn's terminating result arrives, the stray-result handler's CAS
+// consumes the flag, but state is Ready (so wasRunning is false) — leaving the
+// session stranded in Running forever once SpawnReconnect later re-set it.
+// We therefore preserve a pre-armed StateRunning.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
-	p.state = StateReady
+	if !(p.reconnectedMidTurn.Load() && p.state == StateRunning) {
+		p.state = StateReady
+	}
 	p.mu.Unlock()
 	go p.readLoop()
 	go p.heartbeatLoop()

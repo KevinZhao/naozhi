@@ -7,9 +7,7 @@
 
 package cron
 
-import (
-	"time"
-)
+import "sync"
 
 // R20260527122801-ARCH-1 (#1318): The compile-time guard
 // `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
@@ -41,6 +39,29 @@ import (
 // frequency. The constant stays here so future tuning lives at the
 // boundary it actually controls.
 const knownSessionIDsRecentCap = 200
+
+// jobIDsScratchPool reuses the []string scratch slice that
+// buildKnownSessionsSet allocates under s.mu RLock to collect job IDs,
+// then walks after RUnlock to call runStore.RecentSessionIDs per job.
+// invalidateKnownSessionsCache is called on every runStore.Append and
+// LastSessionID write, so cold rebuilds can be frequent in busy
+// deployments. Pooling the scratch slice removes the per-rebuild
+// backing-array allocation without changing semantics: the slice is
+// only used inside buildKnownSessionsSet and is returned to the pool
+// after all runStore reads are done. R20260603-010128-PERF-1.
+var jobIDsScratchPool = sync.Pool{
+	New: func() any {
+		// Default seed sized for the common 50-job case.
+		s := make([]string, 0, 64)
+		return &s
+	},
+}
+
+// jobIDsScratchCapDrop is the cap threshold above which Put refuses to
+// recycle the scratch slice, mirroring the marshalEntriesCapDrop policy
+// in scheduler_persist.go. Prevents a one-off burst from pinning a
+// large backing array indefinitely.
+const jobIDsScratchCapDrop = 4 * maxJobsHardCap // 2000 string slots
 
 // IsExcluded reports whether the given Claude sessionID belongs to a
 // cron-spawned run. Implements session.SessionIDExcluder so the
@@ -112,14 +133,10 @@ func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
 // KnownSessionIDs() caller still gets the complete history. R245-GO-4
 // (#844).
 func (s *Scheduler) containsSessionID(sessionID string) bool {
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		_, ok := s.knownSessionsCache.set[sessionID]
-		s.knownSessionsCache.mu.Unlock()
-		return ok
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		_, hit := set[sessionID]
+		return hit
 	}
-	s.knownSessionsCache.mu.Unlock()
 
 	// Cold cache: cheap fast path before the O(jobs × recentCap) build.
 	// Most spawn-time IsExcluded probes target the *just-written*
@@ -147,13 +164,8 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	s.mu.RUnlock()
 
 	found := false
-	s.runningJobs.Range(func(_, v any) bool {
-		inf, ok := v.(*runInflight)
-		if !ok || inf == nil {
-			return true
-		}
-		view, running := inf.snapshot()
-		if running && view.SessionID == sessionID {
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		if sid == sessionID {
 			found = true
 			return false
 		}
@@ -165,13 +177,13 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 
 	// Not in the cheap sources — pay the full build and populate the
 	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
-	// dashboard) reuse this work.
+	// dashboard) reuse this work. Snapshot the cache generation BEFORE the
+	// build reads any source data so a concurrent invalidate() cannot be
+	// clobbered by our publish (R20260605B-CORR-7 #1811). The local `set`
+	// is still returned to the probe caller even if publish is rejected.
+	buildGen := s.knownSessionsCache.beginBuild()
 	set := s.buildKnownSessionsSet()
-
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.publish(set, buildGen)
 
 	_, ok := set[sessionID]
 	return ok
@@ -189,56 +201,60 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 //   - All in-flight runs (s.runningJobs sync.Map; one per active run).
 //   - The last knownSessionIDsRecentCap runs per job from runStore.
 //
-// Result is a fresh map; safe to retain.  TTL-cached for
-// knownSessionsCacheTTL so dashboard 1Hz pollers do not pay the
-// O(jobs × recentCap) build cost on every call. Invalidated on
-// LastSessionID writes and runStore.Append. Returns an empty
-// (non-nil) map when there are no jobs.
+// The returned map is READ-ONLY and shared: callers MUST NOT mutate or
+// persist it. The set is published once by buildKnownSessionsSet and then
+// only ever replaced wholesale (never mutated in place) or dropped by
+// invalidateKnownSessionsCache, so handing out the cached map directly is
+// race-free for read-only consumers. TTL-cached for knownSessionsCacheTTL
+// so dashboard 1Hz pollers do not pay the O(jobs × recentCap) build cost —
+// nor an O(N) clone — on every call. Invalidated on LastSessionID writes
+// and runStore.Append. Returns an empty (non-nil) map when there are no jobs.
+//
+// R20260601-PERF-1 (#1544): the previous shape cloned the cached set into a
+// fresh map[string]bool on every call (including warm cache hits) to honour
+// a "safe to retain" contract. The only production consumer (dashboard
+// historyFilter.SkipSessionID) is read-only, so the contract was tightened
+// to read-only and the per-call O(N) allocation+copy on the /api/sessions
+// 1Hz hot path was removed.
 //
 // Safe to call on a nil Scheduler — returns empty map.  R245-ARCH
 // (cron+sys hide-from-history); R250-PERF-7 (TTL cache).
-func (s *Scheduler) KnownSessionIDs() map[string]bool {
+func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 	if s == nil {
-		return map[string]bool{}
+		return map[string]struct{}{}
 	}
 
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		// Clone to honour the "safe to retain" contract — callers may
-		// mutate or persist the returned map.
-		cached := s.knownSessionsCache.set
-		s.knownSessionsCache.mu.Unlock()
-		out := make(map[string]bool, len(cached))
-		for id := range cached {
-			out[id] = true
-		}
-		return out
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		return set
 	}
-	s.knownSessionsCache.mu.Unlock()
 
+	// Snapshot the generation before reading source data so a concurrent
+	// invalidate() that lands during the build is not lost to our publish.
+	// The freshly built set is still returned to this caller even when
+	// publish is rejected — the rejection only prevents caching a stale
+	// snapshot. R20260605B-CORR-7 (#1811).
+	buildGen := s.knownSessionsCache.beginBuild()
 	set := s.buildKnownSessionsSet()
+	s.knownSessionsCache.publish(set, buildGen)
 
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
-
-	out := make(map[string]bool, len(set))
-	for id := range set {
-		out[id] = true
-	}
-	return out
+	return set
 }
 
 // buildKnownSessionsSet does the actual O(jobs × recentCap) walk that
 // KnownSessionIDs serves out of cache. Extracted so the cached and
 // uncached paths share one source of truth. R250-PERF-7.
 func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
-	out := make(map[string]struct{}, 32)
+	// Get a pooled scratch slice for job IDs; reset length to 0 before use.
+	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
+	jobIDs := (*jobIDsPtr)[:0]
 
 	s.mu.RLock()
-	jobIDs := make([]string, 0, len(s.jobs))
+	// R20260603-PERF-3: size the map from len(s.jobs) under the lock already
+	// held here, replacing the fixed cap of 32 that caused repeated rehashes
+	// for schedulers with many jobs. Each job contributes at most one
+	// LastSessionID entry in this loop, so len(s.jobs)+8 is a tight upper
+	// bound with a small slack for in-flight and recent-history entries.
+	out := make(map[string]struct{}, len(s.jobs)+8)
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {
@@ -249,12 +265,8 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).
-	s.runningJobs.Range(func(_, v any) bool {
-		if inf, ok := v.(*runInflight); ok && inf != nil {
-			if view, running := inf.snapshot(); running && view.SessionID != "" {
-				out[view.SessionID] = struct{}{}
-			}
-		}
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		out[sid] = struct{}{}
 		return true
 	})
 
@@ -268,12 +280,22 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	// every cold buildKnownSessionsSet rebuild without changing semantics —
 	// the cold disk fallback path is still funneled through the same
 	// cache+disk walk Recent uses.
-	if s.runStore != nil {
+	if s.runStoreEnabled() {
 		for _, jobID := range jobIDs {
-			for _, sid := range s.runStore.RecentSessionIDs(jobID, knownSessionIDsRecentCap) {
+			for _, sid := range s.recentSessionIDs(jobID, knownSessionIDsRecentCap) {
 				out[sid] = struct{}{}
 			}
 		}
+	}
+
+	// Return scratch slice to pool. jobIDs is used above (runStore loop);
+	// Put only after all reads are complete. Drop oversize slices to avoid
+	// pinning a burst-inflated backing array. R20260603-010128-PERF-1.
+	if cap(jobIDs) <= jobIDsScratchCapDrop {
+		// Clear string references to prevent pinning stale job ID strings.
+		clear(jobIDs)
+		*jobIDsPtr = jobIDs[:0]
+		jobIDsScratchPool.Put(jobIDsPtr)
 	}
 
 	return out
@@ -288,7 +310,5 @@ func (s *Scheduler) invalidateKnownSessionsCache() {
 	if s == nil {
 		return
 	}
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = nil
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.invalidate()
 }

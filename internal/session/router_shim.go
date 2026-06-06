@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -71,10 +70,10 @@ func (r *Router) shimManagers() []*shim.Manager {
 		seen[w.ShimManager] = true
 		out = append(out, w.ShimManager)
 	}
-	for _, w := range r.wrappers {
+	for _, w := range r.bkStore.wrappers {
 		add(w)
 	}
-	add(r.wrapper)
+	add(r.bkStore.wrapper)
 	return out
 }
 
@@ -204,7 +203,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	reconnected := 0
 	for _, state := range states {
 		r.mu.Lock()
-		sess, ok := r.sessions[state.Key]
+		sess, ok := r.ss.sessions[state.Key]
 		var hasLiveProcess bool
 		var sessPrevIDs []string
 		if ok && sess.isAlive() {
@@ -217,7 +216,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
-		_, spawning := r.spawningKeys[state.Key]
+		_, spawning := r.pp.spawningKeys[state.Key]
 		r.mu.Unlock()
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses
@@ -287,7 +286,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 					defer histCancel()
-					histEntries := discovery.LoadHistoryChainTailCtx(
+					histEntries := r.historyLoader.LoadHistoryChainTail(
 						histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 					)
 					if len(histEntries) > 0 {
@@ -485,7 +484,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// Bounded budget (maxPersistedHistory) and the inner
 			// shimReconnectTimeout still protect against hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			histEntries := discovery.LoadHistoryChainTailCtx(
+			histEntries := r.historyLoader.LoadHistoryChainTail(
 				histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 			)
 			histCancel()
@@ -505,7 +504,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to eliminate the race window where a concurrent GetOrCreate could see
 		// isAlive()==false between check and ReattachProcess.
 		r.mu.Lock()
-		currentSess := r.sessions[state.Key]
+		currentSess := r.ss.sessions[state.Key]
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			r.mu.Unlock()
 			proc.Close()
@@ -517,7 +516,20 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to avoid deadlock (sync.RWMutex is not reentrant).
 		// (onTurnDone was already bound before the JSONL-load window
 		// to avoid missing early result events.)
-		sess.ReattachProcessNoCallback(proc, state.SessionID)
+		//
+		// R51-CONCUR-002 (#750): use the TryLock-guarded variant so a Send()
+		// still unwinding on the just-died process (holding sendMu) is not
+		// raced by the storeProcess swap + deathReason.Store(""). TryLock is
+		// non-blocking, so it does not violate the sendMu→r.mu ordering the
+		// caller is bound by. If a Send is in flight, abort this reconnect;
+		// the 30s reconcile tick retries once sendMu is free.
+		if !sess.tryReattachProcessNoCallback(proc, state.SessionID) {
+			r.mu.Unlock()
+			proc.Close()
+			slog.Info("shim reconnect deferred: send in flight on session",
+				"key", state.Key)
+			continue
+		}
 		// Record the backend + wrapper-provided CLI identity so the
 		// dashboard snapshot reflects the actual backend post-reconnect,
 		// even for sessions restored from a pre-multi-backend store.
@@ -534,10 +546,10 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		}
 		if state.SessionID != "" {
 			r.trackSessionID(state.SessionID)
-			r.sessionIDToKey[state.SessionID] = state.Key
+			r.ss.idToKey[state.SessionID] = state.Key
 		}
 		if !sess.exempt {
-			r.activeCount.Add(1)
+			r.ss.activeCount.Add(1)
 		}
 		// Mark store dirty so the next Cleanup/saveIfDirty cycle persists
 		// the reconnected session's backend/CLI identity and active flag.
@@ -545,8 +557,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// before the next save would lose the shim-reconnect state even
 		// though the shim itself kept the CLI process alive. Every other
 		// storeGen.Add site pairs with storeDirty = true for this reason.
-		r.storeDirty = true
-		r.storeGen.Add(1)
+		r.ss.dirty = true
+		r.ss.gen.Add(1)
 		r.mu.Unlock()
 
 		// Event-log persist sink goes last so the InjectHistory +

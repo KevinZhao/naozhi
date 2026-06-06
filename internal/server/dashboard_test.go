@@ -8,13 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
-	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/cli"
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -172,6 +174,114 @@ func seedEventSession(t *testing.T, srv *Server, times ...int64) string {
 	}
 	srv.router.InjectSession(key, proc)
 	return key
+}
+
+// typedEvent is a (time,type) pair for seedTypedEventSession.
+type typedEvent struct {
+	time int64
+	typ  string
+}
+
+// seedTypedEventSession injects a session whose event log carries the given
+// typed entries (in order). Used to exercise the visible-aware initial read
+// where the type — not just the timestamp — decides what the dashboard renders.
+func seedTypedEventSession(t *testing.T, srv *Server, events ...typedEvent) string {
+	t.Helper()
+	key := "test:d:u:general"
+	proc := session.NewTestProcess()
+	for _, e := range events {
+		proc.EventLog.Append(cli.EventEntry{Time: e.time, Type: e.typ, Summary: "x"})
+	}
+	srv.router.InjectSession(key, proc)
+	return key
+}
+
+// TestHandleAPISessionEvents_InitialPageIsVisibleAware reproduces the
+// "parallel agent team ate my history" bug at the HTTP layer. The trailing
+// `limit` events are all internal (task_progress); a plain tail-N would return
+// a page the dashboard filters to nothing and renders blank. The visible-aware
+// initial read (beforeStr=="" && limit>0) must keep walking back so the page
+// carries the real "text" bubbles.
+func TestHandleAPISessionEvents_InitialPageIsVisibleAware(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	var evs []typedEvent
+	ts := int64(0)
+	// 3 visible messages up front, then a 200-event internal flood at the tail.
+	for m := 0; m < 3; m++ {
+		ts++
+		evs = append(evs, typedEvent{ts, "text"})
+	}
+	for i := 0; i < 200; i++ {
+		ts++
+		evs = append(evs, typedEvent{ts, "task_progress"})
+	}
+	key := seedTypedEventSession(t, srv, evs...)
+
+	// Initial fetch (limit only, no before) with limit=100 — the trailing 100
+	// are all internal.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&limit=100", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.HandleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	visible := 0
+	for _, e := range entries {
+		if e.Type == "text" {
+			visible++
+		}
+	}
+	if visible < 3 {
+		t.Errorf("initial page carried %d visible bubbles, want >=3 — visible-aware read should walk past the internal flood (got %d entries total)", visible, len(entries))
+	}
+}
+
+// TestHandleAPISessionEvents_BeforeStaysTimeOrdered guards the regression
+// boundary: the "load earlier" pagination path (before>0) must NOT switch to
+// the visible-aware reader, or it would skip past internal events the operator
+// is paging toward. before=250 must return the contiguous time-ordered slice,
+// internal events included.
+func TestHandleAPISessionEvents_BeforeStaysTimeOrdered(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	var evs []typedEvent
+	for ts := int64(1); ts <= 300; ts++ {
+		typ := "task_progress"
+		if ts%50 == 0 {
+			typ = "text"
+		}
+		evs = append(evs, typedEvent{ts, typ})
+	}
+	key := seedTypedEventSession(t, srv, evs...)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=250&limit=10", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.HandleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 10 {
+		t.Fatalf("len = %d, want 10 (plain time-ordered page)", len(entries))
+	}
+	// The newest entry strictly older than 250 is time 249; the page is the
+	// 10 entries 240..249, mostly internal — proving no visible-aware skipping.
+	if entries[len(entries)-1].Time != 249 {
+		t.Errorf("newest entry Time = %d, want 249 (contiguous backward page)", entries[len(entries)-1].Time)
+	}
+	if entries[0].Time != 240 {
+		t.Errorf("oldest entry Time = %d, want 240", entries[0].Time)
+	}
 }
 
 func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
@@ -1115,8 +1225,6 @@ func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
 	}
 }
 
-
-
 // ─── R67 regressions ─────────────────────────────────────────────────────────
 
 // TestHandlePreview_RejectsInvalidNodeID locks down R67-SEC-2: the preview
@@ -1137,6 +1245,85 @@ func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+	}
+}
+
+// writePreviewJSONL drops a minimal one-line user JSONL at the CWD-derived
+// path under claudeDir so HandlePreview's local branch can resolve it. Returns
+// the session id it wrote.
+func writePreviewJSONL(t *testing.T, claudeDir, cwd, content string) string {
+	t.Helper()
+	sessionID := "12345678-1234-1234-1234-123456789abc"
+	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":` +
+		mustJSON(t, content) + `}}`
+	if err := os.WriteFile(filepath.Join(projDir, sessionID+".jsonl"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return sessionID
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestHandlePreview_CWDHintResolvesContent locks down the preview-flake fix:
+// a valid `cwd` query param lets the handler resolve the JSONL via the O(1)
+// CWD-derived path, returning the session content. This is the path that
+// bypasses findSessionJSONL's 60s negative cache — the cache that made
+// interactive preview intermittently render a blank "暂无会话历史" splash.
+func TestHandlePreview_CWDHintResolvesContent(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	claudeDir := t.TempDir()
+	srv.discoveryH.SetClaudeDirForTest(claudeDir)
+
+	cwd := filepath.Join(t.TempDir(), "preview-proj")
+	sessionID := writePreviewJSONL(t, claudeDir, cwd, "hello preview")
+
+	u := "/api/discovered/preview?session_id=" + sessionID + "&cwd=" + url.QueryEscape(cwd)
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.discoveryH.HandlePreview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	var entries []cli.EventEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("decode body: %v (body=%q)", err, w.Body.String())
+	}
+	if len(entries) != 1 || entries[0].Summary != "hello preview" {
+		t.Fatalf("entries = %+v, want one entry summarised %q", entries, "hello preview")
+	}
+}
+
+// TestHandlePreview_InvalidCWDDegradesGracefully confirms a hostile cwd hint
+// (path traversal) is dropped to "" rather than erroring or being used to
+// probe arbitrary projDirName slugs. The handler still returns 200 with an
+// empty list (no JSONL resolvable without the real cwd), never a 4xx/5xx.
+func TestHandlePreview_InvalidCWDDegradesGracefully(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	srv.discoveryH.SetClaudeDirForTest(t.TempDir())
+
+	u := "/api/discovered/preview?session_id=12345678-1234-1234-1234-123456789abc&cwd=" +
+		url.QueryEscape("/home/../etc")
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.discoveryH.HandlePreview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (invalid cwd must degrade, not error; body=%q)", w.Code, w.Body.String())
+	}
+	if strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("body = %q, want empty array", w.Body.String())
 	}
 }
 

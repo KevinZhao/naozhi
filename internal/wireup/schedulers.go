@@ -4,13 +4,29 @@
 //
 // Why this lives in wireup and not cmd/naozhi: the orchestration
 // (cron.NewScheduler config translation, NotifyDefault target build,
-// router.AddSessionIDExcluder, sysession Start, metrics phase tag)
+// sysession Start, metrics phase tag)
 // is pure construction with implicit ordering constraints
-// (router.AddSessionIDExcluder must run after scheduler is constructed
-// but before any session spawn; sysession.Start must run after cron
-// is ready). Pulling it out of main.go makes the entry point a graph
+// (sysession.Start must run after cron is ready). Pulling it out of
+// main.go makes the entry point a graph
 // of explicit constructor calls (the same pattern wireup.RegisterCLIBackends
-// and wireup.RegisterHistoryBackends already established).
+// and the history_backends.go blank-imports already established).
+//
+// Ownership scope (R260528-ARCH-11 / #1372 — tightened, not expanded):
+// wireup deliberately owns exactly the boot-time CONSTRUCTION + REGISTRATION
+// set, and the boot.go bootRegistry now names that set inspectably:
+//
+//	cli-backends      backends.go     (backend.RegisterDefaults)
+//	history-backends  history_backends.go (blank-import init() factories)
+//	schedulers        this file       (cron + sysession construction/Start)
+//
+// It does NOT own — and was never meant to own — the runtime LIFECYCLE of
+// router / server / platforms / upstream / shim: those are long-lived
+// services constructed and shut down by cmd/naozhi against ctx, not
+// init()-style wiring. The package name stays "wireup" (a boot-wiring sink)
+// rather than a broader "lifecycle"/"runtime" name precisely because the
+// lifecycle.Manager RFC was rejected (see below); conflating the two scopes
+// is what #1372 warns against. Validate() asserts the construction set ran;
+// it makes no claim about service lifecycle.
 //
 // What this DOES NOT do (deliberately):
 //   - it does NOT touch shutdown ordering (still owned by main.go's
@@ -58,16 +74,15 @@ type SchedulersDeps struct {
 	// Cfg is the parsed config.
 	Cfg *config.Config
 
-	// Router is the live session router. cron registers itself as a
-	// SessionIDExcluder via router.AddSessionIDExcluder — see godoc
-	// on auto_chain RFC §4.3.
+	// Router is the live session router. WireSchedulers wraps it in the
+	// cron.SessionRouter adapter (newCronRouterAdapter) it feeds to
+	// cron.NewScheduler, and cron also uses it for history-panel filtering via
+	// IsExcluded / RecentSessionsFilter. R260528-ARCH-23 (#1382): the adapter
+	// build moved into this package (see cron_router_adapter.go) so the caller
+	// no longer constructs it — the dependency arrow now points down
+	// (main → wireup → {cron, session}) instead of main owning a
+	// cron.SessionRouter implementation.
 	Router *session.Router
-
-	// SessionRouterAdapter is the cmd-side cronRouterAdapter that
-	// translates cron.AgentOpts ↔ session.AgentOpts. Caller (cmd/naozhi)
-	// constructs it because the adapter type itself lives in main pkg
-	// (cron-sysession-merge RFC §3.3.3 keeps subsystem-agnostic boundary).
-	SessionRouterAdapter cron.SessionRouter
 
 	// Platforms is the live IM platform map; cron's NotifyDefault
 	// resolution + cron job IM delivery use it.
@@ -111,15 +126,24 @@ type Schedulers struct {
 	// SysessionWorkDir is the resolved work dir for sysession daemons.
 	// Empty when sysession is disabled or build failed.
 	SysessionWorkDir string
+	// SysessionBuildErr carries the sysession build failure (if any) back
+	// to the caller as part of the helper's return contract — NOT via a
+	// caller-managed closure side-channel (R20260602141221-ARCH-3 / #1588).
+	// It is non-nil ONLY when sysession was enabled in config but the build
+	// failed; it is nil both when sysession is disabled AND when the build
+	// succeeded. This keeps the failure-vs-disabled distinction (documented
+	// on SysessionBuilder) inside WireSchedulers' return contract so any
+	// caller — not just one that replicated the closure trick — observes it.
+	// Caller should slog.Warn + continue (sysession is degradable; a broken
+	// claude binary must not break naozhi startup).
+	SysessionBuildErr error
 }
 
 // WireSchedulers constructs cron.Scheduler + sysession.Manager in the
-// correct order, registers cron as a SessionIDExcluder, and starts
-// both subsystems.
+// correct order and starts both subsystems.
 //
 // Side-effects (matches what the inlined main.go code did):
 //   - cron.Scheduler.Start() is called — cron is ready to tick on return
-//   - router.AddSessionIDExcluder(scheduler) is invoked
 //   - sysession.Manager.Start(ParentCtx) is called when enabled
 //
 // Caller is responsible for the metrics.StartupPhaseSchedulerMs.Set
@@ -140,6 +164,23 @@ type Schedulers struct {
 // daemons disabled" slog warn).
 func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	out := Schedulers{}
+	if deps.Cfg == nil {
+		return out, fmt.Errorf("WireSchedulers: nil Cfg")
+	}
+	if deps.ParentCtx == nil {
+		return out, fmt.Errorf("WireSchedulers: nil ParentCtx")
+	}
+
+	// deps.Router is wrapped in the cron.SessionRouter adapter below and
+	// passed to cron.SchedulerConfig.Router. A nil router would not panic at
+	// construction time but would panic at first job execution when the
+	// scheduler calls Router methods. Catch it at startup instead.
+	// R260528-ARCH-23 (#1382): the nil check moved from the caller-built
+	// SessionRouterAdapter field to deps.Router now that the adapter is built
+	// here.
+	if deps.Router == nil {
+		return out, fmt.Errorf("WireSchedulers: nil Router")
+	}
 
 	cronLoc := deps.Cfg.ParseCronTimezone()
 	notifyDefault := cron.NotifyTarget{
@@ -148,8 +189,8 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
-		Router:        deps.SessionRouterAdapter,
-		Platforms:     deps.Platforms,
+		Router:        newCronRouterAdapter(deps.Router),
+		NotifySender:  newPlatformNotifySender(deps.Platforms),
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
 		StorePath:     deps.CronStorePath,
@@ -167,23 +208,24 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 	out.Cron = scheduler
 
-	// Auto-workspace-chain (docs/rfc/auto-workspace-chain.md §4.3):
-	// register cron Scheduler as a SessionIDExcluder so cron-spawned
-	// session IDs are never folded into a user session's
-	// prev_session_ids by the auto-chain spawn / backfill paths.
-	deps.Router.AddSessionIDExcluder(scheduler)
+	// (auto-workspace-chain SessionIDExcluder registration removed — RFC
+	// docs/rfc/project-stable-session-key.md §9.1. The cron Scheduler's
+	// IsExcluded / RecentSessionsFilter is retained because the history
+	// panel still uses it to hide cron-owned sessionIDs.)
 
 	// Build sysession Manager when enabled. Failure is degradable:
 	// missing/broken claude binary should not break naozhi startup.
-	// We swallow the error here (caller already logs at slog.Warn)
-	// and return out.Sysession=nil so caller's nil-guard is meaningful.
+	// We surface the build error via out.SysessionBuildErr (part of the
+	// return contract, not a caller closure side-channel — #1588) and
+	// return out.Sysession=nil so caller's nil-guard is meaningful.
 	if deps.BuildSysession != nil {
-		sysMgr, sysWorkDir, _ := deps.BuildSysession()
+		sysMgr, sysWorkDir, sysErr := deps.BuildSysession()
 		if sysMgr != nil {
 			sysMgr.Start(deps.ParentCtx)
 		}
 		out.Sysession = sysMgr
 		out.SysessionWorkDir = sysWorkDir
+		out.SysessionBuildErr = sysErr
 	}
 	return out, nil
 }

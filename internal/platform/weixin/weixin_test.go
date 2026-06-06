@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -356,6 +357,40 @@ func TestAPIClient_SendMessage(t *testing.T) {
 	}
 }
 
+// TestAPIClient_SendMessage_SanitizesErrMsg ensures the untrusted relay-supplied
+// errmsg is stripped of control characters before being embedded in the error
+// returned to callers/logs. R100110-LEAK-12.
+func TestAPIClient_SendMessage_SanitizesErrMsg(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// errmsg carries injected control chars (CR, LF, NUL); marshal so the
+		// raw bytes reach sendMessage's error path unsanitized.
+		body, _ := json.Marshal(map[string]any{
+			"ret":     1,
+			"errcode": 42,
+			"errmsg":  "bad\r\ninjected\x00tail",
+		})
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	api := newAPIClient(srv.URL, "test-token")
+	err := api.sendMessage(context.Background(), "user1", "hello", "ctx-tok")
+	if err == nil {
+		t.Fatal("expected error for ret != 0, got nil")
+	}
+	msg := err.Error()
+	for _, c := range msg {
+		if c < 0x20 || c == 0x7f {
+			t.Fatalf("error message contains unsanitized control char %#x: %q", c, msg)
+		}
+	}
+	if !strings.Contains(msg, "ret=1") || !strings.Contains(msg, "errcode=42") {
+		t.Errorf("error message missing ret/errcode context: %q", msg)
+	}
+}
+
 func TestEditMessage_Noop(t *testing.T) {
 	t.Parallel()
 	w := New(Config{Token: "tok"})
@@ -377,5 +412,63 @@ func TestRandomWechatUIN(t *testing.T) {
 			t.Errorf("duplicate UIN: %s", v)
 		}
 		seen[v] = true
+	}
+}
+
+// TestValidateBaseURLScheme covers the R235-SEC-1 / R214-SEC-1 (#417)
+// transport gate: https is allowed, loopback http is allowed (dev mocks),
+// and non-loopback http is rejected because the no-HMAC long-poll body has
+// no authenticity anchor other than TLS.
+func TestValidateBaseURLScheme(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"empty defaults to https", "", false},
+		{"https ok", "https://ilinkai.weixin.qq.com", false},
+		{"http localhost ok", "http://localhost:8080", false},
+		{"http loopback ip ok", "http://127.0.0.1:9000", false},
+		{"http ipv6 loopback ok", "http://[::1]:9000", false},
+		{"http public host rejected", "http://evil.example.com", true},
+		{"http public ip rejected", "http://203.0.113.5", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBaseURLScheme(tc.url)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateBaseURLScheme(%q) err=%v, wantErr=%v", tc.url, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBaseURLIsTLS locks in the R214-SEC-1 (#417) startup-posture classifier:
+// only an approved loopback http:// relay reports non-TLS; https and the
+// empty default report TLS.
+func TestBaseURLIsTLS(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		url    string
+		wantTL bool
+	}{
+		{"empty default https", "", true},
+		{"https", "https://ilinkai.weixin.qq.com", true},
+		{"loopback http", "http://127.0.0.1:9000", false},
+		{"localhost http", "http://localhost:8080", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := New(Config{Token: "tok", BaseURL: tc.url})
+			if got := w.baseURLIsTLS(); got != tc.wantTL {
+				t.Errorf("baseURLIsTLS(%q) = %v, want %v", tc.url, got, tc.wantTL)
+			}
+		})
 	}
 }

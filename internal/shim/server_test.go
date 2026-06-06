@@ -1121,11 +1121,10 @@ func TestHandleClient_KillCommand(t *testing.T) {
 	_, client, cleanup := setupShimServerWithClient(t)
 	defer cleanup()
 
-	// kill the CLI; handleClient will enqueue cli_exited via writeCh and return.
-	// The writer goroutine flushes before the connection is closed, but
-	// there is a small race between flush and conn.Close() in clearClient.
-	// We read with a deadline and accept EOF as well (means it was already flushed
-	// and the connection was closed before we read).
+	// kill the CLI; handleClient must deliver cli_exited on this live
+	// connection before EOF. Since #1783 the frame is written synchronously
+	// after the writer goroutine drains, so it is no longer racy: a clean EOF
+	// without cli_exited is now a regression, not "acceptable".
 	sendClientCmd(t, client, ClientMsg{Type: "kill"})
 
 	client.conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
@@ -1133,7 +1132,6 @@ func TestHandleClient_KillCommand(t *testing.T) {
 	for !gotExited {
 		line, err := client.reader.ReadBytes('\n')
 		if err != nil {
-			// EOF means connection closed; cli_exited may have already been sent
 			break
 		}
 		var msg ServerMsg
@@ -1145,8 +1143,131 @@ func TestHandleClient_KillCommand(t *testing.T) {
 		}
 	}
 	client.conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-	// gotExited may be false if EOF arrived before we could read — that's acceptable.
-	_ = gotExited
+	if !gotExited {
+		t.Fatal("cli_exited was not delivered on the live connection after kill (#1783 regression)")
+	}
+}
+
+// TestHandleClient_CLIAlreadyDeadNilGuard verifies that when a client attaches
+// after the CLI has already exited, handleClient sends cli_exited during replay
+// and does NOT send it again from the runCommandLoop select (nil-guard prevents
+// the always-selectable closed channel from causing a double delivery).
+// [R20260603-CR-B]
+func TestHandleClient_CLIAlreadyDeadNilGuard(t *testing.T) {
+	dir := shortSocketDir(t)
+	socketPath := filepath.Join(dir, "cmd.sock")
+	stateFile := filepath.Join(dir, "cmd_state.json")
+
+	tokenRaw, _, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	cli, err := startCLI("sh", []string{"-c", "exit 0"}, dir)
+	if err != nil {
+		t.Fatalf("startCLI: %v", err)
+	}
+	// Wait for the process to exit so cli.alive() returns false.
+	cli.wait() //nolint:errcheck
+
+	buf := NewRingBuffer(100, 1024*1024)
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	s := &shimServer{
+		cli:       cli,
+		listener:  ln,
+		buffer:    buf,
+		tokenRaw:  tokenRaw,
+		stateFile: stateFile,
+		state:     State{Key: "cmd:key", Socket: socketPath, CLIAlive: false},
+		done:      make(chan struct{}),
+	}
+	s.watchdog = NewWatchdog(30*time.Second, nil)
+	WriteStateFile(stateFile, s.state) //nolint:errcheck
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, acceptErr := ln.Accept()
+		if acceptErr == nil {
+			connCh <- c
+		}
+	}()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-connCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept timeout")
+	}
+
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		s.handleClient(serverConn, 5*time.Second)
+	}()
+
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+
+	// Auth
+	attach := ClientMsg{Type: "attach", Token: base64.StdEncoding.EncodeToString(tokenRaw), Seq: 0}
+	attachData, _ := json.Marshal(attach)
+	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	writer.Write(append(attachData, '\n'))                 //nolint:errcheck
+	writer.Flush()                                         //nolint:errcheck
+	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
+
+	// Read all initial messages (hello, replay_done, cli_exited).
+	// We wait for the replay_done + cli_exited to appear, then detach.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	exitedCount := 0
+	replayDone := false
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			break
+		}
+		var msg ServerMsg
+		if json.Unmarshal(line, &msg) == nil {
+			switch msg.Type {
+			case "cli_exited":
+				exitedCount++
+			case "replay_done":
+				replayDone = true
+			}
+		}
+		// Once we have replay_done and cli_exited, stop reading and detach.
+		if replayDone && exitedCount > 0 {
+			break
+		}
+	}
+	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+
+	// Send detach to allow handleClient to return cleanly.
+	sendClientCmd(t, connectedClient{conn: conn, reader: reader, writer: writer}, ClientMsg{Type: "detach"})
+
+	// Handler must return promptly — if the nil-guard is broken and the closed
+	// channel is still selectable, the handler would spin or double-deliver.
+	select {
+	case <-handlerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleClient did not return after detach; nil-guard may be broken")
+	}
+
+	// cli_exited must appear exactly once (sent during replay, not a second time from the select).
+	if exitedCount != 1 {
+		t.Errorf("cli_exited appeared %d time(s), want exactly 1", exitedCount)
+	}
 }
 
 func TestHandleClient_ShutdownCommand(t *testing.T) {
@@ -1492,10 +1613,21 @@ func TestHandleClient_StderrForwarded(t *testing.T) {
 		t.Log("note: stderr message may not have arrived within deadline (process timing)")
 	}
 
+	// Deterministic teardown. Without this the test used to return on a
+	// best-effort 3s wait while handleClient was still running; its deferred
+	// s.saveState() then wrote the state file into t.TempDir() concurrently
+	// with the harness's RemoveAll cleanup, intermittently failing with
+	// "directory not empty" (a fresh file appearing between RemoveAll's
+	// readdir and the final rmdir). Closing s.done unblocks runCommandLoop's
+	// <-s.done arm even when the CLI was already dead at attach time
+	// (cliExited==nil), and waiting for handlerDone guarantees the deferred
+	// saveState has completed before this function returns — so no goroutine
+	// writes into the temp dir after cleanup begins.
+	s.initiateShutdown()
 	select {
 	case <-handlerDone:
-	case <-time.After(3 * time.Second):
-		// handleClient may still be waiting; that's OK for this test
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return after shutdown")
 	}
 }
 

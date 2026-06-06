@@ -45,7 +45,11 @@ func (s *rawRouterStub) EventEntriesForKey(key string) []cli.EventEntry {
 }
 
 // TestRouterAdapter_EventEntriesProjection verifies the adapter copies
-// only the Type/Summary fields onto SystemEventEntry and preserves order.
+// only the Type/Summary fields onto SystemEventEntry, preserves order, and
+// (R20260602-PERF-1 / #1578) filters down to the type=="user" turns with a
+// non-blank summary that AutoTitler actually consumes — dropping assistant
+// text / tool_use / blank-summary entries at the single conversion point
+// rather than re-filtering them in buildExcerptFromHistory.
 func TestRouterAdapter_EventEntriesProjection(t *testing.T) {
 	t.Parallel()
 	raw := &rawRouterStub{
@@ -53,6 +57,8 @@ func TestRouterAdapter_EventEntriesProjection(t *testing.T) {
 			"sys:auto:1": {
 				{Type: "user", Summary: "问题一", Time: 100, Detail: "ignored"},
 				{Type: "text", Summary: "回复", Tool: "Read"},
+				{Type: "tool_use", Summary: "Read file"},
+				{Type: "user", Summary: "  "}, // blank user summary dropped
 				{Type: "user", Summary: "问题二"},
 			},
 		},
@@ -61,16 +67,48 @@ func TestRouterAdapter_EventEntriesProjection(t *testing.T) {
 	got := a.EventEntriesForKey("sys:auto:1")
 	want := []SystemEventEntry{
 		{Type: "user", Summary: "问题一"},
-		{Type: "text", Summary: "回复"},
 		{Type: "user", Summary: "问题二"},
 	}
 	if len(got) != len(want) {
-		t.Fatalf("len: got %d want %d", len(got), len(want))
+		t.Fatalf("len: got %d want %d (%+v)", len(got), len(want), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("entry %d: got %+v want %+v", i, got[i], want[i])
 		}
+	}
+
+	// Equivalence guard: feeding the adapter output to buildExcerptFromHistory
+	// must produce the same excerpt as feeding the unfiltered projection,
+	// proving the pushed-down filter is behaviour-preserving.
+	unfiltered := []SystemEventEntry{
+		{Type: "user", Summary: "问题一"},
+		{Type: "text", Summary: "回复"},
+		{Type: "tool_use", Summary: "Read file"},
+		{Type: "user", Summary: "  "},
+		{Type: "user", Summary: "问题二"},
+	}
+	if a, b := buildExcerptFromHistory(got), buildExcerptFromHistory(unfiltered); a != b {
+		t.Errorf("filtered excerpt %q != unfiltered excerpt %q", a, b)
+	}
+}
+
+// TestRouterAdapter_AllNonUserCollapsesToNil verifies that when no entry
+// survives the user/blank filter, the adapter returns nil so the
+// empty-seed contract (buildExcerptFromHistory("")=="") is preserved
+// (R20260602-PERF-1 / #1578).
+func TestRouterAdapter_AllNonUserCollapsesToNil(t *testing.T) {
+	t.Parallel()
+	raw := &rawRouterStub{entries: map[string][]cli.EventEntry{
+		"sys:auto:1": {
+			{Type: "text", Summary: "回复"},
+			{Type: "tool_use", Summary: "Read"},
+			{Type: "user", Summary: "   "},
+		},
+	}}
+	a := wrapRouter(raw)
+	if got := a.EventEntriesForKey("sys:auto:1"); got != nil {
+		t.Errorf("all-non-user slice: got %v want nil", got)
 	}
 }
 

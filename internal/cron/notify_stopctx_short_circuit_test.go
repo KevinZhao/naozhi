@@ -18,7 +18,7 @@ import (
 //
 // Pre-fix: notifyTarget invokes p.MaxReplyLength + SplitText + chunk
 // loop, then bails on the first replyCtx.Err() check. Post-fix: bail
-// at the function head before touching s.platforms[plat] or any text
+// at the function head before any NotifySender.Lookup or text
 // processing. The platform's Reply MUST NOT fire when stopCtx is
 // already cancelled at entry.
 func TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx(t *testing.T) {
@@ -27,9 +27,9 @@ func TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx(t *tes
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	stopCancel() // already dead before notifyTarget is called
 	s := &Scheduler{
-		platforms: map[string]platform.Platform{"fake-notify": fp},
-		stopCtx:   stopCtx,
+		stopCtx: stopCtx,
 	}
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
 	// Long enough to make SplitText's chunk walk visibly nontrivial —
 	// not asserted directly (we lack a hook into the alloc counter),
 	// but the Reply-not-called assertion proves the short-circuit ran
@@ -53,9 +53,9 @@ func TestR20260527122801GO014_NotifyTargetNilStopCtxDoesNotShortCircuit(t *testi
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
 	s := &Scheduler{
-		platforms: map[string]platform.Platform{"fake-notify": fp},
 		// stopCtx intentionally nil
 	}
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
 	s.notifyTarget("fake-notify", "chat-x", "hello world")
 	if fp.uniqueChunks() == 0 {
 		t.Errorf("notifyTarget with nil stopCtx delivered 0 chunks; short-circuit guard fired on a nil parent")

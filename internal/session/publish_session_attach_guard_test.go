@@ -21,7 +21,7 @@ import (
 // having actually called SetHistorySource. The funnel must NOT publish
 // the session with src==nil; the post-publish guarantee is that
 // loadHistorySource returns non-nil for any session reachable through
-// r.sessions.
+// r.ss.sessions.
 func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	t.Parallel()
 
@@ -40,7 +40,7 @@ func TestPublishSessionLocked_AlreadyAttachedButNilStillGetsNoop(t *testing.T) {
 	// Verify the session WAS actually inserted (the guard fires inline,
 	// not as an early return).
 	r.mu.RLock()
-	stored, ok := r.sessions[s.key]
+	stored, ok := r.ss.sessions[s.key]
 	r.mu.RUnlock()
 	if !ok || stored != s {
 		t.Fatalf("publishSessionLocked guard short-circuited the insertion: got=%v ok=%v", stored, ok)

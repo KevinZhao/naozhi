@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -56,6 +57,12 @@ const ffmpegPathEnv = "NAOZHI_FFMPEG_PATH"
 // removing the injection surface entirely instead of merely refreshing it.
 func lookupFFmpeg() (string, error) {
 	if override := os.Getenv(ffmpegPathEnv); override != "" {
+		// R100110-INJ-7: a relative override would degrade to a PATH search
+		// inside exec.LookPath, reintroducing the very PATH-injection surface
+		// this knob promises to remove. Reject it loudly instead.
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("%s=%q: must be an absolute path", ffmpegPathEnv, override)
+		}
 		// Stat to verify the override is still a real file — a misconfigured
 		// path that points at a deleted binary should error loudly rather
 		// than silently fall back to PATH. exec.LookPath also enforces the

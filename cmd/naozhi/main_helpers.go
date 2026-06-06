@@ -37,6 +37,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform/feishu"
 	slackplatform "github.com/naozhi/naozhi/internal/platform/slack"
 	weixinplatform "github.com/naozhi/naozhi/internal/platform/weixin"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
@@ -52,12 +53,13 @@ func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platf
 	platforms := make(map[string]platform.Platform)
 	if cfg.Platforms.Feishu != nil {
 		f := feishu.New(feishu.Config{
-			AppID:             cfg.Platforms.Feishu.AppID,
-			AppSecret:         cfg.Platforms.Feishu.AppSecret,
-			ConnectionMode:    cfg.Platforms.Feishu.ConnectionMode,
-			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
-			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
-			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
+			AppID:                cfg.Platforms.Feishu.AppID,
+			AppSecret:            cfg.Platforms.Feishu.AppSecret,
+			ConnectionMode:       cfg.Platforms.Feishu.ConnectionMode,
+			VerificationToken:    cfg.Platforms.Feishu.VerificationToken,
+			EncryptKey:           cfg.Platforms.Feishu.EncryptKey,
+			MaxReplyLen:          cfg.Platforms.Feishu.MaxReplyLength,
+			AllowInsecureWebhook: cfg.Platforms.Feishu.AllowInsecureWebhook,
 		}, stt)
 		platforms["feishu"] = f
 	}
@@ -153,7 +155,7 @@ func warnIfStateDirLarge(stateDir string) {
 	slog.Warn("state directory large",
 		"path", stateDir, "size_mb", sizeMB, "threshold_mb", stateDirWarnMB,
 		"truncated", truncated,
-		"hint", "prune attachments/events; see docs/ops/disk-budget.md")
+		"hint", "enable the attachment-gc daemon to reclaim old attachments; prune events; see docs/ops/disk-budget.md")
 }
 
 // chatIDSuffix returns the last 8 characters of a chat ID for logging,
@@ -195,6 +197,55 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 	}
 }
 
+// workspaceRootLister unions the attachment-gc daemon's workspace-root
+// sources — router default + per-chat overrides, and bound project
+// paths — then normalises (abs + EvalSymlinks) and dedupes so the same
+// directory reached via two strings is swept once
+// (docs/rfc/attachment-gc-daemon.md §4.4 E1/E2). Either source may be
+// nil (e.g. projects disabled); the lister copes.
+type workspaceRootLister struct {
+	router     *session.Router
+	projectMgr *project.Manager
+}
+
+// KnownWorkspaceRoots implements sysession.WorkspaceRootLister.
+func (l workspaceRootLister) KnownWorkspaceRoots() []string {
+	var raw []string
+	if l.router != nil {
+		raw = append(raw, l.router.WorkspaceRoots()...)
+	}
+	if l.projectMgr != nil {
+		for _, p := range l.projectMgr.All() {
+			if p != nil && p.Path != "" {
+				raw = append(raw, p.Path)
+			}
+		}
+	}
+	// Normalise + dedupe. EvalSymlinks collapses symlink/.. aliases to a
+	// canonical path; failures (dir absent) fall back to the abs form so
+	// a not-yet-created root is still swept once it exists.
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if p == "" {
+			continue
+		}
+		canon, err := filepath.Abs(p)
+		if err != nil {
+			canon = p
+		}
+		if resolved, err := filepath.EvalSymlinks(canon); err == nil {
+			canon = resolved
+		}
+		if _, dup := seen[canon]; dup {
+			continue
+		}
+		seen[canon] = struct{}{}
+		out = append(out, canon)
+	}
+	return out
+}
+
 // buildSysessionManager wires sysession.Manager from cfg.Sysession.
 //
 // Returns (nil, nil) when the framework is disabled — that's the
@@ -206,11 +257,12 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 // aborting startup — sysession is opt-in infrastructure, not a
 // release-critical path.
 //
-// Step 11 will replace the nil OnRunStarted/OnRunEnded with WS-hub
-// callbacks; Phase 1 ships without them so the dashboard reads fall
+// Run-lifecycle telemetry is wired post-construction via
+// Manager.SetTelemetry (server routes), routed through the shared
+// runtelemetry.Broadcaster seam (#1723); the dashboard reads also fall
 // back to polling /api/system/daemons.
 func buildSysessionManager(cfg *config.Config, router *session.Router,
-	defaultWrapper *cli.Wrapper, storePath string,
+	projectMgr *project.Manager, defaultWrapper *cli.Wrapper, storePath string,
 ) (*sysession.Manager, string, error) {
 	if !cfg.Sysession.Enabled {
 		// Return nil rather than a no-op Manager so the caller's nil
@@ -306,26 +358,63 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			}
 		}
 		specific := sysession.DaemonConfig{}
-		if dcfg.MinUserTurns > 0 {
-			specific["min_user_turns"] = dcfg.MinUserTurns
+		if name == sysession.DaemonAutoTitler {
+			if dcfg.MinUserTurns > 0 {
+				specific["min_user_turns"] = dcfg.MinUserTurns
+			}
+			if dcfg.MinRenameInterval != "" {
+				parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
+				if err != nil {
+					slog.Warn("sysession: bad min_rename_interval",
+						"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
+				} else {
+					specific["min_rename_interval"] = parsed
+				}
+			}
+			if dcfg.BatchPerTick > 0 {
+				specific["batch_per_tick"] = dcfg.BatchPerTick
+			}
+			specific["include_group_chat"] = dcfg.IncludeGroupChat
 		}
-		if dcfg.MinRenameInterval != "" {
-			parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
-			if err != nil {
-				slog.Warn("sysession: bad min_rename_interval",
-					"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
+
+		// attachment-gc knobs (docs/rfc/attachment-gc-daemon.md §5).
+		if dcfg.UploadTTL != "" {
+			if d, err := time.ParseDuration(dcfg.UploadTTL); err != nil {
+				slog.Warn("sysession: bad attachment-gc upload_ttl; using daemon default",
+					"daemon", name, "err", err, "value", dcfg.UploadTTL)
 			} else {
-				specific["min_rename_interval"] = parsed
+				specific["upload_ttl"] = d
 			}
 		}
-		if dcfg.BatchPerTick > 0 {
-			specific["batch_per_tick"] = dcfg.BatchPerTick
+		if dcfg.RefTTL != "" {
+			if d, err := time.ParseDuration(dcfg.RefTTL); err != nil {
+				slog.Warn("sysession: bad attachment-gc ref_ttl; using daemon default",
+					"daemon", name, "err", err, "value", dcfg.RefTTL)
+			} else {
+				specific["ref_ttl"] = d
+			}
 		}
-		specific["include_group_chat"] = dcfg.IncludeGroupChat
+		if dcfg.PerRootCap > 0 {
+			specific["per_root_cap"] = dcfg.PerRootCap
+		}
+		if dcfg.DryRun {
+			specific["dry_run"] = true
+		}
+
+		// Tick floor for the low-frequency attachment-gc sweeper: a
+		// misconfigured short tick would re-walk every attachment dir
+		// continuously. GC is fine running hourly at most.
+		if name == sysession.DaemonAttachmentGC && tick < sysession.AttachmentGCMinTick {
+			slog.Warn("sysession: attachment-gc tick below floor; clamping",
+				"requested", tick, "floor", sysession.AttachmentGCMinTick)
+			tick = sysession.AttachmentGCMinTick
+		}
+
 		daemons[name] = sysession.DaemonRuntimeConfig{
-			Enabled:  dcfg.Enabled,
-			Tick:     tick,
-			Specific: specific,
+			Enabled:    dcfg.Enabled,
+			Tick:       tick,
+			RunOnStart: dcfg.RunOnStart,
+			Specific:   specific,
 		}
 	}
 
@@ -335,7 +424,10 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		Runner:      runner,
 		Router:      router,
 		Daemons:     daemons,
-		// OnRunStarted/OnRunEnded are wired in Step 11 (WS broadcast).
+		// attachment-gc daemon sweeps these roots (router default +
+		// overrides ∪ project paths). nil-safe inside the lister.
+		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
+		// Run-lifecycle telemetry is wired via Manager.SetTelemetry (#1723).
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new manager: %w", err)

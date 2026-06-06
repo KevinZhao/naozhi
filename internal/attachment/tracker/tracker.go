@@ -246,11 +246,19 @@ func (t *Tracker) OnSessionRemoved(ctx context.Context, keyhash, workspace strin
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
+	// R20260605B-CORR-16: the first select picks uniformly among ready
+	// cases, so when Stop() has closed closeCh AND t.in still has buffer
+	// space, ~50% of the time the job is buffered into t.in after run()
+	// has already drained-and-exited — nothing will ever write done. The
+	// closeCh case here lets us return ErrTrackerClosed immediately rather
+	// than blocking for the full ctx budget (a 5s shutdown stall).
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-t.closeCh:
+		return ErrTrackerClosed
 	}
 }
 
@@ -270,11 +278,16 @@ func (t *Tracker) Flush(ctx context.Context) error {
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
+	// R20260605B-CORR-16: same drain-then-buffer race as OnSessionRemoved —
+	// cover the closed case so a lost job returns ErrTrackerClosed at once
+	// instead of stalling for the full ctx timeout.
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-t.closeCh:
+		return ErrTrackerClosed
 	}
 }
 
@@ -478,6 +491,15 @@ func (t *Tracker) handleClear(job trackerJob) error {
 	}
 	cleared := 0
 	for _, de := range dayEntries {
+		// Abort the sweep promptly once the tracker is closing so a
+		// large/slow workspace can't pin run() (and Stop's wg.Wait
+		// goroutine) long past Stop's ctx deadline. RemoveReference is
+		// idempotent, so a half-completed clear is safe.
+		select {
+		case <-t.closeCh:
+			return ErrTrackerClosed
+		default:
+		}
 		if !de.IsDir() {
 			continue
 		}
@@ -489,6 +511,11 @@ func (t *Tracker) handleClear(job trackerJob) error {
 			continue
 		}
 		for _, fe := range files {
+			select {
+			case <-t.closeCh:
+				return ErrTrackerClosed
+			default:
+			}
 			name := fe.Name()
 			if !strings.HasSuffix(name, ".meta") {
 				continue
@@ -523,13 +550,17 @@ func (t *Tracker) flushDue() {
 		return
 	}
 	now := t.opts.Clock()
+	deleted := 0
 	for k, v := range t.pending {
 		if v.flushAt.After(now) {
 			continue
 		}
 		t.applyBump(k, v)
 		delete(t.pending, k)
-		t.pendingSize.Add(-1)
+		deleted++
+	}
+	if deleted > 0 {
+		t.pendingSize.Add(-int64(deleted))
 	}
 }
 
@@ -539,10 +570,14 @@ func (t *Tracker) flushAll() {
 	if len(t.pending) == 0 {
 		return
 	}
+	deleted := 0
 	for k, v := range t.pending {
 		t.applyBump(k, v)
 		delete(t.pending, k)
-		t.pendingSize.Add(-1)
+		deleted++
+	}
+	if deleted > 0 {
+		t.pendingSize.Add(-int64(deleted))
 	}
 }
 

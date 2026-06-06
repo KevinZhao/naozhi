@@ -49,3 +49,42 @@ func TestCronView_NilZeroValueIsNil(t *testing.T) {
 		t.Fatalf("zero-value CronView must compare == nil")
 	}
 }
+
+// TestCronScheduler_SchedulerSatisfies pins the field-narrowing contract
+// introduced by R20260603000023-ARCH-2 (#1648): Server.scheduler is now the
+// cronScheduler consumer interface instead of the concrete *cron.Scheduler,
+// advertising only the CronView + dispatch.CronScheduler method sets plus the
+// single direct call (SetTelemetry) the server makes. *cron.Scheduler must
+// continue to satisfy it implicitly; a cron-side rename / signature drift
+// fails to compile here, local to the interface declaration, rather than only
+// at the field assignment in server.go.
+func TestCronScheduler_SchedulerSatisfies(t *testing.T) {
+	var _ cronScheduler = (*cron.Scheduler)(nil)
+}
+
+// TestCronScheduler_NilPointerBoxesToNilInterface guards the ctor's
+// `if opts.Scheduler != nil` conversion (#1648). Boxing a typed nil
+// *cron.Scheduler directly into the interface would yield a NON-nil interface
+// wrapping a nil pointer, which would make every `s.scheduler != nil`
+// cron-enabled guard fire for scheduler-less deployments and panic on the
+// first method call. The constructor must therefore leave the interface as a
+// genuine nil when no scheduler is wired. This test documents the trap so a
+// future edit that "simplifies" the guard away gets a red test.
+func TestCronScheduler_NilPointerBoxesToNilInterface(t *testing.T) {
+	var concrete *cron.Scheduler // typed nil, as opts.Scheduler is when unset
+
+	// WRONG (documented anti-pattern): direct box produces a non-nil interface.
+	var boxedDirect cronScheduler = concrete
+	if boxedDirect == nil {
+		t.Fatal("sanity: a typed-nil pointer boxed directly is NOT a nil interface")
+	}
+
+	// RIGHT (what NewWithOptions does): nil pointer → genuine nil interface.
+	var boxedGuarded cronScheduler
+	if concrete != nil {
+		boxedGuarded = concrete
+	}
+	if boxedGuarded != nil {
+		t.Fatal("guarded conversion of a nil *cron.Scheduler must yield a nil interface")
+	}
+}

@@ -139,6 +139,29 @@
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
+  // §#398-sibling: the agent drill-in panel renders ALL internal events
+  // (tool_use / thinking / task_*), so its DOM grows even faster than the
+  // main panel. Neither renderAgentEvents (reset render) nor appendAgentEvent
+  // (WS live push + HTTP-poll fallback) bounded the node count, so a long
+  // agent task could OOM the tab while drilled in. Cap higher than the
+  // main panel (600) because internal events are denser. We do NOT reuse
+  // dashboard.js trimEventsScroll: it mutates main-panel pagination state
+  // (oldestFetchedEventTime) and mounts a "load earlier" button that the agent
+  // panel has no backing fetch for. This is an agent-local top-trim, mirroring
+  // the cron-live appendEventsToContainer cap.
+  var MAX_AGENT_DOM_EVENTS = 800;
+  function trimAgentEventsScroll(el) {
+    if (!el) return;
+    var bubbles = el.querySelectorAll(':scope > .event').length;
+    if (bubbles <= MAX_AGENT_DOM_EVENTS) return;
+    var node = el.firstChild;
+    while (node && bubbles > MAX_AGENT_DOM_EVENTS) {
+      var next = node.nextSibling;
+      if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
+      el.removeChild(node);
+      node = next;
+    }
+  }
 
   // switchTo(taskID) — drill into a specific agent's internal transcript.
   // Called by:
@@ -293,6 +316,9 @@
         el.appendChild(div);
       }
     }
+    // Bound the live DOM before reading scroll geometry so a long agent task
+    // can't grow #events-scroll without limit and OOM the tab (#398-sibling).
+    trimAgentEventsScroll(el);
     // Track scroll position for sessionScrollPos restore on next switch.
     var k = sid(selectedKey, selectedNode || 'local') + '|' + state.activeTaskID;
     var pos = sessionScrollPos[k];
@@ -318,7 +344,10 @@
       div.textContent = '[' + (ev.type || '?') + '] ' + (ev.summary || '');
       el.appendChild(div);
     }
+    // Sample nearBottom BEFORE trimming: removing top nodes shrinks
+    // scrollHeight and would otherwise skew the stick-to-bottom decision.
     var nearBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
+    trimAgentEventsScroll(el);
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }
 

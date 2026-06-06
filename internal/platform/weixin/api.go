@@ -11,9 +11,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 const (
@@ -37,6 +41,105 @@ type apiClient struct {
 	httpClient *http.Client
 }
 
+// ssrfDialGuard wraps a base DialContext so every resolved address is
+// re-validated against the loopback/private/link-local SSRF deny-set BEFORE
+// the TCP connection is established. The config-time guard in
+// internal/config/config.go only rejects *literal* private IPs in base_url;
+// a hostname like wechat.example.com sails past it and is resolved by the OS
+// resolver at dial time — so an attacker who controls the DNS record (or an
+// internal DNS misconfig) could still steer the request at 169.254.169.254
+// (EC2 IMDS) or an internal admin port. Hooking DialContext is the only place
+// that sees the *resolved* IP, so the guard belongs here. R20260603040203-SEC-10.
+//
+// enabled is false for explicitly-configured loopback dev mocks (httptest /
+// local relays) — validateBaseURLScheme already greenlights those, and a
+// blanket guard would refuse to dial 127.0.0.1, breaking local development.
+func ssrfDialGuard(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return ssrfDialGuardWithResolver(base, func(ctx context.Context, network, host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, network, host)
+	})
+}
+
+// ssrfDialGuardWithResolver is the injectable form used by tests.
+// resolver(ctx, "ip", host) must return the candidate IPs for host.
+func ssrfDialGuardWithResolver(
+	base func(ctx context.Context, network, addr string) (net.Conn, error),
+	resolver func(ctx context.Context, network, host string) ([]net.IP, error),
+) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("weixin dial: split %q: %w", addr, err)
+		}
+		// addr handed to DialContext already has the host resolved to a
+		// literal IP only when the resolver ran; when it's still a name the
+		// default resolver is about to resolve it, so resolve here ourselves
+		// and validate every candidate IP.
+		if ip := net.ParseIP(host); ip != nil {
+			if err := rejectInternalIP(ip); err != nil {
+				return nil, err
+			}
+			return base(ctx, network, addr)
+		}
+		ips, err := resolver(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("weixin dial: resolve %q: %w", host, err)
+		}
+		// DNS-rebinding defence: pass the already-validated IP literal to base
+		// instead of the original hostname. Without this, the OS resolver runs a
+		// second lookup inside base; a TTL=0 rebind can return 169.254.169.254
+		// on that second query even though our check above saw a public IP.
+		var lastRejectErr error
+		for _, ip := range ips {
+			if err := rejectInternalIP(ip); err != nil {
+				lastRejectErr = err
+				continue
+			}
+			// Use the validated IP directly — no second hostname resolution.
+			return base(ctx, network, net.JoinHostPort(ip.String(), port))
+		}
+		if lastRejectErr != nil {
+			return nil, lastRejectErr
+		}
+		return nil, fmt.Errorf("weixin dial: no IPs resolved for %q (SSRF guard)", host)
+	}
+}
+
+// rejectInternalIP returns a non-nil error iff ip falls in the SSRF deny-set:
+// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or
+// the unspecified address. Mirrors the config-time literal-IP guard.
+func rejectInternalIP(ip net.IP) error {
+	if ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() {
+		return fmt.Errorf("weixin dial: refusing connection to internal address %s (SSRF guard)", ip)
+	}
+	return nil
+}
+
+// isLoopbackBaseURL reports whether baseURL targets a loopback host
+// (localhost / 127.0.0.0/8 / ::1). These are the dev-mock URLs that
+// validateBaseURLScheme greenlights, so they must remain dialable with the
+// SSRF guard disabled. Any parse failure is treated as non-loopback so the
+// guard fails closed (a malformed URL gets the stricter treatment).
+func isLoopbackBaseURL(baseURL string) bool {
+	if baseURL == "" {
+		return false // empty → defaultBaseURL (public iLink host)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
 func newAPIClient(baseURL, token string) *apiClient {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
@@ -56,6 +159,14 @@ func newAPIClient(baseURL, token string) *apiClient {
 		// Refuse TLS 1.0/1.1 negotiation even if compiled against an older Go
 		// toolchain; matches feishu/slack/discord clients.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	// R20260603040203-SEC-10: install a DNS-aware SSRF dial guard for every
+	// non-loopback relay. Loopback dev mocks (validateBaseURLScheme-approved
+	// http://127.0.0.1 / localhost) are exempt so local development and the
+	// httptest-based test suite still dial the loopback server.
+	if !isLoopbackBaseURL(baseURL) {
+		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		transport.DialContext = ssrfDialGuard(dialer.DialContext)
 	}
 	return &apiClient{
 		baseURL: baseURL,
@@ -229,7 +340,7 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 		return fmt.Errorf("unmarshal sendMessage response: %w", err)
 	}
 	if resp.Ret != 0 {
-		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%q", resp.Ret, resp.ErrCode, resp.ErrMsg)
+		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%q", resp.Ret, resp.ErrCode, osutil.SanitizeForLog(resp.ErrMsg, 256))
 	}
 	slog.Debug("weixin sendMessage ok")
 	return nil

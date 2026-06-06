@@ -16,8 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/netutil"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
@@ -100,6 +102,17 @@ const maxLoginLimiters = 10000
 // WSUpgradeAllow / UnauthDashAllow handle nil limiter fallback for legacy
 // hand-rolled fixtures.
 func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedProxy bool) *Handlers {
+	// R241-SEC-10 (#470): the cookie MAC is HMAC(secret, token || gen || seq).
+	// When the caller passes an empty gen the MAC collapses to a value fully
+	// determined by (token, secret) alone — deterministic across processes,
+	// so a captured cookie keeps authenticating against any future instance
+	// sharing the same token + secret. Seed an unpredictable per-construction
+	// gen so the no-seed path still rotates the MAC on every restart instead
+	// of replaying a fixed value. Callers that supply a gen (production seeds
+	// one from server.go) keep their explicit value.
+	if cookieGen == "" {
+		cookieGen = cryptoutil.RandomCookieGen()
+	}
 	return &Handlers{
 		DashboardToken:    dashboardToken,
 		cookieSecret:      cookieSecret,
@@ -275,8 +288,9 @@ func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !IsSafeMethod(r.Method) && !SameOriginOK(r, a.TrustedProxy) {
 			slog.Warn("rejecting cross-origin mutating request",
-				"method", r.Method, "path", r.URL.Path,
-				"origin", r.Header.Get("Origin"), "host", r.Host)
+				"method", r.Method, "path", osutil.SanitizeForLog(r.URL.Path, 256),
+				"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
+				"host", osutil.SanitizeForLog(r.Host, 256))
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
@@ -310,6 +324,7 @@ func (a *Handlers) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	if _, err := w.Write([]byte(loginPageHTML)); err != nil {
 		slog.Debug("serve login page", "err", err)
@@ -354,7 +369,7 @@ func buildLoginPageCSP() string {
 	if len(styleHashes) > 0 {
 		styleSrc = strings.Join(styleHashes, " ")
 	}
-	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'"
+	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'; frame-ancestors 'none'"
 }
 
 // Separate regexes per tag: a single `</(?:script|style)>` alternation would
@@ -389,11 +404,25 @@ func (a *Handlers) clientIP(r *http.Request) string {
 // IsSecure returns true if the connection is over TLS.
 // When TrustedProxy is enabled, also trusts the X-Forwarded-Proto header
 // (set by ALB/CloudFront). Without TrustedProxy, only trusts r.TLS.
+//
+// X-Forwarded-Proto may be a comma-separated chain (proto1, proto2) when
+// multiple proxies prepend their own value; only the last hop (the proxy
+// directly in front of naozhi, which we trust via TrustedProxy) is
+// authoritative. A client-injected leading value must never be honoured,
+// so we take the final segment. Per RFC 7239 §5.4 the scheme token is
+// case-insensitive (Nginx may emit "HTTPS"), so compare with EqualFold.
 func (a *Handlers) IsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return a.TrustedProxy && r.Header.Get("X-Forwarded-Proto") == "https"
+	if !a.TrustedProxy {
+		return false
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.LastIndexByte(proto, ','); i >= 0 {
+		proto = proto[i+1:]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 // HandleLoginNoScript is the form-action target for the login page's
@@ -464,7 +493,8 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// R31-SEC1 / R26-SEC1.
 	if !SameOriginOK(r, a.TrustedProxy) {
 		slog.Warn("rejecting cross-origin login attempt",
-			"origin", r.Header.Get("Origin"), "host", r.Host)
+			"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
+			"host", osutil.SanitizeForLog(r.Host, 256))
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
@@ -548,6 +578,12 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	// S9 (#389): clearing the browser cookie alone left the underlying MAC
+	// valid for the full 24h MaxAge — a stolen cookie replayed freely after
+	// logout. Bump cookieGenSeq so the issued MAC no longer authenticates;
+	// IsAuthenticated's constant-time compare now fails for any outstanding
+	// cookie, making logout a real server-side revocation.
+	a.RotateCookieGen()
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    "",

@@ -143,37 +143,46 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	if cap(entries) < len(s.jobs) {
 		entries = make([]*Job, 0, len(s.jobs))
 	}
-	for _, j := range s.jobs {
-		entries = append(entries, j)
+	// R164029-PERF-9 (#1598): emit in s.sortedJobIDs order so the on-disk
+	// JSON stays deterministic WITHOUT running an O(N log N) slices.SortFunc
+	// inside the s.mu critical section on every mutation. The sorted-ID slice
+	// is maintained incrementally at the two s.jobs mutation seams
+	// (addToChatIndexLocked / deleteJobLocked) via binary-search insert/delete.
+	//
+	// s.jobs remains the source of truth: the slice is only a hint. We
+	// validate it still matches the map (same length, every ID resolvable)
+	// while appending; if it drifted — which only happens when a test helper
+	// pokes s.jobs[id] directly without the seam — we fall back to building
+	// + sorting from the map so a job is never silently dropped from the
+	// snapshot. The fallback also covers the empty/single-job case the prior
+	// R241-PERF-9 (#482) fast path special-cased: iterating 0/1 IDs needs no
+	// sort either way.
+	useHint := len(s.sortedJobIDs) == len(s.jobs)
+	if useHint {
+		for _, id := range s.sortedJobIDs {
+			j, ok := s.jobs[id]
+			if !ok {
+				useHint = false
+				break
+			}
+			entries = append(entries, j)
+		}
+	}
+	if !useHint {
+		// Drift fallback: rebuild from the map (authoritative) and sort.
+		// R20260527122801-PERF-2 (#1340): package-level comparator avoids a
+		// per-call closure-header allocation; behaviour is identical
+		// (cmp.Compare on Job.ID). This path is cold in production — only
+		// direct-poke test helpers reach it.
+		entries = entries[:0]
+		for _, j := range s.jobs {
+			entries = append(entries, j)
+		}
+		if len(entries) > 1 {
+			slices.SortFunc(entries, jobIDCmpForSort)
+		}
 	}
 	*entriesPtr = entries
-	// Sort by ID for deterministic on-disk order. Map iteration is random, so
-	// identical in-memory state would produce diff-noisy JSON across saves —
-	// breaking git audit of backed-up cron_jobs.json and making post-incident
-	// diffs much harder to read.
-	//
-	// O(N log N) sort 每 mutation 一次；50 jobs × log50 ≈ 280 比较，热路径可接受。
-	// NEEDS-DESIGN R241-PERF-9 / R242-PERF-12 / R250-PERF-10 (#482 / #675 /
-	// #1113)：若 jobs 上千需增量维护已排 ID slice — 当前 mutator 散布在
-	// scheduler.go / scheduler_jobs.go 多处直写 s.jobs[ID]=j，安全的增量
-	// 实现需要先把所有 mutation 收紧到单一 helper，再加 sortedJobIDs 字段。
-	//
-	// R241-PERF-9 (#482) fast path: skip the sort entirely for the 0/1
-	// job case. slices.SortFunc returns early for n < 2 internally, but
-	// the comparator closure + reflect plumbing in the std lib still
-	// charges a few ns per call. Empty marshalls (`null` from
-	// json.Marshal — see the saveMarshaledSeq side; harmless because no
-	// caller reads jobs.json on a fresh install before any AddJob).
-	// Single-job operator setups + the entire test suite hit this path.
-	if len(entries) > 1 {
-		// R20260527122801-PERF-2 (#1340): use a package-level comparator
-		// rather than a closure literal — closures over no captures still
-		// allocate a fresh function header per call, and at dashboard 1Hz ×
-		// every persist mutation that adds bytes/op + GC pressure that the
-		// pooled-slice optimisation above is otherwise eliminating. The
-		// behaviour is identical (cmp.Compare on Job.ID).
-		slices.SortFunc(entries, jobIDCmpForSort)
-	}
 	fn := s.marshalJobs.Load()
 	if fn == nil {
 		// Defensive fallback: a *Scheduler constructed via the zero
@@ -273,6 +282,16 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // returned ⇒ on disk before next mutation reads cron_jobs.json". Tracked
 // as needs-design under #1333; until then operators on slow disks should
 // pin maxJobs lower so the per-mutation fsync × N traffic stays bounded.
+//
+// RES2 (#400) is the parity-with-session.saveIfDirty framing of the same
+// deferral: adopting a single saveLoop goroutine + dirty flag would trade
+// the synchronous "save() returned ⇒ on disk" determinism (which the
+// rollback contract in persistJobsLocked's godoc relies on) for amortised
+// async writes. Won't-fix as a standalone change because R58 already
+// hoisted WriteFileAtomic out of s.mu (the save-closure pattern) so cron
+// is no longer hot enough to justify losing the determinism; the async
+// loop is gated on the same contract change as #1333 above, not adopted
+// independently. Kept issue-backed so the parity ask has a tracker.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()

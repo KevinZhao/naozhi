@@ -1,7 +1,9 @@
 package shim
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,6 +219,32 @@ func TestReadState_SchemaVersionExceedsMaxRejected(t *testing.T) {
 	}
 }
 
+func TestReadState_SchemaVersionExceedsMaxLogsWarn(t *testing.T) {
+	// The struct-level "Versioning contract" godoc says readers SHOULD log a
+	// warning AND refuse to reconnect when SchemaVersion > theirMax. The
+	// refuse half is covered above; this asserts the warn breadcrumb is
+	// actually emitted so a downgraded binary leaves an operator-visible
+	// trace instead of a silent reconnect failure.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future_warn.json")
+	payload := `{"version":1,"schema_version":2,"shim_pid":1,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k"}`
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStateFile(path); err == nil {
+		t.Fatal("expected error for schema_version > max, got nil")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "newer naozhi") || !strings.Contains(logged, "observed_schema_version=2") {
+		t.Errorf("expected a warn naming the newer-naozhi schema mismatch, got: %q", logged)
+	}
+}
+
 func TestReadState_SchemaVersionEqualToMaxAccepted(t *testing.T) {
 	// schema_version == maxSupportedSchemaVersion is inside the
 	// supported range and must round-trip without error.
@@ -289,9 +317,33 @@ func TestRemoveStateFile(t *testing.T) {
 		t.Error("file should have been removed")
 	}
 
-	// Calling on nonexistent must not panic
+	// Calling on nonexistent must not panic (and must NOT attempt a dir
+	// fsync, since nothing was removed — #406 symmetry). The missing-parent
+	// case exercises the os.Remove-error early return.
 	RemoveStateFile(path)
 	RemoveStateFile("/nonexistent/never/existed.json")
+}
+
+// TestRemoveStateFile_FsyncsDir checks the #406 durability-symmetry fix: a
+// state file written via the atomic write path is removed cleanly and the
+// removal does not error even though RemoveStateFile now fsyncs the parent
+// directory. SyncDir degrades gracefully on filesystems that reject dir
+// fsync (tmpfs/FUSE), so this must pass regardless of the temp-dir backend.
+func TestRemoveStateFile_FsyncsDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shim-abc.json")
+
+	if err := WriteStateFile(path, State{ShimPID: 1, Socket: "/tmp/s.sock", AuthToken: "dA==", Key: "k"}); err != nil {
+		t.Fatalf("WriteStateFile: %v", err)
+	}
+	RemoveStateFile(path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("state file should be gone after RemoveStateFile; stat err = %v", err)
+	}
+	// Parent dir must still be a usable directory afterwards.
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("parent dir unusable after removal: err=%v", err)
+	}
 }
 
 func TestGenerateToken(t *testing.T) {

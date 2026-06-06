@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +54,75 @@ func putRecordBuf(buf *bytes.Buffer) {
 	}
 	buf.Reset()
 	recordBufPool.Put(buf)
+}
+
+// arenaSpan records one entry's byte range inside batchArena.buf. Held
+// only for the second resolve pass in accept(); never escapes the batch.
+type arenaSpan struct{ start, end int }
+
+// batchArena bundles the pooled JSON byte buffer with the two scratch
+// slices accept() needs per batch: `owned` (the materialised Entry
+// headers, which escape into batchJob.Entries) and `spans` (the
+// transient per-entry byte ranges). Folding owned/spans into the same
+// pooled object as the buffer eliminates the two per-batch slice-header
+// allocs accept() previously paid (R20260602-PERF-7, #1630) without
+// introducing a second global pool: the slices share the arena's
+// lifetime exactly (handleBatch returns the whole batchArena once the
+// batch's Entry.JSON bytes are written and no longer referenced).
+type batchArena struct {
+	buf   *bytes.Buffer
+	owned []Entry
+	spans []arenaSpan
+}
+
+// entryArenaPool backs the batch-level copy accept() makes of each
+// borrowed Entry.JSON (R20260531A-PERF-3, #1524). One arena holds every
+// entry's bytes for a single batch; handleBatch returns it after the
+// batch is written. Pooling the arena replaces the bridge's former
+// per-event make([]byte, N) with amortised reuse, eliminating that
+// steady-state heap churn (50 events/s × N sessions).
+var entryArenaPool = sync.Pool{
+	New: func() any {
+		return &batchArena{buf: bytes.NewBuffer(make([]byte, 0, 4*1024))}
+	},
+}
+
+// entryArenaMaxCap caps arena reuse so a one-off giant batch does not
+// pin a large heap allocation in the pool.
+const entryArenaMaxCap = 256 * 1024
+
+// entryArenaSliceMaxCap caps the owned/spans scratch slices so a one-off
+// giant batch (e.g. a 500-entry InjectHistory replay leaking through)
+// does not pin oversized slice backing arrays in the pool for the
+// process lifetime. Sized generously above the typical 50-event batch.
+const entryArenaSliceMaxCap = 1024
+
+func putEntryArena(a *batchArena) {
+	if a == nil {
+		return
+	}
+	if a.buf == nil || a.buf.Cap() > entryArenaMaxCap {
+		// Buffer missing or grown too large: drop the whole arena so the
+		// pool never hands back a giant backing array.
+		return
+	}
+	a.buf.Reset()
+	// Drop entry-pointer references so the persisted EventEntry payloads
+	// are not pinned by the pooled scratch between batches, then reset
+	// length keeping capacity for reuse. Oversized scratch slices are
+	// released to GC (set to nil) rather than pooled.
+	if cap(a.owned) > entryArenaSliceMaxCap {
+		a.owned = nil
+	} else {
+		clear(a.owned)
+		a.owned = a.owned[:0]
+	}
+	if cap(a.spans) > entryArenaSliceMaxCap {
+		a.spans = nil
+	} else {
+		a.spans = a.spans[:0]
+	}
+	entryArenaPool.Put(a)
 }
 
 // logWriteBufSize is the capacity of the bufio.Writer wrapped around
@@ -259,6 +328,27 @@ type Persister struct {
 
 	writers map[string]*perKeyWriter
 
+	// dropping tracks stems whose on-disk files are mid-removal by the
+	// async goroutine spawned in handleOp(opDrop). The per-stem `done`
+	// channel is closed by that goroutine once removeKeyFiles returns; the
+	// run goroutine's opDropDone case then replays any deferred batches and
+	// deletes the entry. This guarantees a same-key recreation's O_CREATE
+	// lands strictly AFTER the unlink — otherwise a slow os.Remove could
+	// race the recreated file and delete it (#1774).
+	//
+	// R20260606 (#1848): handleBatch must NOT block the single writer
+	// goroutine on the per-stem channel while an unlink is in flight (a slow
+	// FUSE/NFS os.Remove would stall every other session's persistence and
+	// drop their batches). Instead, batches that arrive for a dropping stem
+	// are deferred into dropState.pending and replayed in arrival order on
+	// opDropDone, after the unlink completes — preserving the
+	// remove-before-recreate invariant without ever blocking run. The map is
+	// mutated ONLY on the run goroutine (insert in handleOp, pending append
+	// in handleBatch, replay+delete in opDropDone); the `done` channel is
+	// closed by the async goroutine. Nil-safe: an absent key means no
+	// removal is in flight.
+	dropping map[string]*dropState
+
 	// fs is the filesystem classification captured at startup. Never
 	// mutated after NewPersister returns — exposing a changing value
 	// would mislead operators whose only reliable intervention is a
@@ -286,6 +376,13 @@ type Persister struct {
 	// first call and stay grown for the process lifetime.
 	// R249-PERF-19.
 	flushCands []flushCandidate
+	// tickFlushKeys / tickFlushWs are the parallel (key, writer) scratch
+	// slices tickFlush hands to parallelFsync, reused across ticks to keep
+	// the fan-out allocation-free in steady state. Run-goroutine only —
+	// tickFlush is the sole reader/writer, same as flushCands. R20260602-
+	// 091302-PERF-3 (#1569).
+	tickFlushKeys []string
+	tickFlushWs   []*perKeyWriter
 	// lastFlushCount is the number of slots in flushCands that were
 	// actually populated on the most recent tick. R040034-PERF-7 (#1406):
 	// the prior `clear(p.flushCands)` zeroed every slot up to len, so a
@@ -294,16 +391,69 @@ type Persister struct {
 	// Tracking the last-used length lets us clear just the slots we
 	// actually touched. Run-goroutine only — no synchronisation needed.
 	lastFlushCount int
+	// flushAllKeys / flushAllWs are the parallel (key, writer) scratch
+	// slices flushAllLocked hands to parallelFsync, reused across calls
+	// to eliminate the two make() allocations per opFlushAll. Run-goroutine
+	// only — flushAllLocked is called exclusively via the opFlushAll case in
+	// handleOp, which is driven by the same run goroutine as tickFlush.
+	// Kept separate from tickFlushKeys/tickFlushWs: while both run on the
+	// same goroutine, flushAllLocked may be triggered independently of the
+	// tick path (e.g. explicit Flush calls), so conservative independent
+	// fields avoid any cross-path aliasing. R20260603-PERF-2.
+	flushAllKeys []string
+	flushAllWs   []*perKeyWriter
+	// flushAllErrMu serialises firstErr updates inside the parallelFsync
+	// closure used by flushAllLocked. Promoted from a local variable to
+	// eliminate the heap escape caused by the closure capturing its address.
+	// Safe to share without additional coordination: flushAllLocked is only
+	// ever called while the run goroutine holds the op-loop (i.e. no two
+	// flushAllLocked calls can be concurrent). [R20260603-PERF-17]
+	flushAllErrMu sync.Mutex
 }
 
 // batchJob is the internal queue element. Key is the original
 // (un-hashed) session key. Entries are already schema-marshalled
 // bodies pulled from cli.EventEntry upstream.
+//
+// arena (R20260531A-PERF-3, #1524) is an optional pooled buffer that
+// owns the backing bytes for every Entry.JSON in this batch. When the
+// producer hands over borrowed bytes (the bridge no longer copies — see
+// PersistSink contract), accept() copies them into a pooled arena and
+// stores it here so handleBatch can return it to entryArenaPool once the
+// batch is durably written. nil when the producer supplied owned bytes
+// (e.g. older callers / tests); handleBatch's putEntryArena tolerates nil.
 type batchJob struct {
 	Key     string
 	Stem    string
 	Entries []Entry
+	arena   *batchArena
 }
+
+// dropState is the per-stem bookkeeping for an in-flight async unlink
+// (#1774, #1848). It pairs the completion channel (closed by the
+// removeKeyFiles goroutine) with a FIFO of batchJobs that arrived for the
+// stem while the unlink was still running.
+//
+// R20260606 (#1848): replaces the bare `chan struct{}` so handleBatch can
+// defer (rather than block run on) batches landing mid-drop. The pending
+// jobs retain their pooled arena — putEntryArena is deferred until the job
+// is replayed by opDropDone (or dropped/flushed). Mutated ONLY on the run
+// goroutine; the channel is closed by the async unlink goroutine.
+type dropState struct {
+	done    chan struct{}
+	pending []batchJob
+}
+
+// droppingPendingMaxBatches caps how many batches a single dropping stem may
+// defer before handleBatch falls back to the drop telemetry path. A slow
+// FUSE/NFS unlink should not let an unbounded number of in-flight batches
+// (each pinning a pooled arena + EventEntry payloads) accumulate in the
+// pending FIFO and exhaust memory; the cap mirrors the channel-full drop
+// behaviour (count + Observer.OnDrop + return the arena) so overflow is
+// observable rather than silent. Sized generously: a healthy unlink
+// completes in microseconds, so reaching this cap means the filesystem is
+// pathologically slow and dropping is the least-bad outcome.
+const droppingPendingMaxBatches = 256
 
 // NewPersister validates opts, ensures Dir exists, sweeps rotate
 // staging orphans, and spins up the background writer. Returns a
@@ -377,12 +527,13 @@ func NewPersister(opts Options) (*Persister, error) {
 	}
 
 	p := &Persister{
-		opts:    opts,
-		in:      make(chan batchJob, opts.ChannelBuffer),
-		opCh:    make(chan op, 8), // small — drop/flush are rare
-		closeCh: make(chan struct{}),
-		writers: make(map[string]*perKeyWriter),
-		fs:      DetectFS(opts.Dir),
+		opts:     opts,
+		in:       make(chan batchJob, opts.ChannelBuffer),
+		opCh:     make(chan op, 8), // small — drop/flush are rare
+		closeCh:  make(chan struct{}),
+		writers:  make(map[string]*perKeyWriter),
+		dropping: make(map[string]*dropState),
+		fs:       DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {
 		// Operators deserve a prominent log line; doctor + /health
@@ -460,53 +611,117 @@ func (p *Persister) Accept() bool {
 // drops (it is a caller bug to send through a stopped persister, but
 // dropping is the least surprising behaviour).
 func (p *Persister) SinkFor(key string) PersistSink {
-	stem := KeyHash(key)
-	return func(entries []Entry, replayPhase bool) {
-		if p.closed.Load() {
-			return
-		}
-		if replayPhase {
-			p.replayLeakCnt.Add(int64(len(entries)))
-			p.opts.Observer.OnReplayLeak(len(entries))
-			// R242-GO-11 [BREAKING-LOCAL] (closed): previously this branch
-			// panic'd in DevMode to make sink-ordering bugs explode loudly
-			// during tests; the panic was a goroutine-context crash that
-			// took down the whole process and could not be observed cleanly
-			// by callers. We now log at Error level with a `dev_mode=...`
-			// attribute and rely on the `replayLeakCnt` counter +
-			// `OnReplayLeak` Observer hook (both already in place above)
-			// for test assertions and prod alerting. See
-			// TestPersister_DevMode_ReplayLeakObserved for the contract pin.
-			slog.Error("event log persist: replay-phase entries reached sink",
-				"key", key, "count", len(entries),
-				"dev_mode", p.opts.DevMode)
-			return
-		}
-		if len(entries) == 0 {
-			return
-		}
-		job := batchJob{Key: key, Stem: stem, Entries: entries}
-		select {
-		case p.in <- job:
-		default:
-			p.droppedCnt.Add(int64(len(entries)))
-			p.opts.Observer.OnDrop(len(entries))
-			// R250-ARCH-23 (#1184): include channel_used so operators
-			// can distinguish "writer goroutine wedged with N pending
-			// jobs" from "instantaneous burst overrun". Without this
-			// signal the drop log line tells you which key got starved
-			// but not how saturated the queue was at the moment the
-			// drop fired — the single most useful piece of context for
-			// diagnosing whether the writer is making progress at all.
-			// Full per-key fairness (drop additional batches from the
-			// same chatty key first) needs a per-key counter map and
-			// is a follow-up; the observable signal here unblocks
-			// operator triage today.
-			slog.Warn("event log persist: channel full; dropping batch",
-				"key", key, "count", len(entries),
-				"channel_used", len(p.in),
-				"channel_cap", cap(p.in))
-		}
+	// R249-PERF-29 (#997): bind (persister, key, stem) onto a single struct
+	// and return its method value rather than a func literal that captures
+	// three free variables (p, key, stem). The method-value form captures
+	// exactly one receiver pointer, so the per-key sink allocation is a small
+	// fixed-size sessionSink (string header + string header + pointer) rather
+	// than a multi-variable closure environment, and the binding intent is
+	// explicit at the type level.
+	return (&sessionSink{p: p, key: key, stem: KeyHash(key)}).accept
+}
+
+// sessionSink is the per-session binding for a PersistSink. accept implements
+// the PersistSink signature via a method value returned from SinkFor.
+type sessionSink struct {
+	p    *Persister
+	key  string
+	stem string
+}
+
+func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
+	p := s.p
+	if p.closed.Load() {
+		return
+	}
+	if replayPhase {
+		p.replayLeakCnt.Add(int64(len(entries)))
+		p.opts.Observer.OnReplayLeak(len(entries))
+		// R242-GO-11 [BREAKING-LOCAL] (closed): previously this branch
+		// panic'd in DevMode to make sink-ordering bugs explode loudly
+		// during tests; the panic was a goroutine-context crash that
+		// took down the whole process and could not be observed cleanly
+		// by callers. We now log at Error level with a `dev_mode=...`
+		// attribute and rely on the `replayLeakCnt` counter +
+		// `OnReplayLeak` Observer hook (both already in place above)
+		// for test assertions and prod alerting. See
+		// TestPersister_DevMode_ReplayLeakObserved for the contract pin.
+		slog.Error("event log persist: replay-phase entries reached sink",
+			"key", s.key, "count", len(entries),
+			"dev_mode", p.opts.DevMode)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	// R20260531A-PERF-3 (#1524): the PersistSink contract now hands us
+	// borrowed bytes — the producer (bridge) may reuse Entry.JSON's
+	// backing array the moment accept returns. Because the batch is
+	// retained across the async channel, we take ownership here by
+	// copying every entry's JSON into a single pooled arena. The entries
+	// slice header is likewise borrowed, so we materialise our own.
+	//
+	// Two passes: first append all bytes (the arena may grow and move its
+	// backing array), then resolve each Entry.JSON sub-slice once the
+	// arena is final. Resolving slices during the append pass would alias
+	// a stale backing array after a grow.
+	//
+	// R20260602-PERF-7 (#1630): owned/spans are borrowed from the pooled
+	// batchArena (paired with arena.buf) instead of make()'d fresh per
+	// batch, eliminating two slice-header allocs on the hot path. accept
+	// is non-reentrant per arena instance (each Get hands out a distinct
+	// arena, returned only after handleBatch finishes), so the borrowed
+	// slices cannot be aliased across batches. We reslice to the needed
+	// length, growing the backing array only when a batch exceeds the
+	// pooled capacity.
+	arena := entryArenaPool.Get().(*batchArena)
+	n := len(entries)
+	owned := arena.owned
+	if cap(owned) >= n {
+		owned = owned[:n]
+	} else {
+		owned = make([]Entry, n)
+	}
+	spans := arena.spans
+	if cap(spans) >= n {
+		spans = spans[:n]
+	} else {
+		spans = make([]arenaSpan, n)
+	}
+	arena.owned = owned
+	arena.spans = spans
+	for i, e := range entries {
+		start := arena.buf.Len()
+		arena.buf.Write(e.JSON)
+		spans[i] = arenaSpan{start: start, end: arena.buf.Len()}
+		owned[i] = Entry{TimeMS: e.TimeMS}
+	}
+	all := arena.buf.Bytes()
+	for i := range owned {
+		owned[i].JSON = all[spans[i].start:spans[i].end]
+	}
+	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, arena: arena}
+	select {
+	case p.in <- job:
+	default:
+		putEntryArena(arena)
+		p.droppedCnt.Add(int64(len(entries)))
+		p.opts.Observer.OnDrop(len(entries))
+		// R250-ARCH-23 (#1184): include channel_used so operators
+		// can distinguish "writer goroutine wedged with N pending
+		// jobs" from "instantaneous burst overrun". Without this
+		// signal the drop log line tells you which key got starved
+		// but not how saturated the queue was at the moment the
+		// drop fired — the single most useful piece of context for
+		// diagnosing whether the writer is making progress at all.
+		// Full per-key fairness (drop additional batches from the
+		// same chatty key first) needs a per-key counter map and
+		// is a follow-up; the observable signal here unblocks
+		// operator triage today.
+		slog.Warn("event log persist: channel full; dropping batch",
+			"key", s.key, "count", len(entries),
+			"channel_used", len(p.in),
+			"channel_cap", cap(p.in))
 	}
 }
 
@@ -519,12 +734,16 @@ func (p *Persister) DropKey(ctx context.Context, key string) error {
 		return ErrPersisterClosed
 	}
 	done := make(chan error, 1)
-	job := batchJob{Key: key, Stem: KeyHash(key), Entries: nil /* drop signal */}
+	// R250-PERF-18 (#1121): the drop signal travels through opCh, which only
+	// needs the hashed stem (key + done are carried as separate op fields).
+	// Computing the stem into a local avoids materialising a throwaway
+	// batchJob whose Key/Entries fields were never read on this path.
+	stem := KeyHash(key)
 	// Use the pass-through op channel instead of the batch channel so
 	// drops don't get coalesced with pending writes. Implemented as a
 	// dedicated method on the writer goroutine via opCh below.
 	select {
-	case p.opCh <- op{kind: opDrop, key: key, stem: job.Stem, done: done}:
+	case p.opCh <- op{kind: opDrop, key: key, stem: stem, done: done}:
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.closeCh:
@@ -672,6 +891,12 @@ type opKind int
 const (
 	opDrop opKind = iota
 	opFlushAll
+	// opDropDone is posted by the async removeKeyFiles goroutine once the
+	// unlink completes, so the run goroutine can clear the stem from
+	// p.dropping. Carries the same channel that was stored in the map so
+	// the delete only fires when it still matches (a fresh opDrop for the
+	// same stem may have replaced the entry in between). #1774.
+	opDropDone
 )
 
 type op struct {
@@ -679,6 +904,9 @@ type op struct {
 	key  string
 	stem string
 	done chan error
+	// ch is the per-stem completion channel, set only on opDropDone so
+	// the run goroutine can match-and-delete the dropping entry.
+	ch chan struct{}
 }
 
 // run is the single writer goroutine's main loop. It multiplexes
@@ -751,15 +979,74 @@ func (p *Persister) run() {
 			for {
 				select {
 				case o := <-p.opCh:
+					if o.kind == opDropDone {
+						// A still-pending unlink finished during shutdown:
+						// replay its deferred batches (writerFor will recreate
+						// the file) so a clean Stop does not silently lose the
+						// in-flight events. Match-and-delete like the live path.
+						if cur, ok := p.dropping[o.stem]; ok && cur.done == o.ch {
+							pending := cur.pending
+							delete(p.dropping, o.stem)
+							for _, job := range pending {
+								p.handleBatch(job, p.opts.Clock())
+							}
+						}
+						continue
+					}
 					if o.done != nil {
 						// Buffered (cap=1) so this never blocks.
 						o.done <- ErrPersisterClosed
 					}
 				default:
+					// R20260606 (#1848): replay any batches still deferred
+					// behind an in-flight unlink whose opDropDone never landed
+					// (the async goroutine took the <-p.closeCh branch). The
+					// stem's files are being removed concurrently, but
+					// recreating + writing them on a clean Stop preserves the
+					// events; if the unlink races ahead the recreate simply
+					// lands a fresh file, same as the live drop-then-recreate
+					// path. This also returns each deferred job's pooled arena
+					// via handleBatch's defer so Stop leaves no arena pinned.
+					p.replayDroppingPending()
 					p.shutdownAll()
 					return
 				}
 			}
+		}
+	}
+}
+
+// replayDroppingPending drains every dropState.pending FIFO into handleBatch
+// on the run goroutine during Stop's shutdown drain, so batches deferred
+// behind an in-flight unlink (#1848) are persisted (and their pooled arenas
+// returned) rather than silently lost. Called once, after p.in/opCh are
+// drained and before shutdownAll. Run-goroutine only — no synchronisation
+// needed; the entries are removed from p.dropping as they replay so a
+// late-arriving opDropDone for the same stem becomes a no-op.
+func (p *Persister) replayDroppingPending() {
+	if len(p.dropping) == 0 {
+		return
+	}
+	// Snapshot the pending FIFOs first, then delete every dropping entry, so
+	// the subsequent handleBatch replays open/write the recreated files
+	// instead of re-deferring into the same dropState (handleBatch gates on
+	// p.dropping[stem]). A late opDropDone for any of these stems then finds
+	// an absent entry and is a harmless no-op. The map is discarded with the
+	// Persister after run returns regardless.
+	type stemPending struct {
+		stem    string
+		pending []batchJob
+	}
+	snapshot := make([]stemPending, 0, len(p.dropping))
+	for stem, ds := range p.dropping {
+		snapshot = append(snapshot, stemPending{stem: stem, pending: ds.pending})
+	}
+	for _, sp := range snapshot {
+		delete(p.dropping, sp.stem)
+	}
+	for _, sp := range snapshot {
+		for _, job := range sp.pending {
+			p.handleBatch(job, p.opts.Clock())
 		}
 	}
 }
@@ -891,13 +1178,60 @@ func (p *Persister) handleOp(o op) {
 		// have completed yet — Linux/Darwin allow O_CREAT after
 		// unlink-in-flight, the new inode just replaces the dirent).
 		p.dropInMemoryLocked(o.key)
-		go func(stem string, done chan error) {
+		// R20260605 (#1774): publish a per-stem dropState BEFORE spawning the
+		// async unlink. The async goroutine closes ds.done right after
+		// removeKeyFiles returns and posts opDropDone so the run goroutine can
+		// replay any deferred batches and clear the map entry.
+		//
+		// R20260606 (#1848): handleBatch no longer blocks run on ds.done while
+		// the unlink is in flight — instead it defers batches for this stem
+		// into ds.pending, which opDropDone replays in order once the unlink
+		// completes. The remove-before-recreate invariant is preserved because
+		// no writerFor / O_CREATE for this stem runs until opDropDone (and the
+		// replay it drives) has observed the closed channel.
+		ds := &dropState{done: make(chan struct{})}
+		p.dropping[o.stem] = ds
+		go func(stem string, done chan error, ch chan struct{}) {
 			err := p.removeKeyFiles(stem)
+			// Signal completion before notifying the caller, then post
+			// opDropDone so the run goroutine replays deferred batches and
+			// clears the entry. Carry ch so the replay/delete only fires if
+			// this exact dropState is still installed (a newer opDrop for the
+			// same stem may have replaced it).
+			close(ch)
+			select {
+			case p.opCh <- op{kind: opDropDone, stem: stem, ch: ch}:
+			case <-p.closeCh:
+				// Persister shutting down — the map is goroutine-local to
+				// run, which has stopped consuming opCh; Stop's drain replays
+				// (or releases) any deferred batches.
+			}
 			if done != nil {
 				done <- err
 			}
-		}(o.stem, o.done)
+		}(o.stem, o.done, ds.done)
 		return // explicit: skip the post-switch o.done write below
+	case opDropDone:
+		// Replay deferred batches and clear the dropping entry only if it
+		// still matches the channel we closed — a fresh opDrop for the same
+		// stem may have installed a new dropState in between, which a later
+		// opDropDone will retire.
+		cur, ok := p.dropping[o.stem]
+		if !ok || cur.done != o.ch {
+			return
+		}
+		// Delete BEFORE replaying so the replayed batches' writerFor sees an
+		// absent dropping entry and opens the recreated file normally instead
+		// of re-deferring into the same (now retired) dropState.
+		pending := cur.pending
+		delete(p.dropping, o.stem)
+		for _, job := range pending {
+			p.handleBatch(job, p.opts.Clock())
+		}
+		if len(pending) > 0 {
+			p.lastDrainNS.Store(p.opts.Clock().UnixNano())
+		}
+		return
 	case opFlushAll:
 		// Same rationale as opDrop: Flush must observe every pending
 		// batchJob before fsyncing. Without this, tests and /health
@@ -920,16 +1254,27 @@ func (p *Persister) drainInChannel() {
 	// drain may pull dozens of queued batches in a tight burst.
 	// R216-PERF-7. Each handleBatch reuses the same captured `now` so a
 	// burst of 50 batches needs only one vDSO call. R222-PERF-12.
+	//
+	// R20260531A-PERF-9 (#1525): a single Clock() read for the whole
+	// drain would stamp every writer's lastActivity with the pre-drain
+	// instant. A long burst (50+ batches) can take long enough that a
+	// writer touched late in the drain looks idle to tickIdleClose and
+	// gets closed prematurely. Cap that staleness by refreshing `now`
+	// every drainClockRefreshEvery batches — still far cheaper than one
+	// Clock() per batch, but bounds the lastActivity lag.
 	var now time.Time
 	drained := false
+	sinceRefresh := 0
 	for {
 		select {
 		case job := <-p.in:
-			if !drained {
+			if !drained || sinceRefresh >= drainClockRefreshEvery {
 				now = p.opts.Clock()
+				sinceRefresh = 0
 			}
 			p.handleBatch(job, now)
 			drained = true
+			sinceRefresh++
 		default:
 			if drained {
 				p.lastDrainNS.Store(now.UnixNano())
@@ -938,6 +1283,14 @@ func (p *Persister) drainInChannel() {
 		}
 	}
 }
+
+// drainClockRefreshEvery bounds how stale the `now` captured in
+// drainInChannel may become: every N batches the drain re-reads the
+// clock so a long burst cannot stamp late writers with the pre-drain
+// instant and trip tickIdleClose. 16 keeps the vDSO call rate ~16x
+// lower than per-batch while capping staleness to a handful of batches'
+// worth of work. R20260531A-PERF-9 (#1525).
+const drainClockRefreshEvery = 16
 
 // dropInMemoryLocked closes the per-key writer (if open) and removes its
 // map entry. Runs on the writer goroutine — must NOT touch the
@@ -962,16 +1315,21 @@ func (p *Persister) removeKeyFiles(stem string) error {
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
 	idxPath := filepath.Join(p.opts.Dir, stem+idxExt)
 	var firstErr error
-	if err := os.Remove(logPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeFileHook(logPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		firstErr = fmt.Errorf("remove log: %w", err)
 	}
-	if err := os.Remove(idxPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeFileHook(idxPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		if firstErr == nil {
 			firstErr = fmt.Errorf("remove idx: %w", err)
 		}
 	}
 	return firstErr
 }
+
+// removeFileHook is the writable seam tests use to inject a slow or
+// instrumented unlink (e.g. to exercise the DropKey-then-recreate race
+// guarded by p.dropping, #1774). Production callers leave it at os.Remove.
+var removeFileHook = os.Remove
 
 func (p *Persister) flushAllLocked() error {
 	// R250-PERF-25 (#1128): pre-filter dirty writers so the fan-out
@@ -981,8 +1339,8 @@ func (p *Persister) flushAllLocked() error {
 	if len(p.writers) == 0 {
 		return nil
 	}
-	dirtyKeys := make([]string, 0, len(p.writers))
-	dirtyWs := make([]*perKeyWriter, 0, len(p.writers))
+	dirtyKeys := p.flushAllKeys[:0]
+	dirtyWs := p.flushAllWs[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -990,27 +1348,33 @@ func (p *Persister) flushAllLocked() error {
 		dirtyKeys = append(dirtyKeys, k)
 		dirtyWs = append(dirtyWs, w)
 	}
+	p.flushAllKeys = dirtyKeys
+	p.flushAllWs = dirtyWs
 	if len(dirtyWs) == 0 {
 		return nil
 	}
 	// R040034-PERF-13 (#1408): parallel-flush dirty writers via a
 	// bounded worker pool. Same independence-of-state argument as
 	// shutdownAll — see godoc above for the audit. firstErr is
-	// recorded under errMu so concurrent writers racing to lose can
-	// still surface a single representative error to the caller.
-	var (
-		errMu    sync.Mutex
-		firstErr error
-	)
+	// recorded under p.flushAllErrMu so concurrent workers racing to
+	// record the first error surface a single representative error.
+	// p.flushAllErrMu is a Persister field (see struct) to avoid the
+	// heap escape caused by a local sync.Mutex being captured by address
+	// in the closure. [R20260603-PERF-17]
+	var firstErr error
 	p.parallelFsync(dirtyKeys, dirtyWs, func(k string, w *perKeyWriter) {
 		if err := w.flush(p); err != nil {
-			errMu.Lock()
+			p.flushAllErrMu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush %s: %w", k, err)
 			}
-			errMu.Unlock()
+			p.flushAllErrMu.Unlock()
 		}
 	})
+	// Drop writer-pointer references so dropped/idle-closed writers can be
+	// GC'd rather than pinned by the scratch slice until the next Flush.
+	// Keys are plain strings; no GC concern, left as-is. Mirrors tickFlush.
+	clear(dirtyWs)
 	return firstErr
 }
 
@@ -1039,20 +1403,43 @@ func (p *Persister) tickFlush() {
 	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
-	// per tick, sort.Slice is faster in practice than a container/heap
-	// init+pop loop at that N. The slice itself is allocated once per
+	// per tick, slices.SortFunc is faster in practice than a container/heap
+	// init+pop loop at that N, and avoids the closure-boxing alloc that
+	// sort.Slice causes. The slice itself is allocated once per
 	// tick — see flushCandidatePool below if profiling later indicates
 	// this matters.
 	cands := p.collectFlushCandidates(now)
 	if len(cands) == 0 {
 		return
 	}
+	// R20260602-091302-PERF-3 (#1569): fan the per-candidate flush() (each
+	// of which does fsync(log)+fsync(idx)) over the same bounded worker
+	// pool flushAllLocked/shutdownAll use, instead of a serial loop. In the
+	// 50+ concurrent-session steady state a single slow fsync no longer
+	// stalls every other dirty writer's persistence for the whole tick;
+	// wall time drops from ~2N fsyncs serialised to ~2N/workers. The
+	// candidates are distinct writers, so fn touches no shared per-writer
+	// state — same independence audit as shutdownAll's godoc. parallelFsync
+	// keeps the 1-candidate fast path inline (no goroutine spawn), so the
+	// common single-tab case is unchanged.
+	keys := p.tickFlushKeys[:0]
+	ws := p.tickFlushWs[:0]
 	for _, c := range cands {
-		if err := c.w.flush(p); err != nil {
-			slog.Warn("event log persist: debounced flush failed",
-				"key", c.key, "err", err)
-		}
+		keys = append(keys, c.key)
+		ws = append(ws, c.w)
 	}
+	p.tickFlushKeys = keys
+	p.tickFlushWs = ws
+	p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
+		if err := w.flush(p); err != nil {
+			slog.Warn("event log persist: debounced flush failed",
+				"key", k, "err", err)
+		}
+	})
+	// Drop the writer-pointer references so a writer dropped/idle-closed
+	// before the next tick can be GC'd rather than pinned by this scratch
+	// slice. Keys are plain strings; no GC concern, left as-is.
+	clear(ws)
 }
 
 // collectFlushCandidates returns writers whose firstDirtyAt has aged
@@ -1103,8 +1490,8 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		cands = append(cands, flushCandidate{key: k, w: w})
 	}
 	if len(cands) > 1 {
-		sort.Slice(cands, func(i, j int) bool {
-			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
+		slices.SortFunc(cands, func(a, b flushCandidate) int {
+			return a.w.firstDirtyAt.Compare(b.w.firstDirtyAt)
 		})
 	}
 	// Stash the (possibly grown) backing array back so the next tick
@@ -1182,6 +1569,35 @@ func (p *Persister) tickIdleClose() {
 // same clock reading covers both this function's bookkeeping and the
 // caller's lastDrainNS update. R222-PERF-12.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
+	// R20260606 (#1848): if this stem is mid-removal, defer the batch into
+	// the per-stem pending FIFO instead of blocking the single writer
+	// goroutine until the (possibly slow FUSE/NFS) unlink finishes. The
+	// deferred batch retains its pooled arena — putEntryArena is the
+	// replaying handleBatch's responsibility on opDropDone — so we return
+	// WITHOUT the defer below. A cap guards against an unbounded pending
+	// FIFO when the unlink is pathologically slow: overflow falls back to
+	// the drop telemetry path (count + Observer + arena return), mirroring
+	// the channel-full behaviour.
+	if ds, ok := p.dropping[job.Stem]; ok {
+		if len(ds.pending) >= droppingPendingMaxBatches {
+			putEntryArena(job.arena)
+			n := len(job.Entries)
+			p.droppedCnt.Add(int64(n))
+			p.opts.Observer.OnDrop(n)
+			slog.Warn("event log persist: dropping-stem pending cap reached; dropping batch",
+				"key", job.Key, "stem", job.Stem, "count", n,
+				"pending", len(ds.pending))
+			return
+		}
+		ds.pending = append(ds.pending, job)
+		return
+	}
+
+	// R20260531A-PERF-3 (#1524): return the pooled arena that owns this
+	// batch's Entry.JSON bytes once we're done with every entry. The
+	// defer covers the writerFor-error early return below and every
+	// continue/return inside the loop. nil-safe for owned-bytes callers.
+	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
 		slog.Error("event log persist: cannot open writer",
@@ -1196,6 +1612,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// cursor on the underlying slice).
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
+	var written int
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
 		encBuf.Reset()
@@ -1236,8 +1653,11 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		w.bytes += n
 		w.nextSeq++
 		w.entriesSinceIdxWrite++
-		p.writtenCnt.Add(1)
-		p.opts.Observer.OnWrite(1)
+		written++
+	}
+	if written > 0 {
+		p.writtenCnt.Add(int64(written))
+		p.opts.Observer.OnWrite(written)
 	}
 	if !w.dirty {
 		w.dirty = true
@@ -1266,6 +1686,16 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	if w, ok := p.writers[key]; ok {
 		return w, nil
 	}
+
+	// R20260606 (#1848): writerFor no longer blocks the run goroutine on a
+	// mid-removal stem. handleBatch defers any batch for a dropping stem into
+	// dropState.pending and opDropDone replays it only AFTER deleting the
+	// dropping entry, so by the time writerFor runs for a recreated session
+	// the stem is guaranteed absent from p.dropping. The remove-before-
+	// recreate invariant (#1774) therefore still holds without the blocking
+	// receive that previously stalled every other session on a slow unlink.
+	// (handleBatch is the sole caller and gates on p.dropping before reaching
+	// here; writerFor stays defensive by not assuming a dropping entry.)
 
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
 	idxPath := filepath.Join(p.opts.Dir, stem+idxExt)
@@ -1296,6 +1726,9 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	if p.opts.IdxStride > 1 {
 		pendingCap = p.opts.IdxStride * 2
 	}
+	// R20260603-PERF-13: capture clock once; reuse for lastActivity and
+	// hdr.CreatedAt to avoid two vDSO calls when creating a fresh file.
+	now := p.opts.Clock()
 	w := &perKeyWriter{
 		key:          key,
 		stem:         stem,
@@ -1307,13 +1740,13 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		nextSeq:      rec.NextSeq,
 		bytes:        rec.LogSize,
 		pendingIdx:   make([]schema.IdxEntry, 0, pendingCap),
-		lastActivity: p.opts.Clock(),
+		lastActivity: now,
 	}
 
 	// Emit a header if this is a fresh file (log empty after
 	// recovery). Header goes at seq=0.
 	if rec.LogSize == 0 && !rec.HeaderValid {
-		hdr := schema.NewHeader(key, p.opts.Clock().UnixMilli(), p.opts.Generator)
+		hdr := schema.NewHeader(key, now.UnixMilli(), p.opts.Generator)
 		body, mErr := schema.MarshalRecord(hdr)
 		if mErr != nil {
 			logFile.Close()
@@ -1332,7 +1765,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		w.bytes = n
 		w.nextSeq = 1
 		w.dirty = true
-		w.firstDirtyAt = p.opts.Clock()
+		w.firstDirtyAt = now
 
 		// Directly fsync the header so a crash before any other
 		// write leaves a valid file rather than 0 bytes. Cheap (one
@@ -1427,6 +1860,37 @@ func (w *perKeyWriter) flush(p *Persister) error {
 			return fmt.Errorf("append idx batch: %w", err)
 		}
 		idxAppended = true
+	}
+	// Skip the fsync entirely when this flush did not append any idx
+	// bytes — under high session count + short FlushInterval the idx
+	// fsync runs every tick whether or not new data landed, doubling
+	// disk fsync pressure for nothing. Recovery is unaffected: idx is
+	// only valid up to a previously-fsynced suffix anyway.
+	//
+	// R20260605B-CORR-12 (#1816): the idx durability barrier (Sync) MUST
+	// run BEFORE we discard the in-memory retry buffer (pendingIdx) and
+	// advance the stride cursor. AppendBatch above only wrote idx bytes
+	// into the page cache (idx.go's plain Write) — they are NOT durable
+	// until Sync() returns nil. The old code reset pendingIdx to empty and
+	// advanced entriesSinceIdxWrite first; on a transient idx fsync error
+	// flush returned with dirty=true but pendingIdx already empty. The
+	// retry flush then appended nothing (idxAppended=false), never
+	// re-fsynced idx, and cleared dirty — leaving the just-written idx
+	// bytes stranded in page cache. A crash before kernel writeback drove
+	// recovery to truncate log records that were already fsynced in
+	// Phase 1 (recovery.go idx-behind-log branch), destroying durable
+	// data. Syncing first keeps pendingIdx intact on Sync failure so the
+	// next flush re-appends and re-fsyncs the same entries idempotently.
+	if idxAppended {
+		if err := w.idxWriter.Sync(); err != nil {
+			return fmt.Errorf("sync idx: %w", err)
+		}
+		p.fsyncCnt.Add(1)
+		p.opts.Observer.OnFsync()
+
+		// Durability confirmed — only now is it safe to discard the
+		// retry buffer and advance the stride cursor.
+		//
 		// entriesSinceIdxWrite is a cursor into the stride cycle —
 		// reset modulo stride so successive batches stay aligned.
 		w.entriesSinceIdxWrite = (w.entriesSinceIdxWrite + len(w.pendingIdx)) % p.opts.IdxStride
@@ -1461,18 +1925,6 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
 			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		}
-	}
-	// Skip the fsync entirely when this flush did not append any idx
-	// bytes — under high session count + short FlushInterval the idx
-	// fsync runs every tick whether or not new data landed, doubling
-	// disk fsync pressure for nothing. Recovery is unaffected: idx is
-	// only valid up to a previously-fsynced suffix anyway.
-	if idxAppended {
-		if err := w.idxWriter.Sync(); err != nil {
-			return fmt.Errorf("sync idx: %w", err)
-		}
-		p.fsyncCnt.Add(1)
-		p.opts.Observer.OnFsync()
 	}
 
 	w.dirty = false

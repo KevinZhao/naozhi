@@ -102,6 +102,73 @@ func TestLoadStoreInvalidJSON(t *testing.T) {
 	}
 }
 
+// corruptSiblingCount returns how many ".corrupt.*" siblings exist for the
+// given base path in its directory.
+func corruptSiblingCount(t *testing.T, basePath string) int {
+	t.Helper()
+	matches, err := filepath.Glob(basePath + ".corrupt.*")
+	if err != nil {
+		t.Fatalf("glob corrupt siblings: %v", err)
+	}
+	return len(matches)
+}
+
+func TestLoadStore_CorruptFilePreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadStore(path); got != nil {
+		t.Errorf("loadStore(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("corrupt store should be renamed away from %s, stat err = %v", path, err)
+	}
+	if n := corruptSiblingCount(t, path); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt sessions.json, got %d", n)
+	}
+}
+
+// #673: loadWorkspaceOverrides and loadKnownIDs previously discarded a
+// corrupt file silently, letting the next atomic save overwrite the bad
+// bytes. They now preserve the file the same way loadStore does so a
+// partial-write / corruption event leaves a forensic breadcrumb.
+func TestLoadWorkspaceOverrides_CorruptFilePreserved(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	ovPath := workspaceOverridesPath(storePath)
+	if err := os.WriteFile(ovPath, []byte("][garbage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadWorkspaceOverrides(storePath); got != nil {
+		t.Errorf("loadWorkspaceOverrides(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(ovPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt overrides should be renamed away, stat err = %v", err)
+	}
+	if n := corruptSiblingCount(t, ovPath); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt workspace-overrides, got %d", n)
+	}
+}
+
+func TestLoadKnownIDs_CorruptFilePreserved(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	idsPath := knownIDsPath(storePath)
+	if err := os.WriteFile(idsPath, []byte("not an array"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadKnownIDs(storePath); got != nil {
+		t.Errorf("loadKnownIDs(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(idsPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt known-IDs should be renamed away, stat err = %v", err)
+	}
+	if n := corruptSiblingCount(t, idsPath); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt session-ids, got %d", n)
+	}
+}
+
 func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
@@ -392,5 +459,49 @@ func TestWriteStoreMeta_AtomicNoLeftoverTmp(t *testing.T) {
 	}
 	if meta.Version != storeFormatVersion {
 		t.Errorf("meta.Version = %d, want %d", meta.Version, storeFormatVersion)
+	}
+}
+
+// TestWorkspaceOverrides_SaveLoadClear covers the round-trip and the
+// empty-set removal path (#673): clearing all overrides removes the file and
+// fsyncs the parent directory for crash-durability parity with the write
+// path. The removal must succeed (and SyncDir must not error) on a normal
+// temp dir, and a subsequent load must observe no overrides.
+func TestWorkspaceOverrides_SaveLoadClear(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	ovPath := workspaceOverridesPath(storePath)
+
+	overrides := map[string]string{
+		"feishu:direct:alice:general": "/home/alice/proj",
+		"feishu:group:xxx:general":    "/home/team/repo",
+	}
+	if err := saveWorkspaceOverrides(storePath, overrides); err != nil {
+		t.Fatalf("saveWorkspaceOverrides: %v", err)
+	}
+	if _, err := os.Stat(ovPath); err != nil {
+		t.Fatalf("overrides file missing after save: %v", err)
+	}
+	got := loadWorkspaceOverrides(storePath)
+	if len(got) != 2 || got["feishu:direct:alice:general"] != "/home/alice/proj" {
+		t.Fatalf("loadWorkspaceOverrides = %v; want 2 entries round-tripped", got)
+	}
+
+	// Clearing to empty must remove the file (and fsync the dir) without error.
+	if err := saveWorkspaceOverrides(storePath, map[string]string{}); err != nil {
+		t.Fatalf("saveWorkspaceOverrides(empty): %v", err)
+	}
+	if _, err := os.Stat(ovPath); !os.IsNotExist(err) {
+		t.Fatalf("overrides file should be removed after clear; stat err = %v", err)
+	}
+	if got := loadWorkspaceOverrides(storePath); len(got) != 0 {
+		t.Fatalf("loadWorkspaceOverrides after clear = %v; want empty", got)
+	}
+
+	// Clearing again (file already absent) must be a no-op, not an error,
+	// and must not attempt a spurious dir fsync against a removal that
+	// didn't happen.
+	if err := saveWorkspaceOverrides(storePath, nil); err != nil {
+		t.Fatalf("saveWorkspaceOverrides(nil) on absent file: %v", err)
 	}
 }

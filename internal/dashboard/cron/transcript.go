@@ -15,11 +15,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
-	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // cron-dashboard-redesign P2a §4.4.3 — transcript endpoint.
@@ -44,21 +45,6 @@ import (
 // totalling <100 KB so the limits exist purely as safety bounds against
 // pathological JSONL files (long-lived fresh=false sessions accumulate
 // turns from many runs into one file — see internal/cron/run.go:48).
-
-// transcriptSemCap caps concurrent transcript requests across the
-// whole process. R243-SEC-12 (#798): each in-flight transcript holds
-// a 256 KB scanner buffer + 8 MB LimitReader budget; without a
-// process-wide ceiling, N concurrent authenticated operators can each
-// drive their own per-IP bucket and pile up N×8 MB of file-mapped
-// pages. 8 mirrors the dashboard's typical "few operators, occasional
-// detail-drawer fan-out" workload — enough headroom that two users
-// inspecting parallel runs don't 503 each other while still capping
-// the memory amplifier at 8 × 8 MB = 64 MB. Tuned by the same
-// reasoning as transcribeSemCap (which gates ffmpeg runs at 3); the
-// higher cap here reflects that transcript reads are I/O-bound, not
-// CPU-bound, so the bottleneck is buffer memory rather than work
-// throughput.
-const transcriptSemCap = 8
 
 const (
 	// maxTranscriptBytes is the hard cap on bytes read from the JSONL
@@ -101,17 +87,19 @@ const (
 	maxToolInputBytes = 64 * 1024
 
 	// summariseInputCap is the upper byte limit for a tool_use.Input we
-	// will feed to json.Unmarshal in summariseToolInput. Sits between
-	// maxToolInputBytes (the wire payload cap, 64 KB) and
-	// maxTranscriptLineBytes (the bufio.Scanner line cap, 256 KB) so
-	// the contract documented on TestFlattenAssistantEvent_ToolInputSizeCap
-	// still holds — a tool_use.Input slightly larger than the wire cap
-	// (where the wire payload becomes "[truncated]") can still surface a
-	// probe-derived one-line summary. Inputs above this cap are rejected
-	// before json.Unmarshal so a hostile transcript line cannot drive the
-	// parser through a 256 KB deeply-nested blob just to populate a
-	// 200-byte label. R242-SEC-13 (#645).
-	summariseInputCap = 2 * maxToolInputBytes
+	// will feed to json.Unmarshal in summariseToolInput. The probe only
+	// surfaces six short string fields (command, file_path, …) and the
+	// fallback is truncated to 200 bytes, so a useful one-line label never
+	// needs more than a few KB of input. Capping well below the wire
+	// payload limit (maxToolInputBytes = 64 KB) shrinks the amount of
+	// attacker-influenced JSON handed to json.Unmarshal: at
+	// maxTranscriptTurns=500 × transcriptSem(8) the worst-case unmarshal
+	// fan-out drops from 500×128 KB ≈ 64 MB to 500×16 KB ≈ 8 MB per
+	// request. Inputs above this cap are rejected before json.Unmarshal so
+	// a hostile transcript line cannot drive the parser through a large
+	// deeply-nested blob just to populate a 200-byte label.
+	// R242-SEC-13 (#645); R20260602141221-SEC-9 (#1584) lowered 128 KB→16 KB.
+	summariseInputCap = 16 * 1024
 
 	// transcriptRunningSlackMS is the slack added to "now" when computing
 	// the upper bound of the time window for a still-running cron run.
@@ -122,38 +110,15 @@ const (
 	// neither is NTP-synced in test fixtures, and a turn timestamp slightly
 	// ahead of "now" should still appear in the live transcript view.
 	transcriptRunningSlackMS int64 = 5_000
-
-	// transcriptConcurrencyCap caps concurrent in-flight HandleRunTranscript
-	// handlers process-wide. R243-SEC-12 (#798): the existing per-IP
-	// runsLimiter (60/s burst) bounds the per-source rate, but every
-	// authenticated operator still owns a 60/s budget — so N operators
-	// each hitting the limit drive N × per-call resident bytes. Per call
-	// the handler holds a 256 KB bufio.Scanner buffer (maxTranscriptLineBytes)
-	// plus a budget-bounded io.LimitReader chain (maxTranscriptBytes 8 MB
-	// upper bound on bytes drawn from disk before truncated:true is set).
-	// 8 concurrent slots × 8 MB = 64 MB peak resident envelope, which is
-	// well under any reasonable single-server budget; the JSONL is on the
-	// same disk as everything else so even single-stream throughput
-	// dominates wall-time. 503 returned to callers that arrive when all
-	// slots are busy mirrors the TranscribeHandler pattern in
-	// dashboard_transcribe.go and preserves the dashboard's existing
-	// "show 'try again' on 5xx" branch — no client-side change needed.
-	transcriptConcurrencyCap = 8
 )
 
-// transcriptSem is the package-level concurrency gate for
-// HandleRunTranscript. Buffered channel with capacity
-// transcriptConcurrencyCap implements a semaphore: send-on-channel
-// acquires a slot; receive releases it. The non-blocking acquire (select
-// default) returns 503 immediately under saturation rather than queuing
-// — queueing would let a slow disk on one run starve the dashboard's
-// live-tab refresh on every other run.
-//
-// Package-level init keeps this self-contained inside the transcript
-// source file; Handlers itself does not need a new field, so the
-// gate stays orthogonal to the existing per-IP runsLimiter wiring and
-// the construction call sites in build_handlers.go are untouched.
-var transcriptSem = make(chan struct{}, transcriptConcurrencyCap)
+// The concurrency gate for HandleRunTranscript lives on the Handlers
+// struct as transcriptSem (wired by server/build_handlers.go with
+// cronTranscriptSemCap=8). See the acquire site in HandleRunTranscript
+// and the field godoc in handlers.go for the R243-SEC-12 (#798)
+// rationale — each in-flight transcript holds a 256 KB scanner buffer
+// plus an 8 MB LimitReader budget, so a process-wide ceiling bounds the
+// memory amplifier under multi-operator load.
 
 // truncatedToolInputPlaceholder is the JSON value substituted for
 // tool_use.Input fields that exceed maxToolInputBytes. Pre-encoded so the
@@ -337,20 +302,6 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
-		return
-	}
-	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads
-	// process-wide so the per-call 256 KB scanner buffer + 8 MB
-	// LimitReader budget cannot multiply without bound under multi-
-	// operator load. Non-blocking acquire returns 503 immediately
-	// rather than queueing — a slow JSONL read on one run must not
-	// starve a live-tab refresh on another run. Mirrors the
-	// TranscribeHandler pattern in dashboard_transcribe.go.
-	select {
-	case transcriptSem <- struct{}{}:
-		defer func() { <-transcriptSem }()
-	default:
-		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
 		return
 	}
 
@@ -732,10 +683,13 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		// both into truncated=true loses the signal that the JSONL
 		// file itself was malformed vs. the disk was sick.
 		if errors.Is(err, bufio.ErrTooLong) {
-			slog.Warn("cron transcript: line too long (returning partial)", "path", resolved, "err", err)
+			// R20260602141221-SEC-13: use basename only — full path leaks
+			// operator home/workspace/session UUID to log aggregators.
+			// The escape-attempt log at line 461 retains full path (security event).
+			slog.Warn("cron transcript: line too long (returning partial)", "file", filepath.Base(resolved), "err", err)
 			setTruncated("line_too_long")
 		} else {
-			slog.Warn("cron transcript: scan io error (returning partial)", "path", resolved, "err", err)
+			slog.Warn("cron transcript: scan io error (returning partial)", "file", filepath.Base(resolved), "err", err)
 			setTruncated("scan_io_error")
 		}
 	}
@@ -785,28 +739,28 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID string, ok bool) {
 	runID = r.PathValue("run_id")
 	if runID == "" {
-		http.Error(w, "run_id is required", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id is required"})
 		return "", "", false
 	}
 	if len(runID) > runIDLenLimit {
-		http.Error(w, "run_id too long", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id too long"})
 		return "", "", false
 	}
 	if !cronpkg.IsValidID(runID) {
-		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id must be lowercase hex"})
 		return "", "", false
 	}
 	jobID = r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, "job_id is required", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id is required"})
 		return "", "", false
 	}
 	if len(jobID) > maxCronIDLenDashboard {
-		http.Error(w, "job_id too long", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id too long"})
 		return "", "", false
 	}
 	if !cronpkg.IsValidID(jobID) {
-		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id must be lowercase hex"})
 		return "", "", false
 	}
 	return runID, jobID, true
@@ -850,9 +804,9 @@ func sanitizeWireText(s string) string {
 		}
 	}
 	if !dirty {
-		return s
+		return textutil.RedactSecrets(s)
 	}
-	return strings.Map(func(r rune) rune {
+	cleaned := strings.Map(func(r rune) rune {
 		// Drop C0 control runes (incl. 0x1B ESC) except \t / \n / \r.
 		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
 			return -1
@@ -862,6 +816,7 @@ func sanitizeWireText(s string) string {
 		}
 		return r
 	}, s)
+	return textutil.RedactSecrets(cleaned)
 }
 
 // flattenJSONLEvent decodes one JSONL line into 0..N transcript turns.
@@ -1076,10 +1031,9 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 // flattenSystemEvent surfaces system error events (claude CLI lifecycle
 // init / error). init events are dropped because they don't add
 // timeline value; only `subtype == "error"` becomes an "error" turn.
-// Unmarshal failures are logged at Debug — we want operator visibility
-// without changing the downgrade fallback.
+// Unmarshal failures return early (consistent with sibling flatten helpers).
+// The out slice is allocated lazily — only when an error turn is emitted.
 func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 1)
 	tok := transcriptTokens{}
 
 	var sys struct {
@@ -1087,21 +1041,19 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(ev.Message, &sys); err != nil {
-		// Don't change downgrade behavior — sys stays zero-valued so
-		// the error-turn branch below is skipped naturally. Just surface
-		// the parse failure for ops visibility.
 		slog.Debug("cron transcript: system event unmarshal failed; skipping",
 			"err", err)
+		return nil, tok, 0, false
 	}
 	if sys.Subtype != "error" || sys.Message == "" {
-		return out, tok, 0, false
+		return nil, tok, 0, false
 	}
-	out = append(out, transcriptTurn{
+	out := []transcriptTurn{{
 		Index: nextIdx,
 		Kind:  "error",
 		TS:    ts,
 		Text:  sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
-	})
+	}}
 	return out, tok, 0, true
 }
 
@@ -1159,9 +1111,9 @@ type toolInputProbe struct {
 // can still drive json.Unmarshal through a deeply-nested 256 KB blob just
 // to populate six string fields and a fallback that ends up truncated
 // to 200 bytes anyway. Refuse anything beyond summariseInputCap up front
-// so the parser never sees the amplifier shape — the wire payload is
-// already capped at maxToolInputBytes (64 KB) by the call site, so 64 KB
-// is also the largest input we could plausibly need to summarise.
+// so the parser never sees the amplifier shape — the probe only needs a
+// few KB to find a label, so the cap sits well below the wire payload
+// limit (maxToolInputBytes = 64 KB) to minimise unmarshal fan-out.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
@@ -1187,13 +1139,13 @@ func summariseToolInput(name string, input json.RawMessage) string {
 	}
 	for _, s := range candidates {
 		if s != "" {
-			return osutil.SanitizeForLog(s, 200)
+			return textutil.RedactSecrets(osutil.SanitizeForLog(s, 200))
 		}
 	}
 	// Fallback: reuse the original input bytes (json.Unmarshal does not
 	// mutate its source). The probe struct only validated structure, no
 	// need to Marshal again. R244-GO-P2-2.
-	return osutil.SanitizeForLog(string(input), 200)
+	return textutil.RedactSecrets(osutil.SanitizeForLog(string(input), 200))
 }
 
 // isJSONNull reports whether b is the JSON `null` literal (with optional
@@ -1267,10 +1219,15 @@ func parseISO8601MS(s string) int64 {
 //
 // Any deviation (timezone offset other than 'Z', missing field, non-digit
 // where digit expected, lowercase 't'/'z', etc.) returns (0, false) and
-// the caller falls back to time.Parse(time.RFC3339Nano). We DO NOT
-// attempt to validate calendar correctness (e.g. Feb 30) — time.Date
-// performs the normalisation, matching time.Parse's tolerance for the
-// same canonical shape (which also normalises rather than rejects).
+// the caller falls back to time.Parse(time.RFC3339Nano). We range-check
+// each field (month/day/hour/minute/second) before handing them to
+// time.Date, because time.Date *normalises* out-of-range values
+// (e.g. month 13 → Jan of next year) whereas time.Parse *rejects* them
+// ("month out of range"). Accepting them in the fast path would diverge
+// from the slow path; instead we return (0, false) so the caller falls
+// back to time.Parse, which yields its 0 sentinel for the same input.
+// Note: time.Parse rejects second 60 (it does not honour leap seconds for
+// RFC3339), so we likewise cap seconds at 59 to stay consistent.
 func parseISO8601MSFast(s string) (int64, bool) {
 	// Minimum canonical length is "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes.
 	if len(s) < 20 {
@@ -1303,6 +1260,17 @@ func parseISO8601MSFast(s string) (int64, bool) {
 	}
 	second, ok := parseDigits(s[17:19])
 	if !ok {
+		return 0, false
+	}
+	// Range-check each field so we reject the same out-of-range inputs
+	// time.Parse rejects (rather than silently normalising via time.Date).
+	// day is validated per-month (leap-year aware) so e.g. Feb 30 / Apr 31
+	// are declined to match time.Parse rather than rolling into next month.
+	if month < 1 || month > 12 ||
+		day < 1 || day > daysInMonth(year, month) ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 {
 		return 0, false
 	}
 	// After SS we expect either:
@@ -1350,6 +1318,23 @@ func parseISO8601MSFast(s string) (int64, bool) {
 	}
 	t := time.Date(year, time.Month(month), day, hour, minute, second, nanos, time.UTC)
 	return t.UnixMilli(), true
+}
+
+// daysInMonth returns the number of days in the given (year, month). month
+// is assumed to already be in 1..12. February is leap-year aware so the
+// fast path's day range-check matches time.Parse's calendar validation.
+func daysInMonth(year, month int) int {
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		return 31
+	case 4, 6, 9, 11:
+		return 30
+	default: // February
+		if year%4 == 0 && (year%100 != 0 || year%400 == 0) {
+			return 29
+		}
+		return 28
+	}
 }
 
 // parseDigits parses a fixed-length all-ASCII-digits string as a non-
@@ -1419,13 +1404,21 @@ func truncateRunes(s string, maxBytes int) string {
 // Stat error (root deleted mid-flight, permission denied, broken chain) so a
 // failed ancestor probe never weakens the byte-wise gate's negative result.
 func sameFileAncestor(resolved, root string) bool {
-	rootInfo, err := os.Stat(root)
+	// R103901-SEC-8: Lstat (not Stat) so a symlink at the final path
+	// component is never followed when probing inode identity. Both args
+	// arrive already EvalSymlinks-resolved, so on the normal path Lstat and
+	// Stat return identical inode info and SameFile semantics are unchanged
+	// (including case-insensitive FS matching, which folds in the kernel
+	// dir lookup, not the final-component follow). Lstat closes the
+	// defence-in-depth gap where a crafted root/final-component symlink
+	// could otherwise let SameFile match a target outside the subtree.
+	rootInfo, err := os.Lstat(root)
 	if err != nil {
 		return false
 	}
 	cur := filepath.Clean(resolved)
 	for {
-		info, err := os.Stat(cur)
+		info, err := os.Lstat(cur)
 		if err == nil && os.SameFile(info, rootInfo) {
 			return true
 		}

@@ -1,9 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -55,16 +58,20 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	// quickly. We don't need a real CLI; we just need the error path to
 	// run with the stuck flag set.
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		ss: sessionStore{
+			sessions: make(map[string]*ManagedSession),
+			idToKey:  make(map[string]string),
+		},
+		pp: processPool{
+			spawningKeys:     make(map[string]chan struct{}),
+			shimStuckOnReset: make(map[string]bool),
+		},
+		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
+	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	const key = "stuck:key:test"
-	r.shimStuckOnReset[key] = true
+	r.pp.shimStuckOnReset[key] = true
 
 	_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if err == nil {
@@ -73,7 +80,7 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	if !errors.Is(err, ErrShimStuck) {
 		t.Errorf("first GetOrCreate err did not wrap ErrShimStuck: %v", err)
 	}
-	if _, still := r.shimStuckOnReset[key]; still {
+	if _, still := r.pp.shimStuckOnReset[key]; still {
 		t.Error("shimStuckOnReset[key] still set after GetOrCreate; flag must be consumed")
 	}
 
@@ -94,17 +101,21 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		ss: sessionStore{
+			sessions: make(map[string]*ManagedSession),
+			idToKey:  make(map[string]string),
+		},
+		pp: processPool{
+			spawningKeys:     make(map[string]chan struct{}),
+			shimStuckOnReset: make(map[string]bool),
+		},
+		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
+	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
-	r.shimStuckOnReset[stuckKey] = true
+	r.pp.shimStuckOnReset[stuckKey] = true
 
 	_, _, errClean := r.GetOrCreate(context.Background(), cleanKey, AgentOpts{})
 	if errClean == nil {
@@ -113,7 +124,111 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	if errors.Is(errClean, ErrShimStuck) {
 		t.Errorf("clean key got ErrShimStuck wrap: %v", errClean)
 	}
-	if !r.shimStuckOnReset[stuckKey] {
+	if !r.pp.shimStuckOnReset[stuckKey] {
 		t.Error("stuckKey flag must remain after GetOrCreate(cleanKey)")
+	}
+}
+
+// TestRouter_ShimStuckFlagClearedOnTerminalRemoval verifies R090031-CR-5:
+// unregisterSessionLocked with keepBackendOverride=false (terminal removal path)
+// must delete shimStuckOnReset[key] so permanently-deleted sessions do not
+// accumulate stale map entries for the lifetime of the process.
+func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
+	t.Parallel()
+	const key = "dead:session:key"
+	r := &Router{
+		ss: sessionStore{
+			sessions: make(map[string]*ManagedSession),
+			idToKey:  make(map[string]string),
+		},
+		pp: processPool{
+			spawningKeys:     make(map[string]chan struct{}),
+			shimStuckOnReset: make(map[string]bool),
+		},
+		kid: knownIDsStore{ids: make(map[string]bool)},
+	}
+	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
+	s := &ManagedSession{key: key}
+	r.ss.sessions[key] = s
+	r.pp.shimStuckOnReset[key] = true
+
+	r.mu.Lock()
+	r.unregisterSessionLocked(key, s, false)
+	r.mu.Unlock()
+
+	if _, found := r.pp.shimStuckOnReset[key]; found {
+		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
+	}
+}
+
+// TestWarnShimStuckReuse_EmitsOnStuck pins the #1702 fix: when the success
+// path of ResetAndRecreate consumes a set stuck flag (spawnSession reused an
+// alive session via the TOCTOU guard and returned err==nil), the stuck
+// diagnostic must NOT be silently dropped — it must surface as a Warn so
+// operators still learn the shim socket was bound after the gone-wait.
+func TestWarnShimStuckReuse_EmitsOnStuck(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	const key = "feishu:direct:stuck-reuse:general"
+	warnShimStuckReuse(true, key)
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected a WARN record on the stuck-reuse path, got: %q", out)
+	}
+	if !strings.Contains(out, key) {
+		t.Errorf("warn must include the session key for operator triage, got: %q", out)
+	}
+}
+
+// TestWarnShimStuckReuse_SilentWhenNotStuck confirms the normal success path
+// (flag not set) emits nothing — we must not spam a warn on every reset.
+func TestWarnShimStuckReuse_SilentWhenNotStuck(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	warnShimStuckReuse(false, "feishu:direct:clean:general")
+
+	if out := buf.String(); out != "" {
+		t.Errorf("non-stuck success path must not emit any log, got: %q", out)
+	}
+}
+
+// TestRouter_ShimStuckFlagPreservedOnKeepOverride verifies that
+// unregisterSessionLocked with keepBackendOverride=true (ResetAndRecreate /
+// Takeover path) does NOT delete shimStuckOnReset[key] — the key is being
+// recycled so the stuck flag must survive to be consumed by the next spawn.
+func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
+	t.Parallel()
+	const key = "recycled:session:key"
+	r := &Router{
+		ss: sessionStore{
+			sessions: make(map[string]*ManagedSession),
+			idToKey:  make(map[string]string),
+		},
+		pp: processPool{
+			spawningKeys:     make(map[string]chan struct{}),
+			shimStuckOnReset: make(map[string]bool),
+		},
+		kid: knownIDsStore{ids: make(map[string]bool)},
+	}
+	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
+	s := &ManagedSession{key: key}
+	r.ss.sessions[key] = s
+	r.pp.shimStuckOnReset[key] = true
+
+	r.mu.Lock()
+	r.unregisterSessionLocked(key, s, true)
+	r.mu.Unlock()
+
+	if !r.pp.shimStuckOnReset[key] {
+		t.Error("shimStuckOnReset[key] must survive unregisterSessionLocked with keepBackendOverride=true")
 	}
 }

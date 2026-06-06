@@ -61,10 +61,88 @@ type shimMsgCode struct {
 // (Present=false). R222-PERF-13.
 func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	c.Present = true
-	// Delegate to json.Unmarshal for full int parsing semantics (rejects
-	// strings/bools/floats outside int range identically to *int).
-	return json.Unmarshal(data, &c.Value)
+	// Parse the raw JSON integer token directly from []byte with no
+	// string(data) conversion — that conversion allocates a temporary
+	// string on every cli_exited frame on the readLoop hot path.
+	// Hand-parse: accept optional leading '-', then one or more ASCII
+	// digits, reject empty / non-digit / leading '+' / leading zeros
+	// (except bare "0") to match JSON integer semantics. Supports
+	// negative exit codes (e.g. signal kill returns -1). R20260602190132-PERF-1.
+	v, err := parseJSONInt64Bytes(data)
+	if err != nil {
+		return err
+	}
+	c.Value = int(v)
+	return nil
 }
+
+// parseJSONInt64Bytes parses a JSON integer token directly from a []byte
+// slice without allocating a string. Rules match JSON integer semantics:
+//   - optional leading '-' for negatives
+//   - one or more ASCII decimal digits
+//   - no leading '+', no leading zeros (except bare "0")
+//   - empty input and non-digit characters are rejected
+//   - overflow beyond int64 range returns an error
+func parseJSONInt64Bytes(data []byte) (int64, error) {
+	if len(data) == 0 {
+		return 0, errJSONIntEmpty
+	}
+	neg := false
+	i := 0
+	if data[0] == '-' {
+		neg = true
+		i++
+		if i >= len(data) {
+			return 0, errJSONIntInvalid
+		}
+	}
+	// Reject leading '+'.
+	if data[i] == '+' {
+		return 0, errJSONIntInvalid
+	}
+	// Reject leading zero on multi-digit numbers (e.g. "01").
+	if data[i] == '0' && len(data)-i > 1 {
+		return 0, errJSONIntInvalid
+	}
+	var v uint64
+	for ; i < len(data); i++ {
+		b := data[i]
+		if b < '0' || b > '9' {
+			return 0, errJSONIntInvalid
+		}
+		digit := uint64(b - '0')
+		// Check overflow: uint64 max is 18446744073709551615.
+		if v > (maxUint64-digit)/10 {
+			return 0, errJSONIntOverflow
+		}
+		v = v*10 + digit
+	}
+	if neg {
+		// int64 min magnitude is 9223372036854775808.
+		if v > 1<<63 {
+			return 0, errJSONIntOverflow
+		}
+		return -int64(v), nil
+	}
+	if v > 1<<63-1 {
+		return 0, errJSONIntOverflow
+	}
+	return int64(v), nil
+}
+
+const maxUint64 = ^uint64(0)
+
+var (
+	errJSONIntEmpty    = shimIntParseError("empty JSON integer token")
+	errJSONIntInvalid  = shimIntParseError("invalid JSON integer token")
+	errJSONIntOverflow = shimIntParseError("JSON integer overflows int64")
+)
+
+// shimIntParseError is a plain string error type so these sentinel values
+// are package-level constants with no heap allocation.
+type shimIntParseError string
+
+func (e shimIntParseError) Error() string { return string(e) }
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
@@ -289,7 +367,19 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 // teardown path can unwind. R214-CODE-3.
 func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
 	p.lastSeq.Store(msg.Seq)
-	events, _, err := p.protocol.ReadEvent(msg.Line)
+	// R20260603-PERF-10 (#1676): prefer the allocation-aware ReadEventInto so
+	// the dominant single-event frame reuses p.readEventBuf instead of
+	// allocating a fresh 1-element []Event per stdout line. Falls back to
+	// ReadEvent for any Protocol that does not implement the optional variant.
+	var (
+		events []Event
+		err    error
+	)
+	if ri, ok := p.protocol.(eventReaderInto); ok {
+		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
+	} else {
+		events, _, err = p.protocol.ReadEvent(msg.Line)
+	}
 	if err != nil {
 		// ACP RPC errors: kiro returned an error response to a request
 		// we sent (typically session/prompt). The turn is over from
@@ -576,14 +666,23 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 			return false
 		}
 		// No owners claim this result. Under passthrough this means
-		// either (a) an abort with no claimed slots, handled above,
-		// or (b) stray result during reconnect. Either way skip
-		// legacy eventCh; dashboard EventLog already has the entry.
+		// either (a) an abort with no claimed slots, or (b) a true
+		// stray/reconnect result.
+		//
+		// (a) abort: log it here and skip the legacy path — the abort
+		//     errors were already fired above, so there is nothing for
+		//     deliverEvent / the legacy eventCh consumer to do.
 		if ev.SubType == "error_during_execution" {
 			p.logEventAt(ev, nowMS)
 			return false
 		}
-		// Fall through to legacy path only for true stray results.
+		// (b) true stray result (reconnect with no active Send): #1483 —
+		//     do NOT skip; fall through so the unconditional
+		//     p.logEventAt at the bottom of this function records the
+		//     turn-complete entry in EventLog. Returning false here would
+		//     silently drop it from the dashboard transcript, since under
+		//     passthrough no legacy eventCh consumer is guaranteed to
+		//     append it.
 	}
 
 	// SubagentLinker plumbing for RFC v4 agent-team-ui.
@@ -662,8 +761,9 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 		return
 	}
 	if isSystemInit && ev.SessionID != "" {
-		projectDir := resolveProjectDir(p.cwd)
-		p.linker.SetContext(projectDir, ev.SessionID)
+		// Use the pre-computed cachedProjectDir to avoid a rune scan +
+		// os.UserHomeDir syscall on every system/init event. [R112714-PERF-2]
+		p.linker.SetContext(p.cachedProjectDir, ev.SessionID)
 	}
 	// Trigger Resolve for BOTH in-process teammates (TeamCreate's
 	// Agent spawns; task_type="in_process_teammate") AND standalone

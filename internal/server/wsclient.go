@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -115,7 +114,27 @@ type wsClient struct {
 	done              chan struct{}
 	doneOnce          sync.Once
 	dropped           atomic.Int64 // messages dropped due to full send buffer
-	uploadOwner       string       // upload-store owner key derived from auth cookie (or IP in no-token mode)
+	// uploadOwner is the upload-store owner key derived from auth cookie (or
+	// IP in no-token mode). Accessed concurrently: the readPump's auth handler
+	// writes it (handleAuth token-mode derivation) while writePump's
+	// unregister path reads it (releaseOwnerSlot) and the readPump's send path
+	// reads it (allowSendForOwner). #1776: guard the read/write with an atomic
+	// pointer so a write-in-readPump / read-in-writePump overlap is race-free.
+	// nil pointer reads as "" via uploadOwnerKey. R1776-GO-1.
+	uploadOwner atomic.Pointer[string]
+}
+
+// uploadOwnerKey returns the current upload-store owner key, "" when unset.
+func (c *wsClient) uploadOwnerKey() string {
+	if p := c.uploadOwner.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// setUploadOwner stores the upload-store owner key. #1776.
+func (c *wsClient) setUploadOwner(owner string) {
+	c.uploadOwner.Store(&owner)
 }
 
 func (c *wsClient) closeDone() {
@@ -246,7 +265,7 @@ func (c *wsClient) readPump() {
 		if r := recover(); r != nil {
 			// OBS1: increment panic counter before logging so observers see
 			// the rate even when stack-dump output is truncated.
-			metrics.PanicRecoveredTotal.Add(1)
+			serverMetrics.PanicRecovered()
 			// Log the panic cause at Error so operators are alerted, but
 			// keep the verbose stack trace at Debug — shipping it to
 			// journald / aggregated log stores would broadcast internal
@@ -354,7 +373,7 @@ func (c *wsClient) readPump() {
 			// by N. Per-conn limiter above is still the per-tab floor; we
 			// only consult the per-user bucket once that admits the call,
 			// which preserves legitimate single-tab burst semantics.
-			if !c.hub.allowSendForOwner(c.uploadOwner) {
+			if !c.hub.allowSendForOwner(c.uploadOwnerKey()) {
 				c.SendRaw([]byte(wsErrRateLimitedMsg))
 				continue
 			}
@@ -407,7 +426,7 @@ func (c *wsClient) writePump() {
 			// even when stack output is truncated, then log the cause at
 			// Error and keep the stack at Debug to avoid leaking internal
 			// paths to aggregated log stores.
-			metrics.PanicRecoveredTotal.Add(1)
+			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws writePump (recovered)",
 				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws writePump: stack",

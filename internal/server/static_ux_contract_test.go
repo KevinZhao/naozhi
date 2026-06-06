@@ -1,6 +1,28 @@
+// static_ux_contract_test.go — UX contract pins for embedded dashboard assets.
+//
+// DO NOT add more regex-based source-grep tests to this file. (#388 / TEST2)
+//
+// This file has grown to thousands of lines of source-grep regex assertions
+// that lock implementation details (DOM structure, literal strings). Every
+// new regex pin raises the review-velocity tax: a benign DOM rearrange trips
+// dozens of unrelated failures, and reviewers learn to rubber-stamp
+// "just-edit-the-test", which hollows out the contract.
+//
+// For NEW UX contracts, prefer in order:
+//  1. test/e2e/ Playwright assertions for anything user-observable in the DOM.
+//  2. httptest behavioural checks for response bodies / headers / status.
+//  3. A source-grep regex here ONLY for invariants that cannot be expressed
+//     behaviourally (e.g. "this dangerous call site exists exactly once"),
+//     and a positive presence assertion needs ≥2 distinct witnesses so a
+//     coincidental substring match cannot satisfy it.
+//
+// Forbid-list (negative) regex assertions are still welcome here.
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -174,8 +196,10 @@ func TestDashboardHTML_SectionHeaderNotAllCaps(t *testing.T) {
 	if !strings.Contains(html, "text-transform:none") {
 		t.Error("section-header must drop text-transform:uppercase — project names render in natural case now")
 	}
-	if !strings.Contains(html, ".section-header{padding:6px 12px 6px 16px;font-size:12px;") {
-		t.Error("section-header must use font-size:12px on desktop")
+	// font-size migrated to the --nz-fs-sm token (R20260606 design-system
+	// scale); --nz-fs-sm resolves to 12px so the rendered size is unchanged.
+	if !strings.Contains(html, ".section-header{padding:6px 12px 6px 16px;font-size:var(--nz-fs-sm);") {
+		t.Error("section-header must use font-size:var(--nz-fs-sm) (=12px) on desktop")
 	}
 	// Forbid the legacy rule that still includes uppercase + letter-spacing,
 	// to catch accidental reverts that paste the old block back in full.
@@ -220,7 +244,9 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	}
 	// Sanity: code-oriented selectors still use monospace internally so this
 	// rollback doesn't accidentally de-fix code rendering.
-	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono'") {
+	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
+	// font-size:13px and the SF Mono stack are intentionally left as-is.
+	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
@@ -1924,6 +1950,175 @@ func TestDashboardJS_UXP3_UploadReorderHelper(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_ImageOrientationBakedFromEXIF pins the fix that bakes EXIF
+// orientation into the pixels during the canvas re-encode. Re-encoding an
+// image through canvas.toBlob strips the EXIF orientation flag, so without
+// `imageOrientation: 'from-image'` on the createImageBitmap call a portrait
+// iPhone photo (which stores landscape pixels + a rotate flag) arrives at the
+// backend sideways. The option makes the decoder rotate the pixels up-front,
+// and the returned bitmap's width/height are already the corrected
+// dimensions — so the existing scaling math stays correct and we must NOT add
+// any manual ctx.rotate (that would double-correct).
+func TestDashboardJS_ImageOrientationBakedFromEXIF(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The decode in normalizeImage must request EXIF orientation baking.
+	if !strings.Contains(js, "createImageBitmap(file, { imageOrientation: 'from-image' })") {
+		t.Error("normalizeImage must call createImageBitmap with { imageOrientation: 'from-image' } so EXIF orientation is baked into the re-encoded JPEG; without it portrait phone photos reach the backend sideways")
+	}
+
+	// 2) Guard against double-correction: the bitmap is already upright, so
+	//    normalizeImage must not also rotate the canvas context. If a future
+	//    edit reintroduces a manual rotate, the image would be flipped twice.
+	normStart := strings.Index(js, "async function normalizeImage(file)")
+	if normStart < 0 {
+		t.Fatal("normalizeImage function not found")
+	}
+	// Bound the scan to the function body (next top-level `async function` /
+	// `function` declaration) so an unrelated rotate elsewhere can't trip it.
+	rest := js[normStart+len("async function normalizeImage(file)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	for _, banned := range []string{"ctx.rotate", "ctx.translate", "ctx.transform"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("normalizeImage must not call %s — createImageBitmap with imageOrientation:'from-image' already delivers an upright bitmap, so manual canvas rotation would double-correct the orientation", banned)
+		}
+	}
+}
+
+// TestDashboardJS_PreviewUsesNormalizedImage pins the root-cause fix for the
+// sideways preview: uploadEntry must swap entry.blobUrl from the raw picked
+// file to the normalized (canvas re-encoded, EXIF-baked) image, so the
+// thumbnail renders upright on every engine — not just those that honor the
+// CSS image-orientation hint — and matches the bytes actually sent to the
+// backend. The swap must revoke the old object URL to avoid a leak and must
+// only run for images that were actually re-encoded (normalizeImage returns
+// the original File on decode failure; PDFs are never normalized).
+func TestDashboardJS_PreviewUsesNormalizedImage(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	upStart := strings.Index(js, "async function uploadEntry(entry)")
+	if upStart < 0 {
+		t.Fatal("uploadEntry function not found")
+	}
+	rest := js[upStart+len("async function uploadEntry(entry)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	// 1) Only re-encoded images get their preview swapped (identity guard
+	//    against normalizeImage's fallback-to-original and against PDFs).
+	if !strings.Contains(body, "entry.kind === 'image' && file !== entry.file") {
+		t.Error("uploadEntry must guard the preview swap on `entry.kind === 'image' && file !== entry.file` so PDFs and decode-failure fallbacks keep their original preview")
+	}
+	// 2) The normalized blob must become the new preview source.
+	if !strings.Contains(body, "entry.blobUrl = upright") {
+		t.Error("uploadEntry must point entry.blobUrl at the normalized image so the thumbnail matches what is sent to the backend")
+	}
+	// 3) The stale object URL must be revoked to avoid a memory leak.
+	if !strings.Contains(body, "URL.revokeObjectURL(entry.blobUrl)") {
+		t.Error("uploadEntry must revoke the previous entry.blobUrl before replacing it to avoid leaking the raw-file object URL")
+	}
+	// 4) On ready, images must trigger the fire-and-forget auto-orient call.
+	//    It must NOT be awaited (upload stays fast / send not blocked) and
+	//    must be image-gated (PDFs never orient).
+	if !strings.Contains(body, "if (entry.kind === 'image') maybeAutoOrient(entry)") {
+		t.Error("uploadEntry must fire maybeAutoOrient(entry) for ready images (fire-and-forget, image-gated)")
+	}
+	if strings.Contains(body, "await maybeAutoOrient") {
+		t.Error("maybeAutoOrient must be fire-and-forget — awaiting it would stall the upload queue and delay send")
+	}
+}
+
+// TestDashboardJS_AutoOrientCallsEndpoint pins the maybeAutoOrient helper that
+// drives the backend auto-orientation feature: it POSTs the upload id to
+// /api/sessions/orient and, on a confirmed rotation, swaps the preview to the
+// inline corrected image the server echoes back. The whole helper is wrapped
+// so any failure is swallowed (the image is already sendable as-is).
+func TestDashboardJS_AutoOrientCallsEndpoint(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	start := strings.Index(js, "async function maybeAutoOrient(entry)")
+	if start < 0 {
+		t.Fatal("maybeAutoOrient function not found")
+	}
+	rest := js[start+len("async function maybeAutoOrient(entry)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	for _, needed := range []string{
+		"/api/sessions/orient",             // hits the right endpoint
+		"JSON.stringify({ id: entry.id })", // sends the upload id
+		"j.rotated",                        // gates on a confirmed rotation
+		"entry.blobUrl = j.image",          // swaps preview to the inline corrected image
+		"pendingFiles.includes(entry)",     // guards against in-flight removal
+	} {
+		if !strings.Contains(body, needed) {
+			t.Errorf("maybeAutoOrient missing required snippet %q", needed)
+		}
+	}
+	// The helper must be defensively wrapped so a network/parse error never
+	// surfaces — the upload is already 'ready'.
+	if !strings.Contains(body, "catch (_)") {
+		t.Error("maybeAutoOrient must swallow errors (catch) — it is best-effort and the image is already sendable")
+	}
+}
+
+// TestDashboardHTML_FileThumbHonorsEXIFOrientation pins the companion fix for
+// the upload-preview thumbnail. The thumbnail <img> in renderFilePreviews
+// renders the ORIGINAL picked file via URL.createObjectURL (not the canvas
+// re-encoded blob), so it still carries the EXIF orientation flag. Browsers
+// do not uniformly apply that flag to <img> by default, so a portrait phone
+// photo previewed sideways even though the upload sent to the backend was
+// already upright. `image-orientation: from-image` on .file-thumb img makes
+// the preview honor EXIF. This is a CSS rendering invariant that cannot be
+// expressed behaviourally without a real browser, so a source pin is warranted.
+func TestDashboardHTML_FileThumbHonorsEXIFOrientation(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	rule := regexp.MustCompile(`\.file-thumb img\{[^}]*image-orientation:\s*from-image`)
+	if !rule.MatchString(html) {
+		t.Error(".file-thumb img must set image-orientation:from-image so the upload preview honors EXIF orientation and a portrait phone photo isn't shown sideways")
+	}
+}
+
 // TestDashboardJS_R110P1_CronStepValueHumanize pins the R110-P1 fix that
 // lets humanizeCron recognize "step-value" cron expressions (e.g.
 // "*\/15 * * * *" every 15 minutes, "0 *\/6 * * *" every 6 hours on the
@@ -2293,8 +2488,18 @@ func TestDashboardHTML_UXP3_SidebarSearchUI(t *testing.T) {
 	html := string(data)
 
 	// Toggle button in the header-row btns: clicking fires toggleSidebarSearch.
-	if !strings.Contains(html, `id="btn-sidebar-search" onclick="toggleSidebarSearch()"`) {
-		t.Error("dashboard.html must expose the btn-sidebar-search trigger with onclick=toggleSidebarSearch()")
+	// The handler is bound via addEventListener in dashboard.js (#922 / #479
+	// inline-handler migration) rather than an inline onclick=, so the static
+	// HTML only needs the stable #btn-sidebar-search anchor.
+	if !strings.Contains(html, `id="btn-sidebar-search"`) {
+		t.Error("dashboard.html must expose the btn-sidebar-search trigger with id=btn-sidebar-search")
+	}
+	js2, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	if !strings.Contains(string(js2), `bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });`) {
+		t.Error("dashboard.js must bind btn-sidebar-search click to toggleSidebarSearch() via addEventListener")
 	}
 
 	// The search pane must exist inside .sidebar-header and OUTSIDE
@@ -4095,6 +4300,13 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 		`if (stats.cli_name) {`,
 		`if (totalKills > 0) {`,
 		`kind: 'warn',`,
+		// R110-P1 #445: claude subprocess live/capacity line, gated on
+		// max_procs > 0 so an uncapped pool shows no ratio.
+		`const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;`,
+		`text: 'claude 子进程 ' + running + '/' + maxProcs,`,
+		// R110-P1 #445: naozhi build-tag service-health line.
+		`if (stats.version_tag) {`,
+		`lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("buildHomeHealthLines body missing contract fragment %q", fragment)
@@ -4216,7 +4428,12 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		`new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()`,
 		`typeof s.last_active === 'number' && s.last_active >= dayStart`,
 		`typeof s.total_cost === 'number' && isFinite(s.total_cost)`,
-		`return { todayActive: todayActive, totalCost: totalCost };`,
+		// #445: prompt count sums per-session message_count (already in the
+		// snapshot) so the "已处理 prompt" card no longer needs the deferred
+		// /api/stats/aggregate backend. Guard >0 so the omitempty-absent (0)
+		// case stays a no-op rather than NaN-poisoning.
+		`typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0`,
+		`return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("computeHomeStats body missing contract fragment %q", fragment)
@@ -4265,11 +4482,18 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	if statsHtmlIdx > 0 && listHtmlIdx > 0 && statsHtmlIdx > listHtmlIdx {
 		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
 	}
-	// Chinese labels — operators should see Chinese copy.
-	for _, want := range []string{"今日活跃会话", "累计花费"} {
+	// Chinese labels — operators should see Chinese copy. "已处理 prompt"
+	// is the #445 third card sourced from aggregated message_count.
+	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
 		}
+	}
+	// #445: the prompt-count card must read stats.totalPrompts (the new
+	// aggregate) rather than re-deriving a constant — a regression that
+	// dropped the field would render `undefined`.
+	if !strings.Contains(body, "stats.totalPrompts") {
+		t.Error("renderRecentSessionsPanel must render stats.totalPrompts in the 已处理 prompt card")
 	}
 }
 
@@ -4296,11 +4520,11 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 		}
 	}
 
-	// 2-column grid is the intended layout (today active + cost). Anchor
-	// the declaration inside the .recent-panel-stats rule so a future
-	// single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr`, css); !ok {
-		t.Error(".recent-panel-stats must be a 2-column grid (today active + total cost)")
+	// 3-column grid is the intended layout (today active + prompt count +
+	// total cost). Anchor the declaration inside the .recent-panel-stats
+	// rule so a future single-column reflow would trip the check.
+	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:repeat\(3,1fr\)`, css); !ok {
+		t.Error(".recent-panel-stats must be a 3-column grid (today active + prompt count + total cost)")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).
@@ -5262,6 +5486,68 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CronLiveAgentOnlyPlaceholder pins the cron-live sibling of
+// the LoadEarlierFallback bug. A "Daily Code Review" cron runs a parallel
+// agent team whose entire event stream is agent / task_* / tool_use — all in
+// INTERNAL_EVENT_TYPES. repaintCronLive used to blindly assign the
+// render output to innerHTML, so a fully-filtered batch left the #cron-live-events
+// container empty. CSS .cdl-events:empty::before then printed "暂无事件"
+// while the "已折叠 N 条更早事件" banner stayed visible — two contradictory
+// states at once. The fix mirrors appendEvents: when events exist but render
+// to nothing, show a placeholder instead of a blank pane.
+func TestDashboardJS_CronLiveAgentOnlyPlaceholder(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The placeholder constant must exist and carry the .cdl-agent-only
+	//    class that appendEventsToContainer keys off to clear it before
+	//    appending real events.
+	if !strings.Contains(js, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("dashboard.js missing CRON_LIVE_AGENT_ONLY_HTML — cron live needs the same all-filtered fallback as the main transcript")
+	}
+	if !strings.Contains(js, "cdl-agent-only") {
+		t.Error("CRON_LIVE_AGENT_ONLY_HTML must carry the .cdl-agent-only class so appendEventsToContainer can detect and clear the placeholder before appending real events")
+	}
+
+	// 2) repaintCronLive must branch on the rendered html being empty while
+	//    events.length > 0 — the exact condition the bug reproduced under.
+	//    Scan the function body so unrelated edits don't trip the assertion.
+	rcIdx := strings.Index(js, "function repaintCronLive() {")
+	if rcIdx < 0 {
+		t.Fatal("could not locate repaintCronLive in dashboard.js")
+	}
+	rcEnd := strings.Index(js[rcIdx:], "\n}\n")
+	if rcEnd < 0 || rcEnd > 4096 {
+		t.Fatalf("could not locate repaintCronLive end brace within 4 KiB (endIdx=%d)", rcEnd)
+	}
+	body := js[rcIdx : rcIdx+rcEnd]
+	if !strings.Contains(body, "else if (events.length > 0)") {
+		t.Error("repaintCronLive must render the placeholder when events exist but every one was internal-filtered — otherwise CSS :empty::before contradicts the truncated banner")
+	}
+	if !strings.Contains(body, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("repaintCronLive must assign CRON_LIVE_AGENT_ONLY_HTML in its all-filtered branch")
+	}
+
+	// 3) appendEventsToContainer must clear a lingering placeholder before
+	//    appending real events, so the two never coexist.
+	apIdx := strings.Index(js, "function appendEventsToContainer(el, events) {")
+	if apIdx < 0 {
+		t.Fatal("could not locate appendEventsToContainer in dashboard.js")
+	}
+	apEnd := strings.Index(js[apIdx:], "\n}\n")
+	if apEnd < 0 || apEnd > 4096 {
+		t.Fatalf("could not locate appendEventsToContainer end brace within 4 KiB (endIdx=%d)", apEnd)
+	}
+	apBody := js[apIdx : apIdx+apEnd]
+	if !strings.Contains(apBody, ".cdl-agent-only") {
+		t.Error("appendEventsToContainer must clear the .cdl-agent-only placeholder before appending real events so placeholder + events never coexist")
+	}
+}
+
 // TestDashboardJS_SandboxedBlobRender pins the sandbox-render client contract.
 // Originally written for HTML preview; now covers SVG too since both file
 // types share renderSandboxedBlob — they're the only workspace document types
@@ -5512,6 +5798,28 @@ func TestServiceWorker_RNEW_UX005_Contract(t *testing.T) {
 	// the SW as controlling — without it, "Add to Home Screen" breaks.
 	if !regexp.MustCompile(`addEventListener\(\s*['"]fetch['"]`).MatchString(src) {
 		t.Error("sw.js missing fetch event listener (required for PWA installability)")
+	}
+}
+
+// TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed pins the
+// R20260602190132-SEC-2 (#1603) fix: handleSW must NOT emit a
+// `Service-Worker-Allowed` header. The header only broadens the max SW
+// scope above the script's own directory; /sw.js already lives at root so
+// its default scope is "/" regardless, making the header a redundant
+// explicit root-scope grant that an unauthenticated scanner could read as
+// a registration hint. Removing it does not change the effective scope.
+func TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/sw.js", nil)
+	rec := httptest.NewRecorder()
+	handleSW(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("handleSW status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got := res.Header.Get("Service-Worker-Allowed"); got != "" {
+		t.Errorf("handleSW set Service-Worker-Allowed=%q; want it absent (R20260602190132-SEC-2 #1603 — header is a redundant root-scope grant)", got)
 	}
 }
 
@@ -6968,5 +7276,29 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// this test before it ships.
 	if !strings.Contains(js, "bold/italic regex must run AFTER esc(s)") {
 		t.Error("inlineMd's SECURITY CONTRACT comment for bold/italic must remain — it documents the invariant that bold/italic .+? captures span already-escaped HTML, and reordering would re-introduce XSS (R172-SEC-H1 / #436)")
+	}
+}
+
+// TestStaticUXContract_FileHasDoNotAddBanner pins the #388 (TEST2) immediate
+// deliverable: a package-doc banner at the top of this file warning that no
+// further regex source-grep tests should be added here, and pointing new UX
+// contracts at test/e2e/ / httptest. The banner is documentation, but it is
+// the contract's only teeth against unbounded growth, so guard its presence
+// here. If you intentionally reword it, update the witnesses below.
+func TestStaticUXContract_FileHasDoNotAddBanner(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("static_ux_contract_test.go")
+	if err != nil {
+		t.Fatalf("read own source: %v", err)
+	}
+	s := string(src)
+	for _, want := range []string{
+		"DO NOT add more regex-based source-grep tests",
+		"test/e2e/",
+		"#388",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("static_ux_contract_test.go LOST the #388 anti-growth banner witness %q — keep the DO-NOT-ADD warning so the contract-test boundary stays documented", want)
+		}
 	}
 }

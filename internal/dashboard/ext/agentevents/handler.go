@@ -10,8 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
@@ -68,9 +69,10 @@ const (
 // inventing a fake concrete pointer. *cli.SubagentLinker satisfies the
 // interface implicitly; existing tests pass it directly.
 type Handler struct {
-	router     *session.Router
-	nodeAccess NodeAccessor
-	linkerFor  func(key string) agentlink.AgentLinker
+	router      *session.Router
+	nodeAccess  NodeAccessor
+	linkerFor   func(key string) agentlink.AgentLinker
+	allowedRoot string // EvalSymlinks-resolved ~/.claude/projects; set by New
 }
 
 // linkerForSession is the default lookup — ManagedSession → *cli.Process
@@ -184,6 +186,19 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// [R112714-SEC-3] Defence-in-depth: verify JSONLPath is under the
+	// allowed root before opening it. SeedFromHistory already validates on
+	// the cli side; this belt-and-suspenders check guards the HTTP boundary.
+	// allowedRoot is empty on first-run (directory not yet created); in that
+	// case jsonlPathUnderAllowedRoot returns false and we serve 404 rather
+	// than opening an unchecked path.
+	if h.allowedRoot != "" && !jsonlPathUnderAllowedRoot(info.JSONLPath, h.allowedRoot) {
+		slog.Warn("agent_events: JSONLPath outside allowed root, rejecting",
+			"path", info.JSONLPath, "allowed_root", h.allowedRoot)
+		http.Error(w, "unknown task", http.StatusNotFound)
+		return
+	}
+
 	reader := cli.NewTranscriptReader(info.JSONLPath)
 	entries, err := reader.Read(after, limit)
 	if err != nil {
@@ -254,7 +269,20 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := os.Stat(resolved)
+	// Open without following a final-component symlink so the bytes streamed
+	// below come from the same inode we validate via Fstat — closing the
+	// symlink-swap TOCTOU between EvalSymlinks and open. O_NOFOLLOW yields
+	// ELOOP on a swapped-in symlink; fold every open error (missing, ELOOP,
+	// IO) to 404 so "missing" and "escape attempt" look identical.
+	f, err := dashproject.OpenWorkspaceFile(resolved)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	// Fstat the fd so size/IsDir reflect the SAME inode we will read from,
+	// not a name that may have been swapped after EvalSymlinks.
+	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -263,12 +291,6 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	f, err := os.Open(resolved)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	defer f.Close()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
@@ -283,10 +305,82 @@ type Deps struct {
 	NodeAccess NodeAccessor
 }
 
-// New constructs a Handler from injected deps.
+// New constructs a Handler from injected deps. It resolves
+// ~/.claude/projects via EvalSymlinks once at startup so the per-request
+// path check in HandleAgentEvents has a canonical root to compare against.
+// R112714-SEC-3.
 func New(d Deps) *Handler {
+	root := claudeProjectsAllowedRoot()
 	return &Handler{
-		router:     d.Router,
-		nodeAccess: d.NodeAccess,
+		router:      d.Router,
+		nodeAccess:  d.NodeAccess,
+		allowedRoot: root,
 	}
+}
+
+// claudeProjectsAllowedRoot returns the EvalSymlinks-resolved path to
+// ~/.claude/projects. Used as the allowed root for JSONLPath validation in
+// HandleAgentEvents. Returns the unresolved lexical path on EvalSymlinks
+// failure (e.g. first-run before the directory exists) so the handler
+// degrades to a lexical prefix check rather than rejecting all requests.
+func claudeProjectsAllowedRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	raw := filepath.Join(home, ".claude", "projects")
+	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
+		return resolved
+	}
+	return raw
+}
+
+// jsonlPathUnderAllowedRoot checks that p is anchored under root after
+// EvalSymlinks resolution of p's nearest existing ancestor. Pure
+// HasPrefix is unsafe ("/var/foo" matches "/var/fooBar"), so we anchor on
+// root + separator. R112714-SEC-3 defence-in-depth (SeedFromHistory
+// already validates on the cli side; this is a belt-and-suspenders check
+// at the HTTP boundary). Returns false when root is empty (not yet
+// resolved) to fail safe rather than allow everything.
+func jsonlPathUnderAllowedRoot(p, root string) bool {
+	if root == "" {
+		return false
+	}
+	abs := filepath.Clean(p)
+	if !filepath.IsAbs(abs) {
+		return false
+	}
+	// EvalSymlinks the nearest existing ancestor of abs so a not-yet-written
+	// jsonl (CLI emits the path before the first write) still resolves
+	// correctly when the parent directory contains symlinks.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	} else {
+		// Walk up to find the nearest existing ancestor.
+		cur := abs
+		tail := ""
+		for {
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				// Reached filesystem root without finding an existing ancestor;
+				// fall back to the unresolved lexical path.
+				break
+			}
+			base := filepath.Base(cur)
+			if tail == "" {
+				tail = base
+			} else {
+				tail = filepath.Join(base, tail)
+			}
+			cur = parent
+			if resolved, err2 := filepath.EvalSymlinks(cur); err2 == nil {
+				abs = filepath.Join(resolved, tail)
+				break
+			}
+		}
+	}
+	if abs == root {
+		return false // exact root match is not under root
+	}
+	return strings.HasPrefix(abs, root+string(filepath.Separator))
 }

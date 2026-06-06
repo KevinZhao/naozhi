@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot exercises the
@@ -31,7 +29,7 @@ func TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
+	c := &Connector{cfg: &Config{}, defaultWorkspace: root}
 	got, err := c.sanitizeWorkspacePath(sub, "workspace", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -55,7 +53,7 @@ func TestSanitizeWorkspacePath_RejectsOutsideAllowedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(other): %v", err)
 	}
-	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
+	c := &Connector{cfg: &Config{}, defaultWorkspace: root}
 	_, err = c.sanitizeWorkspacePath(other, "workspace", false)
 	if err == nil {
 		t.Fatal("expected outside-root error, got nil")
@@ -73,7 +71,7 @@ func TestSanitizeWorkspacePath_StrictMissing(t *testing.T) {
 		t.Fatalf("EvalSymlinks(root): %v", err)
 	}
 	missing := filepath.Join(root, "does-not-exist")
-	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
+	c := &Connector{cfg: &Config{}, defaultWorkspace: root}
 	_, err = c.sanitizeWorkspacePath(missing, "workspace", false)
 	if err == nil {
 		t.Fatal("expected error for missing path under strict mode, got nil")
@@ -90,7 +88,7 @@ func TestSanitizeWorkspacePath_TolerateMissingFallsBackButStillEnforcesRoot(t *t
 	root := t.TempDir()
 	wantRoot, _ := filepath.EvalSymlinks(root)
 	missingInside := filepath.Join(wantRoot, "vanished")
-	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: wantRoot}
+	c := &Connector{cfg: &Config{}, defaultWorkspace: wantRoot}
 
 	got, err := c.sanitizeWorkspacePath(missingInside, "close_discovered cwd", true)
 	if err != nil {
@@ -115,7 +113,7 @@ func TestSanitizeWorkspacePath_TolerateMissingFallsBackButStillEnforcesRoot(t *t
 // close_discovered cwd).
 func TestSanitizeWorkspacePath_ErrorIncludesKindLabel(t *testing.T) {
 	root := t.TempDir()
-	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
+	c := &Connector{cfg: &Config{}, defaultWorkspace: root}
 	for _, kind := range []string{"workspace", "takeover cwd", "close_discovered cwd"} {
 		_, err := c.sanitizeWorkspacePath("/etc", kind, false)
 		if err == nil {

@@ -30,11 +30,46 @@ type JobIMContext struct {
 	CreatedBy string
 }
 
+// JobInit bundles every operator-settable field a cron Job can carry at
+// creation time. It is the fuller input to NewJobFull, covering the
+// dashboard-only fields (Title / WorkDir / Notify* / FreshContext / Backend
+// / Paused) that the (schedule, prompt, JobIMContext) NewJob signature
+// cannot express.
+//
+// R250-CR-9 (#1142): NewJob's godoc historically claimed it was the single
+// construction choke point that protected every cross-package caller from a
+// cron.Job{} field rename. That invariant was not actually held — the
+// dashboard create handler bypassed NewJob and spelled out a multi-field
+// cron.Job{} literal directly because NewJob accepted none of the
+// dashboard-specific fields. JobInit + NewJobFull restore the invariant:
+// callers needing the richer field set have a constructor to route through
+// instead of an open-coded literal. Schedule/Prompt + the embedded
+// JobIMContext mirror NewJob so the two constructors stay in lockstep.
+//
+// All fields are optional; the zero value yields a Job equivalent to
+// NewJob(schedule, prompt, ctx) with empty schedule/prompt/context.
+type JobInit struct {
+	Schedule string
+	Prompt   string
+	IM       JobIMContext
+
+	Title          string
+	WorkDir        string
+	Backend        string
+	NotifyPlatform string
+	NotifyChatID   string
+	Notify         *bool
+	FreshContext   bool
+	Paused         bool
+}
+
 // NewJob constructs a Job ready to hand to Scheduler.AddJob from the
 // (schedule, prompt) pair plus the IM-channel context that originated it.
-// Centralising this constructor prevents cross-package callers (dispatch,
-// dashboard, IM command handlers) from spelling out the cron.Job{} struct
-// literal — a Job field rename today breaks every literal call site.
+// It is the narrow constructor for the dispatch / IM command path, which
+// only ever sets those fields; the dashboard path that also needs
+// Title / WorkDir / Notify* / FreshContext / Backend / Paused must use
+// NewJobFull so neither surface hand-rolls a cron.Job{} literal that a
+// field rename could silently break (R250-CR-9 / #1142).
 //
 // CreatedAt is intentionally NOT stamped here: AddJob is the choke point
 // that owns Job persistence and needs a single coherent timestamp source.
@@ -42,15 +77,45 @@ type JobIMContext struct {
 // comparisons, missed-schedule detection) when the constructor is called
 // far ahead of AddJob.
 func NewJob(schedule, prompt string, ctx JobIMContext) *Job {
+	return NewJobFull(JobInit{Schedule: schedule, Prompt: prompt, IM: ctx})
+}
+
+// NewJobFull constructs a Job from the full JobInit field set so the
+// dashboard create handler (and any future surface needing the richer
+// fields) routes through a constructor instead of an open-coded
+// cron.Job{} literal. NewJob delegates here so both constructors share a
+// single field-mapping site — a Job field rename now lands in exactly one
+// place. CreatedAt is left zero for AddJob to stamp, mirroring NewJob.
+// R250-CR-9 (#1142).
+func NewJobFull(in JobInit) *Job {
 	return &Job{
-		Schedule:  schedule,
-		Prompt:    prompt,
-		Platform:  ctx.Platform,
-		ChatID:    ctx.ChatID,
-		ChatType:  ctx.ChatType,
-		CreatedBy: ctx.CreatedBy,
+		Schedule:       in.Schedule,
+		Prompt:         in.Prompt,
+		Platform:       in.IM.Platform,
+		ChatID:         in.IM.ChatID,
+		ChatType:       in.IM.ChatType,
+		CreatedBy:      in.IM.CreatedBy,
+		Title:          in.Title,
+		WorkDir:        in.WorkDir,
+		Backend:        in.Backend,
+		NotifyPlatform: in.NotifyPlatform,
+		NotifyChatID:   in.NotifyChatID,
+		Notify:         in.Notify,
+		FreshContext:   in.FreshContext,
+		Paused:         in.Paused,
 	}
 }
+
+// cronEntryID is the cron-local name for robfig/cron's per-entry handle.
+// R249-ARCH-11 (#977): the third-party robfigcron.EntryID type name was
+// scattered across the Job field, the two list-snapshot pools, every
+// pause/resume/update rollback-snapshot local, and cronEntryGoneLocked.
+// Aliasing it to one declaration localises the robfig binding so a future
+// cron-engine swap (or wrapping the handle in a richer entry struct) touches
+// this single line instead of ~15 references. As a type alias it is
+// identical to robfigcron.EntryID, so the pool type-assertions and the
+// s.cron.Remove/Entry calls keep compiling unchanged.
+type cronEntryID = robfigcron.EntryID
 
 // Job represents a scheduled cron task.
 type Job struct {
@@ -140,7 +205,7 @@ type Job struct {
 	// 引入背景：docs/rfc/cron-run-history.md §3.2。
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
-	entryID robfigcron.EntryID // runtime only, not persisted
+	entryID cronEntryID // runtime only, not persisted
 
 	// cachedPeriod is the precomputed schedule period (Next-Next delta), populated
 	// once per registerJob alongside entryID. The hot jitter path (#664 / R242-PERF-2)
@@ -299,6 +364,47 @@ func generateRunID() (string, error) { return generateHexID() }
 // generateID 返回 cron Job.ID（16-char hex）。
 func generateID() (string, error) { return generateHexID() }
 
+// IsValidID reports whether s is a valid cron / cron-run identifier:
+// a non-empty lowercase hex string of at most 64 bytes. Currently job
+// and run IDs are generated as 16 hex chars; the 64-byte upper bound
+// is held in reserve for a future schema bump.
+//
+// Accepts (returns true):
+//   - "0123456789abcdef"               — canonical 16-char job/run ID
+//   - "abc123"                         — short lowercase hex
+//   - strings.Repeat("a", 64)          — at the 64-byte boundary
+//
+// Rejects (returns false):
+//   - ""                               — empty
+//   - "ABC123"                         — uppercase hex (lowercase only)
+//   - "abc-123" / "abc.tmp" / "abc~"   — non-hex chars (rejects temp
+//     files, backups, .DS_Store, etc. that may appear in runs/<jobID>/)
+//   - "../etc/passwd"                  — path traversal characters
+//   - strings.Repeat("a", 65)          — exceeds the 64-byte ceiling
+//
+// 在 store 入口（parse / list / append / detail handler）做边界校验，
+// 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
+// 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
+// R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
+// 私有的 generateRunID / generateID）+ R249-CR-23（补 Accepts/Rejects
+// 示例，明确大写 hex 一律拒绝）。
+//
+// R249-ARCH-26 (#990): co-located with generateID / generateRunID here in
+// job.go (the ID-spec home) rather than runstore.go — store / parse / HTTP
+// callers all consume it, so its home is the ID schema, not the run store.
+func IsValidID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
 // 在 handler 层复用同一上限，避免两处数字不同步漂移。
@@ -377,10 +483,21 @@ func jobTitleOrFallback(j *Job) string {
 	return truncated
 }
 
+// cronParseOptions is the single source of truth for the field set the cron
+// schedule grammar accepts: standard 5-field (Minute/Hour/Dom/Month/Dow) plus
+// @descriptors (@daily, @every 5m, …). Hoisted out of the cronParser var
+// initialiser (R249-ARCH-24 / #988) so the accepted-field bitmask is a named,
+// documented constant rather than a magic literal buried in a package-var
+// init — the field set is now stated once and any future widening (e.g.
+// adding robfigcron.Second) changes exactly this constant. A full move onto a
+// Scheduler field seeded from cfg still needs design (touches scheduler.go),
+// but this localises and names the binding as the first behaviour-preserving
+// step.
+const cronParseOptions = robfigcron.Minute | robfigcron.Hour | robfigcron.Dom |
+	robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor
+
 // cronParser is the shared parser for all schedule validation and preview.
-var cronParser = robfigcron.NewParser(
-	robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor,
-)
+var cronParser = robfigcron.NewParser(cronParseOptions)
 
 // minCronInterval is the minimum allowed interval between cron runs.
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
@@ -430,6 +547,11 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 // 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
 // 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
 // 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+//
+// R249-CR-10 (#954): 这是包内 unexported 的字符串入口帮助函数，唯一调用者是
+// missed_test.go——生产路径全部走 previousTickBeforeFromSched（HasMissedSchedule
+// 已 Parse 一次后复用 sched，避免重复正则）。保留它是为了让测试能用字符串
+// schedule 直测回推逻辑，并非有跨包消费者（unexported 不可能被其他包用）。
 func previousTickBefore(schedule string, now time.Time) time.Time {
 	// R246-PERF-4: previously this called schedulePeriod(schedule, now)
 	// which re-Parses the same expression we already parsed above.
@@ -449,8 +571,12 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
-// 避免在 HasMissedSchedule 路径上重复 Parse。schedulePeriod 是公开签名（其他包
-// 测试有用），保留不动。R238-PERF-2。
+// 避免在 HasMissedSchedule 路径上重复 Parse。R238-PERF-2。
+//
+// R250-CR-6 (#1139): schedulePeriod 是包内 unexported 帮助函数（不是“公开
+// 签名”——没有跨包消费者）。当前唯一生产调用点是 applyJitter（scheduler_run.go
+// 的 entryID==0 fallback 路径），加上包内 jitter_test.go。保留它是因为字符串
+// 入口仍被 fallback 路径使用，并非“其他包测试有用”——旧注释的措辞已纠正。
 func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Duration {
 	first := sched.Next(now)
 	second := sched.Next(first)
@@ -497,7 +623,7 @@ func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration
 //
 // 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
-	return hasMissedScheduleImpl(j, nil, now, startedAt)
+	return hasMissedScheduleImpl(j, nil, 0, now, startedAt)
 }
 
 // HasMissedScheduleCached is the alloc-free variant of HasMissedSchedule for
@@ -515,14 +641,16 @@ func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time)
 	if j == nil {
 		return false, time.Time{}
 	}
-	return hasMissedScheduleImpl(j, j.cachedSched, now, startedAt)
+	return hasMissedScheduleImpl(j, j.cachedSched, j.cachedPeriod, now, startedAt)
 }
 
 // hasMissedScheduleImpl is the shared body of HasMissedSchedule and
 // HasMissedScheduleCached. cached, when non-nil, lets the caller skip the
 // regex parse; on cold cache the caller passes nil and we fall through to
 // cronParser.Parse so test fixtures keep working.
-func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt time.Time) (bool, time.Time) {
+// cachedPeriod, when >0, skips the 2x sched.Next call inside
+// schedulePeriodFromSched (R20260603040203-PERF-9); pass 0 to recompute.
+func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time.Duration, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
@@ -534,7 +662,10 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt ti
 			return false, time.Time{}
 		}
 	}
-	period := schedulePeriodFromSched(sched, now)
+	period := cachedPeriod
+	if period <= 0 {
+		period = schedulePeriodFromSched(sched, now)
+	}
 	if period <= 0 {
 		return false, time.Time{}
 	}
@@ -546,7 +677,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt ti
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
-		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period {
+		// R20260603140013-CR-5: never-run jobs must use the same slack factor as
+		// the already-run branch below. The bare `> period` threshold left no
+		// jitter headroom, so a healthy job whose first scheduled tick landed
+		// inside its jitter window (default up to 30s) was flagged as missed
+		// before it ever had a fair chance to fire. Mirror the already-run
+		// slack (period*missedScheduleSlackNum/missedScheduleSlackDen) so a
+		// period+jitter delay stays under the threshold.
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period*missedScheduleSlackNum/missedScheduleSlackDen {
 			return true, prev
 		}
 		return false, time.Time{}
@@ -577,8 +715,21 @@ func validateSchedule(schedule string, loc *time.Location) error {
 		loc = time.Local
 	}
 	// Check that the interval between the first two runs is at least minCronInterval.
-	now := time.Now().In(loc)
-	first := sched.Next(now)
+	//
+	// R249-CR-22 (#965): seed the interval probe from a FIXED reference instant
+	// rather than time.Now(). With time.Now() the two-Next probe occasionally
+	// straddled a DST transition — e.g. a spring-forward run made a genuine
+	// every-5-minutes schedule appear ~1h apart (or a fall-back run inflated an
+	// hourly schedule), so the minCronInterval floor would mis-classify the
+	// interval depending on the wall-clock minute the operator happened to save
+	// the job. A fixed mid-January noon is DST-quiet in every IANA zone (no zone
+	// transitions occur at 2024-01-15 12:00 local), so the probe measures the
+	// schedule's intrinsic interval deterministically. Anchored in loc so the
+	// validation frame still matches the runtime WithLocation(loc) registration
+	// (#1321): the date is interpreted in the operator's timezone, only the
+	// instant is pinned away from transition boundaries.
+	ref := time.Date(2024, time.January, 15, 12, 0, 0, 0, loc)
+	first := sched.Next(ref)
 	second := sched.Next(first)
 	// R236-QA-07: drop the `interval > 0` guard. Previously a degenerate
 	// schedule whose second tick equaled (or preceded) the first — interval

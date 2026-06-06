@@ -59,3 +59,61 @@ func TestShimMsgCode_InvalidJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestShimMsgCode_UnmarshalJSONDirect tests shimMsgCode.UnmarshalJSON
+// directly to cover the strconv.ParseInt hot path introduced by
+// R20260602-PERF-6. Verifies: valid ints, boundary (0, max int64),
+// invalid (float, bool, string, empty).
+func TestShimMsgCode_UnmarshalJSONDirect(t *testing.T) {
+	t.Run("valid_zero", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("0")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !c.Present || c.Value != 0 {
+			t.Errorf("got Present=%v Value=%d, want Present=true Value=0", c.Present, c.Value)
+		}
+	})
+	t.Run("valid_positive", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("137")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !c.Present || c.Value != 137 {
+			t.Errorf("got Present=%v Value=%d, want Present=true Value=137", c.Present, c.Value)
+		}
+	})
+	t.Run("valid_negative", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("-1")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !c.Present || c.Value != -1 {
+			t.Errorf("got Present=%v Value=%d, want Present=true Value=-1", c.Present, c.Value)
+		}
+	})
+	t.Run("invalid_float", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("3.14")); err == nil {
+			t.Error("expected error for float, got nil")
+		}
+	})
+	t.Run("invalid_bool", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("true")); err == nil {
+			t.Error("expected error for bool, got nil")
+		}
+	})
+	t.Run("invalid_string", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte(`"42"`)); err == nil {
+			t.Error("expected error for quoted string, got nil")
+		}
+	})
+	t.Run("invalid_empty", func(t *testing.T) {
+		var c shimMsgCode
+		if err := c.UnmarshalJSON([]byte("")); err == nil {
+			t.Error("expected error for empty data, got nil")
+		}
+	})
+}

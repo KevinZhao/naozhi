@@ -334,23 +334,55 @@ func (t *agentTailer) finalize(status string) {
 		t.refCount.Store(0)
 		t.mu.Unlock()
 
+		// R20260605B-CORR-3 (#1807): release the persistent transcript fd
+		// eagerly instead of waiting on the *os.File GC finalizer. finalize
+		// is the single teardown funnel for every path (closeTask / idle
+		// reap / Shutdown), and t.closed=true above plus the byTask removal
+		// done by the caller stop the central poller from re-Tailing this
+		// tailer, so the reader will not be reopened. Close() is idempotent
+		// (R233-PERF-4), so a stray late poll that reopens is harmless.
+		if t.reader != nil {
+			_ = t.reader.Close()
+		}
+
 		if status == "" {
 			status = "completed"
 		}
 		m := meta
+		metaMsg := node.ServerMsg{
+			Type:      "agent_meta",
+			Key:       t.key,
+			TaskID:    t.taskID,
+			AgentMeta: &m,
+		}
+		doneMsg := node.ServerMsg{
+			Type:   "agent_done",
+			Key:    t.key,
+			TaskID: t.taskID,
+			Status: status,
+		}
+		// Mirror pollOnce: for a multi-tab fan-out marshal each terminal
+		// frame once and SendRaw, rather than paying the json.Marshal
+		// reflect cost per subscriber. The single-subscriber case keeps the
+		// SendJSON shortcut; a marshal error falls back to per-sub SendJSON.
+		if len(subs) == 1 {
+			subs[0].SendJSON(metaMsg)
+			subs[0].SendJSON(doneMsg)
+			return
+		}
+		metaData, metaErr := marshalPooled(metaMsg)
+		doneData, doneErr := marshalPooled(doneMsg)
 		for _, c := range subs {
-			c.SendJSON(node.ServerMsg{
-				Type:      "agent_meta",
-				Key:       t.key,
-				TaskID:    t.taskID,
-				AgentMeta: &m,
-			})
-			c.SendJSON(node.ServerMsg{
-				Type:   "agent_done",
-				Key:    t.key,
-				TaskID: t.taskID,
-				Status: status,
-			})
+			if metaErr != nil {
+				c.SendJSON(metaMsg)
+			} else {
+				c.SendRaw(metaData)
+			}
+			if doneErr != nil {
+				c.SendJSON(doneMsg)
+			} else {
+				c.SendRaw(doneData)
+			}
 		}
 	})
 }

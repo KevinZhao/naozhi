@@ -105,6 +105,17 @@ type msgRing struct {
 	buf  []QueuedMsg
 	head int // index of the oldest live element when used > 0
 	used int // number of live elements; 0 <= used <= cap(buf)
+
+	// scratch is a reusable backing array for drainInto. The owner goroutine
+	// drains one batch per turn (DoneOrDrain) / once at release
+	// (ReleaseWithDrain) and fully consumes the returned slice before the next
+	// drain on the same ring, so a single per-ring scratch can be reused across
+	// turns without copying — this removes the per-turn `make([]QueuedMsg,
+	// r.used)` that ModeCollect paid on every coalesced follow-up turn
+	// (R20260606-PERF-3, #1827). Reuse is sound because each *sessionQueue owns
+	// its ring exclusively under MessageQueue.mu and the gen-cookie/single-owner
+	// invariant forbids two concurrent drains of the same ring.
+	scratch []QueuedMsg
 }
 
 // len returns the current number of queued messages.
@@ -133,16 +144,29 @@ func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool) {
 	return evicted
 }
 
-// drainAll returns the queued messages in FIFO order and resets the ring
-// to empty (head=used=0). The backing array is retained for reuse but
-// each consumed slot is zeroed so retained image data becomes
+// drainInto returns the queued messages in FIFO order and resets the ring to
+// empty (head=used=0), writing them into dst. The backing array is retained
+// for reuse but each consumed slot is zeroed so retained image data becomes
 // GC-eligible. Returns nil when empty (mirrors the previous nil-vs-slice
 // distinction the queue exposed via sq.msgs == nil).
-func (r *msgRing) drainAll() []QueuedMsg {
+//
+// dst is reused when it has enough capacity (its contents are overwritten and
+// its length re-sliced to r.used); otherwise a fresh slice is allocated. The
+// caller MUST fully consume the returned slice before the next drainInto/drainAll
+// on the same ring — the owner drain loop satisfies this (each batch is
+// coalesced + acknowledged before DoneOrDrain runs again). Passing the previous
+// return value back as dst lets the owner loop reuse one backing array across
+// turns instead of allocating per turn (R20260606-PERF-3, #1827).
+func (r *msgRing) drainInto(dst []QueuedMsg) []QueuedMsg {
 	if r.used == 0 {
 		return nil
 	}
-	out := make([]QueuedMsg, r.used)
+	var out []QueuedMsg
+	if cap(dst) >= r.used {
+		out = dst[:r.used]
+	} else {
+		out = make([]QueuedMsg, r.used)
+	}
 	c := cap(r.buf)
 	for i := 0; i < r.used; i++ {
 		idx := (r.head + i) % c
@@ -152,6 +176,13 @@ func (r *msgRing) drainAll() []QueuedMsg {
 	r.head = 0
 	r.used = 0
 	return out
+}
+
+// drainAll returns the queued messages in a freshly allocated slice (FIFO
+// order) and resets the ring to empty. Equivalent to drainInto(nil); retained
+// for callers/tests that want an independently-owned slice with no scratch.
+func (r *msgRing) drainAll() []QueuedMsg {
+	return r.drainInto(nil)
 }
 
 // reset empties the ring without returning the contents (used by Discard).
@@ -196,14 +227,97 @@ type MessageQueue struct {
 	// recent insertion/update; back holds the least recent. This yields O(1)
 	// insert, refresh, and evict — critical since ShouldNotify runs under
 	// mu on the IM hot path.
-	dropNotifyLRU   *list.List               // element.Value = *dropNotifyEntry
-	dropNotifyIndex map[string]*list.Element // key → list element
+	// dropNotifyLRU orders entries by recency (front = most recent) purely for
+	// O(1) eviction. dropNotifyIndex maps key → *dropNotifyEntry directly so the
+	// hot ShouldNotify probe reads the timestamp off a concrete struct instead
+	// of paying a `list.Element.Value.(*dropNotifyEntry)` interface assertion on
+	// every IM message (R249-PERF-12, #932). Each entry keeps a back-pointer to
+	// its list element so refresh/evict can splice the list without a second
+	// map lookup.
+	dropNotifyLRU   *list.List                  // element.Value = *dropNotifyEntry
+	dropNotifyIndex map[string]*dropNotifyEntry // key → entry
+
+	// dropNotifyPool recycles *dropNotifyEntry structs across the steady-state
+	// cold-key churn in ShouldNotify: once dropNotifyLRU is saturated at
+	// dropNotifyMaxKeys, every new cold key evicts one tail entry and inserts
+	// a fresh one. Returning the evicted entry to the pool and reusing it for
+	// the insert avoids a per-cold-key heap allocation (R20260603-PERF-6,
+	// #1694). Entries are reset before reuse; the back-pointer elem is always
+	// reassigned by PushFront so it needs no clearing for correctness, but we
+	// nil it on return so a pooled-but-never-reused entry doesn't pin a removed
+	// list.Element.
+	dropNotifyPool sync.Pool
+
+	// onStranded, when non-nil, is invoked by Release for every message that
+	// was parked in the ring at release time (FIFO order, outside q.mu). It
+	// closes R37-REL1 (#769): the SessionGuard Release path (Dashboard/WS)
+	// used to leave messages that landed via a concurrent IM-side Enqueue
+	// stranded until the *next* Enqueue happened to make a new owner; on a
+	// quiet key that next Enqueue might never arrive, silently losing the
+	// message. With a handler registered, Release drains those messages back
+	// through the dispatcher so they get processed even when no follow-up
+	// IM message is coming. nil preserves the legacy park-in-place contract
+	// (used by tests and Guard-only deployments without a re-dispatch path).
+	onStranded func(key string, msg QueuedMsg)
 }
 
-// dropNotifyEntry is a single LRU entry: key + last notify nanos.
+// SetStrandHandler registers the callback Release uses to recover messages
+// that were parked by a concurrent IM-side Enqueue while a SessionGuard
+// caller (Dashboard/WS) held the key. Passing nil restores the legacy
+// "leave parked for the next Enqueue owner" behaviour. R37-REL1 (#769).
+//
+// The handler is invoked once per stranded message, in FIFO order, after
+// q.mu has been released and the key marked idle — so the callback may
+// safely re-enter Enqueue without re-entrant locking, mirroring
+// ReleaseWithDrain's delivery contract.
+func (q *MessageQueue) SetStrandHandler(fn func(key string, msg QueuedMsg)) {
+	q.mu.Lock()
+	q.onStranded = fn
+	q.mu.Unlock()
+}
+
+// dropNotifyEntry is a single LRU entry: key + last notify nanos. elem links
+// back to the *list.Element that boxes this entry in dropNotifyLRU.
 type dropNotifyEntry struct {
-	key string
-	ts  int64
+	key  string
+	ts   int64
+	elem *list.Element
+}
+
+// takePooledEntry returns a *dropNotifyEntry ready for reuse. If preferred is
+// non-nil (the entry just evicted from the LRU tail), it is reset and returned
+// directly — the most common steady-state path, recycling in place without
+// touching the pool. Otherwise it draws from dropNotifyPool, falling back to a
+// fresh allocation only when the pool is empty. Callers must hold q.mu.
+func (q *MessageQueue) takePooledEntry(preferred *dropNotifyEntry) *dropNotifyEntry {
+	if preferred != nil {
+		preferred.key = ""
+		preferred.ts = 0
+		preferred.elem = nil
+		return preferred
+	}
+	if v := q.dropNotifyPool.Get(); v != nil {
+		e := v.(*dropNotifyEntry)
+		e.key = ""
+		e.ts = 0
+		e.elem = nil
+		return e
+	}
+	return &dropNotifyEntry{}
+}
+
+// releasePooledEntry returns an entry that has already been spliced out of
+// dropNotifyLRU/dropNotifyIndex to dropNotifyPool for later reuse. It nils the
+// fields so the pooled struct does not pin the removed key string or list
+// element. Callers must hold q.mu and must not touch the entry afterwards.
+func (q *MessageQueue) releasePooledEntry(e *dropNotifyEntry) {
+	if e == nil {
+		return
+	}
+	e.key = ""
+	e.ts = 0
+	e.elem = nil
+	q.dropNotifyPool.Put(e)
 }
 
 // dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
@@ -225,7 +339,7 @@ func NewMessageQueueWithMode(maxDepth int, collectDelay time.Duration, mode Queu
 		collectDelay:    collectDelay,
 		mode:            mode,
 		dropNotifyLRU:   list.New(),
-		dropNotifyIndex: make(map[string]*list.Element),
+		dropNotifyIndex: make(map[string]*dropNotifyEntry),
 	}
 }
 
@@ -347,9 +461,10 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		// first interrupt of the next turn.
 		sq.interruptRequested = false
 		delete(q.queues, key)
-		if elem, ok := q.dropNotifyIndex[key]; ok {
-			q.dropNotifyLRU.Remove(elem)
+		if e, ok := q.dropNotifyIndex[key]; ok {
+			q.dropNotifyLRU.Remove(e.elem)
 			delete(q.dropNotifyIndex, key)
+			q.releasePooledEntry(e)
 		}
 		return nil
 	}
@@ -358,7 +473,12 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 	// once the owner takes the drained batch, the NEXT in-flight turn is a
 	// fresh target for a future interrupt, so subsequent queued messages
 	// during that new turn must be able to trigger another control_request.
-	msgs := sq.ring.drainAll()
+	// Reuse the ring's scratch across turns: the owner fully consumes the
+	// returned batch (coalesce + clear reactions) before the next DoneOrDrain,
+	// so a single backing array can carry every coalesced follow-up turn
+	// without a per-turn alloc (R20260606-PERF-3, #1827).
+	msgs := sq.ring.drainInto(sq.ring.scratch)
+	sq.ring.scratch = msgs
 	sq.interruptRequested = false
 	return msgs
 }
@@ -386,9 +506,10 @@ func (q *MessageQueue) Discard(key string) {
 	// (chat entered via /new after being idle for >3s) would otherwise keep
 	// its stale timestamp and silence the first legitimate notify after
 	// Discard. Safe to delete even if no entry exists.
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(elem)
+	if e, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
+		q.releasePooledEntry(e)
 	}
 }
 
@@ -403,9 +524,10 @@ func (q *MessageQueue) Cleanup(key string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.queues, key)
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(elem)
+	if e, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
+		q.releasePooledEntry(e)
 	}
 }
 
@@ -465,8 +587,7 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 			q.mu.RUnlock()
 			return false
 		}
-	} else if elem, ok := q.dropNotifyIndex[key]; ok {
-		entry := elem.Value.(*dropNotifyEntry)
+	} else if entry, ok := q.dropNotifyIndex[key]; ok {
 		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
 			q.mu.RUnlock()
 			return false
@@ -490,26 +611,34 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 		return true
 	}
 	// No queue entry — per-key cooldown via bounded LRU.
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		entry := elem.Value.(*dropNotifyEntry)
+	if entry, ok := q.dropNotifyIndex[key]; ok {
 		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
 			return false
 		}
 		entry.ts = now
 		// Refresh LRU ordering — most-recently used to front.
-		q.dropNotifyLRU.MoveToFront(elem)
+		q.dropNotifyLRU.MoveToFront(entry.elem)
 		return true
 	}
-	// Insert new entry; evict the LRU tail if at capacity.
+	// Insert new entry; evict the LRU tail if at capacity. The evicted entry
+	// is returned to dropNotifyPool so the insert below can reuse it instead
+	// of allocating a fresh struct on every cold key in steady state (#1694).
+	var reuse *dropNotifyEntry
 	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
 		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
-			entry := oldest.Value.(*dropNotifyEntry)
-			delete(q.dropNotifyIndex, entry.key)
+			evicted := oldest.Value.(*dropNotifyEntry)
+			delete(q.dropNotifyIndex, evicted.key)
 			q.dropNotifyLRU.Remove(oldest)
+			reuse = q.takePooledEntry(evicted)
 		}
 	}
-	elem := q.dropNotifyLRU.PushFront(&dropNotifyEntry{key: key, ts: now})
-	q.dropNotifyIndex[key] = elem
+	if reuse == nil {
+		reuse = q.takePooledEntry(nil)
+	}
+	reuse.key = key
+	reuse.ts = now
+	reuse.elem = q.dropNotifyLRU.PushFront(reuse)
+	q.dropNotifyIndex[key] = reuse
 	return true
 }
 
@@ -535,32 +664,44 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 	return q.ShouldNotify(key)
 }
 
-// Release implements SessionGuard. Releases ownership without draining
-// — internally it calls ReleaseWithDrain(key, nil), which clears the
-// busy flag but leaves any queued messages parked in the sessionQueue
-// for a future Enqueue owner to consume via DoneOrDrain.  This is the
-// SessionGuard-compatible path; it is *not* a drain failure.
+// Release implements SessionGuard. Releases ownership for key.
 //
-// R37-REL1: if messages landed during the busy window (concurrent
-// Enqueue while Dashboard/WS Guard held the session), they would
-// otherwise be stuck until the next Enqueue re-entered the queue.
-// Callers that can process the drained batch should use
-// ReleaseWithDrain instead.
+// R37-REL1 (#769): if messages landed during the busy window (a concurrent
+// Enqueue while a Dashboard/WS Guard caller held the session), they would
+// otherwise be parked in the ring until the *next* Enqueue happened to
+// become a new owner and sweep them via DoneOrDrain — on a quiet key that
+// next Enqueue may never arrive, silently stranding the message. When a
+// strand handler is registered (SetStrandHandler), Release drains those
+// parked messages back through the handler so they are processed even with
+// no follow-up IM message. Without a handler the legacy park-in-place
+// contract is preserved (messages stay for a future Enqueue owner), and a
+// Warn is logged so the silent-loss condition stays observable.
 func (q *MessageQueue) Release(key string) {
-	// Peek depth under the lock so we can warn callers about stranded messages
-	// without changing Release's no-drain contract. Without this log the only
-	// signal is a silent "queue appears to lose messages" user report.
+	// Snapshot the strand handler + pending depth under the lock so the
+	// decision (drain vs park) reflects a consistent view. Enqueue callers
+	// racing this unlock can shift the real depth, which is acceptable: a
+	// message that arrives after the snapshot lands on the now-idle key and
+	// either becomes owner or re-queues normally.
 	q.mu.Lock()
+	handler := q.onStranded
 	depth := 0
 	if sq := q.queues[key]; sq != nil {
 		depth = sq.ring.len()
 	}
 	q.mu.Unlock()
+
+	if handler != nil {
+		// Recover stranded messages through the dispatcher's re-dispatch
+		// path. ReleaseWithDrain clears the ring + marks the key idle before
+		// invoking onDrain, so the handler can safely re-enter Enqueue.
+		q.ReleaseWithDrain(key, func(m QueuedMsg) { handler(key, m) })
+		return
+	}
+
 	if depth > 0 {
-		// `pending` is a lock-release snapshot — Enqueue callers racing this
-		// unlock can shift the real depth. Accurate enough for "a caller
-		// stranded N+ messages" triage.
-		slog.Warn("msgqueue release with pending messages, use ReleaseWithDrain to avoid strand",
+		// No handler: keep the no-drain contract but make the strand visible.
+		// pending_snapshot is a lock-release snapshot (see above).
+		slog.Warn("msgqueue release with pending messages and no strand handler, message may be stranded until next Enqueue",
 			"key", key, "pending_snapshot", depth)
 	}
 	q.ReleaseWithDrain(key, nil)

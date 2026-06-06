@@ -7,17 +7,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
-	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
+	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
@@ -49,14 +48,23 @@ const (
 // Field-block contract (server-split-phase4-design.md §五 / §六.6):
 // Each field below carries `// 读写: <files>` to indicate which non-test
 // files in this package access this Server-struct field via the `s.X`
-// receiver path. New fields MUST add this annotation. Phase 4-5 will
-// redistribute most of these into wshub Options, dashboard sub-packages,
-// or routes.go locals. Verification rule:
+// receiver path. New fields MUST add this annotation.
+//
+// R250-ARCH-22 (#1183): the section dividers below group fields by their
+// current functional role (HTTP entry / core deps / handlers / …), NOT by a
+// planned future disposition. Earlier revisions tagged each group with a
+// "Phase 5: → routes.go locals / NewHub Options / metrics package" target;
+// those tags had drifted (categories no longer matched reality) and were only
+// load-bearing as a refactor-that-never-came. Treat this field list as the
+// canonical current shape: when a field genuinely moves out, delete it here in
+// the same change rather than pre-annotating an intended destination.
+// Verification rule:
 //
 //	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
 //
 // must equal the field count documented in
-// docs/design/server-split-phase4-baseline.md §2 (currently 47).
+// docs/design/server-split-phase4-baseline.md §2 (currently 48 — the
+// logger field was added for R247-ARCH-4 / #620 logger injection).
 //
 // R250-ARCH-11 (#1174): scope clarification — the annotation tracks
 // access to *this struct field*, not usage of the field's underlying
@@ -71,25 +79,26 @@ const (
 // reads/writes so the annotation diff stays localised when handlers
 // are split out per Phase 5.
 type Server struct {
-	// ── HTTP entry (Phase 5: keep) ─────────────────────
+	// ── HTTP entry ─────────────────────────────────────
 	addr      string          // 读写: server.go
 	mux       *http.ServeMux  // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	startedAt time.Time       // 读写: server.go
 	onReady   func()          // 读写: server.go (called after listener is bound)
 	appCtx    context.Context // 读写: server.go, dashboard.go (HubOptions.ParentCtx)
+	logger    *slog.Logger    // 读写: server.go (R247-ARCH-4 #620 injected component logger; nil → slog.Default via s.log())
 
-	// ── core deps (Phase 5: keep) ──────────────────────
+	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
-	scheduler  *cron.Scheduler  // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go
+	scheduler  cronScheduler    // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go (narrowed to the cronScheduler consumer view, #1648)
 	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
-	// ── multi-node (Phase 5: keep) ─────────────────────
+	// ── multi-node ─────────────────────────────────────
 	nodes             map[string]node.Conn // 读写: server.go, dashboard.go
 	reverseNodeServer *node.ReverseServer  // 读写: server.go, dashboard.go
 	nodesMu           sync.RWMutex         // 读写: server.go, dashboard.go (shared with Hub.nodesMu)
 
-	// ── Phase 5: → routes.go local variables ───────────
+	// ── dashboard / API handler groups ─────────────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	cronH        *dashcron.Handlers    // 读写: server.go, dashboard.go
 	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
@@ -102,39 +111,57 @@ type Server struct {
 	cliH         *cli.Handler          // 读写: server.go, dashboard.go
 	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
 	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
+	ccAssetsH    *extccassets.Handler  // 读写: dashboard.go (ctor only in server.go)
 	agentEventsH *agentevents.Handler  // 读写: server.go, dashboard.go
 
-	// ── Phase 5: → NewHub Options ──────────────────────
+	// ── send / dispatch wiring ─────────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
 	sessionGuard    *session.Guard               // 读写: server.go, dashboard.go
-	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go (R242-GO-10: → wshub.MessageEnqueuer interface)
+	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go
 	agents          map[string]session.AgentOpts // 读写: server.go, dashboard.go, dashboard_session.go
 	agentCommands   map[string]string            // 读写: server.go, dashboard.go
 	dashboardToken  string                       // 读写: server.go, dashboard.go, dashboard_auth.go
-	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot — merge in Phase 4)
+	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot)
 	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
 	totalTimeout    time.Duration                // 读写: server.go
 
-	// ── Phase 5: → dashboard/* sub-packages ────────────
+	// ── on-disk paths / caches / sysession ─────────────
 	claudeDir      string               // 读写: server.go, takeover.go, discovery_cache.go, dashboard_cron_transcript.go, dashboard_discovered.go, dashboard_session.go
 	workspaceName  string               // 读写: server.go (ctor only; copied into SessionHandlers/HealthHandler)
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
+	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
 
-	// ── Phase 5: → server-internal reorg ───────────────
+	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
-	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation; → routes.go local)
-	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data; → server/nodecache.go)
+	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback — R248-ARCH-9 #379)
+	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation)
+	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
-	// ── Phase 5: → metrics package ─────────────────────
-	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
-	watchdogTotalKills    atomic.Int64 // 读写: server.go
+	// ── watchdog counters ──────────────────────────────
+	// watchdog groups the no-output / total watchdog-kill counters into one
+	// cohesive observability unit (R243-ARCH-7 / #838). Exposed via /health
+	// and /api/sessions; incremented by the dispatch watchdog through the
+	// *atomic.Int64 handles returned by noOutPtr()/totalPtr().
+	watchdog watchdogCounters
 
-	// ── Phase 5: pending evaluation (delete after grep verifies no usage) ─
-	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
-	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers; v0.4 §六.6 待评估 → dispatch.BackendTag())
-	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names; merge into nodes map)
+	// shutdownComplete closes once Start's shutdown goroutine has finished
+	// draining in-flight HTTP requests (srv.Shutdown returned). Exposed via
+	// ShutdownComplete() so the process-level shutdown sequencer can block on
+	// the real HTTP-drain barrier before tearing down router state, instead
+	// of racing router.Shutdown() against handlers still observing the
+	// session map. S11 / R194-COR. 读写: server.go (ctor + Start + accessor)
+	shutdownComplete chan struct{}
+
+	// platforms is read at routes-registration time (server.go) to wire each
+	// IM channel's webhook + outbound sender; knownNodes maps configured node
+	// IDs → display names (read at server.go:433/553). R20260603-ARCH-1: the
+	// former sibling `backendTag` field was write-only (ctor-only, no receiver
+	// read) and has been removed — the live reply tag flows through the local
+	// `tag` var into SessionHandlers.BackendTag (server.go ctor).
+	platforms  map[string]platform.Platform
+	knownNodes map[string]string
 }
 
 // Workspace 验证 helpers (validateWorkspace / classifyWorkspaceErr /
@@ -174,6 +201,43 @@ func replyTagForBackend(id string) string {
 
 var replyTagForBackendOnce sync.Once
 
+// log returns the Server's component logger. When no logger was injected via
+// ServerOptions.Logger it falls back to slog.Default(), so call sites can move
+// off the bare slog.* package functions onto an injectable seam (R247-ARCH-4 /
+// #620) without forcing every caller — or test — to supply one. This is the
+// first concrete migration step: new structured logging in the server package
+// should go through s.log() so a future change can inject a component-scoped
+// (and test-swappable) logger instead of reading the process global.
+func (s *Server) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
+// RotateDashboardSessions invalidates every outstanding dashboard auth cookie
+// in real time, without a process restart. It bumps the auth handler's
+// generation counter so the cookie HMAC changes; both the HTTP cookie path and
+// the WS upgrade path read the live MAC (CookieMACFn: s.auth.CookieMAC), so an
+// in-flight rotation propagates to every authenticated surface on the next
+// request/handshake.
+//
+// R217-SEC-6 (#595): closes the "rotation has no explicit session
+// invalidation" gap. Previously the only way to revoke outstanding cookies was
+// to rotate the cookie secret and restart the process (or wait out the 24h
+// MaxAge). This exposes server-side revocation that a future dashboard-token
+// hot-reload / SIGHUP handler — or an operator-facing endpoint — can call to
+// kick every browser back to /api/auth/login immediately. Safe to call from
+// any goroutine (the underlying counter is an atomic increment).
+func (s *Server) RotateDashboardSessions() {
+	if s.auth == nil {
+		return
+	}
+	s.auth.RotateCookieGen()
+	s.log().Info("dashboard auth sessions rotated; outstanding cookies invalidated",
+		"reason", "rotate_dashboard_sessions")
+}
+
 // New creates a new Server.
 // ServerOptions lives in server_options.go (Phase 5-prep, 2026-05-28).
 
@@ -211,14 +275,22 @@ func buildServer(opts ServerOptions) *Server {
 	platforms := opts.Platforms
 	agents := opts.Agents
 	agentCommands := opts.AgentCommands
-	scheduler := opts.Scheduler
+	// scheduler is boxed into the cronScheduler consumer interface (#1648).
+	// A nil *cron.Scheduler must become a genuinely nil interface, not a
+	// non-nil interface wrapping a nil pointer — otherwise every
+	// `s.scheduler != nil` cron-enabled guard would fire for scheduler-less
+	// deployments (and tests) and panic on the first method call.
+	var scheduler cronScheduler
+	if opts.Scheduler != nil {
+		scheduler = opts.Scheduler
+	}
 	defaultBackend := opts.Backend
 	// defaultTag is the fallback ReplyFooter tag for sessions whose
 	// Backend() is empty (legacy stores predating the multi-backend Backend
 	// field). docs/rfc/multi-backend.md §7.
 	defaultTag := replyTagForBackend(defaultBackend)
-	// tag is retained as the legacy server-global value (backendTag field +
-	// SessionStats.Backend). Per-session ReplyFooterFn (wired below) reads
+	// tag is the legacy server-global reply footer value (flows into
+	// SessionHandlers.BackendTag). Per-session ReplyFooterFn (wired below) reads
 	// session.Backend() at IM-reply time so a kiro session in a claude-default
 	// deployment gets [kiro] correctly.
 	tag := defaultTag
@@ -273,15 +345,19 @@ func buildServer(opts ServerOptions) *Server {
 	}
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
-	// R247-SEC-17: cookieGen is mixed into the auth-cookie HMAC alongside
-	// the dashboard token so every restart produces a fresh MAC even when
-	// stateDir is shared (the common operator setup). nanoseconds are
-	// unique within the process and cheap to produce — we don't need
-	// crypto-grade entropy because cookieSecret already supplies that;
-	// cookieGen exists only to break MAC equivalence across (re)starts
-	// and future hot-reloads. Future rotation handler can bump this field
-	// at runtime to invalidate every outstanding cookie atomically.
-	cookieGen := strconv.FormatInt(time.Now().UnixNano(), 10)
+	// R217-SEC-6 / R172-SEC-L4 (#595 / #437): cookieGen is mixed into the
+	// auth-cookie HMAC alongside the dashboard token so every restart
+	// produces a fresh MAC even when stateDir is shared (the common operator
+	// setup). The seed was previously time.Now().UnixNano(), which is
+	// predictable: an attacker who learns the process start time (exposed via
+	// /health uptime, journal timestamps, or a banner) can reconstruct the
+	// gen segment and — given the token + secret — forge a cookie that
+	// survives any restart on the same stateDir. Seeding from a CSPRNG closes
+	// that, so a captured cookie cannot be replayed against a future instance
+	// even when token + secret are stable. RotateDashboardSessions can bump
+	// the in-process seq counter at runtime to invalidate every outstanding
+	// cookie atomically without a restart.
+	cookieGen := cryptoutil.RandomCookieGen()
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns
@@ -291,22 +367,23 @@ func buildServer(opts ServerOptions) *Server {
 	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
 
 	s := &Server{
-		addr:         addr,
-		mux:          http.NewServeMux(),
-		platforms:    platforms,
-		router:       router,
-		dedup:        platform.NewDedup(defaultDedupCapacity),
-		sessionGuard: session.NewGuard(),
+		addr:             addr,
+		mux:              http.NewServeMux(),
+		shutdownComplete: make(chan struct{}),
+		platforms:        platforms,
+		router:           router,
+		dedup:            platform.NewDedup(defaultDedupCapacity),
+		sessionGuard:     session.NewGuard(),
 		msgQueue: dispatch.NewMessageQueueWithMode(
 			opts.QueueMaxDepth,
 			opts.QueueCollectDelay,
 			dispatch.ParseQueueMode(opts.QueueMode),
 		),
 		startedAt:       time.Now(),
+		logger:          opts.Logger,
 		agents:          agents,
 		agentCommands:   agentCommands,
 		scheduler:       scheduler,
-		backendTag:      tag,
 		claudeDir:       claudeDir,
 		workspaceName:   opts.WorkspaceName,
 		allowedRoot:     opts.AllowedRoot,
@@ -314,12 +391,14 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		debugMode:       opts.DebugMode,
+		headless:        opts.Headless,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,
 		nodes:           nodes,
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
+		orient:          buildOrientConfig(opts),
 
 		// Extracted handler groups (literals factored to build_handlers.go;
 		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale
@@ -407,8 +486,8 @@ func buildServer(opts ServerOptions) *Server {
 		WorkspaceID:   opts.WorkspaceID,
 		WorkspaceName: opts.WorkspaceName,
 		VersionTag:    opts.Version,
-		WatchdogNoOut: &s.watchdogNoOutputKills,
-		WatchdogTotal: &s.watchdogTotalKills,
+		WatchdogNoOut: s.watchdog.noOutPtr(),
+		WatchdogTotal: s.watchdog.totalPtr(),
 		RetiredStore:  retiredStore,
 		ValidateWS:    validateWorkspace,
 		SystemInfoFn:  systemInfo,
@@ -467,8 +546,8 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeout:       opts.TotalTimeout,
 		noOutputTimeoutStr: opts.NoOutputTimeout.String(),
 		totalTimeoutStr:    opts.TotalTimeout.String(),
-		watchdogNoOut:      &s.watchdogNoOutputKills,
-		watchdogTotal:      &s.watchdogTotalKills,
+		watchdogNoOut:      s.watchdog.noOutPtr(),
+		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodeAccess,
 		platforms:          platNames,
 		hubDropped: func() int64 {
@@ -533,7 +612,28 @@ func buildServer(opts ServerOptions) *Server {
 }
 
 // Start registers routes and begins serving.
+// listenTCP is the listener factory Start uses to bind its socket. It is a
+// package var (defaulting to net.Listen) purely so tests can inject a
+// listener whose Accept fails post-bind, exercising the srv.Serve-error
+// drain path (R20260531-GO-001) without racing a real socket close.
+var listenTCP = net.Listen
+
 func (s *Server) Start(ctx context.Context) error {
+	// R030056-GO-002: Start has several early-return error paths (dispatch
+	// wireup, platform Start, net.Listen) that run BEFORE the shutdown
+	// goroutine — the sole closer of s.shutdownComplete — is spawned. The
+	// process-level shutdown sequencer (cmd/naozhi runShutdown) blocks
+	// unconditionally on ShutdownComplete() in its server-error path, so any
+	// of those early returns would deadlock the whole shutdown. Guard with a
+	// defer that closes the channel unless the shutdown goroutine took
+	// ownership (shutdownClosed=true). close() must happen exactly once: once
+	// the goroutine is spawned it becomes the only closer.
+	shutdownClosed := false
+	defer func() {
+		if !shutdownClosed {
+			close(s.shutdownComplete)
+		}
+	}()
 	// Resolver is constructed in buildServer and reused across the
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
@@ -553,8 +653,8 @@ func (s *Server) Start(ctx context.Context) error {
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
-		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
-		WatchdogTotalKills:    &s.watchdogTotalKills,
+		WatchdogNoOutputKills: s.watchdog.noOutPtr(),
+		WatchdogTotalKills:    s.watchdog.totalPtr(),
 		// R20260527122801-CR-6 (#1320): plumb the long-lived service ctx into
 		// dispatch so the passthrough send goroutine observes graceful
 		// shutdown rather than ignoring SIGTERM until its 5min internal
@@ -611,12 +711,26 @@ func (s *Server) Start(ctx context.Context) error {
 	// restart loop.
 	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
 	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
-	s.appCtx = ctx
-	s.discoveryH.SetAppContext(ctx)
+	// R20260531-GO-001: derive a cancelable child of the caller ctx and use
+	// it for every long-lived background loop AND the shutdown goroutine
+	// below. The shutdown goroutine is the sole closer of shutdownComplete
+	// and blocks on serveCtx.Done(); on a normal SIGTERM the parent ctx
+	// cancels (propagating to serveCtx), and on a srv.Serve error the
+	// Serve-error path cancels serveCtx directly. Both routes wake the loops
+	// (so discoveryCache.Wait() etc. return) and the shutdown goroutine,
+	// which then closes shutdownComplete. Without a single cancel source the
+	// loops would stay alive on the Serve-error path and the goroutine's
+	// discoveryCache.Wait() would block forever, deadlocking any reader of
+	// ShutdownComplete().
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
+	s.appCtx = serveCtx
+	s.discoveryH.SetAppContext(serveCtx)
 	s.registerDashboard()
-	s.nodeCache.StartLoop(ctx)
-	s.discoveryCache.startLoop(ctx)
-	s.startProjectScanLoop(ctx)
+	s.nodeCache.StartLoop(serveCtx)
+	s.discoveryCache.startLoop(serveCtx)
+	s.startProjectScanLoop(serveCtx)
 	// Warn if we're serving a token-protected dashboard over plaintext with no
 	// trusted proxy in front — Bearer tokens and auth cookies would traverse
 	// the wire in the clear, subject to passive sniffing on shared networks.
@@ -673,9 +787,18 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.auth.TrustedProxy {
 		slog.Info(trustedProxyXFFReminder, "addr", s.addr)
 	}
-	slog.Info("server starting", "addr", s.addr)
+	// R244-ARCH-16 (#1054): surface the server's effective turn timeouts at
+	// startup so an operator can confirm the active values from journalctl
+	// without reading config or hitting /health. These two are the only
+	// operator-tunable timeouts the Server owns; other package-internal
+	// intervals (debounce / poll / TTL) stay greppable in their own files.
+	slog.Info("server starting",
+		"addr", s.addr,
+		"no_output_timeout", s.noOutputTimeout,
+		"total_timeout", s.totalTimeout,
+	)
 
-	ln, err := net.Listen("tcp", s.addr)
+	ln, err := listenTCP("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
@@ -691,7 +814,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// trace id needs to be observable to gzip's behaviour and to any
 	// handler panic that fires before the body is written.
 	srv := &http.Server{
-		Handler:           withTraceID(gzipMiddleware(s.mux)),
+		// RNEW-ARCH-401 (#425): withAPIVersionAlias is the innermost wrapper so
+		// a `/api/v1/<rest>` request is rewritten to the existing `/api/<rest>`
+		// route just before mux matching, while trace-id + gzip still observe
+		// the original versioned path the client called.
+		Handler:           withTraceID(gzipMiddleware(withAPIVersionAlias(s.mux))),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -713,15 +840,22 @@ func (s *Server) Start(ctx context.Context) error {
 	// fsync churn modest under burst close-many sessions UX. Prune
 	// drops entries older than 14 days (= 2× the 7-day history window)
 	// so the cap pressure described in NewRetiredStoreWithCap rarely
-	// matters on a normal operator. Stops via ctx.Done in the shutdown
+	// matters on a normal operator. Stops via serveCtx.Done in the shutdown
 	// goroutine below.
 	if s.sessionH != nil && s.sessionH.RetiredStorePresent() {
-		go s.runRetiredStoreFlusher(ctx)
+		go s.runRetiredStoreFlusher(serveCtx)
 	}
 
-	shutdownComplete := make(chan struct{})
+	// Reuse the channel allocated at construction so ShutdownComplete() (which
+	// callers may read before Start runs) and the goroutine below observe the
+	// same channel. S11: this is the HTTP-drain barrier the process shutdown
+	// sequencer blocks on before router.Shutdown().
+	shutdownComplete := s.shutdownComplete
+	// The shutdown goroutine is now the sole owner/closer of shutdownComplete;
+	// suppress the early-return defer above so close() happens exactly once.
+	shutdownClosed = true
 	go func() {
-		<-ctx.Done()
+		<-serveCtx.Done()
 		slog.Info("shutting down server")
 
 		// Shutdown WebSocket hub
@@ -770,23 +904,53 @@ func (s *Server) Start(ctx context.Context) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", "err", err)
 		}
+		// srv.Shutdown has returned, so no new requests can spawn discovery
+		// takeover/close goroutines. Drain any that are still parked in
+		// WaitAndCleanup before signalling shutdown complete, so they don't
+		// outlive the server goroutine with no WaitGroup tracking them.
+		if s.discoveryH != nil {
+			s.discoveryH.Wait()
+		}
 		close(shutdownComplete)
 	}()
 
 	err = srv.Serve(ln)
-	// If ListenAndServe failed for a non-shutdown reason (e.g. port conflict),
-	// return immediately instead of blocking — the shutdown goroutine is still
-	// waiting on ctx.Done and shutdownComplete will never close.
+	// If Serve failed for a non-shutdown reason (e.g. accept loop failure),
+	// the parent ctx may never be cancelled — the shutdown goroutine would
+	// then block forever on serveCtx.Done() and shutdownComplete would never
+	// close, deadlocking any caller that reads ShutdownComplete(). Cancel
+	// serveCtx here so the goroutine wakes, runs the drain sequence, and
+	// closes shutdownComplete; then wait for it before returning the error.
+	// R20260531-GO-001.
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		serveCancel()
+		<-shutdownComplete
 		return err
 	}
 	// Wait for the shutdown goroutine to finish draining connections.
 	select {
 	case <-shutdownComplete:
-	case <-ctx.Done():
+	case <-serveCtx.Done():
 		<-shutdownComplete
 	}
 	return err
+}
+
+// ShutdownComplete returns a channel that closes once Start's shutdown
+// goroutine has finished draining in-flight HTTP requests (srv.Shutdown
+// returned). It is the synchronization barrier S11 (R194-COR) requires:
+// the process-level shutdown sequencer in cmd/naozhi cancels the shared
+// ctx (which triggers the HTTP drain) and then blocks on this channel
+// before calling router.Shutdown(). Without the barrier, router.Shutdown
+// races the drain and an in-flight GetOrCreate/Send handler can observe a
+// half-cleaned session map. The channel is allocated at construction so a
+// caller may obtain it before Start runs; it never closes if Start is
+// never invoked. R030056-GO-002: if Start returns an error early (dispatch
+// wireup, platform Start, or net.Listen — all before the shutdown goroutine
+// is spawned), a defer in Start closes the channel so the process-level
+// shutdown sequencer's unconditional receive does not deadlock.
+func (s *Server) ShutdownComplete() <-chan struct{} {
+	return s.shutdownComplete
 }
 
 // retiredStoreFlushInterval is how often runRetiredStoreFlusher writes
@@ -806,28 +970,8 @@ const (
 	retiredStorePruneCutoff   = 14 * 24 * time.Hour
 )
 
-// runRetiredStoreFlusher writes the retired-store to disk every
-// retiredStoreFlushInterval and prunes stale entries every
-// retiredStorePruneInterval. Stops on ctx.Done; the shutdown goroutine
-// invokes a final FlushRetiredStore so the most recent retirement event
-// survives a clean shutdown.
-func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
-	flushTicker := time.NewTicker(retiredStoreFlushInterval)
-	defer flushTicker.Stop()
-	pruneTicker := time.NewTicker(retiredStorePruneInterval)
-	defer pruneTicker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-flushTicker.C:
-			s.sessionH.FlushRetiredStore()
-		case <-pruneTicker.C:
-			cutoffMs := time.Now().Add(-retiredStorePruneCutoff).UnixMilli()
-			s.sessionH.PruneRetiredStore(cutoffMs)
-		}
-	}
-}
+// runRetiredStoreFlusher + startProjectScanLoop + removedProjectNames moved to
+// server_loops.go (Phase-3 physical split, ARCH1 / #387).
 
 // plaintextDashboardTokenWarning is the message logged when a token-protected
 // dashboard is served over plaintext HTTP with no trusted proxy. R217-SEC-8
@@ -859,50 +1003,6 @@ const noTokenOpenWarning = "no dashboard_token configured on a non-loopback bind
 	"Either set server.dashboard_token, bind to 127.0.0.1 for single-user use, " +
 	"or set server.trusted_proxy=true with an upstream that enforces access control."
 
-// reverseNodePlaintextWarning / trustedProxyXFFReminder consts +
-// shouldWarnReverseNodePlaintext / shouldWarnNoTokenOpen / isPlaintextPublicAddr
-// helpers moved to server_warnings.go (Phase 5-prep, 2026-05-28).
-
-// startProjectScanLoop periodically rescans the projects root for added or
-// removed subdirectories and cleans up orphaned planner sessions for removed
-// projects.
-func (s *Server) startProjectScanLoop(ctx context.Context) {
-	if s.projectMgr == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(session.ProjectScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				oldNames := s.projectMgr.ProjectNames()
-				if err := s.projectMgr.Scan(); err != nil {
-					slog.Warn("project rescan", "err", err)
-					continue
-				}
-				newNames := s.projectMgr.ProjectNames()
-
-				// Detect removed projects and clean up orphaned planner sessions
-				changed := len(oldNames) != len(newNames)
-				for name := range oldNames {
-					if _, ok := newNames[name]; !ok {
-						changed = true
-						plannerKey := project.PlannerKeyFor(name)
-						if s.router.Remove(plannerKey) {
-							slog.Info("removed orphaned planner", "project", name)
-						}
-					}
-				}
-				if changed {
-					slog.Info("project list changed", "count", len(newNames))
-					if s.hub != nil {
-						s.hub.BroadcastSessionsUpdate()
-					}
-				}
-			}
-		}
-	}()
-}
+	// reverseNodePlaintextWarning / trustedProxyXFFReminder consts +
+	// shouldWarnReverseNodePlaintext / shouldWarnNoTokenOpen / isPlaintextPublicAddr
+	// helpers moved to server_warnings.go (Phase 5-prep, 2026-05-28).

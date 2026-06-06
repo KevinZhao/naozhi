@@ -38,7 +38,7 @@ func (c *countingProc) IsRunning() bool {
 // counter on every call. After Cleanup the count must remain zero.
 func TestCleanup_PassTwo_UsesCachedState(t *testing.T) {
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,
@@ -65,7 +65,7 @@ func TestCleanup_PassTwo_UsesCachedState(t *testing.T) {
 // the cached state actually drives classification.
 func TestCleanup_PassTwo_RunningSessionFromCache(t *testing.T) {
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,

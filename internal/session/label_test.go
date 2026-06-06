@@ -102,16 +102,16 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 	if notified != 1 {
 		t.Fatalf("notified after first SetUserLabel = %d, want 1", notified)
 	}
-	genAfterFirst := r.storeGen.Load()
+	genAfterFirst := r.ss.gen.Load()
 	r.mu.RLock()
-	dirtyAfterFirst := r.storeDirty
+	dirtyAfterFirst := r.ss.dirty
 	r.mu.RUnlock()
 	if !dirtyAfterFirst {
 		t.Fatalf("storeDirty should be true after first SetUserLabel")
 	}
 	// Simulate a saveIfDirty cycle clearing the flag.
 	r.mu.Lock()
-	r.storeDirty = false
+	r.ss.dirty = false
 	r.mu.Unlock()
 
 	// Second mutation with the SAME value must be a pure no-op: no notify,
@@ -123,12 +123,12 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 		t.Errorf("onChange fired on same-value SetUserLabel: notified = %d, want 1", notified)
 	}
 	r.mu.RLock()
-	dirtyAfterSecond := r.storeDirty
+	dirtyAfterSecond := r.ss.dirty
 	r.mu.RUnlock()
 	if dirtyAfterSecond {
 		t.Errorf("storeDirty flipped on same-value SetUserLabel")
 	}
-	if got := r.storeGen.Load(); got != genAfterFirst {
+	if got := r.ss.gen.Load(); got != genAfterFirst {
 		t.Errorf("storeGen advanced on same-value SetUserLabel: got %d, want %d", got, genAfterFirst)
 	}
 
@@ -141,12 +141,12 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 		t.Errorf("onChange fired %d times after distinct-value SetUserLabel, want 2", notified)
 	}
 	r.mu.RLock()
-	dirtyAfterThird := r.storeDirty
+	dirtyAfterThird := r.ss.dirty
 	r.mu.RUnlock()
 	if !dirtyAfterThird {
 		t.Errorf("storeDirty should be true after distinct-value SetUserLabel")
 	}
-	if got := r.storeGen.Load(); got == genAfterFirst {
+	if got := r.ss.gen.Load(); got == genAfterFirst {
 		t.Errorf("storeGen did not advance on distinct-value SetUserLabel: got %d, want > %d", got, genAfterFirst)
 	}
 	if got := r.GetSession(sk).UserLabel(); got != "renamed" {

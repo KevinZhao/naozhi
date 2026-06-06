@@ -78,10 +78,112 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 		dst = make([]EventEntry, count)
 	}
 	start := (l.head - count + l.maxSize) % l.maxSize
-	for i := 0; i < count; i++ {
-		dst[i] = l.entries[(start+i)%l.maxSize]
+	// Branch-on-wrap: avoid per-step modulo on the hot WS polling path.
+	// Mirrors the EntriesSince / LastNVisible branch-on-wrap pattern.
+	if start+count <= l.maxSize {
+		copy(dst, l.entries[start:start+count])
+	} else {
+		n1 := l.maxSize - start
+		copy(dst, l.entries[start:l.maxSize])
+		copy(dst[n1:], l.entries[:count-n1])
 	}
 	return dst
+}
+
+// LastNVisible returns the tail of the ring as a CONTIGUOUS chronological
+// slice (internal events included) chosen so that the slice contains at least
+// `visibleTarget` visible entries — i.e. entries IsVisibleEntry reports true
+// for. The walk stops at the first of:
+//
+//   - the slice holds >= visibleTarget visible entries, OR
+//   - the slice length reaches maxTotal (a cost ceiling — when the tail is
+//     dominated by a parallel agent team's tool_use / task_progress flood the
+//     visible count may end up below the target), OR
+//   - the whole ring has been scanned.
+//
+// Why a contiguous run rather than only the visible entries: the dashboard's
+// initial render rebuilds turnState by scanning the history backward for the
+// last turn boundary, and the running banner ("正在使用 X") is reconstructed
+// from the interleaved tool_use / task_* events. Dropping the internal events
+// here would leave the banner blank on first paint. The dashboard still
+// filters them out of the transcript via processEventsForDisplay; they ride
+// along purely to seed turn state.
+//
+// visibleTarget <= 0 falls back to LastN(maxTotal) semantics (no visible
+// accounting). maxTotal <= 0 is treated as "the whole ring".
+//
+// The earliest Time in the returned slice is the cursor a caller uses to
+// continue paginating into the disk tier (EventEntriesBeforeCtx) when the ring
+// alone could not satisfy visibleTarget.
+func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []EventEntry {
+	return l.LastNVisibleAppend(nil, visibleTarget, maxTotal)
+}
+
+// LastNVisibleAppend is the buffer-reusing variant of LastNVisible.
+// Matched entries are appended into `dst` (re-sliced from `dst[:0]`); when
+// `dst` already has enough capacity — e.g. retrieved from a
+// sync.Pool[*[]EventEntry] rotated across polls (the listRefsPool pattern
+// in router_core) — the dashboard first-render walk of up to maxTotal ring
+// slots no longer allocates a fresh rev slice on every call.
+//
+// R20260602-PERF-8 (#1631): dashboard first render uses
+// visibleTarget=50 / maxTotal=200, so the unpooled LastNVisible allocated
+// a 200-cap []EventEntry under l.mu.RLock on each subscribe. Mirrors the
+// EntriesSinceAppend / LastNAppend convention so a pooled caller can drop
+// that per-call allocation. The slices.Reverse stays OUTSIDE l.mu (same as
+// EntriesSince, R220-PERF-3): the RLock is released the instant the
+// backward scan finishes and the reverse touches only the locally-owned
+// buffer, so a long maxTotal walk never blocks a concurrent Append longer
+// than the scan itself.
+//
+// Lifetime: the returned slice is fully owned by the caller after the call
+// returns; the EventLog never retains a reference. Passing nil falls back
+// to LastNVisible's allocate-and-return behaviour (and returns nil on an
+// empty ring, preserving the original API contract).
+func (l *EventLog) LastNVisibleAppend(dst []EventEntry, visibleTarget, maxTotal int) []EventEntry {
+	l.mu.RLock()
+	count := l.count
+	if count == 0 {
+		l.mu.RUnlock()
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
+	}
+	limit := maxTotal
+	if limit <= 0 || limit > count {
+		limit = count
+	}
+	// Walk backward from the newest slot, branch-on-wrap (no per-step modulo),
+	// collecting into a reverse buffer until a stop condition trips. Reuse the
+	// caller's pooled backing array when it is large enough; append grows it
+	// organically otherwise.
+	rev := dst[:0]
+	if cap(rev) < limit {
+		rev = make([]EventEntry, 0, limit)
+	}
+	visible := 0
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
+	for i := 0; i < count && len(rev) < limit; i++ {
+		e := l.entries[idx]
+		rev = append(rev, e)
+		if IsVisibleEntry(e) {
+			visible++
+			if visibleTarget > 0 && visible >= visibleTarget {
+				break
+			}
+		}
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
+	}
+	l.mu.RUnlock()
+	slices.Reverse(rev)
+	return rev
 }
 
 // Count returns the current number of valid entries (0..maxSize).
@@ -160,7 +262,6 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 	// — a DIV per step. Walk backward from the newest slot with a cheap
 	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
 	rev := dst[:0]
-	allocated := false
 	idx := l.head - 1
 	if idx < 0 {
 		idx += l.maxSize
@@ -169,7 +270,7 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
-		if !allocated && cap(rev) == 0 {
+		if cap(rev) == 0 {
 			// Typical streaming match count is 1-5; cap at entriesSinceInitialCap
 			// so sessions with hundreds of buffered entries don't allocate a
 			// giant backing array on every notify. `append` will grow organically
@@ -179,7 +280,6 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 				initialCap = entriesSinceInitialCap
 			}
 			rev = make([]EventEntry, 0, initialCap)
-			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
 		idx--
@@ -226,8 +326,8 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 		return dst[:0]
 	}
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	if l.count == 0 {
+		l.mu.RUnlock()
 		if dst == nil {
 			return nil
 		}
@@ -286,6 +386,7 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 			idx += l.maxSize
 		}
 	}
+	l.mu.RUnlock()
 	if len(rev) == 0 {
 		if dst == nil {
 			return nil

@@ -48,18 +48,52 @@ const interruptedSettleWindow = 500 * time.Millisecond
 
 // findResultSince checks EventLog for a result entry logged after afterMS.
 // Used as fallback when eventCh may have dropped events due to full buffer.
+//
+// R20260605B-CORR-1 (#1805): the "result" EventEntry deliberately carries
+// only cost + turn-boundary metadata — its Detail/Summary are empty
+// (process_event_format.go intentionally does NOT copy ev.Result into them to
+// avoid a duplicate dashboard bubble). The visible reply text was logged
+// separately as the preceding "text" assistant entry. The old code returned
+// SendResult{Text: result.Detail}, i.e. an EMPTY Text, so any caller that hit
+// this fallback (eventCh-drop / watchdog no-output / total-timeout — all on
+// the legacy ACP/cron Send path) silently surfaced a BLANK reply even though
+// the CLI produced a full answer. We now recover the reply from the most
+// recent "text" entry at or after the result (falling back to the latest
+// "text" entry in the turn) so the answer text is preserved.
 func (p *Process) findResultSince(afterMS int64) *SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type == "result" {
-			return &SendResult{
-				Text:      entries[i].Detail,
-				SessionID: p.GetSessionID(),
-				CostUSD:   entries[i].Cost,
-			}
+		if entries[i].Type != "result" {
+			continue
+		}
+		text := entries[i].Detail
+		if text == "" {
+			// The result entry never carries the reply text (#1805); recover
+			// it from the last assistant "text" entry that precedes this
+			// result within the same turn window. Detail holds the full
+			// (up to 16000-rune) text; Summary is the truncated preview.
+			text = lastTextEntryBefore(entries, i)
+		}
+		return &SendResult{
+			Text:      text,
+			SessionID: p.GetSessionID(),
+			CostUSD:   entries[i].Cost,
 		}
 	}
 	return nil
+}
+
+// lastTextEntryBefore returns the Detail of the most recent assistant "text"
+// entry at an index < resultIdx, or "" when the turn produced no text entry.
+// Used by findResultSince to recover the reply the empty-Detail "result"
+// entry does not carry. R20260605B-CORR-1 (#1805).
+func lastTextEntryBefore(entries []EventEntry, resultIdx int) string {
+	for j := resultIdx - 1; j >= 0; j-- {
+		if entries[j].Type == "text" && entries[j].Detail != "" {
+			return entries[j].Detail
+		}
+	}
+	return ""
 }
 
 // drainStaleEvents clears residual events from previous turns.
@@ -163,10 +197,7 @@ drain:
 			// when eventCh is torn down is safe.
 			if isChanAlive(p.done) {
 				for _, ev := range holdback {
-					select {
-					case p.eventCh <- ev:
-					default:
-					}
+					p.safeReenqueue(ev)
 				}
 			}
 			return ctx.Err()
@@ -190,19 +221,43 @@ drain:
 				return nil
 			}
 			for _, ev := range holdback {
-				select {
-				case p.eventCh <- ev:
-				default:
-					// eventCh is full; fresh events are being dropped here.
-					// findResultSince will recover the result from EventLog but
-					// surface the occurrence so operators can enlarge the
-					// channel if it persists under load.
-					slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
-						"type", ev.Type, "session", ev.SessionID)
-				}
+				p.safeReenqueue(ev)
 			}
 			return nil
 		}
+	}
+}
+
+// safeReenqueue pushes a held-back post-cutoff event back onto p.eventCh for
+// the live consumer, non-blocking. The isChanAlive(p.done) guard at the call
+// site already establishes that readLoop had not closed eventCh when checked,
+// but that check and this send are not atomic: readLoop may close `done` and
+// then `eventCh` in the window between them (#1779). Sending on a closed
+// channel panics even through a `select { ... default }`, because the send
+// case is always ready-to-run on a closed channel and select picks it. We wrap
+// the send in a recover and silently drop on a send-on-closed panic: the
+// holdback events were already logged to EventLog by readLoop before being
+// pushed to eventCh, so the live Send() recovers the result via
+// findResultSince() and nothing is actually lost.
+func (p *Process) safeReenqueue(ev Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			// send-on-closed eventCh: readLoop tore the channel down between
+			// the isChanAlive guard and this send. EventLog is authoritative,
+			// so dropping the re-enqueue is safe. R-#1779.
+			slog.Debug("drainStaleEvents: re-enqueue raced eventCh close, dropped",
+				"type", ev.Type, "session", ev.SessionID)
+		}
+	}()
+	select {
+	case p.eventCh <- ev:
+	default:
+		// eventCh is full; fresh events are being dropped here.
+		// findResultSince will recover the result from EventLog but
+		// surface the occurrence so operators can enlarge the
+		// channel if it persists under load.
+		slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
+			"type", ev.Type, "session", ev.SessionID)
 	}
 }
 

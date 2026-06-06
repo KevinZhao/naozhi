@@ -294,6 +294,68 @@ func TestDispatchCommand_New_NamedAgent(t *testing.T) {
 	}
 }
 
+// TestResolveAgentToken pins the two-stage resolution shared by both
+// handleNewCommand branches (R0530-CR-1): exact lowercase key lookup, then
+// EqualFold scan over stored (possibly mixed-case) values.
+func TestResolveAgentToken(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	d.agentCommands = map[string]string{"review": "ReviewerBot", "ops": "ops-agent"}
+
+	cases := []struct {
+		token  string
+		wantID string
+		wantOK bool
+	}{
+		{"review", "ReviewerBot", true},      // exact key hit
+		{"reviewerbot", "ReviewerBot", true}, // EqualFold value hit (lowercased input)
+		{"ops-agent", "ops-agent", true},     // EqualFold value hit, same case
+		{"ops", "ops-agent", true},           // exact key hit
+		{"nope", "", false},                  // miss
+	}
+	for _, tc := range cases {
+		gotID, gotOK := d.resolveAgentToken(tc.token)
+		if gotOK != tc.wantOK || gotID != tc.wantID {
+			t.Errorf("resolveAgentToken(%q) = (%q, %v), want (%q, %v)",
+				tc.token, gotID, gotOK, tc.wantID, tc.wantOK)
+		}
+	}
+}
+
+// TestDispatchCommand_New_ProjectBound_MixedCaseAgent is the R0530-CR-1
+// regression guard: in a project-bound chat, "/new <Agent>" with a
+// mixed-case agent ID must resolve via the EqualFold fallback and reset
+// the session — previously the bound branch did exact-key-only lookup and
+// replied "未知的 agent" while the unbound branch resolved fine.
+func TestDispatchCommand_New_ProjectBound_MixedCaseAgent(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	d.queue = NewMessageQueue(5, 0)
+	// agentCommands keys are lowercased by applyDefaults; values keep the
+	// operator-supplied (mixed) case.
+	d.agentCommands = map[string]string{"review": "ReviewerBot"}
+	// Project-bound resolver: the chat resolves to a bound project.
+	d.resolver = session.NewKeyResolver(
+		map[string]session.AgentOpts{"general": {}, "ReviewerBot": {}},
+		&parityDataSource{binding: session.ProjectBinding{
+			Bound: true, Name: "demo", WorkspaceDir: "/srv/demo",
+		}},
+	)
+
+	// User types the agent in its stored mixed case, which the lowercasing
+	// in handleNewCommand turns into "reviewerbot" — only the EqualFold
+	// fallback can map that back to "ReviewerBot".
+	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new ReviewerBot", slog.Default())
+
+	reply := fp.lastReply()
+	if strings.Contains(reply, "未知") {
+		t.Fatalf("project-bound /new <mixed-case agent> wrongly rejected: %q", reply)
+	}
+	if !strings.Contains(reply, "重置") || !strings.Contains(reply, "ReviewerBot") {
+		t.Errorf("expected reset confirmation for ReviewerBot, got %q", reply)
+	}
+}
+
 func TestNormalizeSlashCommand(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ in, want string }{
@@ -728,6 +790,48 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	if idxSize != size {
 		t.Errorf("dropNotifyIndex size %d != LRU size %d", idxSize, size)
 	}
+}
+
+// TestShouldNotify_DropPath_BackPointerConsistent pins the R249-PERF-12 (#932)
+// refactor invariant: dropNotifyIndex maps directly to *dropNotifyEntry and each
+// entry's elem back-pointer must always reference the live list element, so the
+// LRU stays in lock-step with the map across refresh and eviction.
+func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
+	q := NewMessageQueue(0, 0)
+	q.ShouldNotify("a")
+	q.ShouldNotify("b")
+
+	q.mu.Lock()
+	for key, entry := range q.dropNotifyIndex {
+		if entry.elem == nil {
+			t.Fatalf("entry %q has nil elem back-pointer", key)
+		}
+		if got := entry.elem.Value.(*dropNotifyEntry); got != entry {
+			t.Fatalf("entry %q elem points at a different entry", key)
+		}
+		if entry.key != key {
+			t.Fatalf("index key %q != entry.key %q", key, entry.key)
+		}
+	}
+	q.mu.Unlock()
+
+	// Fill to capacity then overflow; the eviction must drop exactly one key
+	// and keep the map and list the same size (no dangling back-pointers).
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("fill-%d", i))
+	}
+	q.mu.Lock()
+	if q.dropNotifyLRU.Len() != len(q.dropNotifyIndex) {
+		t.Fatalf("LRU/index size mismatch after overflow: %d vs %d",
+			q.dropNotifyLRU.Len(), len(q.dropNotifyIndex))
+	}
+	for e := q.dropNotifyLRU.Front(); e != nil; e = e.Next() {
+		entry := e.Value.(*dropNotifyEntry)
+		if q.dropNotifyIndex[entry.key] != entry {
+			t.Fatalf("list entry %q missing/stale in index", entry.key)
+		}
+	}
+	q.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

@@ -149,7 +149,15 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 		return "", fmt.Errorf("start stream: %w", err)
 	}
 
-	stream := resp.GetStream()
+	return pumpPCMToTranscribe(ctx, pcm, resp.GetStream())
+}
+
+// pumpPCMToTranscribe streams ffmpeg PCM output into the Transcribe event
+// stream and collects the resulting transcript. Split out of streamFromFFmpeg
+// so the sender goroutine + ffmpeg-error propagation logic is unit-testable
+// with a mocked event stream (the SDK output's eventStream field is unexported,
+// so the seam has to live below resp.GetStream()).
+func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribestreaming.StartStreamTranscriptionEventStream) (string, error) {
 	// R186-RELY-H1 / R178-T: see streamFromBuffer; wait for sender goroutine
 	// before stream.Close() to avoid use-after-close on Writer.Send.
 	senderDone := make(chan struct{})
@@ -158,10 +166,19 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 		stream.Close()
 	}()
 
+	// pcm.Close() reaps ffmpeg and returns its non-zero exit error. The Close
+	// runs inside the sender goroutine (its sole owner), so carry the result
+	// back over a buffered (cap-1) channel: the send never blocks even if the
+	// reader bails, and the receive below happens-after that send — so reading
+	// the ffmpeg error is race-free without a second join. #1781: previously
+	// the error was discarded (`defer pcm.Close()`), so a transcode failure
+	// surfaced as ("", nil) — a silent success masking a conversion error.
+	ffmpegErrCh := make(chan error, 1)
+
 	// Read from ffmpeg stdout → send to Transcribe, concurrently with ffmpeg
 	go func() {
 		defer close(senderDone)
-		defer pcm.Close()
+		defer func() { ffmpegErrCh <- pcm.Close() }()
 		buf := make([]byte, 16*1024)
 		for {
 			n, readErr := pcm.Read(buf)
@@ -191,7 +208,20 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 		stream.Writer.Close()
 	}()
 
-	return collectTranscripts(stream)
+	transcript, err := collectTranscripts(stream)
+	if err != nil {
+		return "", err
+	}
+	// #1781: a non-empty transcript means usable PCM still reached Transcribe
+	// before ffmpeg died, so prefer the partial result over the error; only
+	// surface the convert error when nothing was transcribed (otherwise we'd
+	// discard a good result for a benign late ffmpeg hiccup).
+	if transcript == "" {
+		if ffmpegErr := <-ffmpegErrCh; ffmpegErr != nil {
+			return "", fmt.Errorf("audio convert: %w", ffmpegErr)
+		}
+	}
+	return transcript, nil
 }
 
 // collectTranscripts reads final transcript results from the stream.

@@ -11,15 +11,18 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -1251,7 +1254,16 @@ var shimEnvAllowedPrefixes = []string{
 	//                                   redirectable interpreters)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	"NODE_ENV=", "NPM_",
+	"NODE_ENV=",
+	// NPM_CONFIG_* can redirect npm's global-root / prefix / cache,
+	// enabling RCE-class module-hijack attacks. Use an explicit allowlist
+	// instead of the bare "NPM_" prefix. [R112714-ARCH-2]
+	//   NPM_CONFIG_REGISTRY — registry URL redirect, no code execution path.
+	//   NPM_TOKEN           — registry authentication token.
+	// Explicitly excluded: NPM_CONFIG_PREFIX, NPM_CONFIG_GLOBALCONFIG,
+	// NPM_CONFIG_CACHE, NPM_CONFIG_TMP — all redirect writable paths that
+	// npm uses to resolve packages or run lifecycle scripts.
+	"NPM_CONFIG_REGISTRY=", "NPM_TOKEN=",
 	"PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
 	"CONDA_PREFIX=", "CONDA_DEFAULT_ENV=", "CONDA_SHLVL=",
 	"JAVA_HOME=",
@@ -1266,22 +1278,273 @@ var shimEnvAllowedPrefixes = []string{
 // behavior; reject and log instead.
 const maxShimEnvEntryBytes = 4 * 1024
 
+// maxShimEnvOversizeWarnings caps how many "oversized entry rejected" warnings
+// are emitted per process lifetime. [R20260603-SEC-5] A single sync.Once
+// previously let the first benign oversized entry exhaust the log budget,
+// masking a subsequent attacker-injected oversized entry (e.g. an
+// ANTHROPIC_BASE_URL pointing at the IMDS endpoint) that would then be dropped
+// silently. A small counter lets the first few of each batch surface while
+// still bounding log volume from a pathological environment.
+const maxShimEnvOversizeWarnings = 5
+
+// filterShimEnvOversizeWarnings counts how many oversized-entry warnings have
+// been emitted. Oversized entries are always rejected (the continue fires);
+// only the *logging* is capped at maxShimEnvOversizeWarnings. [R20260603-SEC-5]
+var filterShimEnvOversizeWarnings atomic.Int64
+
 // filterShimEnv returns a copy of environ keeping only variables whose key
 // matches one of the allowed prefixes. This is defense-in-depth: the CLI
 // with --skip-permissions can still run `env` via Bash, but at least secrets
 // not needed by the CLI are not exposed by default.
+//
+// Oversized entries (len > maxShimEnvEntryBytes) are rejected and logged
+// (key prefix only, never the value) as documented by the maxShimEnvEntryBytes
+// godoc. [R112714-ARCH-3]
 func filterShimEnv(environ []string) []string {
 	filtered := make([]string, 0, len(environ)/2)
 	for _, kv := range environ {
 		if len(kv) > maxShimEnvEntryBytes {
+			// Log key prefix only — never log the value in case it is a
+			// secret (e.g. a misconfigured PYTHONPATH that happens to
+			// contain credential data). A counter caps the log output at
+			// maxShimEnvOversizeWarnings per process lifetime so a
+			// pathological environment (dozens of multi-MB exports) does
+			// not flood the log, while still surfacing the first few —
+			// previously a single sync.Once let one benign oversized entry
+			// mask later attacker-injected ones. [R112714-ARCH-3]
+			// [R20260603-SEC-5]
+			if n := filterShimEnvOversizeWarnings.Add(1); n <= maxShimEnvOversizeWarnings {
+				msg := "shim env: oversized entry rejected"
+				if n == maxShimEnvOversizeWarnings {
+					msg = "shim env: oversized entry rejected (further oversized warnings suppressed)"
+				}
+				slog.Warn(msg,
+					"key_prefix", kvKeyPrefix(kv),
+					"len", len(kv),
+					"max", maxShimEnvEntryBytes)
+			}
 			continue
 		}
 		for _, prefix := range shimEnvAllowedPrefixes {
 			if strings.HasPrefix(kv, prefix) {
+				// R20260602-SEC-1 (#1576, shim sibling): the endpoint vars
+				// below steer where the CLI subprocess (which has Bash + raw
+				// network access) sends API traffic. A poisoned shell rc / a
+				// tampered profile that exports one of these at an attacker
+				// host or the IMDS endpoint over plain http would silently
+				// redirect / harvest. Require https for non-loopback hosts,
+				// mirroring filterClaudeEnv's guard. Other allowlisted vars
+				// are not URLs and pass through unchanged.
+				if shimEndpointEnvDropped(kv) {
+					break
+				}
+				// R20260603-SEC-1: AWS_PROFILE / AWS_DEFAULT_PROFILE select a
+				// named profile from the AWS config. A profile may declare a
+				// `credential_process` that the SDK executes as a shell command.
+				// A poisoned shell rc / tampered profile that exports a profile
+				// name containing path separators or shell metacharacters could
+				// redirect that lookup to an attacker-controlled profile. Reject
+				// values that don't match ^[A-Za-z0-9_-]{1,64}$. Mirrors
+				// sysession/env.go isSafeProfileValue. Log key only, never value.
+				if shimProfileEnvDropped(kv) {
+					break
+				}
+				// R20260603-SEC-2: AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE /
+				// AWS_WEB_IDENTITY_TOKEN_FILE name files the AWS SDK opens inside
+				// the CLI subprocess. A poisoned shell rc / systemctl
+				// set-environment that points one of these at /proc/self/environ,
+				// /etc/shadow, or a relative-traversal path would make the SDK
+				// read arbitrary host files and ship their contents to STS as a
+				// credential / OIDC token (or leak the path content in SDK error
+				// logs). Require an absolute, traversal-free, null-free path.
+				// Log key only, never value.
+				if shimCredPathEnvDropped(kv) {
+					break
+				}
 				filtered = append(filtered, kv)
 				break
 			}
 		}
 	}
 	return filtered
+}
+
+// shimProfileEnvKeys is the set of allowlisted env keys whose value is an AWS
+// profile *name*. A malformed value can redirect the SDK's credential_process
+// lookup to an attacker-controlled profile, so the value is validated before
+// pass-through. R20260603-SEC-1.
+var shimProfileEnvKeys = map[string]bool{
+	"AWS_PROFILE":         true,
+	"AWS_DEFAULT_PROFILE": true,
+}
+
+// shimProfileEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
+// profile-name var that must be dropped because its value contains characters
+// outside ^[A-Za-z0-9_-]{1,64}$. Non-profile keys return false. The value is
+// never logged. R20260603-SEC-1.
+func shimProfileEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimProfileEnvKeys[key] {
+		return false
+	}
+	if !envpolicy.IsSafeProfileValue(val) {
+		slog.Warn("shim env: rejecting unsafe AWS profile value (credential_process injection guard)", "key", key)
+		return true
+	}
+	return false
+}
+
+// shimCredPathEnvKeys is the set of allowlisted env keys whose value is a
+// filesystem path the AWS SDK opens inside the CLI subprocess. A malicious
+// value (e.g. /proc/self/environ, /etc/shadow, or a relative ../ traversal)
+// makes the SDK read an arbitrary host file and treat it as a credential /
+// OIDC token, so the value is validated before pass-through. R20260603-SEC-2.
+var shimCredPathEnvKeys = map[string]bool{
+	"AWS_SHARED_CREDENTIALS_FILE": true,
+	"AWS_CONFIG_FILE":             true,
+	"AWS_WEB_IDENTITY_TOKEN_FILE": true,
+}
+
+// shimCredPathEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
+// credential-file path var that must be dropped because its value is not a
+// safe path: it must be absolute, contain no ".." traversal segment, and carry
+// no embedded null byte. Non-path keys and safe values return false. The value
+// is never logged. R20260603-SEC-2.
+func shimCredPathEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimCredPathEnvKeys[key] {
+		return false
+	}
+	if !isSafeShimCredPath(val) {
+		slog.Warn("shim env: rejecting unsafe AWS credential file path (path traversal guard)", "key", key)
+		return true
+	}
+	return false
+}
+
+// isSafeShimCredPath reports whether v is a safe absolute credential file path:
+// non-empty, no embedded null byte, absolute, and with no "." or ".." path
+// segment after cleaning (so values like /a/../../etc/shadow are rejected even
+// though they begin with a slash). R20260603-SEC-2.
+func isSafeShimCredPath(v string) bool {
+	if v == "" {
+		return false
+	}
+	if strings.IndexByte(v, 0) >= 0 {
+		return false
+	}
+	if !filepath.IsAbs(v) {
+		return false
+	}
+	// Reject any path containing a ".." segment outright (even if it would
+	// clean away) so a tampered value can never escape its intended root.
+	for _, seg := range strings.Split(filepath.ToSlash(v), "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// shimEndpointEnvKeys is the set of allowlisted env keys whose value is an API
+// endpoint URL forwarded to the CLI subprocess. shimEndpointEnvDropped applies
+// an SSRF/redirect guard to each. R20260602-SEC-1 (#1576, shim sibling).
+var shimEndpointEnvKeys = map[string]bool{
+	"ANTHROPIC_BASE_URL":         true,
+	"ANTHROPIC_BEDROCK_BASE_URL": true,
+	"AWS_ENDPOINT_URL":           true,
+	"AWS_BEDROCK_ENDPOINT":       true,
+}
+
+// shimEndpointEnvDropped reports whether kv (a "KEY=value" env entry) is an
+// endpoint URL var that must be dropped because its value targets a plain-http
+// non-loopback host. Non-endpoint keys and safe URLs return false. The value
+// is never logged. R20260602-SEC-1 (#1576, shim sibling).
+func shimEndpointEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimEndpointEnvKeys[key] {
+		return false
+	}
+	if val == "" {
+		return false
+	}
+	if err := validateShimEndpointURL(val); err != nil {
+		slog.Warn("shim env: rejecting unsafe endpoint base_url", "key", key, "err", err)
+		return true
+	}
+	return false
+}
+
+// validateShimEndpointURL enforces https:// unless the host is loopback
+// (localhost / 127.0.0.0/8 / ::1), for which plain http is allowed so local
+// mock gateways still work. Mirrors filterClaudeEnv's validateClaudeBaseURLEnv.
+//
+// R20260603150052-SEC-7 (#1713): even an https:// target must not point at a
+// literal internal IP (loopback excepted for local mocks). Without this, an
+// operator rc that exports ANTHROPIC_BASE_URL=https://169.254.169.254/... would
+// steer the CLI's Anthropic client — API key in hand — at the EC2 IMDS or an
+// internal admin port. We only inspect literal IPs here (no DNS resolution at
+// env-filter time); hostname-based rebinding is out of scope for this guard.
+func validateShimEndpointURL(v string) error {
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); ip != nil && shimEndpointInternalIP(ip) && !ip.IsLoopback() {
+			return fmt.Errorf("https:// to internal IP %q rejected (SSRF/IMDS guard)", host)
+		}
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
+	}
+	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+}
+
+// shimEndpointInternalIP reports whether ip falls in the SSRF deny-set:
+// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or the
+// unspecified address. Mirrors weixin's rejectInternalIP deny-set.
+func shimEndpointInternalIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
+}
+
+// kvKeyPrefix returns the key part (before '=') of a KEY=value env string,
+// capped at 64 bytes to bound log line length even for pathologically long
+// key names. Never returns the value.
+func kvKeyPrefix(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		k := kv[:i]
+		if len(k) > 64 {
+			k = k[:64]
+		}
+		return k
+	}
+	// Malformed (no '='): return a safe prefix.
+	if len(kv) > 64 {
+		return kv[:64]
+	}
+	return kv
 }

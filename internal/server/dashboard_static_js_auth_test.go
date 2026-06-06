@@ -92,3 +92,38 @@ func TestAgentViewJS_NoTokenModeStillServes(t *testing.T) {
 		t.Fatalf("/static/agent_view.js no-token GET = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
 }
+
+// TestAssetBrowserJS_RequiresAuth_TokenMode guards the cc-asset-browser module
+// against the same SEC-4 (#1328) fingerprinting regression.
+func TestAssetBrowserJS_RequiresAuth_TokenMode(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/static/asset_browser.js", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("/static/asset_browser.js unauth GET = %d, want 401 (SEC-4 #1328)", w.Code)
+	}
+	body := w.Body.String()
+	for _, leak := range []string{"openAssetBrowser", "ab-overlay", "function "} {
+		if strings.Contains(body, leak) {
+			t.Errorf("#923 regression: 401 body leaks asset_browser.js source token %q", leak)
+		}
+	}
+}
+
+// TestAssetBrowserJS_NoTokenModeStillServes locks the no-token escape valve.
+func TestAssetBrowserJS_NoTokenModeStillServes(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/static/asset_browser.js", nil)
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("/static/asset_browser.js no-token GET = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+}

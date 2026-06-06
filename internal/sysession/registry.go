@@ -4,6 +4,16 @@ import (
 	"fmt"
 )
 
+// Built-in daemon names. These are the single source of truth for the
+// kebab-case identifiers used in builtinDaemons, each daemon's Name(),
+// and config-translation wiring (cmd/naozhi). Referencing the constant
+// instead of a string literal makes a rename a compile-time concern
+// rather than a silent drift between registry and wiring (#1634).
+const (
+	DaemonAutoTitler   = "auto-titler"
+	DaemonAttachmentGC = "attachment-gc"
+)
+
 // validateDaemonName enforces the kebab-case naming convention RFC §3.2:
 //
 //	^[a-z][a-z0-9-]{1,30}$
@@ -51,6 +61,9 @@ type DaemonDeps struct {
 	Router SystemSessionRouter
 	Runner Runner
 	Cfg    DaemonConfig
+	// WorkspaceRoots is non-nil only for daemons that sweep workspace
+	// attachment dirs (attachment-gc). Other daemons ignore it.
+	WorkspaceRoots WorkspaceRootLister
 }
 
 // builtinDaemons is the immutable list of compiled-in daemons.  Order
@@ -60,11 +73,40 @@ type DaemonDeps struct {
 //
 // Phase 1 is shipped with AutoTitler only.  TransientSweeper / other
 // future daemons land in Phase 2 (RFC §12).
+//
+// R244-ARCH-18 (#1055): this is a static slice literal, NOT cli/history's
+// blank-import + init()-driven registry.  The divergence is deliberate, so
+// record it here rather than have it re-flagged as accidental inconsistency
+// (mirroring our standing precedent of promoting an implicit decision to a
+// documented anchor).  The two reasons cli/history adopts the init() pattern
+// are both absent for sysession:
+//
+//  1. No import cycle to break.  Every built-in daemon (auto-titler,
+//     attachment-gc, ...) is compiled into this same package, so there is no
+//     peer package that would have to import the registry — nothing to
+//     decouple via blank import.
+//  2. No out-of-package daemon contract.  Registering a daemon is an
+//     in-package slice append, exactly the three steps documented on
+//     builtinDaemonFactory above; there is no external plugin surface that
+//     would benefit from self-registration in an init().
+//
+// The holistic "should every subsystem share one unified Registry[T]"
+// question is tracked separately under R244-ARCH-4 (#1058, internal/wireup);
+// sysession deliberately does not pre-commit and stays on this slice literal
+// until that decision lands.  TestBuiltinDaemonsSliceLiteralInvariant pins
+// this so any future move to an init()-based registry is a deliberate edit
+// of both that test and this comment.
 var builtinDaemons = []builtinDaemonFactory{
 	{
-		Name: "auto-titler",
+		Name: DaemonAutoTitler,
 		Build: func(deps DaemonDeps) (Daemon, error) {
 			return newAutoTitler(deps)
+		},
+	},
+	{
+		Name: DaemonAttachmentGC,
+		Build: func(deps DaemonDeps) (Daemon, error) {
+			return newAttachmentGC(deps)
 		},
 	},
 }

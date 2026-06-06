@@ -3,17 +3,15 @@
 // Split out of scheduler.go to keep the dispatch surface (NotifyTarget +
 // resolveNotifyTarget priority ladder + deliverNotice + chunked notifyTarget)
 // in one place. No behaviour change. Methods stay on *Scheduler so the
-// s.platforms / s.notifyDefault fields remain accessible without exporting.
+// notifySender snapshot / s.notifyDefault fields remain accessible without exporting.
 
 package cron
 
 import (
 	"context"
 	"log/slog"
-	"time"
 
-	"github.com/naozhi/naozhi/internal/limits"
-	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -95,24 +93,10 @@ type NotifyDecision struct {
 	Source NotifySource
 }
 
-// cronNotifyTimeout is the per-target send budget for cron-driven IM replies.
-// Distinct from dispatch.platformReplyTimeout (15s) because cron flushes can
-// chunk large outputs across multiple ReplyWithRetry calls under cron.Stop's
-// 30s in-flight budget — see notifyTarget call site for the shutdown contract.
-//
-// R245-GO-9 (#851): the per-target 30s budget does NOT extend Stop()'s
-// wall-clock past systemd TimeoutStopSec. Stop bounds triggerWG.Wait() with
-// stopBudget (default 30s, see scheduler.go ~L978) so a stuck webhook is
-// preempted at the budget boundary.
-//
-// R243-SEC-14 (#799): replyCtx now chains to s.stopCtx (notifyTarget,
-// this file) so a hung webhook short-circuits the moment Stop fires
-// instead of waiting for the per-target timer. The constant stays the
-// per-target ceiling for normal operation; combined with the chained
-// parent, a stuck reply costs at most min(cronNotifyTimeout, time-since-
-// stopCancel) wall-clock. Keep at 30s for symmetry with stopBudget; if
-// a future review tightens stopBudget, mirror the change here.
-const cronNotifyTimeout = 30 * time.Second
+// cronNotifyTimeout is defined in tuning.go (R249-CR-16 #959 / R249-ARCH-23
+// #987), which documents its relationship to the inner PlatformReplyMaxAttempts
+// retry budget and the stopBudget shutdown contract alongside the other cron
+// tuning knobs.
 
 // The per-call retry budget for platform.ReplyWithRetry now lives on
 // limits.PlatformReplyMaxAttempts (R20260527-ARCH-8) so cron's
@@ -283,8 +267,23 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if s.stopCtx != nil && s.stopCtx.Err() != nil {
 		return
 	}
-	p := s.platforms[plat]
-	if p == nil {
+	// R20260527-PERF-1 (#1116): empty text is a no-op. deliverNotice already
+	// guards its async path, but notifyTarget is also reachable directly
+	// (in-package call sites + future callers) where platform.SplitText("",
+	// maxLen) returns [""] and the loop below would burn one
+	// limits.PlatformReplyMaxAttempts retry budget pushing a zero-byte chunk.
+	// Short-circuit here so the empty-text contract holds at this layer too,
+	// independent of how the caller reached us.
+	if text == "" {
+		return
+	}
+	sender := s.configMaps().notifySender
+	if sender == nil {
+		slog.Warn("cron notify: platform not found", "platform", plat)
+		return
+	}
+	r, ok := sender.Lookup(plat)
+	if !ok {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
@@ -309,13 +308,20 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// usable from narrow unit tests.
 		parent = context.Background()
 	}
+	// R249-ARCH-23 (#987): cronNotifyTimeout is the OUTER per-target ceiling.
+	// The INNER retry budget is limits.PlatformReplyMaxAttempts (inside each
+	// ReplyWithRetry below), shared with dispatch. The composite worst case for
+	// a multi-chunk flush is cronNotifyMaxChunks × PlatformReplyMaxAttempts ×
+	// per-attempt platformReplyTimeout; replyCtx (bound here) and the
+	// replyCtx.Err() check in the loop cut it off so it cannot outrun the
+	// per-target deadline. See the budget table at the top of tuning.go.
 	replyCtx, replyCancel := context.WithTimeout(parent, cronNotifyTimeout)
 	defer replyCancel()
-	maxLen := p.MaxReplyLength()
-	if maxLen <= 0 {
-		maxLen = platform.DefaultMaxReplyLen
-	}
-	chunks := platform.SplitText(text, maxLen)
+	// #725: the PlatformReplier adapter owns the platform.DefaultMaxReplyLen
+	// fallback (MaxReplyLength returns the default when the platform reports
+	// <=0) and the SplitText delegation, so cron no longer imports platform.
+	maxLen := r.MaxReplyLength()
+	chunks := r.Split(text, maxLen)
 	// R236-SEC-15 (#568): cap the chunk count before the loop. The
 	// composite chunks × retries × per-attempt budget can otherwise
 	// exceed cronNotifyTimeout when a chatty job lands on a slow
@@ -337,23 +343,43 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
 		// (limits.PlatformReplyMaxAttempts × per-attempt budget) consumes the budget mid-loop.
 		if err := replyCtx.Err(); err != nil {
+			// R249-CR-26 (#966): record partial delivery so a rising delta
+			// surfaces "IM recipients are seeing truncated cron output".
+			metrics.CronNotifyPartialTotal.Add(1)
+			// R236-SEC-15 follow-up: fold the cap-dropped tail (`dropped`)
+			// into the remaining count. `chunks` was already truncated to
+			// cronNotifyMaxChunks above, so `len(chunks)-i` alone would
+			// undercount what the recipient never saw — operators reading
+			// this WARN must see the full undelivered tail.
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
 				"platform", plat, "chat", chatID, "err", err,
-				"sent", delivered, "remaining", len(chunks)-i)
+				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
-		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
-			ChatID: chatID,
-			Text:   chunk,
-		}, limits.PlatformReplyMaxAttempts); err != nil {
+		// #725: r.Reply passes replyCtx through unchanged to
+		// platform.ReplyWithRetry (with limits.PlatformReplyMaxAttempts),
+		// so the R243-SEC-14 (#799) stopCtx parent chain still short-circuits
+		// a hung webhook the moment Scheduler.Stop cancels stopCtx.
+		if _, err := r.Reply(replyCtx, chatID, chunk); err != nil {
 			// R250-CR-18: abort on first chunk failure. Subsequent sends
 			// would interleave with foreign messages the user receives in
 			// the meantime, so partial delivery is worse than a clean
 			// truncation. Aggregate the count into a single WARN so log
 			// readers can match one line to one dropped notify.
+			//
+			// R249-CR-26 (#966): same partial-delivery counter as the
+			// deadline branch above — operators alert on the aggregate
+			// rather than distinguishing deadline-vs-failure (the WARN
+			// carries that detail for the journalctl drill-down).
+			metrics.CronNotifyPartialTotal.Add(1)
+			// R236-SEC-15 follow-up: report the ORIGINAL chunk count
+			// (len(chunks)+dropped) as total so the WARN reflects every
+			// chunk the recipient was supposed to receive, not just the
+			// post-cap subset. Without this a cap-truncated message that
+			// then fails mid-send under-reports the true loss.
 			slog.Warn("cron notify partial: chunks dropped after send failure",
 				"platform", plat, "chat", chatID, "err", err,
-				"delivered", delivered, "total", len(chunks),
+				"delivered", delivered, "total", len(chunks)+dropped,
 				"failed_index", i)
 			return
 		}

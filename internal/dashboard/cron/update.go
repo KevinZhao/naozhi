@@ -12,30 +12,31 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // HandleUpdate is the PATCH /api/cron endpoint. See dashboard_cron.go for the
 // shared validateCron* helpers and cronUpdateResp wire shape.
 func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	if len(id) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(id) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
@@ -43,11 +44,17 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Sending "work_dir": "" explicitly clears the override; omitting the key
 	// leaves the existing value alone.
 	var req struct {
-		Schedule       *string `json:"schedule,omitempty"`
-		Prompt         *string `json:"prompt,omitempty"`
-		Title          *string `json:"title,omitempty"`
-		WorkDir        *string `json:"work_dir,omitempty"`
-		Notify         *bool   `json:"notify,omitempty"`
+		Schedule *string `json:"schedule,omitempty"`
+		Prompt   *string `json:"prompt,omitempty"`
+		Title    *string `json:"title,omitempty"`
+		WorkDir  *string `json:"work_dir,omitempty"`
+		Notify   *bool   `json:"notify,omitempty"`
+		// NotifyClear wires the scheduler's reset-to-nil opt-in (JobUpdate.
+		// NotifyClear, R249-CR-15 #958) onto the HTTP surface. Pointer-to-true
+		// resets Job.Notify back to legacy-default (inherit scheduler policy);
+		// nil or pointer-to-false is a no-op. Without this field the reset path
+		// was unreachable over HTTP. [R103901-GO-1]
+		NotifyClear    *bool   `json:"notify_clear,omitempty"`
 		NotifyPlatform *string `json:"notify_platform,omitempty"`
 		NotifyChatID   *string `json:"notify_chat_id,omitempty"`
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
@@ -58,40 +65,40 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
-		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
+		req.Notify == nil && req.NotifyClear == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
 		req.FreshContext == nil && req.Backend == nil {
-		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
 	}
 	if req.Prompt != nil {
 		if err := validateCronPrompt(*req.Prompt); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 	if req.Title != nil {
 		if err := validateCronTitle(*req.Title); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 	if req.Schedule != nil && len(*req.Schedule) > maxCronScheduleBytesDashboard {
-		http.Error(w, "schedule too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
 	if req.Schedule != nil {
 		if err := validateCronScheduleChars(*req.Schedule); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 	if req.Backend != nil {
 		if err := ValidateCronBackend(*req.Backend); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
@@ -101,18 +108,18 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// HandleCreate and the send handler for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {
 		if err := validateCronWorkDir(*req.WorkDir); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if h.validateWS == nil {
-			http.Error(w, "cron work_dir validation not wired", http.StatusInternalServerError)
+			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
 		}
 		validated, err := h.validateWS(*req.WorkDir, h.allowedRoot)
 		if err != nil {
 			status, msg := h.classifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
-			http.Error(w, msg, status)
+			writeCronErr(w, status, msg)
 			return
 		}
 		req.WorkDir = &validated
@@ -124,7 +131,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		perJobSet := req.NotifyPlatform != nil && *req.NotifyPlatform != "" &&
 			req.NotifyChatID != nil && *req.NotifyChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
-			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return
 		}
 	}
@@ -147,7 +154,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		// failure category — the request is well-formed JSON, the values
 		// just describe an unprocessable on-disk transition.
 		if (req.NotifyPlatform == nil) != (req.NotifyChatID == nil) {
-			http.Error(w, "notify_platform and notify_chat_id must be patched together", http.StatusUnprocessableEntity)
+			writeCronErr(w, http.StatusUnprocessableEntity, "notify_platform and notify_chat_id must be patched together")
 			return
 		}
 		p := ""
@@ -169,11 +176,11 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		platformSet := p != ""
 		chatIDSet := c != ""
 		if platformSet != chatIDSet {
-			http.Error(w, "notify_platform and notify_chat_id must be set together", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify_platform and notify_chat_id must be set together")
 			return
 		}
 		if err := validateNotifyTarget(p, c); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
@@ -184,6 +191,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		Title:          req.Title,
 		WorkDir:        req.WorkDir,
 		Notify:         req.Notify,
+		NotifyClear:    req.NotifyClear,
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
 		FreshContext:   req.FreshContext,
@@ -195,19 +203,19 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			// Fixed string (not err.Error()) to stay consistent with
 			// HandleDelete and guard against future ErrJobNotFound variants
 			// that carry a wrapped ID.
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
+			slog.Error("cron UpdateJob update not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "updated")
 		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.
-			slog.Warn("cron UpdateJob rejected", "err", err, "id", id)
-			http.Error(w, "invalid update payload", http.StatusBadRequest)
+			slog.Warn("cron UpdateJob rejected", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
+			writeCronErr(w, http.StatusBadRequest, "invalid update payload")
 		}
 		return
 	}
 
-	slog.Info("cron job updated via dashboard", "id", j.ID)
+	slog.Info("cron job updated via dashboard", "id", osutil.SanitizeForLog(j.ID, cronpkg.MaxIDLen))
 	httputil.WriteJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
 }

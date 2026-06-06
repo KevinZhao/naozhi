@@ -174,16 +174,17 @@ func buildDiscoveryHandlers(
 	broadcast func(),
 ) *dashdiscovery.Handlers {
 	return dashdiscovery.New(dashdiscovery.Deps{
-		Cache:        cache,
-		NodeAccess:   nodeAccess,
-		NodeCache:    nodeCache,
-		ClaudeDir:    claudeDir,
-		Router:       routerTakeoverAdapter{r: opts.Router},
-		AllowedRoot:  opts.AllowedRoot,
-		DefaultAgent: opts.Agents["general"],
-		Broadcast:    broadcast,
-		ValidateWS:   validateWorkspace,
-		VerifyProcID: verifyProcIdentity,
+		Cache:         cache,
+		NodeAccess:    nodeAccess,
+		NodeCache:     nodeCache,
+		ClaudeDir:     claudeDir,
+		Router:        routerTakeoverAdapter{r: opts.Router},
+		AllowedRoot:   opts.AllowedRoot,
+		DefaultAgent:  opts.Agents["general"],
+		Broadcast:     broadcast,
+		ValidateWS:    validateWorkspace,
+		VerifyProcID:  verifyProcIdentity,
+		ProcStartTime: discovery.ProcStartTime,
 	})
 }
 
@@ -238,6 +239,8 @@ func buildProjectHandlers(
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
 		PublicTmpEnabled:   opts.PublicTmpEnabled,
+
+		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
 }
 
@@ -248,6 +251,11 @@ func agentIDList(agents map[string]session.AgentOpts) []string {
 	ids := make([]string, 0, len(agents)+1)
 	ids = append(ids, "general")
 	for id := range agents {
+		if id == "general" {
+			// "general" is already prepended unconditionally; skip the
+			// configured copy so it isn't listed twice.
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids

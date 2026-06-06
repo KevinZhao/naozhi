@@ -54,12 +54,12 @@ func TestSchedulerConfig_resolveAllowedRoot_EvalSymlinks(t *testing.T) {
 	}
 }
 
-// TestSchedulerConfig_resolveAllowedRoot_NonExistent pins R241-ARCH-10
-// (#517): a non-existent root resolves to empty (EvalSymlinks errors).
-// The caller then leaves allowedRootResolved as empty, and
-// workDirResolveUnderRoot's empty-root branch falls back to lazy per-call
-// resolution. The original NewScheduler behaviour must survive the
-// extraction.
+// TestSchedulerConfig_resolveAllowedRoot_NonExistent pins R112714-LOGIC-4:
+// when EvalSymlinks fails for a non-existent path the helper must NOT return
+// "" (which would silently disable the allowed-root sandbox). Instead it must
+// return cfg.AllowedRoot verbatim so the constraint is still enforced via
+// bare string comparison. A slog.Warn is also emitted (see
+// allowedroot_evalsymlinks_test.go for the log assertion).
 func TestSchedulerConfig_resolveAllowedRoot_NonExistent(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
@@ -67,8 +67,10 @@ func TestSchedulerConfig_resolveAllowedRoot_NonExistent(t *testing.T) {
 		t.Skipf("expected %q to be missing, got err=%v", missing, err)
 	}
 	cfg := &SchedulerConfig{AllowedRoot: missing}
-	if got := cfg.resolveAllowedRoot(); got != "" {
-		t.Fatalf("non-existent root: got=%q want=empty (EvalSymlinks error path)", got)
+	got := cfg.resolveAllowedRoot()
+	// R112714-LOGIC-4: must return the raw path, not "" (pre-fix returned "").
+	if got != missing {
+		t.Fatalf("non-existent root: got=%q want=%q (raw-path fallback, not empty)", got, missing)
 	}
 	if cfg.AllowedRoot != missing {
 		t.Errorf("AllowedRoot post-call = %q, want preserved %q (only NUL clears)", cfg.AllowedRoot, missing)

@@ -37,6 +37,15 @@ import (
 // Consumers should read Workspace (1) for identity, Nodes (2) for the
 // remote-instance pool, and Session.CWD (3) for the spawn directory.
 type Config struct {
+	// SchemaVersion pins the config schema this file targets. Absent or 0 in
+	// older files is normalized to CurrentSchemaVersion by applyDefaults, so
+	// existing deployments keep loading unchanged. A future breaking change to
+	// the YAML shape bumps CurrentSchemaVersion and a migration pass can branch
+	// on the declared value. R243-ARCH-14 (#843): the config-side half of the
+	// config/v1 migration entry — establishes the version field that the
+	// sysession/scheduler/router migration logic will consult.
+	SchemaVersion int `yaml:"schema_version,omitempty"`
+
 	Server        ServerConfig           `yaml:"server"`
 	CLI           CLIConfig              `yaml:"cli"`
 	Session       SessionConfig          `yaml:"session"`
@@ -61,12 +70,14 @@ type Config struct {
 	Upstream     *UpstreamConfig             `yaml:"upstream"`
 	// Workspace identifies THIS naozhi instance. Distinct from Workspaces
 	// (remote nodes) and Session.Workspace (deprecated CWD alias).
-	Workspace  WorkspaceConfig   `yaml:"workspace"`
-	Transcribe *TranscribeConfig `yaml:"transcribe"`
-	Cron       CronConfig        `yaml:"cron"`
-	Log        LogConfig         `yaml:"log"`
-	Projects   ProjectsConfig    `yaml:"projects"`
-	Sysession  SysessionConfig   `yaml:"sysession,omitempty"`
+	Workspace   WorkspaceConfig   `yaml:"workspace"`
+	Transcribe  *TranscribeConfig `yaml:"transcribe"`
+	Cron        CronConfig        `yaml:"cron"`
+	Log         LogConfig         `yaml:"log"`
+	Projects    ProjectsConfig    `yaml:"projects"`
+	Sysession   SysessionConfig   `yaml:"sysession,omitempty"`
+	Update      UpdateConfig      `yaml:"update,omitempty"`
+	ImageOrient ImageOrientConfig `yaml:"image_orient,omitempty"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
@@ -76,6 +87,7 @@ type Config struct {
 	cachedExecTimeout     time.Duration `yaml:"-"`
 	cachedCollectDelay    time.Duration `yaml:"-"`
 	cachedJitterMax       time.Duration `yaml:"-"`
+	cachedInterval        time.Duration `yaml:"-"`
 }
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -154,9 +166,35 @@ type SessionConfig struct {
 	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
 	// Deprecated: use CWD instead. Preserved for backward compatibility
 	// with existing config files; new fields should write only `cwd`.
-	Workspace string              `yaml:"workspace"`
-	Shim      ShimConfig          `yaml:"shim"`
-	AutoChain AutoChainYAMLConfig `yaml:"auto_chain,omitempty"`
+	Workspace string     `yaml:"workspace"`
+	Shim      ShimConfig `yaml:"shim"`
+	// Deprecated: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). This block is still
+	// parsed so existing config files do not error, but it no longer has
+	// any effect; precise continuation is now carried by the project-stable
+	// session key. A non-default value triggers a one-line deprecation warn
+	// at load (see WarnDeprecated).
+	AutoChain        AutoChainYAMLConfig        `yaml:"auto_chain,omitempty"`
+	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
+}
+
+// ProjectStableKeyYAMLConfig controls the project-level stable session key
+// feature (RFC docs/rfc/project-stable-session-key.md). Default-on. When
+// disabled, the dashboard frontend falls back to the legacy timestamp-key
+// path for "continue" — existing stable-key sessions age out naturally.
+//
+// Enabled is *bool so an absent key falls back to def-true while preserving
+// the ability to explicitly write enabled: false.
+type ProjectStableKeyYAMLConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// ResolvedEnabled returns the effective on/off flag.
+func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
+	if c.Enabled == nil {
+		return def
+	}
+	return *c.Enabled
 }
 
 // AutoChainYAMLConfig represents the auto-workspace-chain feature
@@ -238,6 +276,24 @@ type PlatformConfigs struct {
 	Weixin  *WeixinConfig  `yaml:"weixin"`
 }
 
+// hasPlatform reports whether the named platform has a configured section.
+// Returns false for unknown names so new platforms are treated as
+// unconfigured rather than silently accepted. [R20260602-ARCH-1]
+func (c *Config) hasPlatform(name string) bool {
+	switch name {
+	case "feishu":
+		return c.Platforms.Feishu != nil
+	case "slack":
+		return c.Platforms.Slack != nil
+	case "discord":
+		return c.Platforms.Discord != nil
+	case "weixin":
+		return c.Platforms.Weixin != nil
+	default:
+		return false
+	}
+}
+
 type FeishuConfig struct {
 	AppID             string `yaml:"app_id"`
 	AppSecret         string `yaml:"app_secret"`
@@ -245,6 +301,12 @@ type FeishuConfig struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLength    int    `yaml:"max_reply_length"`
+	// AllowInsecureWebhook opts in to verification_token-only webhook mode
+	// (no encrypt_key HMAC). R250531-SEC-1 (#1507): without this flag, a
+	// webhook configured with only verification_token refuses to start
+	// because plaintext-token-only auth is replay/forgery-prone if the
+	// token leaks. encrypt_key (HMAC) is the recommended secure config.
+	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
 type CronConfig struct {
@@ -274,6 +336,76 @@ type CronConfig struct {
 type CronNotifyTarget struct {
 	Platform string `yaml:"platform"` // "feishu" / "slack" / "discord" / "weixin"
 	ChatID   string `yaml:"chat_id"`
+}
+
+// UpdateConfig configures the in-process auto-update checker. When enabled,
+// a background goroutine periodically queries GitHub Releases and, per Mode,
+// notifies / downloads+installs / downloads+installs+restarts.
+//
+// Default is Enabled=true with Mode="download": pick up new releases and
+// stage them, but do NOT surprise-restart and drop live sessions — the new
+// binary takes effect on the next restart. The underlying selfupdate flow
+// (download → SHA-256 verify → atomic replace → backup) is shared with the
+// manual `naozhi upgrade` command.
+type UpdateConfig struct {
+	// Enabled is the master switch. nil (unset) defaults to true; set
+	// `enabled: false` to turn the checker off entirely.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Mode selects what happens when a newer release is found:
+	//   "notify"             — log + optional IM notice, no binary change.
+	//   "download" (default) — download, verify, atomically replace the
+	//                          binary; do NOT restart (applies next boot).
+	//   "auto"               — download, verify, replace, AND restart.
+	// Unknown values fall back to "download" (the configured default).
+	Mode string `yaml:"mode,omitempty"`
+
+	// Interval is how often to check for a newer release (Go duration,
+	// e.g. "6h"). Default 6h. A value below the 1h floor is clamped up
+	// to protect GitHub from accidental tight loops.
+	Interval string `yaml:"interval,omitempty"`
+
+	// CheckOnStart runs one check shortly after startup instead of waiting
+	// a full Interval. Default false so a restart loop on a bad release
+	// can't immediately re-trigger an auto-update.
+	CheckOnStart bool `yaml:"check_on_start,omitempty"`
+
+	// Notify is the IM target for update notices (new version found, or
+	// a download/install outcome). Empty fields disable IM delivery
+	// (the check still logs).
+	Notify CronNotifyTarget `yaml:"notify,omitempty"`
+}
+
+// UpdateEnabled reports whether the auto-update checker should run. nil
+// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+func (c *Config) UpdateEnabled() bool {
+	return c.Update.Enabled == nil || *c.Update.Enabled
+}
+
+// ImageOrientConfig configures auto-orientation of uploaded images that
+// carry no EXIF orientation flag (e.g. a sideways document photo). When
+// enabled, the dashboard fires a side vision call (small/Haiku-class model)
+// after upload that decides which way is up; the backend then bakes the
+// rotation into the stored bytes before send. Best-effort and fail-safe —
+// an unclear verdict or any error leaves the image untouched.
+type ImageOrientConfig struct {
+	// Enabled gates the feature. nil (unset in YAML) defaults to TRUE so a
+	// fresh deployment gets auto-orient without config; an explicit
+	// `enabled: false` turns it off. Mirrors UpdateConfig's *bool idiom.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Model overrides the --model passed to the side vision call. Empty
+	// leaves it unset so the CLI uses its own default Haiku-class model
+	// (on Bedrock the deployment's ANTHROPIC_DEFAULT_HAIKU_MODEL). Keep it
+	// vendor-neutral here — do NOT hardcode a Bedrock ARN. See the
+	// sysession runner model note (RFC v2.1 §6.4).
+	Model string `yaml:"model,omitempty"`
+}
+
+// ImageOrientEnabled reports whether image auto-orientation should run. nil
+// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+func (c *Config) ImageOrientEnabled() bool {
+	return c.ImageOrient.Enabled == nil || *c.ImageOrient.Enabled
 }
 
 // SysessionConfig configures the system-session daemon framework
@@ -318,21 +450,32 @@ type SysessionRunnerConfig struct {
 }
 
 // SysessionDaemonConfig holds the common-shape fields every daemon
-// consumes plus a free-form Specific map for daemon-private knobs.
+// consumes plus daemon-private knobs. Decoded into each daemon's
+// DaemonConfig in main_helpers.go's wiring. Concrete fields (not an
+// untyped map) because YAML decoding into Go works better that way;
+// each daemon reads only the keys it understands.
 type SysessionDaemonConfig struct {
 	Enabled bool   `yaml:"enabled,omitempty"`
 	Tick    string `yaml:"tick,omitempty"`
 
-	// AutoTitler-specific fields.  Decoded into the daemon's
-	// DaemonConfig in main.go's wiring.  We don't model them as
-	// untyped map[string]any here because YAML decoding into Go
-	// generally works better with concrete fields — and AutoTitler
-	// is the only daemon for now, so the cost of explicit fields is
-	// trivial.
+	// AutoTitler-specific fields.
 	MinUserTurns      int    `yaml:"min_user_turns,omitempty"`
 	MinRenameInterval string `yaml:"min_rename_interval,omitempty"`
 	BatchPerTick      int    `yaml:"batch_per_tick,omitempty"`
 	IncludeGroupChat  bool   `yaml:"include_group_chat,omitempty"`
+
+	// attachment-gc-specific fields (docs/rfc/attachment-gc-daemon.md).
+	// UploadTTL/RefTTL: "0" or unset → daemon default (NOT "disable" —
+	// contrast Runner.JSONLMaxAge where "0" disables). PerRootCap: 0 →
+	// default 500. DryRun: when true, log would-removes without
+	// deleting. RunOnStart: fire one sweep at startup (recommended for
+	// this low-frequency daemon so a restart-churning process still
+	// makes progress).
+	UploadTTL  string `yaml:"upload_ttl,omitempty"`
+	RefTTL     string `yaml:"ref_ttl,omitempty"`
+	PerRootCap int    `yaml:"per_root_cap,omitempty"`
+	DryRun     bool   `yaml:"dry_run,omitempty"`
+	RunOnStart bool   `yaml:"run_on_start,omitempty"`
 }
 
 type LogConfig struct {
@@ -487,34 +630,40 @@ func (cfg *Config) Normalize() {
 }
 
 func applyDefaults(cfg *Config) {
+	if cfg.SchemaVersion == 0 {
+		// Absent schema_version means a pre-versioning config file; treat it
+		// as the current schema so existing deployments load unchanged.
+		cfg.SchemaVersion = CurrentSchemaVersion
+	}
 	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":8080"
+		cfg.Server.Addr = defaultServerAddr
 	}
 	if cfg.Session.MaxProcs <= 0 {
 		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
 	}
 	if cfg.Session.TTL == "" {
-		cfg.Session.TTL = "30m"
+		cfg.Session.TTL = defaultSessionTTL.String()
 	}
 	if cfg.Session.PruneTTL == "" {
-		cfg.Session.PruneTTL = "72h"
+		cfg.Session.PruneTTL = defaultSessionPruneTTL.String()
 	}
 	if cfg.Log.Level == "" {
-		cfg.Log.Level = "info"
-	}
-	if cfg.Session.Workspace == "" {
-		cfg.Session.Workspace = "~/.naozhi/workspace"
+		cfg.Log.Level = defaultLogLevel
 	}
 	if cfg.Session.Queue.MaxDepth == nil {
-		defaultDepth := 20
+		defaultDepth := defaultQueueMaxDepth
 		cfg.Session.Queue.MaxDepth = &defaultDepth
 	}
 	if cfg.Session.Queue.CollectDelay == "" {
-		cfg.Session.Queue.CollectDelay = "500ms"
+		cfg.Session.Queue.CollectDelay = defaultQueueCollectDelay.String()
 	}
 	if cfg.Session.Queue.Mode == "" {
-		cfg.Session.Queue.Mode = "collect"
+		cfg.Session.Queue.Mode = defaultQueueMode
 	}
+	// Reconcile cwd / deprecated workspace using the operator's raw input —
+	// the default must NOT be pre-filled into either field before this, or a
+	// pure-default deployment would spuriously trip the deprecation warning
+	// below. R71-CONFIG-M1.
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
 			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
@@ -527,6 +676,36 @@ func applyDefaults(cfg *Config) {
 		// promotion forever. R71-CONFIG-M1.
 		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
+	} else {
+		// Neither set: fall back to the default. Write only to the canonical
+		// `cwd` field, then mirror to the deprecated alias so downstream
+		// readers of either field keep working.
+		cfg.Session.CWD = defaultSessionCWD
+		cfg.Session.Workspace = defaultSessionCWD
+	}
+
+	// Deprecation: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). The config block is
+	// still parsed so old files don't error, but it has no effect — warn
+	// once if an operator explicitly set any field so they know to drop it.
+	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
+		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
+	}
+
+	if cfg.UpdateEnabled() {
+		if cfg.Update.Mode == "" {
+			cfg.Update.Mode = "download"
+		}
+		switch cfg.Update.Mode {
+		case "notify", "download", "auto":
+		default:
+			slog.Warn("update.mode unrecognized, falling back to download",
+				"mode", cfg.Update.Mode)
+			cfg.Update.Mode = "download"
+		}
+		if cfg.Update.Interval == "" {
+			cfg.Update.Interval = "6h"
+		}
 	}
 
 	cfg.Normalize()
@@ -562,38 +741,62 @@ func applyDefaults(cfg *Config) {
 
 func parseDurations(cfg *Config) error {
 	var err error
-	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); err != nil {
+	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", defaultSessionTTL); err != nil {
 		return err
 	}
-	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); err != nil {
+	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", defaultSessionPruneTTL); err != nil {
 		return err
 	}
-	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); err != nil {
+	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", defaultNoOutputTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", defaultTotalTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", defaultCronExecTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", 500*time.Millisecond); err != nil {
+	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", defaultQueueCollectDelay); err != nil {
 		return err
 	}
-	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", 2*time.Minute); err != nil {
+	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", defaultCronJitterMax); err != nil {
 		return err
 	}
 	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，
 	// 不把配置错误升成启动失败。
-	if cfg.cachedJitterMax > 10*time.Minute {
+	if cfg.cachedJitterMax > cronJitterMaxHardCap {
 		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
-			"requested", cfg.cachedJitterMax, "cap", 10*time.Minute)
-		cfg.cachedJitterMax = 10 * time.Minute
+			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
+		cfg.cachedJitterMax = cronJitterMaxHardCap
+	}
+	if cfg.UpdateEnabled() {
+		if cfg.cachedInterval, err = parseDurationRequired(cfg.Update.Interval, "update.interval", 6*time.Hour); err != nil {
+			return err
+		}
+		// 1h floor: a tighter loop hammers GitHub for no benefit (releases
+		// don't ship minute-to-minute). Clamp + warn rather than fail.
+		if cfg.cachedInterval < time.Hour {
+			slog.Warn("update.interval below 1h floor, clamping",
+				"requested", cfg.cachedInterval, "floor", time.Hour)
+			cfg.cachedInterval = time.Hour
+		}
 	}
 	return nil
 }
 
+// UpdateInterval returns the parsed, clamped auto-update check interval.
+// Valid only when Update.Enabled; returns 0 otherwise.
+func (c *Config) UpdateInterval() time.Duration { return c.cachedInterval }
+
 func validateConfig(cfg *Config) error {
+	// A config declaring a schema newer than this binary understands would be
+	// silently mis-parsed (unknown keys dropped, semantics shifted). Fail loud
+	// so an operator who downgrades the binary after editing config gets a
+	// clear message instead of subtle misbehaviour. R243-ARCH-14 (#843).
+	if cfg.SchemaVersion > CurrentSchemaVersion {
+		return fmt.Errorf("config schema_version %d is newer than this binary supports (max %d); upgrade naozhi or lower schema_version",
+			cfg.SchemaVersion, CurrentSchemaVersion)
+	}
 	if cfg.Platforms.Feishu != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
 			return fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
@@ -610,6 +813,29 @@ func validateConfig(cfg *Config) error {
 		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
 			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
 			return fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
+		}
+		// R20260604-SEC-2 (#1735): allow_insecure_webhook downgrades the feishu
+		// webhook to verification_token-only auth (no encrypt_key HMAC), so a
+		// leaked static token lets an attacker forge arbitrary feishu events
+		// (impersonate users, trigger session sends) within Feishu's 5-minute
+		// timestamp window. The prior behaviour (R20260603-SEC-6 #1656) only
+		// logged, which an operator copying a CI template could silently run in
+		// production. HARD FAIL instead.
+		//
+		// The gate deliberately does NOT exempt loopback binds: a webhook MUST
+		// be reachable from Feishu's public servers to function, and the
+		// documented home-deployment path puts naozhi on 127.0.0.1 behind a
+		// frp/ngrok/Cloudflare tunnel — so a loopback bind still receives
+		// internet-originating events and is fully exposed to forgery. The only
+		// escape is the explicit NAOZHI_ALLOW_INSECURE_WEBHOOK=true opt-in for
+		// CI/testing, matching the issue's "CI/testing-only" intent.
+		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
+			cfg.Platforms.Feishu.AllowInsecureWebhook &&
+			cfg.Platforms.Feishu.EncryptKey == "" {
+			if os.Getenv("NAOZHI_ALLOW_INSECURE_WEBHOOK") != "true" {
+				return fmt.Errorf("feishu allow_insecure_webhook=true with no encrypt_key accepts forged events if the verification_token leaks (webhooks are reachable from the public internet, including loopback binds behind a tunnel); configure encrypt_key (recommended) or set NAOZHI_ALLOW_INSECURE_WEBHOOK=true to accept this risk (CI/testing only)")
+			}
+			slog.Error("SECURITY: feishu allow_insecure_webhook=true with no encrypt_key — webhook runs in verification_token-only mode (no HMAC); events are replay/forgery-prone if the token leaks. Running only because NAOZHI_ALLOW_INSECURE_WEBHOOK=true (CI/testing escape hatch).")
 		}
 	}
 	if cfg.Platforms.Slack != nil {
@@ -719,6 +945,9 @@ func validateConfig(cfg *Config) error {
 		if containsEnvPlaceholder(cfg.Upstream.Token) {
 			return fmt.Errorf("upstream.token contains unexpanded ${VAR} — check environment variables")
 		}
+		if cfg.Upstream.Token == "your-secret-token" {
+			return fmt.Errorf("upstream.token is set to the example placeholder \"your-secret-token\" — replace it with a real secret")
+		}
 	}
 
 	for id, entry := range cfg.ReverseNodes {
@@ -746,19 +975,19 @@ func validateConfig(cfg *Config) error {
 	// operators only discover the misconfig once a notification actually
 	// fires. An empty platform disables the default entirely and is legal.
 	if np := cfg.Cron.NotifyDefault.Platform; np != "" {
-		ok := false
-		switch np {
-		case "feishu":
-			ok = cfg.Platforms.Feishu != nil
-		case "slack":
-			ok = cfg.Platforms.Slack != nil
-		case "discord":
-			ok = cfg.Platforms.Discord != nil
-		case "weixin":
-			ok = cfg.Platforms.Weixin != nil
-		}
-		if !ok {
+		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("cron.notify_default.platform %q is not a configured platform (set platforms.%s or clear notify_default)", np, np)
+		}
+	}
+
+	// R20260602141221-CR-1: mirror the cron.notify_default.platform check for
+	// update.notify.platform — an empty value is legal (disables IM delivery),
+	// but a non-empty value that names a platform without a configured section
+	// silently falls through all delivery attempts and the operator only
+	// discovers the typo when an upgrade occurs.
+	if np := cfg.Update.Notify.Platform; np != "" {
+		if !cfg.hasPlatform(np) {
+			return fmt.Errorf("update.notify.platform %q is not a configured platform (set platforms.%s or clear update.notify)", np, np)
 		}
 	}
 
@@ -797,6 +1026,13 @@ func validateConfig(cfg *Config) error {
 	// projects.planner_defaults.model 同走 BuildArgs（spawnSession 在 planner
 	// 路径覆盖 opts.Model），配置层 allowlist 与 cli.model 对齐。
 	if err := validateModelString("projects.planner_defaults.model", cfg.Projects.PlannerDefaults.Model); err != nil {
+		return err
+	}
+
+	// image_orient.model feeds the same --model argv as the side vision
+	// call; gate it with the shared allowlist so a malformed identifier
+	// can't slip into exec args.
+	if err := validateModelString("image_orient.model", cfg.ImageOrient.Model); err != nil {
 		return err
 	}
 

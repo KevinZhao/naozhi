@@ -208,6 +208,12 @@ type ACPProtocol struct {
 	// WriteMessage / on turn boundary; sessionID's split-out (above) is
 	// what makes mu's contention narrowly scoped to textBuf again.
 	textBuf strings.Builder
+	// thoughtBuf accumulates agent_thought_chunk text during a turn.
+	// kiro streams reasoning in very fine chunks (~2 chars each, 100s per
+	// turn); accumulating here and flushing a single "thinking" block at
+	// the turn boundary avoids flooding EventLog with empty per-chunk rows.
+	// Guarded by mu, same lifecycle as textBuf.
+	thoughtBuf strings.Builder
 	// BackendID labels metric increments emitted by this protocol instance.
 	// Multi-Backend RFC §10 (Sprint 6a): ReadEvent → metrics.RecordProtocolRPCError
 	// and WriteInterrupt → metrics.RecordACPCancel both need to know which
@@ -404,7 +410,8 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	// R226-PERF-11.
 	sid := p.loadSessionID()
 	p.mu.Lock()
-	p.textBuf.Reset() // reset text accumulator for new turn
+	p.textBuf.Reset()    // reset text accumulator for new turn
+	p.thoughtBuf.Reset() // reset thinking accumulator for new turn
 	p.mu.Unlock()
 
 	// Build prompt content blocks. R228-PERF-4: typed []acpPromptBlock
@@ -532,6 +539,21 @@ func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
 }
 
+// ReadEventInto is the allocation-aware variant of ReadEvent
+// (R20260603-PERF-10, #1676). ACP's per-frame return shapes are diverse (zero,
+// one, or two events), so rather than thread buf through every return site we
+// reuse the caller's backing array on the common path by copying the parsed
+// events into buf when they fit. The two-event turn-end split (cap 2 in the
+// readLoop buffer) and all single-event frames avoid the fresh slice header;
+// only a hypothetical >cap result falls back to the ReadEvent allocation.
+func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
+	events, done, err := p.ReadEvent(line)
+	if err != nil || len(events) == 0 || cap(buf) < len(events) {
+		return events, done, err
+	}
+	return append(buf[:0], events...), done, nil
+}
+
 func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
 	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy.
@@ -633,13 +655,23 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		p.mu.Lock()
 		text := p.textBuf.String()
 		p.textBuf.Reset()
+		thought := p.thoughtBuf.String()
+		p.thoughtBuf.Reset()
 		p.mu.Unlock()
 		// sessionID lives on its own atomic.Pointer; read after releasing
 		// mu so the textBuf-only critical section stays narrow.
 		// R226-PERF-11.
 		sid := p.loadSessionID()
 
-		// Turn boundary emits TWO events:
+		// Turn boundary emits up to THREE events:
+		//
+		//   0. (optional) A synthesised assistant frame carrying the accumulated
+		//      reasoning as a single "thinking" content block. agent_thought_chunk
+		//      notifications feed thoughtBuf only (no per-chunk EventLog entry, to
+		//      avoid flooding the log with kiro's ~300 fine chunks/turn); flushing
+		//      here renders it like Claude's thinking. Skipped when thoughtBuf is
+		//      empty. Reasoning is NOT plumbed into the result's Result field, so
+		//      it never leaks into the IM reply text.
 		//
 		//   1. A synthesised assistant frame carrying the accumulated text as
 		//      a single "text" content block. This is the only place in the
@@ -660,6 +692,15 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// "result also carries text") keeps every downstream consumer free
 		// of the ACP/claude special case: each event has exactly one role.
 		var events []Event
+		if thought != "" {
+			events = append(events, Event{
+				Type:      "assistant",
+				SessionID: sid,
+				Message: &AssistantMessage{
+					Content: []ContentBlock{{Type: "thinking", Text: thought}},
+				},
+			})
+		}
 		if text != "" {
 			events = append(events, Event{
 				Type:      "assistant",
@@ -830,6 +871,30 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 					// to the IM/dashboard renderers).
 					n := textutil.TruncateAtRuneBoundary(content.Text, room)
 					p.textBuf.WriteString(content.Text[:n])
+				}
+			}
+			p.mu.Unlock()
+		}
+		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
+
+	case "agent_thought_chunk":
+		// Reasoning stream. Accumulate into thoughtBuf (mirrors
+		// agent_message_chunk) and flush a single "thinking" block at the
+		// turn boundary so the dashboard renders it like Claude's thinking,
+		// instead of dropping the content on the default branch.
+		var content ACPTextContent
+		if err := json.Unmarshal(update.Update.Content, &content); err != nil {
+			slog.Warn("acp: agent_thought_chunk content unmarshal failed",
+				"err", err,
+				"raw_len", len(update.Update.Content))
+		} else if content.Text != "" {
+			p.mu.Lock()
+			if room := maxAssistantMessageContentBytes - p.thoughtBuf.Len(); room > 0 {
+				if len(content.Text) <= room {
+					p.thoughtBuf.WriteString(content.Text)
+				} else {
+					n := textutil.TruncateAtRuneBoundary(content.Text, room)
+					p.thoughtBuf.WriteString(content.Text[:n])
 				}
 			}
 			p.mu.Unlock()
@@ -1017,11 +1082,7 @@ func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 	if len(raw.MeteringUsage) > 0 {
 		meta.MeteringUsage = make([]MeteringEntry, 0, len(raw.MeteringUsage))
 		for _, m := range raw.MeteringUsage {
-			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry{
-				Value:      m.Value,
-				Unit:       m.Unit,
-				UnitPlural: m.UnitPlural,
-			})
+			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry(m))
 		}
 	}
 	return Event{

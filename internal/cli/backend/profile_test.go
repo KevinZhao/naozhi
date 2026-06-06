@@ -13,19 +13,45 @@ import (
 // Tests that exercise registration order or duplicate-panic semantics need
 // this; pure read-only tests against RegisterDefaults can also use it for
 // isolation.
+//
+// defaultsOnce is reset to a fresh sync.Once alongside the registry so a
+// test that calls EnsureDefaults() inside the clean block actually
+// re-bootstraps. Without this reset the block would inherit a fired
+// defaultsOnce from an earlier test (or production init), making
+// EnsureDefaults a silent no-op against the empty registry — the test
+// would then observe All() len 0 purely as a function of run order
+// (#895: test isolation must not depend on which test fires the Once first).
 func withCleanRegistry(t *testing.T, fn func()) {
 	t.Helper()
 	registryMu.Lock()
 	savedRegistry := registry
 	savedOrder := nextOrder
+	// Snapshot whether the saved registry already holds the defaults; this
+	// stands in for "defaultsOnce has fired" — every production fire path
+	// routes through EnsureDefaults/RegisterDefaults, both of which populate
+	// claude+kiro. We restore the Once to a matching fired/unfired state on
+	// cleanup (a sync.Once cannot be copied — copylocks — so we rebuild it).
+	_, savedHasClaude := savedRegistry["claude"]
+	_, savedHasKiro := savedRegistry["kiro"]
+	savedOnceFired := savedHasClaude && savedHasKiro
 	registry = map[string]registryEntry{}
 	nextOrder = 0
+	defaultsOnce = sync.Once{}
 	registryMu.Unlock()
 
 	t.Cleanup(func() {
 		registryMu.Lock()
 		registry = savedRegistry
 		nextOrder = savedOrder
+		// Reset to a fresh Once in place (assigning a zero-value literal is
+		// not a copylocks violation), then — if the saved registry was
+		// already bootstrapped — fire it with a no-op so a later
+		// EnsureDefaults stays a no-op against the restored (populated)
+		// registry rather than panicking on duplicate.
+		defaultsOnce = sync.Once{}
+		if savedOnceFired {
+			defaultsOnce.Do(func() {})
+		}
 		registryMu.Unlock()
 	})
 
@@ -241,6 +267,34 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 	})
 }
 
+// TestEnsureDefaults_CleanRegistryReBootstraps guards the test-isolation
+// fix in #895: a clean-registry block must re-bootstrap via EnsureDefaults
+// regardless of whether defaultsOnce already fired in production init or an
+// earlier test. We fire EnsureDefaults() OUTSIDE the clean block first to
+// trip the package-level Once, then assert that inside withCleanRegistry the
+// defaults re-register. Pre-fix (defaultsOnce not reset) this observed
+// All() len 0 — a run-order-dependent failure.
+func TestEnsureDefaults_CleanRegistryReBootstraps(t *testing.T) {
+	// Trip the global Once outside the clean block (idempotent / safe).
+	EnsureDefaults()
+
+	withCleanRegistry(t, func() {
+		if got := len(All()); got != 0 {
+			t.Fatalf("clean registry should start empty; All() len = %d", got)
+		}
+		EnsureDefaults()
+		if got := len(All()); got != 2 {
+			t.Fatalf("EnsureDefaults inside clean registry did not re-bootstrap: All() len = %d; want 2 (defaultsOnce reset missing?)", got)
+		}
+		if _, ok := Get("claude"); !ok {
+			t.Error("claude missing after re-bootstrap")
+		}
+		if _, ok := Get("kiro"); !ok {
+			t.Error("kiro missing after re-bootstrap")
+		}
+	})
+}
+
 func TestProfile_NewProtocol_Claude(t *testing.T) {
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
@@ -250,32 +304,14 @@ func TestProfile_NewProtocol_Claude(t *testing.T) {
 			t.Fatal("claude profile NewProtocol is nil")
 		}
 
-		// Verify settings plumbing forwards through.
-		called := false
-		deps := ProtocolDeps{
-			SettingsFile: "/tmp/override.json",
-			RefreshSettings: func() string {
-				called = true
-				return "/tmp/refresh.json"
-			},
-		}
-		proto := p.NewProtocol(deps)
+		// direct-user-settings PR1: ProtocolDeps is empty (the settings
+		// override plumbing was removed; cc loads ~/.claude/settings.json
+		// directly via --setting-sources user). NewProtocol must still build
+		// a usable ClaudeProtocol from the empty deps.
+		proto := p.NewProtocol(ProtocolDeps{})
 
-		claudeProto, ok := proto.(*cli.ClaudeProtocol)
-		if !ok {
+		if _, ok := proto.(*cli.ClaudeProtocol); !ok {
 			t.Fatalf("claude NewProtocol returned %T; want *cli.ClaudeProtocol", proto)
-		}
-		if claudeProto.SettingsFile != "/tmp/override.json" {
-			t.Errorf("SettingsFile = %q; want %q", claudeProto.SettingsFile, "/tmp/override.json")
-		}
-		if claudeProto.RefreshSettings == nil {
-			t.Fatal("RefreshSettings was not propagated")
-		}
-		if got := claudeProto.RefreshSettings(); got != "/tmp/refresh.json" {
-			t.Errorf("RefreshSettings() = %q; want %q", got, "/tmp/refresh.json")
-		}
-		if !called {
-			t.Error("RefreshSettings closure was not invoked")
 		}
 		if proto.Name() != "stream-json" {
 			t.Errorf("claude protocol Name() = %q; want %q", proto.Name(), "stream-json")
@@ -293,10 +329,7 @@ func TestProfile_NewProtocol_Kiro(t *testing.T) {
 		}
 
 		// Kiro ignores ProtocolDeps but accept any value without panicking.
-		proto := p.NewProtocol(ProtocolDeps{
-			SettingsFile:    "/should/be/ignored.json",
-			RefreshSettings: func() string { return "ignored" },
-		})
+		proto := p.NewProtocol(ProtocolDeps{})
 
 		if _, ok := proto.(*cli.ACPProtocol); !ok {
 			t.Fatalf("kiro NewProtocol returned %T; want *cli.ACPProtocol", proto)
