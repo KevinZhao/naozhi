@@ -187,3 +187,72 @@ func TestTrustedSigKeysEmptyThisPhase(t *testing.T) {
 		t.Fatalf("empty embedded trust set must hard-fail with ErrEmptyTrustSet, got %v", err)
 	}
 }
+
+// TestStrictIntegrityRequested_Parsing pins the truthy/falsy parsing of the
+// NAOZHI_UPGRADE_REQUIRE_PIN flag. The set of accepted truthy values is
+// deliberately narrow, and any unrecognised value (including a typo) leaves
+// the historical default (false) so a typo never silently disables an
+// upgrade an operator did not intend to gate.
+func TestStrictIntegrityRequested_Parsing(t *testing.T) {
+	truthy := []string{"1", "true", "TRUE", "Yes", "on", " on ", "ON"}
+	for _, v := range truthy {
+		t.Setenv(requirePinEnvVar, v)
+		if !strictIntegrityRequested() {
+			t.Fatalf("value %q should enable strict integrity", v)
+		}
+	}
+	falsy := []string{"", "0", "false", "no", "off", "ture", "2", "enabled?"}
+	for _, v := range falsy {
+		t.Setenv(requirePinEnvVar, v)
+		if strictIntegrityRequested() {
+			t.Fatalf("value %q must NOT enable strict integrity (default off)", v)
+		}
+	}
+}
+
+// TestEnforceStrongTrust_DefaultOff confirms the gate is a no-op when the
+// operator has not opted into strict integrity — the load-bearing default
+// for every existing operator. Empty trust set + no pin must still pass.
+func TestEnforceStrongTrust_DefaultOff(t *testing.T) {
+	t.Setenv(requirePinEnvVar, "")
+	t.Setenv(pinSha256EnvVar, "")
+	if len(trustedSigKeys) != 0 {
+		t.Fatalf("precondition: trustedSigKeys must be empty this phase, got %d", len(trustedSigKeys))
+	}
+	if err := enforceStrongTrust(); err != nil {
+		t.Fatalf("strict mode off must be a no-op, got: %v", err)
+	}
+}
+
+// TestEnforceStrongTrust_StrictNoAnchor_Refused is the security-critical
+// branch: strict mode on, empty embedded trust set, no out-of-band pin →
+// the upgrade must hard-fail with ErrStrictNoStrongTrust rather than fall
+// back to the same-channel checksums.txt that a leaked release token could
+// swap in lock-step (R20260606-SEC-2 #1823).
+func TestEnforceStrongTrust_StrictNoAnchor_Refused(t *testing.T) {
+	t.Setenv(requirePinEnvVar, "1")
+	t.Setenv(pinSha256EnvVar, "")
+	if len(trustedSigKeys) != 0 {
+		t.Fatalf("precondition: trustedSigKeys must be empty this phase, got %d", len(trustedSigKeys))
+	}
+	if err := enforceStrongTrust(); !errors.Is(err, ErrStrictNoStrongTrust) {
+		t.Fatalf("strict mode with no anchor must refuse with ErrStrictNoStrongTrust, got: %v", err)
+	}
+}
+
+// TestEnforceStrongTrust_StrictWithPin_Allowed confirms that a strict-mode
+// operator who DID provide an out-of-band checksums pin clears the gate (the
+// real pin verification still runs later in verifyPinnedChecksumsFile). A
+// blank/whitespace pin does not count as an anchor.
+func TestEnforceStrongTrust_StrictWithPin_Allowed(t *testing.T) {
+	t.Setenv(requirePinEnvVar, "true")
+	t.Setenv(pinSha256EnvVar, strings.Repeat("a", 64))
+	if err := enforceStrongTrust(); err != nil {
+		t.Fatalf("strict mode with a pin set should clear the gate, got: %v", err)
+	}
+
+	t.Setenv(pinSha256EnvVar, "   ")
+	if err := enforceStrongTrust(); !errors.Is(err, ErrStrictNoStrongTrust) {
+		t.Fatalf("whitespace-only pin must not count as an anchor, got: %v", err)
+	}
+}

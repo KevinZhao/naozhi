@@ -3,6 +3,7 @@ package dispatch
 import (
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // TestMsgRing_PushDrainFIFO covers the basic FIFO contract.
@@ -93,6 +94,134 @@ func TestMsgRing_ResetClearsRefs(t *testing.T) {
 		}
 	}
 	_ = canary
+}
+
+// TestMsgRing_DrainInto_ReusesScratch asserts drainInto writes into the
+// supplied dst when it has capacity (no fresh allocation) and preserves FIFO
+// order + ring reset. R20260606-PERF-3 (#1827).
+func TestMsgRing_DrainInto_ReusesScratch(t *testing.T) {
+	t.Parallel()
+	var r msgRing
+	r.push(QueuedMsg{Text: "A"}, 4)
+	r.push(QueuedMsg{Text: "B"}, 4)
+	r.push(QueuedMsg{Text: "C"}, 4)
+
+	first := r.drainInto(nil)
+	if len(first) != 3 || first[0].Text != "A" || first[2].Text != "C" {
+		t.Fatalf("first drain = %#v, want [A B C]", first)
+	}
+
+	// Refill and drain into the same backing array; it must be reused.
+	r.push(QueuedMsg{Text: "D"}, 4)
+	r.push(QueuedMsg{Text: "E"}, 4)
+	second := r.drainInto(first)
+	if len(second) != 2 || second[0].Text != "D" || second[1].Text != "E" {
+		t.Fatalf("second drain = %#v, want [D E]", second)
+	}
+	// Same backing array (capacity reused, no realloc).
+	if &second[:cap(second)][0] != &first[:cap(first)][0] {
+		t.Fatal("drainInto allocated a new backing array despite sufficient dst capacity")
+	}
+}
+
+// TestMsgRing_DrainInto_GrowsWhenDstTooSmall asserts a fresh slice is
+// allocated when dst lacks capacity, and the old dst is left untouched.
+func TestMsgRing_DrainInto_GrowsWhenDstTooSmall(t *testing.T) {
+	t.Parallel()
+	var r msgRing
+	for i := 0; i < 3; i++ {
+		r.push(QueuedMsg{Text: string(rune('A' + i))}, 4)
+	}
+	small := make([]QueuedMsg, 0, 1)
+	smallBase := unsafe.Pointer(&small[:cap(small)][0])
+	out := r.drainInto(small)
+	if len(out) != 3 {
+		t.Fatalf("len = %d, want 3", len(out))
+	}
+	if unsafe.Pointer(&out[0]) == smallBase {
+		t.Fatal("expected fresh allocation when dst too small")
+	}
+}
+
+// TestMsgRing_DrainInto_EmptyReturnsNil preserves the nil-vs-slice contract.
+func TestMsgRing_DrainInto_EmptyReturnsNil(t *testing.T) {
+	t.Parallel()
+	var r msgRing
+	if got := r.drainInto(make([]QueuedMsg, 0, 8)); got != nil {
+		t.Fatalf("empty drainInto = %#v, want nil", got)
+	}
+}
+
+// TestMsgRing_DrainInto_ZeroesConsumedSlots guards the GC-hygiene contract:
+// drainInto must zero the ring's backing slots so retained Images become
+// GC-eligible (matches drainAll/reset).
+func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
+	t.Parallel()
+	var r msgRing
+	r.push(QueuedMsg{Text: "X", MessageID: "m1"}, 4)
+	r.push(QueuedMsg{Text: "Y", MessageID: "m2"}, 4)
+	_ = r.drainInto(nil)
+	for i := 0; i < cap(r.buf); i++ {
+		if r.buf[i].Text != "" || r.buf[i].MessageID != "" {
+			t.Fatalf("post-drain buf[%d] not zeroed: %#v", i, r.buf[i])
+		}
+	}
+}
+
+// TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns is an end-to-end check that
+// the MessageQueue reuses one backing array across coalesced follow-up turns
+// (ModeCollect) without corrupting the FIFO contract. Simulates the ownerLoop:
+// drain -> consume -> enqueue more -> drain again. R20260606-PERF-3 (#1827).
+func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(8, 0)
+	_, _, _, gen := q.Enqueue("k", QueuedMsg{Text: "owner"})
+
+	// Turn 1 follow-ups.
+	q.Enqueue("k", QueuedMsg{Text: "a1"})
+	q.Enqueue("k", QueuedMsg{Text: "a2"})
+	batch1 := q.DoneOrDrain("k", gen)
+	if len(batch1) != 2 || batch1[0].Text != "a1" || batch1[1].Text != "a2" {
+		t.Fatalf("batch1 = %#v, want [a1 a2]", batch1)
+	}
+	base1 := &batch1[:cap(batch1)][0]
+
+	// Turn 2 follow-ups — fewer messages, must reuse the same backing array.
+	q.Enqueue("k", QueuedMsg{Text: "b1"})
+	batch2 := q.DoneOrDrain("k", gen)
+	if len(batch2) != 1 || batch2[0].Text != "b1" {
+		t.Fatalf("batch2 = %#v, want [b1]", batch2)
+	}
+	if &batch2[:cap(batch2)][0] != base1 {
+		t.Fatal("scratch was not reused across turns")
+	}
+
+	// Empty drain releases ownership and returns nil.
+	if got := q.DoneOrDrain("k", gen); got != nil {
+		t.Fatalf("empty drain = %#v, want nil", got)
+	}
+}
+
+// TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc proves the steady-state
+// coalesced-turn drain no longer allocates a backing slice per turn once the
+// scratch is warmed.
+func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
+	q := NewMessageQueue(8, 0)
+	_, _, _, gen := q.Enqueue("k", QueuedMsg{Text: "owner"})
+	// Warm the scratch.
+	q.Enqueue("k", QueuedMsg{Text: "w1"})
+	q.Enqueue("k", QueuedMsg{Text: "w2"})
+	q.Enqueue("k", QueuedMsg{Text: "w3"})
+	_ = q.DoneOrDrain("k", gen)
+
+	allocs := testing.AllocsPerRun(50, func() {
+		q.Enqueue("k", QueuedMsg{Text: "x1"})
+		q.Enqueue("k", QueuedMsg{Text: "x2"})
+		_ = q.DoneOrDrain("k", gen)
+	})
+	if allocs != 0 {
+		t.Fatalf("DoneOrDrain steady-state allocs = %v, want 0 (scratch reuse)", allocs)
+	}
 }
 
 // TestMsgQueue_Enqueue_RingPath_FullEvictsAndDrains is an end-to-end check

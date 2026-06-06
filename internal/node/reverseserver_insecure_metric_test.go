@@ -7,10 +7,15 @@ import (
 )
 
 // TestReverseUpgrader_InsecureMetric verifies the #1026 observability
-// counter: naozhi_node_insecure_reverse_upgrade_total bumps exactly when
-// a reverse-node WS upgrade is accepted over plain HTTP from a non-loopback
-// host (cleartext bearer token on the wire) and stays put for the TLS,
-// loopback, and Origin-bearing (rejected) cases.
+// counter: naozhi_node_insecure_reverse_upgrade_total bumps whenever a
+// reverse-node WS upgrade arrives over plain HTTP from a non-loopback host
+// (cleartext bearer token on the wire) and stays put for the TLS, loopback,
+// and Origin-bearing (rejected) cases.
+//
+// R20260606-SEC-4 (#1824): a plain-HTTP public/routable host is now
+// HARD-REJECTED (wantOK=false) — the token would otherwise traverse the open
+// internet in cleartext. The counter still bumps so /debug/vars records the
+// rejected exposure attempt. Private-LAN plain HTTP is still accepted.
 func TestReverseUpgrader_InsecureMetric(t *testing.T) {
 	check := reverseUpgrader.CheckOrigin
 
@@ -21,8 +26,14 @@ func TestReverseUpgrader_InsecureMetric(t *testing.T) {
 		wantDelta int64
 	}{
 		{
-			name:      "plain http non-loopback counts",
+			name:      "plain http public/routable host rejected but counts",
 			req:       &http.Request{Host: "worker.internal:8080", Header: http.Header{}},
+			wantOK:    false,
+			wantDelta: 1,
+		},
+		{
+			name:      "plain http private-LAN host accepted and counts",
+			req:       &http.Request{Host: "192.168.10.10:8080", Header: http.Header{}},
 			wantOK:    true,
 			wantDelta: 1,
 		},
@@ -63,20 +74,63 @@ func TestReverseUpgrader_InsecureMetric(t *testing.T) {
 
 // TestReverseUpgrader_InsecureMetric_Monotonic confirms the counter bumps
 // on EVERY insecure upgrade, not just the first — the once-guarded log
-// hides repeat exposure, which is the gap the metric closes (#1026).
+// hides repeat exposure, which is the gap the metric closes (#1026). Uses a
+// private-LAN host so the upgrade is still accepted post-#1824 while the
+// counter keeps climbing.
 func TestReverseUpgrader_InsecureMetric_Monotonic(t *testing.T) {
 	check := reverseUpgrader.CheckOrigin
-	req := &http.Request{Host: "worker.internal:8080", Header: http.Header{}}
+	req := &http.Request{Host: "10.1.2.3:8080", Header: http.Header{}}
 
 	before := insecureReverseUpgradeTotal.Value()
 	const n = 3
 	for i := 0; i < n; i++ {
 		if !check(req) {
-			t.Fatalf("CheckOrigin rejected a plain-http non-loopback request")
+			t.Fatalf("CheckOrigin rejected a plain-http private-LAN request")
 		}
 	}
 	if delta := insecureReverseUpgradeTotal.Value() - before; delta != n {
 		t.Errorf("counter delta after %d insecure upgrades = %d, want %d", n, delta, n)
+	}
+}
+
+// TestReverseUpgrader_PublicPlainHTTPRejected covers R20260606-SEC-4 (#1824):
+// a plain-HTTP reverse upgrade from a public/routable Host (no TLS, no Origin)
+// is hard-rejected so the bearer token never rides the first frame in
+// cleartext over the open internet. The cleartext-exposure counter still bumps
+// to record the rejected attempt on /debug/vars. TLS-terminated and
+// loopback/private wiring stay unaffected (covered above).
+func TestReverseUpgrader_PublicPlainHTTPRejected(t *testing.T) {
+	check := reverseUpgrader.CheckOrigin
+	cases := []string{
+		"worker.internal:8080", // public hostname (resolution unknown → routable)
+		"8.8.8.8:8080",         // public IPv4 literal
+		"[2606:4700::1111]:80", // public IPv6 literal
+		"hub.example.com",      // public hostname, no port
+	}
+	for _, host := range cases {
+		req := &http.Request{Host: host, Header: http.Header{}}
+		before := insecureReverseUpgradeTotal.Value()
+		if check(req) {
+			t.Errorf("CheckOrigin(%q) accepted a plain-HTTP public-host upgrade; want rejected", host)
+		}
+		if delta := insecureReverseUpgradeTotal.Value() - before; delta != 1 {
+			t.Errorf("CheckOrigin(%q) counter delta = %d, want 1 (rejected attempt still recorded)", host, delta)
+		}
+	}
+}
+
+// TestReverseUpgrader_PublicPlainHTTP_TLSStillAccepted confirms the #1824
+// reject only targets plain HTTP: the same public Host over TLS (proxy/direct
+// termination) is still accepted, since the token is then encrypted.
+func TestReverseUpgrader_PublicPlainHTTP_TLSStillAccepted(t *testing.T) {
+	check := reverseUpgrader.CheckOrigin
+	req := &http.Request{Host: "hub.example.com", Header: http.Header{}, TLS: &tls.ConnectionState{}}
+	before := insecureReverseUpgradeTotal.Value()
+	if !check(req) {
+		t.Fatalf("CheckOrigin rejected a TLS-terminated public-host upgrade; want accepted")
+	}
+	if delta := insecureReverseUpgradeTotal.Value() - before; delta != 0 {
+		t.Errorf("TLS upgrade bumped cleartext counter by %d, want 0", delta)
 	}
 }
 
