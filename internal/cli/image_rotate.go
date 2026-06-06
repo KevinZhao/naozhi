@@ -13,6 +13,16 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// orientSem caps concurrent auto-orient decodes independently of thumbSem.
+//
+// R20260606-GO-2 (#1844): auto-orient is fire-and-forget and best-effort, but
+// it ran through the same thumbSem (cap=4) that serialises MakeThumbnail. A
+// burst of uploaded images could fill all 4 image-decode slots with orient
+// work and starve the user-visible thumbnail generation, which is the higher
+// priority. A dedicated, smaller semaphore keeps orient bounded for memory
+// while leaving thumbSem exclusively for thumbnails.
+var orientSem = make(chan struct{}, 2)
+
 // RotateJPEG decodes raw image bytes, rotates the pixels clockwise by
 // `degCW` (must be 90, 180, or 270), and re-encodes to JPEG. degCW==0
 // returns the input unchanged. Any other value is rejected.
@@ -26,10 +36,11 @@ import (
 // an upright image.
 //
 // Safety mirrors MakeThumbnail (thumbnail.go): a DecodeConfig pre-check
-// caps pixel count before the full RGBA decode to bound memory, the
-// thumbSem cap serialises concurrent decodes, and a recover() treats a
-// decoder panic on crafted-malformed input as a failure rather than
-// crashing the process.
+// caps pixel count before the full RGBA decode to bound memory, a dedicated
+// orientSem cap serialises concurrent orient decodes (kept separate from
+// thumbSem so best-effort orient can't starve user-visible thumbnails), and
+// a recover() treats a decoder panic on crafted-malformed input as a failure
+// rather than crashing the process.
 //
 // On any failure (bad degrees, undecodable input, oversize, encode error,
 // decoder panic) it returns (nil, false) and the caller MUST fall back to
@@ -58,8 +69,8 @@ func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 		return nil, false
 	}
 
-	thumbSem <- struct{}{}
-	defer func() { <-thumbSem }()
+	orientSem <- struct{}{}
+	defer func() { <-orientSem }()
 
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {

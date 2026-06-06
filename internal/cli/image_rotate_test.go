@@ -6,7 +6,59 @@ import (
 	"image/color"
 	"image/jpeg"
 	"testing"
+	"time"
 )
+
+// TestRotateJPEG_UsesOrientSemNotThumbSem guards R20260606-GO-2 (#1844):
+// auto-orient must serialise on its own orientSem and never consume a
+// thumbSem slot, so a burst of orient decodes cannot starve the
+// user-visible MakeThumbnail path.
+func TestRotateJPEG_UsesOrientSemNotThumbSem(t *testing.T) {
+	// Saturate thumbSem so that if RotateJPEG (wrongly) tried to acquire a
+	// thumbSem token it would block forever; a correct implementation uses
+	// orientSem and proceeds.
+	for i := 0; i < cap(thumbSem); i++ {
+		thumbSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(thumbSem); i++ {
+			<-thumbSem
+		}
+	}()
+
+	src := makeTestJPEG(t, 8, 4, color.RGBA{A: 255})
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := RotateJPEG(src, 90)
+		done <- ok
+	}()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("RotateJPEG failed while thumbSem was saturated")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RotateJPEG blocked while thumbSem was saturated — it is sharing thumbSem instead of using orientSem")
+	}
+}
+
+// TestOrientSemIsDistinctFromThumbSem asserts the two semaphores are separate
+// channels with the orient cap kept below the thumbnail cap.
+func TestOrientSemIsDistinctFromThumbSem(t *testing.T) {
+	// thumbSem is chan struct{} and orientSem is chan struct{}; comparing the
+	// channel values checks they refer to different underlying channels.
+	if (chan struct{})(orientSem) == (chan struct{})(thumbSem) {
+		t.Fatal("orientSem must be a distinct channel from thumbSem")
+	}
+	if cap(orientSem) <= 0 {
+		t.Fatalf("orientSem cap must be positive, got %d", cap(orientSem))
+	}
+	if cap(orientSem) >= cap(thumbSem) {
+		t.Errorf("orientSem cap (%d) should stay below thumbSem cap (%d) so orient cannot dominate decode capacity",
+			cap(orientSem), cap(thumbSem))
+	}
+}
 
 // makeTestJPEG builds a w×h image where a 2×2 block at the top-left corner
 // is painted a marker color and everything else is white, then JPEG-encodes
