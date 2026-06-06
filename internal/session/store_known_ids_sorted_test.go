@@ -14,7 +14,7 @@ import (
 // gen. We observe the cache reuse by checking the cached backing slice
 // identity does not change across repeated snapshots of an unchanged set.
 func TestSnapshotKnownIDsSorted_DeterministicAndMemoised(t *testing.T) {
-	r := &Router{knownIDs: make(map[string]bool)}
+	r := &Router{kid: knownIDsStore{ids: make(map[string]bool)}}
 	for _, id := range []string{"ccc", "aaa", "bbb"} {
 		r.trackSessionID(id)
 	}
@@ -26,9 +26,9 @@ func TestSnapshotKnownIDsSorted_DeterministicAndMemoised(t *testing.T) {
 	}
 
 	// Cache must be built and tagged with the current gen.
-	cachePtr1 := r.knownIDsSortedCache
-	if r.knownIDsSortedGen != r.knownIDsGen {
-		t.Fatalf("cache gen %d != knownIDsGen %d", r.knownIDsSortedGen, r.knownIDsGen)
+	cachePtr1 := r.kid.sortedCache
+	if r.kid.sortedGen != r.kid.gen {
+		t.Fatalf("cache gen %d != knownIDsGen %d", r.kid.sortedGen, r.kid.gen)
 	}
 
 	// Second snapshot with NO mutation: cache backing slice must be reused
@@ -38,11 +38,11 @@ func TestSnapshotKnownIDsSorted_DeterministicAndMemoised(t *testing.T) {
 	if !slices.Equal(got2, want) {
 		t.Errorf("second snapshot = %v, want %v", got2, want)
 	}
-	if &r.knownIDsSortedCache[0] != &cachePtr1[0] {
+	if &r.kid.sortedCache[0] != &cachePtr1[0] {
 		t.Error("cache backing slice was rebuilt despite no mutation (memoisation broken)")
 	}
 	// Returned slice must be a distinct copy, not the cache itself.
-	if len(got2) > 0 && &got2[0] == &r.knownIDsSortedCache[0] {
+	if len(got2) > 0 && &got2[0] == &r.kid.sortedCache[0] {
 		t.Error("snapshot aliases the cache slice; concurrent rebuild could corrupt the in-flight save")
 	}
 
@@ -53,8 +53,8 @@ func TestSnapshotKnownIDsSorted_DeterministicAndMemoised(t *testing.T) {
 	if !slices.Equal(got3, want3) {
 		t.Errorf("post-mutation snapshot = %v, want %v", got3, want3)
 	}
-	if r.knownIDsSortedGen != r.knownIDsGen {
-		t.Errorf("cache gen not advanced after mutation: %d vs %d", r.knownIDsSortedGen, r.knownIDsGen)
+	if r.kid.sortedGen != r.kid.gen {
+		t.Errorf("cache gen not advanced after mutation: %d vs %d", r.kid.sortedGen, r.kid.gen)
 	}
 }
 
@@ -65,7 +65,7 @@ func TestSaveLoadKnownIDs_RoundTripSorted(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "sessions.json")
 
-	r := &Router{knownIDs: make(map[string]bool)}
+	r := &Router{kid: knownIDsStore{ids: make(map[string]bool)}}
 	for _, id := range []string{"zeta", "alpha", "mike"} {
 		r.trackSessionID(id)
 	}
@@ -96,7 +96,7 @@ func TestSaveKnownIDs_StableBytesAcrossSaves(t *testing.T) {
 	p1 := filepath.Join(tmp, "a", "sessions.json")
 	p2 := filepath.Join(tmp, "b", "sessions.json")
 
-	r := &Router{knownIDs: make(map[string]bool)}
+	r := &Router{kid: knownIDsStore{ids: make(map[string]bool)}}
 	for _, id := range []string{"d", "a", "c", "b"} {
 		r.trackSessionID(id)
 	}

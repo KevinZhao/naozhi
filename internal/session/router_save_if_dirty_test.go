@@ -82,19 +82,19 @@ func TestSaveIfDirty_KnownIDsThrottleCommit(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: storePath,
-		knownIDs:  map[string]bool{"sess-1": true, "sess-2": true},
+		kid:       knownIDsStore{ids: map[string]bool{"sess-1": true, "sess-2": true}},
 	}
 	r.mu.Lock()
-	r.knownIDsDirty = true
-	r.knownIDsSavedAt = time.Now().Add(-2 * knownIDsSaveInterval)
-	before := r.knownIDsSavedAt
+	r.kid.dirty = true
+	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
+	before := r.kid.savedAt
 	r.mu.Unlock()
 
 	r.saveIfDirty()
 
 	r.mu.RLock()
-	savedAt := r.knownIDsSavedAt
-	dirty := r.knownIDsDirty
+	savedAt := r.kid.savedAt
+	dirty := r.kid.dirty
 	r.mu.RUnlock()
 	if !savedAt.After(before) {
 		t.Error("knownIDsSavedAt must be advanced after a due known-IDs save")
@@ -135,18 +135,18 @@ func TestSaveIfDirty_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: badStorePath,
-		knownIDs:  map[string]bool{"sess-x": true},
+		kid:       knownIDsStore{ids: map[string]bool{"sess-x": true}},
 	}
 	r.mu.Lock()
-	r.knownIDsDirty = true
+	r.kid.dirty = true
 	// Set savedAt far enough in the past so the throttle gate is open.
-	r.knownIDsSavedAt = time.Now().Add(-2 * knownIDsSaveInterval)
+	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
 	r.mu.Unlock()
 
 	r.saveIfDirty()
 
 	r.mu.RLock()
-	savedAt := r.knownIDsSavedAt
+	savedAt := r.kid.savedAt
 	r.mu.RUnlock()
 
 	// After a failed save the timestamp must be zero so the next tick
@@ -173,12 +173,12 @@ func TestCleanup_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 		ttl:       30 * time.Minute,
 		pruneTTL:  72 * time.Hour,
 		storePath: badStorePath,
-		knownIDs:  map[string]bool{"sess-y": true},
+		kid:       knownIDsStore{ids: map[string]bool{"sess-y": true}},
 	}
 	r.mu.Lock()
-	r.knownIDsDirty = true
+	r.kid.dirty = true
 	// Age savedAt so the throttle is open.
-	r.knownIDsSavedAt = time.Now().Add(-2 * knownIDsSaveInterval)
+	r.kid.savedAt = time.Now().Add(-2 * knownIDsSaveInterval)
 	r.mu.Unlock()
 
 	// Cleanup calls saveKnownIDs via its snapshot path; the bad storePath
@@ -186,7 +186,7 @@ func TestCleanup_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
 	r.Cleanup()
 
 	r.mu.RLock()
-	savedAt := r.knownIDsSavedAt
+	savedAt := r.kid.savedAt
 	r.mu.RUnlock()
 
 	if !savedAt.IsZero() {

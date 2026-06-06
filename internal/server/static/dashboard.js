@@ -2,6 +2,13 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// activeView is the root view-router state: which top-level view owns the
+// viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
+// 'cron' / 'settings' are full-screen peers driven by setActivityView() and
+// the matching body.nz-view-* CSS classes. Cron rendering is gated on
+// activeView==='cron' (was selectedKey===null) so async cron repaints never
+// clobber the chat DOM and vice-versa.
+let activeView = 'chat';
 // _activeCardEl caches the currently-.active session card element so the
 // selector switch doesn't have to O(N) scan every card each time. Stays in
 // sync via setActiveSessionCard(); after renderSidebar rebuilds the list the
@@ -214,21 +221,19 @@ document.addEventListener('DOMContentLoaded', function () {
   applyTheme(getCurrentTheme());
   const btn = document.getElementById('btn-theme');
   if (btn) btn.addEventListener('click', cycleTheme);
-  // Activity-bar view switch (cc-asset-browser). Wired here (not inline
+  // Activity-bar view switch (codex-style rail). Wired here (not inline
   // onclick) to keep the script-src inline-handler surface from growing
-  // (R236-SEC-02 cap). Toggles body.nz-view-assets which swaps the chat
-  // sidebar/main for the asset panels in place — no popup.
-  const navChat = document.getElementById('abnav-chat');
-  const navAssets = document.getElementById('abnav-assets');
-  function setActivityView(view) {
-    const assets = view === 'assets';
-    if (navChat) { navChat.classList.toggle('active', !assets); navChat.setAttribute('aria-pressed', String(!assets)); }
-    if (navAssets) { navAssets.classList.toggle('active', assets); navAssets.setAttribute('aria-pressed', String(assets)); }
-    if (assets) { if (window.nzAssetView) window.nzAssetView.show(); }
-    else { if (window.nzAssetView) window.nzAssetView.hide(); }
-  }
-  if (navChat) navChat.addEventListener('click', function () { setActivityView('chat'); });
-  if (navAssets) navAssets.addEventListener('click', function () { setActivityView('assets'); });
+  // (R236-SEC-02 cap). Each abnav-* routes through the top-level
+  // setActivityView() which toggles the matching body.nz-view-* class and
+  // swaps the chat sidebar/main for the target view's panels in place.
+  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-settings'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
+  });
+  // Bottom-rail connection status doubles as the settings entry.
+  const connBtn = document.getElementById('ab-conn-status');
+  if (connBtn) connBtn.addEventListener('click', function () { setActivityView('settings'); });
+  renderRailConnStatus();
 
   // Header/sidebar controls (#922 / #479 / #441): migrated from inline
   // `onclick=`/`onsubmit=` attributes to addEventListener so the dashboard's
@@ -254,6 +259,44 @@ document.addEventListener('DOMContentLoaded', function () {
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
+
+// setActivityView is the root view-router. It is the single owner of the
+// mutually-exclusive body.nz-view-* classes and the rail button active state.
+// Top-level (not closured) so openCronPanel / selectSession / openCronDetail
+// can re-assert the active view.
+//
+// Recursion note: entering 'cron' calls openCronPanel(), which itself calls
+// setActivityView('cron') when not already in cron view. We set activeView
+// BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
+// already false on the re-entry and the loop terminates after one hop.
+const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'settings'];
+function setActivityView(view) {
+  if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
+  const prev = activeView;
+  activeView = view;
+  // Rail button active / aria-pressed state.
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-settings', 'settings']]
+    .forEach(function (pair) {
+      const el = document.getElementById(pair[0]);
+      if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
+    });
+  // Mutually-exclusive view classes. 'chat' clears all three.
+  document.body.classList.toggle('nz-view-assets', view === 'assets');
+  document.body.classList.toggle('nz-view-cron', view === 'cron');
+  document.body.classList.toggle('nz-view-settings', view === 'settings');
+  // Keep the [hidden] attr in sync with CSS for the always-resident containers
+  // (asset_browser.js manages its own hidden flags on show/hide).
+  const cm = document.getElementById('cron-main');
+  if (cm) cm.hidden = view !== 'cron';
+  const sm = document.getElementById('settings-main');
+  if (sm) sm.hidden = view !== 'settings';
+  // Tear down the previous view if it owns external state.
+  if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  // Enter the target view.
+  if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
+  else if (view === 'cron') { openCronPanel(); }
+  else if (view === 'settings') { renderSettingsView(); }
+}
 
 // RNEW-UX-003: fetchJSON wraps fetch with an AbortController + timeout.
 // NAT-dropped TCP connections can leave the browser in a "pending" state
@@ -1805,6 +1848,7 @@ function updateStatusBar() {
   // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
   // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
   // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
+  renderRailConnStatus();
   if (!container) { updateNodeSelector(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
@@ -2028,6 +2072,11 @@ function selectSession(key, node) {
     }
   }
   pendingDiscovered = null;
+  // Picking a session returns to the chat view from any other top-level view
+  // (assets / cron / settings). This restores the chat sidebar+main, hides the
+  // other view's panels, and flips activeView back to 'chat' so renderMainShell
+  // (which writes #main) is visible and any in-flight cron repaint is suppressed.
+  if (activeView !== 'chat') setActivityView('chat');
   const prevKey = selectedKey;
   const prevNode = selectedNode;
   selectedKey = key;
@@ -9270,6 +9319,73 @@ function statusLabelForNode(status) {
   return m[status] || status;
 }
 
+// RAIL_CONN_LABELS maps a normalized node status to a short Chinese label for
+// the bottom-rail connection indicator + the settings view. Distinct from the
+// English statusLabelForNode (used in the multi-node dropdown for parity with
+// existing tests) — the rail wants compact CJK so it fits the 56px column.
+const RAIL_CONN_LABELS = {
+  ok: '已连接', connected: '已连接',
+  connecting: '连接中', authenticating: '鉴权中',
+  offline: '离线', unreachable: '不可达',
+  error: '错误', disconnected: '已断开', off: '离线',
+};
+function railConnLabel(status) { return RAIL_CONN_LABELS[status] || status; }
+
+// renderRailConnStatus paints the bottom-rail connection indicator (dot +
+// label). Reuses getNodeStatus so it tracks the WS state machine for local and
+// the server health snapshot for the selected remote. Called from
+// updateStatusBar (every WS state change + auth-countdown tick) and once at
+// DOMContentLoaded. Cheap + idempotent — safe to call on every tick.
+function renderRailConnStatus() {
+  const dot = document.getElementById('ab-conn-dot');
+  const label = document.getElementById('ab-conn-label');
+  if (!dot && !label) return;
+  const status = getNodeStatus((typeof selectedNode !== 'undefined' && selectedNode) || 'local');
+  if (dot) dot.className = 'ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
+  if (label) label.textContent = railConnLabel(status);
+}
+
+// renderSettingsView paints the standalone settings top-level view into
+// #settings-main. Two sections: theme (tri-state, reusing applyTheme/
+// THEME_ORDER/THEME_LABELS) and connection (read-only, reusing getNodeStatus/
+// getNodeDisplayName). Theme buttons are wired via event delegation — no inline
+// onclick (the HTML inline-handler cap is 0). Re-rendered on each theme click
+// to refresh the active state.
+function renderSettingsView() {
+  const root = document.getElementById('settings-main');
+  if (!root) return;
+  const cur = getCurrentTheme();
+  const themeBtns = THEME_ORDER.map(function (t) {
+    return '<button type="button" class="settings-theme-opt' + (t === cur ? ' active' : '') +
+      '" data-theme="' + esc(t) + '" aria-pressed="' + (t === cur ? 'true' : 'false') + '">' +
+      esc(THEME_LABELS[t]) + '</button>';
+  }).join('');
+  const status = getNodeStatus('local');
+  const connMeta = isMultiNode()
+    ? '<div class="settings-conn-meta">多节点：点击侧栏顶部的节点选择器切换。</div>'
+    : '';
+  root.innerHTML =
+    '<div class="settings-head"><h1>设置</h1></div>' +
+    '<div class="settings-body">' +
+      '<section class="settings-sec"><h2>主题</h2>' +
+        '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
+      '</section>' +
+      '<section class="settings-sec"><h2>连接</h2>' +
+        '<div class="settings-conn">' +
+          '<span class="ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline') + '"></span>' +
+          '<span>' + esc(getNodeDisplayName('local')) + ' · ' + esc(railConnLabel(status)) + '</span>' +
+        '</div>' + connMeta +
+      '</section>' +
+    '</div>';
+  const grp = document.getElementById('settings-theme-group');
+  if (grp) grp.addEventListener('click', function (e) {
+    const b = e.target.closest('.settings-theme-opt');
+    if (!b) return;
+    applyTheme(b.dataset.theme);
+    renderSettingsView(); // refresh active state
+  });
+}
+
 // updateNodeSelector is the single render entry point for the node-selector
 // trigger + dropdown visibility. Called after every /api/sessions poll (so
 // new/removed remotes appear immediately) and after every open/close toggle.
@@ -12080,6 +12196,12 @@ async function doCreateCronJob() {
 }
 
 function openCronPanel() {
+  // Cron is its own top-level view now. Ensure it's active before painting.
+  // setActivityView('cron') sets activeView='cron' first, then calls back
+  // into openCronPanel — so the guard below is already satisfied on re-entry
+  // and we don't recurse. Direct callers (legacy #btn-cron, openCronDetail)
+  // route through here and get the view switch for free.
+  if (activeView !== 'cron') { setActivityView('cron'); return; }
   // Deselect managed session via selectedKey only — selectedNode is the
   // sidebar filter now (see previewDiscovered comment) and must survive
   // opening the cron panel so the user comes back to the right node list.
@@ -12087,7 +12209,10 @@ function openCronPanel() {
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   setActiveSessionCard(null);
-  mobileEnterChat();
+  // NOTE: no mobileEnterChat() here. Cron is a standalone view, not a chat
+  // session — entering chat view would hide the bottom tab bar (the only nav
+  // surface on mobile) and strand the user. The cron view is full-screen via
+  // body.nz-view-cron CSS and the tab bar stays visible.
   // Paint immediately from the cache primed at page load (line ~5982) so the
   // click feels instant. If the cache is empty we still render the panel —
   // renderCronPanel handles the zero-job "empty state" branch. A background
@@ -14160,12 +14285,15 @@ function renderCronTimelineForJob(jobId) {
 }
 
 function renderCronPanel() {
-  // Guard against an async race: fetchCronJobs().then(renderCronPanel) fires
-  // after the user may have already clicked a cron card and opened a session.
-  // Re-rendering the cron list would clobber renderMainShell's DOM and make
-  // the chat history "disappear". Only paint when no session is selected.
-  if (selectedKey) return;
-  const main = document.getElementById('main');
+  // Guard against an async race: fetchCronJobs().then(renderCronPanel) and the
+  // WS cron_run_ended handler fire after the user may have switched away from
+  // the cron view. Painting then would be wasted (the container is hidden) or
+  // could fight the active view. Only paint when cron is the active view.
+  // (Was `if (selectedKey) return` when cron borrowed #main; now cron has its
+  // own #cron-main container and is gated purely on activeView.)
+  if (activeView !== 'cron') return;
+  const main = document.getElementById('cron-main');
+  if (!main) return;
   // Shell-preserving repaint: when the cron panel is already mounted (user
   // is just typing in the search box or toggling a chip), we only want to
   // repaint the list + drawer. Rebuilding the shell would wipe the input
@@ -14532,6 +14660,13 @@ async function fetchCronJobs() {
       // History badge stays neutral grey because it is a cumulative count, not
       // an unread/failure signal.
       cronBadge.classList.toggle('is-alert', attention > 0);
+    }
+    // Mirror the attention dot onto the rail's 自动化 icon so the alert is
+    // visible from any view (the header cron-badge is only shown in chat view).
+    const railBadge = document.getElementById('abnav-cron-badge');
+    if (railBadge) {
+      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
+      railBadge.hidden = attention === 0;
     }
   } catch (e) { console.error('fetch cron:', e); }
 }

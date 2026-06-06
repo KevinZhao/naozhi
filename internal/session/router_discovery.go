@@ -322,29 +322,29 @@ func (r *Router) trackSessionID(id string) {
 	if id == "" {
 		return
 	}
-	if r.knownIDs[id] {
+	if r.kid.ids[id] {
 		return
 	}
-	if len(r.knownIDs) >= maxKnownIDs {
-		// Drop the oldest entry; r.knownIDsOrder invariant is that it holds
-		// exactly the keys of r.knownIDs in insertion order. Shift in-place
-		// rather than reslicing: `knownIDsOrder[1:]` keeps the backing array
+	if len(r.kid.ids) >= maxKnownIDs {
+		// Drop the oldest entry; r.kid.order invariant is that it holds
+		// exactly the keys of r.kid.ids in insertion order. Shift in-place
+		// rather than reslicing: `order[1:]` keeps the backing array
 		// pinned from the original data pointer, so after many evictions the
 		// slice header drifts rightward and the leading, now-unused portion
 		// of the array can't be reused — eventually forcing re-allocation.
 		// The copy + clear tail approach keeps the header stable and lets the
 		// allocator reuse the same buffer indefinitely.
-		oldest := r.knownIDsOrder[0]
-		delete(r.knownIDs, oldest)
-		n := len(r.knownIDsOrder)
-		copy(r.knownIDsOrder, r.knownIDsOrder[1:])
-		r.knownIDsOrder[n-1] = ""
-		r.knownIDsOrder = r.knownIDsOrder[:n-1]
+		oldest := r.kid.order[0]
+		delete(r.kid.ids, oldest)
+		n := len(r.kid.order)
+		copy(r.kid.order, r.kid.order[1:])
+		r.kid.order[n-1] = ""
+		r.kid.order = r.kid.order[:n-1]
 	}
-	r.knownIDs[id] = true
-	r.knownIDsOrder = append(r.knownIDsOrder, id)
-	r.knownIDsGen++
-	r.knownIDsDirty = true
+	r.kid.ids[id] = true
+	r.kid.order = append(r.kid.order, id)
+	r.kid.gen++
+	r.kid.dirty = true
 }
 
 // RegisterForResume creates a suspended session entry so that the next
