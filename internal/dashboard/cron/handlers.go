@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -886,25 +887,29 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 		return nil
 	}
 	out := make([][]cronpkg.CronRunSummary, len(jobs))
-	// Tasks queue: each worker pulls the next index and fans out to the
-	// scheduler. Channel-of-int keeps the work distribution self-balancing
-	// — a slow per-job lookup (cold cache, slow disk) does not pin a
-	// single worker on a single job while its peers idle.
-	tasks := make(chan int, len(jobs))
-	for i := range jobs {
-		tasks <- i
-	}
-	close(tasks)
 	workers := batchRecentRunsWorkers
 	if workers > len(jobs) {
 		workers = len(jobs)
 	}
+	// R20260606-PERF-2 (#1847): claim work indices via an atomic cursor over
+	// the jobs slice rather than a per-call make(chan int, len(jobs)) seeded
+	// with N sends + close. Mirrors the runstore cold-start fan-out — the
+	// buffered channel was a fresh N-int backing array + channel header on
+	// every 1 Hz dashboard poll; the atomic counter is a single stack int64
+	// and each worker steals the next index with one FetchAdd. The work
+	// distribution stays self-balancing (a slow per-job lookup does not pin a
+	// worker while peers idle) and concurrency/WaitGroup logic is unchanged.
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for idx := range tasks {
+			for {
+				idx := int(atomic.AddInt64(&next, 1)) - 1
+				if idx >= len(jobs) {
+					return
+				}
 				out[idx] = h.scheduler.RecentRuns(jobs[idx].Job.ID, n)
 			}
 		}()
