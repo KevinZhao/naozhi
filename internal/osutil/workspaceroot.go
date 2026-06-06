@@ -69,7 +69,15 @@ func ResolveWorkspaceUnderRoot(
 		}
 		rootResolved = allowedRootResolved
 	}
-	if !PathUnderRoot(resolved, rootResolved) {
+	// Containment via PathContainedInRoot (not the byte-wise PathUnderRoot):
+	// the inode-walk fallback admits a legitimate child on a case-insensitive
+	// fs (macOS APFS, Windows NTFS) where EvalSymlinks kept user-typed case.
+	// Both args are already EvalSymlinks-resolved above (PathContainedInRoot's
+	// input contract), so the symlink-escape rejection is preserved. This keeps
+	// the cron WorkDir boundary in lockstep with server validateWorkspace /
+	// dispatch /cd / the cron transcript gate, which all call PathContainedInRoot
+	// directly.
+	if !PathContainedInRoot(resolved, rootResolved) {
 		return "", false
 	}
 	return resolved, true
