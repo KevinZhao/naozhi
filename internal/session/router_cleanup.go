@@ -114,10 +114,10 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// an actionable diagnosis instead of the generic session error.
 		if !waitSocketGoneForKey(key, 2*time.Second) {
 			r.mu.Lock()
-			if r.shimStuckOnReset == nil {
-				r.shimStuckOnReset = make(map[string]bool)
+			if r.pp.shimStuckOnReset == nil {
+				r.pp.shimStuckOnReset = make(map[string]bool)
 			}
-			r.shimStuckOnReset[key] = true
+			r.pp.shimStuckOnReset[key] = true
 			r.mu.Unlock()
 			slog.Warn("shim socket still bound after Remove wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
 				"key", key)
@@ -187,9 +187,9 @@ func (r *Router) RemoveAsync(key string) bool {
 	if !ok {
 		return false
 	}
-	r.removeWg.Add(1)
+	r.pp.removeWg.Add(1)
 	go func() {
-		defer r.removeWg.Done()
+		defer r.pp.removeWg.Done()
 		// HandleDelete has already returned 200, so a panic in the
 		// teardown chain (Close → Kill → shimSendLocked on a wedged
 		// socket) has no caller to recover it. Swallow + count it, like

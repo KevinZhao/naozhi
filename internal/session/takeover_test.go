@@ -31,7 +31,7 @@ func newTakeoverTestRouter(maxProcs int) *Router {
 	r.wsStore.overrides = map[string]string{}
 	r.bkStore.backendOverrides = map[string]string{}
 	r.ss.idToKey = map[string]string{}
-	r.spawningKeys = map[string]chan struct{}{}
+	r.pp.spawningKeys = map[string]chan struct{}{}
 	return r
 }
 

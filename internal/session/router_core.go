@@ -367,46 +367,27 @@ type Router struct {
 	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
 	wsStore workspaceStore
 
-	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
-	// 读写: lifecycle (spawnSession), core (acquire/release RAII helpers)
-	pendingSpawns int
-
-	// spawningKeys records keys whose spawnSession is in flight. ReconnectShims
-	// consults this set before declaring a discovered shim "orphan": a shim may
-	// have written its state file after we dropped r.mu for wrapper.Spawn() but
-	// before the new ManagedSession is installed, and without this set a
-	// concurrent reconcile would shut the fresh shim down as an orphan.
+	// pp is the process-pool / shim-reconciler facet (Router P5, #805): the
+	// in-flight Spawn() counter (pendingSpawns), the in-flight spawn-key →
+	// done-channel set (spawningKeys), the reset-stuck-shim flag set
+	// (shimStuckOnReset), and the RemoveAsync teardown WaitGroup (removeWg),
+	// grouped into processPool (process_pool.go). No lock of its own —
+	// read/written ONLY under r.mu (RFC §3 candidate A, single r.mu retained,
+	// NO atomic promotion, NO new lock).
 	//
-	// The map value is a per-spawn done-channel that spawnSession close()s
-	// from its defer. GetOrCreate's wait loop selects on this channel
-	// instead of polling, so the second caller wakes the instant the
-	// winner finishes (success or failure) rather than after the next
-	// 20ms tick. ReconnectShims still reads only the key set, so its
-	// presence check is unaffected by the value type. R243-ARCH-4.
-	// 读写: core (init), lifecycle (spawnSession write/close), shim (reconnect read)
-	spawningKeys map[string]chan struct{}
-
-	// shimStuckOnReset records keys whose most recent Reset /
-	// ResetAndRecreate observed waitSocketGoneForKey timing out (the shim
-	// socket was still bound after the 2s grace). The next GetOrCreate
-	// for the same key consults this flag and, on spawn failure, wraps
-	// the returned error with ErrShimStuck so the cron / dashboard caller
-	// can surface a distinct actionable error class to the operator
-	// instead of the generic ErrClassSessionError. The flag is consumed
-	// (deleted) on the very next GetOrCreate for the key — success or
-	// failure — so a subsequent retry gets a clean classification.
-	// 读写: lifecycle (Reset / ResetAndRecreate write; GetOrCreate read+delete), cleanup (finishRemoveCleanup write)
-	// (#1324 — R20260527122801-CR-12)
-	shimStuckOnReset map[string]bool
-
-	// removeWg tracks in-flight RemoveAsync teardown goroutines. It exists
-	// ONLY for test observability (tests call removeWg.Wait() directly) —
-	// production teardown never waits on it, and in particular Shutdown
-	// deliberately does NOT join it (the detached teardown follows the
-	// single-shot + bounded-leak contract documented on Shutdown). Each
-	// tracked goroutine self-terminates in ≤15s.
-	// 读写: cleanup (RemoveAsync Add/Done), test helpers (Wait)
-	removeWg sync.WaitGroup
+	// removeWg is a sync.WaitGroup and therefore NON-COPYABLE; embedding this
+	// facet by value is sound ONLY because Router is always &Router{} (heap,
+	// never value-copied). go vet copylocks enforces this at build time. Do
+	// NOT add any method/func taking Router by value or returning processPool
+	// by value. The done-channel pairing (spawningKeys install ↔
+	// markSpawnDoneLocked close+delete ↔ GetOrCreate select ↔ ReconnectShims
+	// presence read) and the pendingSpawns RAII balance (acquire ++ /
+	// releaseLocked+release -- / panicSafeSpawn recover) all stay funneled
+	// through this one struct under r.mu. The annotation below covers the
+	// UNION of all inner-field domains; the lint recurses one level so each
+	// inner field ALSO carries its own per-domain annotation on processPool.
+	// 读写: core (init/acquire-release RAII helpers), lifecycle (spawnSession write/close/Reset/ResetAndRecreate/GetOrCreate), shim (reconnect read), cleanup (RemoveAsync Add/Done/finishRemoveCleanup write), test helpers (removeWg.Wait)
+	pp processPool
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
@@ -534,7 +515,7 @@ type Router struct {
 type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
 // pendingSpawnSlot is a one-shot RAII token returned by
-// (*Router).acquirePendingSpawnSlotLocked. It guards r.pendingSpawns against
+// (*Router).acquirePendingSpawnSlotLocked. It guards r.pp.pendingSpawns against
 // stranded ++ on any panic / new error path between increment and the matching
 // decrement. release() is idempotent: explicit happy-path callers decrement at
 // the original site (preserving the existing lock-state contract) and a
@@ -545,13 +526,13 @@ type pendingSpawnSlot struct {
 	released bool
 }
 
-// acquirePendingSpawnSlotLocked increments r.pendingSpawns under r.mu (caller
+// acquirePendingSpawnSlotLocked increments r.pp.pendingSpawns under r.mu (caller
 // must hold r.mu for writing). It returns a slot token whose release method
 // can be called from any lock state — release acquires r.mu itself if needed.
 //
 // LOCK: caller must hold r.mu (write).
 func (r *Router) acquirePendingSpawnSlotLocked() *pendingSpawnSlot {
-	r.pendingSpawns++
+	r.pp.pendingSpawns++
 	return &pendingSpawnSlot{r: r}
 }
 
@@ -562,7 +543,7 @@ func (s *pendingSpawnSlot) releaseLocked() {
 	if s == nil || s.released {
 		return
 	}
-	s.r.pendingSpawns--
+	s.r.pp.pendingSpawns--
 	s.released = true
 }
 
@@ -576,7 +557,7 @@ func (s *pendingSpawnSlot) release() {
 	}
 	s.r.mu.Lock()
 	if !s.released {
-		s.r.pendingSpawns--
+		s.r.pp.pendingSpawns--
 		s.released = true
 	}
 	s.r.mu.Unlock()
@@ -937,20 +918,18 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
-		maxProcs:         cfg.MaxProcs,
-		ttl:              cfg.TTL,
-		pruneTTL:         cfg.PruneTTL,
-		defaultCWD:       cfg.Workspace,
-		claudeDir:        cfg.ClaudeDir,
-		kiroSessionsDir:  cfg.KiroSessionsDir,
-		storePath:        cfg.StorePath,
-		spawningKeys:     make(map[string]chan struct{}),
-		shimStuckOnReset: make(map[string]bool),
-		noOutputTimeout:  cfg.NoOutputTimeout,
-		totalTimeout:     cfg.TotalTimeout,
-		eventLogDir:      cfg.EventLogDir,
-		historyLoader:    cfg.HistoryLoader,
-		resolver:         cfg.Resolver,
+		maxProcs:        cfg.MaxProcs,
+		ttl:             cfg.TTL,
+		pruneTTL:        cfg.PruneTTL,
+		defaultCWD:      cfg.Workspace,
+		claudeDir:       cfg.ClaudeDir,
+		kiroSessionsDir: cfg.KiroSessionsDir,
+		storePath:       cfg.StorePath,
+		noOutputTimeout: cfg.NoOutputTimeout,
+		totalTimeout:    cfg.TotalTimeout,
+		eventLogDir:     cfg.EventLogDir,
+		historyLoader:   cfg.HistoryLoader,
+		resolver:        cfg.Resolver,
 	}
 	// ss is a value field (no lock of its own); its maps must be allocated
 	// explicitly since composite-literal sub-struct field init is not used here
@@ -967,6 +946,12 @@ func NewRouter(cfg RouterConfig) *Router {
 	// allocated explicitly since composite-literal sub-struct field init is
 	// not used here (Router P2 facet, #600).
 	r.kid.ids = make(map[string]bool)
+	// pp is a value field (no lock of its own); its two maps must be allocated
+	// explicitly since composite-literal sub-struct field init is not used here
+	// (Router P5 facet, #805). pendingSpawns is a zero-valued int; removeWg is
+	// a zero-valued WaitGroup.
+	r.pp.spawningKeys = make(map[string]chan struct{})
+	r.pp.shimStuckOnReset = make(map[string]bool)
 	// bkStore is a value field (no lock of its own); its config fields and the
 	// backendOverrides map are set post-construction since composite-literal
 	// sub-struct field init is not used here (Router P3 facet, #383).
