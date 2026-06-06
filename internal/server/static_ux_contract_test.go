@@ -1950,6 +1950,53 @@ func TestDashboardJS_UXP3_UploadReorderHelper(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_ImageOrientationBakedFromEXIF pins the fix that bakes EXIF
+// orientation into the pixels during the canvas re-encode. Re-encoding an
+// image through canvas.toBlob strips the EXIF orientation flag, so without
+// `imageOrientation: 'from-image'` on the createImageBitmap call a portrait
+// iPhone photo (which stores landscape pixels + a rotate flag) arrives at the
+// backend sideways. The option makes the decoder rotate the pixels up-front,
+// and the returned bitmap's width/height are already the corrected
+// dimensions — so the existing scaling math stays correct and we must NOT add
+// any manual ctx.rotate (that would double-correct).
+func TestDashboardJS_ImageOrientationBakedFromEXIF(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The decode in normalizeImage must request EXIF orientation baking.
+	if !strings.Contains(js, "createImageBitmap(file, { imageOrientation: 'from-image' })") {
+		t.Error("normalizeImage must call createImageBitmap with { imageOrientation: 'from-image' } so EXIF orientation is baked into the re-encoded JPEG; without it portrait phone photos reach the backend sideways")
+	}
+
+	// 2) Guard against double-correction: the bitmap is already upright, so
+	//    normalizeImage must not also rotate the canvas context. If a future
+	//    edit reintroduces a manual rotate, the image would be flipped twice.
+	normStart := strings.Index(js, "async function normalizeImage(file)")
+	if normStart < 0 {
+		t.Fatal("normalizeImage function not found")
+	}
+	// Bound the scan to the function body (next top-level `async function` /
+	// `function` declaration) so an unrelated rotate elsewhere can't trip it.
+	rest := js[normStart+len("async function normalizeImage(file)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	for _, banned := range []string{"ctx.rotate", "ctx.translate", "ctx.transform"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("normalizeImage must not call %s — createImageBitmap with imageOrientation:'from-image' already delivers an upright bitmap, so manual canvas rotation would double-correct the orientation", banned)
+		}
+	}
+}
+
 // TestDashboardJS_R110P1_CronStepValueHumanize pins the R110-P1 fix that
 // lets humanizeCron recognize "step-value" cron expressions (e.g.
 // "*\/15 * * * *" every 15 minutes, "0 *\/6 * * *" every 6 hours on the

@@ -4690,12 +4690,24 @@ function openFilePicker() {
 // above the 1568 px knee where Anthropic's vision models stop gaining
 // accuracy. HEIC is also handled here — createImageBitmap decodes it on
 // Safari 17+ and we re-encode to JPEG.
+//
+// Orientation: phone cameras tag photos with an EXIF orientation flag
+// instead of rotating the pixels. Re-encoding through canvas drops that
+// flag, so we must bake the rotation into the pixels at decode time via
+// `imageOrientation: 'from-image'` — without it a portrait iPhone shot
+// arrives at the backend sideways. With the flag, the returned bitmap's
+// width/height are ALREADY the visually-correct (post-rotation) dimensions,
+// so the scaling math below needs no orientation branching and we must NOT
+// apply any extra ctx.rotate (that would double-correct). The option is the
+// modern default on Chrome/Firefox and is honored by Safari/iOS 16+; older
+// engines silently ignore the unknown member and fall back to their default
+// decode, which is the best we can do client-side.
 // Falls back to the original file if decoding fails so the server's
 // content-type check still produces a real error message.
 async function normalizeImage(file) {
   const MAX_EDGE = 1600;
   try {
-    const bmp = await createImageBitmap(file);
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const { width: sw, height: sh } = bmp;
     let dw = sw, dh = sh;
     const m = Math.max(sw, sh);
