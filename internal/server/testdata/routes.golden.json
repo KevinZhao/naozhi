@@ -190,6 +190,11 @@
     "handler_type": "*SendHandler"
   },
   {
+    "method": "POST",
+    "path": "/api/sessions/bind",
+    "handler_type": "*SendHandler"
+  },
+  {
     "method": "GET",
     "path": "/api/sessions/events",
     "handler_type": "*dashsession.Handlers"

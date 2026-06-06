@@ -168,6 +168,77 @@ function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch
 // persisted state across 17 call sites is riskier than the double-prefix
 // quirk it would fix. Revisit when LS_SCHEMA is bumped.
 
+// Pending-session persistence (#cwd-fallback fix). The three pending maps
+// (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
+// memory, so a page reload before the first send dropped the chosen workspace.
+// The next send then carried no `workspace`, the backend never wrote a
+// per-chat override (send.go gates SetWorkspace on a non-empty workspace), and
+// the spawn fell through to defaultCWD = workspace root — the session landed in
+// the wrong directory. We mirror the maps into localStorage so a reload (or
+// even a never-sent session) rehydrates the workspace and the first send still
+// carries it. This only re-hydrates state the user authored in THIS browser —
+// no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
+const PENDING_LS_KEY = 'pending_sessions';
+const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
+let _pendingRestored = false;
+
+// persistPending snapshots the in-memory pending maps to localStorage. Called
+// after every mutation of the three maps. lsSet swallows quota/disabled errors.
+function persistPending() {
+  const keys = Object.keys(sessionWorkspaces).slice(0, PENDING_LS_MAX);
+  const obj = {};
+  for (const k of keys) {
+    const entry = { ws: sessionWorkspaces[k] };
+    if (sessionNodes[k] && sessionNodes[k] !== 'local') entry.node = sessionNodes[k];
+    if (sessionBackends[k]) entry.backend = sessionBackends[k];
+    obj[k] = entry;
+  }
+  lsSet(PENDING_LS_KEY, obj);
+}
+
+// restorePending rehydrates the in-memory pending maps from localStorage at
+// boot, BEFORE the first fetchSessions/send. Idempotent via _pendingRestored
+// (multiple DOMContentLoaded listeners exist). Every entry is shape-validated:
+// a hand-edited blob cannot inject a non-string key or a non-absolute ws path
+// (defense in depth — the server still re-validates the workspace on send).
+function restorePending() {
+  if (_pendingRestored) return;
+  _pendingRestored = true;
+  const saved = lsGet(PENDING_LS_KEY, {});
+  if (!saved || typeof saved !== 'object') return;
+  for (const [k, v] of Object.entries(saved)) {
+    if (typeof k !== 'string' || !k) continue;
+    if (!v || typeof v !== 'object' || typeof v.ws !== 'string' || !v.ws) continue;
+    if (v.ws[0] !== '/' && v.ws[0] !== '~') continue; // reject relative / junk
+    sessionWorkspaces[k] = v.ws;
+    if (v.node && v.node !== 'local') sessionNodes[k] = v.node;
+    if (v.backend) sessionBackends[k] = v.backend;
+  }
+}
+
+// eagerBindWorkspace tells the backend the chosen workspace the moment a
+// session is created, instead of waiting for the first send to carry it. This
+// writes the per-chat override eagerly (server-side validateWorkspace +
+// SetWorkspace), so even a session opened in another browser/device — or one
+// reloaded before its first send — spawns into the right directory. Local
+// nodes only: remote sessions resolve their workspace on their own node.
+// Fire-and-forget — never blocks or fails the creation flow (matches the
+// pushRecentProject swallow convention).
+function eagerBindWorkspace(key, workspace, node) {
+  if (!key || !workspace) return;
+  const nd = node || 'local';
+  if (nd !== 'local') return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    fetch('/api/sessions/bind', {
+      method: 'POST', headers,
+      body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
+    }).catch(() => {});
+  } catch (_) { /* never break creation over a bind */ }
+}
+
 // THEME-1 (#453) — theme cycler. The dashboard was GitHub-Dark hardcoded
 // before this; users with a light-mode preference (or who want to follow
 // OS) now get a 3-state toggle in the sidebar header. State is persisted
@@ -218,6 +289,10 @@ function cycleTheme() {
 // handlers; goal in #441 / #479 / #922 is to drive the count to 0 so
 // script-src 'unsafe-inline' can be dropped).
 document.addEventListener('DOMContentLoaded', function () {
+  // Rehydrate pending-session workspaces from localStorage BEFORE the first
+  // fetchSessions/send so a reload-before-first-send still carries the chosen
+  // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
+  restorePending();
   applyTheme(getCurrentTheme());
   const btn = document.getElementById('btn-theme');
   if (btn) btn.addEventListener('click', cycleTheme);
@@ -332,6 +407,8 @@ async function fetchJSON(url, opts = {}) {
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
   delete sessionNodes[key];
+  delete sessionBackends[key];
+  persistPending();
 }
 
 async function fetchSessions() {
@@ -399,13 +476,22 @@ async function fetchSessions() {
       backendKeys.add(s.key);
     });
 
-    // Remove pending sessions that now exist in backend
+    // Remove pending sessions that now exist in backend, then persist ONCE.
+    // The durable localStorage blob must drop the now-real keys so a stale
+    // pending entry can't re-inject a ghost card on the next reload — but
+    // routing each key through removePendingSession would re-serialize the
+    // whole blob per key (M full JSON writes converging to one final state).
+    // Delete in-memory here and call persistPending() a single time after.
+    let reconciledAny = false;
     for (const key of Object.keys(sessionWorkspaces)) {
       if (backendKeys.has(key)) {
         delete sessionWorkspaces[key];
         delete sessionNodes[key];
+        delete sessionBackends[key];
+        reconciledAny = true;
       }
     }
+    if (reconciledAny) persistPending();
 
     // Merge pending dashboard sessions into data for sidebar rendering
     const pendingKeys = Object.keys(sessionWorkspaces);
@@ -3790,6 +3876,11 @@ async function sendMessage() {
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
+      // Confirmed send: the workspace/node/backend were consumed above (and
+      // deleted from the in-memory maps), so rewrite the durable blob without
+      // this key. Only on the success path — a failed wsm.send falls through to
+      // HTTP below and must keep the entry for that retry.
+      persistPending();
       // Optimistic running flip already applied above — no-op if unchanged.
       sending = false;
       if (btn) btn.classList.remove('sending');
@@ -3854,6 +3945,10 @@ async function sendMessage() {
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
+    // Confirmed send: the pending maps were consumed above; rewrite the durable
+    // blob without this key. Only on this 2xx path so a failed send keeps the
+    // entry for retry.
+    persistPending();
     if (ackStatus === 'reset') {
       // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
       // so the running banner doesn't hang on a no-op command.
@@ -6333,6 +6428,11 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
   if (backend) sessionBackends[key] = backend;
+  // Durably persist the pending workspace and eagerly bind it server-side so a
+  // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
+  // the workspace. This is the primary fix path (project palette open).
+  persistPending();
+  eagerBindWorkspace(key, projectPath, nodeId);
 
   // R110-P3 recent-projects: every successful project-scoped session
   // creation bumps the (name,node) pair to the top of the palette's
@@ -6426,6 +6526,9 @@ function doCreateSession() {
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
   if (targetNode !== 'local') sessionNodes[key] = targetNode;
+  // Persist + eager-bind so the custom workspace survives a reload-before-send.
+  persistPending();
+  if (workspace) eagerBindWorkspace(key, workspace, targetNode);
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -6484,6 +6587,9 @@ function createQuickSession(initialText, onTextStranded) {
 
   if (workspace) sessionWorkspaces[key] = workspace;
   // Backend left unset → router falls back to the configured default.
+  // Persist so a reload-before-send keeps the workspace. No eager-bind: quick
+  // sessions use defaultWorkspace, so the override would just mirror defaultCWD.
+  persistPending();
 
   stopPreviewPolling();
   wsm.unsubscribe();

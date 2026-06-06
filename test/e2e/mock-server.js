@@ -183,6 +183,7 @@ function startMockServer(overrides = {}) {
   const authToken = overrides.authToken || 'test-token-123';
 
   let sendCalls = [];
+  let bindCalls = [];
   let cronCreateCalls = [];
   let loginCalls = [];
   let favoriteCalls = [];
@@ -316,6 +317,18 @@ function startMockServer(overrides = {}) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
         }
+      });
+      return;
+    }
+
+    if (pathname === '/api/sessions/bind' && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        bindCalls.push(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
       });
       return;
     }
@@ -514,10 +527,11 @@ function startMockServer(overrides = {}) {
         port,
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
+        get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
-        resetCalls() { sendCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
+        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     });
   });

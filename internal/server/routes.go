@@ -288,6 +288,7 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
+	s.mux.HandleFunc("POST /api/sessions/bind", auth(s.sendH.handleBind))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("POST /api/sessions/orient", auth(s.sendH.handleOrient))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
