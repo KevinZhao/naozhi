@@ -23,7 +23,7 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 		t.Fatal("dashboard.html not embedded")
 	}
 	html := string(data)
-	for _, src := range []string{"/static/nz_util.js", "/static/dashboard.js", "/static/agent_view.js", "/static/asset_browser.js"} {
+	for _, src := range []string{"/static/nz_util.js", "/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js", "/static/asset_browser.js"} {
 		want := `<script defer src="` + src + `">`
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html: %q must be loaded with defer; missing %q", src, want)
