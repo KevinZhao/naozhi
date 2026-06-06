@@ -43,9 +43,18 @@ func TestDashboardSplitView_HTMLContract(t *testing.T) {
 		t.Error("dashboard.html: --nz-split-w custom property must exist — it is the " +
 			"reserved right-strip width the split docks into.")
 	}
-	if !strings.Contains(html, ".nz-split-open .container") {
-		t.Error("dashboard.html: body.nz-split-open .container must reserve padding-right " +
+	// The open-state class reserves the right strip on .container. The selector
+	// is scoped with :not(.nz-view-*) so the split applies only to the chat
+	// view (the drawers don't exist in assets/cron/settings) — assert both the
+	// class+container coupling and that the chat-only scoping guard is present.
+	if !strings.Contains(html, "body.nz-split-open") || !strings.Contains(html, ".container{padding-right:var(--nz-split-w)}") {
+		t.Error("dashboard.html: body.nz-split-open … .container must reserve padding-right " +
 			"so the transcript compresses beside the pane (true split, not overlay).")
+	}
+	if !strings.Contains(html, ":not(.nz-view-cron)") {
+		t.Error("dashboard.html: split selectors must be scoped with :not(.nz-view-*) so " +
+			"switching to assets/cron/settings doesn't reserve the split strip in a " +
+			"drawer-less view.")
 	}
 
 	// The desktop-only gate keeps the phone full-width overlay intact.
@@ -104,5 +113,26 @@ func TestDashboardSplitView_JSContract(t *testing.T) {
 	if !strings.Contains(js, "isMobileVp()") {
 		t.Error("dashboard.js: split controller must gate on isMobileVp() so phones keep " +
 			"the full-width overlay instead of an unusably-cramped split.")
+	}
+
+	// View-router teardown: leaving the chat view must close the docked drawers,
+	// otherwise the position:fixed pane floats over assets/cron/settings and the
+	// split padding stays reserved. setActivityView must reach both close paths.
+	if !strings.Contains(js, "window.__closeScratchDrawer") {
+		t.Error("dashboard.js: a scratch-close global must exist so setActivityView can " +
+			"tear the 追问 drawer down when leaving chat.")
+	}
+	if !strings.Contains(js, "prev === 'chat' && view !== 'chat'") {
+		t.Error("dashboard.js: setActivityView must close the preview/追问 drawers when " +
+			"leaving the chat view (drawers are position:fixed and would float over the " +
+			"target view, leaving the split padding reserved).")
+	}
+
+	// Resize re-clamp: clampW otherwise only runs on drag/dblclick/cold-load, so
+	// shrinking the viewport with the split open could leave --nz-split-w wider
+	// than the viewport and crush the transcript. A resize listener must re-clamp.
+	if !strings.Contains(js, "addEventListener('resize'") {
+		t.Error("dashboard.js: split controller must re-clamp --nz-split-w on window " +
+			"resize so narrowing the viewport can't reserve more than it fits.")
 	}
 }
