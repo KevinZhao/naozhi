@@ -1997,6 +1997,51 @@ func TestDashboardJS_ImageOrientationBakedFromEXIF(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_PreviewUsesNormalizedImage pins the root-cause fix for the
+// sideways preview: uploadEntry must swap entry.blobUrl from the raw picked
+// file to the normalized (canvas re-encoded, EXIF-baked) image, so the
+// thumbnail renders upright on every engine — not just those that honor the
+// CSS image-orientation hint — and matches the bytes actually sent to the
+// backend. The swap must revoke the old object URL to avoid a leak and must
+// only run for images that were actually re-encoded (normalizeImage returns
+// the original File on decode failure; PDFs are never normalized).
+func TestDashboardJS_PreviewUsesNormalizedImage(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	upStart := strings.Index(js, "async function uploadEntry(entry)")
+	if upStart < 0 {
+		t.Fatal("uploadEntry function not found")
+	}
+	rest := js[upStart+len("async function uploadEntry(entry)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	// 1) Only re-encoded images get their preview swapped (identity guard
+	//    against normalizeImage's fallback-to-original and against PDFs).
+	if !strings.Contains(body, "entry.kind === 'image' && file !== entry.file") {
+		t.Error("uploadEntry must guard the preview swap on `entry.kind === 'image' && file !== entry.file` so PDFs and decode-failure fallbacks keep their original preview")
+	}
+	// 2) The normalized blob must become the new preview source.
+	if !strings.Contains(body, "entry.blobUrl = upright") {
+		t.Error("uploadEntry must point entry.blobUrl at the normalized image so the thumbnail matches what is sent to the backend")
+	}
+	// 3) The stale object URL must be revoked to avoid a memory leak.
+	if !strings.Contains(body, "URL.revokeObjectURL(entry.blobUrl)") {
+		t.Error("uploadEntry must revoke the previous entry.blobUrl before replacing it to avoid leaking the raw-file object URL")
+	}
+}
+
 // TestDashboardHTML_FileThumbHonorsEXIFOrientation pins the companion fix for
 // the upload-preview thumbnail. The thumbnail <img> in renderFilePreviews
 // renders the ORIGINAL picked file via URL.createObjectURL (not the canvas

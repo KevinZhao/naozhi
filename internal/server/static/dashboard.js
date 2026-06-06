@@ -4824,6 +4824,22 @@ async function uploadEntry(entry) {
     // via file_ref, not inline base64).
     const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
     entry.normalizedSize = file.size;
+    // Swap the preview thumbnail to the normalized image so what the user
+    // sees matches what the backend receives, pixel-for-pixel. The original
+    // blobUrl points at the raw picked file, which still carries the EXIF
+    // orientation flag — and browsers (notably some WebViews) don't reliably
+    // apply it to <img>, so a portrait phone photo previewed sideways. The
+    // canvas re-encode in normalizeImage bakes the rotation into the pixels
+    // and strips EXIF, so this blob renders upright everywhere. Guard on
+    // identity: normalizeImage falls back to the original File on decode
+    // failure, in which case there's nothing new to show. PDFs keep their
+    // icon card (no blobUrl) untouched.
+    if (entry.kind === 'image' && file !== entry.file) {
+      const upright = URL.createObjectURL(file);
+      if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+      entry.blobUrl = upright;
+      renderFilePreviews();
+    }
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
