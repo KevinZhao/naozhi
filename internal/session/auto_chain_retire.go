@@ -35,14 +35,14 @@ var autoChainRetiredOrigins = map[string]bool{
 //
 // CALLER CONTRACT: invoked from NewRouter BEFORE the background history
 // loaders launch (same slot the old backfill occupied) and while the router
-// is single-threaded, so it does not take r.mu — it snapshots r.sessions
+// is single-threaded, so it does not take r.mu — it snapshots r.ss.sessions
 // under r.mu briefly, then mutates each session via historyMu only.
 func (r *Router) retireAutoChainOnce() {
 	startedAt := time.Now()
 
 	r.mu.Lock()
-	candidates := make([]*ManagedSession, 0, len(r.sessions))
-	for _, s := range r.sessions {
+	candidates := make([]*ManagedSession, 0, len(r.ss.sessions))
+	for _, s := range r.ss.sessions {
 		candidates = append(candidates, s)
 	}
 	r.mu.Unlock()
@@ -85,8 +85,8 @@ func (r *Router) retireAutoChainOnce() {
 
 	if retired > 0 {
 		r.mu.Lock()
-		r.storeDirty = true
-		r.storeGen.Add(1)
+		r.ss.dirty = true
+		r.ss.gen.Add(1)
 		r.mu.Unlock()
 	}
 

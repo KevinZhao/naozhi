@@ -28,7 +28,7 @@
 // reaches for them.
 //
 // Migration note: a follow-up subpackage carve-out is the canonical fix.
-// The blocker is `Router.InjectSession`, which touches r.mu / r.sessions
+// The blocker is `Router.InjectSession`, which touches r.mu / r.ss.sessions
 // / r.attachHistorySource (all unexported). A clean split would either
 // export a narrow seam (e.g. `Router.injectForTest(processIface)` +
 // matching helper in sessiontest) or move the InjectSession glue here
@@ -153,7 +153,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	s.touchLastActive()
 	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.activeCount.Add(1)
+	r.ss.sessions[key] = s
+	r.ss.activeCount.Add(1)
 	return s
 }

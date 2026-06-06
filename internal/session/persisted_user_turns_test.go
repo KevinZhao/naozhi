@@ -116,7 +116,7 @@ func TestRenameSession_RecountsPersistedUserTurns(t *testing.T) {
 	})
 
 	r.mu.Lock()
-	r.sessions[oldKey] = s
+	r.ss.sessions[oldKey] = s
 	r.indexAdd(oldKey)
 	r.mu.Unlock()
 

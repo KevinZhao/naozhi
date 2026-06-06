@@ -37,13 +37,13 @@ func installSession(t *testing.T, r *Router, key string, proc processIface) *Man
 		s.storeProcess(proc)
 	}
 	r.mu.Lock()
-	r.sessions[key] = s
+	r.ss.sessions[key] = s
 	r.mu.Unlock()
 	return s
 }
 
 // TestRemoveAsync_UnregistersImmediately locks the core contract: the
-// session leaves r.sessions synchronously (so the dashboard list / new
+// session leaves r.ss.sessions synchronously (so the dashboard list / new
 // sends stop seeing it) and RemoveAsync returns true even while the slow
 // proc.Close teardown is still blocked in its goroutine.
 func TestRemoveAsync_UnregistersImmediately(t *testing.T) {
@@ -69,10 +69,10 @@ func TestRemoveAsync_UnregistersImmediately(t *testing.T) {
 	// Session must be gone from the map already, even though Close() is
 	// still blocked inside the detached teardown goroutine.
 	r.mu.RLock()
-	_, present := r.sessions[key]
+	_, present := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if present {
-		t.Fatalf("session still in r.sessions after RemoveAsync returned")
+		t.Fatalf("session still in r.ss.sessions after RemoveAsync returned")
 	}
 
 	// Release the teardown and let the goroutine finish so Shutdown is clean.
@@ -176,10 +176,10 @@ func TestRemove_StillSynchronous(t *testing.T) {
 		t.Fatalf("proc still alive immediately after synchronous Remove returned")
 	}
 	r.mu.RLock()
-	_, present := r.sessions[key]
+	_, present := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if present {
-		t.Fatalf("session still in r.sessions after Remove")
+		t.Fatalf("session still in r.ss.sessions after Remove")
 	}
 }
 

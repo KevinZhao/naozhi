@@ -24,15 +24,15 @@ func newStoppedGateRouter() *Router {
 // sessions), every reverse-RPC spawn path that funnels into spawnSession —
 // GetOrCreate (send), Takeover (takeover), ResetAndRecreate (restart_planner) —
 // must refuse with ErrRouterStopped and must NOT install a fresh session into
-// r.sessions (the leak the issue is about). The gate sits before the spawningKeys
+// r.ss.sessions (the leak the issue is about). The gate sits before the spawningKeys
 // lazy-init/defer, so no guard channel may be left dangling either.
 func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 	t.Parallel()
 
 	assertNoLeak := func(t *testing.T, r *Router) {
 		t.Helper()
-		if len(r.sessions) != 0 {
-			t.Errorf("r.sessions grew to %d after a rejected spawn; gate must run before any map mutation", len(r.sessions))
+		if len(r.ss.sessions) != 0 {
+			t.Errorf("r.ss.sessions grew to %d after a rejected spawn; gate must run before any map mutation", len(r.ss.sessions))
 		}
 		if len(r.spawningKeys) != 0 {
 			t.Errorf("r.spawningKeys = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", len(r.spawningKeys))

@@ -11,7 +11,7 @@ import (
 // survive and activeCount is set from the reconcile pass's alive total.
 func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 10,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -21,7 +21,7 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 	// nil-process stub past pruneTTL → prune candidate.
 	stub := &ManagedSession{key: "stub"}
 	stub.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
-	r.sessions["stub"] = stub
+	r.ss.sessions["stub"] = stub
 	r.bkStore.backendOverrides["stub"] = "kiro"
 
 	// dead process past pruneTTL with no session ID → prune candidate.
@@ -36,19 +36,19 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.sessions["stub"]; ok {
+	if _, ok := r.ss.sessions["stub"]; ok {
 		t.Error("nil-process stub past pruneTTL should be pruned")
 	}
 	if _, ok := r.bkStore.backendOverrides["stub"]; ok {
 		t.Error("pruned stub's backendOverride should be freed")
 	}
-	if _, ok := r.sessions["dead"]; ok {
+	if _, ok := r.ss.sessions["dead"]; ok {
 		t.Error("dead session past pruneTTL should be pruned")
 	}
-	if _, ok := r.sessions["aliveA"]; !ok {
+	if _, ok := r.ss.sessions["aliveA"]; !ok {
 		t.Error("alive session aliveA should survive cleanup")
 	}
-	if _, ok := r.sessions["aliveB"]; !ok {
+	if _, ok := r.ss.sessions["aliveB"]; !ok {
 		t.Error("alive session aliveB should survive cleanup")
 	}
 
@@ -70,7 +70,7 @@ func TestCleanup_PruneSnapshot_RemovesCandidatesKeepsAlive(t *testing.T) {
 // !shouldPrune skip branch in the write-locked loop.
 func TestCleanup_PruneSnapshot_ReVerifiesUnderLock(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 5,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -85,7 +85,7 @@ func TestCleanup_PruneSnapshot_ReVerifiesUnderLock(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.sessions["agedButAlive"]; !ok {
+	if _, ok := r.ss.sessions["agedButAlive"]; !ok {
 		t.Error("aged-but-alive session must not be pruned (alive process)")
 	}
 }
@@ -112,7 +112,7 @@ func TestCleanup_PruneSnapshot_ReVerifiesUnderLock(t *testing.T) {
 // deleted: this unit test pins that invariant at the shouldPrune level.
 func TestCleanup_PruneSnapshot_ReVerify_ShouldPruneGate(t *testing.T) {
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss:       sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs: 5,
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
@@ -143,7 +143,7 @@ func TestCleanup_PruneSnapshot_ReVerify_ShouldPruneGate(t *testing.T) {
 	// Confirm Cleanup itself respects the same gate: run Cleanup and verify
 	// the session survives even though it was a pass-1 candidate.
 	r.Cleanup()
-	if _, ok := r.sessions["revivable"]; !ok {
+	if _, ok := r.ss.sessions["revivable"]; !ok {
 		t.Error("session whose lastActive was refreshed before Cleanup's write lock must not be pruned")
 	}
 }

@@ -30,7 +30,7 @@ func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
 	r.wsStore.overrides = map[string]string{}
 	r.bkStore.backendOverrides = map[string]string{}
-	r.sessionIDToKey = map[string]string{}
+	r.ss.idToKey = map[string]string{}
 	r.spawningKeys = map[string]chan struct{}{}
 	return r
 }
@@ -63,7 +63,7 @@ func TestTakeover_NewKey(t *testing.T) {
 	}
 
 	// No stale session should have been injected.
-	if _, ok := r.sessions[key]; ok {
+	if _, ok := r.ss.sessions[key]; ok {
 		t.Error("sessions[key] should be empty after failed spawn on a fresh Takeover")
 	}
 }
@@ -78,21 +78,21 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 
 	old := injectSession(r, key, newDeadProc())
 	old.setSessionID("old-sess")
-	r.sessionIDToKey["old-sess"] = key
-	genBefore := r.storeGen.Load()
+	r.ss.idToKey["old-sess"] = key
+	genBefore := r.ss.gen.Load()
 
 	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error after dead-session unregister")
 	}
 
-	if _, ok := r.sessions[key]; ok {
+	if _, ok := r.ss.sessions[key]; ok {
 		t.Error("dead session should have been unregistered")
 	}
-	if _, ok := r.sessionIDToKey["old-sess"]; ok {
+	if _, ok := r.ss.idToKey["old-sess"]; ok {
 		t.Error("old session ID should have been removed from sessionIDToKey")
 	}
-	if r.storeGen.Load() <= genBefore {
+	if r.ss.gen.Load() <= genBefore {
 		t.Error("storeGen should advance when dead session is unregistered")
 	}
 }
@@ -110,7 +110,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	oldProc := newIdleProc()
 	old := injectSession(r, key, oldProc)
 	old.setSessionID("old-alive-sess")
-	r.sessionIDToKey["old-alive-sess"] = key
+	r.ss.idToKey["old-alive-sess"] = key
 
 	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
@@ -120,7 +120,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	if oldProc.Alive() {
 		t.Error("old alive process must be Close()'d during Takeover")
 	}
-	if _, ok := r.sessions[key]; ok {
+	if _, ok := r.ss.sessions[key]; ok {
 		t.Error("old session should have been unregistered before re-spawn failed")
 	}
 }
@@ -165,7 +165,7 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 		s := &ManagedSession{key: key}
 		s.storeProcess(interloper)
 		s.touchLastActive()
-		r.sessions[key] = s
+		r.ss.sessions[key] = s
 		r.mu.Unlock()
 	})
 	old := injectSession(r, key, hook)
@@ -181,7 +181,7 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 
 	// Interloper session must survive untouched; Takeover may not
 	// clobber a live parallel session.
-	cur, ok := r.sessions[key]
+	cur, ok := r.ss.sessions[key]
 	if !ok {
 		t.Fatal("interloper session should still be in sessions map")
 	}

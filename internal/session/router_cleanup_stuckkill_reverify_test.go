@@ -40,7 +40,7 @@ func TestCleanup_StuckKill_SkipsWhenSessionReplacedProc(t *testing.T) {
 // still fire so genuinely stuck sessions are reclaimed.
 func TestCleanup_StuckKill_FiresWhenSessionStillHoldsProc(t *testing.T) {
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,

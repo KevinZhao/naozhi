@@ -56,7 +56,7 @@ func TestCleanup_StuckRunning_DeathReasonNotStampedWhenProcReplaced(t *testing.T
 	// clean deathReason.
 
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     72 * time.Hour,
