@@ -55,6 +55,12 @@ func New(claudeDir, cwd string, chainIDs ChainIDsFunc) *Source {
 // without simultaneously moving the import.
 func init() {
 	cli.RegisterHistoryFactory("claude", factory)
+	// Sole injection point for discovery.ThumbnailFn. Without it, image
+	// blocks in rehydrated Claude JSONL history are silently dropped (text
+	// still renders, no panic). Reuses cli.MakeThumbnail's OOM pre-check,
+	// concurrency semaphore, and panic recovery instead of re-decoding here.
+	// Removing this line is a silent image-loss regression, not a build error.
+	discovery.ThumbnailFn = cli.MakeThumbnail
 }
 
 // factory is the cli.HistoryFactoryFn for claude-code. Returns
