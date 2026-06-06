@@ -739,28 +739,28 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID string, ok bool) {
 	runID = r.PathValue("run_id")
 	if runID == "" {
-		http.Error(w, "run_id is required", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id is required"})
 		return "", "", false
 	}
 	if len(runID) > runIDLenLimit {
-		http.Error(w, "run_id too long", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id too long"})
 		return "", "", false
 	}
 	if !cronpkg.IsValidID(runID) {
-		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "run_id must be lowercase hex"})
 		return "", "", false
 	}
 	jobID = r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, "job_id is required", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id is required"})
 		return "", "", false
 	}
 	if len(jobID) > maxCronIDLenDashboard {
-		http.Error(w, "job_id too long", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id too long"})
 		return "", "", false
 	}
 	if !cronpkg.IsValidID(jobID) {
-		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "job_id must be lowercase hex"})
 		return "", "", false
 	}
 	return runID, jobID, true

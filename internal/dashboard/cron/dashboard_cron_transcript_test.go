@@ -269,6 +269,48 @@ func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	}
 }
 
+// TestParseRunPathParams_JSONErrorContentType asserts R20260606-SEC-13: param
+// validation errors from parseRunPathParams must carry application/json
+// Content-Type (not text/plain), matching the rest of the cron endpoint error
+// envelope.
+func TestParseRunPathParams_JSONErrorContentType(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+	cases := []struct {
+		name  string
+		runID string
+		jobID string
+	}{
+		{"empty run_id", "", "aaaaaaaaaaaaaaaa"},
+		{"run_id too long", strings.Repeat("a", 200), "aaaaaaaaaaaaaaaa"},
+		{"invalid run_id", "ZZZZ", "aaaaaaaaaaaaaaaa"},
+		{"empty job_id", "aaaaaaaaaaaaaaaa", ""},
+		{"job_id too long", "aaaaaaaaaaaaaaaa", strings.Repeat("b", 200)},
+		{"invalid job_id", "aaaaaaaaaaaaaaaa", "ZZZZ"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			w := callTranscript(h, c.jobID, c.runID)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+			ct := w.Result().Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json; got text/plain would break frontend JSON parse", ct)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Errorf("response is not valid JSON: %v; body=%s", err, w.Body.String())
+			}
+			if body["error"] == "" {
+				t.Errorf("JSON error field missing; body=%v", body)
+			}
+		})
+	}
+}
+
 func TestTranscript_TimeWindowFilter_DropsOlderTurns(t *testing.T) {
 	t.Parallel()
 	// fresh=false simulation: the JSONL contains turns from before the
@@ -950,6 +992,7 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		})
 	}
 }
+
 // TestFlattenSystemEvent_EarlyReturn pins R200109-GO-7 and R200109-GO-10:
 // unmarshal failure must return early (parsed=false, nil slice) rather than
 // falling through to the error-turn branch; non-error subtypes must also
