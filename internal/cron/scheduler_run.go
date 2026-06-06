@@ -1764,6 +1764,16 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		_, stillExists := s.jobs[snap.jobID]
 		s.mu.RUnlock()
 		if stillExists {
+			// #1845: registerStubByValue treats an empty SessionID as a no-op
+			// chain (chain=nil), so the re-registered stub carries no clickable
+			// JSONL history. That only happens when the CLI never emitted a
+			// session-id for an otherwise-successful run (pathological). Log it
+			// explicitly so operators can tell "reap ran but had no prior session
+			// ID" apart from "reap never ran" — otherwise a missing history row
+			// is silently indistinguishable from a skipped reap.
+			if result.SessionID == "" {
+				lg.Debug("cron fresh context: empty session_id on successful run; stub re-registered without history chain")
+			}
 			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, result.SessionID)
 			lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
 		} else {
