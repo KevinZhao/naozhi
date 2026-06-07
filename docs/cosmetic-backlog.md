@@ -578,3 +578,6 @@
 - [R20260607-GO-12] strings.Builder.Reset() 注释错误（称置 nil，实为 buf[:0]）— internal/cron/scheduler_finish.go:933
 - [R20260607-ARCH-6] project.Manager Bind/Unbind/Update in-place mutate 共享 Config，违 copy-on-write 但当前安全 — internal/project/manager.go:232
 - [R20260607-ARCH-7] upstream/dispatch/discovery/cron 各自 SessionRouter 同名异形接口，新人易混 — internal/cron/scheduler_config.go:98
+- [R20260607-CODE-001] applyTo 在 Schedule 比较前 mutate j，今天正确但 fragile，未来若把 Schedule 加入 applyTo 会静默破坏 re-registrati — internal/cron/scheduler_jobs.go:722
+- [R20260607-ARCH-5b] configMapsPtr atomic.Pointer 是为不存在的 hot-reload writer 准备的投机基础设施，应降级为不可变字段直到 writer 落地 — internal/cron/scheduler.go:125
+- [R20260607-ARCH-8] StopPolicyForceExit 是 doc-only 常量无人读，cron 侧缺对应常量，看似 typed-policy 实则未接线 — internal/sysession/manager.go:49
