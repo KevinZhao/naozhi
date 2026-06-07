@@ -62,6 +62,15 @@ func TestDashboardSplitView_HTMLContract(t *testing.T) {
 		t.Error("dashboard.html: split CSS must be gated behind @media(min-width:769px) " +
 			"so phones (≤768px) keep the original full-width slide-over overlay.")
 	}
+
+	// Z-order: when both preview and 追问 are docked, the one opened last carries
+	// .nz-split-front and must paint above the other (higher z-index than the
+	// base 200). Without this rule, two same-z drawers fully overlap with no
+	// stacking and the last-opened pane can sit behind.
+	if !strings.Contains(html, ".nz-split-front") || !strings.Contains(html, "z-index:202") {
+		t.Error("dashboard.html: .nz-split-front must lift the last-opened drawer above " +
+			"the other (z-index 202) so the most recently shown pane stacks on top.")
+	}
 }
 
 func TestDashboardSplitView_JSContract(t *testing.T) {
@@ -134,5 +143,29 @@ func TestDashboardSplitView_JSContract(t *testing.T) {
 	if !strings.Contains(js, "addEventListener('resize'") {
 		t.Error("dashboard.js: split controller must re-clamp --nz-split-w on window " +
 			"resize so narrowing the viewport can't reserve more than it fits.")
+	}
+
+	// Half-width default: the pane defaults to half the dashboard width on PC
+	// (innerWidth/2), not a fixed pixel size. splitDefaultW encodes that, and
+	// hasCustomW gates whether a manual drag opts out of auto-tracking.
+	if !strings.Contains(js, "function splitDefaultW(") || !strings.Contains(js, "window.innerWidth / 2") {
+		t.Error("dashboard.js: splitDefaultW() must default the pane to half the dashboard " +
+			"width (window.innerWidth / 2) on PC.")
+	}
+	if !strings.Contains(js, "hasCustomW") {
+		t.Error("dashboard.js: a hasCustomW flag must gate half-width auto-tracking so a " +
+			"manual drag is honoured while the default follows the viewport at one half.")
+	}
+
+	// Z-order controller: the last-opened drawer is brought to the front, and
+	// both open paths invoke it (one call per open path).
+	if !strings.Contains(js, "window.nzSplitBringToFront = function") {
+		t.Error("dashboard.js: window.nzSplitBringToFront must be defined to stack the " +
+			"last-opened drawer above the other.")
+	}
+	if got := strings.Count(js, "window.nzSplitBringToFront("); got < 2 {
+		t.Errorf("dashboard.js: nzSplitBringToFront must be called from both open paths "+
+			"(preview + 追问; want ≥2 invocations, got %d) so whichever opens last stacks "+
+			"on top.", got)
 	}
 }
