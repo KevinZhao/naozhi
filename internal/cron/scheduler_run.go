@@ -1042,28 +1042,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// stillExists check (~line 712); apply the identical guard here. Reset
 	// itself is always safe (a concurrent Delete Reset is idempotent), so only
 	// the register is gated.
+	// R050103A-COUPLING-1 (#1911): the fresh-context reap (Reset + stillExists +
+	// stub re-register) is a single inseparable unit whose correctness depends on
+	// running BEFORE finishRun releases the inflight CAS gate (see the ordering
+	// note above). Keeping it behind reapFreshSessionLocked instead of inline
+	// makes the "reap, THEN finishRun" sequence a two-statement contract that is
+	// structurally guarded by a source-anchor test (see scheduler_run.go reap
+	// anchor test) rather than maintained by comment alone.
 	if snap.fresh {
-		s.router.Reset(key)
-		s.mu.RLock()
-		_, stillExists := s.jobs[snap.jobID]
-		s.mu.RUnlock()
-		if stillExists {
-			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, result.SessionID)
-			if result.SessionID == "" {
-				// registerStubByValue chains the stub only when the session ID is
-				// non-empty; an empty ID (process.go normally fills it on the
-				// success frame, so empty here is anomalous) registers a chain-less
-				// stub — the sidebar row survives but has no clickable JSONL
-				// history. Surface it instead of silently registering a dead row.
-				lg.Warn("cron fresh context: session released after successful run but session_id empty; re-registered chain-less stub with no clickable history",
-					"job_id", snap.jobID)
-			} else {
-				lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
-			}
-		} else {
-			lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
-				"session_id", result.SessionID)
-		}
+		s.reapFreshSessionLocked(key, snap, result.SessionID, lg)
 	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
@@ -1089,6 +1076,54 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
 	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
 	s.deliverNotice(notifyTo, replyText)
+}
+
+// reapFreshSessionLocked tears down the just-finished fresh-context session
+// (Reset) and re-registers a suspended sidebar stub, as the success-path reap
+// for #1829's idle-leak fix.
+//
+// ORDERING CONTRACT (R050103A-COUPLING-1 / #1911) — DO NOT REORDER:
+// this method MUST be invoked while the caller still holds the inflight CAS
+// gate, i.e. BEFORE finishRun → finalizer.finalize() releases it. A concurrent
+// TriggerNow that won the CAS could otherwise run its own preflight Reset +
+// GetOrCreate in the gap, and a late Reset here would tear down THAT run's
+// fresh session (run-A clobbering run-B). The per-job CAS serialisation
+// (invariant (1) in freshContextPreflightP0) guarantees no sibling cron run is
+// mid-flight while the gate is held, making this Reset race-free for the same
+// reason the preflight Reset is. The contract is structurally guarded by the
+// reap source-anchor test (reapFreshSessionLocked must precede finishRun in
+// executeOpt) rather than relying on the call-site comment alone.
+//
+// Job-existence re-check before re-registering the stub: DeleteJobByID's
+// teardown (deleteJobPostCleanup → resetRouterStub) does NOT take the inflight
+// CAS gate — Delete is not a cron run — so it can land concurrently with this
+// success tail. If a Delete's Reset slips between our Reset and the register,
+// an unconditional register would resurrect a sidebar stub for a job that no
+// longer exists (zombie row). This mirrors the orphan guard the preflight
+// applies with its post-Reset stillExists check. Reset itself is always safe
+// (a concurrent Delete Reset is idempotent), so only the register is gated.
+func (s *Scheduler) reapFreshSessionLocked(key string, snap jobSnapshot, sessionID string, lg *slog.Logger) {
+	s.router.Reset(key)
+	s.mu.RLock()
+	_, stillExists := s.jobs[snap.jobID]
+	s.mu.RUnlock()
+	if stillExists {
+		s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, sessionID)
+		if sessionID == "" {
+			// registerStubByValue chains the stub only when the session ID is
+			// non-empty; an empty ID (process.go normally fills it on the
+			// success frame, so empty here is anomalous) registers a chain-less
+			// stub — the sidebar row survives but has no clickable JSONL
+			// history. Surface it instead of silently registering a dead row.
+			lg.Warn("cron fresh context: session released after successful run but session_id empty; re-registered chain-less stub with no clickable history",
+				"job_id", snap.jobID)
+		} else {
+			lg.Info("cron fresh context: session released after successful run", "session_id", sessionID)
+		}
+	} else {
+		lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
+			"session_id", sessionID)
+	}
 }
 
 // observeSuccessLatency emits the three success-path latency signals for a

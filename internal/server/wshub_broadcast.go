@@ -374,14 +374,44 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	// the common no-subscriber case now returns before any allocation.
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
-	h.mu.RLock()
 	if h.authClients != nil {
+		// R20260607-PERF-1 (#1902): two-phase snapshot so the per-key
+		// subscriber filter no longer pins the Hub-wide h.mu across the whole
+		// authClients walk. broadcastToAuthenticated (#1621) already moved its
+		// membership scan onto the dedicated authMu so it stops serialising
+		// behind register / unregister / markAuthenticated; this path lagged
+		// because it ALSO needs c.subscriptions[key], which is h.mu-owned
+		// (see wsclient.go markSubGenReleasable contract). Phase 1 snapshots
+		// the (small) authenticated-client set under the cheap authMu.RLock and
+		// releases it; phase 2 takes a short h.mu.RLock only to read each
+		// candidate's subscription map, filtering in place. Lock ordering is
+		// preserved — each phase takes ONE lock and releases it before the next,
+		// never nesting authMu inside h.mu the way the writers do, so there is
+		// no inverse-acquisition deadlock. A client unregistered between the two
+		// phases is harmless: its wsClient is still live (GC-pinned by the
+		// snapshot), reading its subscriptions map under h.mu.RLock is race-free,
+		// and a non-blocking SendRaw to a closing client is already tolerated.
+		candPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
+		cand := (*candPtr)[:0]
+		h.authMu.RLock()
 		for c := range h.authClients {
+			cand = append(cand, c)
+		}
+		h.authMu.RUnlock()
+
+		h.mu.RLock()
+		for _, c := range cand {
 			if _, ok := c.subscriptions[key]; ok {
 				snap = append(snap, c)
 			}
 		}
+		h.mu.RUnlock()
+		releaseBroadcastSnap(candPtr, cand)
 	} else {
+		// Legacy fallback for hand-rolled hubs that never initialise
+		// authClients. The clients map is h.mu-owned, so membership and the
+		// subscription filter share the single Hub-wide RLock here.
+		h.mu.RLock()
 		for c := range h.clients {
 			if !c.authenticated.Load() {
 				continue
@@ -390,8 +420,8 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 				snap = append(snap, c)
 			}
 		}
+		h.mu.RUnlock()
 	}
-	h.mu.RUnlock()
 
 	if len(snap) > 0 {
 		ev := cli.EventEntry{
