@@ -5,14 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -78,94 +75,11 @@ var ErrNoActiveProcess = errors.New("session has no active process")
 // Callers already propagate spawn errors, so no bespoke Is-handling is needed.
 var ErrRouterStopped = errors.New("router is shutting down")
 
-// exemptKeyPrefixes lists the session-key namespaces that are exempt from
-// TTL expiry, LRU eviction, and the active-process counter. Derived from
-// keyNamespaces (key.go) so the reserved + exempt lists share a single
-// source of truth — see R239-ARCH-L for the prior drift between the two
-// independently-maintained slices.
-//
-// To toggle a namespace's exempt status (or add a new exempt namespace),
-// edit the matching `exempt` flag in keyNamespaces in key.go; this slice
-// is rebuilt at package init from that table.
-//
-// Scratch keys are deliberately NOT exempt — they are short-lived and
-// should pay the normal TTL / eviction cost (ScratchPool manages its own
-// lifetime on top of that). SysKeyPrefix is exempt: system daemon stubs
-// (when daemons opt to register one — see docs/rfc/system-session.md)
-// must outlive the regular TTL/LRU pressure. Phase 1 daemons typically
-// don't register stubs at all (Runner path), but the prefix is reserved
-// here to keep the policy consistent with future stub-using daemons.
-var exemptKeyPrefixes = func() []string {
-	out := make([]string, 0, len(keyNamespaces))
-	for _, ns := range keyNamespaces {
-		if ns.exempt {
-			out = append(out, ns.prefix)
-		}
-	}
-	return out
-}()
-
-// exemptInfo scans keyNamespaces once and reports both whether key belongs
-// to an exempt namespace and that namespace's kind label. isExemptKey and
-// exemptKind are thin wrappers over it so the (bounded, 4-entry) prefix scan
-// — including the strings.HasPrefix calls — happens a single time even when
-// a caller needs both answers (spawnSession does). R20260603-PERF-8 (#1654):
-// merges the two previously-independent scans of the same table.
-//
-// R239-ARCH-L: derived from keyNamespaces (key.go) so a new exempt namespace
-// registers its prefix + kind label in one place.
-func exemptInfo(key string) (isExempt bool, kind string) {
-	for _, ns := range keyNamespaces {
-		if !ns.exempt {
-			continue
-		}
-		if strings.HasPrefix(key, ns.prefix) {
-			return true, ns.kind
-		}
-	}
-	return false, ""
-}
-
-// isExemptKey reports whether key belongs to an exempt namespace. Callers
-// that already have a ManagedSession should prefer reading s.exempt —
-// this helper exists for the construction path and for external callers
-// that know the key but not the session.
-//
-// Note: ScratchKeyPrefix is intentionally NOT an exempt namespace — scratch
-// sessions are ephemeral and MUST remain subject to the regular TTL /
-// eviction policy so an abandoned scratch conversation eventually releases
-// its process slot. ScratchPool manages its own lifetime on top of that.
-func isExemptKey(key string) bool {
-	exempt, _ := exemptInfo(key)
-	return exempt
-}
-
-// exemptKind classifies an exempt session key into one of three buckets:
-// "cron", "project", "sys", or "" if the key is not exempt. Used by the
-// per-namespace sub-quota gate in spawnSession so a noisy cron chat
-// can't starve planner / sys exempt sessions (R242-ARCH-2).
-func exemptKind(key string) string {
-	_, kind := exemptInfo(key)
-	return kind
-}
-
-// exemptCapFor returns the sub-quota cap for a given exempt kind. Unknown
-// kinds return maxExemptSessions (the pre-R242-ARCH-2 global cap) so a
-// future exempt namespace added to exemptKeyPrefixes without wiring up
-// a sub-quota still has a defined limit and never reaches a "missing
-// case ⇒ unlimited" state.
-func exemptCapFor(kind string) int {
-	switch kind {
-	case "cron":
-		return maxCronExempt
-	case "project":
-		return maxProjectExempt
-	case "sys":
-		return maxSysExempt
-	default:
-		return maxExemptSessions
-	}
-}
+// exemptKeyPrefixes / exemptInfo / isExemptKey / exemptKind / exemptCapFor
+// moved to exempt.go (R20260607-ARCH-4 / #1907) — stateless exempt-quota
+// helpers grouped with the keyNamespaces-derived policy. The maxExemptSessions
+// / maxCronExempt / maxProjectExempt / maxSysExempt constants stay below in
+// this file's const block.
 
 // Router defaults applied by NewRouter when the corresponding RouterConfig
 // field is zero. Exported so other packages (tests, config validation, CLI
@@ -456,6 +370,15 @@ type Router struct {
 	// 读写: cleanup (Shutdown)
 	shutdownOnce sync.Once
 
+	// startOnce guards startBackgroundLifecycle against re-entry. NewRouter
+	// calls startBackgroundLifecycle directly at construction time; Start()
+	// also calls it for callers that defer boot. Without this gate a second
+	// Start() call would re-overwrite r.attachmentTracker (leaking the first
+	// tracker's goroutine) and schedule a redundant orphan sweep.
+	// R20260607-ARCH-1.
+	// 读写: core (startBackgroundLifecycle)
+	startOnce sync.Once
+
 	// stopped is set true (under r.mu, inside Shutdown) immediately before the
 	// session snapshot is taken, and gates spawnSession: any spawn that arrives
 	// after Shutdown's snapshot observes stopped=true and is rejected with
@@ -623,72 +546,9 @@ func chatKeyFor(key string) string {
 	return key
 }
 
-// isENOENTErr reports whether err (or any error it wraps) ultimately
-// carries syscall.ENOENT. The helper exists primarily to make the intent
-// explicit at call sites and to spell out why we must NOT match the
-// strerror text ("no such file or directory") — it is locale-dependent
-// (e.g. LANG=zh_CN.UTF-8 returns a Chinese translation) and silently
-// regresses under non-English containers. errors.Is already walks the
-// %w chain through *os.PathError / *os.SyscallError transparently, so
-// a single call suffices.
-func isENOENTErr(err error) bool {
-	return err != nil && errors.Is(err, syscall.ENOENT)
-}
-
-// claudeProjectSlug maps a CWD to the directory name Claude CLI uses under
-// ~/.claude/projects/. Thin wrapper over discovery.ClaudeProjectSlug so the
-// two call sites (session + discovery) can never drift: if Claude's naming
-// scheme ever changes, the single implementation in internal/discovery is
-// the one to edit. TestClaudeProjectSlug_MatchesDiscovery pins the behaviour.
-// RNEW-002.
-func claudeProjectSlug(cwd string) string {
-	return discovery.ClaudeProjectSlug(cwd)
-}
-
-// resolveResumeID returns resumeID if the corresponding jsonl conversation
-// file exists under claudeDir (i.e. Claude CLI's --resume will actually find
-// it), or "" to downgrade the spawn to a fresh session.
-//
-// Motivating failure: a cron job whose work_dir is edited after first run
-// stores its jsonl under the original workspace's slug; subsequent ticks
-// compute the new slug and --resume hits a path that does not exist, so
-// Claude CLI prints "No conversation found with session ID: <id>" to stderr
-// and exits 1 in ~1.7s. Upstream sees cron_job completed with result_len=0
-// and no recorded error. Same failure mode fires when the prior CLI process
-// died before flushing any turn — shim captured the init event's session_id
-// but no jsonl was ever produced, so every subsequent tick keeps generating
-// fresh-but-unsaved ids in a loop.
-//
-// Skipped when claudeDir or workspace are empty (test harness / misconfig):
-// without both we can't build a meaningful path, and preserving legacy
-// behavior keeps unrelated unit tests independent of filesystem layout.
-// On stat errors other than ErrNotExist (permission denied, I/O failure)
-// we also downgrade — a broken claudeDir would otherwise manifest as the
-// same silent exit-1 loop the primary fix targets.
-func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
-	if resumeID == "" || claudeDir == "" || workspace == "" {
-		return resumeID
-	}
-	jsonlPath := filepath.Join(claudeDir, "projects",
-		claudeProjectSlug(workspace), resumeID+".jsonl")
-	if _, err := os.Stat(jsonlPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			slog.Warn("resume target missing, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"workspace", workspace,
-				"expected_path", jsonlPath)
-		} else {
-			slog.Warn("resume target stat failed, starting fresh session",
-				"key", key,
-				"resume_id", resumeID,
-				"expected_path", jsonlPath,
-				"err", err)
-		}
-		return ""
-	}
-	return resumeID
-}
+// isENOENTErr / claudeProjectSlug / resolveResumeID moved to claudeproject.go
+// (R20260607-ARCH-4 / #1907) — stateless Claude-CLI project-dir + resume
+// helpers, no Router state.
 
 // indexAdd adds key to the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
@@ -1180,8 +1040,10 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 // so the loaders observe the cleaned prev_session_ids chain rather than a
 // polluted one. Treat it as part of construction, not a side effect.
 func (r *Router) startBackgroundLifecycle() {
-	r.runOrphanSweep()
-	r.startAttachmentTracker()
+	r.startOnce.Do(func() {
+		r.runOrphanSweep()
+		r.startAttachmentTracker()
+	})
 }
 
 // startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
@@ -1631,6 +1493,32 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	*refsPtr = refs[:0]
 	listRefsPool.Put(refsPtr)
 	return snapshots, version
+}
+
+// ListSessionsIfChanged is the storeGen-gated variant of
+// ListSessionsWithVersion for the /api/sessions REST poll path.
+//
+// R20260607-PERF-7 (#1886): the WS push path debounces on storeGen, but the
+// REST poll handler called ListSessionsWithVersion every tick (1 Hz × N tabs),
+// always paying make([]SessionSnapshot, len) + a Snapshot() per session +
+// downstream json.Marshal — ~14 KB/poll/tab for 50 sessions even when nothing
+// changed. This method lets the handler pass the version it last served; when
+// storeGen has not advanced it returns (nil, sinceVersion, false) WITHOUT
+// touching r.ss.sessions or building any snapshots, so the handler can emit a
+// 304 / {version, unchanged:true} and skip the marshal entirely.
+//
+// The storeGen read is a wait-free atomic load; correctness depends only on the
+// writer ordering documented on ListSessionsWithVersion (writers bump storeGen
+// under r.mu.Lock). A reader that observes an unchanged gen is guaranteed that
+// no mutation has been published since it last read, so returning the stale
+// version is sound. changed==true falls through to the full snapshot build,
+// reusing ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
+func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
+	if cur := r.ss.gen.Load(); cur == sinceVersion {
+		return nil, cur, false
+	}
+	snaps, v := r.ListSessionsWithVersion()
+	return snaps, v, true
 }
 
 // SessionFor returns the session for the given key, or nil.

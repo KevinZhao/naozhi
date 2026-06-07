@@ -21,11 +21,17 @@ import (
 // 这些不变量保证：cron 任务结果显示在记录中行内展开，而不是右侧 popup。
 func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): cron render helpers moved to cron_view.js, but the
+	// global Esc handler (assertion 5) stayed in dashboard.js. Assert on the union.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// 1. Module-scoped expanded state.
 	if !strings.Contains(js, "const cronExpandedRunId = {") {
@@ -73,7 +79,8 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 		t.Error("cronTimelineRowHtml: 展开行内必须复用 cronTimelineDetailHtml 渲染详情")
 	}
 
-	// 5. ESC handler 优先 collapse 再关 drawer。
+	// 5. ESC handler 优先 collapse 再关 drawer。Global Esc handler 留在
+	// dashboard.js（已包含在上面的 union 里）。
 	escIdx := strings.Index(js, "if (e.key !== 'Escape') return;")
 	if escIdx < 0 {
 		t.Fatal("dashboard.js: Global Esc handler 块未找到")

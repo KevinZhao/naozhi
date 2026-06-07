@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // slogPrintfLogger satisfies the Printf interface that robfig/cron's
@@ -74,6 +76,10 @@ func (slogPrintfLogger) Printf(format string, args ...any) {
 		msg = fmt.Sprintf(format, args...)
 	}
 	msg = strings.TrimRight(msg, "\n")
+	// R20260607-SEC-3: sanitize before writing to slog to prevent bidi/C1
+	// injection via attacker-influenced content (e.g. cron spec strings).
+	// cronPanicMarker is pure ASCII so sanitization does not affect marker matching.
+	msg = osutil.SanitizeForLog(msg, 512)
 	if strings.Contains(msg, cronPanicMarker) {
 		slog.Error("cron logger", "msg", msg)
 		return

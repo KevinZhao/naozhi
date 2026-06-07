@@ -124,6 +124,46 @@ func TestValidateWorkspace_SymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestValidateWorkspace_CaseInsensitiveChild is the regression for the
+// dashboard "恢复会话失败：无权限或参数越界" bug: on a case-insensitive
+// filesystem (macOS APFS, Windows NTFS) EvalSymlinks preserves the caller's
+// case, so a workspace path that differs from allowedRoot only by case (the
+// operator configured /Users/x/Workspace but the history pane reconstructed
+// /Users/x/workspace) used to fail the byte-wise prefix check and return
+// ErrWorkspaceOutsideRoot. PathContainedInRoot's inode-walk fallback now
+// accepts it.
+//
+// The test detects case-insensitivity at runtime via a Stat of a case
+// variant rather than keying on runtime.GOOS — macOS can be formatted
+// case-sensitive and some Linux mounts are case-insensitive, so the
+// filesystem probe is the accurate gate. On a case-sensitive fs it Skips
+// (the bug is not reproducible there, and asserting acceptance would be a
+// false negative).
+func TestValidateWorkspace_CaseInsensitiveChild(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Real child directory in mixed case.
+	child := filepath.Join(root, "Proj")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Probe: can we Stat the child through an all-lowercase spelling? If not,
+	// the filesystem is case-sensitive and this bug cannot occur here.
+	lowerChild := filepath.Join(root, "proj")
+	if _, err := os.Stat(lowerChild); err != nil {
+		t.Skip("filesystem is case-sensitive; case-fold containment not exercisable here")
+	}
+	// allowedRoot in mixed case, workspace handed in the lowercase spelling —
+	// byte-wise prefix would mismatch, inode walk must rescue it.
+	resolved, err := validateWorkspace(lowerChild, root)
+	if err != nil {
+		t.Fatalf("case-variant child must be accepted on case-insensitive fs, got %v", err)
+	}
+	if resolved == "" {
+		t.Fatalf("expected a resolved path, got empty")
+	}
+}
+
 // TestClassifyWorkspaceErr asserts the (status, msg) mapping is stable —
 // dashboard.js localizeAPIError and the cron handler both depend on the
 // exact substrings here.

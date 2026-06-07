@@ -165,3 +165,48 @@ func TestHandleResume_NilLimiter_PassThrough(t *testing.T) {
 		t.Fatalf("nil writeLimiter must not produce 429; got %d", w.Code)
 	}
 }
+
+// TestHandleUpdate_PerIPRateLimit pins R20260607-SEC-1: PATCH /api/cron MUST
+// gate per-IP via writeLimiter before reaching the scheduler. HandleUpdate
+// writes cron_jobs.json and calls validateWorkspace on every request; a stolen
+// token without this gate could loop-PATCH to exhaust disk IO.
+//
+// Scheduler is nil so requests that pass the limiter never reach the scheduler
+// (501 path). The load-bearing assertion is 429 not 501 on the third call: an
+// inverted or missing gate would emit 501 before 429.
+func TestHandleUpdate_PerIPRateLimit(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{
+		writeLimiter: newPerIPBurstNLimiter(2),
+	}
+	body := `{"title":"updated"}`
+	doReq := func() int {
+		req := httptest.NewRequest(http.MethodPatch, "/api/cron?id=deadbeefdeadbeef", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.5:2222"
+		w := httptest.NewRecorder()
+		h.HandleUpdate(w, req)
+		return w.Code
+	}
+	for i := 0; i < 2; i++ {
+		if got := doReq(); got == http.StatusTooManyRequests {
+			t.Fatalf("request %d 429ed early — burst budget exhausted prematurely", i+1)
+		}
+	}
+	if got := doReq(); got != http.StatusTooManyRequests {
+		t.Fatalf("3rd update after burst exhaustion: got %d, want 429; R20260607-SEC-1 update rate-limit gate may be missing", got)
+	}
+}
+
+// TestHandleUpdate_NilLimiter_PassThrough: nil writeLimiter must not 429.
+func TestHandleUpdate_NilLimiter_PassThrough(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{} // writeLimiter nil, scheduler nil
+	req := httptest.NewRequest(http.MethodPatch, "/api/cron?id=deadbeefdeadbeef", strings.NewReader(`{"title":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.HandleUpdate(w, req)
+	if w.Code == http.StatusTooManyRequests {
+		t.Fatalf("nil writeLimiter must not produce 429; got %d", w.Code)
+	}
+}

@@ -20,12 +20,9 @@ import (
 // `defer t.Stop()` releases the timer.
 func TestRunDeadlineWatchdog_FastPathReleasesTimerSlot(t *testing.T) {
 	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
 	// Long enough that, if the test instead waited for the timer, it
 	// would dwarf the deadline-fire latency by ~2 orders of magnitude.
-	watchdogInterruptTimeoutAtomic.Store(int64(2 * time.Second))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 2*time.Second)
 
 	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)

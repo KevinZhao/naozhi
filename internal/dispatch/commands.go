@@ -746,13 +746,27 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	if d.allowedRoot != "" && absPath != d.allowedRoot && !strings.HasPrefix(absPath, d.allowedRoot+string(filepath.Separator)) {
-		d.replyText(ctx, msg, "不允许访问该路径", log)
-		return
+	if d.allowedRoot != "" {
+		// Resolve allowedRoot the same way absPath was resolved above so the
+		// containment check compares two canonical paths. EvalSymlinks failure
+		// (root temporarily unmounted) falls back to the raw string — matches
+		// server.validateWorkspace / cron.workDirResolveUnderRoot. The shared
+		// osutil.PathContainedInRoot then byte-compares with an inode-walk
+		// fallback, so a case-insensitive fs (macOS APFS) where the operator's
+		// configured root differs in case from the typed path no longer
+		// rejects a legitimate /cd target.
+		rootResolved := d.allowedRoot
+		if r, err := filepath.EvalSymlinks(d.allowedRoot); err == nil {
+			rootResolved = r
+		}
+		if !osutil.PathContainedInRoot(absPath, rootResolved) {
+			d.replyText(ctx, msg, "不允许访问该路径", log)
+			return
+		}
 	}
 
-	d.router.SetWorkspace(chatKey, absPath)
 	d.router.ResetChat(chatKey)
+	d.router.SetWorkspace(chatKey, absPath)
 
 	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
 	// expansion + Clean) rather than absPath or post-expansion path, which

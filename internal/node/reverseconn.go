@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // maxReverseRPCResponseBytes caps the size of a single reverse-RPC response
@@ -606,7 +607,7 @@ func (c *ReverseConn) readLoop() {
 			if ok {
 				var err error
 				if msg.Error != "" {
-					err = fmt.Errorf("node %s: %s", c.id, msg.Error)
+					err = fmt.Errorf("node %s: %s", c.id, osutil.SanitizeForLog(msg.Error, 256))
 				}
 				ch <- reverseResult{msg.Result, err}
 			}

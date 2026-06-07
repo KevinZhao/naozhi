@@ -30,10 +30,11 @@ import (
 // remove the Job type will break this anchor first.
 func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	// notify uses tri-state pointer semantics; explicitly true so the
-	// snapshot deep-copy path (which heap-allocates a fresh *bool to
-	// avoid sharing the underlying storage with mutating writers) is
-	// exercised — a regression that copied the pointer directly would
-	// pass the equality check below but tear under concurrent UpdateJob.
+	// snapshot's notify aliasing path is exercised. R090135-PERF-003
+	// (#1931): the snapshot now aliases j.Notify directly (alloc-free)
+	// rather than deep-copying — safe because UpdateJob reassigns the
+	// whole pointer under s.mu and never mutates *j.Notify in place, so
+	// the pointed-to bool is immutable once published.
 	tru := true
 	j := &Job{
 		ID:             "abcdef0123456789",
@@ -89,18 +90,24 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	if snap.label == "" {
 		t.Errorf("label: got empty, want non-empty derived from Title=%q", j.Title)
 	}
-	// notify must be a fresh allocation, not the caller's pointer — a
-	// regression that aliased j.Notify would let a concurrent UpdateJob
-	// flip the value mid-execute and break the snapshot's "consistent
-	// view" guarantee.
+	// R090135-PERF-003 (#1931): notify now aliases j.Notify directly to
+	// avoid a per-tick *bool heap alloc. This is tear-free because
+	// UpdateJob (scheduler_jobs.go) reassigns j.Notify to a fresh &v / nil
+	// under s.mu.Lock and never mutates *j.Notify in place — the snapshot's
+	// RLock read therefore captures a stable pointer to an immutable bool.
 	if snap.notify == nil {
 		t.Fatalf("notify: got nil, want pointer to true")
 	}
-	if snap.notify == j.Notify {
-		t.Errorf("notify: snapshot aliases j.Notify; expected fresh allocation")
+	if snap.notify != j.Notify {
+		t.Errorf("notify: snapshot should alias j.Notify (alloc-free); got distinct pointer")
 	}
 	if *snap.notify != *j.Notify {
 		t.Errorf("notify value: got %v want %v", *snap.notify, *j.Notify)
+	}
+	// nil Notify must round-trip as nil (tri-state "unset").
+	jNil := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "p", Platform: "feishu", ChatID: "c"}
+	if snapNil := s.snapshotJob(jNil); snapNil.notify != nil {
+		t.Errorf("notify: nil Job.Notify must snapshot as nil, got %v", *snapNil.notify)
 	}
 }
 
@@ -153,13 +160,17 @@ func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
 		t.Fatalf("snapshotJobLocked diverged from snapshotJob:\n  public=%+v\n  locked=%+v",
 			viaPublic, viaLocked)
 	}
-	// Each path must allocate a fresh *bool — sharing the pointer would
-	// let a UpdateJob race mid-execute, defeating the snapshot.
+	// R090135-PERF-003 (#1931): both paths alias j.Notify (alloc-free).
+	// They must agree on pointer identity AND value so the jitter and
+	// no-jitter execute paths observe the same notify decision input.
 	if viaPublic.notify == nil || viaLocked.notify == nil {
 		t.Fatal("both snapshots must populate notify")
 	}
-	if viaPublic.notify == j.Notify || viaLocked.notify == j.Notify {
-		t.Fatal("both snapshots must clone notify; aliasing breaks snapshot semantics")
+	if viaPublic.notify != j.Notify || viaLocked.notify != j.Notify {
+		t.Fatal("both snapshots must alias j.Notify (alloc-free)")
+	}
+	if *viaPublic.notify != *viaLocked.notify {
+		t.Fatalf("notify value diverged: public=%v locked=%v", *viaPublic.notify, *viaLocked.notify)
 	}
 }
 
