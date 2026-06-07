@@ -1633,6 +1633,32 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	return snapshots, version
 }
 
+// ListSessionsIfChanged is the storeGen-gated variant of
+// ListSessionsWithVersion for the /api/sessions REST poll path.
+//
+// R20260607-PERF-7 (#1886): the WS push path debounces on storeGen, but the
+// REST poll handler called ListSessionsWithVersion every tick (1 Hz × N tabs),
+// always paying make([]SessionSnapshot, len) + a Snapshot() per session +
+// downstream json.Marshal — ~14 KB/poll/tab for 50 sessions even when nothing
+// changed. This method lets the handler pass the version it last served; when
+// storeGen has not advanced it returns (nil, sinceVersion, false) WITHOUT
+// touching r.ss.sessions or building any snapshots, so the handler can emit a
+// 304 / {version, unchanged:true} and skip the marshal entirely.
+//
+// The storeGen read is a wait-free atomic load; correctness depends only on the
+// writer ordering documented on ListSessionsWithVersion (writers bump storeGen
+// under r.mu.Lock). A reader that observes an unchanged gen is guaranteed that
+// no mutation has been published since it last read, so returning the stale
+// version is sound. changed==true falls through to the full snapshot build,
+// reusing ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
+func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
+	if cur := r.ss.gen.Load(); cur == sinceVersion {
+		return nil, cur, false
+	}
+	snaps, v := r.ListSessionsWithVersion()
+	return snaps, v, true
+}
+
 // SessionFor returns the session for the given key, or nil.
 func (r *Router) SessionFor(key string) *ManagedSession {
 	r.mu.RLock()
