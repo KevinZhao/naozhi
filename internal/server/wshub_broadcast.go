@@ -68,6 +68,18 @@ func marshalSessionsUpdate() []byte {
 // the cap) fall through to a fresh allocation.
 const broadcastSnapPoolMaxCap = maxWSConns
 
+// subFilterChunk bounds how many candidate clients broadcastSessionSystemEvent
+// filters per h.mu.RLock acquisition. R20260607-PERF-014 (#1925): the phase-2
+// subscription scan reads c.subscriptions[key] under the Hub-wide h.mu, and a
+// single RLock spanning all N authenticated clients blocks every writer
+// (register / unregister / markAuthenticated take the WRITE lock) for the whole
+// walk. Releasing the lock every subFilterChunk candidates lets those writers
+// interleave between batches, capping the starvation window at O(subFilterChunk)
+// regardless of fleet size. 64 keeps the per-chunk lock/unlock overhead
+// negligible against a tiny map lookup per client while still draining a
+// maxWSConns-sized fleet in a bounded handful of acquisitions.
+const subFilterChunk = 64
+
 var broadcastClientSnapPool = sync.Pool{
 	New: func() any {
 		s := make([]*wsClient, 0, 32)
@@ -399,13 +411,32 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		}
 		h.authMu.RUnlock()
 
-		h.mu.RLock()
-		for _, c := range cand {
-			if _, ok := c.subscriptions[key]; ok {
-				snap = append(snap, c)
+		// R20260607-PERF-014 (#1925): chunk the phase-2 subscription filter so a
+		// single h.mu.RLock no longer spans the entire candidate walk. The map is
+		// h.mu-owned (see wsclient.go markSubGenReleasable contract) so we still
+		// take h.mu.RLock to read c.subscriptions[key], but releasing it every
+		// subFilterChunk candidates bounds the writer-starvation window from
+		// O(N_auth_clients) to O(subFilterChunk): register / unregister /
+		// markAuthenticated (which take the h.mu WRITE lock) can interleave
+		// between chunks instead of waiting behind the whole fleet's scan. Each
+		// candidate wsClient is GC-pinned by `cand`, so a client unregistered
+		// between chunks is still a live, race-free read under the next RLock;
+		// a non-blocking SendRaw to a closing client is already tolerated. Lock
+		// ordering is unchanged — each chunk takes ONE lock and releases it, never
+		// nesting authMu inside h.mu the way the writers do.
+		for start := 0; start < len(cand); start += subFilterChunk {
+			end := start + subFilterChunk
+			if end > len(cand) {
+				end = len(cand)
 			}
+			h.mu.RLock()
+			for _, c := range cand[start:end] {
+				if _, ok := c.subscriptions[key]; ok {
+					snap = append(snap, c)
+				}
+			}
+			h.mu.RUnlock()
 		}
-		h.mu.RUnlock()
 		releaseBroadcastSnap(candPtr, cand)
 	} else {
 		// Legacy fallback for hand-rolled hubs that never initialise
