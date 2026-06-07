@@ -456,6 +456,15 @@ type Router struct {
 	// 读写: cleanup (Shutdown)
 	shutdownOnce sync.Once
 
+	// startOnce guards startBackgroundLifecycle against re-entry. NewRouter
+	// calls startBackgroundLifecycle directly at construction time; Start()
+	// also calls it for callers that defer boot. Without this gate a second
+	// Start() call would re-overwrite r.attachmentTracker (leaking the first
+	// tracker's goroutine) and schedule a redundant orphan sweep.
+	// R20260607-ARCH-1.
+	// 读写: core (startBackgroundLifecycle)
+	startOnce sync.Once
+
 	// stopped is set true (under r.mu, inside Shutdown) immediately before the
 	// session snapshot is taken, and gates spawnSession: any spawn that arrives
 	// after Shutdown's snapshot observes stopped=true and is rejected with
@@ -1180,8 +1189,10 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 // so the loaders observe the cleaned prev_session_ids chain rather than a
 // polluted one. Treat it as part of construction, not a side effect.
 func (r *Router) startBackgroundLifecycle() {
-	r.runOrphanSweep()
-	r.startAttachmentTracker()
+	r.startOnce.Do(func() {
+		r.runOrphanSweep()
+		r.startAttachmentTracker()
+	})
 }
 
 // startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
