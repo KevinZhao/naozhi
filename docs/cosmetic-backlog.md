@@ -568,3 +568,8 @@
 - [R20260607-CORR-7] redactPathsBuilderPool defer 超 cap 早返回未 Reset,backing array 留旧串到 GC(无数据外泄) — internal/cron/scheduler_finish.go:930
 - [R20260607-SEC-C3] wshub_send.go:229 dashboard interrupt 用 slog.Info 记 key,高频可降 Debug — internal/server/wshub_send.go:229
 - [R20260607-PERF-10] workDirResolveCache.store 过 cap 分支二次 count.Load 冗余(单 ticker goroutine 无并发改) — internal/cron/scheduler_workdir.go:148
+- [R050103S-PPROF-1] pprof 403 body "set a dashboard token to enable profiling" 暴露配置机制（loopback-gated，fingerprint 风险低）— internal/server/debug_pprof.go:69
+- [R050103G-SEC-1] NodeConfig/UpstreamConfig 仅 slog.LogValuer 防泄漏，fmt.Sprintf("%+v") 仍漏 Token（当前无 fmt 调用点，防未来）— internal/config/config.go:120
+- [R050103G-BUG-1] subagent_transcript openOrReuse 快路径非零字节读绕过 reprobeRotation（依赖 writer 停止追加不变量，无实际 trigger）— internal/cli/subagent_transcript.go:94
+- [R050103C-BUG-2] runStore.Append preflight_bytes 在 slog.Warn 重算 len 和（post-marshal gate 已兜底正确，微开销）— internal/cron/runstore.go:479
+- [R050103C-CORR-9] static_split_view_test 用 strings.Contains 而非结构唯一性，注释中 token 可假性满足（项目既定 contract-test 模式）— internal/server/static_split_view_test.go:42
