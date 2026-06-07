@@ -523,6 +523,131 @@ func TestEventEntriesBefore_SortedEmptyReturnsNil(t *testing.T) {
 	}
 }
 
+// TestEventEntriesAppend_EquivalentToEventEntries pins R20260607-PERF-6 (#1885):
+// the append variant returns the same entries as EventEntries() on the dead /
+// persistedHistory path.
+func TestEventEntriesAppend_EquivalentToEventEntries(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+
+	want := s.EventEntries()
+	got := s.EventEntriesAppend(nil)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
+				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+// TestEventEntriesAppend_ReusesBuffer verifies the append variant grows a
+// caller-supplied buffer in place instead of allocating a fresh slice, so an
+// O(N sessions) scan can reuse one backing array.
+func TestEventEntriesAppend_ReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	}
+
+	pool := make([]cli.EventEntry, 0, 8)
+	got := s.EventEntriesAppend(pool)
+	if len(got) != 2 {
+		t.Fatalf("len = %d want 2", len(got))
+	}
+	if cap(got) != 8 {
+		t.Errorf("cap = %d want 8 (buffer should have been reused)", cap(got))
+	}
+	// Second session reusing the same backing array (after dst[:0]) must not
+	// see the first session's entries leak through.
+	s2 := &ManagedSession{key: "k2"}
+	s2.persistedHistory = []cli.EventEntry{{Time: 400, Summary: "z"}}
+	got2 := s2.EventEntriesAppend(got[:0])
+	if len(got2) != 1 || got2[0].Summary != "z" {
+		t.Fatalf("reuse leaked prior entries: got %+v", got2)
+	}
+}
+
+// TestEventEntriesAppend_EmptyHistoryNilDst confirms a nil dst with empty
+// history returns nil (no zero-length allocation).
+func TestEventEntriesAppend_EmptyHistoryNilDst(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	if got := s.EventEntriesAppend(nil); got != nil {
+		t.Errorf("empty history with nil dst: got %v want nil", got)
+	}
+}
+
+// TestEventEntriesAppend_PreservesPrefix verifies a non-empty dst keeps its
+// existing contents and the session entries are appended after them.
+func TestEventEntriesAppend_PreservesPrefix(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{{Time: 200, Summary: "b"}}
+
+	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	got := s.EventEntriesAppend(dst)
+	if len(got) != 2 || got[0].Summary != "prefix" || got[1].Summary != "b" {
+		t.Fatalf("prefix not preserved: got %+v", got)
+	}
+}
+
+// TestEventEntriesAppend_LiveProcessPreservesPrefix verifies the live-process
+// branch also appends after an existing dst prefix.
+func TestEventEntriesAppend_LiveProcessPreservesPrefix(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	})
+	s.storeProcess(proc)
+
+	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	got := s.EventEntriesAppend(dst)
+	want := proc.EventEntries()
+	if len(got) != len(want)+1 {
+		t.Fatalf("len = %d want %d", len(got), len(want)+1)
+	}
+	if got[0].Summary != "prefix" {
+		t.Errorf("prefix dropped: got[0]=%q", got[0].Summary)
+	}
+}
+
+// TestEventEntriesForKeyAppend pins the Router-level append wrapper:
+// unknown key returns dst unchanged; known key appends its history.
+func TestEventEntriesForKeyAppend(t *testing.T) {
+	t.Parallel()
+	r := NewRouter(RouterConfig{})
+	s := &ManagedSession{key: "alpha"}
+	s.persistedHistory = []cli.EventEntry{{Time: 100, Summary: "a"}}
+	r.mu.Lock()
+	r.ss.sessions["alpha"] = s
+	r.mu.Unlock()
+
+	// Unknown key: dst unchanged.
+	dst := []cli.EventEntry{{Time: 1, Summary: "keep"}}
+	if got := r.EventEntriesForKeyAppend(dst, "missing"); len(got) != 1 || got[0].Summary != "keep" {
+		t.Fatalf("unknown key mutated dst: got %+v", got)
+	}
+
+	// Known key appends after prefix.
+	got := r.EventEntriesForKeyAppend(dst[:0], "alpha")
+	if len(got) != 1 || got[0].Summary != "a" {
+		t.Fatalf("known key append: got %+v", got)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage
