@@ -8621,39 +8621,69 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     }
     const bytes = await r.arrayBuffer();
     if (mySeq !== _sandboxRenderSeq) return;
-    // Force the Blob's type from the caller — the server intentionally
-    // returned application/octet-stream so direct-URL hits don't render.
-    // The browser only interprets the bytes as HTML/SVG because we ask it
-    // to here. Callers MUST pass a type the server-side render whitelist
-    // already accepted (text/html, application/xhtml+xml, image/svg+xml);
-    // otherwise the iframe would display nothing.
-    const blob = new Blob([bytes], { type: blobType || 'text/html' });
-    const url = URL.createObjectURL(blob);
-    // Final stale check AFTER allocating the URL — if a newer invocation
-    // landed in the tiny window between the arrayBuffer await and now,
-    // revoke our URL immediately instead of stashing it in the tracked
-    // slot (which would clobber the newer render's tracking and leak).
-    if (mySeq !== _sandboxRenderSeq) {
-      try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
-      return;
-    }
-    _pendingSandboxBlobUrl = url;
 
     body.innerHTML = '';
     const frame = document.createElement('iframe');
-    frame.src = url;
     frame.title = path;
     // sandbox='allow-scripts' grants script execution but withholds the
     // same-origin token — the iframe stays in an opaque origin and cannot
-    // read dashboard cookies, localStorage, or DOM. Combined with the blob:
-    // URL (origin already opaque) the document is fully isolated from the
-    // dashboard. Scripts are required so workspace HTML using MathJax /
-    // KaTeX / Mermaid / chart libs renders correctly. The contract test
-    // (TestDashboardJS_SandboxedBlobRender) substring-matches the helper
-    // body for forbidden tokens, so this comment must NEVER spell out
-    // those tokens — see that test for the canonical contract.
+    // read dashboard cookies, localStorage, or DOM. This holds for BOTH
+    // delivery paths below (blob URL and srcdoc): a sandbox missing the
+    // same-origin token is always an opaque origin regardless of how the
+    // document bytes arrive. Scripts are required so workspace HTML using
+    // MathJax / KaTeX / Mermaid / chart libs renders. The contract test
+    // (TestDashboardJS_SandboxedBlobRender) substring-matches this helper
+    // body for forbidden tokens, so comments must NEVER spell them out.
     frame.setAttribute('sandbox', 'allow-scripts');
     frame.referrerPolicy = 'no-referrer';
+
+    // Desktop path: fetch → Blob({type:blobType}) → blob: URL. blob:
+    // documents carry no inherited CSP, so desktop workspace HTML renders
+    // with the widest capability. Force the Blob type from the caller (the
+    // server returns application/octet-stream so a direct URL hit downloads
+    // rather than renders); callers pass a server-whitelisted type
+    // (text/html, application/xhtml+xml, image/svg+xml). The mobile branch
+    // is checked AFTER setup so blob-path tokens stay early in the helper.
+    if (!isMobile()) {
+      const blob = new Blob([bytes], { type: blobType || 'text/html' });
+      const url = URL.createObjectURL(blob);
+      // Final stale check AFTER allocating the URL — a newer invocation in
+      // the window between arrayBuffer and now must revoke this URL instead
+      // of clobbering the tracked slot (which would leak the newer render).
+      if (mySeq !== _sandboxRenderSeq) {
+        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+        return;
+      }
+      _pendingSandboxBlobUrl = url;
+      frame.src = url;
+      body.appendChild(frame);
+      return;
+    }
+
+    // Mobile WebKit fallback (iOS Safari, every iOS browser, and the in-app
+    // webviews Feishu / WeChat use all run WebKit): pointing a sandboxed
+    // iframe at a parent-minted blob: URL is treated as a cross-origin
+    // navigation and silently blocked — blank frame, no console error
+    // (WebKit bug 170075; cf. bulwarkmail/webmail #253). srcdoc inlines the
+    // bytes, sidestepping the blob: scheme, and mobile WebKit renders it.
+    // Isolation is unchanged (opaque origin, see above). No blob URL is
+    // allocated, so there is nothing to track or revoke.
+    //
+    // Accepted trade-offs vs. the desktop blob path (all strictly better
+    // than the blank frame mobile users get today; tracked for follow-up):
+    //   - CSP: srcdoc documents inherit the dashboard page CSP, so workspace
+    //     HTML loading an external <script> is restricted to the script-src
+    //     allowlist AND require-sri-for (i.e. even jsdelivr needs integrity=).
+    //     Inline scripts (MathJax/KaTeX/Mermaid) still run via allow-scripts.
+    //   - Encoding: srcdoc is parsed as UTF-8 per spec and an in-document
+    //     <meta charset> is ignored, so a non-UTF-8 file (e.g. GBK) renders
+    //     garbled here. TextDecoder defaults to fatal:false (U+FFFD on bad
+    //     bytes) so it never throws. naozhi workspace HTML is UTF-8 in
+    //     practice (Claude/tool generated); legacy encodings are out of scope.
+    //   - SVG: srcdoc is HTML-parsed, not XML-parsed. A single <svg> root
+    //     renders as foreign content; XML-only features (CDATA, xml:* attrs)
+    //     may parse differently than the desktop image/svg+xml blob path.
+    frame.srcdoc = new TextDecoder('utf-8').decode(bytes);
     body.appendChild(frame);
   } catch (e) {
     if (mySeq !== _sandboxRenderSeq) return;
