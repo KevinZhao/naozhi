@@ -709,18 +709,24 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 
 	// R20260604-GO-001: the critical section runs under a single
 	// `defer s.mu.Unlock()` inside an IIFE rather than three hand-written
-	// Unlock branches. persistJobsLocked → marshalJobsLocked → (*fn)(entries)
-	// can panic (a buggy injected marshalJobs stub today, or a future Job
-	// field type bug); robfig's Recover wrapper only catches the panic after
-	// finishRun returns — i.e. above this frame — so a manual Unlock that the
-	// panic skips would leave s.mu held forever and deadlock every later tick.
-	// The defer releases the lock on any exit path including panic. save() and
-	// the cache invalidation stay OUTSIDE the lock, so they are recorded into
-	// locals here and acted on after the section returns.
+	// Unlock branches. The defer releases the lock on any exit path including
+	// panic. save() and the cache invalidation stay OUTSIDE the lock, so they
+	// are recorded into locals here and acted on after the section returns.
+	//
+	// R20260607-PERF-005 (#1923): the JSON encode no longer runs inside this
+	// write critical section. The lock now only mutates the Job fields and
+	// captures a detached value-copy snapshot (+ persist seq) via
+	// snapshotJobsForSaveLocked; json.Marshal moves to persistSnapshot below,
+	// off the lock, so a 50+ job encode no longer serialises the dashboard
+	// read path (ListJobs / ListAllJobsWithNextRun / PerChatJobCount) for the
+	// marshal duration on every cron tick. This finishes the half left open by
+	// #1340 (R20260527122801-PERF-2 moved the sort comparator but not marshal).
 	var (
 		save           func()
 		sessionChanged bool
-		ok             bool
+		snap           jobsSnapshot
+		haveSnap       bool
+		prev           JobState
 	)
 	func() {
 		s.mu.Lock()
@@ -728,7 +734,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		if _, exists := s.jobs[j.ID]; !exists {
 			return
 		}
-		prev := j.snapshotResultState()
+		prev = j.snapshotResultState()
 
 		j.LastRunAt = endedAt
 		j.LastResult = result
@@ -739,26 +745,39 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		}
 		j.RunCounters.addRun(state)
 
-		saveFn, perr := s.persistJobsLocked()
-		if perr != nil {
-			prev.restore(j)
-			slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
-				"job_id", j.ID, "err", perr)
-			return
-		}
-		save = saveFn
+		snap = s.snapshotJobsForSaveLocked()
+		haveSnap = true
 		// R250-PERF-7: detect whether LastSessionID changed under the lock
 		// so we can invalidate the KnownSessionIDs TTL cache exactly when
 		// the persisted set has shifted. Comparing against the snapshot
 		// taken before the in-place write avoids redundant invalidation
 		// when the same session id repeats.
 		sessionChanged = sessionID != "" && sessionID != prev.LastSessionID
-		ok = true
 	}()
 
-	if !ok {
+	if !haveSnap {
 		return result, errMsg, false
 	}
+
+	// Marshal OFF the lock (#1923). On marshal failure re-acquire s.mu and
+	// roll back the in-memory mutation so the live read path and the on-disk
+	// snapshot stay in sync — same contract persistJobsLocked enforced inline,
+	// only the encode moved out of the critical section. Marshal failure is an
+	// OOM / broken-schema (or injected-stub) event, so the brief window where
+	// the not-yet-persisted mutation is visible to readers before rollback is
+	// acceptable: finishRun gates cron_run_ended on this function's ok return.
+	saveFn, perr := s.persistSnapshot(snap)
+	if perr != nil {
+		s.mu.Lock()
+		if _, exists := s.jobs[j.ID]; exists {
+			prev.restore(j)
+		}
+		s.mu.Unlock()
+		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
+			"job_id", j.ID, "err", perr)
+		return result, errMsg, false
+	}
+	save = saveFn
 
 	if sessionChanged {
 		s.invalidateKnownSessionsCache()
