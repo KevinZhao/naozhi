@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // R040034-PERF-13 (#1408): pins parallelFsync's contract — every entry
@@ -69,6 +70,41 @@ func TestParallelFsyncEmptyIsNoOp(t *testing.T) {
 	})
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("empty parallelFsync called fn %d times; want 0", got)
+	}
+}
+
+// TestParallelFsyncWorkerPanicRecovered verifies R20260607-GO-016: a panic
+// inside a worker fn does not crash the process — the recover() in the
+// goroutine catches it, and parallelFsync still returns (wg.Wait() unblocks).
+func TestParallelFsyncWorkerPanicRecovered(t *testing.T) {
+	const n = 8
+	keys := make([]string, n)
+	ws := make([]*perKeyWriter, n)
+	for i := range ws {
+		ws[i] = &perKeyWriter{}
+	}
+
+	var called atomic.Int64
+	var p Persister
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
+			called.Add(1)
+			panic("simulated fsync panic")
+		})
+	}()
+
+	select {
+	case <-done:
+		// parallelFsync returned — all workers exited (recovered or normal).
+	case <-time.After(3 * time.Second):
+		t.Fatal("parallelFsync did not return after worker panics; likely deadlocked on wg.Wait()")
+	}
+	// At least one fn was invoked before the panics.
+	if called.Load() == 0 {
+		t.Error("expected fn to be called at least once before panics")
 	}
 }
 
