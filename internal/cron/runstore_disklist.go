@@ -312,6 +312,38 @@ const diskDecodeParallelThreshold = 16
 // maxConcurrentWarm × diskDecodeWorkers, not N × keepCount.
 const diskDecodeWorkers = 8
 
+// decodeSlot is the position-indexed scratch entry decodeRunsParallel writes
+// each parallel decode into so completion order is irrelevant (items is
+// already mtime-sorted). Hoisted to package scope (was a function-local type)
+// so the []decodeSlot backing array can be recycled via decodeSlotPool
+// instead of freshly allocated on every cold-cache warm. R20260607-PERF-012
+// (#1924).
+type decodeSlot struct {
+	summary CronRunSummary
+	ok      bool
+	corrupt bool
+}
+
+// decodeSlotPool recycles the []decodeSlot scratch slice across
+// decodeRunsParallel calls. Every cold-cache warm previously allocated a fresh
+// make([]decodeSlot, n) (n up to keepCount=200); a 50-job cold start
+// (trimAllCtx-then-warm) was 50 × that allocation. Pooling drops it to
+// amortised zero after warmup. The slice is reset to its full capacity and
+// cleared before reuse so a stale ok=true / summary from a prior (larger) call
+// can never leak into the result. R20260607-PERF-012 (#1924).
+var decodeSlotPool = sync.Pool{
+	New: func() any {
+		s := make([]decodeSlot, 0, DefaultRunsKeepCount)
+		return &s
+	},
+}
+
+// decodeSlotPoolMaxCap drops oversized backing arrays from the pool so an
+// operator who raised RunsKeepCount well above the default for one job does
+// not pin an outsized array for the process lifetime. Sized at 2× the default
+// cap for headroom around the common case.
+const decodeSlotPoolMaxCap = 2 * DefaultRunsKeepCount
+
 // decodeRunsParallel reads + decodes the supplied newest-first items across
 // a bounded worker pool and returns the summaries in the SAME newest-first
 // order plus separate counts of corrupt files (ErrCorruptRun) and unreadable
@@ -331,12 +363,24 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 		// those rather than the whole directory.
 		n = limit
 	}
-	type slot struct {
-		summary CronRunSummary
-		ok      bool
-		corrupt bool
+	// R20260607-PERF-012 (#1924): recycle the position-indexed scratch slice
+	// via decodeSlotPool rather than make([]decodeSlot, n) per warm. Grow to n
+	// (reusing the pooled backing array when its cap suffices) and clear so no
+	// stale entry from a prior call survives into this result.
+	slotsPtr := decodeSlotPool.Get().(*[]decodeSlot)
+	defer func() {
+		if cap(*slotsPtr) > decodeSlotPoolMaxCap {
+			return
+		}
+		decodeSlotPool.Put(slotsPtr)
+	}()
+	if cap(*slotsPtr) >= n {
+		*slotsPtr = (*slotsPtr)[:n]
+		clear(*slotsPtr)
+	} else {
+		*slotsPtr = make([]decodeSlot, n)
 	}
-	slots := make([]slot, n)
+	slots := *slotsPtr
 	workers := diskDecodeWorkers
 	if workers > n {
 		workers = n
