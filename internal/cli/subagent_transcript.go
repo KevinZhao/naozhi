@@ -84,7 +84,17 @@ func (r *TranscriptReader) Close() error {
 //
 // On Stat/Open errors any prior fd is closed so a transient ENOENT does
 // not leave a stale handle behind. The caller MUST hold r.mu.
+//
+// R20260607-PERF-3 (#1884): the fast path (a live fd that we trust still
+// points at the current inode) returns immediately WITHOUT an os.Stat —
+// see readLocked, which only invokes the stat-bearing rotation re-probe
+// (reprobeRotation) when a poll reads zero fresh bytes. An actively-growing
+// file cannot have rotated, so re-statting it every 200ms was pure overhead
+// (≈250 stat(2)/s under 50 tailers).
 func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
+	if r.f != nil && r.statSig != nil {
+		return r.f, false, nil
+	}
 	st, err := os.Stat(r.path)
 	if err != nil {
 		// Path disappeared (logrotate window, /new prune). Drop any cached
@@ -165,36 +175,33 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 		r.tail = nil
 	}
 
-	// Offset semantics: r.offset is the next file byte we haven't yet read
-	// as part of a complete line. r.tail is the in-memory buffer of the
-	// most recent incomplete trailing line seen on a prior read; its bytes
-	// have ALREADY been consumed from the file from the OS's point of view
-	// (r.offset points past them), so don't read them twice.
-	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	// Bound a single read so an unexpectedly large transcript (or a
-	// symlink-swap pointing at a huge file) cannot pin tens of MB on a
-	// hot polling path. Subagent jsonl files are typically a few hundred
-	// KB; 16 MB leaves ample headroom for long-running agents.
-	// (R227-CR-4)
-	const maxTranscriptReadBytes = 16 * 1024 * 1024
-	// R231-PERF-3 / R232-PERF-3: reuse r.readBuf across poll calls to
-	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
-	// r.readBuf[:0]; the cap is retained for next call unless it
-	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
-	const readBufRetainCap = 256 * 1024
-	r.readBuf = r.readBuf[:0]
-	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)
+	freshBytes, err := r.readFresh(f)
 	if err != nil {
 		return nil, err
 	}
-	readLen := int64(len(freshBytes))
-	r.readBuf = freshBytes
-	if cap(r.readBuf) > readBufRetainCap {
-		r.readBuf = nil
+	// R20260607-PERF-3 (#1884): openOrReuse no longer stats the path on the
+	// fast (live-fd) path. A zero-byte poll is the only window in which a
+	// rotation (rm+create / atomic rename) can hide — an actively-growing
+	// file is provably the same inode — so probe for an inode swap exactly
+	// there. If the path now resolves to a different file, reopen, reset
+	// bookkeeping, and re-read once so rotation is still caught on the very
+	// next poll (preserving the prior every-poll-stat guarantee at a
+	// fraction of the syscall cost).
+	if len(freshBytes) == 0 {
+		rotated, perr := r.reprobeRotation()
+		if perr != nil {
+			return nil, perr
+		}
+		if rotated {
+			r.offset = 0
+			r.tail = nil
+			freshBytes, err = r.readFresh(r.f)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
+	readLen := int64(len(freshBytes))
 
 	// Concatenate [prior partial][fresh bytes] for line splitting.
 	data := freshBytes
@@ -244,6 +251,80 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 	// offset advances fully.
 	r.offset += readLen
 	return out, nil
+}
+
+// readFresh seeks f to r.offset and reads everything available into the
+// reused r.readBuf, returning the fresh bytes. Caller must hold r.mu.
+//
+// Offset semantics: r.offset is the next file byte we haven't yet read as
+// part of a complete line. r.tail is the in-memory buffer of the most recent
+// incomplete trailing line seen on a prior read; its bytes have ALREADY been
+// consumed from the file from the OS's point of view (r.offset points past
+// them), so don't read them twice.
+func (r *TranscriptReader) readFresh(f *os.File) ([]byte, error) {
+	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	// Bound a single read so an unexpectedly large transcript (or a
+	// symlink-swap pointing at a huge file) cannot pin tens of MB on a
+	// hot polling path. Subagent jsonl files are typically a few hundred
+	// KB; 16 MB leaves ample headroom for long-running agents. (R227-CR-4)
+	const maxTranscriptReadBytes = 16 * 1024 * 1024
+	// R231-PERF-3 / R232-PERF-3: reuse r.readBuf across poll calls to
+	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
+	// r.readBuf[:0]; the cap is retained for next call unless it
+	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
+	const readBufRetainCap = 256 * 1024
+	r.readBuf = r.readBuf[:0]
+	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)
+	if err != nil {
+		return nil, err
+	}
+	r.readBuf = freshBytes
+	if cap(r.readBuf) > readBufRetainCap {
+		r.readBuf = nil
+	}
+	return freshBytes, nil
+}
+
+// reprobeRotation runs the os.Stat(r.path) + os.SameFile rotation guard that
+// openOrReuse skips on the fast path. It is invoked only after a zero-byte
+// poll. Returns rotated=true (with r.f, r.statSig swapped to the new inode)
+// when the path now resolves to a different file; false when the inode is
+// unchanged (no new data, genuinely idle). On a path that disappeared the
+// cached fd is dropped and the os.IsNotExist-classifiable error surfaced, so
+// agent_tailer keeps its "agent terminated, jsonl gone" 404 semantics.
+// Caller must hold r.mu. R20260607-PERF-3 (#1884).
+func (r *TranscriptReader) reprobeRotation() (bool, error) {
+	st, err := os.Stat(r.path)
+	if err != nil {
+		if r.f != nil {
+			_ = r.f.Close()
+			r.f = nil
+			r.statSig = nil
+		}
+		return false, err
+	}
+	if r.f != nil && r.statSig != nil && os.SameFile(r.statSig, st) {
+		return false, nil
+	}
+	if r.f != nil {
+		_ = r.f.Close()
+		r.f = nil
+		r.statSig = nil
+	}
+	f, err := os.Open(r.path)
+	if err != nil {
+		return false, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return false, err
+	}
+	r.f = f
+	r.statSig = fi
+	return true, nil
 }
 
 // advanceOffset adjusts r.offset after an early `break` on limit. We honor
