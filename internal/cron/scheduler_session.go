@@ -13,11 +13,9 @@ import "sync"
 // `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
 // here, which forced internal/cron to import internal/session — the
 // last reverse import in production code (RFC cron-sysession-merge
-// Phase B). The guard moved to cmd/naozhi/cron_router_adapter.go where
-// session is already imported (alongside the InterruptOutcome ordinal
-// pin and the cron.SessionRouter guard), keeping the breakage co-located
-// with the wiring that actually consumes it. cron is now fully decoupled
-// from session in production code.
+// Phase B). The guard was removed when auto-workspace-chain registration
+// was dropped; neither internal/wireup nor cmd/naozhi carry it any longer.
+// cron is now fully decoupled from session in production code.
 
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk
 // when building the known-IDs set. Cron jobs share the user's workspace
