@@ -237,6 +237,12 @@ type finishArgs struct {
 	prompt      string
 	workDir     string
 	fresh       bool
+	// endedAt, when non-zero, overrides the s.now() read inside finishRun.
+	// The success path in executeOpt sets this once so observeSuccessLatency
+	// and finishRun share the same clock read (R20260607-GO-002: injectable
+	// clock; avoids an extra s.now() step that would advance step-based test
+	// clocks an extra tick). Zero value means finishRun calls s.now() itself.
+	endedAt time.Time
 	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded
 	// 之前调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步
 	// ok=false；caller 自己的 defer 也调一次作兜底（覆盖 jitter-window
@@ -282,7 +288,13 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
 	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
 	// Default clock is time.Now(), byte-identical to the prior inline read.
-	endedAt := s.now()
+	// R20260607-GO-002: when the caller pre-computed endedAt (success path
+	// in executeOpt), reuse it so observeSuccessLatency and finishRun share
+	// a single s.now() read rather than advancing step-based clocks twice.
+	endedAt := a.endedAt
+	if endedAt.IsZero() {
+		endedAt = s.now()
+	}
 	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
@@ -768,7 +780,12 @@ var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+
 // messages such as "dial tcp [2001:db8::1]:4012: connection refused".
 // Only bracket form is matched — bare IPv6 without brackets is ambiguous in
 // free-form text (colons appear in many other contexts). R20260604-GO-016.
-var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F:]+\](:\d+)?`)
+//
+// R20260607-GO-013: the pattern requires at least one colon inside the
+// brackets ([0-9a-fA-F]*:[0-9a-fA-F:]+) so non-address bracketed tokens
+// like [foo], [abc], or [1] are not over-redacted. A valid IPv6 literal
+// always contains at least one colon (the :: or x:y shorthand forms).
+var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
 
 // hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
 // contains at least one digit immediately followed (or preceded) by a dot

@@ -26,7 +26,7 @@ import (
 // it did. The fired flag is the discriminator the caller logs.
 //
 // outcome is the cron-local InterruptOutcome; the production adapter
-// in cmd/naozhi/cron_router_adapter.go casts session.InterruptOutcome
+// in internal/wireup/cron_router_adapter.go casts session.InterruptOutcome
 // → cron.InterruptOutcome via a numeric cast, with an init() panic
 // pinning the ordinals.
 //

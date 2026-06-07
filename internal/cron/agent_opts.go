@@ -3,7 +3,7 @@
 //
 // All types here mirror counterparts in internal/session (AgentOpts,
 // ManagedSession, SessionStatus, InterruptOutcome). The production
-// adapter in cmd/naozhi/cron_router_adapter.go translates between them;
+// adapter in internal/wireup/cron_router_adapter.go translates between them;
 // an init() panic in that adapter pins the InterruptOutcome ordinals
 // against session.InterruptOutcome so a divergence crashes the binary
 // at boot rather than silently miscasting.
@@ -37,7 +37,7 @@ type AgentOpts struct {
 // adapter does cron.SessionStatus(int(session.SessionStatus)); we rely
 // on the iota order matching. session.SessionStatus has three values
 // (Existing / Resumed / New). These ordinals ARE panic-pinned at boot
-// by cmd/naozhi/cron_router_adapter.go init() (R260528-GO-18), which
+// by internal/wireup/cron_router_adapter.go init() (R260528-GO-18), which
 // asserts cron.SessionExisting/Resumed/New equal their session.*
 // counterparts and panics on divergence — production inflight
 // broadcasts key off the value, so a silent reorder is not safe.
@@ -58,7 +58,7 @@ const (
 // changes, add fields here then.
 //
 // The narrow contract makes the adapter trivial — see
-// cmd/naozhi/cron_router_adapter.go cronSessionAdapter.
+// internal/wireup/cron_router_adapter.go cronSessionAdapter.
 type Session interface {
 	Send(ctx context.Context, text string) (SendResult, error)
 	SessionID() string
@@ -80,7 +80,7 @@ type SendResult struct {
 //	cron.InterruptOutcome(c.s.InterruptViaControl())
 //
 // which is a numeric cast — diverging ordinals would silently shuffle
-// values. The init() panic in cmd/naozhi/cron_router_adapter.go pins
+// values. The init() panic in internal/wireup/cron_router_adapter.go pins
 // the contract; CI green build proves the ordinals still match.
 //
 // Five values mirror session.go exactly: Sent / NoSession / NoTurn /
