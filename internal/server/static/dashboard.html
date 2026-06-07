@@ -717,7 +717,11 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    see syncSplitScroll in dashboard.js). A draggable #split-resizer sits on the
    seam. Phone (≤768px) keeps the original full-width slide-over overlay, so
    every rule here is gated behind the ≥769px breakpoint. */
-:root{--nz-split-w:480px}
+/* --nz-split-w defaults to half the viewport at runtime (set by the JS
+   controller's splitDefaultW); the 50vw fallback here keeps the very first
+   paint sensible before JS runs. The split docks the preview / 追问 panes at
+   half the dashboard width on PC. */
+:root{--nz-split-w:50vw}
 #split-resizer{display:none}
 /* The split docks the preview / 追问 drawers, which only exist in the chat
    view. The padding-right + seam are therefore scoped to chat (body carries
@@ -731,6 +735,12 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
      the border-left now reads as the split seam, not a drawer edge. */
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .fv-drawer.fv-open,
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .aside-drawer.visible{width:var(--nz-split-w);box-shadow:none}
+  /* Z-order: preview and 追问 can be open at once and share the right strip.
+     The drawer opened LAST gets .nz-split-front (z-index 202) so it stacks
+     on top; the other stays at its base z-index 200. The JS controller moves
+     the class on each open. A subtle shadow on the front pane hints depth. */
+  body.nz-split-open .fv-drawer.nz-split-front,
+  body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:-4px 0 16px rgba(0,0,0,.45)}
   /* Draggable seam. Sits exactly on the left edge of the reserved strip,
      above the drawer (z-index 200) so the hit area is never occluded. */
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}

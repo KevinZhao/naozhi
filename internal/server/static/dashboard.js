@@ -8477,6 +8477,8 @@ async function openFilePreview(wrapEl) {
   // Dock as a right-hand split on desktop so the transcript stays visible
   // beside the preview (no-op on phone — falls back to the overlay).
   if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+  // Opened last → stack on top of the 追问 pane if both are docked.
+  if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('preview');
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -11475,7 +11477,6 @@ function initSwipeBack() {
    bubbles scrolled off-screen. */
 (function(){
   const LS_SPLIT_W = 'split_w';
-  const DEFAULT_W = 480;   // matches --nz-split-w default in dashboard.html
   const MIN_W = 320;
   // Reserve at least this much for the activity-bar + sidebar + transcript so
   // the split can never swallow the whole window.
@@ -11485,6 +11486,16 @@ function initSwipeBack() {
   function isMobileVp() {
     return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
   }
+  // The pane defaults to HALF the dashboard width on PC. clampW still caps it
+  // so a tiny window can't drop the transcript below MIN_LEFT — on a narrow
+  // desktop the "half" yields to the MIN_LEFT floor.
+  function splitDefaultW() {
+    return Math.round(window.innerWidth / 2);
+  }
+  // hasCustomW: the user has dragged the seam, so we stop auto-tracking the
+  // half-width on resize and honour their saved value instead. Seeded from
+  // whether a width was ever persisted.
+  let hasCustomW = parseFloat(lsGet(LS_SPLIT_W, 0)) >= MIN_W;
   function clampW(w) {
     const max = Math.max(MIN_W, window.innerWidth - MIN_LEFT);
     return Math.min(Math.max(w, MIN_W), max);
@@ -11492,9 +11503,9 @@ function initSwipeBack() {
   function applyW(w) {
     document.documentElement.style.setProperty('--nz-split-w', clampW(w) + 'px');
   }
-  // Restore persisted width on cold-load (falls back to the CSS default).
+  // Cold-load: a persisted custom width wins; otherwise default to half.
   const savedW = parseFloat(lsGet(LS_SPLIT_W, 0));
-  if (savedW >= MIN_W) applyW(savedW);
+  applyW(savedW >= MIN_W ? savedW : splitDefaultW());
 
   function anyDrawerOpen() {
     const fv = document.getElementById('fv-drawer');
@@ -11526,6 +11537,10 @@ function initSwipeBack() {
     if (isMobileVp()) return;  // phone keeps the full-width overlay
     if (document.body.classList.contains('nz-split-open')) return;
     const wasBottom = eventsAtBottom();
+    // Refresh to half-width on open unless the user set a custom width — the
+    // window may have been resized while the split was closed, and the
+    // "half the dashboard" default should reflect the current viewport.
+    if (!hasCustomW) applyW(splitDefaultW());
     document.body.classList.add('nz-split-open');
     preserveBottom(wasBottom);
   };
@@ -11537,6 +11552,19 @@ function initSwipeBack() {
     const wasBottom = eventsAtBottom();
     document.body.classList.remove('nz-split-open');
     preserveBottom(wasBottom);
+  };
+  // Preview and 追问 can be open at once and share the right strip. Whichever
+  // was opened LAST should stack on top. Stamp .nz-split-front on the given
+  // drawer and strip it from the other so exactly one pane is ever in front.
+  // Called from both open paths (openFilePreview / scratch showDrawer).
+  window.nzSplitBringToFront = function(which) {
+    const ids = { preview: 'fv-drawer', scratch: 'aside-drawer' };
+    const frontId = ids[which];
+    if (!frontId) return;
+    Object.values(ids).forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('nz-split-front', id === frontId);
+    });
   };
 
   // --- Drag-to-resize the seam ---
@@ -11561,12 +11589,14 @@ function initSwipeBack() {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w'));
-      if (cur >= MIN_W) lsSet(LS_SPLIT_W, Math.round(cur));
+      // A manual drag opts out of half-width auto-tracking and persists the
+      // chosen width.
+      if (cur >= MIN_W) { lsSet(LS_SPLIT_W, Math.round(cur)); hasCustomW = true; }
     }
     resizer.addEventListener('mousedown', function(e) {
       e.preventDefault();
       startX = e.clientX;
-      startW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || DEFAULT_W;
+      startW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || splitDefaultW();
       dragBottom = eventsAtBottom();
       resizer.classList.add('dragging');
       document.body.style.cursor = 'col-resize';
@@ -11574,30 +11604,29 @@ function initSwipeBack() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+    // Double-click resets to the half-width default and re-enables auto-tracking.
     resizer.addEventListener('dblclick', function() {
       const wasBottom = eventsAtBottom();
-      applyW(DEFAULT_W);
+      applyW(splitDefaultW());
       lsRemove(LS_SPLIT_W);
+      hasCustomW = false;
       preserveBottom(wasBottom);
     });
   }
 
-  // Re-clamp the strip when the viewport shrinks. clampW otherwise only runs
-  // on drag/dblclick/cold-load, so narrowing the window with the split open
-  // (or after restoring a width saved on a wider monitor) could leave
-  // --nz-split-w wider than innerWidth-MIN_LEFT — padding-right would then
-  // exceed the viewport and crush the transcript. Only re-apply while the
-  // split is actually open so we never clobber a saved wide value before it
-  // is used. Reads the current var (not the saved one) so an in-session drag
-  // is respected; clampW caps it to the new viewport. Re-pins the bottom if
-  // the user was there. No-op on mobile (split never open there).
+  // Keep the pane at half-width (or a re-clamped custom width) as the viewport
+  // changes. Without a custom width the strip TRACKS half the window so the
+  // "half the dashboard" contract holds across resizes; with a custom width we
+  // only re-clamp so narrowing can't push padding-right past the viewport and
+  // crush the transcript. Only runs while the split is open (else we'd clobber
+  // a value before it's shown). No-op on mobile (split never open there).
   window.addEventListener('resize', function() {
     if (!document.body.classList.contains('nz-split-open')) return;
-    const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || DEFAULT_W;
-    const clamped = clampW(cur);
-    if (clamped === cur) return;
+    const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || splitDefaultW();
+    const target = hasCustomW ? clampW(cur) : clampW(splitDefaultW());
+    if (target === cur) return;
     const wasBottom = eventsAtBottom();
-    applyW(clamped);
+    applyW(target);
     preserveBottom(wasBottom);
   });
 })();
@@ -12070,6 +12099,8 @@ initSidebarSearch();
     drawer.classList.add('visible');
     // Dock as a right-hand split on desktop (no-op on phone overlay).
     if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+    // Opened last → stack on top of the preview pane if both are docked.
+    if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('scratch');
   }
   function hideDrawer() {
     drawer.classList.remove('visible');
