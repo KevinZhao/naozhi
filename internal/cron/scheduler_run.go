@@ -921,6 +921,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 				finalizer: finalizer,
 			})
+			// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
+			// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
+			// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
+			// the next tick's preflight (up to 24 h for @daily jobs).
+			if snap.fresh {
+				s.router.Reset(key)
+			}
 			stubRefresh.run()
 			return
 		}
@@ -962,6 +969,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
+		// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
+		// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
+		// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
+		// the next tick's preflight (up to 24 h for @daily jobs).
+		if snap.fresh {
+			s.router.Reset(key)
+		}
 		stubRefresh.run()
 		return
 	}
