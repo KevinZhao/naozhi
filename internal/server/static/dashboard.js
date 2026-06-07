@@ -4061,6 +4061,32 @@ function clearPendingFiles() {
 // Tracked with a 20s safety timer so a lost session_state push can't keep
 // the banner stuck forever.
 const _optimisticRunningTimers = {};
+
+// patchSidebarCardState updates the sidebar card's status dot + label text in
+// place so an optimistic running flip is reflected on the left list at the
+// same instant as the main conversation, instead of lagging behind the
+// server's session_state push (which can be several hundred ms when a CLI
+// subprocess has to spawn) or the 5s sessions poll. Mirrors the DOM-patch
+// branch in onSessionState. No-op if the card isn't currently rendered.
+function patchSidebarCardState(key, node, state) {
+  const msgNode = node || 'local';
+  const displayState = state === 'dead' ? 'ready' : state;
+  let card = null;
+  document.querySelectorAll('.session-card').forEach(c => {
+    if (c.dataset.key === key && (c.dataset.node || 'local') === msgNode) card = c;
+  });
+  if (!card) return;
+  const dot = card.querySelector('.sc-dot');
+  if (dot) {
+    dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
+  }
+  const meta = card.querySelector('.sc-meta');
+  if (meta) {
+    const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
+    if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
+  }
+}
+
 function markSessionOptimisticRunning(key, node) {
   if (!key) return;
   const sKey = sid(key, node || 'local');
@@ -4069,6 +4095,9 @@ function markSessionOptimisticRunning(key, node) {
   if (sd.state === 'running') return; // server already said running
   sd.state = 'running';
   sessionOptimisticRunning[sKey] = true;
+  // Sidebar parity: flip the card's dot/label to running right now so the
+  // left list never looks idle while the main banner already says working.
+  patchSidebarCardState(key, node, 'running');
   if (_optimisticRunningTimers[sKey]) clearTimeout(_optimisticRunningTimers[sKey]);
   _optimisticRunningTimers[sKey] = setTimeout(() => {
     delete _optimisticRunningTimers[sKey];
@@ -4078,6 +4107,11 @@ function markSessionOptimisticRunning(key, node) {
     }
   }, 20000);
   if (key === selectedKey && (node || 'local') === selectedNode) {
+    // justSent makes the banner's first line read "已发送，正在处理…" until the
+    // first real event (tool/thinking/output) arrives, so the operator gets a
+    // distinct "received, starting up" signal during CLI spawn rather than a
+    // generic static "处理中…".
+    turnState.justSent = true;
     updateSendButton('running');
   }
 }
@@ -4094,6 +4128,7 @@ function rollbackOptimisticRunning(key, node) {
   const sd = sessionsData[sKey];
   if (sd && sd.state === 'running') {
     sd.state = 'ready';
+    patchSidebarCardState(key, node, 'ready');
     if (key === selectedKey && (node || 'local') === selectedNode) {
       updateSendButton('ready');
     }
@@ -4105,7 +4140,7 @@ function rollbackOptimisticRunning(key, node) {
 let turnState = {
   toolCount: 0, currentTool: null, agents: [], isThinking: false,
   thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-  timerId: null
+  timerId: null, justSent: false
 };
 
 function resetTurnState() {
@@ -4113,7 +4148,7 @@ function resetTurnState() {
   turnState = {
     toolCount: 0, currentTool: null, agents: [], isThinking: false,
     thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-    timerId: null
+    timerId: null, justSent: false
   };
   refreshBanner();
 }
@@ -4174,7 +4209,10 @@ function refreshBanner() {
   const agEl = document.getElementById('rb-agents');
   const statsEl = document.getElementById('rb-stats');
 
-  // Line 1: current activity
+  // Line 1: current activity. justSent (set on the optimistic flip, cleared by
+  // the first real event in updateTurnState) gives a distinct "received,
+  // starting up" message during the CLI-spawn window so the operator knows the
+  // send landed rather than staring at a generic static "处理中…".
   if (actEl) {
     if (turnState.currentTool) {
       actEl.textContent = toolVerb(turnState.currentTool.tool, turnState.currentTool.summary);
@@ -4182,6 +4220,8 @@ function refreshBanner() {
       actEl.textContent = '思考中...';
     } else if (turnState.isWriting) {
       actEl.textContent = '输出中...';
+    } else if (turnState.justSent) {
+      actEl.textContent = '已发送，正在处理…';
     } else {
       actEl.textContent = '处理中...';
     }
@@ -4260,6 +4300,10 @@ function updateSidebarAgentBadge() {
 
 function applyEventToTurnState(ev) {
   startTurnTimer();
+  // Any real turn event ends the optimistic "已发送，正在处理…" window — the
+  // CLI is now actively thinking/using-tools/writing, so let the normal
+  // activity labels take over.
+  turnState.justSent = false;
   switch (ev.type) {
     case 'tool_use':
       turnState.toolCount++;
