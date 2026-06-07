@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -28,6 +29,20 @@ func (l *errAcceptListener) Accept() (net.Conn, error) { return nil, l.err }
 // ctx.Done() forever and any reader of ShutdownComplete() deadlocked.
 func TestShutdownComplete_ClosesOnServeError(t *testing.T) {
 	fatalAccept := errors.New("forced fatal accept failure")
+
+	// Pin $HOME (and CLAUDE_PROJECTS_DIR) to an empty temp dir BEFORE
+	// NewWithOptions resolves ~/.claude. Otherwise NewWithOptions kicks off
+	// WarmHistoryCache against the host's real ~/.claude, and on a machine
+	// with a large session history the background scan can take >5s under
+	// -race. The shutdown goroutine blocks on WaitWarmHistory() during drain,
+	// so a slow scan stalls Start's return past the 5s assertion below and
+	// keeps the Start goroutine alive — which then races the t.Cleanup that
+	// restores the package-global listenTCP (R20260531-GO-001 / #1934). An
+	// empty home makes the scan return immediately, isolating the test from
+	// host state and from that cleanup race.
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("CLAUDE_PROJECTS_DIR", filepath.Join(emptyHome, ".claude", "projects"))
 
 	// Inject a listener that binds fine but fails Accept fatally.
 	prev := listenTCP
