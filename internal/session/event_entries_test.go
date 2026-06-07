@@ -423,6 +423,71 @@ func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer pins
+// R20260607-PERF-002 (#1922): on the live-process path a NON-empty dst that
+// still has spare capacity must have the matched entries appended into that
+// spare capacity (reusing the backing array) rather than triggering a fresh
+// []cli.EventEntry allocation inside EventLog. Before the fix the non-empty
+// branch called proc.EventEntriesSince (fresh alloc) + append, so the
+// resubscribe catch-up path silently lost the #1740 reuse win whenever dst
+// carried residual entries.
+func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	s.storeProcess(proc)
+
+	// Buffer with a residual prefix plus ample spare capacity. The two matched
+	// entries (Time > 150) must land in the spare slots, sharing dst's array.
+	buf := make([]cli.EventEntry, 0, 8)
+	buf = append(buf, cli.EventEntry{Time: 1, Summary: "prefix"})
+	got := s.EventEntriesSinceAppend(buf, 150)
+	if len(got) != 3 {
+		t.Fatalf("len=%d want 3 (prefix + b + c)", len(got))
+	}
+	if got[0].Summary != "prefix" || got[1].Summary != "b" || got[2].Summary != "c" {
+		t.Fatalf("entries wrong: got %q,%q,%q want prefix,b,c",
+			got[0].Summary, got[1].Summary, got[2].Summary)
+	}
+	// The returned slice must reuse buf's backing array (no fresh allocation):
+	// the appended tail occupies buf's spare capacity.
+	if cap(got) != cap(buf) || &got[:1][0] != &buf[:1][0] {
+		t.Errorf("non-empty dst path did not reuse the caller's buffer backing array (#1922 regression)")
+	}
+}
+
+// TestEventEntriesSinceAppend_LiveProcessNonEmptyDstNoSpareGrows verifies the
+// fallback half of the #1922 fix: when the non-empty dst has NO spare capacity,
+// the result still correctly preserves the prefix and folds in the matched
+// entries (append grows into a new backing array).
+func TestEventEntriesSinceAppend_LiveProcessNonEmptyDstNoSpareGrows(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	})
+	s.storeProcess(proc)
+
+	// len == cap so there is no spare capacity past the prefix.
+	dst := make([]cli.EventEntry, 0, 1)
+	dst = append(dst, cli.EventEntry{Time: 1, Summary: "prefix"})
+	got := s.EventEntriesSinceAppend(dst, 0)
+	if len(got) != 3 {
+		t.Fatalf("len=%d want 3 (prefix + a + b)", len(got))
+	}
+	if got[0].Summary != "prefix" || got[1].Summary != "a" || got[2].Summary != "b" {
+		t.Fatalf("entries wrong: got %q,%q,%q want prefix,a,b",
+			got[0].Summary, got[1].Summary, got[2].Summary)
+	}
+}
+
 // TestEventEntriesSinceAppend_LiveProcessReusesBuffer pins R20260604-PERF-25
 // (#1740): on the live-process path an empty (cap>0) dst must have its backing
 // array reused rather than a fresh slice allocated per call. Before the fix the
