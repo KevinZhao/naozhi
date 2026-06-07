@@ -64,14 +64,22 @@ const MaxNotifyTargetLen = 256
 // validateJobFields enforces the AddJob defence-in-depth policy that mirrors
 // loadJobs's read-side validation (store.go) so an internal caller bypassing
 // the dashboard validators (commands.go ParseCronAdd / validateCron* in
-// internal/server) cannot persist arbitrary Prompt / WorkDir / Backend /
-// Notify* bytes into cron_jobs.json. Title and Prompt are already enforced
-// inline in AddJob; this helper covers the remaining fields the dashboard
-// validates but the scheduler-level entry previously took on trust.
+// internal/server) cannot persist arbitrary Title / Prompt / WorkDir /
+// Backend / Notify* bytes into cron_jobs.json.
+//
+// R20260607-ARCH-3 (#1927): Title (rune cap) and Prompt (ValidatePromptStrict)
+// were previously enforced inline in AddJob, leaving validateJobFields an
+// INCOMPLETE write-path gate — a future caller reaching it directly (its
+// godoc invites exactly that: "kept exported so test fixtures and IM dispatch
+// can share the same policy") would silently skip Title/Prompt validation.
+// Folding both into this helper makes it the single complete write-path gate;
+// AddJob now calls only validateJobFields. UpdateJob keeps its per-field delta
+// path (it validates *upd.X partials, not a whole *Job).
 //
 // Empty values are allowed because the dashboard creates jobs with optional
-// WorkDir / Backend / Notify* fields zero. The policy only rejects values
-// that exceed the cap or smuggle log-injection / non-UTF-8 bytes.
+// WorkDir / Backend / Notify* fields zero and a paused-with-empty-prompt
+// state. The policy only rejects values that exceed the cap or smuggle
+// log-injection / non-UTF-8 bytes.
 //
 // R250-CR-8 (#1141): defence-in-depth — IM dispatch (commands.go
 // ParseCronAdd) and dashboard handlers (validateCron*) validate before
@@ -79,6 +87,21 @@ const MaxNotifyTargetLen = 256
 // AddJob directly would otherwise persist arbitrary bytes for these fields.
 // Kept exported so test fixtures and IM dispatch can share the same policy.
 func validateJobFields(j *Job) error {
+	// R20260607-ARCH-3 (#1927): Title rune-cap, folded from AddJob. Title 长度
+	// 校验在 scheduler 层兜底，避免绕过 dashboard handler（例如 store 直接加载
+	// 被篡改的 cron_jobs.json）把超长字符串持久化进内存。
+	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
+		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	}
+	// R20260607-ARCH-3 (#1927): Prompt strict validation, folded from AddJob
+	// (R244-SEC-P2-5 / #889). Empty prompts are permitted because the dashboard
+	// creates jobs in a paused-with-empty-prompt state to be filled in via
+	// SetJobPrompt later.
+	if j.Prompt != "" {
+		if err := ValidatePromptStrict(j.Prompt); err != nil {
+			return err
+		}
+	}
 	if len(j.WorkDir) > MaxWorkDirLen {
 		return fmt.Errorf("cron: work_dir too long: %d bytes > %d cap", len(j.WorkDir), MaxWorkDirLen)
 	}

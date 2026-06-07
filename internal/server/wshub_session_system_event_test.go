@@ -240,6 +240,55 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 	wg.Wait()
 }
 
+// TestBroadcastSessionSystemEvent_ChunkedFilter verifies the #1925 chunked
+// phase-2 subscription filter still delivers to every subscriber and skips
+// non-subscribers when the candidate set spans more than one subFilterChunk.
+// With > subFilterChunk authenticated clients the filter loop releases and
+// re-acquires h.mu.RLock between batches; this asserts the chunk boundary math
+// is correct (no client dropped or double-counted) across the seam.
+func TestBroadcastSessionSystemEvent_ChunkedFilter(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	const key = "feishu:p2p:chunk"
+	// Span two full chunks plus a partial third so both the interior seam and
+	// the final short batch are exercised.
+	const subCount = subFilterChunk*2 + 5
+
+	outs := make([]<-chan node.ServerMsg, 0, subCount)
+	for i := 0; i < subCount; i++ {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, key)
+		outs = append(outs, out)
+	}
+	// Interleave non-subscribers (different key) so the filter must correctly
+	// reject them across chunk boundaries too.
+	const otherCount = subFilterChunk + 3
+	otherOuts := make([]<-chan node.ServerMsg, 0, otherCount)
+	for i := 0; i < otherCount; i++ {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, "feishu:p2p:other")
+		otherOuts = append(otherOuts, out)
+	}
+
+	hub.broadcastSessionSystemEvent(key, "发送失败：remote down")
+
+	for i, out := range outs {
+		msg, ok := recvMsg(t, out)
+		if !ok {
+			t.Fatalf("subscriber %d received no frame", i)
+		}
+		if msg.Type != "event" || msg.Key != key || msg.Event == nil || msg.Event.Type != "system" {
+			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
+		}
+	}
+	for i, out := range otherOuts {
+		if _, ok := recvMsg(t, out); ok {
+			t.Fatalf("non-subscriber %d must not receive the event", i)
+		}
+	}
+}
+
 // TestBroadcastSessionSystemEvent_EmptyArgsNoop guards the early return so an
 // empty key or summary cannot emit a malformed frame.
 func TestBroadcastSessionSystemEvent_EmptyArgsNoop(t *testing.T) {
