@@ -288,12 +288,39 @@ func (s *runStore) warmCacheLocked(jobID string) (corruptCount int, unreadableCo
 
 	v, _ := s.recentCache.LoadOrStore(jobID, &recentCacheEntry{})
 	entry := v.(*recentCacheEntry)
+
+	// Fast warm check under entry.mu. jobLock already serialises warm passes
+	// and cacheHeadPush against each other, so a concurrent warm cannot flip
+	// entry.warm while we hold jobLock; the RLock here only reads warm safely
+	// relative to in-flight cacheGet readers.
+	entry.mu.RLock()
+	alreadyWarm := entry.warm
+	entry.mu.RUnlock()
+	if alreadyWarm {
+		return 0, 0 // another goroutine warmed it before we took jobLock
+	}
+
+	// R20260607-PERF-6 (#1903): do the ReadDir + per-file ReadFile WITHOUT
+	// holding entry.mu. On FUSE/NFS the disk scan is a chain of network
+	// round-trips; holding entry.mu across it would block every concurrent
+	// cacheGet/cacheGetBefore RLock reader for the full latency. jobLock (held
+	// for the whole function) already excludes other writers — concurrent
+	// warmCacheLocked and cacheHeadPush both acquire jobLock first — so the
+	// entry's ring/warm state cannot change underneath us while entry.mu is
+	// released here. Readers that observe warm=false during the gap simply
+	// fall back to disk (cacheGetBefore) or block on jobLock behind us
+	// (cacheGet → warmCache), then see the seeded ring once we publish it.
+	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
+
+	// Re-acquire entry.mu only to publish the seeded ring. Re-check warm under
+	// the lock as a defensive belt: jobLock guarantees no other warm ran, but
+	// this keeps the helper correct even if a future refactor narrows the
+	// jobLock window. If someone else already warmed, discard our scan.
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.warm {
-		return 0, 0 // another goroutine warmed it during our wait
+		return 0, 0
 	}
-	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
 	return corruptCount, unreadableCount
