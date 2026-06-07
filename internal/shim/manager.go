@@ -386,7 +386,7 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 				return
 			}
 			if ready.Status == "error" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", osutil.SanitizeForLog(ready.Error, 256))}
 				return
 			}
 			if ready.Status != "ready" {
@@ -782,11 +782,11 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	}
 	if hello.Type == "auth_failed" {
 		conn.Close()
-		return nil, fmt.Errorf("shim auth failed: %s", hello.Msg)
+		return nil, fmt.Errorf("shim auth failed: %s", osutil.SanitizeForLog(hello.Msg, 128))
 	}
 	if hello.Type != "hello" {
 		conn.Close()
-		return nil, fmt.Errorf("unexpected message type: %s", hello.Type)
+		return nil, fmt.Errorf("unexpected message type: %s", osutil.SanitizeForLog(hello.Type, 64))
 	}
 	// RNEW-ARCH-403 (#427): reject hellos whose ProtocolVersion is outside
 	// the [MinSupportedProtocolVersion, ProtocolVersion] band. Older
