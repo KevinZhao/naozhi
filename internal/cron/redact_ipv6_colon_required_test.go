@@ -34,11 +34,33 @@ func TestRedactAddrInCronError_IPv6ColonRequired(t *testing.T) {
 			"token [cafe] in stream",
 			"token [cafe] in stream",
 		},
+		// R20260607-COR-008: degenerate colon-only bracket tokens are NOT
+		// valid IPv6 literals and must not be over-redacted.
+		{
+			"single colon empty brackets not redacted",
+			"flag [:] unknown",
+			"flag [:] unknown",
+		},
+		{
+			"bare colon-only token not redacted",
+			"got [:] in stream",
+			"got [:] in stream",
+		},
 		// Positive: real IPv6 still redacted.
 		{
 			"ipv6 loopback redacted",
 			"dial tcp [::1]:443: connection refused",
 			"dial tcp [redacted-addr]: connection refused",
+		},
+		{
+			"ipv6 unspecified compressed redacted",
+			"bind [::]:8080: address in use",
+			"bind [redacted-addr]: address in use",
+		},
+		{
+			"ipv6 link-local with port redacted",
+			"dial [fe80::1]:8080: no route",
+			"dial [redacted-addr]: no route",
 		},
 		{
 			"ipv6 full form redacted",
