@@ -5629,6 +5629,73 @@ func TestDashboardJS_SandboxedBlobRender(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_SandboxedBlobMobileSrcdoc pins the mobile-WebKit fallback in
+// renderSandboxedBlob. On iOS Safari and the in-app webviews Feishu / WeChat
+// use (all WebKit), a sandboxed iframe pointed at a parent-minted blob: URL is
+// treated as a cross-origin navigation and silently blocked — the frame stays
+// blank with no console error (WebKit bug 170075; cf. bulwarkmail/webmail
+// #253). The fix keeps the desktop blob: path (no inherited CSP → widest
+// capability) and, only when isMobile(), inlines the bytes via iframe.srcdoc,
+// which sidesteps the blob: scheme. Isolation is unchanged because the sandbox
+// still withholds the same-origin token in both paths (asserted by
+// TestDashboardJS_SandboxedBlobRender).
+//
+// This contract guards three regressions:
+//  1. The mobile branch exists and uses srcdoc (not frame.src = blob URL).
+//  2. The branch is gated on isMobile() so desktop keeps the blob: path —
+//     switching desktop to srcdoc would regress pages loading non-jsdelivr
+//     CDN scripts, which the inherited dashboard CSP blocks.
+//  3. The mobile srcdoc path allocates no blob URL, so the leak-tracking slot
+//     (_pendingSandboxBlobUrl) is only ever written on the desktop path.
+func TestDashboardJS_SandboxedBlobMobileSrcdoc(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	helperIdx := strings.Index(js, "async function renderSandboxedBlob(")
+	if helperIdx < 0 {
+		t.Fatal("dashboard.js missing renderSandboxedBlob — structural anchor for mobile srcdoc contract")
+	}
+	endIdx := strings.Index(js[helperIdx:], "\nfunction scrollToPreviewLine(")
+	if endIdx < 0 {
+		t.Fatal("dashboard.js missing scrollToPreviewLine — cannot bound renderSandboxedBlob body")
+	}
+	helper := js[helperIdx : helperIdx+endIdx]
+
+	// 1. Mobile fallback inlines bytes via iframe.srcdoc.
+	if !strings.Contains(helper, "frame.srcdoc") {
+		t.Error("renderSandboxedBlob must set frame.srcdoc on the mobile path — a sandboxed iframe pointed at a blob: URL is silently blocked on iOS/WebKit (WebKit bug 170075)")
+	}
+	// The bytes arrive as an ArrayBuffer; srcdoc needs a decoded string.
+	if !strings.Contains(helper, "TextDecoder") {
+		t.Error("renderSandboxedBlob mobile path must decode the ArrayBuffer (TextDecoder) before assigning frame.srcdoc")
+	}
+
+	// 2. The srcdoc path is gated behind isMobile() — desktop must keep the
+	// blob: path so workspace HTML loading third-party CDN scripts is not
+	// regressed by the dashboard CSP that a srcdoc document inherits.
+	if !strings.Contains(helper, "isMobile()") {
+		t.Error("renderSandboxedBlob must gate the srcdoc fallback on isMobile() — desktop keeps the blob: path (blob: documents carry no inherited CSP)")
+	}
+	// The blob: path (desktop) must still exist — frame.src assignment from a
+	// createObjectURL result. Guards against a regression that drops desktop
+	// blob rendering entirely in favour of srcdoc-everywhere.
+	if !strings.Contains(helper, "frame.src = url") {
+		t.Error("renderSandboxedBlob must keep the desktop blob: path (frame.src = url) — srcdoc-everywhere regresses desktop pages that load non-jsdelivr CDN scripts via the inherited CSP")
+	}
+
+	// 3. _pendingSandboxBlobUrl (the revoke-tracking slot) must be assigned
+	// only on the desktop blob path. The mobile srcdoc path allocates no blob
+	// URL, so tracking it there would be a dangling reference. Exactly one
+	// assignment (`_pendingSandboxBlobUrl = url`) should exist in the helper.
+	if assigns := strings.Count(helper, "_pendingSandboxBlobUrl = url"); assigns != 1 {
+		t.Errorf("renderSandboxedBlob must assign _pendingSandboxBlobUrl exactly once (desktop blob path); got %d — the mobile srcdoc path allocates no blob URL and must not track one", assigns)
+	}
+}
+
 // TestDashboardJS_RNEW_UX002_GlobalErrorHandler pins the RNEW-UX-002 fix:
 // the SPA registers module-scope window listeners for both uncaught errors
 // and unhandled promise rejections. Without these, a silent handler throw
