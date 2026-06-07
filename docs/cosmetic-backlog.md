@@ -581,3 +581,7 @@
 - [R20260607-CODE-001] applyTo 在 Schedule 比较前 mutate j，今天正确但 fragile，未来若把 Schedule 加入 applyTo 会静默破坏 re-registrati — internal/cron/scheduler_jobs.go:722
 - [R20260607-ARCH-5b] configMapsPtr atomic.Pointer 是为不存在的 hot-reload writer 准备的投机基础设施，应降级为不可变字段直到 writer 落地 — internal/cron/scheduler.go:125
 - [R20260607-ARCH-8] StopPolicyForceExit 是 doc-only 常量无人读，cron 侧缺对应常量，看似 typed-policy 实则未接线 — internal/sysession/manager.go:49
+- [R20260607-GO-010] parallelFsyncWorkers 是 package-level mutable var，并行 test 间可能 race（生产无并发改写，仅测试 seam）— internal/eventlog/persist/persister.go:1106
+- [R20260607-GO-014] redactAddrIPv6Re 字符类 [0-9a-fA-F:] 会误匹配 [bad:1] 等 hex-looking 括号 token，可能过度 redact — internal/cron/scheduler_finish.go:788
+- [R20260607-GO-005] heartbeatLoop 新建 pongTimer 后立即 Stop 冗余（freshly-created 无 pending tick），Go1.26 下无害 — internal/cli/process_readloop.go:921
+- [R20260607-SEC-12] buildShimArgs --cwd 经 exec.Command execve 直传无 shell 注入风险（已 validateWorkspace），false-positive — internal/shim/manager.go:342
