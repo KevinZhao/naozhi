@@ -765,8 +765,8 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		}
 	}
 
-	d.router.SetWorkspace(chatKey, absPath)
 	d.router.ResetChat(chatKey)
+	d.router.SetWorkspace(chatKey, absPath)
 
 	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
 	// expansion + Clean) rather than absPath or post-expansion path, which
