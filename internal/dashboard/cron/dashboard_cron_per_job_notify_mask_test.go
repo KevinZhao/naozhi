@@ -78,4 +78,21 @@ func TestHandleList_PerJobNotifyChatIDMasked(t *testing.T) {
 	if !strings.HasPrefix(got, string(r[:4])) {
 		t.Errorf("notify_chat_id %q lost 4-rune prefix hint (want prefix %q)", got, string(r[:4]))
 	}
+
+	// j.ChatID (IM source/origin chat) must also be masked — R090135-LOGIC-2.
+	// The PATCH /api/cron flow never reads ChatID back from the list response
+	// (update.go has no ChatID field in its request struct), so masking here
+	// is safe and does not break any edit flow.
+	gotChatID := resp.Jobs[0].ChatID
+	const rawChatID = "oc_sourcechat"
+	if gotChatID == rawChatID {
+		t.Errorf("chat_id returned verbatim (%q) — origin IM chat ID leaked", gotChatID)
+	}
+	if !strings.Contains(gotChatID, "…") {
+		t.Errorf("chat_id %q missing ellipsis affordance after masking", gotChatID)
+	}
+	rchat := []rune(rawChatID)
+	if !strings.HasPrefix(gotChatID, string(rchat[:4])) {
+		t.Errorf("chat_id %q lost 4-rune prefix hint (want prefix %q)", gotChatID, string(rchat[:4]))
+	}
 }
