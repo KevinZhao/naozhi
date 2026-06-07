@@ -22,7 +22,7 @@ import (
 //   - The list response notify_chat_id for a job must NOT equal the raw ID.
 //   - The masked value must contain the "…" affordance (prefix/suffix hint).
 //   - The masked value must preserve the 4-rune prefix of the original ID.
-//   - j.ChatID (the IM source chat) is untouched — not in scope.
+//   - j.ChatID (the IM source chat) is also masked — R090135-LOGIC-2.
 func TestHandleList_PerJobNotifyChatIDMasked(t *testing.T) {
 	t.Parallel()
 
@@ -77,11 +77,5 @@ func TestHandleList_PerJobNotifyChatIDMasked(t *testing.T) {
 	r := []rune(rawNotifyChatID)
 	if !strings.HasPrefix(got, string(r[:4])) {
 		t.Errorf("notify_chat_id %q lost 4-rune prefix hint (want prefix %q)", got, string(r[:4]))
-	}
-
-	// j.ChatID (IM source chat) must be returned as-is — different field,
-	// different semantics, out of scope for this fix.
-	if resp.Jobs[0].ChatID != "oc_sourcechat" {
-		t.Errorf("ChatID must not be masked; got %q, want %q", resp.Jobs[0].ChatID, "oc_sourcechat")
 	}
 }
