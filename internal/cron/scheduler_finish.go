@@ -703,6 +703,11 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	// scrub, so a token's surrounding text still has its control bytes
 	// stripped.
 	result = redactSecretsInResult(result)
+	// R090135-GO-2: scrub well-known secret-prefix patterns from the error
+	// message before path-redaction and SanitizeForLog, mirroring the result
+	// branch above. Without this, a token (sk-ant-/ghp_/AKIA/…) embedded in a
+	// session error string would survive into Job.LastError → cron_jobs.json.
+	errMsg = redactSecretsInResult(errMsg)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps the trailing marker intact;

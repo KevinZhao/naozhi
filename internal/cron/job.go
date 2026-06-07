@@ -348,13 +348,19 @@ const hexIDEntropyBytes = 8
 // 测试需要 panic 等价语义时用 mustGenerateHexID（test helper），别在
 // 生产路径 catch error 后 panic —— 那等于把这次重构反向回去。
 func generateHexID() (string, error) {
-	b := make([]byte, hexIDEntropyBytes)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+	// R090135-PERF-007: hexIDEntropyBytes is a compile-time constant (= 8),
+	// so a fixed-size array can be declared on the stack. The previous
+	// make([]byte, hexIDEntropyBytes) forced a heap allocation on every call
+	// because io.ReadFull takes an interface (io.Reader) that the compiler
+	// cannot prove does not retain the slice. The array is passed as b[:] so
+	// the call signature is unchanged; the stack frame holds the 8 bytes.
+	var b [hexIDEntropyBytes]byte
+	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
 		return "", fmt.Errorf("cron: crypto/rand unavailable: %w", err)
 	}
 	// R228-CR-9: hex.EncodeToString skips fmt's reflection path; matches
 	// textutil/uuid.go encoding style.
-	return hex.EncodeToString(b), nil
+	return hex.EncodeToString(b[:]), nil
 }
 
 // generateRunID 返回 CronRun.RunID（16-char hex）。语义上独立于 jobID，
