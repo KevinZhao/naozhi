@@ -964,7 +964,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
+			state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // R20260607-GO-004: strip IP:port/paths, mirrors lg.Error above
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
 		})
