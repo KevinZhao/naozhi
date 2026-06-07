@@ -14,38 +14,27 @@ import (
 )
 
 // skipAppendTrim returns true when the cache for jobID indicates the on-disk
-// run count is comfortably below keepCount and the keepWindow age policy
-// won't have anything to evict yet (oldest cached row newer than cutoff).
-// In that case Append's per-call trimJobLocked → ReadDir is pure overhead;
-// running it once every appendTrimBatch Appends is enough to clean up
-// background drift without paying ReadDir on every call. R232-PERF-8.
+// run count is comfortably below keepCount (with an appendTrimBatch headroom
+// margin) and the keepWindow age policy won't have anything to evict yet
+// (oldest cached row newer than cutoff). In that case Append's per-call
+// trimJobLocked → ReadDir is pure overhead and is skipped. R232-PERF-8.
 //
 // Falls back to "do not skip" when the cache is cold or the safety margins
-// don't hold — a missed trim is bounded by appendTrimBatch and the next
-// trimAll cold-pass, so over-keeping a few entries is acceptable; missing a
-// trim entirely is not.
+// don't hold — over-keeping a few entries is acceptable; missing a trim
+// entirely is not.
 //
-// CALLER CONTRACT: caller MUST hold jobLock(jobID). The function bumps
-// entry.appendsSinceTrim and resets it on the "do trim" branches; without
-// jobLock serialisation two parallel Appends can both hit the
-// >= appendTrimBatch boundary, mis-coalesce trim cadence, or — combined
-// with cacheHeadPush which is also jobLock-serialised — race trimJobLocked
-// against a fresh Append's WriteFileAtomic. Today the sole caller is
-// Append (runstore.go:252) which acquires jobLock at line 213; any future
-// helper must do the same. R239-GO-5.
+// R20260527-PERF-24 (#1295) reworked the priority so the cache-headroom
+// proofs (capSafe/windowSafe) decide the result directly. The earlier
+// appendsSinceTrim "force a trim every appendTrimBatch Appends" counter is
+// gone: when both proofs hold there is provably nothing to evict, so a
+// forced periodic ReadDir would only ever find no work. R20260607-COR-002
+// (#1901) removed the now-dead counter field and its bookkeeping.
 //
-// R245-PERF-14 (#863) proposed converting appendsSinceTrim to atomic.Int32
-// to skip entry.mu on the no-race fast path. Won't-fix: the threshold-
-// gate is the cheapest of the four checks below — entry.warm,
-// entry.count, oldest-row.EndedAt all require entry.mu since they read
-// the ring state, and ringRead derives from cap(ring) which is mutated
-// by ringSeed under the same mutex. Atomicising just the counter would
-// not let us release entry.mu, so the lock-elision premise of the
-// proposal does not hold without a much larger redesign (split the
-// counter from the ring state, double-buffer the ring, etc.). The
-// existing jobLock + entry.mu pair runs in <100ns on the warm path
-// already; the remaining cost is dominated by ringRead's modulo, not
-// the lock itself.
+// CALLER CONTRACT: caller MUST hold jobLock(jobID). Without jobLock
+// serialisation a concurrent Append's cacheHeadPush (also jobLock-serialised)
+// could race trimJobLocked against a fresh Append's WriteFileAtomic. Today
+// the sole caller is Append (runstore.go:252) which acquires jobLock at line
+// 213; any future helper must do the same. R239-GO-5.
 func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
@@ -62,14 +51,13 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	if !entry.warm {
 		return false
 	}
-	// R20260527-PERF-24 (#1295): perform the cache-headroom checks BEFORE
-	// the appendTrimBatch boundary. The prior order force-returned false on
-	// the boundary regardless of cap/window state, walking the runs/<jobID>/
-	// ReadDir+Stat tree every 10 Appends even when the cache could prove no
-	// candidate exists (steady-state: 1run/min × 50 jobs × 30 days = 14400
-	// wasted ReadDirs/day). The boundary is now only honoured when cap or
-	// window state is unprovable from cache alone.
-	entry.appendsSinceTrim++
+	// R20260527-PERF-24 (#1295): the cache-headroom proofs below decide the
+	// result directly. The prior implementation force-returned false on an
+	// appendsSinceTrim boundary regardless of cap/window state, walking the
+	// runs/<jobID>/ ReadDir+Stat tree every 10 Appends even when the cache
+	// could prove no candidate exists (steady-state: 1run/min × 50 jobs × 30
+	// days = 14400 wasted ReadDirs/day). appendTrimBatch survives only as the
+	// capSafe headroom margin.
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
 	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
@@ -90,17 +78,11 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 		}
 	}
 	if capSafe && windowSafe {
-		// Both cache-state proofs hold — nothing for trimJobLocked to do
-		// even on the appendTrimBatch boundary. Reset the counter so we
-		// don't accumulate drift toward an inevitable forced scan that
-		// would still find no work.
-		entry.appendsSinceTrim = 0
+		// Both cache-state proofs hold — nothing for trimJobLocked to do.
 		return true
 	}
 	// One of the two cache proofs failed — there may be on-disk work for
-	// trimJobLocked. Run it now (resetting the counter); the appendTrimBatch
-	// boundary is irrelevant once we've already decided to scan.
-	entry.appendsSinceTrim = 0
+	// trimJobLocked. Run it now.
 	return false
 }
 
