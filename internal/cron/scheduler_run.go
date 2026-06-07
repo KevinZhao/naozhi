@@ -24,6 +24,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	robfigcron "github.com/robfig/cron/v3"
@@ -737,7 +738,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// needle. Leave the alloc; document the rationale so future reviewers
 	// don't reopen it. #666 is the latest [REPEAT-N] — closing as
 	// won't-fix-by-design.
-	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
+	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", osutil.SanitizeForLog(snap.chatID, 64), "run_id", runID) // R20260607-SEC-1: chatID is attacker-influenced; strip C1/bidi log-injection chars
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
