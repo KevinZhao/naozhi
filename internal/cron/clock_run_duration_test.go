@@ -76,9 +76,12 @@ func TestR247ARCH11_RunDurationDeterministicUnderClock(t *testing.T) {
 	if got.State != RunStateSucceeded {
 		t.Fatalf("state: want succeeded, got %q (err=%q)", got.State, got.ErrorClass)
 	}
-	// startedAt = first Now() (+250ms), endedAt = second Now() (+250ms more);
-	// DurationMS = 250.
-	if got.DurationMS != 250 {
-		t.Errorf("DurationMS = %d, want 250 (run duration must derive from the injected clock)", got.DurationMS)
+	// Clock reads during executeOpt with a step-clock (step=250ms):
+	//   1. startedAt (executeOpt entry) = T0 + 250ms
+	//   2. spawnStart = s.now() (R20260607-GO-002: executeGetSession) = T0 + 500ms
+	//   3. endedAt (finishRun) = T0 + 750ms
+	// DurationMS = endedAt - startedAt = 500ms.
+	if got.DurationMS != 500 {
+		t.Errorf("DurationMS = %d, want 500 (run duration must derive from the injected clock)", got.DurationMS)
 	}
 }

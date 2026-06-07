@@ -1690,12 +1690,13 @@ func formatTZOffset(ianaName string, offsetSeconds int) string {
 // endpoints, separate from the CRUD surface that owns this file. R20260527-
 // ARCH-14 (#1281).
 
-// HasRunsLimiter / HasListLimiter / HasWriteLimiter expose nil-state of
-// the corresponding limiter for server's boot-time invariant check.
-// Phase 1 (server-split-phase4-design.md §6.5 Plan B).
-func (h *Handlers) HasRunsLimiter() bool  { return h.runsLimiter != nil }
-func (h *Handlers) HasListLimiter() bool  { return h.listLimiter != nil }
-func (h *Handlers) HasWriteLimiter() bool { return h.writeLimiter != nil }
+// HasRunsLimiter / HasListLimiter / HasWriteLimiter / HasTranscriptLimiter
+// expose nil-state of the corresponding limiter for server's boot-time
+// invariant check. Phase 1 (server-split-phase4-design.md §6.5 Plan B).
+func (h *Handlers) HasRunsLimiter() bool       { return h.runsLimiter != nil }
+func (h *Handlers) HasListLimiter() bool       { return h.listLimiter != nil }
+func (h *Handlers) HasWriteLimiter() bool      { return h.writeLimiter != nil }
+func (h *Handlers) HasTranscriptLimiter() bool { return h.transcriptLimiter != nil }
 
 // Deps bundles all wiring for New. Phase 1.
 type Deps struct {

@@ -841,7 +841,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// TimeoutStopSec exceeded on cron runs because the un-clamped sendCtx
 	// could double the per-run budget; the floor + spawnElapsedWarnRatio
 	// warn (just below) keep the operator-signal path intact.
-	sendBudget := jobTimeout - time.Since(spawnStart)
+	// R20260607-GO-001: capture spawnElapsed once so sendBudget and the
+	// warn log share the same baseline; two separate time.Since calls would
+	// produce slightly different values, making spawn_elapsed_ms +
+	// send_budget_ms not sum exactly to job_timeout_ms in the log line.
+	spawnElapsed := time.Since(spawnStart)
+	sendBudget := jobTimeout - spawnElapsed
 	if sendBudget < minSendBudget {
 		sendBudget = minSendBudget
 	}
@@ -856,9 +861,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// function). R247-CR-28: ratio extracted to a documented const so
 	// future tuning is a one-line change with shared rationale.
 	spawnWarnBudget := time.Duration(float64(jobTimeout) * spawnElapsedWarnRatio)
-	// R250-CR-22 (#1155): time.Since(spawnStart) — not startedAt — so jitter
-	// time is excluded. See spawnStart capture above (just before GetOrCreate).
-	if spawnElapsed := time.Since(spawnStart); spawnElapsed > spawnWarnBudget {
+	// R250-CR-22 (#1155): spawnElapsed captured once above (not startedAt)
+	// so jitter time is excluded. See spawnStart capture above (just before
+	// GetOrCreate). R20260607-GO-001: reuse the already-captured value.
+	if spawnElapsed > spawnWarnBudget {
 		metrics.CronSendBudgetDoubledTotal.Add(1)
 		// Message string preserved for runbook grep — see docs/ops/pprof.md
 		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
@@ -1225,7 +1231,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 	// consumed too much of the budget — folding jitter (default up to 30s)
 	// into that measurement triggers false positives on healthy jobs whose
 	// schedule landed unlucky in the jitter window.
-	spawnStart = time.Now()
+	// R20260607-GO-002: use s.now() so tests can inject a fake clock and
+	// exercise the spawn-budget path without real sleeps.
+	spawnStart = s.now()
 	sess, _, err := s.router.GetOrCreate(a.ctx, a.key, a.opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
