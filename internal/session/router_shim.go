@@ -174,6 +174,49 @@ func shutdownShimViaReconnect(
 	}
 }
 
+// adoptableShimKey reports whether a live shim whose key is absent from
+// sessions.json may be rebuilt + reconnected rather than killed as an orphan
+// (#1875). It rejects the same key classes that sessionToStoreEntry refuses to
+// persist (sys:/scratch:) — those are register-on-startup or deliberately
+// volatile, so a live shim under such a key is a genuine anomaly that should
+// not be resurrected from disk — and rejects keys that fail session-key
+// validation, mirroring the trust boundary the shim layer already enforces in
+// validateKeyForShim. A malformed key on a shim state file is evidence of
+// tampering or corruption, not a session worth saving.
+func adoptableShimKey(key string) bool {
+	if IsSysKey(key) || IsScratchKey(key) {
+		return false
+	}
+	return ValidateSessionKey(key) == nil
+}
+
+// adoptLiveShimLocked rebuilds a ManagedSession for a discovered live shim that
+// is missing from sessions.json and publishes it into the router maps, so the
+// subsequent classifyShimState sees sessFound=true and routes to reconnect
+// instead of orphan-kill (#1875).
+//
+// The shim state file is the source of truth here: it carries the session key,
+// workspace, backend, and (once system/init has fired) the session_id — every
+// field restoreSessionFromEntry needs. We adapt State → storeEntry and delegate
+// to the same construction path NewRouter uses for persisted sessions, so the
+// adopted session is wired identically (CLI identity, idToKey index,
+// trackSessionID, publishSessionLocked). Cost/label/model are unknown at adopt
+// time and left zero/empty; they re-populate from the first post-reconnect
+// system/init + result events.
+//
+// LOCK: caller MUST hold r.mu (restoreSessionFromEntry's publishSessionLocked +
+// idToKey writes require it). Returns the published *ManagedSession.
+func (r *Router) adoptLiveShimLocked(state shim.State, backendID string, _ *cli.Wrapper) *ManagedSession {
+	entry := &storeEntry{
+		Key:       state.Key,
+		SessionID: state.SessionID,
+		Workspace: state.Workspace,
+		Backend:   backendID,
+	}
+	r.restoreSessionFromEntry(state.Key, entry)
+	return r.ss.sessions[state.Key]
+}
+
 func (r *Router) reconnectShims(parentCtx context.Context) {
 	managers := r.shimManagers()
 	if len(managers) == 0 {
@@ -241,6 +284,55 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				ExtraArgs: driftArgs,
 			})
 			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
+		}
+
+		// Adopt-before-classify (#1875): a live shim whose key is absent from
+		// sessions.json is NOT necessarily an orphan. The store is written
+		// lazily (spawn only marks dirty; saveIfDirty runs every 30s) and
+		// sessionToStoreEntry drops any entry whose session_id is still empty
+		// — so a session spawned <30s before a crash (or one that never
+		// received its system/init session_id) leaves a fully-alive shim with
+		// no store record. The shim state file itself carries everything we
+		// need to rebuild the ManagedSession (key + workspace + backend), so
+		// adopt it here rather than killing a live conversation. Only adopt
+		// when a wrapper exists for the backend (recWrapper != nil) and the
+		// key is adoptable (not sys:/scratch:, passes validation); otherwise
+		// fall through to the existing orphan/no-wrapper handling unchanged.
+		if !ok && !spawning && recWrapper != nil && adoptableShimKey(state.Key) {
+			r.mu.Lock()
+			// Re-check under lock: a concurrent spawnSession may have installed
+			// the session (or its spawning marker) between the snapshot above
+			// and now.
+			if existing, exists := r.ss.sessions[state.Key]; exists {
+				// A concurrent spawnSession won the race and installed the
+				// session. Re-snapshot from it instead of adopting a duplicate.
+				sess = existing
+				ok = true
+				sessPrevIDs = slices.Clone(sess.prevSessionIDs)
+				if sess.isAlive() {
+					hasLiveProcess = true
+				}
+			} else if _, racingSpawn := r.pp.spawningKeys[state.Key]; racingSpawn {
+				// spawnSession started inside the adopt window but hasn't
+				// published its ManagedSession yet. Hand the shim to that spawn
+				// rather than adopting a competing copy: promote spawning so
+				// classifyShimState routes to skip (its highest-priority
+				// branch), exactly as if the marker had been visible at the
+				// top-of-loop snapshot. The next reconcile tick re-evaluates.
+				spawning = true
+			} else {
+				// Genuinely absent + no spawn in flight: rebuild from the shim
+				// state file so classifyShimState sees sessFound and reconnects.
+				adopted := r.adoptLiveShimLocked(state, recBackendID, recWrapper)
+				sess = adopted
+				ok = true
+				sessPrevIDs = slices.Clone(adopted.prevSessionIDs)
+				slog.Info("adopted live shim missing from store",
+					"key", state.Key,
+					"session_id", state.SessionID,
+					"pid", state.ShimPID)
+			}
+			r.mu.Unlock()
 		}
 
 		switch classifyShimState(spawning, ok, hasLiveProcess, recWrapper == nil, argsDrift) {
