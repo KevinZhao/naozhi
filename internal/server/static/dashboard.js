@@ -265,37 +265,13 @@ function applyTheme(theme) {
   if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
-  const btn = document.getElementById('btn-theme');
-  if (btn) {
-    const label = THEME_LABELS[theme] || '跟随系统';
-    btn.title = '切换主题 (当前: ' + label + ')';
-    btn.setAttribute('aria-label', '切换主题，当前: ' + label);
-    btn.dataset.themeMode = theme;
-  }
 }
-function cycleTheme() {
-  const cur = getCurrentTheme();
-  const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
-  applyTheme(next);
-  if (typeof showToast === 'function') {
-    showToast('主题: ' + (THEME_LABELS[next] || next), 'info', 1200);
-  }
-}
-// Wire title/aria on first load so the button reflects the persisted
-// state (the inline early-paint script already set data-theme; this
-// just syncs the visible affordances). Also wire the click handler via
-// addEventListener instead of an inline onclick="" so the theme toggle
-// doesn't push the dashboard CSP migration backwards (cap+1 → 8 inline
-// handlers; goal in #441 / #479 / #922 is to drive the count to 0 so
-// script-src 'unsafe-inline' can be dropped).
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
   // fetchSessions/send so a reload-before-first-send still carries the chosen
   // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
   restorePending();
   applyTheme(getCurrentTheme());
-  const btn = document.getElementById('btn-theme');
-  if (btn) btn.addEventListener('click', cycleTheme);
   // Activity-bar view switch (codex-style rail). Wired here (not inline
   // onclick) to keep the script-src inline-handler surface from growing
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
@@ -323,7 +299,6 @@ document.addEventListener('DOMContentLoaded', function () {
   bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });
   bindClick('btn-history', function () { toggleHistory(); });
   bindClick('btn-new-session', function () { createNewSession(); });
-  bindClick('btn-cron', function () { openCronPanel(); });
   bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
   bindClick('ns-trigger', function (e) { toggleNodeSelector(e); });
   bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
@@ -14797,18 +14772,9 @@ async function fetchCronJobs() {
     // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
     // 纳入 attention，与 filterCronJobs 判定对齐。
     const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
-    const cronBadge = document.getElementById('cron-badge');
-    if (cronBadge) {
-      cronBadge.textContent = attention;
-      cronBadge.style.display = attention > 0 ? '' : 'none';
-      // Attention badge is semantically an alert (paused / errored jobs), so
-      // opt into the red .is-alert variant defined in dashboard.html Track D.
-      // History badge stays neutral grey because it is a cumulative count, not
-      // an unread/failure signal.
-      cronBadge.classList.toggle('is-alert', attention > 0);
-    }
-    // Mirror the attention dot onto the rail's 自动化 icon so the alert is
-    // visible from any view (the header cron-badge is only shown in chat view).
+    // Surface the attention dot on the rail's 自动化 icon so the alert is
+    // visible from any view. (The legacy header cron-badge was removed once
+    // the sidebar 定时任务 quick-button folded into the rail's 自动化 entry.)
     const railBadge = document.getElementById('abnav-cron-badge');
     if (railBadge) {
       railBadge.hidden = attention === 0;

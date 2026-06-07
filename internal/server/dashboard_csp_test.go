@@ -359,7 +359,6 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 		{"btn-sidebar-search", "toggleSidebarSearch"},
 		{"btn-history", "toggleHistory"},
 		{"btn-new-session", "createNewSession"},
-		{"btn-cron", "openCronPanel"},
 		{"sidebar-search-clear", "closeSidebarSearch"},
 		{"ns-trigger", "toggleNodeSelector"},
 		{"btn-sidebar-toggle", "toggleSidebarCollapsed"},

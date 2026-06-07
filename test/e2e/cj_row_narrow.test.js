@@ -27,7 +27,7 @@ test.describe('cj-row 窄屏不被压扁', () => {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cj-row');
     // 点开 drawer 让 has-drawer + ResizeObserver 启动 narrow layout
     await page.click('.cj-row[data-cron-id="cron-001"]');
@@ -64,7 +64,7 @@ test.describe('cj-row 窄屏不被压扁', () => {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cj-row');
     await page.click('.cj-row[data-cron-id="cron-001"]');
     await page.waitForTimeout(300);
