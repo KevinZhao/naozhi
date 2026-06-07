@@ -93,6 +93,15 @@ type resolveJob struct {
 // step 5 cross-check.
 const staleAgentReuseSlack = 10 * time.Second
 
+// maxMetaCacheEntries caps the number of path→firstLineMeta entries held in
+// the per-Resolve metaCache. Under normal usage the cache holds one entry per
+// surviving candidate (a handful per retry attempt). In a directory with
+// hundreds of stale agent files the map could accumulate hundreds of entries
+// across retryLimit+1 attempts. When the map exceeds this limit we clear it
+// so the next attempt starts with a fresh map, avoiding unbounded growth while
+// retaining the cache-hit benefit for the common case. R050103G-PERF-1.
+const maxMetaCacheEntries = 256
+
 // maxNamedLinkHistory caps how many resolved LinkInfo records the linker
 // retains per agent name in byName. byName is only consulted for same-name
 // respawn detection (Resolve step 7b), which needs nothing more than a small
@@ -619,6 +628,13 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
+		// Safety valve: if the directory had hundreds of candidates the cache
+		// can accumulate hundreds of entries across attempts. Reset it when it
+		// grows beyond maxMetaCacheEntries so memory stays bounded. The next
+		// iteration re-reads only the files it actually inspects.
+		if len(metaCache) > maxMetaCacheEntries {
+			clear(metaCache)
+		}
 		entries := l.scanMetaFiles(subagentDir)
 		// Reuse the hoisted slices: reset to zero length, keep backing
 		// array from the previous attempt to avoid re-allocating on each
