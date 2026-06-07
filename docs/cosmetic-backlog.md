@@ -585,3 +585,22 @@
 - [R20260607-GO-014] redactAddrIPv6Re 字符类 [0-9a-fA-F:] 会误匹配 [bad:1] 等 hex-looking 括号 token，可能过度 redact — internal/cron/scheduler_finish.go:788
 - [R20260607-GO-005] heartbeatLoop 新建 pongTimer 后立即 Stop 冗余（freshly-created 无 pending tick），Go1.26 下无害 — internal/cli/process_readloop.go:921
 - [R20260607-SEC-12] buildShimArgs --cwd 经 exec.Command execve 直传无 shell 注入风险（已 validateWorkspace），false-positive — internal/shim/manager.go:342
+- [R090135-GO-4] warmCacheLocked stale-entry 理论窗口已被 cacheGet re-Load 缓解,无实害 — internal/cron/runstore_cache.go:284
+- [R090135-GO-5] 两锁不同时持有约束仅文档非类型,未来 caller 风险 — internal/cron/runstore.go:63
+- [R090135-GO-6] reapFreshSessionLocked register TOCTOU 与 preflight 同级已接受 — internal/cron/scheduler_run.go:1106
+- [R090135-GO-7] finalize done 非 atomic,单 goroutine 使用无实害 — internal/cron/runinflight.go:180
+- [R090135-GO-8] hasAddrTrigger [ 触发无谓 IPv4 regex 扫描,极小 — internal/cron/scheduler_finish.go:837
+- [R090135-LOGIC-6] endedAllCron 测试 helper 未被调用,godoc 称留给未来 — internal/cron/scheduler_telemetry_testutil_test.go:77
+- [R090135-SEC-1] CSP script-src unsafe-inline,已 NEEDS-DESIGN strict-dynamic+nonce — internal/server/routes.go:504
+- [R090135-SEC-3] pprof no-token 已 403 双门,仅 Warn 未硬失败 — internal/server/debug_pprof.go:55
+- [R090135-SEC-4] /health no-token 泄 workspace,已知 local-dev 限制 Warn — internal/server/server.go:764
+- [R090135-SEC-5] EvalSymlinks 最多 64 次/认证请求,已 capped 仅 amplification — internal/server/agent_tailer_pathcheck.go:101
+- [R090135-SEC-8] KaTeX 字体 CDN 无 SRI,@font-face 无法带 integrity,需 vendoring — internal/server/routes.go:504
+- [R090135-SEC-9] NotifyChatID WS 已 mask,speculative — internal/cron/scheduler_finish.go:431
+- [R090135-ARCH-3] Scheduler god-object ~40 字段,需 RFC 拆 jobIndex/persistState — internal/cron/scheduler.go:45
+- [R090135-PERF-002] missedScheduleVerdict 3段concat key alloc,RWMutex 已缓解竞争 — internal/dashboard/cron/handlers.go:770
+- [R090135-PERF-004] evictOldestMissedCache 持锁内 sort,稀发 — internal/dashboard/cron/handlers.go:816
+- [R090135-PERF-005] HandleList views slice 未 pool,15KB/req — internal/dashboard/cron/handlers.go:990
+- [R090135-PERF-009] batchRecentRuns out slice 未 pool,400B — internal/dashboard/cron/handlers.go:889
+- [R090135-PERF-010] missedScheduleVerdict miss 双 Lock,可 double-checked — internal/dashboard/cron/handlers.go:773
+- [R090135-GO-3] session error errMsg 未在调用点 sanitise,recordTerminalResult 已脱敏(GO-2 修后) — internal/cron/scheduler_run.go:1265
