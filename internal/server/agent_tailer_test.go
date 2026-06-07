@@ -49,7 +49,11 @@ func newCapturedClient(t *testing.T, hub *Hub) (*wsClient, <-chan node.ServerMsg
 			}
 		}
 	}()
-	t.Cleanup(func() { close(c.done) })
+	// closeDone (sync.Once) rather than a bare close: the production
+	// SendRaw slow-client path also closes c.done via c.doneOnce when a
+	// captured client overflows its 64-deep buffer under load (e.g.
+	// ConcurrentChurn), so a plain close here would double-close and panic.
+	t.Cleanup(c.closeDone)
 	return c, out
 }
 
