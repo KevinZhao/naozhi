@@ -2,12 +2,15 @@
 // + transcript. Phase 1 (server-split-phase4-design.md §6.5 Plan B) moved
 // these from internal/server.
 //
-// Cross-cutting helpers below are duplicated locally rather than reverse-
-// imported from internal/server, keeping the dependency direction one-way.
+// Cross-cutting helpers below are accepted as interfaces (or pulled from leaf
+// packages) rather than reverse-imported from internal/server, keeping the
+// dependency direction one-way.
 package cron
 
 import (
 	"net/http"
+
+	"github.com/naozhi/naozhi/internal/backendid"
 )
 
 // IPLimiter is the subset of internal/server.ipLimiter the cron handlers use.
@@ -18,20 +21,9 @@ type IPLimiter interface {
 	AllowRequest(r *http.Request) bool
 }
 
-// maxBackendIDLen / isValidBackendID duplicate internal/server/select_node_for_backend.go's
-// length+charset gate so this package doesn't reverse-import server.
-const maxBackendIDLen = 64
+// maxBackendIDLen / isValidBackendID alias the shared backendid leaf package's
+// length+charset gate so this package and internal/server enforce one contract
+// without a reverse import (R20260607-ARCH-2 #1893).
+const maxBackendIDLen = backendid.MaxLen
 
-func isValidBackendID(s string) bool {
-	if len(s) > maxBackendIDLen {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
-			return false
-		}
-	}
-	return true
-}
+func isValidBackendID(s string) bool { return backendid.IsValid(s) }
