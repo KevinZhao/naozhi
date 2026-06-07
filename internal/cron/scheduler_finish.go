@@ -810,10 +810,13 @@ var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+
 var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
 
 // ipv6BracketIsAddr reports whether a string matched by redactAddrIPv6Re is a
-// plausible IPv6 literal rather than a degenerate colon-only token like "[:]".
-// It returns true when the bracket body holds at least one hex digit or a "::"
-// compression run. The input is a full match including brackets and optional
-// :port suffix.
+// plausible IPv6 literal rather than a degenerate token like "[:]" or "[a:b]"
+// (which contain a single colon and are not valid IPv6 addresses).
+// A valid IPv6 literal requires either a "::" compression run or at least two
+// colons (the minimum for any real IPv6 segment sequence, e.g. "::1" or
+// "a:b:c"). Single-colon forms like "[a:b]" look like host:port notation and
+// must not be over-redacted. The input is a full match including brackets and
+// optional :port suffix.
 func ipv6BracketIsAddr(match string) bool {
 	end := strings.IndexByte(match, ']')
 	if end < 0 {
@@ -823,10 +826,15 @@ func ipv6BracketIsAddr(match string) bool {
 	if strings.Contains(body, "::") {
 		return true
 	}
+	// Require at least 2 colons: minimum valid IPv6 segment count
+	// (e.g. "a:b:c" has 2 colons; single-colon "[a:b]" is not IPv6).
+	n := 0
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
-			return true
+		if body[i] == ':' {
+			n++
+			if n >= 2 {
+				return true
+			}
 		}
 	}
 	return false
