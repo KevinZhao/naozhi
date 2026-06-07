@@ -978,7 +978,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// to avoid echoing attacker-controlled values into the log stream.
 	if project == publicTmpProject {
 		slog.Info("public_tmp file access",
-			"path", resolved,
+			"path", osutil.SanitizeForLog(resolved, 512),
 			"mode", mode,
 			"remote_addr", r.RemoteAddr)
 	}
@@ -1008,7 +1008,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("project files: rootPath EvalSymlinks IO failure",
 				"err", rrErr,
 				"project", project,
-				"path", path)
+				"path", osutil.SanitizeForLog(path, 256))
 		}
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return

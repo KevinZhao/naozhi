@@ -785,7 +785,39 @@ var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+
 // brackets ([0-9a-fA-F]*:[0-9a-fA-F:]+) so non-address bracketed tokens
 // like [foo], [abc], or [1] are not over-redacted. A valid IPv6 literal
 // always contains at least one colon (the :: or x:y shorthand forms).
+//
+// R20260607-COR-008: the leading hex group is `*` (not `+`) so the `::`
+// compressed/loopback forms ([::1], [::]) still match — those have no hex
+// char before the first colon. The downside is that `[:]` (empty prefix +
+// a single colon) is a degenerate match that is NOT a valid IPv6 literal
+// (a real address needs either a hex digit or the `::` compression). To
+// avoid over-redacting non-address text like "flag [:]", redaction uses
+// ReplaceAllStringFunc + ipv6BracketIsAddr below: a bracket body is only
+// redacted when it contains at least one hex digit OR a `::` run.
 var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
+
+// ipv6BracketIsAddr reports whether a string matched by redactAddrIPv6Re is a
+// plausible IPv6 literal rather than a degenerate colon-only token like "[:]".
+// It returns true when the bracket body holds at least one hex digit or a "::"
+// compression run. The input is a full match including brackets and optional
+// :port suffix.
+func ipv6BracketIsAddr(match string) bool {
+	end := strings.IndexByte(match, ']')
+	if end < 0 {
+		return false
+	}
+	body := match[1:end] // strip leading '[' and trailing ']'
+	if strings.Contains(body, "::") {
+		return true
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			return true
+		}
+	}
+	return false
+}
 
 // hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
 // contains at least one digit immediately followed (or preceded) by a dot
@@ -814,7 +846,12 @@ func redactAddrInCronError(s string) string {
 		return s
 	}
 	s = redactAddrRe.ReplaceAllString(s, "[redacted-addr]")
-	s = redactAddrIPv6Re.ReplaceAllString(s, "[redacted-addr]")
+	s = redactAddrIPv6Re.ReplaceAllStringFunc(s, func(m string) string {
+		if ipv6BracketIsAddr(m) {
+			return "[redacted-addr]"
+		}
+		return m
+	})
 	return s
 }
 

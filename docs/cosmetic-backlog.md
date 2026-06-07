@@ -573,3 +573,8 @@
 - [R050103G-BUG-1] subagent_transcript openOrReuse 快路径非零字节读绕过 reprobeRotation（依赖 writer 停止追加不变量，无实际 trigger）— internal/cli/subagent_transcript.go:94
 - [R050103C-BUG-2] runStore.Append preflight_bytes 在 slog.Warn 重算 len 和（post-marshal gate 已兜底正确，微开销）— internal/cron/runstore.go:479
 - [R050103C-CORR-9] static_split_view_test 用 strings.Contains 而非结构唯一性，注释中 token 可假性满足（项目既定 contract-test 模式）— internal/server/static_split_view_test.go:42
+- [R20260607-SEC-6] serveRender CSP script-src 含冗余 data:（'unsafe-inline' 已覆盖内联）— internal/dashboard/project/files.go:1236
+- [R20260607-SEC-10] sensitiveNameSubstrings 含 "token" 误伤 tokenizer.py/token_parser.go 预览 — internal/dashboard/project/files.go:1613
+- [R20260607-GO-12] strings.Builder.Reset() 注释错误（称置 nil，实为 buf[:0]）— internal/cron/scheduler_finish.go:933
+- [R20260607-ARCH-6] project.Manager Bind/Unbind/Update in-place mutate 共享 Config，违 copy-on-write 但当前安全 — internal/project/manager.go:232
+- [R20260607-ARCH-7] upstream/dispatch/discovery/cron 各自 SessionRouter 同名异形接口，新人易混 — internal/cron/scheduler_config.go:98

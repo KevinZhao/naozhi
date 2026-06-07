@@ -83,7 +83,11 @@ type batchArena struct {
 // steady-state heap churn (50 events/s × N sessions).
 var entryArenaPool = sync.Pool{
 	New: func() any {
-		return &batchArena{buf: bytes.NewBuffer(make([]byte, 0, 4*1024))}
+		return &batchArena{
+			buf:   bytes.NewBuffer(make([]byte, 0, 4*1024)),
+			owned: make([]Entry, 0, 32),
+			spans: make([]arenaSpan, 0, 32),
+		}
 	},
 }
 
@@ -1106,7 +1110,7 @@ const parallelFsyncMaxWorkers = 8
 var parallelFsyncWorkers = 0
 
 // parallelFsync fans `fn` over (keys[i], ws[i]) using a bounded
-// worker pool. Single-entry input skips the WaitGroup entirely so
+// worker pool. Inputs of 1-2 writers skip the WaitGroup entirely so
 // the typical "1-2 active sessions on Stop" footprint stays cheap.
 // Each fn call runs concurrently with at most workers-1 others; the
 // caller MUST guarantee that fn does not mutate any state shared
@@ -1119,8 +1123,16 @@ func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(str
 	if n == 0 {
 		return
 	}
-	if n == 1 {
-		fn(keys[0], ws[0])
+	if n <= 2 {
+		// R20260607-PERF-4: small deployments (1-2 active writers) flush
+		// serially. The goroutine + WaitGroup + atomic setup costs more
+		// than running two fsyncs back-to-back, and on the ~100ms
+		// tickFlush this overhead recurs steadily. Semantics match the
+		// worker-pool path: fn returns nothing and each index is invoked
+		// exactly once, so serial vs parallel are equivalent here.
+		for i := range ws {
+			fn(keys[i], ws[i])
+		}
 		return
 	}
 	workers := parallelFsyncWorkers
