@@ -599,10 +599,6 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 // between capture and rollback; naming it JobState ties that work to the
 // god-struct split tracker.
 //
-// jobResultSnapshot is kept as an alias so the existing capture/rollback
-// call sites and the tests pinning the round-trip contract compile
-// unchanged.
-//
 // restore re-applies the captured values to j; caller MUST hold s.mu so
 // the in-memory state stays serialised against concurrent readers.
 type JobState struct {
@@ -613,11 +609,6 @@ type JobState struct {
 	LastSessionID  string
 	Counters       JobRunCounters
 }
-
-// jobResultSnapshot is the historical name for the runtime-state cluster,
-// retained as an alias of JobState (R238-ARCH-13 / #764) so existing
-// capture / rollback sites and round-trip contract tests keep compiling.
-type jobResultSnapshot = JobState
 
 func (p JobState) restore(j *Job) {
 	j.LastRunAt = p.LastRunAt
@@ -685,8 +676,8 @@ func (j *Job) snapshotResultState() JobState {
 // R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
 // to drop the "P0" review-tag prefix that lost meaning once the dead
 // recordResult path was deleted (R220-GO-1). The rollback state now lives
-// in the named jobResultSnapshot struct above so a future "add a Last*
-// field" diff lands once on the type instead of three coupled edits.
+// in JobState so a future "add a Last* field" diff lands once on the type
+// instead of three coupled edits.
 func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
