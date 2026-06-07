@@ -670,7 +670,7 @@ type Handlers struct {
 	// missedScheduleVerdict helper); LastRunAt advances invalidate via
 	// the lastRunNanos guard so a job that just ran does not keep an
 	// outdated "missed" verdict for a full second. R245-PERF-4 (#857).
-	missedCacheMu sync.Mutex
+	missedCacheMu sync.RWMutex
 	missedCache   map[string]missedVerdict
 
 	// tzLabelMu guards the memoised timezone label below. HandleList runs
@@ -770,16 +770,16 @@ func (h *Handlers) missedScheduleVerdict(j *cronpkg.Job, now, startedAt time.Tim
 	key := j.ID + "|" + j.Schedule + "|" + strconv.FormatInt(startedNs, 10)
 	lastRunNanos := j.LastRunAt.UnixNano()
 
-	h.missedCacheMu.Lock()
+	h.missedCacheMu.RLock()
 	if h.missedCache != nil {
 		if v, ok := h.missedCache[key]; ok {
 			if v.lastRunNanos == lastRunNanos && now.Sub(v.computedAt) < missedCacheTTL {
-				h.missedCacheMu.Unlock()
+				h.missedCacheMu.RUnlock()
 				return v.missed, v.prevAt
 			}
 		}
 	}
-	h.missedCacheMu.Unlock()
+	h.missedCacheMu.RUnlock()
 
 	missed, prevAt := cronpkg.HasMissedSchedule(j, now, startedAt)
 
