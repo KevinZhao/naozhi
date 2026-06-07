@@ -63,47 +63,6 @@ func TestDashboardJS_NoPromptIsLocalized(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_CronBadgeAlertClass pins the R110-P1 fix that the cron
-// header badge toggles the .is-alert red variant when any jobs need attention
-// (paused or last_error). The history badge is intentionally left neutral
-// because it is a cumulative count, not an unread/failure signal — so this
-// test also asserts history-badge's classList is NOT being mutated toward
-// is-alert in the same render path.
-func TestDashboardJS_CronBadgeAlertClass(t *testing.T) {
-	t.Parallel()
-	// cron extraction (PR-1): cronBadge toggle moved to cron_view.js, while the
-	// sibling history-badge render stayed in dashboard.js. Assert on the union.
-	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
-	if err != nil {
-		t.Fatalf("read cron_view.js: %v", err)
-	}
-	js := string(dashData) + "\n" + string(cronData)
-	if !strings.Contains(js, "cronBadge.classList.toggle('is-alert', attention > 0)") {
-		t.Error("dashboard.js: cron badge must toggle 'is-alert' based on attention count")
-	}
-	// History badge block (id 'history-badge') must not grow an is-alert
-	// toggle. Search within the surrounding neighborhood to keep the
-	// assertion robust against unrelated later references to the class.
-	hIdx := strings.Index(js, "history-badge")
-	if hIdx < 0 {
-		t.Fatal("history-badge reference not found in dashboard.js")
-	}
-	// Slice ~400 chars around the history-badge render site — that is the
-	// full block that writes textContent + style.display.
-	end := hIdx + 800
-	if end > len(js) {
-		end = len(js)
-	}
-	window := js[hIdx:end]
-	if strings.Contains(window, "hBadge.classList") && strings.Contains(window, "is-alert") {
-		t.Error("history-badge must stay neutral grey (no is-alert toggle); it is a cumulative count, not an alert")
-	}
-}
-
 // TestDashboardJS_FormatAbsTimeHoverTitles pins the R110-P3 time-format-unify
 // fix: relative labels ("3m ago", "next 2h") stay compact in the UI, but the
 // three surfaces that render them — history popover / session card / cron
@@ -1695,12 +1654,13 @@ func TestDashboardHTML_R110HeaderBadgePalette(t *testing.T) {
 // filesystem-stored sessions that are not in the live workspace — it
 // is not an unread / failure / alert signal. Red would misread as
 // "something needs attention" when the number has been sitting there
-// for months. The rendering path must:
+// for months. The rendering path must set textContent + display, but
+// NEVER add the .is-alert class.
 //
-//  1. Set textContent + display, but NEVER add the .is-alert class.
-//  2. The only `classList.toggle('is-alert', ...)` call in dashboard.js
-//     must be the cron attention one — the history badge must not
-//     acquire a second such site in the future.
+// (The sibling header cron-badge that used to be the file's one
+// legitimate is-alert site was removed when the sidebar 定时任务
+// quick-button folded into the rail's 自动化 entry; the rail mirror
+// uses a hidden flag, not the is-alert class.)
 func TestDashboardJS_R110HistoryBadgeIsNeutral(t *testing.T) {
 	t.Parallel()
 	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -1713,22 +1673,8 @@ func TestDashboardJS_R110HistoryBadgeIsNeutral(t *testing.T) {
 	}
 	js := string(dashData) + "\n" + string(cronData)
 
-	// The only is-alert toggle in the file should be the cron one.
-	// If somebody adds a `hBadge.classList.toggle('is-alert', ...)`
-	// or similar, count goes to ≥2 and the test flags it.
-	toggleCount := strings.Count(js, "classList.toggle('is-alert'")
-	if toggleCount != 1 {
-		t.Errorf("dashboard.js has %d `classList.toggle('is-alert'...)` sites — expected exactly 1 (cron attention). The history badge must stay neutral.", toggleCount)
-	}
-	// The single toggle must be on cronBadge, not on the history
-	// badge. If the target variable ever changes to hBadge the
-	// single-count check above would still pass, so pin the variable
-	// name directly.
-	if !strings.Contains(js, "cronBadge.classList.toggle('is-alert'") {
-		t.Error("dashboard.js is-alert toggle must target cronBadge (cron attention), not the history badge")
-	}
-	// Conversely, the history-badge pipeline must still be present
-	// and must not touch is-alert.
+	// The history-badge pipeline must still be present and must not
+	// touch is-alert.
 	hIdx := strings.Index(js, "getElementById('history-badge')")
 	if hIdx < 0 {
 		t.Fatal("dashboard.js missing history-badge pipeline")
@@ -3550,15 +3496,18 @@ func TestDashboardHTML_R144_TopNavA11yLabelsLocalized(t *testing.T) {
 }
 
 // TestDashboardHTML_R149_HeaderIconA11yLocalized pins the Round 149
-// follow-on to Round 144: the hdr-btn icons `btn-history` and `btn-cron`
-// had `title="History"` / `"Cron Jobs"` + `aria-label="Show session
-// history"` / `"Cron jobs"` left in English, which clashed with the
-// otherwise-Chinese a11y surface (Round 116 did btn-mobile-back/nav-prev/
-// nav-next/btn-hold-talk; Round 144 did sf-help/resizer/main). The two
-// invisible badges nested inside (history-badge, cron-badge) also had
-// English aria-labels. This round localizes all four plus the nav's
+// follow-on to Round 144: the hdr-btn icon `btn-history` had
+// `title="History"` + `aria-label="Show session history"` left in English,
+// which clashed with the otherwise-Chinese a11y surface (Round 116 did
+// btn-mobile-back/nav-prev/nav-next/btn-hold-talk; Round 144 did
+// sf-help/resizer/main). The invisible history-badge nested inside also had
+// an English aria-label. This round localizes those plus the nav's
 // top-level `aria-label="Sessions"`, while the `+` New Session button
 // stays English (hard E2E contract — see Round 144 test).
+//
+// (The sibling btn-cron/cron-badge anchors this test used to pin were
+// dropped when the sidebar 定时任务 quick-button folded into the rail's
+// 自动化 entry.)
 //
 // The history popover header text "History (N)" → "历史 (N)" is covered
 // by the sibling TestDashboardJS_R149_HistoryPopoverHeaderLocalized so the
@@ -3581,9 +3530,6 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 		{"btn-history title", `title="历史会话"`},
 		{"btn-history aria-label", `aria-label="查看会话历史"`},
 		{"history-badge aria-label", `aria-label="历史记录数"`},
-		{"btn-cron title", `title="定时任务"`},
-		{"btn-cron aria-label", `aria-label="定时任务面板"`},
-		{"cron-badge aria-label", `aria-label="定时任务数"`},
 	}
 	for _, w := range wantChinese {
 		if !strings.Contains(html, w.fragment) {
@@ -3602,9 +3548,6 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 		{"btn-history title legacy", `title="History"`},
 		{"btn-history aria-label legacy", `aria-label="Show session history"`},
 		{"history-badge legacy", `aria-label="unread history count"`},
-		{"btn-cron title legacy", `title="Cron Jobs"`},
-		{"btn-cron aria-label legacy", `aria-label="Cron jobs"`},
-		{"cron-badge legacy", `aria-label="cron job count"`},
 	}
 	for _, f := range forbiddenEnglish {
 		if strings.Contains(html, f.fragment) {

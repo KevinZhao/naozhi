@@ -3454,18 +3454,9 @@ async function fetchCronJobs() {
     // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
     // 纳入 attention，与 filterCronJobs 判定对齐。
     const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
-    const cronBadge = document.getElementById('cron-badge');
-    if (cronBadge) {
-      cronBadge.textContent = attention;
-      cronBadge.style.display = attention > 0 ? '' : 'none';
-      // Attention badge is semantically an alert (paused / errored jobs), so
-      // opt into the red .is-alert variant defined in dashboard.html Track D.
-      // History badge stays neutral grey because it is a cumulative count, not
-      // an unread/failure signal.
-      cronBadge.classList.toggle('is-alert', attention > 0);
-    }
-    // Mirror the attention dot onto the rail's 自动化 icon so the alert is
-    // visible from any view (the header cron-badge is only shown in chat view).
+    // Surface the attention dot on the rail's 自动化 icon so the alert is
+    // visible from any view. (The legacy header cron-badge was removed once
+    // the sidebar 定时任务 quick-button folded into the rail's 自动化 entry.)
     const railBadge = document.getElementById('abnav-cron-badge');
     if (railBadge) {
       railBadge.hidden = attention === 0;

@@ -5,7 +5,9 @@
 // These lock the structural pieces JS and CSS depend on so a refactor can't
 // silently break the rail nav, the view-switching CSS, or the cron-view
 // decoupling from selectedKey. They complement (not replace) the existing
-// CSP wiring test (dashboard_csp_test.go) which still pins #btn-cron.
+// CSP wiring test (dashboard_csp_test.go). The legacy sidebar #btn-cron
+// quick-button was removed once the rail's 自动化 entry became the single
+// nav surface for cron, so the rail's #abnav-cron is the load-bearing pin.
 package server
 
 import (
