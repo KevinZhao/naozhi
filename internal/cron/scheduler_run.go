@@ -1196,7 +1196,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 	// consumed too much of the budget — folding jitter (default up to 30s)
 	// into that measurement triggers false positives on healthy jobs whose
 	// schedule landed unlucky in the jitter window.
-	spawnStart = time.Now()
+	// R20260607-GO-002: use s.now() so tests can inject a fake clock and
+	// exercise the spawn-budget path without real sleeps.
+	spawnStart = s.now()
 	sess, _, err := s.router.GetOrCreate(a.ctx, a.key, a.opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
