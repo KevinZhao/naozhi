@@ -1316,7 +1316,9 @@ const drainClockRefreshEvery = 16
 // underlying FS is slow on os.Remove.
 func (p *Persister) dropInMemoryLocked(key string) {
 	if w, ok := p.writers[key]; ok {
-		_ = w.close()
+		if err := w.close(); err != nil {
+			slog.Warn("event log persist: close on drop failed", "key", key, "err", err)
+		}
 		delete(p.writers, key)
 	}
 }
