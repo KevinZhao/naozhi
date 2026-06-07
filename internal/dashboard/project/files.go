@@ -978,7 +978,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// to avoid echoing attacker-controlled values into the log stream.
 	if project == publicTmpProject {
 		slog.Info("public_tmp file access",
-			"path", resolved,
+			"path", osutil.SanitizeForLog(resolved, 512),
 			"mode", mode,
 			"remote_addr", r.RemoteAddr)
 	}
