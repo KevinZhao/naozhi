@@ -83,7 +83,11 @@ type batchArena struct {
 // steady-state heap churn (50 events/s × N sessions).
 var entryArenaPool = sync.Pool{
 	New: func() any {
-		return &batchArena{buf: bytes.NewBuffer(make([]byte, 0, 4*1024))}
+		return &batchArena{
+			buf:   bytes.NewBuffer(make([]byte, 0, 4*1024)),
+			owned: make([]Entry, 0, 32),
+			spans: make([]arenaSpan, 0, 32),
+		}
 	},
 }
 
