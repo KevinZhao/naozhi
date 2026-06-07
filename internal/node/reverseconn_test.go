@@ -1000,3 +1000,37 @@ func TestTruncateLabelUTF8(t *testing.T) {
 		})
 	}
 }
+
+// TestReverseConn_RPCError_Sanitized verifies R20260607-SEC-13: a response
+// error string from an inbound RPC message containing bidi/control injection
+// sequences is sanitized before appearing in the returned error.
+func TestReverseConn_RPCError_Sanitized(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	// Respond with an error field containing a bidi-override (U+202E).
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		// Embed bidi-override in the error string.
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Error: "remote error: ‮injected"}) //nolint:errcheck
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := rc.FetchSessions(ctx)
+	if err == nil {
+		t.Fatal("expected error from error response, got nil")
+	}
+	// The bidi-override (U+202E) must have been stripped by SanitizeForLog.
+	if strings.ContainsRune(err.Error(), '‮') {
+		t.Errorf("error still contains bidi-override rune: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "remote error") {
+		t.Errorf("expected 'remote error' in message, got: %q", err.Error())
+	}
+}
