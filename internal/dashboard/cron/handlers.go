@@ -681,7 +681,7 @@ type Handlers struct {
 	// now.In(loc).Zone() still flips across DST transitions, so the cache
 	// is keyed on (locName, offset) — NOT on loc.String() alone — to stay
 	// correct across DST boundaries. R103901-PERF-10.
-	tzLabelMu     sync.Mutex
+	tzLabelMu     sync.RWMutex
 	tzLabelLoc    string
 	tzLabelOffset int
 	tzLabelCached string
@@ -1663,6 +1663,17 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 // transitions, so keying on the offset (not locName alone) keeps the label
 // correct across DST boundaries. R103901-PERF-10.
 func (h *Handlers) cachedTZLabel(locName string, offset int) string {
+	// Fast path: read-lock for the ≈100% cache-hit case (DST flips are rare).
+	h.tzLabelMu.RLock()
+	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
+		cached := h.tzLabelCached
+		h.tzLabelMu.RUnlock()
+		return cached
+	}
+	h.tzLabelMu.RUnlock()
+
+	// Slow path: write-lock with double-check so two concurrent misses do not
+	// both recompute (rare, but correctness requires it).
 	h.tzLabelMu.Lock()
 	defer h.tzLabelMu.Unlock()
 	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
