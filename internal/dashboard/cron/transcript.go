@@ -1006,6 +1006,9 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		if isJSONNull(input) {
 			input = nil
 		}
+		// R20260607-SEC-8 (#1914): redact secrets in the raw Input JSON so
+		// credentials a cron job read into a tool call don't leak verbatim.
+		input = redactToolInput(input)
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
 			Kind:      "tool_use",
@@ -1167,6 +1170,29 @@ trail:
 	}
 compare:
 	return len(b) == 4 && b[0] == 'n' && b[1] == 'u' && b[2] == 'l' && b[3] == 'l'
+}
+
+// redactToolInput strips well-known secret tokens (API keys, passwords, …)
+// out of the raw tool_use.Input JSON before it reaches the wire.
+//
+// R20260607-SEC-8 (#1914): summariseToolInput's one-line Summary already runs
+// through sanitizeWireText (→ RedactSecrets), but the full Input RawMessage
+// surfaced verbatim — a cron job that read a file containing credentials would
+// echo them back in the transcript response's `input` field. RedactSecrets is
+// JSON-safe here: it only swaps secret-token runs (which never contain JSON
+// structural bytes) for the shorter literal "[REDACTED]", so the JSON shape is
+// preserved and re-encoding is unnecessary. Returns the input unchanged when
+// nothing matched (RedactSecrets aliases clean strings) so the common path
+// pays only a single prefix scan.
+func redactToolInput(in json.RawMessage) json.RawMessage {
+	if len(in) == 0 {
+		return in
+	}
+	redacted := textutil.RedactSecrets(string(in))
+	if redacted == string(in) {
+		return in
+	}
+	return json.RawMessage(redacted)
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
