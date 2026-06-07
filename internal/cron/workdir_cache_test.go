@@ -246,6 +246,82 @@ func TestWorkDirReachableCached_NilSchedulerSafe(t *testing.T) {
 	}
 }
 
+// TestWorkDirResolveUnderRootCached_TTLDrivenByInjectedClock pins
+// R050103P-ALLOC-2 (#1909): the cached resolve reads its clock through the
+// injectable s.now() seam, so a fake step clock can advance past
+// workDirResolveCacheTTL to force a re-resolve WITHOUT a real sleep. A
+// regression that reverted to time.Now() would ignore the fake clock: the
+// removed-workspace second call would keep returning the stale cached positive
+// because real wall-clock barely advanced, so the assertion below (re-resolve
+// after the clock jumps past TTL → ok=false) would fail.
+func TestWorkDirResolveUnderRootCached_TTLDrivenByInjectedClock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workDir := filepath.Join(root, "child")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rootResolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
+	clk := &fakeClock{now: time.Date(2026, 6, 7, 5, 0, 0, 0, time.UTC)}
+	s := &Scheduler{
+		allowedRoot:         root,
+		allowedRootResolved: rootResolved,
+		clock:               clk,
+	}
+	expected, _ := filepath.EvalSymlinks(workDir)
+	if resolved, ok := s.workDirResolveUnderRootCached(workDir); !ok || resolved != expected {
+		t.Fatalf("warm call: resolved=%q ok=%v want=%q ok=true", resolved, ok, expected)
+	}
+	// Remove the workspace so a re-resolve would now answer ok=false.
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	// Within TTL (fake clock unchanged): cached positive is reused.
+	if _, ok := s.workDirResolveUnderRootCached(workDir); !ok {
+		t.Fatalf("within TTL via fake clock: ok=false, want cached ok=true")
+	}
+	// Step the fake clock just past the TTL — no real sleep. The cached entry
+	// must now be treated as expired and re-resolved against the (now missing)
+	// workspace, yielding ok=false.
+	clk.set(clk.Now().Add(workDirResolveCacheTTL + time.Second))
+	if _, ok := s.workDirResolveUnderRootCached(workDir); ok {
+		t.Fatalf("after fake clock advanced past TTL: ok=true, want re-resolve ok=false")
+	}
+}
+
+// TestWorkDirReachableCached_TTLDrivenByInjectedClock is the sibling of the
+// resolve test for the reachability cache: it proves workDirReachableCached
+// also drives its TTL through s.now() so a fake step clock expires the cached
+// positive without a real sleep. R050103P-ALLOC-2 (#1909).
+func TestWorkDirReachableCached_TTLDrivenByInjectedClock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workDir := filepath.Join(root, "child")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	clk := &fakeClock{now: time.Date(2026, 6, 7, 5, 0, 0, 0, time.UTC)}
+	s := &Scheduler{clock: clk}
+	if !s.workDirReachableCached(workDir) {
+		t.Fatalf("warm call: reachable=false, want true")
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	// Within TTL: cached positive reused despite the directory being gone.
+	if !s.workDirReachableCached(workDir) {
+		t.Fatalf("within TTL via fake clock: reachable=false, want cached true")
+	}
+	// Step past TTL with the fake clock: must re-stat and now answer false.
+	clk.set(clk.Now().Add(workDirResolveCacheTTL + time.Second))
+	if s.workDirReachableCached(workDir) {
+		t.Fatalf("after fake clock advanced past TTL: reachable=true, want re-stat false")
+	}
+}
+
 // BenchmarkWorkDirResolveUnderRootCached approximates the syscall savings
 // the cache delivers. Cached path is a sync.Map.Load + time.Now compare;
 // uncached path is an EvalSymlinks chain (Lstat+Readlink per component).
