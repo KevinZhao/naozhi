@@ -561,3 +561,10 @@
 - [R20260607-LOGIC-3] UpdateJob 中 applyTo(j) 先于 *upd.Schedule!=j.Schedule 比较，future-proof 隐患（applyTo 当前不改 Schedule）— internal/cron/scheduler_jobs.go:724
 - [R20260607-SEC-15] handleDashboard CSP script-src 仍含 unsafe-inline，待 strict-dynamic+nonce 迁移（已有 tracking 注释）— internal/server/routes.go:504
 - [R20260607-PERF-9] Snapshot() 每次 5 次 loadAtomicString barrier，>200 session 才显著 — internal/session/managed_query.go:194
+
+## cron-cr-20260607 (5-reviewer 全面 review)
+- [R20260607-GO-001] StartContext 在 Start() 失败时 watcher goroutine 可能驻留(需 ctx 长生命周期才触发,假设性) — internal/cron/scheduler.go:624
+- [R20260607-GO-002] telemetry 用 atomic.Pointer[Broadcaster] 指向接口,当前 SetTelemetry 已防护 nil-interface,未来脆弱 — internal/cron/scheduler_callbacks.go:83
+- [R20260607-CORR-7] redactPathsBuilderPool defer 超 cap 早返回未 Reset,backing array 留旧串到 GC(无数据外泄) — internal/cron/scheduler_finish.go:930
+- [R20260607-SEC-C3] wshub_send.go:229 dashboard interrupt 用 slog.Info 记 key,高频可降 Debug — internal/server/wshub_send.go:229
+- [R20260607-PERF-10] workDirResolveCache.store 过 cap 分支二次 count.Load 冗余(单 ticker goroutine 无并发改) — internal/cron/scheduler_workdir.go:148
