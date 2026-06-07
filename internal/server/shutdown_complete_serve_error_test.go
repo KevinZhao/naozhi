@@ -53,7 +53,6 @@ func TestShutdownComplete_ClosesOnServeError(t *testing.T) {
 		}
 		return &errAcceptListener{Listener: real, err: fatalAccept}, nil
 	}
-	t.Cleanup(func() { listenTCP = prev })
 
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{Addr: "127.0.0.1:0", Router: router})
@@ -65,11 +64,28 @@ func TestShutdownComplete_ClosesOnServeError(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Start(ctx) }()
 
+	// Restore listenTCP only after the Start goroutine has returned, never
+	// from cleanup while Start is still reading the package global at
+	// server.go:808 — that overlap was the reported data race. The bounded
+	// wait keeps a hung Start from deadlocking the test binary; on that
+	// (already-failed) path we intentionally leave the global injected
+	// rather than write it concurrently with the live Start read.
+	defer func() {
+		select {
+		case <-errCh:
+			listenTCP = prev
+		case <-time.After(2 * time.Second):
+		}
+	}()
+
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, fatalAccept) {
 			t.Fatalf("Start error = %v, want wrap of %v", err, fatalAccept)
 		}
+		// Re-deposit so the deferred restore observes the completed Start
+		// and safely restores the package global after the goroutine exited.
+		errCh <- err
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after Serve errored — serveCtx was never " +
 			"cancelled (R20260531-GO-001 regression)")
