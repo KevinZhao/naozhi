@@ -8,11 +8,10 @@ import (
 )
 
 // TestRouter_Start_Idempotent locks in that Router.Start (the lifecycle
-// hook extracted from NewRouter for R245-ARCH-46 / #906) can be invoked
-// repeatedly without panicking. Production callers invoke it
-// transitively via NewRouter; future refactors that defer Start to a
-// later moment must not regress this contract — re-calling Start after
-// Shutdown, or calling it twice during boot, has to be a no-op shape.
+// hook extracted from NewRouter for R245-ARCH-46 / #906) is idempotent.
+// startBackgroundLifecycle is guarded by startOnce (R20260607-ARCH-1), so
+// multiple Start calls must not spawn redundant orphan sweeps or overwrite
+// r.attachmentTracker (which would leak the first tracker's goroutine).
 func TestRouter_Start_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
 	r := NewRouter(RouterConfig{
@@ -23,13 +22,17 @@ func TestRouter_Start_Idempotent(t *testing.T) {
 	})
 	t.Cleanup(r.Shutdown)
 
-	// NewRouter already invoked Start once via startBackgroundLifecycle.
-	// A second explicit Start must not panic. Exact semantics (whether a
-	// second sweep goroutine is scheduled) are deliberately unspecified
-	// at this level — callers that want stricter "exactly-once" wiring
-	// should layer their own gate on top.
+	// NewRouter already consumed startOnce via startBackgroundLifecycle.
+	// Capture the tracker pointer installed at construction time.
+	trackerAfterNew := r.attachmentTracker
+
+	// Subsequent Start calls must be no-ops: startOnce.Do skips the body.
 	r.Start(context.Background())
 	r.Start(context.Background())
+
+	if r.attachmentTracker != trackerAfterNew {
+		t.Error("Start called multiple times overwrote attachmentTracker — startOnce guard not working (R20260607-ARCH-1)")
+	}
 }
 
 // TestRouter_Start_NoEventLogDir verifies that Start is safe to call

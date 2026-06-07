@@ -1154,6 +1154,11 @@ func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(str
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("persist: parallelFsync worker panic", "panic", r)
+				}
+			}()
 			for {
 				i := idx.Add(1) - 1
 				if i >= int64(n) {
@@ -1311,7 +1316,9 @@ const drainClockRefreshEvery = 16
 // underlying FS is slow on os.Remove.
 func (p *Persister) dropInMemoryLocked(key string) {
 	if w, ok := p.writers[key]; ok {
-		_ = w.close()
+		if err := w.close(); err != nil {
+			slog.Warn("event log persist: close on drop failed", "key", key, "err", err)
+		}
 		delete(p.writers, key)
 	}
 }
