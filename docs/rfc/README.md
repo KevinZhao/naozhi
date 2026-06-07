@@ -49,6 +49,7 @@
 | [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（待评审） | 2026-06-04 | #1738：自更新二进制加密签名（cosign keyless vs 自管 ed25519）；须先评审密钥信任模型，本轮不落地 |
 | [dashboard-csp-strict.md](dashboard-csp-strict.md) | Draft v1（待评审） | 2026-06-04 | #1734/#922：dashboard CSP 去 unsafe-inline（nonce/strict-dynamic）；前端+CSP+鉴权联动 high risk，须先评审 |
 | [router-god-object-split.md](router-god-object-split.md) | Draft v1（待评审） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）；纯设计本轮不落地 |
+| [session-catalog-boundary.md](session-catalog-boundary.md) | Draft v1（待评审） | 2026-06-07 | #577：router-god-object-split §8.4 P7 的 follow-up。核实 discovery↔sysession 零互相 import、catalog 不同维度（外部进程发现 vs 内置 daemon）、Summary 双来源是物理必然；真实双视角在 discovery↔Router 已由 DiscoveryExcludeIDs/Takeover/双端点缝合。建议关闭 #577（无消费者，避免重蹈 #1600 覆辙），不引入统一 catalog 抽象 |
 | [lifecycle-policy-and-naming.md](lifecycle-policy-and-naming.md) | Draft v1（待评审） | 2026-06-04 | #870/#463/#729：lifecycle policy 接口（须等 restart RFC）/ Get*Fetch*Load* 165处 rename ADR / AutoTitler 持久进程（撞 SharedCLI 决策）；均须先评审 |
 
 ## 已废弃 / 已被取代
