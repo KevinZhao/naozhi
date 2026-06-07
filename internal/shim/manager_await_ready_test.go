@@ -122,6 +122,33 @@ func TestAwaitReady_Timeout(t *testing.T) {
 	}
 }
 
+// TestAwaitReady_ShimErrorSanitized verifies R20260607-SEC-4: a ready.Error
+// containing bidi/control injection sequences is sanitized before it appears
+// in the returned error string.
+func TestAwaitReady_ShimErrorSanitized(t *testing.T) {
+	t.Parallel()
+	r, w := makePipe(t)
+	// Embed a bidi-override (U+202E) and a C1 control (U+0080) in the message.
+	injected := "bad‮injectedend"
+	go func() {
+		line := `{"status":"error","error":"` + injected + `"}` + "\n"
+		_, _ = w.Write([]byte(line))
+		_ = w.Close()
+	}()
+
+	_, err := awaitReady(context.Background(), r, 2*time.Second)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "‮") {
+		t.Errorf("sanitized error still contains injection runes: %q", msg)
+	}
+	if !strings.Contains(msg, "shim startup failed") {
+		t.Errorf("expected 'shim startup failed' prefix, got: %q", msg)
+	}
+}
+
 func TestAwaitReady_ContextCancel(t *testing.T) {
 	t.Parallel()
 	r, _ := makePipe(t) // never writes

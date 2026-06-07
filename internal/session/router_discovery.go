@@ -171,6 +171,25 @@ func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
 	return s.EventEntries()
 }
 
+// EventEntriesForKeyAppend is the buffer-reusing variant of EventEntriesForKey:
+// it appends the keyed session's event log onto dst and returns the grown slice,
+// or dst unchanged when the key is unknown. Callers that scan many keys in a
+// loop (AutoTitler's per-tick rename batch, startup discovery) can pass a single
+// dst[:0] buffer so the common case appends into existing capacity instead of
+// allocating a fresh ~120 KB slice per session. R20260607-PERF-6 (#1885).
+//
+// Ownership matches ManagedSession.EventEntriesAppend: the caller must not
+// retain dst across calls; the returned slice shares dst's backing array.
+func (r *Router) EventEntriesForKeyAppend(dst []cli.EventEntry, key string) []cli.EventEntry {
+	r.mu.RLock()
+	s := r.ss.sessions[key]
+	r.mu.RUnlock()
+	if s == nil {
+		return dst
+	}
+	return s.EventEntriesAppend(dst)
+}
+
 // InterruptSession sends SIGINT to the CLI process for the given session key.
 // Returns true if the session was found and interrupted.
 //

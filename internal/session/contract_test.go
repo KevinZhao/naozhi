@@ -40,7 +40,7 @@ import (
 // session.AgentOpts / *session.ManagedSession, so *session.Router no
 // longer satisfies it directly. The cmd/naozhi adapter
 // (cronRouterAdapter) bridges the two; the round-trip test for that
-// adapter lives in cmd/naozhi/cron_router_adapter_test.go.
+// adapter lives in internal/wireup/cron_router_adapter_test.go.
 var (
 	_ dispatch.SessionRouter = (*session.Router)(nil)
 	_ server.HubRouter       = (*session.Router)(nil)

@@ -89,13 +89,22 @@ func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 // caller can detect the asymmetric-canonicalisation hazard rather than
 // silently falling back to an unsound lexical prefix check against a
 // resolved root. R20260531070014-SEC-6 (#1533).
+//
+// R20260607-SEC-11 (#1891): the parent walk is bounded by maxAncestorDepth so
+// an authenticated caller cannot drive O(depth) EvalSymlinks syscalls per
+// agent-transcript request with a pathologically deep JSONLPath (e.g. 500
+// nested components). Legitimate workspace transcript paths sit only a handful
+// of components below the allowed root, so a 64-level cap never trips on real
+// input; hitting the cap returns (abs, false) — the same unresolved verdict as
+// reaching the filesystem root — so the caller rejects the asymmetric compare.
 func resolveExistingAncestor(abs string) (string, bool) {
+	const maxAncestorDepth = 64
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		return resolved, true
 	}
 	parent := abs
 	tail := ""
-	for {
+	for depth := 0; depth < maxAncestorDepth; depth++ {
 		next := filepath.Dir(parent)
 		if next == parent {
 			// Hit filesystem root without finding an existing ancestor;
@@ -114,4 +123,7 @@ func resolveExistingAncestor(abs string) (string, bool) {
 			return filepath.Join(resolved, tail), true
 		}
 	}
+	// Walked maxAncestorDepth parents without resolving any; treat the same
+	// as hitting the filesystem root — return cleaned input, unresolved.
+	return abs, false
 }

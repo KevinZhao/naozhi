@@ -864,11 +864,10 @@ func TestRunStore_ListHonoursConfiguredKeepCount(t *testing.T) {
 }
 
 // newEntryFromRows builds a warm recentCacheEntry whose ring is seeded
-// from rows (newest-first). appendsSinceTrim sets the bookkeeping
-// counter for skipAppendTrim test cases. Pure test helper for R242-GO-8
-// — production code seeds via ringSeed inside warmCache.
-func newEntryFromRows(rows []CronRunSummary, appendsSinceTrim int) *recentCacheEntry {
-	e := &recentCacheEntry{warm: true, appendsSinceTrim: appendsSinceTrim}
+// from rows (newest-first). Pure test helper for R242-GO-8 — production
+// code seeds via ringSeed inside warmCache.
+func newEntryFromRows(rows []CronRunSummary) *recentCacheEntry {
+	e := &recentCacheEntry{warm: true}
 	// Cap the ring to len(rows) at minimum so iteration works; production
 	// uses keepCount, but skipAppendTrim only reads count and ringRead
 	// which both honour cap(ring).
@@ -888,9 +887,9 @@ func newEntryFromRows(rows []CronRunSummary, appendsSinceTrim int) *recentCacheE
 // to the heuristic cannot silently regress.
 //
 // Each case constructs a minimal *runStore + recentCacheEntry directly (no
-// disk I/O) and asserts the boolean result, then verifies the
-// appendsSinceTrim bookkeeping side effect that drives the periodic
-// "force one trim every appendTrimBatch" forcing condition.
+// disk I/O) and asserts the boolean result. appendTrimBatch survives only
+// as the capSafe headroom margin; the per-call force-trim counter was
+// removed in R20260607-COR-002 (#1901).
 func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 	now := time.Now()
 
@@ -904,36 +903,30 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 		return newEntryFromRows([]CronRunSummary{
 			{RunID: "a", EndedAt: now.Add(-1 * time.Minute)},
 			{RunID: "b", EndedAt: now.Add(-2 * time.Minute)},
-		}, 0)
+		})
 	}
 
 	cases := []struct {
-		name        string
-		entry       *recentCacheEntry
-		notWarm     bool
-		keepCount   int
-		keepWindow  time.Duration
-		wantSkip    bool
-		wantCounter int // appendsSinceTrim after the call
+		name       string
+		entry      *recentCacheEntry
+		notWarm    bool
+		keepCount  int
+		keepWindow time.Duration
+		wantSkip   bool
 	}{
 		{
-			name:        "cold cache forces full trim",
-			entry:       &recentCacheEntry{warm: false},
-			keepCount:   100,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    false,
-			wantCounter: 0, // not warm: counter untouched (R242-GO-8: cold ring stays nil)
+			name:       "cold cache forces full trim",
+			entry:      &recentCacheEntry{warm: false},
+			keepCount:  100,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   false,
 		},
 		{
-			// R20260527-PERF-24 (#1295): when both cap and window proofs
-			// hold the counter resets — there is no benefit to advancing
-			// toward an inevitable forced scan that will find no work.
-			name:        "warm + headroom + within window: skip",
-			entry:       makeHappyEntry(),
-			keepCount:   100,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    true,
-			wantCounter: 0, // both proofs hold → no need to track drift
+			name:       "warm + headroom + within window: skip",
+			entry:      makeHappyEntry(),
+			keepCount:  100,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   true,
 		},
 		{
 			name: "near keepCount cap: do not skip",
@@ -944,50 +937,44 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
 				}
 				return r
-			}(), 0),
-			keepCount:   15,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    false,
-			wantCounter: 0, // forced trim resets counter
+			}()),
+			keepCount:  15,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   false,
 		},
 		{
 			name: "oldest row beyond keepWindow: do not skip",
 			entry: newEntryFromRows([]CronRunSummary{
 				{RunID: "a", EndedAt: now.Add(-30 * time.Second)},
 				{RunID: "b", EndedAt: now.Add(-2 * time.Hour)}, // older than keepWindow
-			}, 0),
-			keepCount:   100,
-			keepWindow:  1 * time.Hour, // cutoff = now-1h, oldest at now-2h is older
-			wantSkip:    false,
-			wantCounter: 0,
+			}),
+			keepCount:  100,
+			keepWindow: 1 * time.Hour, // cutoff = now-1h, oldest at now-2h is older
+			wantSkip:   false,
 		},
 		{
-			// R20260527-PERF-24 (#1295): when cap+window are both safe the
-			// appendTrimBatch boundary no longer forces a disk scan — the
-			// scan would find nothing to evict, so paying ReadDir+Stat
-			// every 10 calls was pure overhead. Counter resets so we
-			// don't accumulate phantom drift toward a forced no-op scan.
-			name:        "appendTrimBatch reached but cache clean: still skip",
-			entry:       newEntryFromRows([]CronRunSummary{{EndedAt: now}}, appendTrimBatch-1),
-			keepCount:   100,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    true,
-			wantCounter: 0, // both proofs hold → reset, no force trim
+			// R20260527-PERF-24 (#1295): cap+window both safe → skip, even
+			// though count is small. The old per-call force-trim counter
+			// would have paid ReadDir+Stat periodically with nothing to
+			// evict; it was removed in R20260607-COR-002 (#1901).
+			name:       "small clean cache: skip",
+			entry:      newEntryFromRows([]CronRunSummary{{EndedAt: now}}),
+			keepCount:  100,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   true,
 		},
 		{
-			// Boundary still forces a trim when window proof fails — the
-			// reason for the periodic forcing was age-based eviction for
-			// jobs that never approach keepCount; that behaviour is
-			// preserved when the cache cannot prove safety.
-			name: "appendTrimBatch reached + oldest beyond window: force trim",
+			// Window proof fails → do not skip, regardless of count. The
+			// reason for trimming here is age-based eviction for jobs that
+			// never approach keepCount.
+			name: "oldest beyond window (clean cap): do not skip",
 			entry: newEntryFromRows([]CronRunSummary{
 				{EndedAt: now.Add(-30 * time.Second)},
 				{EndedAt: now.Add(-2 * time.Hour)},
-			}, appendTrimBatch-1),
-			keepCount:   100,
-			keepWindow:  1 * time.Hour,
-			wantSkip:    false,
-			wantCounter: 0,
+			}),
+			keepCount:  100,
+			keepWindow: 1 * time.Hour,
+			wantSkip:   false,
 		},
 		{
 			// R090031-CR-3: capSafe used < instead of <=; when
@@ -999,11 +986,10 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 				// keepCount=10, appendTrimBatch=10 → count=0: 0+10==10 → capSafe
 				r := make([]CronRunSummary, 0)
 				return r
-			}(), 0),
-			keepCount:   appendTrimBatch,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    true,
-			wantCounter: 0,
+			}()),
+			keepCount:  appendTrimBatch,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   true,
 		},
 		{
 			// count+appendTrimBatch exactly == keepCount with rows present.
@@ -1016,11 +1002,10 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i+1) * time.Minute)}
 				}
 				return r
-			}(), 0),
-			keepCount:   15,
-			keepWindow:  24 * time.Hour,
-			wantSkip:    true,
-			wantCounter: 0,
+			}()),
+			keepCount:  15,
+			keepWindow: 24 * time.Hour,
+			wantSkip:   true,
 		},
 	}
 
@@ -1040,10 +1025,6 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
-			}
-			if tc.entry.appendsSinceTrim != tc.wantCounter {
-				t.Errorf("appendsSinceTrim = %d, want %d",
-					tc.entry.appendsSinceTrim, tc.wantCounter)
 			}
 		})
 	}

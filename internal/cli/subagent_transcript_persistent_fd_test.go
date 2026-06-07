@@ -145,6 +145,110 @@ func TestTranscriptReader_Close_Idempotent(t *testing.T) {
 	}
 }
 
+// TestTranscriptReader_GrowingFile_ReusesFdWithoutReopen pins
+// R20260607-PERF-3 (#1884): on the steady-state path (a live fd that just
+// yielded fresh bytes) openOrReuse must reuse the cached fd with no reopen —
+// the per-poll os.Stat(r.path) rotation probe only fires on a zero-byte poll.
+// We assert the fd pointer is stable as the file grows across polls.
+func TestTranscriptReader_GrowingFile_ReusesFdWithoutReopen(t *testing.T) {
+	t.Parallel()
+	mk := func(i int) string {
+		return `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"line` +
+			string(rune('0'+i)) + `"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:0` +
+			string(rune('0'+i)) + `Z"}` + "\n"
+	}
+	path := tmpFile(t, mk(0))
+	r := NewTranscriptReader(path)
+	defer r.Close() //nolint:errcheck
+
+	if _, err := r.Read(0, 100); err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	r.mu.Lock()
+	fd := r.f
+	r.mu.Unlock()
+	if fd == nil {
+		t.Fatal("expected r.f populated")
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	defer f.Close() //nolint:errcheck
+
+	for i := 1; i <= 5; i++ {
+		if _, err := f.WriteString(mk(i)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		ents, err := r.Tail()
+		if err != nil {
+			t.Fatalf("Tail %d: %v", i, err)
+		}
+		if len(ents) != 1 {
+			t.Fatalf("Tail %d: got %d entries, want 1", i, len(ents))
+		}
+		r.mu.Lock()
+		got := r.f
+		r.mu.Unlock()
+		if got != fd {
+			t.Fatalf("Tail %d reopened fd (%p→%p); growing file must reuse the cached fd", i, fd, got)
+		}
+	}
+}
+
+// TestTranscriptReader_IdlePollThenRotation pins the rotation-after-idle
+// branch of R20260607-PERF-3 (#1884): an idle (zero-byte) poll re-probes the
+// inode via reprobeRotation, so a rm+create that lands while the reader is
+// idle is still detected and the new content surfaced.
+func TestTranscriptReader_IdlePollThenRotation(t *testing.T) {
+	t.Parallel()
+	line1 := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
+	line2 := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:01Z"}`
+	path := tmpFile(t, line1+"\n")
+	r := NewTranscriptReader(path)
+	defer r.Close() //nolint:errcheck
+
+	if ents, err := r.Read(0, 100); err != nil || len(ents) != 1 {
+		t.Fatalf("first Read: ents=%+v err=%v", ents, err)
+	}
+
+	// Idle poll: no new bytes, no rotation. Must return empty and NOT reopen.
+	r.mu.Lock()
+	fdBefore := r.f
+	r.mu.Unlock()
+	if ents, err := r.Tail(); err != nil || len(ents) != 0 {
+		t.Fatalf("idle Tail: ents=%+v err=%v, want empty", ents, err)
+	}
+	r.mu.Lock()
+	fdAfterIdle := r.f
+	r.mu.Unlock()
+	if fdAfterIdle != fdBefore {
+		t.Fatalf("idle poll with no rotation must not reopen fd (%p→%p)", fdBefore, fdAfterIdle)
+	}
+
+	// Now rotate: rm + create with new content.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(line2+"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	ents, err := r.Tail()
+	if err != nil {
+		t.Fatalf("post-rotation Tail: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Summary != "new" {
+		t.Fatalf("post-rotation Tail = %+v, want [{new}]", ents)
+	}
+	r.mu.Lock()
+	fdAfterRot := r.f
+	r.mu.Unlock()
+	if fdAfterRot == fdBefore {
+		t.Error("rotation should swap r.f to a new fd")
+	}
+}
+
 // TestTranscriptReader_PersistentFd_ENOENTPath verifies that when the path
 // is missing the call returns os.IsNotExist-classifiable err and clears any
 // cached fd, so the next call after the file reappears reopens cleanly

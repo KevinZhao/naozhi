@@ -556,3 +556,32 @@
 - [R20260606-SEC-12] memory handler 构造期 os.Getwd 固定 currentProject 非 session workspace — internal/memory/handler.go:166
 - [R20260606-PERF-13] storeAtomicString 每事件堆分配 string header — internal/cli/eventlog_append.go:167
 - [R20260606-PERF-14] drainInChannel 首批仍无条件调 time.Now — internal/eventlog/persist/persister.go:1157
+- [R20260607-GO-005] knownSessionsCache.publish 用 time.Now 而非可注入时钟，TTL 测试需 sleep — internal/cron/scheduler_session_cache.go:74
+- [R20260607-GO-015] runStore.Append 首次 json.Marshal 失败仅 slog.Warn 不 bump historyDropTotal（CronRun 几无 marshal 失败可能）— internal/cron/runstore.go:506
+- [R20260607-LOGIC-3] UpdateJob 中 applyTo(j) 先于 *upd.Schedule!=j.Schedule 比较，future-proof 隐患（applyTo 当前不改 Schedule）— internal/cron/scheduler_jobs.go:724
+- [R20260607-SEC-15] handleDashboard CSP script-src 仍含 unsafe-inline，待 strict-dynamic+nonce 迁移（已有 tracking 注释）— internal/server/routes.go:504
+- [R20260607-PERF-9] Snapshot() 每次 5 次 loadAtomicString barrier，>200 session 才显著 — internal/session/managed_query.go:194
+
+## cron-cr-20260607 (5-reviewer 全面 review)
+- [R20260607-GO-001] StartContext 在 Start() 失败时 watcher goroutine 可能驻留(需 ctx 长生命周期才触发,假设性) — internal/cron/scheduler.go:624
+- [R20260607-GO-002] telemetry 用 atomic.Pointer[Broadcaster] 指向接口,当前 SetTelemetry 已防护 nil-interface,未来脆弱 — internal/cron/scheduler_callbacks.go:83
+- [R20260607-CORR-7] redactPathsBuilderPool defer 超 cap 早返回未 Reset,backing array 留旧串到 GC(无数据外泄) — internal/cron/scheduler_finish.go:930
+- [R20260607-SEC-C3] wshub_send.go:229 dashboard interrupt 用 slog.Info 记 key,高频可降 Debug — internal/server/wshub_send.go:229
+- [R20260607-PERF-10] workDirResolveCache.store 过 cap 分支二次 count.Load 冗余(单 ticker goroutine 无并发改) — internal/cron/scheduler_workdir.go:148
+- [R050103S-PPROF-1] pprof 403 body "set a dashboard token to enable profiling" 暴露配置机制（loopback-gated，fingerprint 风险低）— internal/server/debug_pprof.go:69
+- [R050103G-SEC-1] NodeConfig/UpstreamConfig 仅 slog.LogValuer 防泄漏，fmt.Sprintf("%+v") 仍漏 Token（当前无 fmt 调用点，防未来）— internal/config/config.go:120
+- [R050103G-BUG-1] subagent_transcript openOrReuse 快路径非零字节读绕过 reprobeRotation（依赖 writer 停止追加不变量，无实际 trigger）— internal/cli/subagent_transcript.go:94
+- [R050103C-BUG-2] runStore.Append preflight_bytes 在 slog.Warn 重算 len 和（post-marshal gate 已兜底正确，微开销）— internal/cron/runstore.go:479
+- [R050103C-CORR-9] static_split_view_test 用 strings.Contains 而非结构唯一性，注释中 token 可假性满足（项目既定 contract-test 模式）— internal/server/static_split_view_test.go:42
+- [R20260607-SEC-6] serveRender CSP script-src 含冗余 data:（'unsafe-inline' 已覆盖内联）— internal/dashboard/project/files.go:1236
+- [R20260607-SEC-10] sensitiveNameSubstrings 含 "token" 误伤 tokenizer.py/token_parser.go 预览 — internal/dashboard/project/files.go:1613
+- [R20260607-GO-12] strings.Builder.Reset() 注释错误（称置 nil，实为 buf[:0]）— internal/cron/scheduler_finish.go:933
+- [R20260607-ARCH-6] project.Manager Bind/Unbind/Update in-place mutate 共享 Config，违 copy-on-write 但当前安全 — internal/project/manager.go:232
+- [R20260607-ARCH-7] upstream/dispatch/discovery/cron 各自 SessionRouter 同名异形接口，新人易混 — internal/cron/scheduler_config.go:98
+- [R20260607-CODE-001] applyTo 在 Schedule 比较前 mutate j，今天正确但 fragile，未来若把 Schedule 加入 applyTo 会静默破坏 re-registrati — internal/cron/scheduler_jobs.go:722
+- [R20260607-ARCH-5b] configMapsPtr atomic.Pointer 是为不存在的 hot-reload writer 准备的投机基础设施，应降级为不可变字段直到 writer 落地 — internal/cron/scheduler.go:125
+- [R20260607-ARCH-8] StopPolicyForceExit 是 doc-only 常量无人读，cron 侧缺对应常量，看似 typed-policy 实则未接线 — internal/sysession/manager.go:49
+- [R20260607-GO-010] parallelFsyncWorkers 是 package-level mutable var，并行 test 间可能 race（生产无并发改写，仅测试 seam）— internal/eventlog/persist/persister.go:1106
+- [R20260607-GO-014] redactAddrIPv6Re 字符类 [0-9a-fA-F:] 会误匹配 [bad:1] 等 hex-looking 括号 token，可能过度 redact — internal/cron/scheduler_finish.go:788
+- [R20260607-GO-005] heartbeatLoop 新建 pongTimer 后立即 Stop 冗余（freshly-created 无 pending tick），Go1.26 下无害 — internal/cli/process_readloop.go:921
+- [R20260607-SEC-12] buildShimArgs --cwd 经 exec.Command execve 直传无 shell 注入风险（已 validateWorkspace），false-positive — internal/shim/manager.go:342

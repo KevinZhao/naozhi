@@ -23,18 +23,18 @@ func TestObserveSuccessLatency_SlowCounterFires(t *testing.T) {
 	snap := jobSnapshot{jobID: "job-slow"}
 	res := SendResult{Text: "ok", SessionID: "s1"}
 
-	// Slow run: startedAt well before now with a tiny threshold → counter +1.
+	// Slow run: elapsed well over threshold → counter +1.
 	s := &Scheduler{slowThreshold: time.Millisecond}
 	before := metrics.CronExecutionSlowTotal.Value()
-	s.observeSuccessLatency(time.Now().Add(-50*time.Millisecond), res, snap, lg)
+	s.observeSuccessLatency(50*time.Millisecond, res, snap, lg)
 	if got := metrics.CronExecutionSlowTotal.Value() - before; got != 1 {
 		t.Errorf("slow run: CronExecutionSlowTotal delta = %d, want 1", got)
 	}
 
-	// Fast run: startedAt = now with a large threshold → no increment.
+	// Fast run: elapsed 0 with a large threshold → no increment.
 	sFast := &Scheduler{slowThreshold: time.Hour}
 	before = metrics.CronExecutionSlowTotal.Value()
-	sFast.observeSuccessLatency(time.Now(), res, snap, lg)
+	sFast.observeSuccessLatency(0, res, snap, lg)
 	if got := metrics.CronExecutionSlowTotal.Value() - before; got != 0 {
 		t.Errorf("fast run: CronExecutionSlowTotal delta = %d, want 0", got)
 	}
@@ -50,8 +50,8 @@ func TestObserveSuccessLatency_DefaultThreshold(t *testing.T) {
 
 	s := &Scheduler{slowThreshold: 0} // unset → defaultCronSlowThreshold
 	before := metrics.CronExecutionSlowTotal.Value()
-	// A run that completes "now" is far under the default threshold.
-	s.observeSuccessLatency(time.Now(), res, snap, lg)
+	// elapsed = 0 is far under the default threshold.
+	s.observeSuccessLatency(0, res, snap, lg)
 	if got := metrics.CronExecutionSlowTotal.Value() - before; got != 0 {
 		t.Errorf("default-threshold fast run: CronExecutionSlowTotal delta = %d, want 0", got)
 	}

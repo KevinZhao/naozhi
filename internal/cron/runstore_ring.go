@@ -29,11 +29,6 @@ type recentCacheEntry struct {
 	// count is the populated length (0 ≤ count ≤ cap(ring)).
 	count int
 	warm  bool // false until first warm() pass; List/Recent will lazy-warm
-	// appendsSinceTrim counts Append calls since the last full trimJobLocked
-	// pass. Used by skipAppendTrim to batch ReadDir-driven trims when the
-	// cache shows we're well under keepCount. Reset to 0 by Append after
-	// calling trimJobLocked. R232-PERF-8.
-	appendsSinceTrim int
 	// runIDs is the set of RunIDs currently present in the ring. cacheHeadPush
 	// consults it for an O(1) duplicate check instead of an O(count) linear
 	// ring scan on every Append (#1517). It is maintained in lockstep with the
