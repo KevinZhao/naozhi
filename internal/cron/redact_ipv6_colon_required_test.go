@@ -46,6 +46,19 @@ func TestRedactAddrInCronError_IPv6ColonRequired(t *testing.T) {
 			"got [:] in stream",
 			"got [:] in stream",
 		},
+		// R20260607-CORR-004: single-hex + single-colon token [a:] and
+		// single-colon tokens like [a:b] are NOT valid IPv6 addresses and
+		// must not be over-redacted.
+		{
+			"hex plus single trailing colon not redacted",
+			"flag [a:] unknown",
+			"flag [a:] unknown",
+		},
+		{
+			"single colon hex:hex token not redacted",
+			"see [a:b] in output",
+			"see [a:b] in output",
+		},
 		// Positive: real IPv6 still redacted.
 		{
 			"ipv6 loopback redacted",

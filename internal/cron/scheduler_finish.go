@@ -599,10 +599,6 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 // between capture and rollback; naming it JobState ties that work to the
 // god-struct split tracker.
 //
-// jobResultSnapshot is kept as an alias so the existing capture/rollback
-// call sites and the tests pinning the round-trip contract compile
-// unchanged.
-//
 // restore re-applies the captured values to j; caller MUST hold s.mu so
 // the in-memory state stays serialised against concurrent readers.
 type JobState struct {
@@ -613,11 +609,6 @@ type JobState struct {
 	LastSessionID  string
 	Counters       JobRunCounters
 }
-
-// jobResultSnapshot is the historical name for the runtime-state cluster,
-// retained as an alias of JobState (R238-ARCH-13 / #764) so existing
-// capture / rollback sites and round-trip contract tests keep compiling.
-type jobResultSnapshot = JobState
 
 func (p JobState) restore(j *Job) {
 	j.LastRunAt = p.LastRunAt
@@ -685,8 +676,8 @@ func (j *Job) snapshotResultState() JobState {
 // R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
 // to drop the "P0" review-tag prefix that lost meaning once the dead
 // recordResult path was deleted (R220-GO-1). The rollback state now lives
-// in the named jobResultSnapshot struct above so a future "add a Last*
-// field" diff lands once on the type instead of three coupled edits.
+// in JobState so a future "add a Last* field" diff lands once on the type
+// instead of three coupled edits.
 func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
@@ -810,10 +801,13 @@ var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+
 var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
 
 // ipv6BracketIsAddr reports whether a string matched by redactAddrIPv6Re is a
-// plausible IPv6 literal rather than a degenerate colon-only token like "[:]".
-// It returns true when the bracket body holds at least one hex digit or a "::"
-// compression run. The input is a full match including brackets and optional
-// :port suffix.
+// plausible IPv6 literal rather than a degenerate token like "[:]" or "[a:b]"
+// (which contain a single colon and are not valid IPv6 addresses).
+// A valid IPv6 literal requires either a "::" compression run or at least two
+// colons (the minimum for any real IPv6 segment sequence, e.g. "::1" or
+// "a:b:c"). Single-colon forms like "[a:b]" look like host:port notation and
+// must not be over-redacted. The input is a full match including brackets and
+// optional :port suffix.
 func ipv6BracketIsAddr(match string) bool {
 	end := strings.IndexByte(match, ']')
 	if end < 0 {
@@ -823,10 +817,15 @@ func ipv6BracketIsAddr(match string) bool {
 	if strings.Contains(body, "::") {
 		return true
 	}
+	// Require at least 2 colons: minimum valid IPv6 segment count
+	// (e.g. "a:b:c" has 2 colons; single-colon "[a:b]" is not IPv6).
+	n := 0
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
-			return true
+		if body[i] == ':' {
+			n++
+			if n >= 2 {
+				return true
+			}
 		}
 	}
 	return false

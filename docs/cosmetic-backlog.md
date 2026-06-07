@@ -604,3 +604,9 @@
 - [R090135-PERF-009] batchRecentRuns out slice 未 pool,400B — internal/dashboard/cron/handlers.go:889
 - [R090135-PERF-010] missedScheduleVerdict miss 双 Lock,可 double-checked — internal/dashboard/cron/handlers.go:773
 - [R090135-GO-3] session error errMsg 未在调用点 sanitise,recordTerminalResult 已脱敏(GO-2 修后) — internal/cron/scheduler_run.go:1265
+- [R20260607-SEC-D] EvalSymlinks fallback 在 fs.ErrNotExist 用 raw allowedRoot — 仅目录不存在时触发,无可利用符号链接,假设性 hardening — internal/dashboard/cron/transcript.go:436
+- [R20260607-CORR-003] warmCacheLocked:300 注释称"another goroutine warmed before jobLock"实为不可能,误导未来 reviewer — internal/cron/runstore_cache.go:300
+- [R20260607-CORR-006] setWatchdogInterruptTimeoutForTest 入口断言在隔离运行时被旁路,seam 自测覆盖缺口 — internal/cron/scheduler_watchdog_timeout_seam_test.go:23
+- [R20260607-CORR-007] cacheGet RLock 在 disk-scan 窗口可观察 warm=false 触发 jobLock 重试,缺可观测点(FUSE 多秒 ReadDir) — internal/cron/runstore_cache.go:313
+- [R20260607-LOGIC-001] executeGetSession session-error errMsg 未在 call site 预脱敏(下游 recordTerminalResult 已脱敏),与 send-error 路径不对称,维护债 — internal/cron/scheduler_run.go:1265
+- [R20260607-PERF-011] knownSessionsCache.publish 用 time.Now() 而非注入时钟,测试 TTL 非确定 — internal/cron/scheduler_session_cache.go:74

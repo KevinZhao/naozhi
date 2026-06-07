@@ -132,38 +132,35 @@ func ClassifyError(err error) ErrCode {
 	}
 }
 
+// errCodeHTTP is the authoritative mapping from ErrCode to HTTP status.
+// Adding a new ErrCode constant requires a corresponding entry here;
+// TestErrCodeHTTP_Exhaustive will fail at test time if one is missing.
+var errCodeHTTP = map[ErrCode]int{
+	CodeOK:               http.StatusOK,
+	CodeJobNotFound:      http.StatusNotFound,
+	CodeAmbiguousPrefix:  http.StatusConflict,
+	CodeJobAlreadyPaused: http.StatusConflict,
+	CodeJobNotPaused:     http.StatusConflict,
+	CodeJobPaused:        http.StatusConflict,
+	CodeJobNoPrompt:      http.StatusUnprocessableEntity,
+	CodePersistFailed:    http.StatusInternalServerError,
+	CodeInvalidPrompt:    http.StatusBadRequest,
+	CodePromptAlreadySet: http.StatusConflict,
+	CodeSchedulerStopped: http.StatusServiceUnavailable,
+	CodeUnknown:          http.StatusInternalServerError,
+}
+
 // HTTPStatus returns the HTTP status code dashboard handlers should
 // emit for this ErrCode. Centralising the mapping eliminates the
 // per-handler 6-arm switch documented above. Maps unknown codes to
 // http.StatusInternalServerError so a forgotten case stays observable
 // rather than silently 200ing.
 func (c ErrCode) HTTPStatus() int {
-	switch c {
-	case CodeOK:
-		return http.StatusOK
-	case CodeJobNotFound:
-		return http.StatusNotFound
-	case CodeAmbiguousPrefix,
-		CodeJobAlreadyPaused,
-		CodeJobNotPaused,
-		CodeJobPaused:
-		return http.StatusConflict
-	case CodeJobNoPrompt:
-		return http.StatusUnprocessableEntity
-	case CodePersistFailed:
-		return http.StatusInternalServerError
-	case CodeInvalidPrompt:
-		return http.StatusBadRequest
-	case CodePromptAlreadySet:
-		return http.StatusConflict
-	case CodeSchedulerStopped:
-		return http.StatusServiceUnavailable
-	case CodeUnknown:
-		return http.StatusInternalServerError
-	default:
-		// Forward-compat: a future ErrCode constant added without
-		// extending this switch should default to 500 — surface the
-		// gap rather than silently mapping to 200.
-		return http.StatusInternalServerError
+	if s, ok := errCodeHTTP[c]; ok {
+		return s
 	}
+	// Forward-compat: a future ErrCode constant added without a
+	// corresponding errCodeHTTP entry defaults to 500 — surface the
+	// gap rather than silently mapping to 200.
+	return http.StatusInternalServerError
 }
