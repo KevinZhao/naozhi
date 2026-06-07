@@ -77,12 +77,11 @@ type runInflight struct {
 type runPhase int32
 
 const (
-	phaseUnset      runPhase = 0
-	phaseQueued     runPhase = 1
-	phaseJittering  runPhase = 2
-	phaseSpawning   runPhase = 3
-	phaseSending    runPhase = 4
-	phasePopulating runPhase = phaseUnset
+	phaseUnset     runPhase = 0
+	phaseQueued    runPhase = 1
+	phaseJittering runPhase = 2
+	phaseSpawning  runPhase = 3
+	phaseSending   runPhase = 4
 )
 
 // phaseToString maps the runPhase enum back to the wire string. The
