@@ -558,6 +558,21 @@ async function fetchSessions() {
       const wsConnected = wsm.state === WS_STATES.CONNECTED;
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
         updateMainState(sd.state, sd.death_reason);
+      } else if (sd && wsConnected && sd.state === 'running') {
+        // Self-heal a DROPPED 'running' session_state push. renderSidebar above
+        // always paints the card from the REST snapshot, so the sidebar shows
+        // this selected session as running — but the right-side banner is only
+        // ever flipped to running by the WS push (the block above refuses to
+        // reconcile toward running to avoid banner flicker). If that push was
+        // lost, the sidebar says running while the banner stays idle — the one
+        // left/right desync the push-only rule leaves open. Reconcile toward
+        // running ONLY when the banner is still fully hidden: an already-visible
+        // banner (live activity, or zero-downtime background agents) is left
+        // untouched, so this can't flicker a banner that's correctly showing.
+        const banner = document.getElementById('running-banner');
+        if (banner && banner.style.display === 'none') {
+          updateMainState('running', sd.death_reason);
+        }
       }
     }
     if (selectedKey) updateHeaderCLI();

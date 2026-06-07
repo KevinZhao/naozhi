@@ -131,3 +131,54 @@ func TestDashboardHTML_BannerVisualEmphasis(t *testing.T) {
 		t.Error(".running-dot must layer rb-dot-ripple on top of the existing pulse so the working indicator is unmistakable")
 	}
 }
+
+// TestDashboardJS_PollReconcilesDroppedRunningPush pins the self-heal for the
+// one left/right desync the push-only rule leaves open: when a 'running'
+// session_state WS push is DROPPED, renderSidebar still paints the selected
+// card as running from the REST snapshot, but the right-side banner — which is
+// only ever flipped to running by the push — stays idle. The poll reconcile
+// must recover the banner, but ONLY when it is fully hidden, so a banner that
+// is correctly showing live activity (or zero-downtime background agents) is
+// never flickered by a lagging REST snapshot.
+func TestDashboardJS_PollReconcilesDroppedRunningPush(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Bound the fetchSessions reconcile block so the assertions can't match a
+	// similarly-shaped condition elsewhere.
+	anchor := strings.Index(js, "// Reconcile main area state:")
+	if anchor < 0 {
+		t.Fatal("fetchSessions reconcile block not found")
+	}
+	end := anchor + 2600
+	if end > len(js) {
+		end = len(js)
+	}
+	block := js[anchor:end]
+
+	// The recovery branch must exist and gate on a live WS + running REST state
+	// (the exact condition the finished-direction branch refuses to handle).
+	if !strings.Contains(block, "wsConnected && sd.state === 'running'") {
+		t.Error("poll reconcile must add a branch for (WS connected && REST says running) to recover a dropped running push")
+	}
+	// It must reconcile toward running only when the banner is hidden — an
+	// already-visible banner must be left untouched to avoid flicker and to
+	// preserve the zero-downtime background-agent banner.
+	if !strings.Contains(block, "banner.style.display === 'none'") {
+		t.Error("the dropped-push recovery must fire only when the running-banner is hidden, so a correctly-showing banner is never flickered")
+	}
+	if !strings.Contains(block, "updateMainState('running'") {
+		t.Error("the dropped-push recovery must call updateMainState('running', ...) to bring the right-side banner in sync with the sidebar")
+	}
+
+	// Guard the invariant the recovery must NOT break: the finished-direction
+	// branch still refuses to reconcile toward running over a live WS in the
+	// general case (only the hidden-banner recovery is the exception).
+	if !strings.Contains(block, "sd.state !== 'running' && !sessionOptimisticRunning[sKey]") {
+		t.Error("the original finished-direction reconcile (state!=='running' && !optimistic) must remain — the recovery is an additive exception, not a replacement")
+	}
+}
