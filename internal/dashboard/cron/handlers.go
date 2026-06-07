@@ -1010,7 +1010,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			PromptTruncated: truncated,
 			Title:           j.Title,
 			Platform:        j.Platform,
-			ChatID:          j.ChatID,
+			ChatID:          maskNotifyChatID(j.ChatID),
 			CreatedBy:       j.CreatedBy,
 			CreatedAt:       j.CreatedAt.UnixMilli(),
 			Paused:          j.Paused,
