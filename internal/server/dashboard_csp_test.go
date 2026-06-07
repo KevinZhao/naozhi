@@ -350,8 +350,17 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 	}
 	js := string(jsBytes)
 
+	// cron extraction (PR-1): the btn-cron bind stays in dashboard.js but its
+	// handler openCronPanel moved to cron_view.js. The handler-definition check
+	// below searches the union; the bind-reference check stays on dashboard.js.
+	cronJSBytes, err := os.ReadFile(filepath.Join(dir, "cron_view.js"))
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	jsAll := js + "\n" + string(cronJSBytes)
+
 	// Each migrated control: the element id that must exist in the HTML, and
-	// the handler function name that must still be defined in dashboard.js.
+	// the handler function name that must still be defined in the dashboard JS.
 	controls := []struct {
 		id      string
 		handler string
@@ -375,8 +384,8 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 				"the inline handler was removed from HTML (#922) but the replacement "+
 				"addEventListener bind is missing, so the control is inert", c.id)
 		}
-		if !strings.Contains(js, "function "+c.handler+"(") {
-			t.Errorf("dashboard.js missing handler function %q that the migrated control invokes (#922)", c.handler)
+		if !strings.Contains(jsAll, "function "+c.handler+"(") {
+			t.Errorf("dashboard JS missing handler function %q that the migrated control invokes (#922)", c.handler)
 		}
 	}
 }

@@ -104,11 +104,17 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 //   - renderSettingsView / renderRailConnStatus exist
 func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): the view router (activeView/setActivityView) stayed
+	// in dashboard.js while renderCronPanel moved to cron_view.js. Union both.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	wants := []string{
 		"function setActivityView(",      // top-level router
@@ -138,7 +144,7 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 // computed exactly once and shared by both cronBadge and railBadge.
 func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
