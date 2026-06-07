@@ -975,7 +975,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// extracted to observeSuccessLatency to shave one of executeOpt's mixed
 	// concerns. Behaviour-preserving — the same three signals fire in the same
 	// order against the same startedAt.
-	s.observeSuccessLatency(startedAt, result, snap, lg)
+	//
+	// R20260607-GO-002: compute successEndedAt once from the injectable clock
+	// and share it between observeSuccessLatency and finishRun. A single
+	// s.now() read keeps step-based test clocks deterministic (2 reads total:
+	// startedAt here and successEndedAt below) while ensuring elapsed and
+	// DurationMS both come from the same clock rather than mixing s.now() with
+	// time.Since(startedAt) which reads real wall time.
+	successEndedAt := s.now()
+	s.observeSuccessLatency(successEndedAt.Sub(startedAt), result, snap, lg)
 	// #1829: release the fresh-context session now that the run succeeded.
 	// cron sessions are spawned Exempt=true (line ~1517) so the TTL cleanup
 	// loop skips them entirely (router_cleanup.go: `if s.exempt { continue }`).
@@ -1042,7 +1050,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
 	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		finalizer: finalizer,
@@ -1075,8 +1083,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // classified by the CronRun*Total state counters instead, and folding their
 // (often deadline-clamped) durations into the histogram would skew the
 // success-latency distribution operators alert on. OBS1 (#392) / R208-OBS1.
-func (s *Scheduler) observeSuccessLatency(startedAt time.Time, result SendResult, snap jobSnapshot, lg *slog.Logger) {
-	elapsed := time.Since(startedAt)
+// observeSuccessLatency receives elapsed pre-computed by the caller via
+// s.now().Sub(startedAt) (R20260607-GO-002: injectable clock, consistent
+// with finishRun's endedAt). Accepting elapsed directly avoids an extra
+// s.now() call that would advance step-based test clocks an extra tick.
+func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResult, snap jobSnapshot, lg *slog.Logger) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
