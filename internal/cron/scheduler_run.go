@@ -24,6 +24,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	robfigcron "github.com/robfig/cron/v3"
@@ -737,7 +738,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// needle. Leave the alloc; document the rationale so future reviewers
 	// don't reopen it. #666 is the latest [REPEAT-N] — closing as
 	// won't-fix-by-design.
-	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
+	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", osutil.SanitizeForLog(snap.chatID, 64), "run_id", runID) // R20260607-SEC-1: chatID is attacker-influenced; strip C1/bidi log-injection chars
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
@@ -921,6 +922,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 				finalizer: finalizer,
 			})
+			// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
+			// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
+			// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
+			// the next tick's preflight (up to 24 h for @daily jobs).
+			if snap.fresh {
+				s.router.Reset(key)
+			}
 			stubRefresh.run()
 			return
 		}
@@ -957,11 +965,18 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
+			state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // R20260607-GO-004: strip IP:port/paths, mirrors lg.Error above
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
+		// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
+		// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
+		// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
+		// the next tick's preflight (up to 24 h for @daily jobs).
+		if snap.fresh {
+			s.router.Reset(key)
+		}
 		stubRefresh.run()
 		return
 	}

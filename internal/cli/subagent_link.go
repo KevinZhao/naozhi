@@ -196,6 +196,12 @@ type SubagentLinker struct {
 	// Wired by TestLinker_Resolve_DirCacheTTL to count cache hits/misses
 	// without adding a telemetry atomic to production code.
 	scanHook func()
+
+	// Optional hook fired on every readFirstLineMeta cache MISS inside the
+	// Resolve retry loop. Wired by the R20260607-PERF-2 (#1883) regression
+	// test to assert a stable candidate's first line is parsed at most once
+	// across all retry attempts. nil in production.
+	readMetaHook func()
 }
 
 // LinkInfo is the resolved mapping for a single agent task. Zero value is the
@@ -597,6 +603,20 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var candidates []metaEntry
 	var filtered []scored
 
+	// R20260607-PERF-2 (#1883): cache first-line meta across retry attempts.
+	// The retry loop runs up to retryLimit+1 times and re-stat+open+32KB-bufio
+	// +json.Unmarshal'd every surviving candidate on EVERY attempt, even
+	// though an agent jsonl's first line is immutable once written. Cache by
+	// path, keyed on ModTime+Size so a candidate that is created or rewritten
+	// mid-retry is re-read, but a stable file is parsed at most once.
+	type metaCacheEntry struct {
+		modTime time.Time
+		size    int64
+		meta    firstLineMeta
+		err     error
+	}
+	metaCache := map[string]metaCacheEntry{}
+
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
 		entries := l.scanMetaFiles(subagentDir)
@@ -634,10 +654,21 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 			if err != nil || st.Size() == 0 {
 				continue
 			}
-			first, err := readFirstLineMeta(cand.jsonlPath)
-			if err != nil {
+			// R20260607-PERF-2 (#1883): reuse the cached parse when the file's
+			// ModTime+Size are unchanged since we last read it this Resolve.
+			ce, cached := metaCache[cand.jsonlPath]
+			if !cached || !ce.modTime.Equal(st.ModTime()) || ce.size != st.Size() {
+				if l.readMetaHook != nil {
+					l.readMetaHook()
+				}
+				meta, perr := readFirstLineMeta(cand.jsonlPath)
+				ce = metaCacheEntry{modTime: st.ModTime(), size: st.Size(), meta: meta, err: perr}
+				metaCache[cand.jsonlPath] = ce
+			}
+			if ce.err != nil {
 				continue
 			}
+			first := ce.meta
 			if first.SessionID != "" && first.SessionID != sessionID {
 				continue
 			}

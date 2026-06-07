@@ -367,6 +367,32 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	return out
 }
 
+// EventEntriesAppend is the buffer-reusing variant of EventEntries: it appends
+// this session's full event log onto dst and returns the grown slice instead of
+// always allocating a fresh []cli.EventEntry + full copy.
+//
+// R20260607-PERF-6 (#1885): EventEntries() allocates make([]cli.EventEntry,len)
+// + copy on every call. The startup-discovery scan (EventEntriesForKey, called
+// per-session in router_discovery) and collectPreviousHistory (every spawn/reset)
+// run it across O(N sessions) of dead sessions, each ~120 KB for 500-entry
+// histories. Callers that iterate sessions can pass a single pooled buffer
+// (buf[:0]) and reuse its backing array between sessions.
+//
+// Ownership mirrors EventEntriesSinceAppend: the caller must not retain dst
+// across calls; the returned slice shares the backing array with dst. The
+// live-process branch forwards through proc.EventEntries() (the ring's own
+// snapshot) and appends it, so dst's prefix is preserved in every branch.
+func (s *ManagedSession) EventEntriesAppend(dst []cli.EventEntry) []cli.EventEntry {
+	proc := s.loadProcess()
+	if proc != nil {
+		return append(dst, proc.EventEntries()...)
+	}
+	s.historyMu.RLock()
+	dst = append(dst, s.persistedHistory...)
+	s.historyMu.RUnlock()
+	return dst
+}
+
 // SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
 // or nil when the session is not backed by a live Claude-CLI process (fake
 // test process, dead process, ACP protocol, etc.). Callers must guard the
