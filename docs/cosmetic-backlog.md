@@ -556,3 +556,8 @@
 - [R20260606-SEC-12] memory handler 构造期 os.Getwd 固定 currentProject 非 session workspace — internal/memory/handler.go:166
 - [R20260606-PERF-13] storeAtomicString 每事件堆分配 string header — internal/cli/eventlog_append.go:167
 - [R20260606-PERF-14] drainInChannel 首批仍无条件调 time.Now — internal/eventlog/persist/persister.go:1157
+- [R20260607-GO-005] knownSessionsCache.publish 用 time.Now 而非可注入时钟，TTL 测试需 sleep — internal/cron/scheduler_session_cache.go:74
+- [R20260607-GO-015] runStore.Append 首次 json.Marshal 失败仅 slog.Warn 不 bump historyDropTotal（CronRun 几无 marshal 失败可能）— internal/cron/runstore.go:506
+- [R20260607-LOGIC-3] UpdateJob 中 applyTo(j) 先于 *upd.Schedule!=j.Schedule 比较，future-proof 隐患（applyTo 当前不改 Schedule）— internal/cron/scheduler_jobs.go:724
+- [R20260607-SEC-15] handleDashboard CSP script-src 仍含 unsafe-inline，待 strict-dynamic+nonce 迁移（已有 tracking 注释）— internal/server/routes.go:504
+- [R20260607-PERF-9] Snapshot() 每次 5 次 loadAtomicString barrier，>200 session 才显著 — internal/session/managed_query.go:194
