@@ -587,15 +587,28 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 	if proc != nil {
 		// Empty dst is the hot path (backfillSubscriberEvents always passes
 		// buf[:0]): forward straight into the process's append-mode query so
-		// the EventLog reuses dst's backing capacity — the #1740 win. A
-		// non-empty dst must preserve its prefix, but EventLog.EntriesSinceAppend
-		// re-slices from dst[:0] and appends forward, which would OVERWRITE the
-		// caller's prefix; so fall back to proc.EventEntriesSince + explicit
-		// append, matching the dead-session branch below.
+		// the EventLog reuses dst's backing capacity — the #1740 win.
 		if len(dst) == 0 {
 			return proc.EventEntriesSinceAppend(dst, afterMS)
 		}
-		return append(dst, proc.EventEntriesSince(afterMS)...)
+		// Non-empty dst (resubscribe catch-up): the prefix must be preserved.
+		// EventLog.EntriesSinceAppend re-slices from its argument's [:0] and
+		// appends forward, so handing it dst directly would OVERWRITE the
+		// prefix. Instead hand it dst[len(dst):] — a zero-length view anchored
+		// at dst's tail that writes into dst's spare capacity past the prefix,
+		// reusing the backing array when capacity allows (the #1740 win).
+		// R20260607-PERF-002 (#1922): the previous
+		// append(dst, proc.EventEntriesSince(afterMS)...) made EventLog
+		// allocate a fresh []cli.EventEntry, silently defeating the
+		// buffer-reuse optimization whenever dst had residual entries.
+		//
+		// When the spare capacity sufficed, `appended` already occupies dst's
+		// tail and append is an in-place no-op (copy handles the overlap); when
+		// it didn't, EntriesSinceAppend returned a fresh slice and append grows
+		// dst to fold it in. Either way the prefix is preserved and the result
+		// spans prefix + appended tail.
+		appended := proc.EventEntriesSinceAppend(dst[len(dst):], afterMS)
+		return append(dst, appended...)
 	}
 	s.historyMu.RLock()
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
