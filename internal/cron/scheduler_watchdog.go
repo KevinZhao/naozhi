@@ -78,7 +78,24 @@ const watchdogInterruptTimeoutDefault = 3 * time.Second
 // nanoseconds. Atomic so the timeout regression tests can shorten it
 // (typically to 50ms so they don't burn 3s of CI wall time) without
 // racing the production read in the watchdog goroutine. Tests must
-// always restore the previous value via defer.
+// always restore the previous value (use setWatchdogInterruptTimeoutForTest,
+// which registers the restore on t.Cleanup) and must NOT call t.Parallel().
+//
+// R20260607-GO-4 (#1904): this is package-level mutable state, so two
+// t.Parallel() tests that each shorten it would clobber each other — one
+// test's 50ms override could bleed into another's watchdog read. The clean
+// fix mirrors Scheduler.stopBudget (R249-CR-3 / #947): move the timeout onto
+// a per-Scheduler field so each instance is isolated. That is deferred here
+// because runDeadlineWatchdog / sendWithWatchdog are *package-level
+// functions* (no *Scheduler receiver) called from scheduler_run.go; threading
+// a per-instance timeout would require changing the Scheduler struct
+// definition (scheduler.go) and the call site (scheduler_run.go), both
+// outside this file's change scope. As a contained mitigation the override
+// is funnelled through setWatchdogInterruptTimeoutForTest below so the
+// snapshot+restore discipline is enforced in one place rather than copied
+// (and occasionally fumbled) across every timeout test, and the no-Parallel
+// constraint is documented at the single seam. When the per-Scheduler field
+// lands, delete this var, the helper, and the constraint.
 var watchdogInterruptTimeoutAtomic atomic.Int64
 
 // watchdogParkedInterruptGoroutines is a LIVE gauge of inner
