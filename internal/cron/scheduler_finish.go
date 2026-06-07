@@ -380,18 +380,26 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
 	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() {
 		s.appendRun(&CronRun{
-			RunID:       a.runID,
-			JobID:       a.job.ID,
-			State:       a.state,
-			Trigger:     a.trigger,
-			StartedAt:   a.startedAt,
-			EndedAt:     endedAt,
-			DurationMS:  durationMS,
-			SessionID:   a.sessionID,
-			Prompt:      persistedPrompt,
-			WorkDir:     a.workDir,
-			Fresh:       a.fresh,
-			Result:      persistedResult,
+			RunID:      a.runID,
+			JobID:      a.job.ID,
+			State:      a.state,
+			Trigger:    a.trigger,
+			StartedAt:  a.startedAt,
+			EndedAt:    endedAt,
+			DurationMS: durationMS,
+			SessionID:  a.sessionID,
+			Prompt:     persistedPrompt,
+			WorkDir:    a.workDir,
+			Fresh:      a.fresh,
+			Result:     persistedResult,
+			// R050103C-CORR-7 (#1910): ResultBytes is the STORED byte count —
+			// persistedResult has already passed through recordTerminalResult's
+			// truncateWithSuffix (≤ maxStoredResultRunes) + redactSecretsInResult +
+			// SanitizeForLog. It is deliberately NOT the raw Claude output size, so
+			// it must not be used for billing / capacity analysis of upstream output
+			// (a truncated long answer and a genuinely short answer are
+			// indistinguishable here). It measures on-disk footprint only, matching
+			// what the dashboard renders.
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
