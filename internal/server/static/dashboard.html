@@ -770,10 +770,12 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .voice-overlay.transcribing .vo-hint{color:var(--nz-accent)}
 
 .input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none}
-.running-banner{background:#1a2332;border-bottom:1px solid rgba(31,111,235,.27);font-size:13px;color:var(--nz-accent);flex-shrink:0}
+.running-banner{background:#1a2332;border-bottom:1px solid rgba(31,111,235,.27);font-size:13px;color:var(--nz-accent);flex-shrink:0;animation:rb-appear .18s ease-out}
+@keyframes rb-appear{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .rb-tool-row{display:flex;align-items:center;padding:6px 12px;gap:8px}
 .rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
-.rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--nz-accent);flex-shrink:0;animation:pulse 1.5s ease-in-out infinite}
+.rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--nz-accent);flex-shrink:0;animation:pulse 1.5s ease-in-out infinite,rb-dot-ripple 1.5s ease-out infinite}
+@keyframes rb-dot-ripple{0%{box-shadow:0 0 0 0 rgba(88,166,255,.55)}70%{box-shadow:0 0 0 6px rgba(88,166,255,0)}100%{box-shadow:0 0 0 0 rgba(88,166,255,0)}}
 #tool-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rb-elapsed{color:var(--nz-text-mute);font-size:var(--nz-fs-sm);flex-shrink:0;font-variant-numeric:tabular-nums}
 .rb-thinking-summary{padding:0 12px 4px 22px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
