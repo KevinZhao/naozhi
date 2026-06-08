@@ -274,6 +274,12 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 				break
 			}
 			cp := *j
+			// R20260608133928-CR-5: deep-copy Notify (*bool) to avoid alias with
+			// live job during off-lock json.Marshal (R20260607-PERF-005 / #1923).
+			if j.Notify != nil {
+				v := *j.Notify
+				cp.Notify = &v
+			}
 			entries = append(entries, &cp)
 		}
 	}
@@ -281,6 +287,12 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 		entries = entries[:0]
 		for _, j := range s.jobs {
 			cp := *j
+			// R20260608133928-CR-5: deep-copy Notify (*bool) to avoid alias with
+			// live job during off-lock json.Marshal (R20260607-PERF-005 / #1923).
+			if j.Notify != nil {
+				v := *j.Notify
+				cp.Notify = &v
+			}
 			entries = append(entries, &cp)
 		}
 		if len(entries) > 1 {

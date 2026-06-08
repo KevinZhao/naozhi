@@ -759,13 +759,19 @@ func SanitizePromptForTransport(s string) string {
 	if s == "" {
 		return s
 	}
+	// R20260608133928-PERF-15: use rune-level iteration for the fast-path so
+	// that valid multi-byte UTF-8 (Chinese, emoji, accented chars) does not
+	// bail out early. The previous byte-level check treated any byte ≥ 0x80 as
+	// "dirty" and fell through to strings.Map unconditionally — for a Chinese
+	// prompt that is every call. We bail only when we encounter a rune that
+	// strings.Map would actually replace, keeping the predicate identical to
+	// the slow path to prevent fast/slow divergence.
 	clean := true
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\t' {
+	for _, r := range s {
+		if r == '\t' {
 			continue
 		}
-		if c < 0x20 || c == 0x7f || c >= 0x80 {
+		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
 			clean = false
 			break
 		}
