@@ -851,10 +851,18 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			// source) so log attrs survive while shutdown still aborts the
 			// send.
 			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
-			// Ack arrival so the IM user sees a reaction/receipt. This is
-			// cheap and does not depend on the turn completing.
+			// Ack arrival BEFORE spawning the turn goroutine, matching the
+			// /urgent path (commands.go: ack then goSendAndReply). The ack's
+			// AddReaction stores the reaction_id synchronously; the goroutine's
+			// defer clearQueuedReaction (goSendAndReply :1067) is the only clear
+			// on this detached path. R20260608-133914-LB-3 (#1963): with the
+			// pre-fix order (spawn then ack) a fast-fail turn (GetOrCreate/Send
+			// early-return) could run the goroutine's clear — a LoadAndDelete
+			// no-op against the not-yet-stored reaction — before this ack landed
+			// its AddReaction, leaving a permanent HOURGLASS that no later clear
+			// removes. Acking first establishes the AddReaction-then-clear order.
 			d.ackQueuedWithReaction(ctx, msg, lg)
+			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			return
 		}
 
