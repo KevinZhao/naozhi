@@ -3,6 +3,7 @@ package osutil
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestIsLogInjectionRune covers the classes explicitly enumerated in the
@@ -265,5 +266,59 @@ func TestSanitizeForLog_EmptyInput(t *testing.T) {
 	}
 	if got := SanitizeForLog("", 64); got != "" {
 		t.Errorf("SanitizeForLog(\"\", 64) = %q, want empty", got)
+	}
+}
+
+// TestSanitizeForLog_CJKTruncationValidUTF8 is the regression test for #1943
+// (R20260608-013840-LB-1): the slow-path walk-back only stripped UTF-8
+// continuation bytes, so a cap landing right after a multi-byte lead byte left
+// an isolated lead byte → invalid UTF-8. The godoc promises a rune boundary,
+// never a split rune. We assert the output is always valid UTF-8 and never ends
+// on a dangling lead byte, for every cap from 0 through the full byte length.
+func TestSanitizeForLog_CJKTruncationValidUTF8(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"pure-cjk", "中文世界"},
+		{"ascii-prefix-cjk", "ab世界"},
+		{"emoji-4byte", "x🌟🚀"},
+		{"mixed-cjk-ascii", "你a好b世c界"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Exercise every possible byte cap so we hit lead-byte and
+			// continuation-byte boundaries alike.
+			for maxLen := 0; maxLen <= len(tc.input); maxLen++ {
+				got := SanitizeForLog(tc.input, maxLen)
+				if !utf8.ValidString(got) {
+					t.Errorf("SanitizeForLog(%q, %d) = %q produced invalid UTF-8", tc.input, maxLen, got)
+				}
+				if maxLen > 0 && len(got) > maxLen {
+					t.Errorf("SanitizeForLog(%q, %d) = %q exceeds cap (%d bytes)", tc.input, maxLen, got, len(got))
+				}
+			}
+		})
+	}
+}
+
+// TestSanitizeForLog_CJKBoundaryExamples pins the exact failing examples from
+// the issue so a future regression is unambiguous.
+func TestSanitizeForLog_CJKBoundaryExamples(t *testing.T) {
+	t.Parallel()
+
+	// "ab世界" cap 3: previously emitted "ab\xe4" (invalid). Now the dangling
+	// lead byte of 世 must be dropped → "ab".
+	if got := SanitizeForLog("ab世界", 3); got != "ab" {
+		t.Errorf("SanitizeForLog(%q, 3) = %q, want %q", "ab世界", got, "ab")
+	}
+	// "中文" cap 4: previously emitted 中 + isolated 0xe6. Now → just "中".
+	if got := SanitizeForLog("中文", 4); got != "中" {
+		t.Errorf("SanitizeForLog(%q, 4) = %q, want %q", "中文", got, "中")
 	}
 }
