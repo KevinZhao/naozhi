@@ -281,11 +281,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
-  // Bottom-rail connection status doubles as the settings entry.
-  const connBtn = document.getElementById('ab-conn-status');
-  if (connBtn) connBtn.addEventListener('click', function () { setActivityView('settings'); });
-  renderRailConnStatus();
-
   // Header/sidebar controls (#922 / #479 / #441): migrated from inline
   // `onclick=`/`onsubmit=` attributes to addEventListener so the dashboard's
   // script-src no longer needs `'unsafe-inline'` on account of these handlers.
@@ -1925,7 +1920,6 @@ function updateStatusBar() {
   // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
   // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
   // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
-  renderRailConnStatus();
   if (!container) { updateNodeSelector(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
@@ -9572,9 +9566,9 @@ function statusLabelForNode(status) {
 }
 
 // RAIL_CONN_LABELS maps a normalized node status to a short Chinese label for
-// the bottom-rail connection indicator + the settings view. Distinct from the
-// English statusLabelForNode (used in the multi-node dropdown for parity with
-// existing tests) — the rail wants compact CJK so it fits the 56px column.
+// the settings view's connection section. Distinct from the English
+// statusLabelForNode (used in the multi-node dropdown for parity with existing
+// tests) — the settings view wants compact CJK.
 const RAIL_CONN_LABELS = {
   ok: '已连接', connected: '已连接',
   connecting: '连接中', authenticating: '鉴权中',
@@ -9582,20 +9576,6 @@ const RAIL_CONN_LABELS = {
   error: '错误', disconnected: '已断开', off: '离线',
 };
 function railConnLabel(status) { return RAIL_CONN_LABELS[status] || status; }
-
-// renderRailConnStatus paints the bottom-rail connection indicator (dot +
-// label). Reuses getNodeStatus so it tracks the WS state machine for local and
-// the server health snapshot for the selected remote. Called from
-// updateStatusBar (every WS state change + auth-countdown tick) and once at
-// DOMContentLoaded. Cheap + idempotent — safe to call on every tick.
-function renderRailConnStatus() {
-  const dot = document.getElementById('ab-conn-dot');
-  const label = document.getElementById('ab-conn-label');
-  if (!dot && !label) return;
-  const status = getNodeStatus((typeof selectedNode !== 'undefined' && selectedNode) || 'local');
-  if (dot) dot.className = 'ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
-  if (label) label.textContent = railConnLabel(status);
-}
 
 // renderSettingsView paints the standalone settings top-level view into
 // #settings-main. Two sections: theme (tri-state, reusing applyTheme/
