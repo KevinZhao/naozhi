@@ -1042,6 +1042,17 @@ func (d *Dispatcher) goSendAndReply(
 				d.handleOwnerLoopPanic(key, msg, r, lg)
 			}
 		}()
+		// #1946: clear the HOURGLASS the passthrough / /urgent ack added once
+		// this turn finishes. The detached goroutine never enters ownerLoop's
+		// drain loop (the only other caller of the reaction-clear path), so
+		// without this the queued reaction hangs until the platform's reaction
+		// cache TTL GCs it (feishu: 12h), falsely showing "still processing".
+		// WithoutCancel: the turn's ctx often carries a per-turn deadline that
+		// has elapsed by reply time, and on shutdown it is Canceled — either
+		// would make RemoveReaction fail fast. Strip cancellation/deadline but
+		// keep request-scoped values; clearQueuedReaction re-bounds with its
+		// own reactionAckTimeout.
+		defer d.clearQueuedReaction(context.WithoutCancel(ctx), msg.Platform, msg.MessageID, lg)
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
 	}()
 }

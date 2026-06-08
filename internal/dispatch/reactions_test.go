@@ -142,6 +142,53 @@ func TestClearQueuedReactions_RemovesOnlyThoseWithMessageID(t *testing.T) {
 	}
 }
 
+// TestClearQueuedReaction_RemovesSingle pins #1946: the passthrough / /urgent
+// path clears its HOURGLASS via the singular helper once the turn finishes.
+func TestClearQueuedReaction_RemovesSingle(t *testing.T) {
+	t.Parallel()
+	fp := &fakeReactorPlatform{}
+	d := newTestDispatcherWithPlatform(fp)
+	d.platforms = map[string]platform.Platform{"fake": fp}
+
+	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
+
+	if len(fp.removed) != 1 {
+		t.Fatalf("expected 1 removal, got %d: %+v", len(fp.removed), fp.removed)
+	}
+	if fp.removed[0].msgID != "m1" || fp.removed[0].reaction != platform.ReactionQueued {
+		t.Errorf("unexpected removal: %+v", fp.removed[0])
+	}
+}
+
+func TestClearQueuedReaction_EmptyIDIsNoOp(t *testing.T) {
+	t.Parallel()
+	fp := &fakeReactorPlatform{}
+	d := newTestDispatcherWithPlatform(fp)
+	d.platforms = map[string]platform.Platform{"fake": fp}
+
+	d.clearQueuedReaction(context.Background(), "fake", "", nil)
+	if len(fp.removed) != 0 {
+		t.Fatalf("empty MessageID must not call RemoveReaction, got %d", len(fp.removed))
+	}
+}
+
+func TestClearQueuedReaction_NonReactorIsNoOp(t *testing.T) {
+	t.Parallel()
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	// Must not panic and must leave no side effects.
+	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
+}
+
+func TestClearQueuedReaction_ErrorSwallowed(t *testing.T) {
+	t.Parallel()
+	fp := &fakeReactorPlatform{removeErr: errors.New("rate limit")}
+	d := newTestDispatcherWithPlatform(fp)
+	d.platforms = map[string]platform.Platform{"fake": fp}
+	// Should not panic; error is logged and swallowed.
+	d.clearQueuedReaction(context.Background(), "fake", "m1", nil)
+}
+
 func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
