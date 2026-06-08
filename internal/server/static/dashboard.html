@@ -119,6 +119,18 @@
   --nz-chip-info-fg:#a5d6ff;            /* sc-agents / ts-subagent / feishu chip */
   --nz-chip-info-bg:rgba(56,139,253,.12);
   --nz-overlay-pill-bg:rgba(22,27,34,.9); /* floating nav-pill */
+  /* Row / item hover + active fills. These were bare GitHub-Dark literals
+     (#1c2129 hover, #1a2027 cron-spec hover, #1c2939 active-running) repeated
+     across cmd-palette / history-popover / cron rows; on a white surface they
+     rendered as alien dark blocks. Tokenised here so the light blocks below
+     remap them. Dark defaults preserve the originals (#1a2027 converges onto
+     the shared hover literal — an imperceptible step). */
+  --nz-hover-bg:#1c2129;                /* list / row / item hover + open */
+  --nz-row-active-running-bg:#1c2939;   /* cron row when active AND running */
+  --nz-memlink-user-bg:#1a3a2c;         /* [[user]] memory chip */
+  --nz-memlink-user-fg:#7ad9a3;
+  --nz-memlink-project-bg:#1a2a4a;      /* [[project]] memory chip */
+  --nz-memlink-project-fg:#7aacf7;
 }
 /* THEME-1 (#453) — light theme + system follow modes. The dashboard was
    GitHub-Dark hardcoded; users who prefer light or want to follow OS now
@@ -160,6 +172,12 @@
   --nz-overlay-pill-bg:rgba(255,255,255,.92);
   --nz-badge-info:#eaeef2;              /* neutral count chip on white */
   --nz-badge-info-text:#1f2328;
+  /* Row hover / active fills on a light surface — subtle grey tints, not dark
+     blocks. active-running keeps a faint blue wash to read as "running". */
+  --nz-hover-bg:#eaeef2;
+  --nz-row-active-running-bg:#dbeafe;
+  --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
+  --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
 }
 @media (prefers-color-scheme: light){
   :root[data-theme="auto"]{
@@ -184,6 +202,10 @@
     --nz-overlay-pill-bg:rgba(255,255,255,.92);
     --nz-badge-info:#eaeef2;
     --nz-badge-info-text:#1f2328;
+    --nz-hover-bg:#eaeef2;
+    --nz-row-active-running-bg:#dbeafe;
+    --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
+    --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
   }
 }
 /* Global focus-visible: keyboard users get a clear ring, mouse users don't. */
@@ -1002,7 +1024,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .cmd-palette-header input:focus{border-color:var(--nz-accent)}
 .cmd-palette-list{flex:1;overflow-y:auto;padding:6px;min-height:0}
 .cmd-palette-item{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .1s}
-.cmd-palette-item:hover{background:#1c2129}
+.cmd-palette-item:hover{background:var(--nz-hover-bg)}
 .cmd-palette-item.active{background:rgba(31,111,235,.2);box-shadow:inset 2px 0 0 var(--nz-accent)}
 .cmd-palette-item .cp-main{flex:1;min-width:0}
 .cmd-palette-item .cp-name{font-size:13px;color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1060,7 +1082,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hp-search-input::placeholder{color:var(--nz-text-faint)}
 .history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid var(--nz-bg-2);position:relative}
 .history-popover-item:last-child{border-bottom:none}
-.history-popover-item:hover{background:#1c2129}
+.history-popover-item:hover{background:var(--nz-hover-bg)}
 .history-popover-item .hp-prompt{font-size:13px;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
@@ -1557,7 +1579,7 @@ body.kbd-open .input-hints{display:none}
 .cj-list{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:10px;overflow:hidden;background:var(--nz-bg-1)}
 .cj-row{position:relative;display:grid;grid-template-columns:18px minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:10px 12px 10px 14px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s,border-color .12s;min-height:48px}
 .cj-row:last-child{border-bottom:none}
-.cj-row:hover{background:#1c2129}
+.cj-row:hover{background:var(--nz-hover-bg)}
 .cj-row.paused{opacity:.6}
 .cj-row.paused:hover{opacity:.85}
 /* 左侧 3px 色条：错误=红，missed=琥珀。正常态无色条。 */
@@ -1732,8 +1754,8 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ct-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
 .cron-timeline-panel .ctr{padding:8px 12px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s}
 .cron-timeline-panel .ctr:last-child{border-bottom:none}
-.cron-timeline-panel .ctr:hover{background:#1c2129}
-.cron-timeline-panel .ctr.open{background:#1c2129}
+.cron-timeline-panel .ctr:hover{background:var(--nz-hover-bg)}
+.cron-timeline-panel .ctr.open{background:var(--nz-hover-bg)}
 .cron-timeline-panel .ctr-main{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--nz-text)}
 .cron-timeline-panel .ctr-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--nz-text-faint)}
 .cron-timeline-panel .ctr-dot.ok{background:var(--nz-green)}
@@ -2044,7 +2066,7 @@ body.kbd-open .input-hints{display:none}
  */
 .cron-drawer-spec{display:flex;flex-direction:column;gap:10px;padding:14px 20px;background:var(--nz-bg-0)}
 .cron-spec-section{padding:12px 14px;border-radius:var(--nz-radius-md);border:1px solid var(--nz-border);background:var(--nz-bg-1);cursor:pointer;transition:border-color .12s,background .12s;-webkit-tap-highlight-color:transparent}
-.cron-spec-section:hover{border-color:var(--nz-text-faint);background:#1a2027}
+.cron-spec-section:hover{border-color:var(--nz-text-faint);background:var(--nz-hover-bg)}
 .cron-spec-section:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
 .cron-spec-section .css-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .cron-spec-section .css-label{margin:0;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
@@ -2057,7 +2079,7 @@ body.kbd-open .input-hints{display:none}
 .cron-spec-section .css-prompt-body{font-size:13px;color:var(--nz-text);background:transparent;border:none;padding:0;margin:0;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body{display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
 .cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body::after{content:"";position:absolute;left:0;right:0;bottom:24px;height:32px;background:linear-gradient(180deg,transparent,var(--nz-bg-1));pointer-events:none}
-.cron-spec-section:hover .css-prompt[data-clamped="true"] .css-prompt-body::after{background:linear-gradient(180deg,transparent,#1a2027)}
+.cron-spec-section:hover .css-prompt[data-clamped="true"] .css-prompt-body::after{background:linear-gradient(180deg,transparent,var(--nz-hover-bg))}
 .cron-spec-section .css-prompt-toggle{margin-top:6px;background:transparent;border:none;color:var(--nz-accent);cursor:pointer;font-size:var(--nz-fs-sm);font-family:inherit;padding:2px 0;-webkit-tap-highlight-color:transparent}
 .cron-spec-section .css-prompt-toggle:hover{text-decoration:underline}
 /* 什么时候 — schedule + next-run lines. */
@@ -2110,7 +2132,7 @@ body.kbd-open .input-hints{display:none}
 .cj-row.is-active .cj-title{color:var(--nz-text-strong)}
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}
-.cj-row.is-active.is-running{background:#1c2939;box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-accent)}
 /* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
  * gated on the *main column width* rather than the viewport width. The
  * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
@@ -2540,8 +2562,8 @@ body.kbd-open .sidebar-footer{display:none}
 .md-memlink-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11.5px;letter-spacing:.01em}
 .md-memlink[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
-.md-memlink[data-type="user"]{background:#1a3a2c;color:#7ad9a3}
-.md-memlink[data-type="project"]{background:#1a2a4a;color:#7aacf7}
+.md-memlink[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
+.md-memlink[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
 .md-memlink[data-type="reference"]{background:#3a1a3a;color:#d97af7}
 .md-memlink[data-type="memory"]{background:var(--nz-bg-2);color:var(--nz-text)}
 .md-memlink-broken,.md-memlink-broken[data-type]{
@@ -2564,8 +2586,8 @@ body.kbd-open .sidebar-footer{display:none}
   font-size:var(--nz-fs-xs);text-transform:uppercase;letter-spacing:.04em;
   color:var(--nz-text-strong)}
 .mem-pop-type[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
-.mem-pop-type[data-type="user"]{background:#1a3a2c;color:#7ad9a3}
-.mem-pop-type[data-type="project"]{background:#1a2a4a;color:#7aacf7}
+.mem-pop-type[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
+.mem-pop-type[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
 .mem-pop-type[data-type="reference"]{background:#3a1a3a;color:#d97af7}
 .mem-pop-scope{color:var(--nz-text-faint)}
 .mem-pop-slug{font-family:ui-monospace,Menlo,monospace;color:var(--nz-text-strong);
