@@ -6617,37 +6617,44 @@ func TestDashboardHTML_CronCardLegacyStylesStripped(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_CronOverviewBar pins cron-dashboard-redesign P0 §4.2:
-// the four-chip overview strip is rendered above the filter bar, including
-// counts for healthy + running buckets. The strip MUST always render (not
-// gated by the >5 jobs threshold filterBar uses) so users get status counts
-// at a glance even with a small number of jobs.
-func TestDashboardJS_CronOverviewBar(t *testing.T) {
+// TestDashboardJS_CronOverviewBarRemoved pins the removal of the cron
+// "任务概览" overview chip strip (formerly cron-dashboard-redesign P0 §4.2).
+// The 健康 / 运行中 chips and their healthy/running filter predicates were
+// dropped per product decision; this guards against any reintroduction so
+// the strip doesn't silently creep back via a future merge.
+func TestDashboardJS_CronOverviewBarRemoved(t *testing.T) {
 	t.Parallel()
 	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read cron_view.js: %v", err)
 	}
 	js := string(data)
-	for _, want := range []string{
+	for _, gone := range []string{
 		"cron-overview",
 		"cron-ov-chip",
 		"healthyCount",
 		"runningCount",
 		"overviewBar",
+		"status !== 'healthy'",
+		"status !== 'running'",
+		"if (s === 'healthy')",
+		"if (s === 'running'",
 	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("dashboard.js missing P0 overview marker %q", want)
+		if strings.Contains(js, gone) {
+			t.Errorf("cron_view.js must no longer contain removed overview marker %q", gone)
 		}
 	}
-	if !strings.Contains(js, "status !== 'healthy'") || !strings.Contains(js, "status !== 'running'") {
-		t.Error("setCronStatusFilter must accept 'healthy' and 'running' status values")
+
+	// The CSS rules backing the strip must be gone from dashboard.html too.
+	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
 	}
-	if !strings.Contains(js, "if (s === 'healthy')") {
-		t.Error("filterCronJobs must implement the 'healthy' predicate")
-	}
-	if !strings.Contains(js, "if (s === 'running'") {
-		t.Error("filterCronJobs must implement the 'running' predicate")
+	html := string(htmlData)
+	for _, gone := range []string{".cron-overview", ".cron-ov-chip", ".cron-ov-num"} {
+		if strings.Contains(html, gone) {
+			t.Errorf("dashboard.html must no longer contain removed overview CSS rule %q", gone)
+		}
 	}
 }
 
