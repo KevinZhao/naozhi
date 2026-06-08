@@ -9624,19 +9624,19 @@ function systemTickLabel(ns) {
 }
 
 // systemStatLabel maps a flattened TickReport stat key to a Chinese label.
-// The skipped_* keys come from the daemon's Skipped map (e.g. skipped_min_turns)
-// so we strip the prefix and translate the well-known reasons; unknown reasons
-// keep their raw suffix so a new skip-bucket still shows up.
+// The skipped_* keys are "skipped_" + the daemon's Skipped-map reason
+// (flattenTickReport in manager.go). Keys MUST match the reasons the daemon
+// actually emits — AutoTitler's bumpSkip(...) calls in auto_titler.go produce
+// reserved_namespace / group_chat / origin_user / min_user_turns / no_new_turns.
+// Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
 const SYSTEM_STAT_LABELS = {
   examined: '检查',
   acted: '执行',
-  skipped_min_turns: '跳过·轮次不足',
-  skipped_min_rename_interval: '跳过·改名过频',
   skipped_reserved_namespace: '跳过·保留命名空间',
   skipped_group_chat: '跳过·群聊',
-  skipped_user_label: '跳过·用户已命名',
-  skipped_empty: '跳过·内容为空',
-  skipped_validation: '跳过·校验失败',
+  skipped_origin_user: '跳过·用户已命名',
+  skipped_min_user_turns: '跳过·轮次不足',
+  skipped_no_new_turns: '跳过·无新增对话',
 };
 function systemStatLabel(key) {
   if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
