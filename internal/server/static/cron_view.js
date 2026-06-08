@@ -2308,6 +2308,23 @@ function navigateExpandedRun(direction) {
   cronTimelineExpand(cronExpandedRunId.jobId, nextRun.run_id);
 }
 
+// cronEscClose — 全局 Esc 的 cron 分支委托入口。
+// dashboard.js 的 Global Esc handler 不再裸引用 cron 内部状态（cronExpandedRunId /
+// cronDetailJobId），而是经 `window.nzCronEscClose && window.nzCronEscClose()` 守卫调用，由本函数在 cron_view.js
+// 内部决定关哪一层。返回 true 表示"消费了 Esc"（调用方据此 preventDefault）。
+//
+// 这是 dashboard-cron-view-extraction RFC §2.6 B1 的修复：cron 状态搬入 cron_view.js
+// 后，留在 dashboard.js 的 handler 跨脚本引用这些符号——一旦 cron_view.js 未加载
+// （部署期缓存撕裂）即 `ReferenceError: cronExpandedRunId is not defined`。把决策收进
+// cron_view.js，dashboard.js 仅经可选链委托，cron_view.js 缺席时 Esc 优雅降级。
+//
+// 关闭优先级与原 dashboard.js 一致：行内展开（更靠前的二级状态）先于 drawer。
+function cronEscClose() {
+  if (cronExpandedRunId && cronExpandedRunId.runId) { cronTimelineCollapse(); return true; }
+  if (cronDetailJobId !== null) { closeCronDetail(); return true; }
+  return false;
+}
+
 // scrollExpandedRunIntoView — 'nearest' 让快速 ↑↓ 不引起列表来回跳，只有
 // 行已滚出视野才滚。behavior:'auto' 不 smooth 避免追动画。
 function scrollExpandedRunIntoView(runId) {
@@ -3971,6 +3988,30 @@ async function doEditCronJob(id) {
     showNetworkError('保存定时任务', e);
   }
 }
+
+// Expose the Esc-close delegate so dashboard.js's Global Esc handler can route
+// the cron branch here without referencing cron-internal globals across the
+// script boundary (dashboard-cron-view-extraction RFC §2.6 B1). The optional
+// call (window.nzCronEscClose && window.nzCronEscClose()) degrades gracefully if cron_view.js fails
+// to load, instead of throwing `cronExpandedRunId is not defined`.
+window.nzCronEscClose = cronEscClose;
+
+// §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run（仅当某行展开时）。
+// Moved here from dashboard.js (B1 fix): this handler reads cronExpandedRunId /
+// navigateExpandedRun, both file-local to cron_view.js. Keeping the listener in
+// the same script as its state means the binding is guaranteed to exist when
+// the handler runs — and the shortcut simply never registers if cron_view.js
+// is absent, rather than crashing dashboard.js.
+// 与 Cmd/Ctrl+Up/Down 的会话切换错开（那个在 dashboard.js，有 metaKey 守卫）。
+document.addEventListener('keydown', function(e) {
+  if (!cronExpandedRunId || !cronExpandedRunId.runId) return;
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  e.preventDefault();
+  navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next');
+});
 
 // Bootstrap moved from dashboard.js: load initial cron state for the sidebar
 // badge. Runs after all cron functions above are defined.

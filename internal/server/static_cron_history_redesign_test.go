@@ -21,8 +21,14 @@ import (
 // 这些不变量保证：cron 任务结果显示在记录中行内展开，而不是右侧 popup。
 func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	t.Parallel()
-	// cron extraction (PR-1): cron render helpers moved to cron_view.js, but the
-	// global Esc handler (assertion 5) stayed in dashboard.js. Assert on the union.
+	// cron extraction (PR-1): cron render helpers + state moved to cron_view.js.
+	// The inline-expand state (cronExpandedRunId) and its lifecycle functions all
+	// live in cron_view.js, so the symbol-existence assertions (1-4, 8-9) read the
+	// union. But assertions 5 (Esc) and 6 (↑↓) now pin the *decoupling* contract
+	// per file: dashboard.js must NOT reference cron-internal globals across the
+	// <script> boundary (that caused `cronExpandedRunId is not defined` when
+	// cron_view.js failed to load — dashboard-cron-view-extraction §2.6 B1), so
+	// those two read dashJS / cronJS separately.
 	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
@@ -31,21 +37,23 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cron_view.js: %v", err)
 	}
-	js := string(dashData) + "\n" + string(cronData)
+	dashJS := string(dashData)
+	cronJS := string(cronData)
+	js := dashJS + "\n" + cronJS
 
-	// 1. Module-scoped expanded state.
+	// 1. Module-scoped expanded state（cron_view.js，union 命中即可）。
 	if !strings.Contains(js, "const cronExpandedRunId = {") {
-		t.Error("dashboard.js: cronExpandedRunId 模块状态缺失 — inline-expand 必须有单一 state 源")
+		t.Error("cron_view.js: cronExpandedRunId 模块状态缺失 — inline-expand 必须有单一 state 源")
 	}
 
-	// 2. Lifecycle functions.
+	// 2. Lifecycle functions（cron_view.js）。
 	for _, fn := range []string{
 		"function cronTimelineExpand(jobId, runId)",
 		"function cronTimelineCollapse()",
 		"function navigateExpandedRun(direction)",
 	} {
 		if !strings.Contains(js, fn) {
-			t.Errorf("dashboard.js: 缺少 %s — inline-expand 生命周期 API 必备", fn)
+			t.Errorf("cron_view.js: 缺少 %s — inline-expand 生命周期 API 必备", fn)
 		}
 	}
 
@@ -79,34 +87,62 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 		t.Error("cronTimelineRowHtml: 展开行内必须复用 cronTimelineDetailHtml 渲染详情")
 	}
 
-	// 5. ESC handler 优先 collapse 再关 drawer。Global Esc handler 留在
-	// dashboard.js（已包含在上面的 union 里）。
-	escIdx := strings.Index(js, "if (e.key !== 'Escape') return;")
+	// 5. ESC handler：dashboard.js 的 Global Esc handler 经 window.nzCronEscClose()
+	// 委托关 cron 层，cron_view.js 的 cronEscClose 持有 collapse→drawer 的优先级。
+	// B1 解耦契约：dashboard.js 的 Esc handler 绝不裸引用 cron 内部状态/函数
+	// （cronExpandedRunId / cronTimelineCollapse），否则 cron_view.js 未加载时抛
+	// `cronExpandedRunId is not defined`。
+	escIdx := strings.Index(dashJS, "if (e.key !== 'Escape') return;")
 	if escIdx < 0 {
 		t.Fatal("dashboard.js: Global Esc handler 块未找到")
 	}
 	// Esc handler 不是函数定义,而是 function(e){...} 体内的第一行 anchor。
 	// 改用显式右花括号收敛符 `\n});\n`(addEventListener 注册的 IIFE 收尾形态)。
-	escEndRel := strings.Index(js[escIdx:], "\n});\n")
+	escEndRel := strings.Index(dashJS[escIdx:], "\n});\n")
 	if escEndRel < 0 {
 		t.Fatal("dashboard.js: Esc handler 闭合 `\\n});\\n` 未找到 — 解析失败,断言无意义")
 	}
-	escBody := js[escIdx : escIdx+escEndRel]
-	collapseIdx := strings.Index(escBody, "cronTimelineCollapse()")
-	drawerCloseIdx := strings.Index(escBody, "closeCronDetail()")
+	escBody := dashJS[escIdx : escIdx+escEndRel]
+	if !strings.Contains(escBody, "window.nzCronEscClose") {
+		t.Error("Global Esc handler: 必须经 window.nzCronEscClose() 委托关 cron 层 — " +
+			"不得在 dashboard.js 内联 cron 关闭逻辑（B1 解耦）")
+	}
+	// 反向断言（dashboard.js 的 Esc handler 不得跨脚本裸引用 cron 内部符号，
+	// 这是 `cronExpandedRunId is not defined` 的根因守卫）由职责单一、且正确排除
+	// 注释的 TestDashboardJS_CronKeydownDecoupled 覆盖，此处不重复（escBody 含本次
+	// 新增的解释性注释，裸 Contains 会误命中注释里的符号名）。
+	// cron_view.js 侧：cronEscClose 必须存在，且保持 collapse 先于 closeCronDetail 的优先级。
+	escFnIdx := strings.Index(cronJS, "function cronEscClose()")
+	if escFnIdx < 0 {
+		t.Fatal("cron_view.js: 缺少 function cronEscClose() — dashboard.js 委托的关闭入口")
+	}
+	escFnBody, ok := sliceFunctionBody(cronJS, escFnIdx)
+	if !ok {
+		t.Fatal("cron_view.js: cronEscClose 函数体边界未找到 — 解析失败,断言无意义")
+	}
+	collapseIdx := strings.Index(escFnBody, "cronTimelineCollapse()")
+	drawerCloseIdx := strings.Index(escFnBody, "closeCronDetail()")
 	if collapseIdx < 0 {
-		t.Error("Global Esc handler: 缺少 cronTimelineCollapse() 分支 — 行内展开必须可 ESC 关闭")
+		t.Error("cronEscClose: 缺少 cronTimelineCollapse() 分支 — 行内展开必须可 ESC 关闭")
 	}
 	if drawerCloseIdx < 0 {
-		t.Error("Global Esc handler: 缺少 closeCronDetail() 分支（v2 已有，不应被本次改动移除）")
+		t.Error("cronEscClose: 缺少 closeCronDetail() 分支（v2 已有，不应被本次改动移除）")
 	}
 	if collapseIdx > 0 && drawerCloseIdx > 0 && collapseIdx > drawerCloseIdx {
-		t.Error("Global Esc handler: cronTimelineCollapse 必须在 closeCronDetail 之前（行展开是更靠前的状态）")
+		t.Error("cronEscClose: cronTimelineCollapse 必须在 closeCronDetail 之前（行展开是更靠前的状态）")
+	}
+	// dashboard.js 须挂 nzCronEscClose（导出委托入口）。
+	if !strings.Contains(cronJS, "window.nzCronEscClose = cronEscClose") {
+		t.Error("cron_view.js: 必须 window.nzCronEscClose = cronEscClose 导出委托入口")
 	}
 
-	// 6. ↑↓ 全局键盘 handler。
-	if !strings.Contains(js, "navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next')") {
-		t.Error("dashboard.js: 缺少 ↑↓ 键盘绑定到 navigateExpandedRun")
+	// 6. ↑↓ 方向编码行为契约：↑=prev（更新的 run）、↓=next（更旧的 run）。这条精确
+	// 字符串守护的是“方向映射不能反”的行为，与 §6 历史职责一致。绑定的“迁移位置”
+	// （必须在 cron_view.js、不得在 dashboard.js）由 TestCronViewJS_OwnsKeydownAndEscDelegate
+	// 用鲁棒的 `navigateExpandedRun(` 存在/缺失断言覆盖，两者职责分离不冗余。
+	const arrowBind = "navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next')"
+	if !strings.Contains(cronJS, arrowBind) {
+		t.Error("cron_view.js: ↑↓ 方向编码必须是 ↑→'prev' / ↓→'next'（方向映射契约）")
 	}
 
 	// 7. v3 sheet 符号已删除：禁止再出现 cronRunSheetState / openRunDetailSheet /
