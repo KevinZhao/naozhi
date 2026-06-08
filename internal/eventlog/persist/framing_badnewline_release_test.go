@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,14 @@ func TestReadFramedBody_BadNewline_ReleasesBuffer(t *testing.T) {
 	// buffer available immediately.
 	body := strings.Repeat("z", 8192)
 	wantCap := len(body) + 1
+
+	// sync.Pool drops its entire contents on a GC (the victim cache is
+	// cleared every two cycles). This test's premise — "the buffer the
+	// error path Put is the one the next Get returns" — only holds if no
+	// GC runs in the window between Put and Get. Disable GC for that
+	// window so the check is deterministic; CI saw spurious failures when
+	// a GC fired between the read and the reclaiming Get (#1950 flake).
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
 	// Drain any pre-existing pooled buffers so the only entry that can be
 	// present after the read is the one ReadFramedBody released.
