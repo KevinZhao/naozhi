@@ -85,7 +85,9 @@ func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 	})
 	w.bytes += n
 	w.nextSeq++
-	w.entriesSinceIdxWrite++
+	// Mirrors handleBatch: entriesSinceIdxWrite is NOT advanced per entry.
+	// It stays at the start-of-batch phase (0 here) until flush() advances
+	// it modulo stride after a durable idx sync.
 	w.dirty = true
 
 	idxSizeBefore := idxFileSize(t, idxPath)
@@ -111,8 +113,8 @@ func TestFlush_RetainsPendingIdxOnSyncError(t *testing.T) {
 	if !w.dirty {
 		t.Fatalf("w.dirty=false after sync failure, want true (flush must retry)")
 	}
-	if w.entriesSinceIdxWrite != 1 {
-		t.Fatalf("entriesSinceIdxWrite=%d after sync failure, want 1 (cursor must not advance)",
+	if w.entriesSinceIdxWrite != 0 {
+		t.Fatalf("entriesSinceIdxWrite=%d after sync failure, want 0 (cursor must not advance)",
 			w.entriesSinceIdxWrite)
 	}
 

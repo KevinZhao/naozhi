@@ -1671,7 +1671,14 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		})
 		w.bytes += n
 		w.nextSeq++
-		w.entriesSinceIdxWrite++
+		// NOTE: entriesSinceIdxWrite is NOT advanced here. It is a cursor
+		// into the stride cycle that records the absolute-stream phase of
+		// pendingIdx[0] (the first entry staged since the last successful
+		// idx append). flush() reads it as the selectForIdx start phase and
+		// then advances it by len(pendingIdx) modulo stride after a durable
+		// idx sync. Incrementing per entry here would double-count the batch
+		// (cursor advances by 2N per cycle instead of N) and offset the
+		// selectForIdx phase by N, breaking the stride alignment invariant.
 		written++
 	}
 	if written > 0 {
