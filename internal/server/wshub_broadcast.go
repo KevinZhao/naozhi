@@ -171,7 +171,21 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // marshal failure is swallowed (matching the prior behaviour) because the WS
 // payload structs are fixed-shape and cannot fail json.Marshal in practice;
 // dropping the frame is preferable to panicking the producer goroutine.
+//
+// R20260608133928-PERF-1: fast-path zero-client check mirrors the subscriber
+// guard in broadcastSessionSystemEvent (see line ~381). When authClients is
+// non-nil (all production hubs via NewHub) and empty, there is nobody to
+// deliver to — skip marshalPooled entirely. Hand-rolled hubs that leave
+// authClients nil fall through to the legacy path (h.clients scan) as before.
 func (h *Hub) marshalBroadcastAuth(v any) {
+	// Fast-path: if the authClients mirror exists and is empty there are no
+	// authenticated dashboard tabs — skip the marshal entirely.
+	h.authMu.RLock()
+	empty := h.authClients != nil && len(h.authClients) == 0
+	h.authMu.RUnlock()
+	if empty {
+		return
+	}
 	data, err := marshalPooled(v)
 	if err != nil {
 		return
