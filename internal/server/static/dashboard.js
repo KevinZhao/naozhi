@@ -4639,13 +4639,13 @@ function navShowList() {
   const popover = document.createElement('div');
   popover.id = 'nav-list-popover';
   const maxW = Math.min(280, (document.getElementById('main')?.offsetWidth || 280) - 70);
-  popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:rgba(22,27,34,.95);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
+  popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
   popover.innerHTML = items.join('');
   pill.appendChild(popover);
   navPopoverOpen = true;
   popover.querySelectorAll('.nav-list-item').forEach(item => {
     item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    item.onmouseenter = () => item.style.background = '#1f2937';
+    item.onmouseenter = () => item.style.background = 'var(--nz-hover-bg)';
     item.onmouseleave = () => item.style.background = '';
     item.onclick = () => {
       navIdx = parseInt(item.dataset.idx);
