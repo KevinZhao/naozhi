@@ -363,6 +363,17 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 		return
 	}
 
+	// #1957: Only assistant events carry meaningful status content.
+	// Result events and other non-assistant frames must not fire the
+	// initial Reply banner: in passthrough mode a result event is
+	// delivered to onEvent for each slot owner (including merged-follower
+	// slots), and result events have ev.Message==nil which would cause
+	// formatEventLine to return "" → fallback "💭 思考中..." → a permanent
+	// orphan banner on platforms that support interim edits (Feishu).
+	if ev.Type != "assistant" {
+		return
+	}
+
 	line := formatEventLine(ev)
 	if line == "" {
 		line = "💭 思考中..."

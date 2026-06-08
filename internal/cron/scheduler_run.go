@@ -921,6 +921,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 					"abort_fired", abort.fired,
 					"abort_outcome", abort.outcome)
 			}
+			// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+			// is still held (i.e. BEFORE finishRun releases it). Matches the
+			// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+			// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+			// spawn run-B's fresh session, and then have run-A's Reset blindly
+			// delete it (router_lifecycle.go resetLocked has no owner check).
+			if snap.fresh {
+				s.router.Reset(key)
+			}
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -928,13 +937,6 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 				finalizer: finalizer,
 			})
-			// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
-			// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
-			// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
-			// the next tick's preflight (up to 24 h for @daily jobs).
-			if snap.fresh {
-				s.router.Reset(key)
-			}
 			stubRefresh.run()
 			return
 		}
@@ -969,6 +971,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// R20260603-SEC-4: sanitise before logging to strip IP:port / paths.
 			lg.Error("cron send error", "err", sanitiseRunErrMsg(err.Error()))
 		}
+		// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+		// is still held (i.e. BEFORE finishRun releases it). Matches the
+		// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+		// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+		// spawn run-B's fresh session, and then have run-A's Reset blindly
+		// delete it (router_lifecycle.go resetLocked has no owner check).
+		if snap.fresh {
+			s.router.Reset(key)
+		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 			state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // R20260607-GO-004: strip IP:port/paths, mirrors lg.Error above
@@ -976,13 +987,6 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
-		// R20260607-CORR-2: mirrors the #1829 success-path Reset (line ~1017).
-		// Fresh-context sessions are Exempt=true so TTL cleanup skips them;
-		// without an explicit Reset the CLI+MCP subtree (~1.6 GB) leaks until
-		// the next tick's preflight (up to 24 h for @daily jobs).
-		if snap.fresh {
-			s.router.Reset(key)
-		}
 		stubRefresh.run()
 		return
 	}

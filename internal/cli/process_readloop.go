@@ -640,6 +640,28 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		return false
 	}
 
+	// #1958: assistant interim events under passthrough: deliver to
+	// currentTurnSlots owners' onEvent so AskUserQuestion cards (and
+	// thinking/tool_use status banners) reach the IM tracker.
+	// The legacy Send path does this inside process_send.go's drain loop;
+	// passthrough's readLoop-only path was previously skipping these
+	// frames entirely, so AskUserQuestion never fired askQuestionFired and
+	// its bailout text was not suppressed. We do NOT skip legacy eventCh
+	// delivery — EventLog + eventCh consumers still need these events.
+	// Holding slotsMu only long enough to snapshot the owner slice so the
+	// onEvent callbacks run outside the lock (they may block on Reply).
+	if ev.Type == "assistant" && p.caps.Replay {
+		p.slotsMu.Lock()
+		owners := make([]*sendSlot, len(p.currentTurnSlots))
+		copy(owners, p.currentTurnSlots)
+		p.slotsMu.Unlock()
+		for _, owner := range owners {
+			if owner.onEvent != nil {
+				owner.onEvent(ev)
+			}
+		}
+	}
+
 	// result under passthrough: fan-out to claimed slots and skip
 	// legacy eventCh delivery. We still log to EventLog so dashboard
 	// sees the turn-complete event.
