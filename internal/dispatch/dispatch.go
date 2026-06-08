@@ -1360,12 +1360,18 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	for _, img := range outImages {
-		if _, err := p.Reply(ctx, platform.OutgoingMessage{
-			ChatID: msg.ChatID,
-			Images: []platform.Image{img},
-		}); err != nil {
-			slog.Warn("send image failed", "err", err)
+	// #1959: outImages is derived from replyText (same source). When
+	// askQuestionFired suppresses replyText, its associated images must
+	// also be suppressed — otherwise orphaned /tmp image bubbles are sent
+	// after the AskUserQuestion card, confusing the user.
+	if !tracker.askQuestionFired.Load() {
+		for _, img := range outImages {
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{
+				ChatID: msg.ChatID,
+				Images: []platform.Image{img},
+			}); err != nil {
+				slog.Warn("send image failed", "err", err)
+			}
 		}
 	}
 }
