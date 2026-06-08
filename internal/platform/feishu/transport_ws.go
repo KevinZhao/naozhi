@@ -153,15 +153,21 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// Card actions don't carry a chat_type; we infer from chat_id prefix:
-		// "oc_" is a group chat (open_chat_id), "ou_" would be direct (open_id
-		// used as chat target in 1:1). Feishu's card actions originate from a
-		// message in a chat, so oc_ indicates group; anything else we call
-		// direct. Defensive default: group chats get authorization via
-		// dispatch's own mention/owner rules.
-		chatType := "direct"
-		if strings.HasPrefix(chatID, "oc_") {
-			chatType = "group"
+		// The WS card-action callback envelope carries no chat_type, so we
+		// prefer the originating chat type embedded in the button value (see
+		// buildQuestionCardJSON) to route the answer back to the same session
+		// key the question was asked in.
+		//
+		// Fallback only when the value is absent (older cards / non-card
+		// clicks): default to "direct". The previous chat_id-prefix heuristic
+		// ("oc_" => group) was wrong — Feishu p2p (1:1) chats ALSO use an
+		// "oc_" open_chat_id, so it mis-routed 1:1 answers into a phantom
+		// group session. Genuine group chats still gate on dispatch's
+		// mention/owner rules, and MentionMe is set on the synthesised message
+		// regardless.
+		chatType := normalizeCardChatType(val.ChatType)
+		if chatType == "" {
+			chatType = "direct"
 		}
 		// R20260608-133914-LB-4 (#1964): track + rate-limit the dispatch like
 		// the WS text/image/audio branches and the webhook card branch

@@ -218,6 +218,15 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
 				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
 			}
+			// Embed the originating chat type so the WebSocket card-action
+			// path (whose callback lacks chat_type and would otherwise infer
+			// "group" from the oc_ prefix even for 1:1 chats) routes the
+			// answer back to the same session key. Only the whitelisted
+			// values are emitted; anything else is omitted and the receiver
+			// falls back to its heuristic.
+			if ct := normalizeCardChatType(card.ChatType); ct != "" {
+				a.Value["chat_type"] = ct
+			}
 			acts = append(acts, a)
 		}
 		elements = append(elements, actionModule{Tag: "action", Layout: "flow", Actions: acts})
@@ -250,6 +259,19 @@ var markdownEscaper = strings.NewReplacer(
 	"_", "\\_",
 )
 
+// normalizeCardChatType whitelists a chat-type string down to the two values
+// the session router understands. Anything outside {"direct","group"} returns
+// "" so callers fall back to their own heuristic rather than propagating an
+// unexpected (possibly attacker-relayed) value into the session key.
+func normalizeCardChatType(s string) string {
+	switch s {
+	case "direct", "group":
+		return s
+	default:
+		return ""
+	}
+}
+
 // escapeMarkdown escapes the minimal set of markdown metacharacters that
 // could break the card body rendering if they appear literally in a user-
 // facing string. Feishu markdown is GitHub-flavoured; we only guard against
@@ -271,6 +293,16 @@ type cardActionPayload struct {
 	ToolUseID string `json:"tool_use_id"`
 	Header    string `json:"header"`
 	Label     string `json:"label"`
+	// ChatType carries the originating session's chat type ("direct"/"group").
+	// Unlike the removed SessionKey field, this is not attacker-derived
+	// routing state: it is strictly whitelisted to {"direct","group"} on read
+	// (anything else is ignored) and only consulted by the WebSocket card
+	// path, whose callback envelope lacks a chat_type. The webhook path reads
+	// the real chat_type from the signed envelope and never trusts this.
+	// Feishu p2p (1:1) chats also use an "oc_" open_chat_id, so the old
+	// prefix heuristic mis-routed 1:1 card answers into a phantom group
+	// session — this field lets the answer land back in the direct session.
+	ChatType string `json:"chat_type,omitempty"`
 }
 
 // handleCardActionWebhook parses an im.card.action.v1_trigger envelope and

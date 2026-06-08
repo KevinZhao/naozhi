@@ -258,6 +258,99 @@ func TestDispatchCardAction_IgnoresUnknownKind(t *testing.T) {
 	}
 }
 
+// TestNormalizeCardChatType pins the whitelist: only the two router-known
+// values survive; everything else (including attacker-relayed junk) is
+// dropped to "" so callers fall back to their own heuristic.
+func TestNormalizeCardChatType(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"direct": "direct",
+		"group":  "group",
+		"":       "",
+		"p2p":    "", // Feishu's wire value for 1:1 is normalised upstream; raw form rejected here
+		"GROUP":  "",
+		"../etc": "",
+	}
+	for in, want := range cases {
+		if got := normalizeCardChatType(in); got != want {
+			t.Errorf("normalizeCardChatType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestBuildQuestionCardJSON_EmbedsChatType verifies the originating chat type
+// rides in the button value so the WS card-action path can route the answer
+// back to the same session key (regression for the 1:1-misrouted-as-group bug
+// where every "oc_" prefix was treated as group).
+func TestBuildQuestionCardJSON_EmbedsChatType(t *testing.T) {
+	t.Parallel()
+	card := platform.QuestionCard{
+		ToolUseID: "t1",
+		ChatType:  "direct",
+		Items: []platform.QuestionItem{{
+			Question: "q",
+			Header:   "H",
+			Options:  []platform.QuestionOption{{Label: "A"}},
+		}},
+	}
+	data, err := buildQuestionCardJSON(card)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(string(data), `"chat_type":"direct"`) {
+		t.Errorf("card value missing chat_type:direct: %s", data)
+	}
+}
+
+// TestBuildQuestionCardJSON_OmitsUnknownChatType ensures a non-whitelisted
+// chat type is not propagated into the button value (defence in depth — the
+// value round-trips through Feishu and back into the session key).
+func TestBuildQuestionCardJSON_OmitsUnknownChatType(t *testing.T) {
+	t.Parallel()
+	card := platform.QuestionCard{
+		ToolUseID: "t1",
+		ChatType:  "p2p", // not a router value; must be dropped
+		Items: []platform.QuestionItem{{
+			Question: "q",
+			Options:  []platform.QuestionOption{{Label: "A"}},
+		}},
+	}
+	data, err := buildQuestionCardJSON(card)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(string(data), `"chat_type"`) {
+		t.Errorf("non-whitelisted chat_type leaked into card: %s", data)
+	}
+}
+
+// TestDispatchCardAction_DirectChatTypeRoutesToDirect is the core regression:
+// a 1:1 card click whose value carries chat_type=direct must route to a
+// direct session even though the chat_id is an "oc_" prefix (Feishu p2p chats
+// use oc_ open_chat_ids). The WS handler resolves chatType from the value and
+// passes it here; this asserts the resulting IncomingMessage stays "direct".
+func TestDispatchCardAction_DirectChatTypeRoutesToDirect(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	var got platform.IncomingMessage
+	var called atomic.Int32
+	handler := func(_ context.Context, m platform.IncomingMessage) {
+		called.Add(1)
+		got = m
+	}
+	// chatID is an oc_ prefix (a real 1:1 open_chat_id) but the value-derived
+	// chatType is "direct" — the bug was treating this as "group".
+	f.dispatchCardAction(context.Background(),
+		cardActionPayload{Kind: "ask_answer", ToolUseID: "t1", Header: "H", Label: "L", ChatType: "direct"},
+		"oc_p2p_chat", "", "direct", "ou_user", handler)
+	if called.Load() != 1 {
+		t.Fatalf("handler called %d times, want 1", called.Load())
+	}
+	if got.ChatType != "direct" {
+		t.Errorf("1:1 card answer routed as %q, want direct (oc_ prefix must not force group)", got.ChatType)
+	}
+}
+
 func TestHandleCardActionWebhook_ParsesShape(t *testing.T) {
 	t.Parallel()
 	f := &Feishu{}
