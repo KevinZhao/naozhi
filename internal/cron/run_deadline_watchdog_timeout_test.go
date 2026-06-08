@@ -62,10 +62,7 @@ func (b *blockingInterrupter) waitDrained(t *testing.T) {
 // releases the stub so the inner goroutine drains cleanly.
 func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 50*time.Millisecond)
 
 	bi := &blockingInterrupter{release: make(chan struct{}), returned: make(chan struct{}), outcome: InterruptSent}
 	defer bi.waitDrained(t) // ensure the parked goroutine drains before returning
@@ -102,9 +99,7 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 // shared metric counter (which other tests may also touch but only via
 // strict deltas around this test).
 func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 50*time.Millisecond)
 
 	before := metrics.CronWatchdogInterruptTimeoutTotal.Value()
 
@@ -136,9 +131,7 @@ func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
 // decrement the gauge back to baseline. NOT t.Parallel() — mutates
 // package-level watchdogInterruptTimeoutAtomic and the shared gauge.
 func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 50*time.Millisecond)
 
 	// returned + waitDrained guarantee THIS test's parked inner goroutine
 	// (and its gauge -1) drains before the test returns, so it leaves no
@@ -228,9 +221,7 @@ func settleParkedGauge() int64 {
 // the watchdog fires — the CAS(0→2) loses to the inner goroutine's
 // CAS(0→1) so no increment happens. R20260602-GO-005 (#1632).
 func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(200 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 200*time.Millisecond)
 
 	base := watchdogParkedInterruptGoroutines.Value()
 
@@ -257,10 +248,7 @@ func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
 // real outcome is preserved, not overridden to InterruptError.
 func TestRunDeadlineWatchdog_FastInterruptStillWins(t *testing.T) {
 	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(200 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	setWatchdogInterruptTimeoutForTest(t, 200*time.Millisecond)
 
 	ci := &countingInterrupter{outcome: InterruptUnsupported}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)

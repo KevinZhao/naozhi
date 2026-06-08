@@ -180,6 +180,66 @@ func TestConnect_UnexpectedMessageType(t *testing.T) {
 	}
 }
 
+// TestConnect_AuthFailed_SanitizesMsg verifies R20260607-SEC-1: a Msg field
+// containing bidi-override characters is sanitized before entering the error.
+func TestConnect_AuthFailed_SanitizesMsg(t *testing.T) {
+	srv := newFakeShimServer(t)
+	defer srv.cleanup()
+
+	srv.handleOnce(func(conn net.Conn) {
+		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
+		// Embed bidi-override U+202E in Msg.
+		raw := []byte("{\"type\":\"auth_failed\",\"msg\":\"bad‮creds\"}\n")
+		conn.Write(raw) //nolint:errcheck
+	})
+
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+	token := []byte("some-32-byte-token-padded!!!!!!!")
+	_, err := m.connect(srv.path, token, 0)
+	if err == nil {
+		t.Fatal("expected error for auth_failed, got nil")
+	}
+	if containsRune(err.Error(), '‮') {
+		t.Errorf("error message still contains bidi-override: %q", err.Error())
+	}
+}
+
+// TestConnect_UnexpectedType_SanitizesType verifies R20260607-SEC-3: a Type
+// field containing control/bidi characters is sanitized before entering the error.
+func TestConnect_UnexpectedType_SanitizesType(t *testing.T) {
+	srv := newFakeShimServer(t)
+	defer srv.cleanup()
+
+	srv.handleOnce(func(conn net.Conn) {
+		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
+		// Type contains a C1 control byte (0x80) after UTF-8 encode.
+		raw := []byte("{\"type\":\"badtype\"}\n")
+		conn.Write(raw) //nolint:errcheck
+	})
+
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+	token := []byte("some-32-byte-token-padded!!!!!!!")
+	_, err := m.connect(srv.path, token, 0)
+	if err == nil {
+		t.Fatal("expected error for unexpected message type, got nil")
+	}
+	if containsRune(err.Error(), '') {
+		t.Errorf("error message still contains C1 control: %q", err.Error())
+	}
+}
+
+// containsRune reports whether s contains the given rune.
+func containsRune(s string, r rune) bool {
+	for _, c := range s {
+		if c == r {
+			return true
+		}
+	}
+	return false
+}
+
 // TestConnect_RejectsHelloProtocolVersionTooNew locks RNEW-ARCH-403 (#427):
 // when a forward-rolled shim ships a wire-incompatible v=ProtocolVersion+1
 // hello, naozhi must refuse the attach handshake immediately rather than

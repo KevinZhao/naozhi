@@ -797,6 +797,12 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				if reErr := s.registerJob(j2); reErr != nil {
 					slog.Error("cron: failed to restore previous schedule after UpdateJob rollback",
 						"job_id", id, "schedule", schedOldSchedule, "err", reErr)
+					// R20260607-LOGIC-1: both re-register attempts failed; the job has
+					// entryID=0 and will never fire again. Mark it Paused so the
+					// dashboard shows a degraded/paused state rather than falsely
+					// reporting it as active. persistJobsLocked below will write
+					// Paused=true to disk so a restart does not silently clear this.
+					j2.Paused = true
 				}
 				// Re-persist with the rolled-back schedule so disk stays
 				// consistent with in-memory state.

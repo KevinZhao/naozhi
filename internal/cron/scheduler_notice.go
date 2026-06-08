@@ -190,9 +190,18 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 		backend:       j.Backend,
 		lastSessionID: j.LastSessionID,
 	}
-	if j.Notify != nil {
-		v := *j.Notify
-		snap.notify = &v
-	}
+	// R090135-PERF-003 (#1931): alias j.Notify directly instead of deep-
+	// copying via `v := *j.Notify; snap.notify = &v`. The old form forced
+	// `v` to the heap (the returned snapshot escapes the function), costing
+	// one *bool alloc per snapshot — 50 jobs × 1Hz = 50 alloc/s under
+	// executeOpt. The deep copy was never needed for correctness: UpdateJob
+	// (scheduler_jobs.go) only ever *reassigns* j.Notify to a fresh &v (or
+	// nil) under s.mu.Lock — it never mutates *j.Notify in place — so the
+	// pointed-to bool is immutable once published. Reading the pointer slot
+	// under s.mu (the snapshot's RLock) yields a stable pointer to an
+	// immutable value; the sole downstream reader (resolveNotifyDecision)
+	// only nil-checks and derefs, never writes through it. Aliasing is
+	// therefore alloc-free and tear-free.
+	snap.notify = j.Notify
 	return snap
 }

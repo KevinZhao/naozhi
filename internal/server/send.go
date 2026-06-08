@@ -347,7 +347,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		Images:    p.Images,
 		EnqueueAt: time.Now(),
 	}
-	isOwner, enqueued, shouldInterrupt, gen := h.queue.Enqueue(key, qm)
+	isOwner, enqueued, shouldInterrupt, gen, _ := h.queue.Enqueue(key, qm)
 	if !isOwner {
 		if shouldInterrupt {
 			// Interrupt mode: abort the in-flight turn so the queued

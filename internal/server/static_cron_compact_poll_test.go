@@ -26,7 +26,7 @@ import (
 func TestDashboardJS_CronCompactPoll(t *testing.T) {
 	t.Parallel()
 
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestDashboardJS_CronCompactPoll(t *testing.T) {
 func TestDashboardJS_CronRefetchFullJobFailSafe(t *testing.T) {
 	t.Parallel()
 
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}

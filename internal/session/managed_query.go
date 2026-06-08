@@ -367,6 +367,32 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	return out
 }
 
+// EventEntriesAppend is the buffer-reusing variant of EventEntries: it appends
+// this session's full event log onto dst and returns the grown slice instead of
+// always allocating a fresh []cli.EventEntry + full copy.
+//
+// R20260607-PERF-6 (#1885): EventEntries() allocates make([]cli.EventEntry,len)
+// + copy on every call. The startup-discovery scan (EventEntriesForKey, called
+// per-session in router_discovery) and collectPreviousHistory (every spawn/reset)
+// run it across O(N sessions) of dead sessions, each ~120 KB for 500-entry
+// histories. Callers that iterate sessions can pass a single pooled buffer
+// (buf[:0]) and reuse its backing array between sessions.
+//
+// Ownership mirrors EventEntriesSinceAppend: the caller must not retain dst
+// across calls; the returned slice shares the backing array with dst. The
+// live-process branch forwards through proc.EventEntries() (the ring's own
+// snapshot) and appends it, so dst's prefix is preserved in every branch.
+func (s *ManagedSession) EventEntriesAppend(dst []cli.EventEntry) []cli.EventEntry {
+	proc := s.loadProcess()
+	if proc != nil {
+		return append(dst, proc.EventEntries()...)
+	}
+	s.historyMu.RLock()
+	dst = append(dst, s.persistedHistory...)
+	s.historyMu.RUnlock()
+	return dst
+}
+
 // SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
 // or nil when the session is not backed by a live Claude-CLI process (fake
 // test process, dead process, ACP protocol, etc.). Callers must guard the
@@ -561,15 +587,28 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 	if proc != nil {
 		// Empty dst is the hot path (backfillSubscriberEvents always passes
 		// buf[:0]): forward straight into the process's append-mode query so
-		// the EventLog reuses dst's backing capacity — the #1740 win. A
-		// non-empty dst must preserve its prefix, but EventLog.EntriesSinceAppend
-		// re-slices from dst[:0] and appends forward, which would OVERWRITE the
-		// caller's prefix; so fall back to proc.EventEntriesSince + explicit
-		// append, matching the dead-session branch below.
+		// the EventLog reuses dst's backing capacity — the #1740 win.
 		if len(dst) == 0 {
 			return proc.EventEntriesSinceAppend(dst, afterMS)
 		}
-		return append(dst, proc.EventEntriesSince(afterMS)...)
+		// Non-empty dst (resubscribe catch-up): the prefix must be preserved.
+		// EventLog.EntriesSinceAppend re-slices from its argument's [:0] and
+		// appends forward, so handing it dst directly would OVERWRITE the
+		// prefix. Instead hand it dst[len(dst):] — a zero-length view anchored
+		// at dst's tail that writes into dst's spare capacity past the prefix,
+		// reusing the backing array when capacity allows (the #1740 win).
+		// R20260607-PERF-002 (#1922): the previous
+		// append(dst, proc.EventEntriesSince(afterMS)...) made EventLog
+		// allocate a fresh []cli.EventEntry, silently defeating the
+		// buffer-reuse optimization whenever dst had residual entries.
+		//
+		// When the spare capacity sufficed, `appended` already occupies dst's
+		// tail and append is an in-place no-op (copy handles the overlap); when
+		// it didn't, EntriesSinceAppend returned a fresh slice and append grows
+		// dst to fold it in. Either way the prefix is preserved and the result
+		// spans prefix + appended tail.
+		appended := proc.EventEntriesSinceAppend(dst[len(dst):], afterMS)
+		return append(dst, appended...)
 	}
 	s.historyMu.RLock()
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {

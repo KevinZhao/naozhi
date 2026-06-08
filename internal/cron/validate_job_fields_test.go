@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -95,5 +96,51 @@ func TestValidateJobFields_RejectsControlBytes(t *testing.T) {
 				t.Fatalf("expected control-byte rejection, got nil")
 			}
 		})
+	}
+}
+
+// TestValidateJobFields_RejectsOverlongTitle confirms R20260607-ARCH-3 (#1927):
+// Title rune-cap validation was folded into validateJobFields so a caller
+// reaching it directly (not via AddJob's inline check) still gets the full
+// policy. A Title exceeding MaxCronTitleLen runes must be rejected.
+func TestValidateJobFields_RejectsOverlongTitle(t *testing.T) {
+	j := &Job{Title: strings.Repeat("a", MaxCronTitleLen+1)}
+	err := validateJobFields(j)
+	if err == nil {
+		t.Fatalf("expected title-too-long rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "title too long") {
+		t.Errorf("error %q does not mention title too long", err.Error())
+	}
+	// Exactly cap runes is allowed (inclusive bound).
+	if err := validateJobFields(&Job{Title: strings.Repeat("a", MaxCronTitleLen)}); err != nil {
+		t.Errorf("title at exactly cap rejected: %v", err)
+	}
+}
+
+// TestValidateJobFields_RejectsUnsafePrompt confirms R20260607-ARCH-3 (#1927):
+// Prompt strict validation (R244-SEC-P2-5 / #889) was folded into
+// validateJobFields. A non-empty prompt carrying log-injection / control
+// bytes must be rejected, while an empty prompt (paused-with-empty-prompt
+// dashboard state) stays allowed.
+func TestValidateJobFields_RejectsUnsafePrompt(t *testing.T) {
+	// Empty prompt is permitted (paused-with-empty-prompt create state).
+	if err := validateJobFields(&Job{Prompt: ""}); err != nil {
+		t.Errorf("empty prompt rejected: %v", err)
+	}
+	// A clean prompt passes.
+	if err := validateJobFields(&Job{Prompt: "summarise the inbox"}); err != nil {
+		t.Errorf("clean prompt rejected: %v", err)
+	}
+	// An oversized prompt is rejected by the strict validator.
+	over := &Job{Prompt: strings.Repeat("x", MaxPromptBytes+1)}
+	if err := validateJobFields(over); err == nil {
+		t.Fatalf("expected oversize prompt rejection, got nil")
+	} else if !errors.Is(err, ErrInvalidPrompt) {
+		t.Errorf("oversize prompt error %v is not ErrInvalidPrompt", err)
+	}
+	// A control-byte (NUL) prompt is rejected.
+	if err := validateJobFields(&Job{Prompt: "hi\x00there"}); err == nil {
+		t.Fatalf("expected control-byte prompt rejection, got nil")
 	}
 }

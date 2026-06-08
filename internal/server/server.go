@@ -606,6 +606,13 @@ func buildServer(opts ServerOptions) *Server {
 		if !s.cronH.HasWriteLimiter() {
 			panic("server: writeLimiter must be non-nil when scheduler is wired")
 		}
+		// [R20260607-SEC-9] transcriptLimiter guards flattenJSONLEvent which
+		// is more expensive than a runs list fetch. Without this check a future
+		// refactor that forgets to wire transcriptLimiter would silently fall
+		// back to runsLimiter (transcript.go fallback path) with no boot alert.
+		if !s.cronH.HasTranscriptLimiter() {
+			panic("server: transcriptLimiter must be non-nil when scheduler is wired")
+		}
 	}
 
 	return s

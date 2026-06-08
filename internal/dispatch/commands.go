@@ -162,9 +162,16 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 // available; ACP-backed sessions fall back to SIGINT-equivalent Interrupt().
 // In passthrough mode, pending slots remain queued — only the active turn
 // is dropped; CLI moves on to the next message automatically.
+//
+// #1944: a chat can host multiple agent sessions (general/planner plus any
+// agent-command sessions like /review→code-reviewer). The previous
+// implementation hard-coded the "general" key, so /stop was a no-op for
+// agent-command turns and replied with the misleading "no reply in progress".
+// We now broadcast the control interrupt across every agent the chat could
+// have a live session for and aggregate the outcomes, mirroring /cd's
+// chat-wide ResetChat semantics.
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
-	key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-	outcome := d.router.InterruptSessionViaControl(key)
+	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
 	switch outcome {
 	case session.InterruptSent:
 		d.replyText(ctx, msg, "已中断当前回复。", log)
@@ -175,6 +182,55 @@ func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.Incomin
 	case session.InterruptError:
 		d.replyText(ctx, msg, "中断失败，请稍后重试或使用 /new 重置会话。", log)
 	}
+}
+
+// interruptChat broadcasts a control_request interrupt across every agent
+// session a chat may own (general/planner + every configured agent-command
+// target) and folds the per-key outcomes into a single user-facing result.
+//
+// Folding precedence (best-news-wins, so an idle planner session never masks
+// an actually-interrupted code-reviewer turn):
+//
+//	Sent > Error > Unsupported > NoTurn > NoSession
+//
+// Keys are deduplicated because the same agentID can be reachable through
+// multiple slash commands, and because general/planner are always probed.
+func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.InterruptOutcome {
+	agentIDs := make(map[string]struct{}, len(d.agentCommands)+2)
+	agentIDs["general"] = struct{}{}
+	agentIDs["planner"] = struct{}{}
+	for _, id := range d.agentCommands {
+		agentIDs[id] = struct{}{}
+	}
+
+	best := session.InterruptNoSession
+	rank := func(o session.InterruptOutcome) int {
+		switch o {
+		case session.InterruptSent:
+			return 4
+		case session.InterruptError:
+			return 3
+		case session.InterruptUnsupported:
+			return 2
+		case session.InterruptNoTurn:
+			return 1
+		default: // InterruptNoSession
+			return 0
+		}
+	}
+
+	seenKey := make(map[string]struct{}, len(agentIDs))
+	for id := range agentIDs {
+		key := d.keyForChat(platform, chatType, chatID, id)
+		if _, dup := seenKey[key]; dup {
+			continue
+		}
+		seenKey[key] = struct{}{}
+		if o := d.router.InterruptSessionViaControl(key); rank(o) > rank(best) {
+			best = o
+		}
+	}
+	return best
 }
 
 // handleUrgentCommand dispatches a priority:"now" passthrough message. The
@@ -746,13 +802,27 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	if d.allowedRoot != "" && absPath != d.allowedRoot && !strings.HasPrefix(absPath, d.allowedRoot+string(filepath.Separator)) {
-		d.replyText(ctx, msg, "不允许访问该路径", log)
-		return
+	if d.allowedRoot != "" {
+		// Resolve allowedRoot the same way absPath was resolved above so the
+		// containment check compares two canonical paths. EvalSymlinks failure
+		// (root temporarily unmounted) falls back to the raw string — matches
+		// server.validateWorkspace / cron.workDirResolveUnderRoot. The shared
+		// osutil.PathContainedInRoot then byte-compares with an inode-walk
+		// fallback, so a case-insensitive fs (macOS APFS) where the operator's
+		// configured root differs in case from the typed path no longer
+		// rejects a legitimate /cd target.
+		rootResolved := d.allowedRoot
+		if r, err := filepath.EvalSymlinks(d.allowedRoot); err == nil {
+			rootResolved = r
+		}
+		if !osutil.PathContainedInRoot(absPath, rootResolved) {
+			d.replyText(ctx, msg, "不允许访问该路径", log)
+			return
+		}
 	}
 
-	d.router.SetWorkspace(chatKey, absPath)
 	d.router.ResetChat(chatKey)
+	d.router.SetWorkspace(chatKey, absPath)
 
 	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
 	// expansion + Clean) rather than absPath or post-expansion path, which

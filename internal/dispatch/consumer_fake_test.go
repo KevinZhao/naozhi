@@ -112,6 +112,7 @@ type fakeSessionRouter struct {
 	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 	notifyIdle                func()
 	discardPassthroughPending func(key string, reason error)
+	interruptViaControl       func(key string) session.InterruptOutcome
 }
 
 func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
@@ -139,8 +140,11 @@ func (f *fakeSessionRouter) SetWorkspace(string, string) {
 	panic("fakeSessionRouter.SetWorkspace not configured")
 }
 
-func (f *fakeSessionRouter) InterruptSessionViaControl(string) session.InterruptOutcome {
-	panic("fakeSessionRouter.InterruptSessionViaControl not configured")
+func (f *fakeSessionRouter) InterruptSessionViaControl(key string) session.InterruptOutcome {
+	if f.interruptViaControl == nil {
+		panic("fakeSessionRouter.InterruptSessionViaControl not configured")
+	}
+	return f.interruptViaControl(key)
 }
 
 func (f *fakeSessionRouter) NotifyIdle() {

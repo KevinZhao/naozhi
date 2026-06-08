@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/slack-go/slack/slackevents"
@@ -179,6 +180,45 @@ func TestHandleMessage_EmptyAfterMentionStrip(t *testing.T) {
 	s.handleMessage(&slackevents.MessageEvent{Text: "<@U123>"})
 	if called {
 		t.Error("empty text after mention strip should be skipped")
+	}
+}
+
+// TestHandleMessage_EmptyBotIDFailsOpenForGroup pins #1947: when AuthTest
+// failed at Start so botID is unknown, a group message must be marked
+// MentionMe=true (fail-open) rather than MentionMe=false. The Start-time warn
+// promises "all channel messages will be processed (no mention filtering)";
+// the previous code left MentionMe=false, which the dispatcher's group gate
+// (ChatType=="group" && !MentionMe) turned into a silent fail-CLOSED drop of
+// every group message until restart.
+func TestHandleMessage_EmptyBotIDFailsOpenForGroup(t *testing.T) {
+	t.Parallel()
+	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
+	// botID intentionally left "" (AuthTest failed). Push the self-heal
+	// cooldown into the future so this test never makes a live auth.test call.
+	s.botHealAt = time.Now().Add(time.Hour)
+
+	var received platform.IncomingMessage
+	done := make(chan struct{})
+	s.handler = func(_ context.Context, msg platform.IncomingMessage) {
+		received = msg
+		close(done)
+	}
+	s.handleMessage(&slackevents.MessageEvent{
+		User:        "U456",
+		Channel:     "C789",
+		ChannelType: "channel",
+		Text:        "hello bot",
+		TimeStamp:   "1234567890.000300",
+	})
+	<-done
+	if !received.MentionMe {
+		t.Fatal("MentionMe must be true when botID is unknown (fail-open) so the group gate does not silently drop the message (#1947)")
+	}
+	if received.ChatType != "group" {
+		t.Errorf("ChatType = %q, want group", received.ChatType)
+	}
+	if received.Text != "hello bot" {
+		t.Errorf("Text = %q, want 'hello bot'", received.Text)
 	}
 }
 
