@@ -242,7 +242,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    Each is a full-screen peer of the chat sidebar+main. The chat panels hide
    under the matching body.nz-view-* class; the target view's panels show.
    Mutually exclusive — setActivityView() toggles exactly one body class. */
-.asset-sidebar,.asset-main,.cron-main,.settings-main{display:none}
+.asset-sidebar,.asset-main,.cron-main,.settings-main,.system-main{display:none}
 body.nz-view-assets .sidebar,body.nz-view-assets .resizer,body.nz-view-assets .main{display:none!important}
 body.nz-view-assets .asset-sidebar{display:flex}
 body.nz-view-assets .asset-main{display:flex}
@@ -254,6 +254,9 @@ body.nz-view-cron .cron-main{display:flex;flex-direction:column;flex:1;min-width
 /* Settings view */
 body.nz-view-settings .sidebar,body.nz-view-settings .resizer,body.nz-view-settings .main{display:none!important}
 body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;min-width:0}
+/* System view: single full-width read-only daemon list (mirrors settings). */
+body.nz-view-system .sidebar,body.nz-view-system .resizer,body.nz-view-system .main{display:none!important}
+body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-width:0}
 
 /* ===== Settings view ===== */
 .settings-head{flex-shrink:0;padding:14px 20px;border-bottom:1px solid var(--nz-border)}
@@ -268,6 +271,30 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .settings-conn{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:10px 14px}
 .settings-conn .ab-conn-dot{width:9px;height:9px}
 .settings-conn-meta{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin-top:6px}
+
+/* ===== System view (sysession daemons) ===== */
+.system-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--nz-border)}
+.system-head h1{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;flex:1}
+.system-body{flex:1;overflow-y:auto;padding:20px;max-width:860px;width:100%}
+.system-intro{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin-bottom:16px;line-height:1.5}
+.sys-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:14px 16px;margin-bottom:12px}
+.sys-card-top{display:flex;align-items:center;gap:10px}
+.sys-state-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;background:var(--nz-text-dim)}
+.sys-state-dot.ok{background:var(--nz-green,#3fb950)}
+.sys-state-dot.fail{background:var(--nz-red)}
+.sys-state-dot.off{background:var(--nz-text-dim)}
+.sys-state-dot.running{background:var(--nz-accent)}
+.sys-name{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sys-pill{flex-shrink:0;font-size:var(--nz-fs-xs);padding:2px 9px;border-radius:var(--nz-radius-pill);border:1px solid var(--nz-border);color:var(--nz-text-mute);background:var(--nz-bg-2)}
+.sys-pill.on{color:var(--nz-green,#3fb950);border-color:var(--nz-green,#3fb950)}
+.sys-pill.off{color:var(--nz-text-dim)}
+.sys-desc{color:var(--nz-text-mute);font-size:var(--nz-fs-sm);margin:8px 0 0;line-height:1.5}
+.sys-meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.sys-meta b{color:var(--nz-text);font-weight:500;font-variant-numeric:tabular-nums}
+.sys-stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.sys-stat{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:2px 8px;font-variant-numeric:tabular-nums}
+.sys-warn{color:var(--nz-red);font-size:var(--nz-fs-xs);margin-top:8px}
+.system-empty{color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center;padding:40px 20px}
 
 .asset-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
 .asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
@@ -1301,7 +1328,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
   /* Container: block so each panel stacks */
   .container{display:block;height:100%;overflow:hidden}
   /* Activity Bar -> fixed bottom tab bar; rail rows become horizontal nav.
-     .ab-top/.ab-bottom collapse via display:contents so all 4 .ab-nav buttons
+     .ab-top/.ab-bottom collapse via display:contents so all 5 .ab-nav buttons
      become direct flex children of the horizontal bar (margin-top:auto is a
      no-op once the wrapper is display:contents). */
   .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
@@ -1331,9 +1358,9 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
      + .cron-detail-body.has-drawer rules, so no extra work here. The cron
      in-panel .btn-mobile-back (returns to session list) is stale in the
      standalone view — hide it; the bottom tab bar is the nav surface now. */
-  body.nz-view-cron .cron-main,body.nz-view-settings .settings-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
+  body.nz-view-cron .cron-main,body.nz-view-settings .settings-main,body.nz-view-system .system-main{position:fixed;inset:var(--vv-top,0) 0 0 0;width:100%!important;height:var(--vv-height,100%);z-index:10;padding-bottom:var(--nz-tabbar-h)}
   body.nz-view-cron .cron-list-head .btn-mobile-back{display:none}
-  .settings-head{padding-top:max(14px,env(safe-area-inset-top))}
+  .settings-head,.system-head{padding-top:max(14px,env(safe-area-inset-top))}
   /* Sidebar: full-screen drawer. Default = visible (translateX(0)), slides
      out only when body.mobile-chat-view is set. Rationale: the previous
      default was translateX(-100%) relying on JS to add body.mobile-list-view
@@ -2582,6 +2609,15 @@ body.kbd-open .sidebar-footer{display:none}
         <span class="ab-nav-label">自动化</span>
         <span class="ab-badge" id="abnav-cron-badge" hidden aria-label="需关注的定时任务数"></span>
       </button>
+      <!-- System view: built-in background daemons (sysession), e.g. the
+           AutoTitler. Peer of 自动化 but read-only — naozhi owns these, so the
+           panel surfaces run状态/last-run/失败计数 without create/edit/delete.
+           Routes through setActivityView('system') → renderSystemView(). -->
+      <button class="ab-nav" id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+        <span class="ab-nav-label">系统</span>
+        <span class="ab-badge" id="abnav-system-badge" hidden aria-label="需关注的系统任务数"></span>
+      </button>
     </div>
     <!-- Bottom group: pushed to the rail foot via .ab-bottom{margin-top:auto}.
          Settings view entry. Wired in dashboard.js. -->
@@ -2688,6 +2724,10 @@ body.kbd-open .sidebar-footer{display:none}
        body.nz-view-cron. renderCronPanel() in dashboard.js paints the existing
        .cron-detail two-pane layout in here instead of #main. -->
   <main class="cron-main" id="cron-main" aria-label="定时任务" hidden></main>
+  <!-- System view: independent top-level view (peer of chat/assets/cron),
+       shown under body.nz-view-system. renderSystemView() in dashboard.js
+       paints the read-only daemon status list (GET /api/system/daemons). -->
+  <main class="system-main" id="system-main" aria-label="系统任务" hidden></main>
   <!-- Settings view: shown under body.nz-view-settings. renderSettingsView()
        fills it (theme switch + connection info). -->
   <main class="settings-main" id="settings-main" aria-label="设置" hidden></main>
