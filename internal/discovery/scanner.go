@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -55,6 +57,13 @@ type Scanner struct {
 	promptCache  promptCacheState
 	summaryCache summaryCacheState
 	pathCache    pathCacheState
+
+	// summaryLoad collapses concurrent loads of the same sessions-index.json
+	// into one os.Stat + os.ReadFile + json.Unmarshal. Without it, the 4
+	// concurrent promptWg goroutines (plus repeated scans) each take the
+	// summary write lock on a cache miss and serialise behind the slowest
+	// stat+parse for the same workspace (PERF-10 #1967). Keyed by indexPath.
+	summaryLoad singleflight.Group
 }
 
 type promptCacheState struct {
@@ -920,25 +929,9 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 
 	result := make(map[string]string, len(sessions))
 	for indexPath, sids := range byProjDir {
-		// Check mtime cache to avoid re-reading unchanged index files.
-		fi, err := os.Stat(indexPath)
-		if err != nil {
+		idx, ok := s.loadSummaryIndex(indexPath)
+		if !ok {
 			continue
-		}
-		mtime := fi.ModTime().UnixNano()
-
-		var idx sessionsIndex
-		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
-			idx = cachedIdx
-		} else {
-			data, err := os.ReadFile(indexPath)
-			if err != nil {
-				continue
-			}
-			if err := json.Unmarshal(data, &idx); err != nil {
-				continue
-			}
-			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
 		// Single-session projects (the common case) skip the map alloc: a
@@ -971,6 +964,51 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 		}
 	}
 	return result
+}
+
+// loadSummaryIndex resolves indexPath to its parsed sessionsIndex, serving the
+// summary cache on an mtime hit and otherwise reading + parsing the file once.
+// Concurrent callers for the same indexPath are collapsed via singleflight so
+// they share a single os.Stat + os.ReadFile + json.Unmarshal instead of each
+// taking the summary write lock and serialising behind the slowest parse
+// (PERF-10 #1967). ok is false when the index is missing or unparseable.
+func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
+	// Fast path: stat once and serve a fresh cache hit without entering
+	// singleflight at all (the common steady-state case).
+	if fi, err := os.Stat(indexPath); err == nil {
+		mtime := fi.ModTime().UnixNano()
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, true
+		}
+	}
+
+	v, err, _ := s.summaryLoad.Do(indexPath, func() (any, error) {
+		fi, err := os.Stat(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		mtime := fi.ModTime().UnixNano()
+		// Re-check the cache inside the flight: an earlier flight for the same
+		// key may have just populated it, or a parallel fast-path missed by a
+		// hair. This keeps a burst from re-reading the file N times.
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, nil
+		}
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		var idx sessionsIndex
+		if err := json.Unmarshal(data, &idx); err != nil {
+			return sessionsIndex{}, err
+		}
+		s.setCachedSummary(indexPath, mtime, idx)
+		return idx, nil
+	})
+	if err != nil {
+		return sessionsIndex{}, false
+	}
+	return v.(sessionsIndex), true
 }
 
 // getCachedSummary checks the summary cache. Reads use RLock; only the gen
