@@ -188,17 +188,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    pinned to the icon's top-right. */
 .ab-badge{position:absolute;top:6px;right:6px;min-width:8px;height:8px;border-radius:var(--nz-radius-sm);background:var(--nz-red)}
 .ab-badge[hidden]{display:none}
-/* Connection status indicator: dot + tiny label. Dot color reuses the same
-   status keys as VALID_DOT_CLASSES so renderRailConnStatus can set className
-   directly. Clicking it opens the settings view. */
-.ab-conn{display:flex;flex-direction:column;align-items:center;gap:3px;width:44px;border:none;background:none;cursor:pointer;color:var(--nz-text-mute);padding:4px 0;border-radius:var(--nz-radius-md);transition:background .15s,color .15s}
-.ab-conn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+/* Connection status dot. Color reuses the same status keys as
+   VALID_DOT_CLASSES. Now only used by the settings view's connection section
+   (.settings-conn .ab-conn-dot) — the standalone bottom-rail indicator was
+   removed. */
 .ab-conn-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .ab-conn-dot.ok,.ab-conn-dot.connected{background:var(--nz-green)}
 .ab-conn-dot.connecting,.ab-conn-dot.authenticating{background:var(--nz-amber);animation:pulse 1.5s ease-in-out infinite}
 .ab-conn-dot.disconnected,.ab-conn-dot.error{background:var(--nz-red)}
 .ab-conn-dot.off,.ab-conn-dot.offline,.ab-conn-dot.unreachable{background:var(--nz-text-faint)}
-.ab-conn-label{font-size:var(--nz-fs-xs);line-height:1;white-space:nowrap;transform:scale(.82)}
 
 /* ===== Top-level views (asset / cron / settings) =====
    Each is a full-screen peer of the chat sidebar+main. The chat panels hide
@@ -1213,9 +1211,6 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
      no-op once the wrapper is display:contents). */
   .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
   .ab-top,.ab-bottom{display:contents}
-  /* Connection status lives only in the settings page on mobile (no room in a
-     4-tab bar); the rail dot is hidden. */
-  .ab-conn{display:none}
   /* In an open conversation, hide the bottom tab bar and reclaim its space so
      the chat history gets full height. The ← back button in the main header
      returns to the session list, where the tab bar reappears. Cron/settings
@@ -2494,13 +2489,8 @@ body.kbd-open .sidebar-footer{display:none}
       </button>
     </div>
     <!-- Bottom group: pushed to the rail foot via .ab-bottom{margin-top:auto}.
-         Connection status indicator (reuses getNodeStatus/statusLabelForNode)
-         + settings view entry. Both wired in dashboard.js. -->
+         Settings view entry. Wired in dashboard.js. -->
     <div class="ab-bottom">
-      <button class="ab-conn" id="ab-conn-status" type="button" title="连接状态" aria-label="连接状态，点击查看设置">
-        <span class="ab-conn-dot off" id="ab-conn-dot"></span>
-        <span class="ab-conn-label" id="ab-conn-label">—</span>
-      </button>
       <button class="ab-nav" id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span class="ab-nav-label">设置</span>

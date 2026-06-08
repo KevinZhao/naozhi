@@ -14,9 +14,9 @@ import (
 )
 
 // TestDashboardHTML_RailStructure pins the rail's top/bottom groups and the
-// new nav buttons + connection indicator. The rail is the single nav surface
-// after this redesign, so these ids/classes are load-bearing for both the
-// addEventListener wiring and the mobile bottom-tab-bar CSS.
+// nav buttons. The rail is the single nav surface after this redesign, so these
+// ids/classes are load-bearing for both the addEventListener wiring and the
+// mobile bottom-tab-bar CSS.
 func TestDashboardHTML_RailStructure(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
@@ -27,12 +27,9 @@ func TestDashboardHTML_RailStructure(t *testing.T) {
 
 	wants := []string{
 		`class="ab-top"`,                   // top nav group
-		`class="ab-bottom"`,                // bottom group (settings + conn)
+		`class="ab-bottom"`,                // bottom group (settings)
 		`id="abnav-cron" data-view="cron"`, // 自动化 nav button
 		`id="abnav-settings" data-view="settings"`,
-		`id="ab-conn-status"`, // connection indicator (also settings entry)
-		`id="ab-conn-dot"`,
-		`id="ab-conn-label"`,
 		`id="abnav-cron-badge"`, // rail attention badge mirror
 	}
 	for _, w := range wants {
@@ -99,7 +96,7 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 //   - top-level setActivityView (callable from openCronPanel/selectSession)
 //   - cron rendering gated on activeView (NOT selectedKey) and targeting
 //     #cron-main (NOT #main)
-//   - renderSettingsView / renderRailConnStatus exist
+//   - renderSettingsView exists
 func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -109,10 +106,9 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	js := string(data)
 
 	wants := []string{
-		"function setActivityView(",      // top-level router
-		"let activeView = 'chat'",        // root view state
-		"function renderSettingsView(",   // settings view renderer
-		"function renderRailConnStatus(", // bottom-rail conn indicator
+		"function setActivityView(",    // top-level router
+		"let activeView = 'chat'",      // root view state
+		"function renderSettingsView(", // settings view renderer
 	}
 	for _, w := range wants {
 		if !strings.Contains(js, w) {
@@ -216,9 +212,9 @@ func TestDashboardJS_SetActivityViewNoOpGuard(t *testing.T) {
 }
 
 // TestDashboardJS_ValidDotClassesIncludesUnreachable pins R20260606-CODE-3:
-// 'unreachable' must be in VALID_DOT_CLASSES so ab-conn-dot and ns-dot
-// elements receive the correct CSS class (whose rules exist in dashboard.html)
-// instead of falling back to 'offline'.
+// 'unreachable' must be in VALID_DOT_CLASSES so the settings-view conn dot and
+// ns-dot elements receive the correct CSS class (whose rules exist in
+// dashboard.html) instead of falling back to 'offline'.
 func TestDashboardJS_ValidDotClassesIncludesUnreachable(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -245,7 +241,6 @@ func TestDashboardHTML_RailA11yLabelsLocalized(t *testing.T) {
 	wants := []string{
 		`id="abnav-cron" data-view="cron" title="定时任务" aria-label="自动化视图"`,
 		`id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图"`,
-		`id="ab-conn-status" type="button" title="连接状态"`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(html, w) {
