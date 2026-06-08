@@ -51,6 +51,43 @@ func TestLinker_Resolve_HoistedSlicesRetry(t *testing.T) {
 	}
 }
 
+// TestLinker_Resolve_FirstLineMetaCachedAcrossRetries pins
+// R20260607-PERF-2 (#1883): the retry loop must parse a stable candidate's
+// first jsonl line at most once, reusing the cached firstLineMeta on every
+// subsequent attempt instead of re-open+32KB-bufio+Unmarshal'ing it.
+//
+// Scenario: a candidate matches the requested agentType (so it survives into
+// `candidates`) but its sessionId belongs to another session, so it is
+// filtered out on every attempt and `filtered` stays empty — driving the loop
+// through all retryLimit+1 attempts. Without the cache each attempt re-reads
+// the same file; with it, readMetaHook fires exactly once.
+func TestLinker_Resolve_FirstLineMetaCachedAcrossRetries(t *testing.T) {
+	t.Parallel()
+	const realSession = "cafebabe-1111-2222-3333-444444444444"
+	const otherSession = "99998888-7777-6666-5555-444433332222"
+	l, subagentDir := newLinkerForTest(t, realSession)
+	l.retryInterval = 1 * time.Millisecond
+	l.retryLimit = 6
+	l.cacheTTL = 1 * time.Millisecond // expire dir cache so each attempt rescans
+
+	// Stable candidate: agentType matches but sessionId mismatches → always
+	// filtered out, so the loop runs every attempt against the same file.
+	writeAgentFiles(t, subagentDir, "feedfacecafe00011", "cache-worker", otherSession, "p_x", time.Now())
+
+	var reads int
+	l.readMetaHook = func() { reads++ }
+
+	toolUseTime := time.Now().UnixMilli()
+	info, resolved := l.Resolve(context.Background(), "t_cache", "toolu_K", "cache-worker", "", toolUseTime)
+	// Mismatched sessionId → no real link (tombstone or unresolved).
+	if resolved && info.InternalAgentID != "" {
+		t.Fatalf("mismatched-session candidate should not resolve to a real agent, got %+v", info)
+	}
+	if reads != 1 {
+		t.Errorf("readFirstLineMeta cache misses = %d across %d attempts, want 1 (stable first line must be parsed once)", reads, l.retryLimit+1)
+	}
+}
+
 // TestLinker_Resolve_HoistedSlicesMultiCandidate verifies that hoisted slices
 // don't accumulate stale entries when multiple candidates exist and the best
 // one is selected by mtime.

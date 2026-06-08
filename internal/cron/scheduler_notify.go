@@ -12,6 +12,7 @@ import (
 	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -333,7 +334,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		dropped = totalChunks - cronNotifyMaxChunks
 		chunks = chunks[:cronNotifyMaxChunks]
 		slog.Warn("cron notify: chunk count exceeds cap; tail dropped",
-			"platform", plat, "chat", chatID,
+			"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), // R090135-LOGIC-3: chatID is attacker-influenced
 			"total", totalChunks, "cap", cronNotifyMaxChunks,
 			"dropped", dropped)
 	}
@@ -352,7 +353,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			// undercount what the recipient never saw — operators reading
 			// this WARN must see the full undelivered tail.
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
-				"platform", plat, "chat", chatID, "err", err,
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // R090135-LOGIC-3: chatID is attacker-influenced
 				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
@@ -378,7 +379,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			// post-cap subset. Without this a cap-truncated message that
 			// then fails mid-send under-reports the true loss.
 			slog.Warn("cron notify partial: chunks dropped after send failure",
-				"platform", plat, "chat", chatID, "err", err,
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // R090135-LOGIC-3: chatID is attacker-influenced
 				"delivered", delivered, "total", len(chunks)+dropped,
 				"failed_index", i)
 			return

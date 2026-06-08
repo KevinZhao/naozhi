@@ -207,11 +207,19 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 
 // pdfNestedInImage reports whether the payload — already classified as an
 // image by http.DetectContentType — contains a "%PDF-" magic sequence in
-// the first 4 KB. R232-SEC-7 (#1002): blocks JFIF+PDF nested-container
+// the first 16 KB. R232-SEC-7 (#1002): blocks JFIF+PDF nested-container
 // bypass where the JFIF header passes the leading-byte sniff but the body
 // is actually a PDF.
+//
+// R20260607-SEC-8 (#1890): the window was 4 KB, which a crafted JPEG could
+// step past by padding its JFIF header (e.g. an embedded ICC profile, or APPn
+// segments) beyond 4 KB so the "%PDF-" payload lands outside the scan while
+// http.DetectContentType still reports image/jpeg from the leading ~512 B.
+// A legitimate JFIF header is only tens of bytes and even a fat ICC profile
+// rarely exceeds a few KB, so widening to 16 KB closes the bypass with no
+// false positives — the cost stays constant-bounded on legitimate uploads.
 func pdfNestedInImage(data []byte) bool {
-	const scanWindow = 4 * 1024
+	const scanWindow = 16 * 1024
 	end := len(data)
 	if end > scanWindow {
 		end = scanWindow

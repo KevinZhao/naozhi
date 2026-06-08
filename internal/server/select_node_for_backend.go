@@ -29,44 +29,19 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/naozhi/naozhi/internal/backendid"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
-// maxBackendIDLen mirrors send.go:263's per-request cap. Used by both
-// HTTP and WS dispatch entry points so a hostile client can't blow up
-// JSON / slog attrs with a 4 KB backend string.
-//
-// R20260527122801-ARCH-8 (#1314): aligned to 64 to match
-// session/router_backend.go's maxBackendBytes. The previous 32-byte
-// server cap rejected legal 33–64 byte backend IDs at the dashboard /
-// HTTP-send boundary even though the router's own validateBackend
-// (charset+length) accepted them — so a 60-byte backend stored in
-// sessions.json could be routed through the cron path but not edited
-// from the dashboard. Widening the server cap to 64 closes the
-// asymmetry: both layers now share the same length contract. The DoS
-// concern motivating the 32-byte cap is unchanged at 64 bytes (still
-// 1/64 of the 4 KB JSON-attr inflation worst case).
-const maxBackendIDLen = 64
+// maxBackendIDLen / isValidBackendID alias the shared backendid leaf package
+// so the HTTP send path, WS handlers, and the dashboard cron CRUD endpoints
+// all enforce one length+charset contract (R20260607-ARCH-2 #1893 unified the
+// previously copy-pasted definitions). See internal/backendid for the contract
+// rationale (R20260527122801-ARCH-8 #1314 widened the cap to 64).
+const maxBackendIDLen = backendid.MaxLen
 
-// isValidBackendID reports whether s passes the per-request charset +
-// length gate shared by HTTP /api/sessions/send and WS handleRemoteSend.
-// Empty is allowed (treated as "router default" by selectNodeForBackend).
-// PR #119 review fix — close the asymmetry where WS path forwarded
-// unvalidated msg.Backend straight into error strings.
-func isValidBackendID(s string) bool {
-	if len(s) > maxBackendIDLen {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
-			return false
-		}
-	}
-	return true
-}
+func isValidBackendID(s string) bool { return backendid.IsValid(s) }
 
 // nodeLookup is the minimal surface selectNodeForBackend needs to find
 // an active reverse-node connection by id. Server's nodeAccess and

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -107,6 +108,184 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 
 	if _, ok := recvMsg(t, out); ok {
 		t.Fatal("a session with no subscribers should deliver nothing")
+	}
+}
+
+// TestBroadcastSessionSystemEvent_MultipleSubscribers verifies every client
+// subscribed to the key receives the system event after the #1902 two-phase
+// snapshot (authMu membership snapshot → short h.mu.RLock subscription filter).
+func TestBroadcastSessionSystemEvent_MultipleSubscribers(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	const key = "feishu:p2p:alice"
+	outs := make([]<-chan node.ServerMsg, 0, 3)
+	for i := 0; i < 3; i++ {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, key)
+		outs = append(outs, out)
+	}
+	// A subscriber on a different key must stay silent.
+	other, otherOut := newCapturedClient(t, hub)
+	registerSub(hub, other, "feishu:p2p:bob")
+
+	hub.broadcastSessionSystemEvent(key, "发送失败：remote down")
+
+	for i, out := range outs {
+		msg, ok := recvMsg(t, out)
+		if !ok {
+			t.Fatalf("subscriber %d received no frame", i)
+		}
+		if msg.Type != "event" || msg.Key != key || msg.Event == nil || msg.Event.Type != "system" {
+			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
+		}
+	}
+	if _, ok := recvMsg(t, otherOut); ok {
+		t.Fatal("subscriber on a different key must not receive the event")
+	}
+}
+
+// TestBroadcastSessionSystemEvent_ConcurrentChurn exercises the #1902 lock
+// split under the race detector: while a goroutine continuously broadcasts
+// session system events (taking authMu.RLock then h.mu.RLock), other
+// goroutines churn the authClients / subscriptions maps the way register /
+// unregister / handleSubscribe do under h.mu (+nested authMu). A client
+// dropped from authClients between the two phases must not corrupt state or
+// trip the detector. The test asserts no panic / no race; delivery counts are
+// nondeterministic by design so they are not checked.
+func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	const key = "feishu:p2p:churn"
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// drain continuously empties a captured client's output so SendRaw never
+	// overflows the 64-deep buffer (which would trip the test helper's
+	// non-idempotent done-close on the slow-client path).
+	drain := func(out <-chan node.ServerMsg) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-out:
+				case <-done:
+					return
+				}
+			}
+		}()
+	}
+
+	// Seed a stable subscriber so there is always something to deliver to.
+	stable, stableOut := newCapturedClient(t, hub)
+	registerSub(hub, stable, key)
+	drain(stableOut)
+
+	churn := make([]*wsClient, 8)
+	for i := range churn {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, key)
+		drain(out)
+		churn[i] = c
+	}
+
+	// Broadcaster: hammer the two-phase fan-out.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				hub.broadcastSessionSystemEvent(key, "发送失败：x")
+			}
+		}
+	}()
+
+	// Churner: add/remove clients from authClients + subscriptions the way the
+	// real register/unregister writers do — h.mu held, authMu nested inside.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				for _, c := range churn {
+					h := hub
+					h.mu.Lock()
+					h.authMu.Lock()
+					delete(h.authClients, c)
+					h.authMu.Unlock()
+					delete(c.subscriptions, key)
+					h.mu.Unlock()
+
+					h.mu.Lock()
+					h.authMu.Lock()
+					h.authClients[c] = struct{}{}
+					h.authMu.Unlock()
+					c.subscriptions[key] = func() {}
+					h.mu.Unlock()
+				}
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(done)
+	wg.Wait()
+}
+
+// TestBroadcastSessionSystemEvent_ChunkedFilter verifies the #1925 chunked
+// phase-2 subscription filter still delivers to every subscriber and skips
+// non-subscribers when the candidate set spans more than one subFilterChunk.
+// With > subFilterChunk authenticated clients the filter loop releases and
+// re-acquires h.mu.RLock between batches; this asserts the chunk boundary math
+// is correct (no client dropped or double-counted) across the seam.
+func TestBroadcastSessionSystemEvent_ChunkedFilter(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	const key = "feishu:p2p:chunk"
+	// Span two full chunks plus a partial third so both the interior seam and
+	// the final short batch are exercised.
+	const subCount = subFilterChunk*2 + 5
+
+	outs := make([]<-chan node.ServerMsg, 0, subCount)
+	for i := 0; i < subCount; i++ {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, key)
+		outs = append(outs, out)
+	}
+	// Interleave non-subscribers (different key) so the filter must correctly
+	// reject them across chunk boundaries too.
+	const otherCount = subFilterChunk + 3
+	otherOuts := make([]<-chan node.ServerMsg, 0, otherCount)
+	for i := 0; i < otherCount; i++ {
+		c, out := newCapturedClient(t, hub)
+		registerSub(hub, c, "feishu:p2p:other")
+		otherOuts = append(otherOuts, out)
+	}
+
+	hub.broadcastSessionSystemEvent(key, "发送失败：remote down")
+
+	for i, out := range outs {
+		msg, ok := recvMsg(t, out)
+		if !ok {
+			t.Fatalf("subscriber %d received no frame", i)
+		}
+		if msg.Type != "event" || msg.Key != key || msg.Event == nil || msg.Event.Type != "system" {
+			t.Fatalf("subscriber %d got unexpected frame: %+v", i, msg)
+		}
+	}
+	for i, out := range otherOuts {
+		if _, ok := recvMsg(t, out); ok {
+			t.Fatalf("non-subscriber %d must not receive the event", i)
+		}
 	}
 }
 

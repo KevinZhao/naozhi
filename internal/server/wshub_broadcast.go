@@ -68,6 +68,18 @@ func marshalSessionsUpdate() []byte {
 // the cap) fall through to a fresh allocation.
 const broadcastSnapPoolMaxCap = maxWSConns
 
+// subFilterChunk bounds how many candidate clients broadcastSessionSystemEvent
+// filters per h.mu.RLock acquisition. R20260607-PERF-014 (#1925): the phase-2
+// subscription scan reads c.subscriptions[key] under the Hub-wide h.mu, and a
+// single RLock spanning all N authenticated clients blocks every writer
+// (register / unregister / markAuthenticated take the WRITE lock) for the whole
+// walk. Releasing the lock every subFilterChunk candidates lets those writers
+// interleave between batches, capping the starvation window at O(subFilterChunk)
+// regardless of fleet size. 64 keeps the per-chunk lock/unlock overhead
+// negligible against a tiny map lookup per client while still draining a
+// maxWSConns-sized fleet in a bounded handful of acquisitions.
+const subFilterChunk = 64
+
 var broadcastClientSnapPool = sync.Pool{
 	New: func() any {
 		s := make([]*wsClient, 0, 32)
@@ -374,14 +386,63 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	// the common no-subscriber case now returns before any allocation.
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
-	h.mu.RLock()
 	if h.authClients != nil {
+		// R20260607-PERF-1 (#1902): two-phase snapshot so the per-key
+		// subscriber filter no longer pins the Hub-wide h.mu across the whole
+		// authClients walk. broadcastToAuthenticated (#1621) already moved its
+		// membership scan onto the dedicated authMu so it stops serialising
+		// behind register / unregister / markAuthenticated; this path lagged
+		// because it ALSO needs c.subscriptions[key], which is h.mu-owned
+		// (see wsclient.go markSubGenReleasable contract). Phase 1 snapshots
+		// the (small) authenticated-client set under the cheap authMu.RLock and
+		// releases it; phase 2 takes a short h.mu.RLock only to read each
+		// candidate's subscription map, filtering in place. Lock ordering is
+		// preserved — each phase takes ONE lock and releases it before the next,
+		// never nesting authMu inside h.mu the way the writers do, so there is
+		// no inverse-acquisition deadlock. A client unregistered between the two
+		// phases is harmless: its wsClient is still live (GC-pinned by the
+		// snapshot), reading its subscriptions map under h.mu.RLock is race-free,
+		// and a non-blocking SendRaw to a closing client is already tolerated.
+		candPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
+		cand := (*candPtr)[:0]
+		h.authMu.RLock()
 		for c := range h.authClients {
-			if _, ok := c.subscriptions[key]; ok {
-				snap = append(snap, c)
-			}
+			cand = append(cand, c)
 		}
+		h.authMu.RUnlock()
+
+		// R20260607-PERF-014 (#1925): chunk the phase-2 subscription filter so a
+		// single h.mu.RLock no longer spans the entire candidate walk. The map is
+		// h.mu-owned (see wsclient.go markSubGenReleasable contract) so we still
+		// take h.mu.RLock to read c.subscriptions[key], but releasing it every
+		// subFilterChunk candidates bounds the writer-starvation window from
+		// O(N_auth_clients) to O(subFilterChunk): register / unregister /
+		// markAuthenticated (which take the h.mu WRITE lock) can interleave
+		// between chunks instead of waiting behind the whole fleet's scan. Each
+		// candidate wsClient is GC-pinned by `cand`, so a client unregistered
+		// between chunks is still a live, race-free read under the next RLock;
+		// a non-blocking SendRaw to a closing client is already tolerated. Lock
+		// ordering is unchanged — each chunk takes ONE lock and releases it, never
+		// nesting authMu inside h.mu the way the writers do.
+		for start := 0; start < len(cand); start += subFilterChunk {
+			end := start + subFilterChunk
+			if end > len(cand) {
+				end = len(cand)
+			}
+			h.mu.RLock()
+			for _, c := range cand[start:end] {
+				if _, ok := c.subscriptions[key]; ok {
+					snap = append(snap, c)
+				}
+			}
+			h.mu.RUnlock()
+		}
+		releaseBroadcastSnap(candPtr, cand)
 	} else {
+		// Legacy fallback for hand-rolled hubs that never initialise
+		// authClients. The clients map is h.mu-owned, so membership and the
+		// subscription filter share the single Hub-wide RLock here.
+		h.mu.RLock()
 		for c := range h.clients {
 			if !c.authenticated.Load() {
 				continue
@@ -390,8 +451,8 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 				snap = append(snap, c)
 			}
 		}
+		h.mu.RUnlock()
 	}
-	h.mu.RUnlock()
 
 	if len(snap) > 0 {
 		ev := cli.EventEntry{

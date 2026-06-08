@@ -682,8 +682,11 @@ func (s *Scheduler) Start() error {
 		// dashboard / metrics) and report a false "running since N min ago"
 		// state. Clearing it keeps StartedAt() == zero until a Start() that
 		// actually hands off to cron runner.
-		s.started.Store(false)
+		// R20260607-CORR-1: clear nanos BEFORE clearing started so a concurrent
+		// retry goroutine that wins the CAS after started=false cannot observe
+		// started=true with a stale (non-zero) startedAtNanos value.
 		s.startedAtNanos.Store(0)
+		s.started.Store(false)
 		return fmt.Errorf("load cron store: %w", err)
 	}
 

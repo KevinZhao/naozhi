@@ -96,15 +96,24 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 	// path; the live dashboard WS stream was the one egress that handed raw
 	// cli.EventEntry text to the browser. marshalHistoryFrame is the single
 	// serialization choke point for both the backfill and live-push paths, so
-	// redacting here covers every WS history frame exactly once — the result is
-	// cached by getOrMarshal so the scan is not repeated across the fan-out
-	// wave.
-	entries = redactEntrySecrets(entries)
+	// redacting here covers every WS history frame exactly once.
+	//
+	// R20260607-PERF-1 (#1888): redactEntrySecrets is an O(n) scan over every
+	// entry's Summary/Detail. Running it unconditionally above the cache meant a
+	// multi-tab fan-out wave re-scanned the SAME already-redacted entries on
+	// every getOrMarshal cache HIT (the cache returns pre-redacted bytes, so the
+	// scan was pure waste on hits). Push the redaction INSIDE both marshal
+	// closures — the single-subscriber fast path and the getOrMarshal closure —
+	// so the scan fires only when bytes are actually produced (cache miss), not
+	// on every fan-out hit. The cache fingerprint (lastTime, latest Time, count)
+	// is computed from the un-redacted entries, and redactEntrySecrets is
+	// copy-on-write and never touches Time, so moving it below the fingerprint
+	// is fingerprint-neutral.
 	if h.historyMarshalCache == nil {
 		// Defensive: should not happen for a Hub built via NewHub, but a
 		// hand-constructed test Hub may skip the field. Fall back to the
 		// uncached path so behaviour is identical to pre-R214-PERF-4.
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
 	}
 	// R249-PERF-30 (#944): single-subscriber fast path. The marshal
 	// cache only pays off when ≥2 pushLoops share the same (key,
@@ -118,10 +127,10 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 	// in test harnesses) we fall through to the cached path so
 	// behaviour for the multi-tab fan-out case is unchanged.
 	if h.singleSubscriber(key) {
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
 	}
 	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
-		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
 	})
 	return data, err
 }

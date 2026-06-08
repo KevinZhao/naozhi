@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // defaultMaxClientLineBytes is the compiled-in per-line size limit.
@@ -754,9 +756,14 @@ func (s *shimServer) readStderr() {
 	scanner.Buffer(make([]byte, 4*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		slog.Debug("cli stderr", "line", line)
+		safeLine := osutil.SanitizeForLog(line, 512)
+		slog.Debug("cli stderr", "line", safeLine)
 
-		msg := ServerMsg{Type: "stderr", Line: line}
+		wsLine := line
+		if len(line) > 64*1024 {
+			wsLine = line[:64*1024] + "...[truncated]"
+		}
+		msg := ServerMsg{Type: "stderr", Line: wsLine}
 		if data, err := msg.MarshalLine(); err == nil {
 			s.enqueueWrite(data)
 		}

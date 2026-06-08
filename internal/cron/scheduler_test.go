@@ -15,7 +15,7 @@ import (
 
 // realRouterAdapter wraps a real *session.Router into the post-Phase-B
 // cron.SessionRouter interface for integration tests that need the
-// router's stub-tracking semantics. Mirrors cmd/naozhi/cron_router_adapter.go
+// router's stub-tracking semantics. Mirrors internal/wireup/cron_router_adapter.go
 // without re-using main's adapter (cmd/* is not importable from internal/*).
 type realRouterAdapter struct{ r *session.Router }
 
