@@ -610,3 +610,4 @@
 - [R20260607-CORR-007] cacheGet RLock 在 disk-scan 窗口可观察 warm=false 触发 jobLock 重试,缺可观测点(FUSE 多秒 ReadDir) — internal/cron/runstore_cache.go:313
 - [R20260607-LOGIC-001] executeGetSession session-error errMsg 未在 call site 预脱敏(下游 recordTerminalResult 已脱敏),与 send-error 路径不对称,维护债 — internal/cron/scheduler_run.go:1265
 - [R20260607-PERF-011] knownSessionsCache.publish 用 time.Now() 而非注入时钟,测试 TTL 非确定 — internal/cron/scheduler_session_cache.go:74
+- [PR1953-GO-1] discovery.Scan 的 excludeSessionIDs / managedCWDs 移除 session-ID upgrade 后已成纯死参数,保留仅为不改 3 个调用点;若将来 CI 接入 unparam 会被标记,届时可一并清理签名 — internal/discovery/scanner.go:343
