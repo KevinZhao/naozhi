@@ -217,6 +217,13 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 				"tool_use_id": textutil.TruncateRunesNoEllipsis(card.ToolUseID, cardValueIDMaxRunes),
 				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
 				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
+				// Round-trip the originating chat type so the WS card-action
+				// path routes the answer back to the question's session key
+				// instead of inferring (wrongly) from the oc_ chat-id prefix.
+				// Only the closed enum value is carried; the reader re-validates
+				// it (#1971). normalizeChatType keeps the empty/unknown case as
+				// "direct" so an absent field can't accidentally read "group".
+				"chat_type": normalizeChatType(card.ChatType),
 			}
 			acts = append(acts, a)
 		}
@@ -271,6 +278,17 @@ type cardActionPayload struct {
 	ToolUseID string `json:"tool_use_id"`
 	Header    string `json:"header"`
 	Label     string `json:"label"`
+	// ChatType round-trips the originating conversation's chat type
+	// ("direct" | "group") so the WebSocket card-action path — whose SDK
+	// callback (CardActionTriggerEvent) carries no chat_type and only an
+	// open_chat_id — can route the answer back to the exact session key the
+	// question used. Feishu p2p chat_ids are also "oc_"-prefixed, so the old
+	// HasPrefix(chatID,"oc_") heuristic mis-classified every 1:1 chat as a
+	// group and split the answer onto a different session key
+	// (R20260608-LB-54, #1971). It's a closed enum re-validated on read
+	// (only "group" promotes; anything else is "direct"), so unlike the
+	// removed SessionKey field it widens no meaningful attacker surface.
+	ChatType string `json:"chat_type,omitempty"`
 }
 
 // handleCardActionWebhook parses an im.card.action.v1_trigger envelope and
@@ -306,6 +324,19 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 		outer.ChatType, outer.Operator.OpenID, handler)
 }
 
+// normalizeChatType collapses any input to the closed session-key enum:
+// only the literal "group" maps to "group"; everything else (including the
+// empty string and unknown values) is "direct". Centralising the rule keeps
+// the send-side card value, the WS reader, and the webhook reader from
+// drifting — all three must agree for the answer to route to the question's
+// session key (#1971).
+func normalizeChatType(ct string) string {
+	if ct == "group" {
+		return "group"
+	}
+	return "direct"
+}
+
 // dispatchCardAction turns a validated card click into a synthesised
 // MessageHandler call. Shared between webhook + WebSocket card paths so both
 // transports produce identical IncomingMessage shapes.
@@ -326,10 +357,17 @@ func (f *Feishu) dispatchCardAction(
 			"tool_use_id", osutil.SanitizeForLog(val.ToolUseID, 64))
 		return
 	}
-	ct := "direct"
-	if chatType == "group" {
-		ct = "group"
+	// Prefer the chat_type the question card round-tripped in its value over
+	// the caller-supplied one: the WS path can only infer chatType from the
+	// chat-id prefix, which is wrong for p2p chats (also oc_-prefixed) and
+	// would split the answer onto a "group" session key the question never
+	// used (#1971). The webhook path passes a real chat_type AND the value
+	// carries it, so they agree; the value wins only when it names a concrete
+	// enum, otherwise we fall back to the caller's inference.
+	if val.ChatType == "direct" || val.ChatType == "group" {
+		chatType = val.ChatType
 	}
+	ct := normalizeChatType(chatType)
 	// Stable-ish dedup key. Lark SDK can re-deliver the same card_action on
 	// WS reconnect; without this, a click gets forwarded twice. Derive the
 	// id from (open_message_id, operator, tool_use_id) — same card + same

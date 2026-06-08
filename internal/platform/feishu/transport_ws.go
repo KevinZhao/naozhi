@@ -153,12 +153,16 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// Card actions don't carry a chat_type; we infer from chat_id prefix:
-		// "oc_" is a group chat (open_chat_id), "ou_" would be direct (open_id
-		// used as chat target in 1:1). Feishu's card actions originate from a
-		// message in a chat, so oc_ indicates group; anything else we call
-		// direct. Defensive default: group chats get authorization via
-		// dispatch's own mention/owner rules.
+		// The larkws CardActionTriggerEvent carries no chat_type — only an
+		// open_chat_id. We used to infer chatType from the chat-id prefix
+		// ("oc_" → group), but Feishu p2p 1:1 chat_ids are ALSO "oc_"-prefixed,
+		// so that heuristic mis-classified every direct chat as a group and
+		// routed the answer onto a "feishu:group:..." session key the question
+		// never used (R20260608-LB-54, #1971). The real chat_type is now
+		// round-tripped through the card value (val.ChatType) by
+		// SendQuestionCard; dispatchCardAction prefers it and only falls back
+		// to this inference when the value is absent (e.g. an older card sent
+		// before the field existed). Keep the prefix guess as that fallback.
 		chatType := "direct"
 		if strings.HasPrefix(chatID, "oc_") {
 			chatType = "group"

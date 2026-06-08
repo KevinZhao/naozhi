@@ -175,6 +175,16 @@ type QuestionCard struct {
 	// carried into card action callbacks so the handler knows which
 	// question the user answered.
 	ToolUseID string
+	// ChatType is the originating chat type ("direct" | "group") of the
+	// conversation that asked the question. Adapters whose card-action
+	// callbacks don't carry a reliable chat_type (Feishu WebSocket — the
+	// SDK's CardActionTriggerEvent has only open_chat_id/open_message_id)
+	// round-trip it through the card value so the answer routes back to the
+	// exact session key the question used, instead of guessing from a
+	// chat-id prefix. Feishu p2p chat_ids are also "oc_"-prefixed, so the
+	// prefix heuristic mis-classified 1:1 chats as group (R20260608-LB-54,
+	// #1971).
+	ChatType string
 	// Items is one or more questions. Adapters render each as its own
 	// labelled block.
 	Items []QuestionItem

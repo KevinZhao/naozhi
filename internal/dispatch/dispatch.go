@@ -1281,7 +1281,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	tracker := newIMEventTracker(ctx, p, msg.ChatID)
+	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType)
 	defer tracker.stop()
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)

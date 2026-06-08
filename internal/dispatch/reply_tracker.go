@@ -20,9 +20,10 @@ import (
 // to the read path so we don't waste allocations on events that are coalesced
 // away by the 1-per-second rate limit.
 type replyTracker struct {
-	ctx    context.Context
-	p      platform.Platform
-	chatID string
+	ctx      context.Context
+	p        platform.Platform
+	chatID   string
+	chatType string // "direct" | "group" — round-tripped into AskUserQuestion cards (#1971)
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
 	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
 	// When ctx cancels, waitReady can return before msgIDReady is closed,
@@ -108,12 +109,13 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	t := &replyTracker{
 		ctx:             ctx,
 		p:               p,
 		chatID:          chatID,
+		chatType:        chatType,
 		msgIDReady:      make(chan struct{}),
 		editCh:          make(chan struct{}, 1),
 		todoWake:        make(chan struct{}, 1),
@@ -216,6 +218,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 		if sender, ok := platform.AsCapability[platform.QuestionCardSender](p); ok {
 			card := platform.QuestionCard{
 				ToolUseID: aq.ToolUseID,
+				ChatType:  t.chatType,
 				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
 			}
 			for _, q := range aq.Items {

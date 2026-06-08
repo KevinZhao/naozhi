@@ -258,6 +258,89 @@ func TestDispatchCardAction_IgnoresUnknownKind(t *testing.T) {
 	}
 }
 
+// TestDispatchCardAction_ValueChatTypeOverridesInference is the regression
+// guard for #1971: a 1:1 (p2p) Feishu chat_id is also "oc_"-prefixed, so the
+// WS path's prefix inference passes chatType="group" even though the question
+// was asked in a direct chat. The card value round-trips the real chat_type,
+// and dispatchCardAction must prefer it so the answer routes back to the
+// "direct" session key the question used — not a divergent "group" key.
+func TestDispatchCardAction_ValueChatTypeOverridesInference(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	var got platform.IncomingMessage
+	var called atomic.Int32
+	handler := func(_ context.Context, m platform.IncomingMessage) {
+		called.Add(1)
+		got = m
+	}
+	payload := cardActionPayload{
+		Kind:      "ask_answer",
+		ToolUseID: "toolu_p2p",
+		Header:    "Pick one",
+		Label:     "Option A",
+		ChatType:  "direct", // the value carries the true chat type
+	}
+	// Caller-supplied chatType is the WS prefix inference, which is WRONG for
+	// p2p (oc_-prefixed) chats — it says "group". The value must win.
+	f.dispatchCardAction(context.Background(), payload, "oc_p2p_chat", "", "group", "ou_user", handler)
+	if called.Load() != 1 {
+		t.Fatalf("handler called %d times, want 1", called.Load())
+	}
+	if got.ChatType != "direct" {
+		t.Errorf("chatType = %q, want %q (value must override prefix inference, #1971)", got.ChatType, "direct")
+	}
+}
+
+// TestDispatchCardAction_AbsentValueChatTypeFallsBack confirms backward
+// compatibility: an older card sent before chat_type existed in the value
+// carries ChatType="" — dispatchCardAction must then fall back to the
+// caller-supplied chatType rather than forcing "direct" (#1971).
+func TestDispatchCardAction_AbsentValueChatTypeFallsBack(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	var got platform.IncomingMessage
+	var called atomic.Int32
+	handler := func(_ context.Context, m platform.IncomingMessage) {
+		called.Add(1)
+		got = m
+	}
+	payload := cardActionPayload{
+		Kind:      "ask_answer",
+		ToolUseID: "toolu_old",
+		Header:    "Pick one",
+		Label:     "Option A",
+		// ChatType omitted — pre-#1971 card.
+	}
+	f.dispatchCardAction(context.Background(), payload, "oc_group", "", "group", "ou_user", handler)
+	if called.Load() != 1 {
+		t.Fatalf("handler called %d times, want 1", called.Load())
+	}
+	if got.ChatType != "group" {
+		t.Errorf("chatType = %q, want %q (absent value must fall back to caller arg)", got.ChatType, "group")
+	}
+}
+
+// TestBuildQuestionCardJSON_EmbedsChatType verifies the send side actually
+// round-trips the chat type into each button's value object (#1971).
+func TestBuildQuestionCardJSON_EmbedsChatType(t *testing.T) {
+	t.Parallel()
+	card := platform.QuestionCard{
+		ToolUseID: "t1",
+		ChatType:  "direct",
+		Items: []platform.QuestionItem{{
+			Question: "Q?",
+			Options:  []platform.QuestionOption{{Label: "A"}},
+		}},
+	}
+	body, err := buildQuestionCardJSON(card)
+	if err != nil {
+		t.Fatalf("buildQuestionCardJSON: %v", err)
+	}
+	if !strings.Contains(string(body), `"chat_type":"direct"`) {
+		t.Errorf("card JSON missing chat_type round-trip: %s", body)
+	}
+}
+
 func TestHandleCardActionWebhook_ParsesShape(t *testing.T) {
 	t.Parallel()
 	f := &Feishu{}
