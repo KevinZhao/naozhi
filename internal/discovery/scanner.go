@@ -3,7 +3,6 @@ package discovery
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -337,11 +335,19 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 }
 
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
-// that are not managed by naozhi (excluded via excludePIDs).
-// excludeSessionIDs prevents the session-ID upgrade heuristic from assigning
-// a JSONL file that belongs to a naozhi-managed session to a CLI process.
-// managedCWDs is the set of working directories that have active managed sessions;
-// session ID upgrade is skipped entirely for these CWDs to prevent cross-contamination.
+// that are not managed by naozhi (excluded via excludePIDs). The discovered
+// SessionID is taken verbatim from each {pid}.json — modern Claude CLI keeps
+// that field accurate.
+//
+// excludeSessionIDs and managedCWDs are retained for signature/back-compat with
+// the existing call sites (server discoveryCache, upstream discover callback,
+// auto-takeover) but are no longer consulted: they previously fed a
+// "session-ID upgrade" heuristic that rewrote a process's
+// SessionID to the newest JSONL in its CWD. Because ~/.claude/projects/<cwd>/ is
+// shared by every session that ran in that directory, the heuristic mis-assigned
+// other sessions' transcripts to live processes (dashboard crosstalk) and is
+// removed. See the second-pass note in the body and
+// TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
@@ -437,76 +443,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		candidates = append(candidates, scanCandidate{sf: sf, lastActive: la})
 	}
 
-	// Second pass: upgrade stale session IDs. CLI doesn't update {pid}.json
-	// after /clear, so the session ID may be outdated. For each CWD, find
-	// recent JSONL files and assign them to PIDs.
-	// Strategy: sort PIDs by original staleness (most stale first = most
-	// likely to have done /clear), assign newest unassigned JSONL to each.
-	type cwdGroup struct {
-		indices []int // indices into candidates
-	}
-	groups := make(map[string]*cwdGroup, len(candidates))
-	for i, c := range candidates {
-		g, ok := groups[c.sf.CWD]
-		if !ok {
-			g = &cwdGroup{}
-			groups[c.sf.CWD] = g
-		}
-		g.indices = append(g.indices, i)
-	}
-
-	for cwd, g := range groups {
-		// Skip session ID upgrade when multiple processes share the same CWD.
-		// The heuristic is non-deterministic with multiple live processes and
-		// can swap session IDs between scans, causing takeover to target the
-		// wrong process.
-		if len(g.indices) > 1 {
-			continue
-		}
-
-		// Skip upgrade when a managed naozhi session is using the same CWD.
-		// Any recent JSONL in this directory likely belongs to the managed
-		// session, not the CLI process.
-		if managedCWDs[cwd] {
-			continue
-		}
-
-		recentJSONLs := listJSONLsByMtime(claudeDir, cwd)
-		if len(recentJSONLs) == 0 {
-			continue
-		}
-
-		// Build set of "claimed" session IDs (original assignments).
-		// Pre-claim managed naozhi session IDs so they are never assigned to
-		// a CLI process — the same workspace can have both a CLI and a managed
-		// session writing JSONL files to the same project directory.
-		claimed := map[string]bool{}
-		for id := range excludeSessionIDs {
-			claimed[id] = true
-		}
-		for _, idx := range g.indices {
-			claimed[candidates[idx].sf.SessionID] = true
-		}
-
-		// Sort group indices by staleness (most stale first)
-		sortByLastActive(g.indices, candidates)
-
-		for _, idx := range g.indices {
-			c := &candidates[idx]
-			// Find newest unclaimed JSONL newer than this PID's current session
-			for _, jl := range recentJSONLs {
-				if claimed[jl.id] {
-					continue
-				}
-				if jl.mtime > c.lastActive {
-					c.sf.SessionID = jl.id // will be used below
-					c.lastActive = jl.mtime
-					claimed[jl.id] = true
-					break
-				}
-			}
-		}
-	}
+	// Historical note: a "second pass" here used to upgrade a process's
+	// SessionID to the newest JSONL in its CWD, on the theory that the CLI
+	// failed to rewrite {pid}.json after /clear. Modern Claude CLI keeps
+	// {pid}.json's sessionId accurate, and ~/.claude/projects/<cwd>/ is shared
+	// by every session that ever ran in that directory (managed, closed, cron),
+	// so the heuristic routinely mis-assigned a *different* session's JSONL to
+	// a live process — the dashboard card and preview then showed someone
+	// else's conversation, and takeover --resume targeted the wrong session.
+	// The upgrade is removed; the SessionID is whatever {pid}.json records.
+	// Regression: TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 
 	// Batch-lookup summaries from sessions-index.json for all candidates.
 	candidateWorkspaces := make(map[string]string, len(candidates))
@@ -568,48 +514,6 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 // misreport phantom processes as alive) is consistent across packages.
 func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
-}
-
-type jsonlEntry struct {
-	id    string // session UUID (filename without .jsonl)
-	mtime int64  // unix ms
-}
-
-// listJSONLsByMtime returns JSONL files in the project dir sorted by mtime desc.
-func listJSONLsByMtime(claudeDir, cwd string) []jsonlEntry {
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
-	entries, err := os.ReadDir(projDir)
-	if err != nil {
-		return nil
-	}
-
-	var result []jsonlEntry
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		result = append(result, jsonlEntry{
-			id:    strings.TrimSuffix(name, ".jsonl"),
-			mtime: info.ModTime().UnixMilli(),
-		})
-	}
-
-	slices.SortFunc(result, func(a, b jsonlEntry) int {
-		return cmp.Compare(b.mtime, a.mtime) // newest first
-	})
-	return result
-}
-
-// sortByLastActive sorts candidate indices by lastActive ascending (most stale first).
-func sortByLastActive(indices []int, candidates []scanCandidate) {
-	slices.SortFunc(indices, func(a, b int) int {
-		return cmp.Compare(candidates[a].lastActive, candidates[b].lastActive)
-	})
 }
 
 // ClaudeProjectSlug converts a CWD path to the Claude project directory name.
