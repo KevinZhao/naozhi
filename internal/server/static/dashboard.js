@@ -4792,30 +4792,22 @@ document.addEventListener('keydown', function(e) {
   let closed = false;
   if (activePopover) { closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
-  // §16 inline-expand 回归: Esc 优先关展开行（如果有），保留 drawer。
-  // 行内展开是 drawer 的二级展开，关 expand 而不连带关 drawer 才符合用户心智。
-  if (cronExpandedRunId && cronExpandedRunId.runId) { cronTimelineCollapse(); closed = true; }
-  // cron-panel-consolidation RFC §6.4: Esc closes the cron drawer when
-  // it's open. Routed before / alongside other popover dismissals so the
-  // drawer ✕ button's title="关闭 (Esc)" promise is actually kept.
-  // The drawer is NOT a modal — Esc only acts when no input or modal is
-  // foregrounded (gates above), and focus is restored to the originating
-  // .cj-row by closeCronDetail itself.
-  else if (cronDetailJobId !== null) { closeCronDetail(); closed = true; }
+  // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
+  // 行内展开 / drawer。优先级（行展开先于 drawer）与关闭逻辑都收在 cron_view.js
+  // 的 cronEscClose 里，dashboard.js 仅经委托——绝不跨脚本裸引用 cron 内部状态
+  // （cronExpandedRunId / cronDetailJobId），否则 cron_view.js 未加载时这里会抛
+  // `cronExpandedRunId is not defined`（dashboard-cron-view-extraction §2.6 B1）。
+  // window.nzCronEscClose 缺席（cron_view.js 没加载）时优雅降级，不影响其它 Esc 分支。
+  // 独立 if（非 else if）：忠实保留迁移前语义——cron 分支独立于上方 popover 分支，
+  // 即便同一次 Esc 已关掉 history/nav-list popover，仍会继续关 cron 展开/drawer。
+  if (window.nzCronEscClose && window.nzCronEscClose()) { closed = true; }
   if (closed) e.preventDefault();
 });
 
-// §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run（仅当某行展开时）。
-// 与 Cmd/Ctrl+Up/Down 的会话切换错开（那个有 metaKey 守卫）。
-document.addEventListener('keydown', function(e) {
-  if (!cronExpandedRunId || !cronExpandedRunId.runId) return;
-  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-  e.preventDefault();
-  navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next');
-});
+// §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run 的全局快捷键已随 cron 状态一并
+// 迁入 cron_view.js（B1 修复）——handler 与它读的 cronExpandedRunId / navigateExpandedRun
+// 同处一个 <script>，绑定必然就绪；cron_view.js 缺席则该快捷键自然不注册，不再
+// 拖垮 dashboard.js。Cmd/Ctrl+Up/Down 的会话切换仍在下方（有 metaKey 守卫，错开）。
 
 // Keyboard shortcut: Cmd/Ctrl+1..9 — switch to Nth session in current project group
 // Cmd/Ctrl+Up/Down — prev/next session in group
