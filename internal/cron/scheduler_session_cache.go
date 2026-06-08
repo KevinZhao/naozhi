@@ -24,6 +24,19 @@ type knownSessionsCache struct {
 	// it back to publish(); publish only installs the set if gen is
 	// unchanged. R20260605B-CORR-7 (#1811).
 	gen uint64
+	// lastInvalidatedAt records when the snapshot was last actually dropped.
+	// R20260608133928-PERF-3 (#1965): invalidate() is called on *every*
+	// runStore.Append and LastSessionID write. On an active deployment that
+	// fires far more often than once per knownSessionsCacheTTL, so the TTL
+	// snapshot almost never survived and containsSessionID paid the
+	// O(jobs × recentCap) cold rebuild on nearly every spawn-time probe.
+	// invalidate() now coalesces: it drops the set at most once per
+	// minInvalidateInterval, setting `dirty` in between so the next eligible
+	// call (or lookupFresh past the interval) still rebuilds. This bounds the
+	// cold-rebuild rate to ~1 per minInvalidateInterval while keeping staleness
+	// far below the 30s TTL.
+	lastInvalidatedAt time.Time
+	dirty             bool
 }
 
 // lookupFresh returns the cached set when it is populated and still within
@@ -37,11 +50,47 @@ type knownSessionsCache struct {
 // cache own its own mutex instead of exposing c.mu to every Scheduler caller.
 func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
-		return c.set, true
+		// A coalesced invalidate (dirty) is honoured only once
+		// minInvalidateInterval has elapsed since the last real drop, so a
+		// burst of Appends does not force a rebuild on every probe.
+		// R20260608133928-PERF-3 (#1965).
+		if !c.dirty || time.Since(c.lastInvalidatedAt) < minInvalidateInterval {
+			set := c.set
+			c.mu.RUnlock()
+			return set, true
+		}
+	}
+	c.mu.RUnlock()
+
+	// The set is stale (TTL expired) or a coalesced invalidate is now due.
+	// Promote the pending dirty drop under the write lock so the next caller
+	// rebuilds and the dirty flag does not linger.
+	if set, ok := c.lookupFreshFlush(); ok {
+		return set, ok
 	}
 	return nil, false
+}
+
+// lookupFreshFlush re-checks freshness under the write lock and, when a
+// coalesced invalidate is now due (dirty + past minInvalidateInterval),
+// performs the deferred drop. Split out so the common read path in
+// lookupFresh stays on the RLock. Returns the still-fresh set when the
+// deferred drop was NOT triggered (a concurrent publish may have refreshed it).
+func (c *knownSessionsCache) lookupFreshFlush() (map[string]struct{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set == nil || time.Since(c.generatedAt) >= knownSessionsCacheTTL {
+		return nil, false
+	}
+	if c.dirty && time.Since(c.lastInvalidatedAt) >= minInvalidateInterval {
+		c.set = nil
+		c.dirty = false
+		c.lastInvalidatedAt = time.Now()
+		c.gen++
+		return nil, false
+	}
+	return c.set, true
 }
 
 // beginBuild snapshots the current generation counter. A caller that is
@@ -72,18 +121,35 @@ func (c *knownSessionsCache) publish(set map[string]struct{}, buildGen uint64) b
 	}
 	c.set = set
 	c.generatedAt = time.Now()
+	// A fresh build reflects the latest source data, so any pending coalesced
+	// invalidate is satisfied: clear dirty so lookupFresh serves this set for
+	// the full TTL rather than re-dropping it on the next probe.
+	c.dirty = false
 	return true
 }
 
-// invalidate drops the snapshot so the next lookupFresh misses and forces a
-// rebuild, and bumps gen so any in-flight build started before this call
-// cannot publish over it. Cheap (one mutex + nil assign + increment) so
-// mutator paths call it unconditionally.
+// invalidate marks the snapshot stale, coalescing bursts: it performs the
+// actual drop (nil set + gen bump) at most once per minInvalidateInterval. In
+// between, it records a pending `dirty` flag so the deferred drop is honoured
+// by lookupFresh once the interval elapses. This bounds the cold-rebuild rate
+// on append-heavy deployments while keeping staleness well below the TTL.
+// R20260608133928-PERF-3 (#1965). Cheap (one mutex) so mutator paths call it
+// unconditionally.
 func (c *knownSessionsCache) invalidate() {
 	c.mu.Lock()
-	c.set = nil
-	c.gen++
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if c.lastInvalidatedAt.IsZero() || time.Since(c.lastInvalidatedAt) >= minInvalidateInterval {
+		// Far enough since the last real drop: drop now.
+		c.set = nil
+		c.gen++
+		c.dirty = false
+		c.lastInvalidatedAt = time.Now()
+		return
+	}
+	// Within the coalescing window: defer the drop. The set stays live (and
+	// gen-protected) so concurrent publishers and lookupFresh callers keep
+	// serving it until lookupFresh flushes the dirty drop past the interval.
+	c.dirty = true
 }
 
 // knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
@@ -91,3 +157,12 @@ func (c *knownSessionsCache) invalidate() {
 // auto-workspace-chain spawn cadence (one spawn per user message);
 // dashboard 1Hz pollers see at most one rebuild per cache cycle. R250-PERF-7.
 const knownSessionsCacheTTL = 30 * time.Second
+
+// minInvalidateInterval bounds how often invalidate() actually drops the
+// KnownSessionIDs snapshot. On an active deployment runStore.Append and
+// LastSessionID writes call invalidate() many times per second; without
+// coalescing the 30s TTL never survived and every spawn-time probe paid the
+// O(jobs × recentCap) cold rebuild. Coalescing the drop to at most once per
+// 5s caps the rebuild rate while keeping staleness an order of magnitude
+// below the TTL. R20260608133928-PERF-3 (#1965).
+const minInvalidateInterval = 5 * time.Second

@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -54,18 +57,33 @@ type Scanner struct {
 	promptCache  promptCacheState
 	summaryCache summaryCacheState
 	pathCache    pathCacheState
+
+	// summaryLoad collapses concurrent loads of the same sessions-index.json
+	// into one os.Stat + os.ReadFile + json.Unmarshal. Without it, the 4
+	// concurrent promptWg goroutines (plus repeated scans) each take the
+	// summary write lock on a cache miss and serialise behind the slowest
+	// stat+parse for the same workspace (PERF-10 #1967). Keyed by indexPath.
+	summaryLoad singleflight.Group
 }
 
 type promptCacheState struct {
 	sync.RWMutex
-	entries    map[string]promptCacheEntry
-	generation uint64
+	entries map[string]promptCacheEntry
+	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
+	// refresh a hit entry's generation without upgrading the RLock to a write
+	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
+	// gen-stale on first touch and forced a Lock(), serialising the concurrent
+	// promptWg goroutines behind a trivial map write.
+	generation atomic.Uint64
 }
 
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	gen    uint64
+	// gen is a heap-allocated atomic so its address stays stable while the
+	// entry lives in the map: getCachedPrompt refreshes it lock-free via
+	// Store, and evictPromptCache reads it via Load under the write lock.
+	gen *atomic.Uint64
 }
 
 type summaryCacheState struct {
@@ -228,8 +246,9 @@ func (s *Scanner) evictPromptCache() {
 	if len(s.promptCache.entries) <= 500 {
 		return
 	}
+	gen := s.promptCache.generation.Load()
 	for k, v := range s.promptCache.entries {
-		if v.gen+1 < s.promptCache.generation {
+		if v.gen.Load()+1 < gen {
 			delete(s.promptCache.entries, k)
 		}
 	}
@@ -360,9 +379,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
-	s.promptCache.Lock()
-	s.promptCache.generation++
-	s.promptCache.Unlock()
+	s.promptCache.generation.Add(1)
 
 	s.summaryCache.Lock()
 	s.summaryCache.generation++
@@ -636,19 +653,15 @@ func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (
 func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 	s.promptCache.RLock()
 	cached, ok := s.promptCache.entries[path]
-	gen := s.promptCache.generation
 	s.promptCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return "", false
 	}
-	if cached.gen != gen {
-		s.promptCache.Lock()
-		if e, ok2 := s.promptCache.entries[path]; ok2 && e.mtime == mtime {
-			e.gen = s.promptCache.generation
-			s.promptCache.entries[path] = e
-		}
-		s.promptCache.Unlock()
-	}
+	// Refresh the entry's generation lock-free so eviction keeps it alive.
+	// The *atomic.Uint64 address is stable for the entry's lifetime, so this
+	// Store needs no write lock — avoiding the per-hit Lock() upgrade that
+	// serialised concurrent promptWg goroutines (PERF-6 #1966).
+	cached.gen.Store(s.promptCache.generation.Load())
 	return cached.prompt, true
 }
 
@@ -656,7 +669,9 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
 	s.promptCache.Lock()
 	defer s.promptCache.Unlock()
-	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: s.promptCache.generation}
+	gen := new(atomic.Uint64)
+	gen.Store(s.promptCache.generation.Load())
+	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: gen}
 	s.evictPromptCache()
 }
 
@@ -920,25 +935,9 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 
 	result := make(map[string]string, len(sessions))
 	for indexPath, sids := range byProjDir {
-		// Check mtime cache to avoid re-reading unchanged index files.
-		fi, err := os.Stat(indexPath)
-		if err != nil {
+		idx, ok := s.loadSummaryIndex(indexPath)
+		if !ok {
 			continue
-		}
-		mtime := fi.ModTime().UnixNano()
-
-		var idx sessionsIndex
-		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
-			idx = cachedIdx
-		} else {
-			data, err := os.ReadFile(indexPath)
-			if err != nil {
-				continue
-			}
-			if err := json.Unmarshal(data, &idx); err != nil {
-				continue
-			}
-			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
 		// Single-session projects (the common case) skip the map alloc: a
@@ -971,6 +970,51 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 		}
 	}
 	return result
+}
+
+// loadSummaryIndex resolves indexPath to its parsed sessionsIndex, serving the
+// summary cache on an mtime hit and otherwise reading + parsing the file once.
+// Concurrent callers for the same indexPath are collapsed via singleflight so
+// they share a single os.Stat + os.ReadFile + json.Unmarshal instead of each
+// taking the summary write lock and serialising behind the slowest parse
+// (PERF-10 #1967). ok is false when the index is missing or unparseable.
+func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
+	// Fast path: stat once and serve a fresh cache hit without entering
+	// singleflight at all (the common steady-state case).
+	if fi, err := os.Stat(indexPath); err == nil {
+		mtime := fi.ModTime().UnixNano()
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, true
+		}
+	}
+
+	v, err, _ := s.summaryLoad.Do(indexPath, func() (any, error) {
+		fi, err := os.Stat(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		mtime := fi.ModTime().UnixNano()
+		// Re-check the cache inside the flight: an earlier flight for the same
+		// key may have just populated it, or a parallel fast-path missed by a
+		// hair. This keeps a burst from re-reading the file N times.
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, nil
+		}
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		var idx sessionsIndex
+		if err := json.Unmarshal(data, &idx); err != nil {
+			return sessionsIndex{}, err
+		}
+		s.setCachedSummary(indexPath, mtime, idx)
+		return idx, nil
+	})
+	if err != nil {
+		return sessionsIndex{}, false
+	}
+	return v.(sessionsIndex), true
 }
 
 // getCachedSummary checks the summary cache. Reads use RLock; only the gen

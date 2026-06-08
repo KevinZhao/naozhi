@@ -6,9 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// newGen returns a *atomic.Uint64 initialised to v, matching promptCacheEntry.gen.
+func newGen(v uint64) *atomic.Uint64 {
+	g := new(atomic.Uint64)
+	g.Store(v)
+	return g
+}
 
 // ---------------------------------------------------------------------------
 // helpers shared across scanner tests
@@ -23,7 +31,7 @@ func resetCaches(t *testing.T) {
 	sc := DefaultScanner()
 	sc.promptCache.Lock()
 	sc.promptCache.entries = make(map[string]promptCacheEntry)
-	sc.promptCache.generation = 0
+	sc.promptCache.generation.Store(0)
 	sc.promptCache.Unlock()
 
 	sc.summaryCache.Lock()
@@ -35,7 +43,7 @@ func resetCaches(t *testing.T) {
 		sc := DefaultScanner()
 		sc.promptCache.Lock()
 		sc.promptCache.entries = make(map[string]promptCacheEntry)
-		sc.promptCache.generation = 0
+		sc.promptCache.generation.Store(0)
 		sc.promptCache.Unlock()
 
 		sc.summaryCache.Lock()
@@ -654,9 +662,9 @@ func TestEvictPromptCache_UnderThreshold(t *testing.T) {
 	// Fill with 10 entries — well under the 500 threshold
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
 	}
-	sc.promptCache.generation = 5
+	sc.promptCache.generation.Store(5)
 	beforeLen := len(sc.promptCache.entries)
 	sc.evictPromptCache() // should be a no-op
 	afterLen := len(sc.promptCache.entries)
@@ -674,11 +682,11 @@ func TestEvictPromptCache_OverThreshold(t *testing.T) {
 	// Fill with 501 entries with old generation
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
 	}
 	// Add one entry with current generation
-	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: 3}
-	sc.promptCache.generation = 3
+	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: newGen(3)}
+	sc.promptCache.generation.Store(3)
 	sc.evictPromptCache()
 	afterLen := len(sc.promptCache.entries)
 	_, hasCurrent := sc.promptCache.entries["current"]
