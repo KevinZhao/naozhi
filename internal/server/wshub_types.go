@@ -45,7 +45,7 @@ import (
 //   - Mode reflects the configured queue strategy (ModeInterrupt / etc.);
 //     drives broadcast-debounce decisions in wshub_broadcast.go.
 type MessageEnqueuer interface {
-	Enqueue(key string, msg dispatch.QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64)
+	Enqueue(key string, msg dispatch.QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string)
 	DoneOrDrain(key string, gen uint64) []dispatch.QueuedMsg
 	Discard(key string)
 	Mode() dispatch.QueueMode
