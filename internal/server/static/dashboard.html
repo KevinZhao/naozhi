@@ -100,6 +100,25 @@
   --nz-ease-out:cubic-bezier(.16,1,.3,1);
   --nz-dur:.15s;
   --nz-selection-bar:3px; /* single source for the selected-row left edge */
+  /* ---------- Light-theme parity tokens (R20260608) ----------
+     #453 shipped light theme as a "minimal scaffold": many component rules
+     still hard-coded GitHub-Dark hex (near-white text, dark-blue fills) that
+     never got a light override, so on a white bg they fell to <2:1 contrast
+     (chat bubbles, running banner, code text, IM-origin chips, count badge).
+     Tokenising those literals here lets the light blocks below remap them in
+     one place. Dark-theme defaults below preserve each rule's original hex,
+     EXCEPT a handful of near-duplicate fills/text colours that this pass also
+     converged onto an existing canonical token (e.g. .ts-subagent / .md-code
+     backgrounds, .hp-tool → --nz-accent); those shift by a barely-perceptible
+     step in dark mode and tighten the palette. New component colours MUST come
+     through a token like this, never a bare hex in a rule. */
+  --nz-event-agent-fg:#a5d6ff;          /* thinking / agent prose */
+  --nz-event-user-fg:#e6edf3;           /* user bubble text + icon */
+  --nz-banner-bg:#1a2332;               /* running-banner strip */
+  --nz-code-fg:#e6edf3;                 /* inline + block code text */
+  --nz-chip-info-fg:#a5d6ff;            /* sc-agents / ts-subagent / feishu chip */
+  --nz-chip-info-bg:rgba(56,139,253,.12);
+  --nz-overlay-pill-bg:rgba(22,27,34,.9); /* floating nav-pill */
 }
 /* THEME-1 (#453) — light theme + system follow modes. The dashboard was
    GitHub-Dark hardcoded; users who prefer light or want to follow OS now
@@ -130,6 +149,17 @@
   --nz-status-new:var(--nz-blue);
   --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
   --nz-rust-subtle:rgba(217,119,87,.12);
+  /* Light-theme parity (R20260608): remap the dark literals tokenised in
+     :root above to values that clear AA on a white/near-white surface. */
+  --nz-event-agent-fg:#0a3069;          /* deep blue, ~9:1 on white */
+  --nz-event-user-fg:#0d1117;           /* user bubble sits on pale blue tint */
+  --nz-banner-bg:#ddf4ff;               /* pale blue strip, accent text stays readable */
+  --nz-code-fg:#1f2328;                 /* code text on --nz-bg-1 */
+  --nz-chip-info-fg:#0550ae;            /* darker blue chip text */
+  --nz-chip-info-bg:rgba(9,105,218,.1);
+  --nz-overlay-pill-bg:rgba(255,255,255,.92);
+  --nz-badge-info:#eaeef2;              /* neutral count chip on white */
+  --nz-badge-info-text:#1f2328;
 }
 @media (prefers-color-scheme: light){
   :root[data-theme="auto"]{
@@ -144,6 +174,16 @@
     --nz-status-new:var(--nz-blue);
     --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
     --nz-rust-subtle:rgba(217,119,87,.12);
+    /* Light-theme parity (R20260608) — mirror of the explicit light block. */
+    --nz-event-agent-fg:#0a3069;
+    --nz-event-user-fg:#0d1117;
+    --nz-banner-bg:#ddf4ff;
+    --nz-code-fg:#1f2328;
+    --nz-chip-info-fg:#0550ae;
+    --nz-chip-info-bg:rgba(9,105,218,.1);
+    --nz-overlay-pill-bg:rgba(255,255,255,.92);
+    --nz-badge-info:#eaeef2;
+    --nz-badge-info-text:#1f2328;
   }
 }
 /* Global focus-visible: keyboard users get a clear ring, mouse users don't. */
@@ -379,7 +419,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .main-header .detail{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .main-header .detail-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
-.main-header .detail-cost.has-cost{color:#e6edf3}
+.main-header .detail-cost.has-cost{color:var(--nz-text-strong)}
 .main-header .detail-cost.high-cost{color:var(--nz-amber)}
 
 /* Multi-Backend RFC §8.4 — backend chip (D1 header / D2 sidebar). Color
@@ -488,7 +528,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0}
 /* Message navigation pill */
-.nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:rgba(22,27,34,.9);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}
+.nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}
 .nav-pill.visible{opacity:1;pointer-events:auto}
 .nav-pill button{width:32px;height:28px;background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-base);display:flex;align-items:center;justify-content:center;border-radius:14px;transition:all .15s}
 .nav-pill button:hover{background:var(--nz-border);color:var(--nz-text)}
@@ -505,8 +545,8 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    gave ~1.3:1 contrast — operators reported the empty circle "looks like
    a stuck spinner". Push background to .35 alpha (~3.2:1) and lighten the
    emoji color so the 👤 reads as an avatar instead of a hollow ring. */
-.event.user .event-icon{background:rgba(88,166,255,.35);color:#e6edf3;font-size:13px}
-.event.user .event-content{flex:0 1 auto;max-width:80%;color:#e6edf3;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
+.event.user .event-icon{background:rgba(88,166,255,.35);color:var(--nz-event-user-fg);font-size:13px}
+.event.user .event-content{flex:0 1 auto;max-width:80%;color:var(--nz-event-user-fg);background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
 /* Queued-send indicator: inline chip on the optimistic user bubble when
    send_ack returns status=queued. Replaces the previous top-of-screen
    toast so the signal stays bound to its message (and vanishes naturally
@@ -540,10 +580,10 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .event.system .event-icon,.event.init .event-icon{display:none}
 .event.system .event-content,.event.init .event-content{flex:none;color:var(--nz-text-dim);font-size:var(--nz-fs-sm);text-align:center}
 /* Hidden types (kept for safety) */
-.event.thinking .event-content{color:#a5d6ff;font-style:italic}
+.event.thinking .event-content{color:var(--nz-event-agent-fg);font-style:italic}
 .event.result{margin:2px 0}
 .event.result .event-content{color:#7ee787;background:rgba(126,231,135,.05);padding:4px 8px;border-radius:var(--nz-radius-sm);border-left:2px solid var(--nz-green)}
-.event.agent .event-content{color:#a5d6ff}
+.event.agent .event-content{color:var(--nz-event-agent-fg)}
 .event.agent{background:rgba(56,139,253,.05);border-left:2px solid #388bfd}
 /* Todo checklist bubble — neutral framing, keeps per-item legibility */
 .event.todo .event-icon{background:rgba(139,148,158,.12);color:var(--nz-text-mute);font-size:var(--nz-fs-sm)}
@@ -636,7 +676,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .input-row #msg-input:focus{border-color:var(--nz-accent)}
 .input-row #msg-input:empty::before{content:attr(data-placeholder);color:var(--nz-text-faint);pointer-events:none}
 .btn-icon{width:36px;height:36px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .15s}
-.btn-icon:hover{background:#1f2937;color:var(--nz-text);border-color:var(--nz-text-faint)}
+.btn-icon:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
 .btn-icon.sending{opacity:.5;pointer-events:none}
 /* Primary send CTA in brand rust (was hardcoded green #238636, off-token).
    Rust is the app's single primary-action colour; send and stop swap in the
@@ -700,7 +740,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 /* Voice recording overlay */
 .voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:300;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
 .voice-overlay.show{opacity:1;pointer-events:auto}
-.vo-card{background:#1c2128;border:1px solid var(--nz-border);border-radius:var(--nz-radius-xl);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
+.vo-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xl);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
 .vo-timer{font-size:48px;color:var(--nz-text-strong);font-weight:300;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:2px}
 .vo-wave{display:flex;align-items:center;justify-content:center;gap:3px;height:40px}
 .vo-wave span{display:block;width:4px;background:var(--nz-green);border-radius:2px;transition:background .2s;animation:wave-bar .8s ease-in-out infinite}
@@ -720,7 +760,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .voice-overlay.transcribing .vo-hint{color:var(--nz-accent)}
 
 .input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none}
-.running-banner{background:#1a2332;border-bottom:1px solid rgba(31,111,235,.27);font-size:13px;color:var(--nz-accent);flex-shrink:0}
+.running-banner{background:var(--nz-banner-bg);border-bottom:1px solid rgba(31,111,235,.27);font-size:13px;color:var(--nz-accent);flex-shrink:0}
 .rb-tool-row{display:flex;align-items:center;padding:6px 12px;gap:8px}
 .rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
 .rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--nz-accent);flex-shrink:0;animation:pulse 1.5s ease-in-out infinite}
@@ -944,7 +984,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .history-popover-item .hp-prompt{font-size:13px;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
-.history-popover-item .hp-meta .hp-tool{color:#a5d6ff}
+.history-popover-item .hp-meta .hp-tool{color:var(--nz-accent)}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
 /* Day group header inside the history popover. Dropped text-transform:uppercase
    in Round 129 — the browser returns "Wed, Apr 29" for English locales and
@@ -960,7 +1000,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 
 /* Markdown rendering */
 .md-pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;margin:8px 0;overflow-x:auto;font-size:13px;line-height:1.6;max-width:100%}
-.md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
+.md-pre code{color:var(--nz-code-fg);font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
 .md-code-wrap{position:relative;max-width:100%}
 .md-code-actions{position:absolute;top:6px;right:6px;display:flex;gap:4px;opacity:0;transition:opacity .15s}
 .md-code-wrap:hover .md-code-actions{opacity:1}
@@ -972,9 +1012,9 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    inline file-ref scanner) instead of verbatim <pre> text. */
 .md-pathlist{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;margin:8px 0;overflow-x:auto;display:flex;flex-direction:column;gap:4px}
 .md-pathline{font-size:13px;line-height:1.6}
-.md-pathline code{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;color:#e6edf3;white-space:pre}
+.md-pathline code{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;color:var(--nz-code-fg);white-space:pre}
 .md-pathnote{margin-left:10px;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
-.md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
+.md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:var(--nz-text-strong);margin:8px 0 4px}
 .md-h1{font-size:var(--nz-fs-md)}.md-h2{font-size:15px}.md-h3{font-size:var(--nz-fs-base)}
 .md-ul{margin:6px 0 6px 16px;padding:0;list-style:disc}
@@ -1011,7 +1051,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    .tex/.latex files. Visually close to .fv-lined <pre> so switching
    between file types doesn't jolt the reader. */
 .rich-plain{margin:0 0 8px 0;padding:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',Consolas,monospace;color:var(--nz-text);background:transparent;border:none}
-.ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);font-weight:600;margin-left:2px}
+.ts-subagent{display:inline-block;background:var(--nz-chip-info-bg);color:var(--nz-chip-info-fg);padding:0 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);font-weight:600;margin-left:2px}
 
 
 
@@ -1055,7 +1095,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .section-header .sh-btn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .section-header .sh-btn.star-on{color:#e3b341}
 .section-header .sh-btn.star-on:hover{color:#f7c744}
-.section-header .sh-btn.github-on{color:#a5d6ff}
+.section-header .sh-btn.github-on{color:var(--nz-accent)}
 .section-header .sh-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .section-header .sh-btn.star-on svg{fill:currentColor}
 /* Collapse chevron: ▾ pointing down = expanded; rotated -90deg (→) when
@@ -1144,7 +1184,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .ns-addr{display:block;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ns-body{flex:1;min-width:0}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
-.sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#a5d6ff;background:rgba(56,139,253,.12);flex-shrink:0;margin-left:auto}
+.sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
 /* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
    below the cold-start CTA when sessionsData has entries. Keeps density low
    (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives
@@ -1184,7 +1224,7 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    hues pick brand-adjacent colors; keep alpha conservative so the chip
    doesn't compete with the session title for attention. */
 .sc-origin{display:inline-flex;align-items:center;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
-.sc-origin.kind-feishu{color:#a5d6ff;background:rgba(0,122,255,.14);border-color:rgba(0,122,255,.35)}
+.sc-origin.kind-feishu{color:var(--nz-chip-info-fg);background:rgba(0,122,255,.14);border-color:rgba(0,122,255,.35)}
 .sc-origin.kind-slack{color:#d8b4fe;background:rgba(168,85,247,.14);border-color:rgba(168,85,247,.35)}
 .sc-origin.kind-discord{color:#b4c0ff;background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
 .sc-origin.kind-weixin{color:#a7f3d0;background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
@@ -1632,7 +1672,7 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ctr-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .cron-timeline-panel .ctr-sub .ctr-sep{opacity:.5}
 .cron-timeline-panel .ctr-trigger{color:var(--nz-text-mute)}
-.cron-timeline-panel .ctr-session{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#a5d6ff;background:rgba(165,214,255,.08);border-radius:3px;padding:0 5px;font-size:10px}
+.cron-timeline-panel .ctr-session{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-radius:3px;padding:0 5px;font-size:10px}
 .cron-timeline-panel .ctr-errcls{color:var(--nz-red)}
 .cron-timeline-panel .ctr-loading{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-style:italic}
 .cron-timeline-panel .ctr-err-load{font-size:var(--nz-fs-sm);color:var(--nz-red)}
@@ -1989,7 +2029,7 @@ body.kbd-open .input-hints{display:none}
 /* Drawer empty state (jobId set but job not in cronJobs) */
 .cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:13px;text-align:center;line-height:1.6}
 /* List row selection (cj-row.is-active) */
-.cj-row.is-active{background:#1f2937;box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cj-row.is-active{background:var(--nz-bg-2);box-shadow:inset 4px 0 0 var(--nz-accent)}
 .cj-row.is-active .cj-title{color:var(--nz-text-strong)}
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}

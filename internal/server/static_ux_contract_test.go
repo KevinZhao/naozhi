@@ -246,7 +246,10 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	// rollback doesn't accidentally de-fix code rendering.
 	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
 	// font-size:13px and the SF Mono stack are intentionally left as-is.
-	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
+	// R20260608: bg moved var(--nz-border)→var(--nz-bg-2) and color #e6edf3→
+	// var(--nz-code-fg) so inline code stays legible in light theme. The
+	// monospace stack (the actual subject of this guard) is unchanged.
+	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
