@@ -501,16 +501,18 @@ func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
 					return
 				}
 				jobID := jobIDs[i]
-				dir := filepath.Join(s.root, jobID)
 				warmCorrupt, warmUnreadable := s.warmCacheLocked(jobID)
-				if warmCorrupt > 0 {
-					slog.Warn("cron runstore: cold-start warm skipped corrupt files",
-						"count", warmCorrupt, "dir", dir)
-				}
-				// R20260603-CR-1 (#1693): separate log for I/O errors.
-				if warmUnreadable > 0 {
-					slog.Warn("cron runstore: cold-start warm skipped unreadable files",
-						"count", warmUnreadable, "dir", dir)
+				if warmCorrupt > 0 || warmUnreadable > 0 {
+					dir := filepath.Join(s.root, jobID)
+					if warmCorrupt > 0 {
+						slog.Warn("cron runstore: cold-start warm skipped corrupt files",
+							"count", warmCorrupt, "dir", dir)
+					}
+					// R20260603-CR-1 (#1693): separate log for I/O errors.
+					if warmUnreadable > 0 {
+						slog.Warn("cron runstore: cold-start warm skipped unreadable files",
+							"count", warmUnreadable, "dir", dir)
+					}
 				}
 			}
 		}()

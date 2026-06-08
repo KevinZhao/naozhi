@@ -30,14 +30,25 @@ func ValidateBaseURLValue(v string) error {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				return fmt.Errorf("link-local host %q rejected (SSRF/IMDS guard)", host)
+			}
+		}
 		return nil
 	case "http":
 		host := u.Hostname()
 		if strings.EqualFold(host, "localhost") {
 			return nil
 		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			return nil
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() {
+				return nil
+			}
+			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				return fmt.Errorf("link-local host %q rejected (SSRF/IMDS guard)", host)
+			}
 		}
 		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
 	}

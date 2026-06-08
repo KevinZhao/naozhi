@@ -670,7 +670,7 @@ type Handlers struct {
 	// missedScheduleVerdict helper); LastRunAt advances invalidate via
 	// the lastRunNanos guard so a job that just ran does not keep an
 	// outdated "missed" verdict for a full second. R245-PERF-4 (#857).
-	missedCacheMu sync.Mutex
+	missedCacheMu sync.RWMutex
 	missedCache   map[string]missedVerdict
 
 	// tzLabelMu guards the memoised timezone label below. HandleList runs
@@ -681,7 +681,7 @@ type Handlers struct {
 	// now.In(loc).Zone() still flips across DST transitions, so the cache
 	// is keyed on (locName, offset) — NOT on loc.String() alone — to stay
 	// correct across DST boundaries. R103901-PERF-10.
-	tzLabelMu     sync.Mutex
+	tzLabelMu     sync.RWMutex
 	tzLabelLoc    string
 	tzLabelOffset int
 	tzLabelCached string
@@ -770,16 +770,16 @@ func (h *Handlers) missedScheduleVerdict(j *cronpkg.Job, now, startedAt time.Tim
 	key := j.ID + "|" + j.Schedule + "|" + strconv.FormatInt(startedNs, 10)
 	lastRunNanos := j.LastRunAt.UnixNano()
 
-	h.missedCacheMu.Lock()
+	h.missedCacheMu.RLock()
 	if h.missedCache != nil {
 		if v, ok := h.missedCache[key]; ok {
 			if v.lastRunNanos == lastRunNanos && now.Sub(v.computedAt) < missedCacheTTL {
-				h.missedCacheMu.Unlock()
+				h.missedCacheMu.RUnlock()
 				return v.missed, v.prevAt
 			}
 		}
 	}
-	h.missedCacheMu.Unlock()
+	h.missedCacheMu.RUnlock()
 
 	missed, prevAt := cronpkg.HasMissedSchedule(j, now, startedAt)
 
@@ -1010,7 +1010,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			PromptTruncated: truncated,
 			Title:           j.Title,
 			Platform:        j.Platform,
-			ChatID:          j.ChatID,
+			ChatID:          maskNotifyChatID(j.ChatID),
 			CreatedBy:       j.CreatedBy,
 			CreatedAt:       j.CreatedAt.UnixMilli(),
 			Paused:          j.Paused,
@@ -1663,6 +1663,17 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 // transitions, so keying on the offset (not locName alone) keeps the label
 // correct across DST boundaries. R103901-PERF-10.
 func (h *Handlers) cachedTZLabel(locName string, offset int) string {
+	// Fast path: read-lock for the ≈100% cache-hit case (DST flips are rare).
+	h.tzLabelMu.RLock()
+	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
+		cached := h.tzLabelCached
+		h.tzLabelMu.RUnlock()
+		return cached
+	}
+	h.tzLabelMu.RUnlock()
+
+	// Slow path: write-lock with double-check so two concurrent misses do not
+	// both recompute (rare, but correctness requires it).
 	h.tzLabelMu.Lock()
 	defer h.tzLabelMu.Unlock()
 	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
@@ -1690,12 +1701,13 @@ func formatTZOffset(ianaName string, offsetSeconds int) string {
 // endpoints, separate from the CRUD surface that owns this file. R20260527-
 // ARCH-14 (#1281).
 
-// HasRunsLimiter / HasListLimiter / HasWriteLimiter expose nil-state of
-// the corresponding limiter for server's boot-time invariant check.
-// Phase 1 (server-split-phase4-design.md §6.5 Plan B).
-func (h *Handlers) HasRunsLimiter() bool  { return h.runsLimiter != nil }
-func (h *Handlers) HasListLimiter() bool  { return h.listLimiter != nil }
-func (h *Handlers) HasWriteLimiter() bool { return h.writeLimiter != nil }
+// HasRunsLimiter / HasListLimiter / HasWriteLimiter / HasTranscriptLimiter
+// expose nil-state of the corresponding limiter for server's boot-time
+// invariant check. Phase 1 (server-split-phase4-design.md §6.5 Plan B).
+func (h *Handlers) HasRunsLimiter() bool       { return h.runsLimiter != nil }
+func (h *Handlers) HasListLimiter() bool       { return h.listLimiter != nil }
+func (h *Handlers) HasWriteLimiter() bool      { return h.writeLimiter != nil }
+func (h *Handlers) HasTranscriptLimiter() bool { return h.transcriptLimiter != nil }
 
 // Deps bundles all wiring for New. Phase 1.
 type Deps struct {

@@ -91,7 +91,7 @@ var ErrSchedulerStopped = errors.New("cron: scheduler already stopped")
 // agent_opts.go for the Send/SessionID/InterruptViaControl method set —
 // so cron does NOT transitively depend on *session.ManagedSession. The
 // production wireup wraps the concrete session in cronSessionAdapter
-// (cmd/naozhi/cron_router_adapter.go); the InterruptOutcome ordinal pin
+// (internal/wireup/cron_router_adapter.go); the InterruptOutcome ordinal pin
 // + the SessionRouter compile-time guard live there too. The cron
 // package no longer imports internal/session in production code (last
 // reverse import eliminated by R20260527122801-ARCH-1).
@@ -147,7 +147,7 @@ type SessionRouter interface {
 	// GetOrCreate returns an existing session or spawns a new one at
 	// execute time. Returns cron-local Session / SessionStatus types so
 	// the scheduler does not transitively depend on internal/session.
-	// The production wireup (cmd/naozhi/cron_router_adapter.go) wraps
+	// The production wireup (internal/wireup/cron_router_adapter.go) wraps
 	// *session.ManagedSession in a cron.Session adapter.
 	GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error)
 }

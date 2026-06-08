@@ -237,6 +237,12 @@ type finishArgs struct {
 	prompt      string
 	workDir     string
 	fresh       bool
+	// endedAt, when non-zero, overrides the s.now() read inside finishRun.
+	// The success path in executeOpt sets this once so observeSuccessLatency
+	// and finishRun share the same clock read (R20260607-GO-002: injectable
+	// clock; avoids an extra s.now() step that would advance step-based test
+	// clocks an extra tick). Zero value means finishRun calls s.now() itself.
+	endedAt time.Time
 	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded
 	// 之前调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步
 	// ok=false；caller 自己的 defer 也调一次作兜底（覆盖 jitter-window
@@ -282,7 +288,13 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
 	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
 	// Default clock is time.Now(), byte-identical to the prior inline read.
-	endedAt := s.now()
+	// R20260607-GO-002: when the caller pre-computed endedAt (success path
+	// in executeOpt), reuse it so observeSuccessLatency and finishRun share
+	// a single s.now() read rather than advancing step-based clocks twice.
+	endedAt := a.endedAt
+	if endedAt.IsZero() {
+		endedAt = s.now()
+	}
 	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
@@ -368,18 +380,26 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
 	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() {
 		s.appendRun(&CronRun{
-			RunID:       a.runID,
-			JobID:       a.job.ID,
-			State:       a.state,
-			Trigger:     a.trigger,
-			StartedAt:   a.startedAt,
-			EndedAt:     endedAt,
-			DurationMS:  durationMS,
-			SessionID:   a.sessionID,
-			Prompt:      persistedPrompt,
-			WorkDir:     a.workDir,
-			Fresh:       a.fresh,
-			Result:      persistedResult,
+			RunID:      a.runID,
+			JobID:      a.job.ID,
+			State:      a.state,
+			Trigger:    a.trigger,
+			StartedAt:  a.startedAt,
+			EndedAt:    endedAt,
+			DurationMS: durationMS,
+			SessionID:  a.sessionID,
+			Prompt:     persistedPrompt,
+			WorkDir:    a.workDir,
+			Fresh:      a.fresh,
+			Result:     persistedResult,
+			// R050103C-CORR-7 (#1910): ResultBytes is the STORED byte count —
+			// persistedResult has already passed through recordTerminalResult's
+			// truncateWithSuffix (≤ maxStoredResultRunes) + redactSecretsInResult +
+			// SanitizeForLog. It is deliberately NOT the raw Claude output size, so
+			// it must not be used for billing / capacity analysis of upstream output
+			// (a truncated long answer and a genuinely short answer are
+			// indistinguishable here). It measures on-disk footprint only, matching
+			// what the dashboard renders.
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
@@ -579,10 +599,6 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 // between capture and rollback; naming it JobState ties that work to the
 // god-struct split tracker.
 //
-// jobResultSnapshot is kept as an alias so the existing capture/rollback
-// call sites and the tests pinning the round-trip contract compile
-// unchanged.
-//
 // restore re-applies the captured values to j; caller MUST hold s.mu so
 // the in-memory state stays serialised against concurrent readers.
 type JobState struct {
@@ -593,11 +609,6 @@ type JobState struct {
 	LastSessionID  string
 	Counters       JobRunCounters
 }
-
-// jobResultSnapshot is the historical name for the runtime-state cluster,
-// retained as an alias of JobState (R238-ARCH-13 / #764) so existing
-// capture / rollback sites and round-trip contract tests keep compiling.
-type jobResultSnapshot = JobState
 
 func (p JobState) restore(j *Job) {
 	j.LastRunAt = p.LastRunAt
@@ -665,8 +676,8 @@ func (j *Job) snapshotResultState() JobState {
 // R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
 // to drop the "P0" review-tag prefix that lost meaning once the dead
 // recordResult path was deleted (R220-GO-1). The rollback state now lives
-// in the named jobResultSnapshot struct above so a future "add a Last*
-// field" diff lands once on the type instead of three coupled edits.
+// in JobState so a future "add a Last* field" diff lands once on the type
+// instead of three coupled edits.
 func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
@@ -683,6 +694,11 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	// scrub, so a token's surrounding text still has its control bytes
 	// stripped.
 	result = redactSecretsInResult(result)
+	// R090135-GO-2: scrub well-known secret-prefix patterns from the error
+	// message before path-redaction and SanitizeForLog, mirroring the result
+	// branch above. Without this, a token (sk-ant-/ghp_/AKIA/…) embedded in a
+	// session error string would survive into Job.LastError → cron_jobs.json.
+	errMsg = redactSecretsInResult(errMsg)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps the trailing marker intact;
@@ -693,18 +709,24 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 
 	// R20260604-GO-001: the critical section runs under a single
 	// `defer s.mu.Unlock()` inside an IIFE rather than three hand-written
-	// Unlock branches. persistJobsLocked → marshalJobsLocked → (*fn)(entries)
-	// can panic (a buggy injected marshalJobs stub today, or a future Job
-	// field type bug); robfig's Recover wrapper only catches the panic after
-	// finishRun returns — i.e. above this frame — so a manual Unlock that the
-	// panic skips would leave s.mu held forever and deadlock every later tick.
-	// The defer releases the lock on any exit path including panic. save() and
-	// the cache invalidation stay OUTSIDE the lock, so they are recorded into
-	// locals here and acted on after the section returns.
+	// Unlock branches. The defer releases the lock on any exit path including
+	// panic. save() and the cache invalidation stay OUTSIDE the lock, so they
+	// are recorded into locals here and acted on after the section returns.
+	//
+	// R20260607-PERF-005 (#1923): the JSON encode no longer runs inside this
+	// write critical section. The lock now only mutates the Job fields and
+	// captures a detached value-copy snapshot (+ persist seq) via
+	// snapshotJobsForSaveLocked; json.Marshal moves to persistSnapshot below,
+	// off the lock, so a 50+ job encode no longer serialises the dashboard
+	// read path (ListJobs / ListAllJobsWithNextRun / PerChatJobCount) for the
+	// marshal duration on every cron tick. This finishes the half left open by
+	// #1340 (R20260527122801-PERF-2 moved the sort comparator but not marshal).
 	var (
 		save           func()
 		sessionChanged bool
-		ok             bool
+		snap           jobsSnapshot
+		haveSnap       bool
+		prev           JobState
 	)
 	func() {
 		s.mu.Lock()
@@ -712,7 +734,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		if _, exists := s.jobs[j.ID]; !exists {
 			return
 		}
-		prev := j.snapshotResultState()
+		prev = j.snapshotResultState()
 
 		j.LastRunAt = endedAt
 		j.LastResult = result
@@ -723,26 +745,39 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		}
 		j.RunCounters.addRun(state)
 
-		saveFn, perr := s.persistJobsLocked()
-		if perr != nil {
-			prev.restore(j)
-			slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
-				"job_id", j.ID, "err", perr)
-			return
-		}
-		save = saveFn
+		snap = s.snapshotJobsForSaveLocked()
+		haveSnap = true
 		// R250-PERF-7: detect whether LastSessionID changed under the lock
 		// so we can invalidate the KnownSessionIDs TTL cache exactly when
 		// the persisted set has shifted. Comparing against the snapshot
 		// taken before the in-place write avoids redundant invalidation
 		// when the same session id repeats.
 		sessionChanged = sessionID != "" && sessionID != prev.LastSessionID
-		ok = true
 	}()
 
-	if !ok {
+	if !haveSnap {
 		return result, errMsg, false
 	}
+
+	// Marshal OFF the lock (#1923). On marshal failure re-acquire s.mu and
+	// roll back the in-memory mutation so the live read path and the on-disk
+	// snapshot stay in sync — same contract persistJobsLocked enforced inline,
+	// only the encode moved out of the critical section. Marshal failure is an
+	// OOM / broken-schema (or injected-stub) event, so the brief window where
+	// the not-yet-persisted mutation is visible to readers before rollback is
+	// acceptable: finishRun gates cron_run_ended on this function's ok return.
+	saveFn, perr := s.persistSnapshot(snap)
+	if perr != nil {
+		s.mu.Lock()
+		if _, exists := s.jobs[j.ID]; exists {
+			prev.restore(j)
+		}
+		s.mu.Unlock()
+		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
+			"job_id", j.ID, "err", perr)
+		return result, errMsg, false
+	}
+	save = saveFn
 
 	if sessionChanged {
 		s.invalidateKnownSessionsCache()
@@ -768,7 +803,52 @@ var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+
 // messages such as "dial tcp [2001:db8::1]:4012: connection refused".
 // Only bracket form is matched — bare IPv6 without brackets is ambiguous in
 // free-form text (colons appear in many other contexts). R20260604-GO-016.
-var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F:]+\](:\d+)?`)
+//
+// R20260607-GO-013: the pattern requires at least one colon inside the
+// brackets ([0-9a-fA-F]*:[0-9a-fA-F:]+) so non-address bracketed tokens
+// like [foo], [abc], or [1] are not over-redacted. A valid IPv6 literal
+// always contains at least one colon (the :: or x:y shorthand forms).
+//
+// R20260607-COR-008: the leading hex group is `*` (not `+`) so the `::`
+// compressed/loopback forms ([::1], [::]) still match — those have no hex
+// char before the first colon. The downside is that `[:]` (empty prefix +
+// a single colon) is a degenerate match that is NOT a valid IPv6 literal
+// (a real address needs either a hex digit or the `::` compression). To
+// avoid over-redacting non-address text like "flag [:]", redaction uses
+// ReplaceAllStringFunc + ipv6BracketIsAddr below: a bracket body is only
+// redacted when it contains at least one hex digit OR a `::` run.
+var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
+
+// ipv6BracketIsAddr reports whether a string matched by redactAddrIPv6Re is a
+// plausible IPv6 literal rather than a degenerate token like "[:]" or "[a:b]"
+// (which contain a single colon and are not valid IPv6 addresses).
+// A valid IPv6 literal requires either a "::" compression run or at least two
+// colons (the minimum for any real IPv6 segment sequence, e.g. "::1" or
+// "a:b:c"). Single-colon forms like "[a:b]" look like host:port notation and
+// must not be over-redacted. The input is a full match including brackets and
+// optional :port suffix.
+func ipv6BracketIsAddr(match string) bool {
+	end := strings.IndexByte(match, ']')
+	if end < 0 {
+		return false
+	}
+	body := match[1:end] // strip leading '[' and trailing ']'
+	if strings.Contains(body, "::") {
+		return true
+	}
+	// Require at least 2 colons: minimum valid IPv6 segment count
+	// (e.g. "a:b:c" has 2 colons; single-colon "[a:b]" is not IPv6).
+	n := 0
+	for i := 0; i < len(body); i++ {
+		if body[i] == ':' {
+			n++
+			if n >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
 // contains at least one digit immediately followed (or preceded) by a dot
@@ -797,7 +877,12 @@ func redactAddrInCronError(s string) string {
 		return s
 	}
 	s = redactAddrRe.ReplaceAllString(s, "[redacted-addr]")
-	s = redactAddrIPv6Re.ReplaceAllString(s, "[redacted-addr]")
+	s = redactAddrIPv6Re.ReplaceAllStringFunc(s, func(m string) string {
+		if ipv6BracketIsAddr(m) {
+			return "[redacted-addr]"
+		}
+		return m
+	})
 	return s
 }
 

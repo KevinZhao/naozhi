@@ -24,11 +24,19 @@ import (
 //     the drawer doesn't latch onto a deleted phantom
 func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): cron panel functions moved to cron_view.js, but
+	// the global Esc handler (assertion 9) stayed in dashboard.js. Assert on
+	// the union; the only negative assertion is scoped to a function body slice
+	// so concatenation is safe.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// 1. Module-scoped cronDetailJobId state.
 	if !strings.Contains(js, "let cronDetailJobId = null") {
@@ -312,7 +320,7 @@ func TestDashboardHTML_CronPanelConsolidationStyles(t *testing.T) {
 // double-click during the WS round-trip; the cooldown is what stops that.
 func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -435,7 +443,7 @@ func TestDashboardJS_R2_R4_TriggerCooldown(t *testing.T) {
 // sidebar doesn't get a 240px-wide drawer.
 func TestDashboardJS_R2_R1_LayoutObserver(t *testing.T) {
 	t.Parallel()
-	jsData, err := dashboardJS.ReadFile("static/dashboard.js")
+	jsData, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -502,7 +510,7 @@ func TestDashboardJS_R2_R1_LayoutObserver(t *testing.T) {
 // All three flow through a 3 s countdown via confirmDialog's countdownSecs.
 func TestDashboardJS_R2_R12_DeleteCopy(t *testing.T) {
 	t.Parallel()
-	jsData, err := dashboardJS.ReadFile("static/dashboard.js")
+	jsData, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
