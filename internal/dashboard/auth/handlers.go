@@ -622,6 +622,17 @@ input[type="password"]:focus{border-color:#4a9eff}
 button{width:100%;padding:.75rem;background:#4a9eff;color:#fff;border:none;border-radius:8px;font-size:.95rem;cursor:pointer;font-weight:500;transition:background .2s}
 button:hover{background:#3a8eef}button:active{background:#2a7edf}
 .error{color:#ef4444;font-size:.85rem;margin-top:.75rem;min-height:1.2em}
+/* The login page renders before any dashboard JS, so it can't read the
+   persisted nz_theme; follow the OS preference instead. Dark stays the
+   default above; light users no longer get a jarring near-black card. */
+@media (prefers-color-scheme:light){
+  body{background:#f6f8fa;color:#1f2328}
+  .login{background:#fff;border-color:#d0d7de;box-shadow:0 1px 3px rgba(27,31,36,.08)}
+  .login p{color:#656d76}
+  input[type="password"]{background:#fff;border-color:#d0d7de;color:#1f2328}
+  input[type="password"]:focus{border-color:#0969da}
+  button{background:#0969da}button:hover{background:#0860c9}button:active{background:#0757ba}
+}
 </style></head><body>
 <div class="login">
 <h1>naozhi</h1>

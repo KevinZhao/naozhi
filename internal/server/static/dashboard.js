@@ -7386,6 +7386,7 @@ function previewCodeBlock(btn) {
   const name = _codeBlockFilename(lang);
   drawer.classList.remove('hidden');
   drawer.classList.add('fv-open');
+  collapseSidebarForDrawer();
   // Mark as snippet so the drawer header copy/download buttons fall back to
   // the inline code instead of trying to fetch a server file.
   drawer.dataset.project = '';
@@ -8512,6 +8513,7 @@ async function openFilePreview(wrapEl) {
   if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
   // Opened last → stack on top of the 追问 pane if both are docked.
   if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('preview');
+  collapseSidebarForDrawer();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -11901,6 +11903,19 @@ function toggleSidebarCollapsed() {
   lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
 }
 
+// collapseSidebarForDrawer auto-collapses the sidebar when a right-side drawer
+// (追问 / file preview / code-block preview) opens, freeing horizontal space
+// for the drawer. Intentionally does NOT persist to localStorage — this is a
+// transient, context-driven collapse, so a later cold-load still honors the
+// user's own toggle preference rather than this side effect. moveFocus=false
+// since focus belongs to the drawer being opened, not the toggle handle.
+// Mobile viewport is skipped (sidebar is a modal drawer there, not a column).
+function collapseSidebarForDrawer() {
+  if (isMobileViewport()) return;
+  if (document.body.classList.contains('sidebar-collapsed')) return;
+  applySidebarCollapsed(true, false);
+}
+
 (function initSidebarCollapsed(){
   // Honor persisted preference on cold-load. Skip on mobile so a previously
   // collapsed PC session doesn't black-box the drawer when the user pops the
@@ -12612,6 +12627,7 @@ initSidebarSearch();
       clearMessages();
       elSave.classList.remove('visible');
       showDrawer();
+      collapseSidebarForDrawer();
       setTimeout(() => elInput.focus(), 60);
       startPolling();
     } catch (e) {
