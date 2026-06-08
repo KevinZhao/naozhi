@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -58,45 +59,54 @@ func TestReadFramedBody_BadNewline_ReturnsMalformed(t *testing.T) {
 // the only reference to the buffer (the caller receives nil and cannot
 // release it), so the pooled buffer was never returned.
 //
-// Deterministic check: drain the pool, perform the malformed read in a
-// tight window, then Get from the pool. A Put on the error path means a
-// buffer sized for the frame (cap >= n+1) is available immediately;
-// without the fix the pool yields only freshly-New'd zero-cap buffers.
+// Check: drain the pool, then in a GC-disabled, thread-pinned window
+// repeatedly { malformed read; Get } and assert that at least one Get
+// observes a buffer sized for the frame (cap >= n+1). If the error path
+// releases its buffer, such a buffer reaches the pool and is observed
+// within a few iterations; if it never releases, no iteration can ever
+// observe a cap >= n+1 buffer (the pool only ever New's the 4096 default).
+//
+// Why a retry loop rather than a single Get: sync.Pool is per-P. Even
+// with GC off, a single Put-then-Get can miss if the goroutine is
+// rescheduled onto a different P between the two (the new P's local pool
+// is empty, so Get falls back to New). macOS CI runners with many cores
+// hit this reliably (#1950 flake). LockOSThread reduces P migration and
+// the loop tolerates the residual misses without ever producing a false
+// positive for the no-release regression.
 func TestReadFramedBody_BadNewline_ReleasesBuffer(t *testing.T) {
 	// Use a body LARGER than the pool's default New capacity (4096) so a
 	// released (grown) buffer is unmistakably distinct from a fresh pool
 	// entry: only an actual Put on the error path can make a cap >= 8193
-	// buffer available immediately.
+	// buffer available.
 	body := strings.Repeat("z", 8192)
 	wantCap := len(body) + 1
 
-	// sync.Pool drops its entire contents on a GC (the victim cache is
-	// cleared every two cycles). This test's premise — "the buffer the
-	// error path Put is the one the next Get returns" — only holds if no
-	// GC runs in the window between Put and Get. Disable GC for that
-	// window so the check is deterministic; CI saw spurious failures when
-	// a GC fired between the read and the reclaiming Get (#1950 flake).
+	// Pin the goroutine to one OS thread and keep GC off for the whole
+	// window so a released buffer is not evicted (GC clears the pool) and
+	// the per-P pool we Put into is the same one we Get from.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
-	// Drain any pre-existing pooled buffers so the only entry that can be
-	// present after the read is the one ReadFramedBody released.
-	for i := 0; i < 64; i++ {
-		_ = framedBodyPool.Get()
-	}
-
 	frame := makeBadNewlineFrame(body)
-	_, _, err := ReadFramedBody(bufio.NewReader(strings.NewReader(frame)))
-	if !errors.Is(err, ErrMalformedFrame) {
-		t.Fatalf("err = %v, want ErrMalformedFrame", err)
-	}
+	for iter := 0; iter < 256; iter++ {
+		// Drain pooled buffers so the only large entry that can be present
+		// after the read is the one ReadFramedBody released this iteration.
+		for i := 0; i < 64; i++ {
+			_ = framedBodyPool.Get()
+		}
 
-	// Immediately reclaim the released buffer. sync.Pool may evict under
-	// GC pressure, but in this tight single-goroutine window a Put is
-	// overwhelmingly returned by the very next Get.
-	bp := framedBodyPool.Get().(*[]byte)
-	if cap(*bp) < wantCap {
-		t.Fatalf("pool returned cap=%d < %d after bad-newline read: "+
-			"buffer was not released back to framedBodyPool (#1950 regression)",
-			cap(*bp), wantCap)
+		_, _, err := ReadFramedBody(bufio.NewReader(strings.NewReader(frame)))
+		if !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("err = %v, want ErrMalformedFrame", err)
+		}
+
+		bp := framedBodyPool.Get().(*[]byte)
+		if cap(*bp) >= wantCap {
+			return // observed the released buffer — fix is present.
+		}
 	}
+	t.Fatalf("no Get observed a cap >= %d buffer across 256 iterations: "+
+		"bad-newline branch never released its pool buffer (#1950 regression)",
+		wantCap)
 }
