@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -725,7 +726,7 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 func TestOwnerLoop_GenMismatch(t *testing.T) {
 	q := NewMessageQueue(5, 10*time.Millisecond)
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	_, _, _, gen := q.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
+	_, _, _, gen, _ := q.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
 	q.Enqueue(key, QueuedMsg{Text: "second", EnqueueAt: time.Now()})
 	q.Discard(key)
 	// Old gen → nil → stale owner stops
@@ -934,6 +935,37 @@ func TestHandleCdCommand_OutsideAllowedRoot(t *testing.T) {
 
 	if !strings.Contains(fp.lastReply(), "不允许") {
 		t.Errorf("expected not-allowed message, got %q", fp.lastReply())
+	}
+}
+
+// TestHandleCdCommand_CaseInsensitiveChild is the /cd counterpart of the
+// dashboard resume bug: on a case-insensitive filesystem (macOS APFS) an
+// allowedRoot configured in one case must still admit a /cd target typed in
+// another case for the same physical directory. PathContainedInRoot's inode
+// walk handles it. Skips on a case-sensitive fs where the bug can't occur.
+func TestHandleCdCommand_CaseInsensitiveChild(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	child := filepath.Join(root, "Proj")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lowerChild := filepath.Join(root, "proj")
+	if _, err := os.Stat(lowerChild); err != nil {
+		t.Skip("filesystem is case-sensitive; case-fold containment not exercisable here")
+	}
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	d.allowedRoot = child // mixed-case root
+
+	// /cd the lowercase spelling — byte prefix mismatches, inode walk rescues.
+	msg := incomingMsg("/cd " + lowerChild)
+	d.handleCdCommand(context.Background(), msg, "/cd "+lowerChild, slog.Default())
+
+	if !strings.Contains(fp.lastReply(), "已切换") {
+		t.Errorf("case-variant /cd must be accepted on case-insensitive fs, got %q", fp.lastReply())
 	}
 }
 

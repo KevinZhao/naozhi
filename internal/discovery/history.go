@@ -81,6 +81,13 @@ type imageSource struct {
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
 func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
+	// Defence-in-depth path-traversal guard: reject non-UUID sessionIDs before
+	// joining into a filepath, matching the sibling resolveJSONLPath guard in
+	// history_tail.go. Prevents an attacker-controlled sessionID like
+	// "../../etc/passwd" from escaping claudeDir/projects.
+	if !IsValidSessionID(sessionID) {
+		return nil, nil
+	}
 	var path string
 	if cwd != "" {
 		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")

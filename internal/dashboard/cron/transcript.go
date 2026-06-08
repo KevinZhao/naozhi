@@ -442,25 +442,17 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 		resolvedRoot = allowedRoot
 	}
-	// R236-SEC-05: align with the validateWorkspace / workDirUnderRoot
-	// pattern (`resolved != root && !HasPrefix(resolved, root+sep)`) so a
-	// future refactor can grep for one shape across server/cron. The old
-	// "double-append separator" form was correct but easy to misread as
-	// "if I forget the trailing sep on one side, the check is now wrong",
-	// which is the failure mode the unified pattern eliminates.
-	//
-	// R238-SEC-6: HasPrefix is byte-wise case-sensitive. On macOS APFS /
-	// HFS+ (default case-insensitive) and Windows NTFS, EvalSymlinks may
-	// preserve the user-typed case for path components that the kernel
-	// otherwise treats as equivalent — e.g. resolved="/Users/alice/.claude/projects/..."
-	// vs resolvedRoot="/Users/Alice/.claude/projects" would falsely fail
-	// the prefix check and downgrade every legitimate run to "missing".
-	// Fall back to a SameFile-walk on the resolved path's ancestors when
-	// the byte-wise check fails so the gate matches actual filesystem
-	// containment semantics rather than path-string identity.
-	if resolved != resolvedRoot &&
-		!strings.HasPrefix(resolved, resolvedRoot+string(os.PathSeparator)) &&
-		!sameFileAncestor(resolved, resolvedRoot) {
+	// R236-SEC-05 / R238-SEC-6: containment honours filesystem semantics, not
+	// path-string identity. osutil.PathContainedInRoot does the byte-wise
+	// prefix check first, then falls back to an os.SameFile walk on resolved's
+	// ancestors. The fallback matters on case-insensitive filesystems (macOS
+	// APFS/HFS+, Windows NTFS) where EvalSymlinks preserves user-typed case —
+	// e.g. resolved="/Users/alice/.claude/projects/..." vs
+	// resolvedRoot="/Users/Alice/.claude/projects" — which would otherwise
+	// falsely fail the prefix check and downgrade every legitimate run to
+	// "missing". Both args are EvalSymlinks-resolved above (the helper's input
+	// contract), keeping the symlink-escape rejection intact.
+	if !osutil.PathContainedInRoot(resolved, resolvedRoot) {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		httputil.WriteJSON(w, resp)
@@ -1014,6 +1006,9 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		if isJSONNull(input) {
 			input = nil
 		}
+		// R20260607-SEC-8 (#1914): redact secrets in the raw Input JSON so
+		// credentials a cron job read into a tool call don't leak verbatim.
+		input = redactToolInput(input)
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
 			Kind:      "tool_use",
@@ -1175,6 +1170,29 @@ trail:
 	}
 compare:
 	return len(b) == 4 && b[0] == 'n' && b[1] == 'u' && b[2] == 'l' && b[3] == 'l'
+}
+
+// redactToolInput strips well-known secret tokens (API keys, passwords, …)
+// out of the raw tool_use.Input JSON before it reaches the wire.
+//
+// R20260607-SEC-8 (#1914): summariseToolInput's one-line Summary already runs
+// through sanitizeWireText (→ RedactSecrets), but the full Input RawMessage
+// surfaced verbatim — a cron job that read a file containing credentials would
+// echo them back in the transcript response's `input` field. RedactSecrets is
+// JSON-safe here: it only swaps secret-token runs (which never contain JSON
+// structural bytes) for the shorter literal "[REDACTED]", so the JSON shape is
+// preserved and re-encoding is unnecessary. Returns the input unchanged when
+// nothing matched (RedactSecrets aliases clean strings) so the common path
+// pays only a single prefix scan.
+func redactToolInput(in json.RawMessage) json.RawMessage {
+	if len(in) == 0 {
+		return in
+	}
+	redacted := textutil.RedactSecrets(string(in))
+	if redacted == string(in) {
+		return in
+	}
+	return json.RawMessage(redacted)
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
@@ -1392,40 +1410,4 @@ func truncateRunes(s string, maxBytes int) string {
 		cut = i + size
 	}
 	return s[:cut] + ellipsis
-}
-
-// sameFileAncestor reports whether root names the same inode as resolved or
-// any of its ancestors. Used as a fallback after a byte-wise HasPrefix check
-// fails so the path-escape gate honours filesystem containment semantics on
-// case-insensitive filesystems (macOS APFS/HFS+ default, Windows NTFS) where
-// EvalSymlinks preserves user-typed case while the kernel still treats the
-// path as equivalent. Walking parents one Stat at a time bounds the work to
-// path depth and avoids os-specific case-folding rules. Returns false on any
-// Stat error (root deleted mid-flight, permission denied, broken chain) so a
-// failed ancestor probe never weakens the byte-wise gate's negative result.
-func sameFileAncestor(resolved, root string) bool {
-	// R103901-SEC-8: Lstat (not Stat) so a symlink at the final path
-	// component is never followed when probing inode identity. Both args
-	// arrive already EvalSymlinks-resolved, so on the normal path Lstat and
-	// Stat return identical inode info and SameFile semantics are unchanged
-	// (including case-insensitive FS matching, which folds in the kernel
-	// dir lookup, not the final-component follow). Lstat closes the
-	// defence-in-depth gap where a crafted root/final-component symlink
-	// could otherwise let SameFile match a target outside the subtree.
-	rootInfo, err := os.Lstat(root)
-	if err != nil {
-		return false
-	}
-	cur := filepath.Clean(resolved)
-	for {
-		info, err := os.Lstat(cur)
-		if err == nil && os.SameFile(info, rootInfo) {
-			return true
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur { // reached filesystem root, stop.
-			return false
-		}
-		cur = parent
-	}
 }

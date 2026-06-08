@@ -47,9 +47,14 @@ func TestDashboardJS_LiveEventDOMCap(t *testing.T) {
 	// The cron-live container has the sibling bug: onCronLiveEvent caps the
 	// data model at CRON_LIVE_MAX_EVENTS but appendEventsToContainer only
 	// appended, so its DOM grew unbounded. Pin that the container append
-	// path now trims against the same ceiling.
-	if !strings.Contains(js, "bubbles > CRON_LIVE_MAX_EVENTS") {
-		t.Error("dashboard.js: appendEventsToContainer must trim oldest .event nodes " +
+	// path now trims against the same ceiling. appendEventsToContainer moved
+	// to cron_view.js with the cron extraction (PR-1), so assert it there.
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	if !strings.Contains(string(cronData), "bubbles > CRON_LIVE_MAX_EVENTS") {
+		t.Error("cron_view.js: appendEventsToContainer must trim oldest .event nodes " +
 			"against CRON_LIVE_MAX_EVENTS (#398): the data model already shifts at the " +
 			"cap, so the DOM must too or a long cron run OOMs the tab.")
 	}

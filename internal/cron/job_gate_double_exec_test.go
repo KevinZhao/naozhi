@@ -60,8 +60,13 @@ func TestJobGateLock_SameJobIDSharesMutex(t *testing.T) {
 	if idx := jobGateShardIndex("job-x"); idx >= jobGateShards {
 		t.Fatalf("shard index %d out of range [0,%d)", idx, jobGateShards)
 	}
-	if jobGateShardIndex("job-x") != jobGateShardIndex("job-x") {
-		t.Fatal("jobGateShardIndex not deterministic")
+	// R090135-LOGIC-7: compare against a stored first result; comparing two
+	// independent calls to the same pure function is always false (SA4000).
+	first := jobGateShardIndex("job-x")
+	for i := 0; i < 8; i++ {
+		if jobGateShardIndex("job-x") != first {
+			t.Fatalf("jobGateShardIndex not deterministic: call %d returned different shard", i+1)
+		}
 	}
 }
 

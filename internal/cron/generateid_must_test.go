@@ -11,14 +11,6 @@ package cron
 // 对比；reviewers 一眼就能看出哪段是 test-only 简化、哪段是必须把
 // error 处理掉的真路径。
 
-func mustGenerateHexID() string {
-	id, err := generateHexID()
-	if err != nil {
-		panic("cron test: generateHexID: " + err.Error())
-	}
-	return id
-}
-
 func mustGenerateID() string {
 	id, err := generateID()
 	if err != nil {

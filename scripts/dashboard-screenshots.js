@@ -124,7 +124,7 @@ const STEPS = [
     body: async (page) => {
       await page.goto(BASE + '/dashboard', { waitUntil: 'networkidle' });
       await page.waitForTimeout(600);
-      const btn = page.locator('button#btn-cron').first();
+      const btn = page.locator('button#abnav-cron').first();
       await btn.click({ timeout: 2000 });
       await page.waitForTimeout(600);
     },
