@@ -187,3 +187,109 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 	close(releaseMarshal)
 	wg.Wait()
 }
+
+// TestSnapshotJobsForSaveLocked_NotifyDeepCopy pins R20260608133928-CR-5:
+// snapshotJobsForSaveLocked must deep-copy the Notify *bool field so that
+// reassigning the live job's Notify pointer after the snapshot is taken does
+// not affect the snapshot value seen by the off-lock json.Marshal
+// (R20260607-PERF-005 / #1923).
+func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	trueVal := true
+	j := &Job{
+		ID: "notify-deep-copy", Schedule: "@every 1h", Prompt: "p",
+		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
+		Notify: &trueVal,
+	}
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.sortedJobIDs = append(s.sortedJobIDs, j.ID)
+	snap := s.snapshotJobsForSaveLocked()
+	s.mu.Unlock()
+
+	// The snapshot entry's Notify pointer must be a distinct allocation.
+	if len(snap.entries) != 1 {
+		t.Fatalf("want 1 snapshot entry, got %d", len(snap.entries))
+	}
+	snapNotify := snap.entries[0].Notify
+	if snapNotify == nil {
+		t.Fatal("snapshot Notify is nil, want non-nil")
+	}
+	if snapNotify == j.Notify {
+		t.Fatal("snapshot Notify shares the same pointer as the live job; expected a deep copy (R20260608133928-CR-5)")
+	}
+
+	// Reassign the live job's Notify to a different value after the snapshot.
+	falseVal := false
+	s.mu.Lock()
+	j.Notify = &falseVal
+	s.mu.Unlock()
+
+	// The snapshot's Notify must still reflect the original true value.
+	if !*snapNotify {
+		t.Errorf("snapshot Notify = false after live job Notify was reassigned; "+
+			"deep copy must isolate snapshot from post-unlock mutations (R20260608133928-CR-5)")
+	}
+
+	// Marshal the snapshot and verify the JSON encodes the snapshotted value.
+	data, err := s.marshalJobsSnapshotForTest(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	var rt []*Job
+	if err := json.Unmarshal(data, &rt); err != nil {
+		t.Fatalf("unmarshal: %v: %s", err, data)
+	}
+	if len(rt) != 1 {
+		t.Fatalf("want 1 job in marshal output, got %d", len(rt))
+	}
+	if rt[0].Notify == nil || !*rt[0].Notify {
+		t.Errorf("marshaled Notify = %v, want true; snapshot must carry the pre-mutation value (R20260608133928-CR-5)",
+			rt[0].Notify)
+	}
+}
+
+// TestSnapshotJobsForSaveLocked_NotifyNilSafe verifies that a job with a nil
+// Notify field is handled safely (no nil dereference) and produces a nil
+// Notify in the snapshot entry.
+func TestSnapshotJobsForSaveLocked_NotifyNilSafe(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	j := &Job{
+		ID: "notify-nil", Schedule: "@every 1h", Prompt: "p",
+		Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true,
+		Notify: nil,
+	}
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.sortedJobIDs = append(s.sortedJobIDs, j.ID)
+	snap := s.snapshotJobsForSaveLocked()
+	s.mu.Unlock()
+
+	if len(snap.entries) != 1 {
+		t.Fatalf("want 1 snapshot entry, got %d", len(snap.entries))
+	}
+	if snap.entries[0].Notify != nil {
+		t.Errorf("snapshot Notify = %v, want nil for a job with nil Notify (R20260608133928-CR-5)",
+			snap.entries[0].Notify)
+	}
+}

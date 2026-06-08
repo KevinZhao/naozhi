@@ -1247,6 +1247,15 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			// notification would be spam and the stored LastError would
 			// falsely blame the job itself.
 			a.lg.Info("cron session cancelled", "err", err)
+			// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+			// is still held (i.e. BEFORE finishRun releases it). Matches the
+			// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+			// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+			// spawn run-B's fresh session, and then have run-A's Reset blindly
+			// delete it (router_lifecycle.go resetLocked has no owner check).
+			if a.snap.fresh {
+				s.router.Reset(a.key)
+			}
 			s.finishRun(finishArgs{
 				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1263,6 +1272,15 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		} else {
 			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
 			a.lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
+		}
+		// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+		// is still held (i.e. BEFORE finishRun releases it). Matches the
+		// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+		// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+		// spawn run-B's fresh session, and then have run-A's Reset blindly
+		// delete it (router_lifecycle.go resetLocked has no owner check).
+		if a.snap.fresh {
+			s.router.Reset(a.key)
 		}
 		s.finishRun(finishArgs{
 			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,

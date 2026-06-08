@@ -611,3 +611,9 @@
 - [R20260607-LOGIC-001] executeGetSession session-error errMsg 未在 call site 预脱敏(下游 recordTerminalResult 已脱敏),与 send-error 路径不对称,维护债 — internal/cron/scheduler_run.go:1265
 - [R20260607-PERF-011] knownSessionsCache.publish 用 time.Now() 而非注入时钟,测试 TTL 非确定 — internal/cron/scheduler_session_cache.go:74
 - [PR1953-GO-1] discovery.Scan 的 excludeSessionIDs / managedCWDs 移除 session-ID upgrade 后已成纯死参数,保留仅为不改 3 个调用点;若将来 CI 接入 unparam 会被标记,届时可一并清理签名 — internal/discovery/scanner.go:343
+- [R20260608133928-COS-1] cli.ImageData 已弃用，~20 处 dispatch/server/shim 用法待迁移到 cli.Attachment(SA1019) — internal/dispatch/dispatch.go
+- [R20260608133928-COS-2] session.CronKey 弃用，测试应改用 sessionkey.CronKey(SA1019) — internal/cron/ensure_stub_lockorder_test.go:43
+- [R20260608133928-COS-3] cronview_contract_test.go:78 SA4023 always-false 比较是有意的反模式文档，建议改 t.Log 措辞 — internal/server/cronview_contract_test.go:78
+- [R20260608133928-COS-4] rotate() reopen-fd 错误返回路径依赖单个 rotateOK=false defer 驱逐，建议加内联注释防未来 tidy 误删 — internal/eventlog/persist/rotate.go:164
+- [R20260608133928-COS-5] shim validateKeyForShim maxKeyBytes=515 硬编码魔数，建议契约测试数值断言 == session.MaxSessionKeyBytes — internal/shim/manager.go:58
+- [R20260608133928-COS-6] reapFreshSessionLocked warn 日志冗余重复 job_id(已在 lg context) — internal/cron/scheduler_run.go:1122
