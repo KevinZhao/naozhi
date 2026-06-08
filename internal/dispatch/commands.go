@@ -162,9 +162,16 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 // available; ACP-backed sessions fall back to SIGINT-equivalent Interrupt().
 // In passthrough mode, pending slots remain queued — only the active turn
 // is dropped; CLI moves on to the next message automatically.
+//
+// #1944: a chat can host multiple agent sessions (general/planner plus any
+// agent-command sessions like /review→code-reviewer). The previous
+// implementation hard-coded the "general" key, so /stop was a no-op for
+// agent-command turns and replied with the misleading "no reply in progress".
+// We now broadcast the control interrupt across every agent the chat could
+// have a live session for and aggregate the outcomes, mirroring /cd's
+// chat-wide ResetChat semantics.
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
-	key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-	outcome := d.router.InterruptSessionViaControl(key)
+	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
 	switch outcome {
 	case session.InterruptSent:
 		d.replyText(ctx, msg, "已中断当前回复。", log)
@@ -175,6 +182,55 @@ func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.Incomin
 	case session.InterruptError:
 		d.replyText(ctx, msg, "中断失败，请稍后重试或使用 /new 重置会话。", log)
 	}
+}
+
+// interruptChat broadcasts a control_request interrupt across every agent
+// session a chat may own (general/planner + every configured agent-command
+// target) and folds the per-key outcomes into a single user-facing result.
+//
+// Folding precedence (best-news-wins, so an idle planner session never masks
+// an actually-interrupted code-reviewer turn):
+//
+//	Sent > Error > Unsupported > NoTurn > NoSession
+//
+// Keys are deduplicated because the same agentID can be reachable through
+// multiple slash commands, and because general/planner are always probed.
+func (d *Dispatcher) interruptChat(platform, chatType, chatID string) session.InterruptOutcome {
+	agentIDs := make(map[string]struct{}, len(d.agentCommands)+2)
+	agentIDs["general"] = struct{}{}
+	agentIDs["planner"] = struct{}{}
+	for _, id := range d.agentCommands {
+		agentIDs[id] = struct{}{}
+	}
+
+	best := session.InterruptNoSession
+	rank := func(o session.InterruptOutcome) int {
+		switch o {
+		case session.InterruptSent:
+			return 4
+		case session.InterruptError:
+			return 3
+		case session.InterruptUnsupported:
+			return 2
+		case session.InterruptNoTurn:
+			return 1
+		default: // InterruptNoSession
+			return 0
+		}
+	}
+
+	seenKey := make(map[string]struct{}, len(agentIDs))
+	for id := range agentIDs {
+		key := d.keyForChat(platform, chatType, chatID, id)
+		if _, dup := seenKey[key]; dup {
+			continue
+		}
+		seenKey[key] = struct{}{}
+		if o := d.router.InterruptSessionViaControl(key); rank(o) > rank(best) {
+			best = o
+		}
+	}
+	return best
 }
 
 // handleUrgentCommand dispatches a priority:"now" passthrough message. The

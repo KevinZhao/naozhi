@@ -123,16 +123,19 @@ func (r *msgRing) len() int { return r.used }
 
 // push appends m. When the ring is at the supplied capacity (cap, the
 // MessageQueue's maxDepth), the head is advanced and the oldest element
-// is overwritten — returns true to signal an eviction so the caller can
-// emit the rate-limited warn log. The first push allocates the backing
+// is overwritten — returns evicted=true plus a copy of the dropped message
+// so the caller can emit the rate-limited warn log AND clear the dropped
+// message's queued reaction (#1945). The first push allocates the backing
 // array at the requested capacity; subsequent pushes reuse it.
-func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool) {
+func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool, dropped QueuedMsg) {
 	if cap(r.buf) == 0 {
 		r.buf = make([]QueuedMsg, capacity)
 	}
 	if r.used == capacity {
-		// Full: drop oldest. Zero the slot first so any held image data
-		// becomes GC-eligible immediately.
+		// Full: drop oldest. Capture it before zeroing so the caller can
+		// clear its dangling HOURGLASS reaction. Zero the slot so any held
+		// image data becomes GC-eligible immediately.
+		dropped = r.buf[r.head]
 		r.buf[r.head] = QueuedMsg{}
 		r.head = (r.head + 1) % capacity
 		r.used--
@@ -141,7 +144,7 @@ func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool) {
 	idx := (r.head + r.used) % capacity
 	r.buf[idx] = m
 	r.used++
-	return evicted
+	return evicted, dropped
 }
 
 // drainInto returns the queued messages in FIFO order and resets the ring to
@@ -370,25 +373,32 @@ func (q *MessageQueue) getOrCreate(key string) *sessionQueue {
 //     an in-band CLI interrupt so the active turn aborts promptly.
 //   - isOwner=false, enqueued=false: queue is disabled (maxDepth<=0).
 //     Caller should reply "please wait".
-func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64) {
+//
+// evictedID is the MessageID of an oldest message dropped to make room for
+// this one (queue-full backpressure), or "" when nothing was evicted. The
+// caller uses it to clear that message's dangling queued reaction (#1945) —
+// otherwise the evicted message's HOURGLASS hangs until the platform's
+// reaction-cache TTL (feishu: 12h), falsely signalling "still queued".
+func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64, evictedID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	sq := q.getOrCreate(key)
 	if !sq.busy {
 		sq.busy = true
-		return true, false, false, sq.gen
+		return true, false, false, sq.gen, ""
 	}
 
 	// maxDepth<=0: degrade to drop (backward-compatible with old Guard behavior).
 	if q.maxDepth <= 0 {
-		return false, false, false, 0
+		return false, false, false, 0, ""
 	}
 
 	// Push into the ring buffer. Eviction on full is O(1) (head advance);
 	// the previous slice-memmove was O(N) on every push at full depth.
 	// R247-PERF-23 (#570).
-	if evicted := sq.ring.push(msg, q.maxDepth); evicted {
+	if evicted, dropped := sq.ring.push(msg, q.maxDepth); evicted {
+		evictedID = dropped.MessageID
 		// Queue-full eviction is silent data loss: the user that sent the
 		// evicted message gets no feedback. Log at Warn so operators can
 		// observe backpressure (single chat overwhelmed, or CLI hung).
@@ -413,9 +423,9 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, sh
 	// and the CLI would ignore a second one mid-abort.
 	if q.mode == ModeInterrupt && !sq.interruptRequested {
 		sq.interruptRequested = true
-		return false, true, true, 0
+		return false, true, true, 0, evictedID
 	}
-	return false, true, false, 0
+	return false, true, false, 0, evictedID
 }
 
 // DoneOrDrain is called by the owner goroutine after processing a message.

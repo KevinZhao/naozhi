@@ -750,9 +750,21 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 // handleQueuedNonOwner runs the queue non-owner branch: interrupt-mode control
 // request for the active turn, plus the enqueue-vs-disabled acknowledgement.
 // Extracted from BuildHandler (R20260531A-ARCH-3 / #1527) — behaviour-
-// preserving. shouldInterrupt / enqueued come from queue.Enqueue.
-func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool) {
+// preserving. shouldInterrupt / enqueued / evictedID come from queue.Enqueue.
+// A non-empty evictedID means this enqueue dropped the oldest queued message
+// for the key (queue-full backpressure); its dangling HOURGLASS reaction is
+// cleared so the evicted user is not left with a permanent "still queued"
+// indicator (#1945).
+func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool, evictedID string) {
 	lg, key := p.lg, p.key
+	// #1945: an evicted message's queued reaction must be removed — it never
+	// enters a DoneOrDrain batch, so ownerLoop's clearQueuedReactions never
+	// touches it. Without this its HOURGLASS hangs until the platform reaction
+	// cache TTL (feishu: 12h) GCs it, falsely telling the dropped user "still
+	// queued". The evicted message shares this inbound msg.Platform (same chat).
+	if evictedID != "" {
+		d.clearQueuedReaction(ctx, msg.Platform, evictedID, lg)
+	}
 	// Interrupt mode: the first queued follow-up for the active
 	// turn fires a control_request to the CLI so the in-flight
 	// turn aborts within ~300ms. The ongoing owner loop's Send()
@@ -854,9 +866,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				MessageID: msg.MessageID,
 				EnqueueAt: time.Now(),
 			}
-			isOwner, enqueued, shouldInterrupt, gen := d.queue.Enqueue(key, qm)
+			isOwner, enqueued, shouldInterrupt, gen, evictedID := d.queue.Enqueue(key, qm)
 			if !isOwner {
-				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued)
+				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued, evictedID)
 				return
 			}
 			// I am the owner — enter the process-and-drain loop.
@@ -1042,6 +1054,17 @@ func (d *Dispatcher) goSendAndReply(
 				d.handleOwnerLoopPanic(key, msg, r, lg)
 			}
 		}()
+		// #1946: clear the HOURGLASS the passthrough / /urgent ack added once
+		// this turn finishes. The detached goroutine never enters ownerLoop's
+		// drain loop (the only other caller of the reaction-clear path), so
+		// without this the queued reaction hangs until the platform's reaction
+		// cache TTL GCs it (feishu: 12h), falsely showing "still processing".
+		// WithoutCancel: the turn's ctx often carries a per-turn deadline that
+		// has elapsed by reply time, and on shutdown it is Canceled — either
+		// would make RemoveReaction fail fast. Strip cancellation/deadline but
+		// keep request-scoped values; clearQueuedReaction re-bounds with its
+		// own reactionAckTimeout.
+		defer d.clearQueuedReaction(context.WithoutCancel(ctx), msg.Platform, msg.MessageID, lg)
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
 	}()
 }
