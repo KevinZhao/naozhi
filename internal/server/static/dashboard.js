@@ -277,7 +277,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
-  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-settings'].forEach(function (id) {
+  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
@@ -314,21 +314,22 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 // setActivityView('cron') when not already in cron view. We set activeView
 // BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
 // already false on the re-entry and the loop terminates after one hop.
-const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'settings'];
+const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === activeView) return;
   const prev = activeView;
   activeView = view;
   // Rail button active / aria-pressed state.
-  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-settings', 'settings']]
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
     });
-  // Mutually-exclusive view classes. 'chat' clears all three.
+  // Mutually-exclusive view classes. 'chat' clears all of them.
   document.body.classList.toggle('nz-view-assets', view === 'assets');
   document.body.classList.toggle('nz-view-cron', view === 'cron');
+  document.body.classList.toggle('nz-view-system', view === 'system');
   document.body.classList.toggle('nz-view-settings', view === 'settings');
   // Keep the [hidden] attr in sync with CSS for the always-resident containers
   // (asset_browser.js manages its own hidden flags on show/hide).
@@ -336,8 +337,11 @@ function setActivityView(view) {
   if (cm) cm.hidden = view !== 'cron';
   const sm = document.getElementById('settings-main');
   if (sm) sm.hidden = view !== 'settings';
+  const sysm = document.getElementById('system-main');
+  if (sysm) sysm.hidden = view !== 'system';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  if (prev === 'system' && view !== 'system') stopSystemPoll();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
   // float over the assets/cron/settings view and leave the split padding
@@ -349,6 +353,7 @@ function setActivityView(view) {
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
   else if (view === 'cron') { openCronPanel(); }
+  else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
 }
 
@@ -7381,6 +7386,7 @@ function previewCodeBlock(btn) {
   const name = _codeBlockFilename(lang);
   drawer.classList.remove('hidden');
   drawer.classList.add('fv-open');
+  collapseSidebarForDrawer();
   // Mark as snippet so the drawer header copy/download buttons fall back to
   // the inline code instead of trying to fetch a server file.
   drawer.dataset.project = '';
@@ -8507,6 +8513,7 @@ async function openFilePreview(wrapEl) {
   if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
   // Opened last → stack on top of the 追问 pane if both are docked.
   if (typeof window.nzSplitBringToFront === 'function') window.nzSplitBringToFront('preview');
+  collapseSidebarForDrawer();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -9616,6 +9623,185 @@ function renderSettingsView() {
     applyTheme(b.dataset.theme);
     renderSettingsView(); // refresh active state
   });
+}
+
+// ===== System view (sysession daemons) =====
+//
+// Read-only mirror of the 自动化 (cron) view for naozhi's built-in background
+// daemons — today just the AutoTitler (自动化改名). The backend already exposes
+// everything we need at GET /api/system/daemons (a DaemonStatus[] array; empty
+// when sysession is disabled), so this view is pure presentation:
+//   - one card per daemon: 状态点 + 名称 + 启用 pill + 描述
+//   - last-run summary: 状态 / 触发方式 / 用时 / 多久之前
+//   - per-tick stats (examined/acted/skipped_*) as compact chips
+//   - consecutive-failure warnings when a daemon is unhealthy
+// No create/edit/delete: these are naozhi-owned, configured via YAML+restart
+// (RFC system-session §9.2). The view polls at 5s while active and stops on
+// leave (stopSystemPoll), matching the cron view's poll-while-visible model.
+let systemDaemons = [];
+let systemPollTimer = null;
+
+function openSystemPanel() {
+  if (activeView !== 'system') { setActivityView('system'); return; }
+  renderSystemView();              // paint from cache (instant)
+  fetchSystemDaemons().then(renderSystemView).catch(function () {});
+  startSystemPoll();
+}
+
+function startSystemPoll() {
+  if (systemPollTimer) return;
+  // 5s cadence: daemons tick on the order of 30s, so a faster poll only burns
+  // requests. Skip the fetch when the tab is hidden to avoid background churn.
+  systemPollTimer = setInterval(function () {
+    if (document.hidden || activeView !== 'system') return;
+    fetchSystemDaemons().then(renderSystemView).catch(function () {});
+  }, 5000);
+}
+
+function stopSystemPoll() {
+  if (systemPollTimer) { clearInterval(systemPollTimer); systemPollTimer = null; }
+}
+
+async function fetchSystemDaemons() {
+  // 8s timeout mirrors the cron poll. The endpoint always returns a JSON array
+  // (empty when sysession is off), so a non-array is treated as empty.
+  const data = await fetchJSON('/api/system/daemons', { timeoutMs: 8000 });
+  systemDaemons = Array.isArray(data) ? data : [];
+  updateSystemBadge();
+  return systemDaemons;
+}
+
+// A daemon needs attention when its last run failed or it has accumulated
+// consecutive CLI/validation failures (the circuit-breaker inputs). Mirrors
+// the cron attention badge so the rail surfaces problems without opening the
+// view.
+function daemonNeedsAttention(d) {
+  if (!d) return false;
+  if ((d.consecutive_cli_failures || 0) > 0) return true;
+  if ((d.consecutive_validation_failures || 0) > 0) return true;
+  const lr = d.last_run;
+  return !!(lr && lr.state && lr.state !== 'succeeded');
+}
+
+function updateSystemBadge() {
+  const badge = document.getElementById('abnav-system-badge');
+  if (!badge) return;
+  const n = systemDaemons.filter(daemonNeedsAttention).length;
+  badge.hidden = n === 0;
+}
+
+// systemStateMeta maps a last-run state into (dot class, Chinese label).
+// Unknown states fall back to a neutral dot + the raw string so a forward-
+// compat backend state never renders as blank.
+function systemStateMeta(state) {
+  switch (state) {
+    case 'succeeded': return { cls: 'ok', label: '成功' };
+    case 'failed': return { cls: 'fail', label: '失败' };
+    case 'timed_out': return { cls: 'fail', label: '超时' };
+    case 'canceled': return { cls: 'off', label: '已取消' };
+    default: return { cls: 'off', label: state || '—' };
+  }
+}
+
+// systemTickLabel renders a Go time.Duration (JSON-marshalled as integer
+// nanoseconds) as a compact human string. Falls back to formatDurationShort
+// once we're past sub-second, reusing the existing ms formatter.
+function systemTickLabel(ns) {
+  if (!ns || ns <= 0) return '—';
+  return formatDurationShort(ns / 1e6);
+}
+
+// systemStatLabel maps a flattened TickReport stat key to a Chinese label.
+// The skipped_* keys are "skipped_" + the daemon's Skipped-map reason
+// (flattenTickReport in manager.go). Keys MUST match the reasons the daemon
+// actually emits — AutoTitler's bumpSkip(...) calls in auto_titler.go produce
+// reserved_namespace / group_chat / origin_user / min_user_turns / no_new_turns.
+// Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
+const SYSTEM_STAT_LABELS = {
+  examined: '检查',
+  acted: '执行',
+  skipped_reserved_namespace: '跳过·保留命名空间',
+  skipped_group_chat: '跳过·群聊',
+  skipped_origin_user: '跳过·用户已命名',
+  skipped_min_user_turns: '跳过·轮次不足',
+  skipped_no_new_turns: '跳过·无新增对话',
+};
+function systemStatLabel(key) {
+  if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
+  if (key.indexOf('skipped_') === 0) return '跳过·' + key.slice(8);
+  return key;
+}
+
+function renderSystemView() {
+  const root = document.getElementById('system-main');
+  if (!root) return;
+  const cards = systemDaemons.map(function (d) {
+    const lr = d.last_run;
+    const st = systemStateMeta(lr && lr.state);
+    // Dot reflects the most salient state: unhealthy > running-but-fine.
+    const dotCls = daemonNeedsAttention(d) ? 'fail' : (d.enabled ? (lr ? st.cls : 'ok') : 'off');
+    const enabledPill = d.enabled
+      ? '<span class="sys-pill on">已启用</span>'
+      : '<span class="sys-pill off">已停用</span>';
+    let metaRows = '';
+    metaRows += '<span>周期 <b>' + esc(systemTickLabel(d.tick)) + '</b></span>';
+    metaRows += '<span>累计运行 <b>' + (d.runs_total || 0) + '</b> 次</span>';
+    if (d.process_started_at) {
+      const started = Date.parse(d.process_started_at);
+      if (!isNaN(started)) {
+        metaRows += '<span>启动于 <b title="' + esc(formatAbsTime(started)) + '">' + esc(timeAgo(started)) + '</b></span>';
+      }
+    }
+    let lastRunBlock = '<div class="sys-meta"><span>尚未运行</span></div>';
+    let statsBlock = '';
+    if (lr) {
+      const ended = lr.ended_at ? Date.parse(lr.ended_at) : NaN;
+      const whenTxt = !isNaN(ended) ? timeAgo(ended) : '—';
+      const whenTitle = !isNaN(ended) ? formatAbsTime(ended) : '';
+      const triggerTxt = lr.trigger === 'manual' ? '手动' : '定时';
+      lastRunBlock =
+        '<div class="sys-meta">' +
+          '<span>最近一次 <b>' + esc(st.label) + '</b></span>' +
+          '<span>触发 <b>' + esc(triggerTxt) + '</b></span>' +
+          '<span>用时 <b>' + esc(formatDurationShort(lr.duration_ms)) + '</b></span>' +
+          '<span><b title="' + esc(whenTitle) + '">' + esc(whenTxt) + '</b></span>' +
+        '</div>';
+      const stats = lr.stats || {};
+      const chips = Object.keys(stats).map(function (k) {
+        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' ' + (stats[k] || 0) + '</span>';
+      });
+      if (chips.length) statsBlock = '<div class="sys-stats">' + chips.join('') + '</div>';
+    }
+    let warnBlock = '';
+    const cliF = d.consecutive_cli_failures || 0;
+    const valF = d.consecutive_validation_failures || 0;
+    if (cliF > 0 || valF > 0) {
+      const parts = [];
+      if (cliF > 0) parts.push('连续 CLI 失败 ' + cliF + ' 次');
+      if (valF > 0) parts.push('连续校验失败 ' + valF + ' 次');
+      warnBlock = '<div class="sys-warn">⚠ ' + esc(parts.join(' · ')) + '</div>';
+    }
+    return '<div class="sys-card">' +
+        '<div class="sys-card-top">' +
+          '<span class="sys-state-dot ' + dotCls + '"></span>' +
+          '<span class="sys-name">' + esc(d.name || '—') + '</span>' +
+          enabledPill +
+        '</div>' +
+        (d.description ? '<p class="sys-desc">' + esc(d.description) + '</p>' : '') +
+        '<div class="sys-meta">' + metaRows + '</div>' +
+        lastRunBlock +
+        statsBlock +
+        warnBlock +
+      '</div>';
+  }).join('');
+  const body = cards ||
+    '<div class="system-empty">暂无系统任务。<br>内置后台守护（如自动化改名）需在配置中启用 <code>sysession</code> 后重启生效。</div>';
+  root.innerHTML =
+    '<div class="system-head"><h1>系统任务</h1></div>' +
+    '<div class="system-body">' +
+      '<div class="system-intro">naozhi 内置的后台守护进程。它们由系统自动调度，只读展示运行状态，配置通过 YAML 调整后重启生效。</div>' +
+      body +
+    '</div>';
 }
 
 // updateNodeSelector is the single render entry point for the node-selector
@@ -11717,6 +11903,19 @@ function toggleSidebarCollapsed() {
   lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
 }
 
+// collapseSidebarForDrawer auto-collapses the sidebar when a right-side drawer
+// (追问 / file preview / code-block preview) opens, freeing horizontal space
+// for the drawer. Intentionally does NOT persist to localStorage — this is a
+// transient, context-driven collapse, so a later cold-load still honors the
+// user's own toggle preference rather than this side effect. moveFocus=false
+// since focus belongs to the drawer being opened, not the toggle handle.
+// Mobile viewport is skipped (sidebar is a modal drawer there, not a column).
+function collapseSidebarForDrawer() {
+  if (isMobileViewport()) return;
+  if (document.body.classList.contains('sidebar-collapsed')) return;
+  applySidebarCollapsed(true, false);
+}
+
 (function initSidebarCollapsed(){
   // Honor persisted preference on cold-load. Skip on mobile so a previously
   // collapsed PC session doesn't black-box the drawer when the user pops the
@@ -11842,6 +12041,7 @@ sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 30000);
 // fetchCronJobs() bootstrap moved to cron_view.js tail (PR-1).
+fetchSystemDaemons().catch(function () {}); // prime the 系统 rail badge
 wsm.connect();
 
 // RNEW-UX-014: suspend background pollers when the tab is hidden. 1-5s
@@ -12427,6 +12627,7 @@ initSidebarSearch();
       clearMessages();
       elSave.classList.remove('visible');
       showDrawer();
+      collapseSidebarForDrawer();
       setTimeout(() => elInput.focus(), 60);
       startPolling();
     } catch (e) {
