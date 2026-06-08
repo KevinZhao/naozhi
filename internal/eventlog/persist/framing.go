@@ -314,12 +314,11 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 		// unreachable — we can't recover, treat the whole file as
 		// truncated at this point.
 		//
-		// R245-PERF-8 follow-up / R247-PERF-1: ReleaseFramedBody is NOT
-		// called here — the body buffer is owned by the pool and must be
-		// returned exactly once on the success path. Releasing on this
-		// error path would risk a double-free if a caller upstream also
-		// returned an already-released buffer to the pool, violating the
-		// invariant ("the next reader gets the same backing array").
+		// Release the borrowed buffer before returning, consistent with
+		// the io.ReadFull error branch above. We return nil to the caller,
+		// so there is no double-free risk: callers cannot release a slice
+		// they never received.
+		ReleaseFramedBody(body)
 		return nil, 0, ErrMalformedFrame
 	}
 

@@ -120,6 +120,16 @@ func SanitizeForLog(s string, maxLen int) string {
 		for len(mapped) > 0 && !utf8.RuneStart(mapped[len(mapped)-1]) {
 			mapped = mapped[:len(mapped)-1]
 		}
+		// The walk-back above only strips continuation bytes (0x80..0xBF).
+		// If the cap lands right after a multi-byte lead byte but before its
+		// continuation bytes, the loop stops on that isolated lead byte
+		// (utf8.RuneStart is true for lead bytes), leaving an incomplete rune
+		// that is invalid UTF-8. Detect that case via DecodeLastRuneInString —
+		// an incomplete trailing rune decodes to (RuneError, 1) — and drop the
+		// dangling lead byte too. R20260608-LB-1 (#1943).
+		if r, size := utf8.DecodeLastRuneInString(mapped); r == utf8.RuneError && size == 1 {
+			mapped = mapped[:len(mapped)-1]
+		}
 	}
 	return mapped
 }
