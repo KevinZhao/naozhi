@@ -122,6 +122,32 @@ func (s *passthroughShim) emitResult(sessionID, text string) {
 	s.srv.SendStdout(string(data))
 }
 
+// emitAssistantAskQuestion sends an assistant event whose content contains a
+// tool_use block for AskUserQuestion. This is the shape the real CLI emits
+// when the model calls AskUserQuestion in -p mode.
+func (s *passthroughShim) emitAssistantAskQuestion(toolUseID string) {
+	inp, _ := json.Marshal(map[string]any{
+		"questions": []map[string]any{{
+			"question": "Choose?",
+			"options":  []map[string]any{{"label": "yes"}, {"label": "no"}},
+		}},
+	})
+	ev := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    toolUseID,
+				"name":  "AskUserQuestion",
+				"input": json.RawMessage(inp),
+			}},
+		},
+	}
+	data, _ := json.Marshal(ev)
+	s.srv.SendStdout(string(data))
+}
+
 func (s *passthroughShim) close() {
 	s.srv.Close()
 	s.readerWG.Wait()
@@ -590,6 +616,79 @@ func TestRemoveSlotByID_ZerosTail(t *testing.T) {
 	full := p.pendingSlots[:cap(p.pendingSlots)]
 	if got := full[2]; got != nil {
 		t.Errorf("backing tail = %+v, want nil (dangling slot ref)", got)
+	}
+}
+
+// TestPassthrough_AssistantEvent_DeliveredToOnEvent verifies #1958: under
+// passthrough mode, an interim assistant event (carrying AskUserQuestion) is
+// delivered to the claimed slot's onEvent callback before the turn result
+// arrives. Before the fix, dispatchProtocolEvent only delivered result events
+// to slot owners; assistant events fell through to the legacy eventCh path
+// and were never seen by the slot's onEvent, so askQuestionFired was never
+// set and the bailout text was not suppressed.
+func TestPassthrough_AssistantEvent_DeliveredToOnEvent(t *testing.T) {
+	sh := newPassthroughShim(t)
+	defer sh.close()
+	go sh.proc.readLoop()
+
+	var (
+		mu             sync.Mutex
+		eventsReceived []Event
+	)
+	onEvent := func(ev Event) {
+		mu.Lock()
+		eventsReceived = append(eventsReceived, ev)
+		mu.Unlock()
+	}
+
+	resultCh := make(chan *SendResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		res, err := sh.proc.SendPassthrough(context.Background(), "hello", nil, onEvent, "")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- res
+	}()
+
+	input := sh.expectWrite(t, 2*time.Second)
+
+	// Emit: init → replay → assistant(AskUserQuestion) → result.
+	sh.emitInit("s1")
+	sh.emitReplay(input.UUID, "hello")
+	sh.emitAssistantAskQuestion("tu-aq-1")
+	sh.emitResult("s1", "bailed out")
+
+	select {
+	case <-resultCh:
+	case err := <-errCh:
+		t.Fatalf("SendPassthrough error: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("SendPassthrough did not return within 3s")
+	}
+
+	// Verify that the onEvent callback received the assistant event.
+	mu.Lock()
+	received := make([]Event, len(eventsReceived))
+	copy(received, eventsReceived)
+	mu.Unlock()
+
+	var gotAssistant bool
+	var gotAskQuestion bool
+	for _, ev := range received {
+		if ev.Type == "assistant" {
+			gotAssistant = true
+		}
+		if ev.AskQuestion != nil {
+			gotAskQuestion = true
+		}
+	}
+	if !gotAssistant {
+		t.Error("#1958: onEvent did not receive any assistant event in passthrough mode")
+	}
+	if !gotAskQuestion {
+		t.Error("#1958: onEvent did not receive AskQuestion event in passthrough mode (askQuestionFired would not be set)")
 	}
 }
 
