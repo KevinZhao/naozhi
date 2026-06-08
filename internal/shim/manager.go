@@ -955,13 +955,35 @@ func (m *Manager) Discover() ([]State, error) {
 }
 
 // SendMsg sends a ClientMsg over the handle's connection.
+//
+// R20260608133928-ARCH-1 (#1969): Close() does not take WriteMu, so a
+// SendMsg racing a concurrent Close (e.g. Detach/Shutdown overlapping a
+// StopAll/Reconnect-swap) could Flush onto an already-closed fd. Guard on
+// ClientDone before acquiring WriteMu (and re-check under the lock) so that
+// SendMsg after Close is a deterministic net.ErrClosed no-op rather than a
+// racy write to a closed connection. ClientDone is closed exactly once by
+// Close(), so the non-blocking select is a stable happens-before signal.
 func (h *ShimHandle) SendMsg(msg ClientMsg) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+	select {
+	case <-h.ClientDone:
+		return net.ErrClosed
+	default:
+	}
 	h.WriteMu.Lock()
 	defer h.WriteMu.Unlock()
+	// Re-check under the lock: a Close() may have landed between the select
+	// above and acquiring WriteMu. ClientDone is closed before Conn.Close()
+	// in Close(), so observing it closed here means the fd may already be
+	// gone; bail rather than Flush onto it.
+	select {
+	case <-h.ClientDone:
+		return net.ErrClosed
+	default:
+	}
 	h.Writer.Write(data)     //nolint:errcheck
 	h.Writer.WriteByte('\n') //nolint:errcheck
 	return h.Writer.Flush()
