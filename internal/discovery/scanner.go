@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -58,14 +59,22 @@ type Scanner struct {
 
 type promptCacheState struct {
 	sync.RWMutex
-	entries    map[string]promptCacheEntry
-	generation uint64
+	entries map[string]promptCacheEntry
+	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
+	// refresh a hit entry's generation without upgrading the RLock to a write
+	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
+	// gen-stale on first touch and forced a Lock(), serialising the concurrent
+	// promptWg goroutines behind a trivial map write.
+	generation atomic.Uint64
 }
 
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	gen    uint64
+	// gen is a heap-allocated atomic so its address stays stable while the
+	// entry lives in the map: getCachedPrompt refreshes it lock-free via
+	// Store, and evictPromptCache reads it via Load under the write lock.
+	gen *atomic.Uint64
 }
 
 type summaryCacheState struct {
@@ -228,8 +237,9 @@ func (s *Scanner) evictPromptCache() {
 	if len(s.promptCache.entries) <= 500 {
 		return
 	}
+	gen := s.promptCache.generation.Load()
 	for k, v := range s.promptCache.entries {
-		if v.gen+1 < s.promptCache.generation {
+		if v.gen.Load()+1 < gen {
 			delete(s.promptCache.entries, k)
 		}
 	}
@@ -360,9 +370,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
-	s.promptCache.Lock()
-	s.promptCache.generation++
-	s.promptCache.Unlock()
+	s.promptCache.generation.Add(1)
 
 	s.summaryCache.Lock()
 	s.summaryCache.generation++
@@ -636,19 +644,15 @@ func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (
 func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 	s.promptCache.RLock()
 	cached, ok := s.promptCache.entries[path]
-	gen := s.promptCache.generation
 	s.promptCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return "", false
 	}
-	if cached.gen != gen {
-		s.promptCache.Lock()
-		if e, ok2 := s.promptCache.entries[path]; ok2 && e.mtime == mtime {
-			e.gen = s.promptCache.generation
-			s.promptCache.entries[path] = e
-		}
-		s.promptCache.Unlock()
-	}
+	// Refresh the entry's generation lock-free so eviction keeps it alive.
+	// The *atomic.Uint64 address is stable for the entry's lifetime, so this
+	// Store needs no write lock — avoiding the per-hit Lock() upgrade that
+	// serialised concurrent promptWg goroutines (PERF-6 #1966).
+	cached.gen.Store(s.promptCache.generation.Load())
 	return cached.prompt, true
 }
 
@@ -656,7 +660,9 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
 	s.promptCache.Lock()
 	defer s.promptCache.Unlock()
-	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: s.promptCache.generation}
+	gen := new(atomic.Uint64)
+	gen.Store(s.promptCache.generation.Load())
+	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: gen}
 	s.evictPromptCache()
 }
 
