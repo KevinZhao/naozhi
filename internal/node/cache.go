@@ -86,7 +86,9 @@ func (m *CacheManager) RefreshAll() {
 		sessions   []map[string]any
 		projects   []map[string]any
 		discovered []map[string]any
-		err        error
+		err        error // FetchSessions error → node status "error"
+		projErr    error // FetchProjects error → preserve prev projects
+		discErr    error // FetchDiscovered error → preserve prev discovered
 	}
 	ch := make(chan result, len(nodesCopy))
 	for id, nc := range nodesCopy {
@@ -97,27 +99,25 @@ func (m *CacheManager) RefreshAll() {
 			var sessions []map[string]any
 			var projects []map[string]any
 			var discovered []map[string]any
-			var sessErr error
+			var sessErr, projErr, discErr error
 			wg.Add(3)
 			go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
 			go func() {
 				defer wg.Done()
-				var err error
-				projects, err = nc.FetchProjects(ctx)
-				if err != nil {
-					slog.Debug("node cache: FetchProjects failed", "node", id, "err", err)
+				projects, projErr = nc.FetchProjects(ctx)
+				if projErr != nil {
+					slog.Debug("node cache: FetchProjects failed", "node", id, "err", projErr)
 				}
 			}()
 			go func() {
 				defer wg.Done()
-				var err error
-				discovered, err = nc.FetchDiscovered(ctx)
-				if err != nil {
-					slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", err)
+				discovered, discErr = nc.FetchDiscovered(ctx)
+				if discErr != nil {
+					slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", discErr)
 				}
 			}()
 			wg.Wait()
-			ch <- result{id, sessions, projects, discovered, sessErr}
+			ch <- result{id, sessions, projects, discovered, sessErr, projErr, discErr}
 		}(id, nc)
 	}
 
@@ -158,14 +158,27 @@ func (m *CacheManager) RefreshAll() {
 			rs["node"] = res.nodeID
 		}
 		newSessions[res.nodeID] = res.sessions
-		for _, rp := range res.projects {
-			rp["node"] = res.nodeID
+		// projects/discovered are fetched independently of sessions and can
+		// fail on their own (endpoint 500/timeout/decode). Only overwrite the
+		// cached field when its fetch succeeded; otherwise preserve the node's
+		// last-known value so a partial failure doesn't blank dashboard subitems
+		// every 10s tick (matching RefreshFor's per-field gate).
+		if res.projErr == nil {
+			for _, rp := range res.projects {
+				rp["node"] = res.nodeID
+			}
+			newProjects[res.nodeID] = res.projects
+		} else if p, ok := prevProjects[res.nodeID]; ok {
+			newProjects[res.nodeID] = p
 		}
-		newProjects[res.nodeID] = res.projects
-		for _, rd := range res.discovered {
-			rd["node"] = res.nodeID
+		if res.discErr == nil {
+			for _, rd := range res.discovered {
+				rd["node"] = res.nodeID
+			}
+			newDiscovered[res.nodeID] = res.discovered
+		} else if d, ok := prevDiscovered[res.nodeID]; ok {
+			newDiscovered[res.nodeID] = d
 		}
-		newDiscovered[res.nodeID] = res.discovered
 	}
 
 	m.mu.Lock()

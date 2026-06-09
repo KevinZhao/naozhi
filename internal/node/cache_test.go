@@ -223,6 +223,75 @@ func TestCacheManager_RefreshAll_preservesCacheOnTransientError(t *testing.T) {
 	}
 }
 
+// ---- RefreshAll preserves projects/discovered on partial fetch failure ----
+//
+// Regression for #1993: sessions/projects/discovered are fetched via three
+// independent requests. When FetchSessions succeeds but FetchProjects and/or
+// FetchDiscovered fail (endpoint 500/timeout/decode), the success branch must
+// preserve the node's last-known projects/discovered rather than overwrite
+// them with nil and blank dashboard subitems every 10s tick.
+func TestCacheManager_RefreshAll_preservesOnPartialFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		projErr      error
+		discErr      error
+		wantProjects int // expected cached project count after the failing refresh
+		wantDisc     int
+	}{
+		{name: "projects fail, discovered ok", projErr: errors.New("500"), wantProjects: 1, wantDisc: 1},
+		{name: "discovered fail, projects ok", discErr: errors.New("timeout"), wantProjects: 1, wantDisc: 1},
+		{name: "both fail", projErr: errors.New("500"), discErr: errors.New("timeout"), wantProjects: 1, wantDisc: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &stubConn{
+				nodeID:   "partial",
+				sessions: []map[string]any{{"session_id": "s1"}},
+				projects: []map[string]any{{"name": "proj1"}},
+				disc:     []map[string]any{{"pid": 100}},
+			}
+			cm := NewCacheManager(
+				func() map[string]Conn { return map[string]Conn{"partial": node} },
+				nil,
+			)
+
+			// First refresh fully succeeds and populates the cache.
+			cm.RefreshAll()
+			if got := cm.Projects()["partial"]; len(got) != 1 {
+				t.Fatalf("setup: expected 1 project, got %d", len(got))
+			}
+			if got := cm.Discovered()["partial"]; len(got) != 1 {
+				t.Fatalf("setup: expected 1 discovered, got %d", len(got))
+			}
+
+			// Second refresh: sessions succeed, projects/discovered may fail.
+			node.projErr = tt.projErr
+			node.discErr = tt.discErr
+			// Also clear the underlying slices so a regression (unconditional
+			// overwrite) would surface as nil rather than the stale slice.
+			if tt.projErr != nil {
+				node.projects = nil
+			}
+			if tt.discErr != nil {
+				node.disc = nil
+			}
+			cm.RefreshAll()
+
+			// Sessions still succeeded → node status "ok".
+			_, status := cm.Sessions()
+			if status["partial"] != "ok" {
+				t.Errorf("expected status 'ok' (sessions succeeded), got %q", status["partial"])
+			}
+			if got := cm.Projects()["partial"]; len(got) != tt.wantProjects {
+				t.Errorf("expected %d projects preserved on partial failure, got %d", tt.wantProjects, len(got))
+			}
+			if got := cm.Discovered()["partial"]; len(got) != tt.wantDisc {
+				t.Errorf("expected %d discovered preserved on partial failure, got %d", tt.wantDisc, len(got))
+			}
+		})
+	}
+}
+
 // ---- RefreshAll with no nodes is a no-op ----
 
 func TestCacheManager_RefreshAll_noNodes(t *testing.T) {
