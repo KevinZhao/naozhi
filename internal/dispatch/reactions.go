@@ -82,6 +82,40 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 	d.replyText(ctx, msg, "已合并到上一条回复。", lg)
 }
 
+// clearQueuedReaction removes the single "queued" (HOURGLASS) reaction from
+// one message after the turn that consumed it has completed. Used by the
+// passthrough / /urgent path (#1946), where the message is dispatched in its
+// own detached goroutine and never enters ownerLoop's drain batch — the only
+// place clearQueuedReactions runs. Without this the HOURGLASS hangs until the
+// platform's reaction-cache TTL (feishu: 12h) GCs it, falsely signalling
+// "still processing" long after the reply landed.
+//
+// Best-effort and nil-safe: a missing MessageID, non-reactor platform, or API
+// error is logged at Debug and swallowed — a lingering reaction is cosmetic,
+// not user-blocking.
+func (d *Dispatcher) clearQueuedReaction(ctx context.Context, platformName, messageID string, lg *slog.Logger) {
+	if messageID == "" {
+		return
+	}
+	p := d.platforms[platformName]
+	if p == nil {
+		return
+	}
+	reactor, ok := platform.AsCapability[platform.Reactor](p)
+	if !ok {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
+	defer cancel()
+	if err := reactor.RemoveReaction(rctx, messageID, platform.ReactionQueued); err != nil {
+		useLg := lg
+		if useLg == nil {
+			useLg = slog.Default()
+		}
+		useLg.Debug("remove passthrough queued reaction failed", "msg_id", messageID, "err", err)
+	}
+}
+
 // clearQueuedReactions removes the "queued" reaction from each drained
 // message. Called from ownerLoop after a drain-batch has been processed.
 // Errors are logged and swallowed — a lingering reaction is cosmetically

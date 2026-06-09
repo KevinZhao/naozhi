@@ -175,6 +175,54 @@ func TestCacheManager_RefreshAll_fetchError(t *testing.T) {
 	}
 }
 
+// ---- RefreshAll preserves last-known cache on transient FetchSessions error ----
+
+func TestCacheManager_RefreshAll_preservesCacheOnTransientError(t *testing.T) {
+	node := &stubConn{
+		nodeID:   "flaky",
+		sessions: []map[string]any{{"session_id": "s1"}, {"session_id": "s2"}},
+		projects: []map[string]any{{"name": "proj1"}},
+		disc:     []map[string]any{{"pid": 100}},
+	}
+	cm := NewCacheManager(
+		func() map[string]Conn { return map[string]Conn{"flaky": node} },
+		nil,
+	)
+
+	// First refresh succeeds and populates the cache.
+	cm.RefreshAll()
+
+	// Next refresh: FetchSessions returns a transient error.
+	node.sessErr = errors.New("connection refused")
+	cm.RefreshAll()
+
+	sessions, status := cm.Sessions()
+	if status["flaky"] != "error" {
+		t.Errorf("expected status 'error', got %q", status["flaky"])
+	}
+	if len(sessions["flaky"]) != 2 {
+		t.Errorf("expected 2 preserved sessions on transient error, got %d", len(sessions["flaky"]))
+	}
+	if got := cm.Projects()["flaky"]; len(got) != 1 {
+		t.Errorf("expected 1 preserved project on transient error, got %d", len(got))
+	}
+	if got := cm.Discovered()["flaky"]; len(got) != 1 {
+		t.Errorf("expected 1 preserved discovered on transient error, got %d", len(got))
+	}
+
+	// Recovery: error clears and fresh data replaces the preserved snapshot.
+	node.sessErr = nil
+	node.sessions = []map[string]any{{"session_id": "s3"}}
+	cm.RefreshAll()
+	sessions, status = cm.Sessions()
+	if status["flaky"] != "ok" {
+		t.Errorf("expected status 'ok' after recovery, got %q", status["flaky"])
+	}
+	if len(sessions["flaky"]) != 1 {
+		t.Errorf("expected 1 fresh session after recovery, got %d", len(sessions["flaky"]))
+	}
+}
+
 // ---- RefreshAll with no nodes is a no-op ----
 
 func TestCacheManager_RefreshAll_noNodes(t *testing.T) {

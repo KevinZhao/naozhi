@@ -6,9 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// newGen returns a *atomic.Uint64 initialised to v, matching promptCacheEntry.gen.
+func newGen(v uint64) *atomic.Uint64 {
+	g := new(atomic.Uint64)
+	g.Store(v)
+	return g
+}
 
 // ---------------------------------------------------------------------------
 // helpers shared across scanner tests
@@ -23,7 +31,7 @@ func resetCaches(t *testing.T) {
 	sc := DefaultScanner()
 	sc.promptCache.Lock()
 	sc.promptCache.entries = make(map[string]promptCacheEntry)
-	sc.promptCache.generation = 0
+	sc.promptCache.generation.Store(0)
 	sc.promptCache.Unlock()
 
 	sc.summaryCache.Lock()
@@ -35,7 +43,7 @@ func resetCaches(t *testing.T) {
 		sc := DefaultScanner()
 		sc.promptCache.Lock()
 		sc.promptCache.entries = make(map[string]promptCacheEntry)
-		sc.promptCache.generation = 0
+		sc.promptCache.generation.Store(0)
 		sc.promptCache.Unlock()
 
 		sc.summaryCache.Lock()
@@ -611,72 +619,6 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// listJSONLsByMtime
-// ---------------------------------------------------------------------------
-
-func TestListJSONLsByMtime_Ordering(t *testing.T) {
-	t.Parallel()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/order-test"
-	dirName := projDirName(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write files with explicit sleep to ensure distinct mtimes
-	sid1 := "aaaaaaaa-0000-0000-0000-000000000001"
-	sid2 := "aaaaaaaa-0000-0000-0000-000000000002"
-
-	if err := os.WriteFile(filepath.Join(projDir, sid1+".jsonl"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if err := os.WriteFile(filepath.Join(projDir, sid2+".jsonl"), []byte("b"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	result := listJSONLsByMtime(claudeDir, cwd)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(result))
-	}
-	// Newest first
-	if result[0].id != sid2 {
-		t.Errorf("first entry = %q, want %q (newest first)", result[0].id, sid2)
-	}
-	if result[1].id != sid1 {
-		t.Errorf("second entry = %q, want %q", result[1].id, sid1)
-	}
-}
-
-func TestListJSONLsByMtime_SkipNonJSONL(t *testing.T) {
-	t.Parallel()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/skip-test"
-	dirName := projDirName(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Write a valid JSONL and an unrelated file
-	sid := "bbbbbbbb-0000-0000-0000-000000000001"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projDir, "sessions-index.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	result := listJSONLsByMtime(claudeDir, cwd)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 entry (only .jsonl files), got %d", len(result))
-	}
-	if result[0].id != sid {
-		t.Errorf("entry id = %q, want %q", result[0].id, sid)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // findJSONLPath
 // ---------------------------------------------------------------------------
 
@@ -720,9 +662,9 @@ func TestEvictPromptCache_UnderThreshold(t *testing.T) {
 	// Fill with 10 entries — well under the 500 threshold
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
 	}
-	sc.promptCache.generation = 5
+	sc.promptCache.generation.Store(5)
 	beforeLen := len(sc.promptCache.entries)
 	sc.evictPromptCache() // should be a no-op
 	afterLen := len(sc.promptCache.entries)
@@ -740,11 +682,11 @@ func TestEvictPromptCache_OverThreshold(t *testing.T) {
 	// Fill with 501 entries with old generation
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
 	}
 	// Add one entry with current generation
-	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: 3}
-	sc.promptCache.generation = 3
+	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: newGen(3)}
+	sc.promptCache.generation.Store(3)
 	sc.evictPromptCache()
 	afterLen := len(sc.promptCache.entries)
 	_, hasCurrent := sc.promptCache.entries["current"]

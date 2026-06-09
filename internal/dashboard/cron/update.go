@@ -20,6 +20,15 @@ import (
 // HandleUpdate is the PATCH /api/cron endpoint. See dashboard_cron.go for the
 // shared validateCron* helpers and cronUpdateResp wire shape.
 func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
+	// [R20260607-SEC-1] Per-IP rate limit: HandleUpdate writes cron_jobs.json
+	// and mutates the scheduler map on every call (validateWorkspace×2 +
+	// persist). A stolen dashboard token without this gate could loop-PATCH to
+	// exhaust disk IO. Nil-guarded for hand-built test handlers (matches
+	// HandleCreate/Delete/Pause/Resume/Trigger/Preview pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return

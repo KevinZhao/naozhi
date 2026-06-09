@@ -348,13 +348,19 @@ const hexIDEntropyBytes = 8
 // 测试需要 panic 等价语义时用 mustGenerateHexID（test helper），别在
 // 生产路径 catch error 后 panic —— 那等于把这次重构反向回去。
 func generateHexID() (string, error) {
-	b := make([]byte, hexIDEntropyBytes)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+	// R090135-PERF-007: hexIDEntropyBytes is a compile-time constant (= 8),
+	// so a fixed-size array can be declared on the stack. The previous
+	// make([]byte, hexIDEntropyBytes) forced a heap allocation on every call
+	// because io.ReadFull takes an interface (io.Reader) that the compiler
+	// cannot prove does not retain the slice. The array is passed as b[:] so
+	// the call signature is unchanged; the stack frame holds the 8 bytes.
+	var b [hexIDEntropyBytes]byte
+	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
 		return "", fmt.Errorf("cron: crypto/rand unavailable: %w", err)
 	}
 	// R228-CR-9: hex.EncodeToString skips fmt's reflection path; matches
 	// textutil/uuid.go encoding style.
-	return hex.EncodeToString(b), nil
+	return hex.EncodeToString(b[:]), nil
 }
 
 // generateRunID 返回 CronRun.RunID（16-char hex）。语义上独立于 jobID，
@@ -677,6 +683,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
+		// R20260609-COR-004 (#1979): a paused never-run job has had no fair
+		// chance to fire. The startedAt suppression above only covers the
+		// process-startup window, not a job that was created paused and only
+		// just resumed, so guard the never-run branch on Paused to avoid a
+		// spurious missed badge the instant such a job resumes.
+		if j.Paused {
+			return false, time.Time{}
+		}
 		// R20260603140013-CR-5: never-run jobs must use the same slack factor as
 		// the already-run branch below. The bare `> period` threshold left no
 		// jitter headroom, so a healthy job whose first scheduled tick landed

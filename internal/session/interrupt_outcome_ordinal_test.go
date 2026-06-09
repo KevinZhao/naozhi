@@ -20,7 +20,7 @@ import "testing"
 // This test runs in CI on every session package change and fails the instant
 // any constant's integer value moves, catching the drift at the layer that
 // owns the enum rather than only at boot. If you intentionally renumber these,
-// update cmd/naozhi/cron_router_adapter.go's init() pin AND cron's mirror enum
+// update internal/wireup/cron_router_adapter.go's init() pin AND cron's mirror enum
 // (internal/cron/agent_opts.go) in the same change.
 func TestInterruptOutcomeOrdinals(t *testing.T) {
 	t.Parallel()
@@ -38,7 +38,7 @@ func TestInterruptOutcomeOrdinals(t *testing.T) {
 	for _, tc := range cases {
 		if int(tc.got) != tc.want {
 			t.Errorf("%s ordinal = %d, want %d — cron numeric cast in "+
-				"cmd/naozhi/cron_router_adapter.go relies on this value",
+				"internal/wireup/cron_router_adapter.go relies on this value",
 				tc.name, int(tc.got), tc.want)
 		}
 	}

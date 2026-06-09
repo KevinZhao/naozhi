@@ -24,6 +24,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	robfigcron "github.com/robfig/cron/v3"
@@ -737,7 +738,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// needle. Leave the alloc; document the rationale so future reviewers
 	// don't reopen it. #666 is the latest [REPEAT-N] — closing as
 	// won't-fix-by-design.
-	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
+	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", osutil.SanitizeForLog(snap.chatID, 64), "run_id", runID) // R20260607-SEC-1: chatID is attacker-influenced; strip C1/bidi log-injection chars
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
@@ -840,7 +841,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// TimeoutStopSec exceeded on cron runs because the un-clamped sendCtx
 	// could double the per-run budget; the floor + spawnElapsedWarnRatio
 	// warn (just below) keep the operator-signal path intact.
-	sendBudget := jobTimeout - time.Since(spawnStart)
+	// R20260607-GO-001: capture spawnElapsed once so sendBudget and the
+	// warn log share the same baseline; two separate time.Since calls would
+	// produce slightly different values, making spawn_elapsed_ms +
+	// send_budget_ms not sum exactly to job_timeout_ms in the log line.
+	spawnElapsed := time.Since(spawnStart)
+	sendBudget := jobTimeout - spawnElapsed
 	if sendBudget < minSendBudget {
 		sendBudget = minSendBudget
 	}
@@ -855,9 +861,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// function). R247-CR-28: ratio extracted to a documented const so
 	// future tuning is a one-line change with shared rationale.
 	spawnWarnBudget := time.Duration(float64(jobTimeout) * spawnElapsedWarnRatio)
-	// R250-CR-22 (#1155): time.Since(spawnStart) — not startedAt — so jitter
-	// time is excluded. See spawnStart capture above (just before GetOrCreate).
-	if spawnElapsed := time.Since(spawnStart); spawnElapsed > spawnWarnBudget {
+	// R250-CR-22 (#1155): spawnElapsed captured once above (not startedAt)
+	// so jitter time is excluded. See spawnStart capture above (just before
+	// GetOrCreate). R20260607-GO-001: reuse the already-captured value.
+	if spawnElapsed > spawnWarnBudget {
 		metrics.CronSendBudgetDoubledTotal.Add(1)
 		// Message string preserved for runbook grep — see docs/ops/pprof.md
 		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
@@ -883,7 +890,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// accidentally reorder the lines and let the next Reset race the
 	// in-flight interrupt write. See sendWithWatchdog godoc for the
 	// invariant.
-	result, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
+	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress
@@ -913,6 +920,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 					"err", err,
 					"abort_fired", abort.fired,
 					"abort_outcome", abort.outcome)
+			}
+			// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+			// is still held (i.e. BEFORE finishRun releases it). Matches the
+			// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+			// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+			// spawn run-B's fresh session, and then have run-A's Reset blindly
+			// delete it (router_lifecycle.go resetLocked has no owner check).
+			if snap.fresh {
+				s.router.Reset(key)
 			}
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
@@ -955,9 +971,18 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// R20260603-SEC-4: sanitise before logging to strip IP:port / paths.
 			lg.Error("cron send error", "err", sanitiseRunErrMsg(err.Error()))
 		}
+		// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+		// is still held (i.e. BEFORE finishRun releases it). Matches the
+		// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+		// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+		// spawn run-B's fresh session, and then have run-A's Reset blindly
+		// delete it (router_lifecycle.go resetLocked has no owner check).
+		if snap.fresh {
+			s.router.Reset(key)
+		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
+			state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // R20260607-GO-004: strip IP:port/paths, mirrors lg.Error above
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
 		})
@@ -975,7 +1000,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// extracted to observeSuccessLatency to shave one of executeOpt's mixed
 	// concerns. Behaviour-preserving — the same three signals fire in the same
 	// order against the same startedAt.
-	s.observeSuccessLatency(startedAt, result, snap, lg)
+	//
+	// R20260607-GO-002: compute successEndedAt once from the injectable clock
+	// and share it between observeSuccessLatency and finishRun. A single
+	// s.now() read keeps step-based test clocks deterministic (2 reads total:
+	// startedAt here and successEndedAt below) while ensuring elapsed and
+	// DurationMS both come from the same clock rather than mixing s.now() with
+	// time.Since(startedAt) which reads real wall time.
+	successEndedAt := s.now()
+	s.observeSuccessLatency(successEndedAt.Sub(startedAt), result, snap, lg)
 	// #1829: release the fresh-context session now that the run succeeded.
 	// cron sessions are spawned Exempt=true (line ~1517) so the TTL cleanup
 	// loop skips them entirely (router_cleanup.go: `if s.exempt { continue }`).
@@ -1013,28 +1046,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// stillExists check (~line 712); apply the identical guard here. Reset
 	// itself is always safe (a concurrent Delete Reset is idempotent), so only
 	// the register is gated.
+	// R050103A-COUPLING-1 (#1911): the fresh-context reap (Reset + stillExists +
+	// stub re-register) is a single inseparable unit whose correctness depends on
+	// running BEFORE finishRun releases the inflight CAS gate (see the ordering
+	// note above). Keeping it behind reapFreshSessionLocked instead of inline
+	// makes the "reap, THEN finishRun" sequence a two-statement contract that is
+	// structurally guarded by a source-anchor test (see scheduler_run.go reap
+	// anchor test) rather than maintained by comment alone.
 	if snap.fresh {
-		s.router.Reset(key)
-		s.mu.RLock()
-		_, stillExists := s.jobs[snap.jobID]
-		s.mu.RUnlock()
-		if stillExists {
-			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, result.SessionID)
-			if result.SessionID == "" {
-				// registerStubByValue chains the stub only when the session ID is
-				// non-empty; an empty ID (process.go normally fills it on the
-				// success frame, so empty here is anomalous) registers a chain-less
-				// stub — the sidebar row survives but has no clickable JSONL
-				// history. Surface it instead of silently registering a dead row.
-				lg.Warn("cron fresh context: session released after successful run but session_id empty; re-registered chain-less stub with no clickable history",
-					"job_id", snap.jobID)
-			} else {
-				lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
-			}
-		} else {
-			lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
-				"session_id", result.SessionID)
-		}
+		s.reapFreshSessionLocked(key, snap, result.SessionID, lg)
 	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
@@ -1042,7 +1062,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
 	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		finalizer: finalizer,
@@ -1062,6 +1082,54 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	s.deliverNotice(notifyTo, replyText)
 }
 
+// reapFreshSessionLocked tears down the just-finished fresh-context session
+// (Reset) and re-registers a suspended sidebar stub, as the success-path reap
+// for #1829's idle-leak fix.
+//
+// ORDERING CONTRACT (R050103A-COUPLING-1 / #1911) — DO NOT REORDER:
+// this method MUST be invoked while the caller still holds the inflight CAS
+// gate, i.e. BEFORE finishRun → finalizer.finalize() releases it. A concurrent
+// TriggerNow that won the CAS could otherwise run its own preflight Reset +
+// GetOrCreate in the gap, and a late Reset here would tear down THAT run's
+// fresh session (run-A clobbering run-B). The per-job CAS serialisation
+// (invariant (1) in freshContextPreflightP0) guarantees no sibling cron run is
+// mid-flight while the gate is held, making this Reset race-free for the same
+// reason the preflight Reset is. The contract is structurally guarded by the
+// reap source-anchor test (reapFreshSessionLocked must precede finishRun in
+// executeOpt) rather than relying on the call-site comment alone.
+//
+// Job-existence re-check before re-registering the stub: DeleteJobByID's
+// teardown (deleteJobPostCleanup → resetRouterStub) does NOT take the inflight
+// CAS gate — Delete is not a cron run — so it can land concurrently with this
+// success tail. If a Delete's Reset slips between our Reset and the register,
+// an unconditional register would resurrect a sidebar stub for a job that no
+// longer exists (zombie row). This mirrors the orphan guard the preflight
+// applies with its post-Reset stillExists check. Reset itself is always safe
+// (a concurrent Delete Reset is idempotent), so only the register is gated.
+func (s *Scheduler) reapFreshSessionLocked(key string, snap jobSnapshot, sessionID string, lg *slog.Logger) {
+	s.router.Reset(key)
+	s.mu.RLock()
+	_, stillExists := s.jobs[snap.jobID]
+	s.mu.RUnlock()
+	if stillExists {
+		s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, sessionID)
+		if sessionID == "" {
+			// registerStubByValue chains the stub only when the session ID is
+			// non-empty; an empty ID (process.go normally fills it on the
+			// success frame, so empty here is anomalous) registers a chain-less
+			// stub — the sidebar row survives but has no clickable JSONL
+			// history. Surface it instead of silently registering a dead row.
+			lg.Warn("cron fresh context: session released after successful run but session_id empty; re-registered chain-less stub with no clickable history",
+				"job_id", snap.jobID)
+		} else {
+			lg.Info("cron fresh context: session released after successful run", "session_id", sessionID)
+		}
+	} else {
+		lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
+			"session_id", sessionID)
+	}
+}
+
 // observeSuccessLatency emits the three success-path latency signals for a
 // completed cron run: the "cron job completed" info log, the execution-
 // duration histogram, and the slow-tail counter + warn when elapsed exceeds
@@ -1075,8 +1143,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // classified by the CronRun*Total state counters instead, and folding their
 // (often deadline-clamped) durations into the histogram would skew the
 // success-latency distribution operators alert on. OBS1 (#392) / R208-OBS1.
-func (s *Scheduler) observeSuccessLatency(startedAt time.Time, result SendResult, snap jobSnapshot, lg *slog.Logger) {
-	elapsed := time.Since(startedAt)
+// observeSuccessLatency receives elapsed pre-computed by the caller via
+// s.now().Sub(startedAt) (R20260607-GO-002: injectable clock, consistent
+// with finishRun's endedAt). Accepting elapsed directly avoids an extra
+// s.now() call that would advance step-based test clocks an extra tick.
+func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResult, snap jobSnapshot, lg *slog.Logger) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
@@ -1164,7 +1235,9 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 	// consumed too much of the budget — folding jitter (default up to 30s)
 	// into that measurement triggers false positives on healthy jobs whose
 	// schedule landed unlucky in the jitter window.
-	spawnStart = time.Now()
+	// R20260607-GO-002: use s.now() so tests can inject a fake clock and
+	// exercise the spawn-budget path without real sleeps.
+	spawnStart = s.now()
 	sess, _, err := s.router.GetOrCreate(a.ctx, a.key, a.opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -1174,6 +1247,15 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			// notification would be spam and the stored LastError would
 			// falsely blame the job itself.
 			a.lg.Info("cron session cancelled", "err", err)
+			// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+			// is still held (i.e. BEFORE finishRun releases it). Matches the
+			// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+			// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+			// spawn run-B's fresh session, and then have run-A's Reset blindly
+			// delete it (router_lifecycle.go resetLocked has no owner check).
+			if a.snap.fresh {
+				s.router.Reset(a.key)
+			}
 			s.finishRun(finishArgs{
 				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1190,6 +1272,15 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		} else {
 			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
 			a.lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
+		}
+		// R20260608-CORR-1 (#1956): Reset MUST run while the inflight CAS gate
+		// is still held (i.e. BEFORE finishRun releases it). Matches the
+		// success-path ordering contract (R050103A-COUPLING-1 / #1911). A late
+		// Reset after finishRun lets a concurrent TriggerNow win the CAS,
+		// spawn run-B's fresh session, and then have run-A's Reset blindly
+		// delete it (router_lifecycle.go resetLocked has no owner check).
+		if a.snap.fresh {
+			s.router.Reset(a.key)
 		}
 		s.finishRun(finishArgs{
 			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,

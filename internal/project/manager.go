@@ -239,33 +239,53 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 }
 
 // UnbindAllChat removes all bindings for a given chat across all projects.
+//
+// R20260608-133914-LB-1 (#1961): a chat can end up bound to more than one
+// project (BindChat does not reject cross-project duplicates, and `/project
+// <name>` does not unbind first), so the single-value bindingIndex is not a
+// reliable enumeration of every project holding this binding. Scan every
+// project's ChatBindings and strip the matching binding from each, persisting
+// only the ones actually modified. This guarantees the godoc contract
+// ("across all projects") and removes the non-deterministic routing that
+// last-writer-wins index rebuilds produced for multi-bound chats.
 func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	m.mu.Lock()
-	key := platform + ":" + chatType + ":" + chatID
-	name, ok := m.bindingIndex[key]
-	if !ok {
-		m.mu.Unlock()
-		return nil
-	}
-	p := m.projects[name]
-	if p == nil {
-		m.mu.Unlock()
-		return nil
-	}
 
-	filtered := p.Config.ChatBindings[:0]
-	for _, b := range p.Config.ChatBindings {
-		if b.Platform != platform || b.ChatID != chatID || b.ChatType != chatType {
-			filtered = append(filtered, b)
-		}
+	type pendingSave struct {
+		path string
+		cfg  ProjectConfig
 	}
-	p.Config.ChatBindings = filtered
-	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
+	var saves []pendingSave
+	changed := false
+	for _, p := range m.projects {
+		filtered := p.Config.ChatBindings[:0]
+		removed := false
+		for _, b := range p.Config.ChatBindings {
+			if b.Platform != platform || b.ChatID != chatID || b.ChatType != chatType {
+				filtered = append(filtered, b)
+			} else {
+				removed = true
+			}
+		}
+		if !removed {
+			continue
+		}
+		p.Config.ChatBindings = filtered
+		changed = true
+		saves = append(saves, pendingSave{path: p.configPath(), cfg: snapshotConfig(p)})
+	}
+	if changed {
+		m.rebuildBindingIndex()
+	}
 	m.mu.Unlock()
 
-	return saveConfigToPath(path, cfgSnap)
+	var firstErr error
+	for _, s := range saves {
+		if err := saveConfigToPath(s.path, s.cfg); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // SetFavorite toggles a project's Favorite flag and persists it atomically.

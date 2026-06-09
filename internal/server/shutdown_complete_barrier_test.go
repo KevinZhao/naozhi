@@ -21,7 +21,16 @@ import (
 // drain; an in-flight GetOrCreate/Send handler could observe a half-cleaned
 // session map.
 func TestShutdownComplete_ClosesOnlyAfterDrain(t *testing.T) {
-	t.Parallel()
+	// Pin $HOME to an empty temp dir BEFORE NewWithOptions resolves ~/.claude,
+	// so WarmHistoryCache has nothing to scan. On a host with a large real
+	// ~/.claude history the background scan can take tens of seconds under
+	// -race; the shutdown goroutine blocks on WaitWarmHistory() during drain,
+	// so a slow scan stalls the barrier past the ShutdownTimeout+5s ceiling and
+	// flakes this test (#1934). t.Setenv forbids t.Parallel(), so this test now
+	// runs serially — the drain is near-instant once the scan is empty.
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("CLAUDE_PROJECTS_DIR", filepath.Join(emptyHome, ".claude", "projects"))
 
 	router := session.NewRouter(session.RouterConfig{})
 	ready := make(chan struct{})

@@ -23,8 +23,8 @@ import (
 //	got := rec.endedAtCron(0) // single ended event captured
 //
 // recordingBroadcaster also exposes the converted cron-local view via
-// endedAtCron / endedAllCron so tests keep asserting on RunEndedEvent
-// shape (not the runtelemetry shape).
+// endedAtCron so tests keep asserting on RunEndedEvent shape (not the
+// runtelemetry shape).
 type recordingBroadcaster struct {
 	mu      sync.Mutex
 	started []runtelemetry.RunStartedEvent
@@ -70,27 +70,4 @@ func (r *recordingBroadcaster) endedAtCron(i int) RunEndedEvent {
 		ErrorMsg:   ev.ErrorMsg,
 		Trigger:    TriggerKind(ev.Trigger),
 	}
-}
-
-// endedAllCron returns every captured RunEnded translated back to
-// cron-local shape, for tests that loop / multi-event assertions.
-func (r *recordingBroadcaster) endedAllCron() []RunEndedEvent {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]RunEndedEvent, len(r.ended))
-	for i, ev := range r.ended {
-		out[i] = RunEndedEvent{
-			JobID:      ev.OwnerID,
-			RunID:      ev.RunID,
-			State:      RunState(ev.State),
-			StartedAt:  ev.StartedAt,
-			EndedAt:    ev.EndedAt,
-			DurationMS: ev.DurationMS,
-			SessionID:  ev.SessionID,
-			ErrorClass: ErrorClass(ev.ErrorClass),
-			ErrorMsg:   ev.ErrorMsg,
-			Trigger:    TriggerKind(ev.Trigger),
-		}
-	}
-	return out
 }

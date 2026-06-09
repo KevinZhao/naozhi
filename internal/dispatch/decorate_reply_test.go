@@ -26,11 +26,10 @@ func (f fixedFooterCaps) ReplyFooter(string) string { return f.footer }
 //
 //   - merge-group head appends the "*— 合并了 N 条消息的回复*" chip
 //   - per-session ReplyFooter is appended when non-empty
-//   - empty Text + non-empty footer still surfaces no footer (we only
-//     append on non-empty replyText for the merge chip; footer was
-//     historically always appended when non-empty even on empty text,
-//     and we preserve that to keep behaviour identical to the inline
-//     version)
+//   - empty Text + non-empty footer surfaces NO footer (#1985): the footer
+//     append is guarded by replyText != "" just like the merge chip, so an
+//     empty-text turn returns the "nothing to send" sentinel rather than an
+//     orphan "— cc" bubble.
 //
 // nil sess is the cron-pruned edge case — must not panic.
 func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
@@ -56,11 +55,36 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 	t.Run("empty text with merge skips chip", func(t *testing.T) {
 		// Merge follower (Text=="" && MergedCount>1): chip MUST NOT
 		// fire because it'd add a "合并了…" line on a bubble that
-		// otherwise has no content. Footer still fires (matches
-		// pre-extraction behaviour: footer append was unconditional).
+		// otherwise has no content.
 		got := d.decorateReplyText(&cli.SendResult{Text: "", MergedCount: 5}, nil)
 		if strings.Contains(got, "合并了") {
 			t.Errorf("got %q, must not contain merge chip on empty text", got)
+		}
+	})
+
+	t.Run("empty text returns empty sentinel despite footer", func(t *testing.T) {
+		// #1985: a healthy empty-result turn (e.g. error_max_turns /
+		// error_during_execution, where the CLI result.Text is "" and
+		// MergedCount<=1) must return the empty "nothing to send" sentinel.
+		// With a default footer ("cc") the old unconditional append produced
+		// "\n\n— cc", which punched through the sentinel and made callers
+		// (gating on replyText != "") emit a lone "— cc" bubble to the IM
+		// channel. The footer must be guarded by replyText != "" like the
+		// merge chip.
+		cases := []struct {
+			name   string
+			result *cli.SendResult
+		}{
+			{"empty text, single backend", &cli.SendResult{Text: ""}},
+			{"empty text, merge head count 1", &cli.SendResult{Text: "", MergedCount: 1}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := d.decorateReplyText(tc.result, nil)
+				if got != "" {
+					t.Errorf("got %q, want empty sentinel (no orphan footer bubble)", got)
+				}
+			})
 		}
 	})
 }

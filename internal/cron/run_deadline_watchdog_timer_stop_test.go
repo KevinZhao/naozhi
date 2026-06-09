@@ -19,20 +19,19 @@ import (
 // could possibly fire — proving the success branch wins and the
 // `defer t.Stop()` releases the timer.
 func TestRunDeadlineWatchdog_FastPathReleasesTimerSlot(t *testing.T) {
-	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	// Long enough that, if the test instead waited for the timer, it
-	// would dwarf the deadline-fire latency by ~2 orders of magnitude.
-	watchdogInterruptTimeoutAtomic.Store(int64(2 * time.Second))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	// R20260607-GO-4 (#1904): timeout is a per-call parameter, so this test is
+	// isolated and may run in parallel. Long enough that, if the test instead
+	// waited for the timer, it would dwarf the deadline-fire latency by ~2
+	// orders of magnitude.
+	t.Parallel()
+	const longTimeout = 2 * time.Second
 
 	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
-	ch, _ := runDeadlineWatchdog(ctx, ci)
+	ch, _ := runDeadlineWatchdog(ctx, ci, longTimeout)
 	abort := <-ch
 	elapsed := time.Since(start)
 

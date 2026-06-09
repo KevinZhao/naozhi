@@ -750,9 +750,21 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 // handleQueuedNonOwner runs the queue non-owner branch: interrupt-mode control
 // request for the active turn, plus the enqueue-vs-disabled acknowledgement.
 // Extracted from BuildHandler (R20260531A-ARCH-3 / #1527) — behaviour-
-// preserving. shouldInterrupt / enqueued come from queue.Enqueue.
-func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool) {
+// preserving. shouldInterrupt / enqueued / evictedID come from queue.Enqueue.
+// A non-empty evictedID means this enqueue dropped the oldest queued message
+// for the key (queue-full backpressure); its dangling HOURGLASS reaction is
+// cleared so the evicted user is not left with a permanent "still queued"
+// indicator (#1945).
+func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool, evictedID string) {
 	lg, key := p.lg, p.key
+	// #1945: an evicted message's queued reaction must be removed — it never
+	// enters a DoneOrDrain batch, so ownerLoop's clearQueuedReactions never
+	// touches it. Without this its HOURGLASS hangs until the platform reaction
+	// cache TTL (feishu: 12h) GCs it, falsely telling the dropped user "still
+	// queued". The evicted message shares this inbound msg.Platform (same chat).
+	if evictedID != "" {
+		d.clearQueuedReaction(ctx, msg.Platform, evictedID, lg)
+	}
 	// Interrupt mode: the first queued follow-up for the active
 	// turn fires a control_request to the CLI so the in-flight
 	// turn aborts within ~300ms. The ongoing owner loop's Send()
@@ -839,10 +851,18 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			// source) so log attrs survive while shutdown still aborts the
 			// send.
 			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
-			// Ack arrival so the IM user sees a reaction/receipt. This is
-			// cheap and does not depend on the turn completing.
+			// Ack arrival BEFORE spawning the turn goroutine, matching the
+			// /urgent path (commands.go: ack then goSendAndReply). The ack's
+			// AddReaction stores the reaction_id synchronously; the goroutine's
+			// defer clearQueuedReaction (goSendAndReply :1067) is the only clear
+			// on this detached path. R20260608-133914-LB-3 (#1963): with the
+			// pre-fix order (spawn then ack) a fast-fail turn (GetOrCreate/Send
+			// early-return) could run the goroutine's clear — a LoadAndDelete
+			// no-op against the not-yet-stored reaction — before this ack landed
+			// its AddReaction, leaving a permanent HOURGLASS that no later clear
+			// removes. Acking first establishes the AddReaction-then-clear order.
 			d.ackQueuedWithReaction(ctx, msg, lg)
+			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			return
 		}
 
@@ -854,9 +874,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				MessageID: msg.MessageID,
 				EnqueueAt: time.Now(),
 			}
-			isOwner, enqueued, shouldInterrupt, gen := d.queue.Enqueue(key, qm)
+			isOwner, enqueued, shouldInterrupt, gen, evictedID := d.queue.Enqueue(key, qm)
 			if !isOwner {
-				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued)
+				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued, evictedID)
 				return
 			}
 			// I am the owner — enter the process-and-drain loop.
@@ -1042,6 +1062,17 @@ func (d *Dispatcher) goSendAndReply(
 				d.handleOwnerLoopPanic(key, msg, r, lg)
 			}
 		}()
+		// #1946: clear the HOURGLASS the passthrough / /urgent ack added once
+		// this turn finishes. The detached goroutine never enters ownerLoop's
+		// drain loop (the only other caller of the reaction-clear path), so
+		// without this the queued reaction hangs until the platform's reaction
+		// cache TTL GCs it (feishu: 12h), falsely showing "still processing".
+		// WithoutCancel: the turn's ctx often carries a per-turn deadline that
+		// has elapsed by reply time, and on shutdown it is Canceled — either
+		// would make RemoveReaction fail fast. Strip cancellation/deadline but
+		// keep request-scoped values; clearQueuedReaction re-bounds with its
+		// own reactionAckTimeout.
+		defer d.clearQueuedReaction(context.WithoutCancel(ctx), msg.Platform, msg.MessageID, lg)
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
 	}()
 }
@@ -1250,7 +1281,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	tracker := newIMEventTracker(ctx, p, msg.ChatID)
+	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType)
 	defer tracker.stop()
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
@@ -1337,12 +1368,18 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	for _, img := range outImages {
-		if _, err := p.Reply(ctx, platform.OutgoingMessage{
-			ChatID: msg.ChatID,
-			Images: []platform.Image{img},
-		}); err != nil {
-			slog.Warn("send image failed", "err", err)
+	// #1959: outImages is derived from replyText (same source). When
+	// askQuestionFired suppresses replyText, its associated images must
+	// also be suppressed — otherwise orphaned /tmp image bubbles are sent
+	// after the AskUserQuestion card, confusing the user.
+	if !tracker.askQuestionFired.Load() {
+		for _, img := range outImages {
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{
+				ChatID: msg.ChatID,
+				Images: []platform.Image{img},
+			}); err != nil {
+				slog.Warn("send image failed", "err", err)
+			}
 		}
 	}
 }
@@ -1390,7 +1427,12 @@ func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.Man
 	if sess != nil {
 		backendID = sess.Backend()
 	}
-	if footer := d.caps.ReplyFooter(backendID); footer != "" {
+	// #1985: guard on replyText != "" (mirroring the merge-chip branch above)
+	// so an empty-text turn returns the empty "nothing to send" sentinel
+	// instead of an orphan "— cc" footer bubble. Without this guard a healthy
+	// empty result (e.g. error_max_turns) plus the default footer would emit a
+	// lone footer message to the IM channel.
+	if footer := d.caps.ReplyFooter(backendID); footer != "" && replyText != "" {
 		replyText += "\n\n— " + footer
 	}
 	return replyText

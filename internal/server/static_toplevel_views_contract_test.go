@@ -1,11 +1,14 @@
 // static_toplevel_views_contract_test.go — contract tests for the codex-style
-// unified activity rail (会话 / 资产 / 自动化 / 设置) introduced when cron and
-// settings were promoted to full-screen top-level views.
+// unified activity rail (会话 / 资产 / 自动化 / 系统 / 设置) introduced when cron
+// and settings were promoted to full-screen top-level views (系统 added later
+// to surface the built-in sysession daemons, e.g. the AutoTitler).
 //
 // These lock the structural pieces JS and CSS depend on so a refactor can't
 // silently break the rail nav, the view-switching CSS, or the cron-view
 // decoupling from selectedKey. They complement (not replace) the existing
-// CSP wiring test (dashboard_csp_test.go) which still pins #btn-cron.
+// CSP wiring test (dashboard_csp_test.go). The legacy sidebar #btn-cron
+// quick-button was removed once the rail's 自动化 entry became the single
+// nav surface for cron, so the rail's #abnav-cron is the load-bearing pin.
 package server
 
 import (
@@ -14,9 +17,9 @@ import (
 )
 
 // TestDashboardHTML_RailStructure pins the rail's top/bottom groups and the
-// new nav buttons + connection indicator. The rail is the single nav surface
-// after this redesign, so these ids/classes are load-bearing for both the
-// addEventListener wiring and the mobile bottom-tab-bar CSS.
+// nav buttons. The rail is the single nav surface after this redesign, so these
+// ids/classes are load-bearing for both the addEventListener wiring and the
+// mobile bottom-tab-bar CSS.
 func TestDashboardHTML_RailStructure(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
@@ -26,14 +29,13 @@ func TestDashboardHTML_RailStructure(t *testing.T) {
 	html := string(data)
 
 	wants := []string{
-		`class="ab-top"`,                   // top nav group
-		`class="ab-bottom"`,                // bottom group (settings + conn)
-		`id="abnav-cron" data-view="cron"`, // 自动化 nav button
+		`class="ab-top"`,                       // top nav group
+		`class="ab-bottom"`,                    // bottom group (settings)
+		`id="abnav-cron" data-view="cron"`,     // 自动化 nav button
+		`id="abnav-system" data-view="system"`, // 系统 nav button (sysession daemons)
 		`id="abnav-settings" data-view="settings"`,
-		`id="ab-conn-status"`, // connection indicator (also settings entry)
-		`id="ab-conn-dot"`,
-		`id="ab-conn-label"`,
-		`id="abnav-cron-badge"`, // rail attention badge mirror
+		`id="abnav-cron-badge"`,   // rail attention badge mirror (cron)
+		`id="abnav-system-badge"`, // rail attention badge mirror (system)
 	}
 	for _, w := range wants {
 		if !strings.Contains(html, w) {
@@ -44,7 +46,7 @@ func TestDashboardHTML_RailStructure(t *testing.T) {
 	if !strings.Contains(html, ".ab-bottom{margin-top:auto") {
 		t.Error("CSS: .ab-bottom must use margin-top:auto to sit at the rail foot")
 	}
-	// On mobile the two groups collapse so all 4 buttons become bottom-tab-bar
+	// On mobile the two groups collapse so all 5 buttons become bottom-tab-bar
 	// flex children.
 	if !strings.Contains(html, ".ab-top,.ab-bottom{display:contents}") {
 		t.Error("CSS: .ab-top/.ab-bottom must collapse via display:contents on mobile")
@@ -67,6 +69,7 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 	for _, w := range []string{
 		`class="cron-main" id="cron-main"`,
 		`class="settings-main" id="settings-main"`,
+		`class="system-main" id="system-main"`,
 	} {
 		if !strings.Contains(html, w) {
 			t.Errorf("dashboard.html missing view container: %q", w)
@@ -78,15 +81,20 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 	if !strings.Contains(html, `id="settings-main" aria-label="设置" hidden`) {
 		t.Error("#settings-main must be hidden by default")
 	}
+	if !strings.Contains(html, `id="system-main" aria-label="系统任务" hidden`) {
+		t.Error("#system-main must be hidden by default")
+	}
 
 	// View-switch CSS: each non-chat view hides the chat panels and shows its
 	// own. The default-hidden rule must cover the new containers too.
 	wantCSS := []string{
-		".asset-sidebar,.asset-main,.cron-main,.settings-main{display:none}",
+		".asset-sidebar,.asset-main,.cron-main,.settings-main,.system-main{display:none}",
 		"body.nz-view-cron .sidebar,body.nz-view-cron .resizer,body.nz-view-cron .main{display:none!important}",
 		"body.nz-view-cron .cron-main{display:flex",
 		"body.nz-view-settings .sidebar,body.nz-view-settings .resizer,body.nz-view-settings .main{display:none!important}",
 		"body.nz-view-settings .settings-main{display:flex",
+		"body.nz-view-system .sidebar,body.nz-view-system .resizer,body.nz-view-system .main{display:none!important}",
+		"body.nz-view-system .system-main{display:flex",
 	}
 	for _, w := range wantCSS {
 		if !strings.Contains(html, w) {
@@ -99,20 +107,29 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 //   - top-level setActivityView (callable from openCronPanel/selectSession)
 //   - cron rendering gated on activeView (NOT selectedKey) and targeting
 //     #cron-main (NOT #main)
-//   - renderSettingsView / renderRailConnStatus exist
+//   - renderSettingsView exists
 func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): the view router (activeView/setActivityView) stayed
+	// in dashboard.js while renderCronPanel moved to cron_view.js. Union both.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	wants := []string{
-		"function setActivityView(",      // top-level router
-		"let activeView = 'chat'",        // root view state
-		"function renderSettingsView(",   // settings view renderer
-		"function renderRailConnStatus(", // bottom-rail conn indicator
+		"function setActivityView(",    // top-level router
+		"let activeView = 'chat'",      // root view state
+		"function renderSettingsView(", // settings view renderer
+		"function renderSystemView(",   // system (sysession) view renderer
+		// 系统 must be a registered view and route to its panel opener.
+		`const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];`,
+		"else if (view === 'system') { openSystemPanel(); }",
 	}
 	for _, w := range wants {
 		if !strings.Contains(js, w) {
@@ -136,7 +153,7 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 // computed exactly once and shared by both cronBadge and railBadge.
 func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -216,9 +233,9 @@ func TestDashboardJS_SetActivityViewNoOpGuard(t *testing.T) {
 }
 
 // TestDashboardJS_ValidDotClassesIncludesUnreachable pins R20260606-CODE-3:
-// 'unreachable' must be in VALID_DOT_CLASSES so ab-conn-dot and ns-dot
-// elements receive the correct CSS class (whose rules exist in dashboard.html)
-// instead of falling back to 'offline'.
+// 'unreachable' must be in VALID_DOT_CLASSES so the settings-view conn dot and
+// ns-dot elements receive the correct CSS class (whose rules exist in
+// dashboard.html) instead of falling back to 'offline'.
 func TestDashboardJS_ValidDotClassesIncludesUnreachable(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -244,12 +261,46 @@ func TestDashboardHTML_RailA11yLabelsLocalized(t *testing.T) {
 	html := string(data)
 	wants := []string{
 		`id="abnav-cron" data-view="cron" title="定时任务" aria-label="自动化视图"`,
+		`id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图"`,
 		`id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图"`,
-		`id="ab-conn-status" type="button" title="连接状态"`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(html, w) {
 			t.Errorf("dashboard.html missing localized rail label: %q", w)
+		}
+	}
+}
+
+// TestDashboardJS_SystemViewContract pins the 系统 (sysession daemon) view's
+// load-bearing pieces: the read-only fetch against GET /api/system/daemons, the
+// poll-while-visible lifecycle (start on enter / stop on leave), and the rail
+// attention badge mirror. These mirror the cron view's contract so a refactor
+// can't silently strand the new view's data path.
+func TestDashboardJS_SystemViewContract(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	wants := []string{
+		"function openSystemPanel(",      // view entry
+		"function fetchSystemDaemons(",   // data fetch
+		"function startSystemPoll(",      // poll lifecycle
+		"function stopSystemPoll(",       // teardown on leave
+		"function updateSystemBadge(",    // rail attention badge
+		"function daemonNeedsAttention(", // shared attention predicate
+		"'/api/system/daemons'",          // the read-only backend endpoint
+		// Leaving the view must stop the poll so a backgrounded view doesn't
+		// keep hitting the endpoint.
+		"if (prev === 'system' && view !== 'system') stopSystemPoll();",
+		// The rail badge is primed at module load (parity with fetchCronJobs).
+		"fetchSystemDaemons().catch(function () {}); // prime the 系统 rail badge",
+	}
+	for _, w := range wants {
+		if !strings.Contains(js, w) {
+			t.Errorf("dashboard.js missing system-view contract piece: %q", w)
 		}
 	}
 }

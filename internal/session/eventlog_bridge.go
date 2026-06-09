@@ -273,19 +273,20 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
-		// putScratch returns the three helper slices to the pool, writing the
-		// (possibly reallocated) headers back first so a grown capacity is
-		// preserved for the next call. Slices wider than batchScratchMaxCap
-		// are dropped (left for GC) instead of pinning an outsized array.
-		putScratch := func() {
+		// R20260607-PERF-2: the scratch-return logic was a captured closure
+		// (out/spans/bs), which the compiler heap-allocated on every batch on
+		// this hot path (5-20 entries × N sessions × ≥5/s). Inlined verbatim
+		// at both return points instead. Returns the helper slices to the
+		// pool, writing the (possibly reallocated) headers back first so a
+		// grown capacity is preserved for the next call. Slices wider than
+		// batchScratchMaxCap are dropped (left for GC) instead of pinning an
+		// outsized array.
+		if len(spans) == 0 {
 			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
 				bs.out = out[:0]
 				bs.spans = spans[:0]
 				batchScratchPool.Put(bs)
 			}
-		}
-		if len(spans) == 0 {
-			putScratch()
 			if eb.buf.Cap() <= bridgeEncMaxCap {
 				bridgeEncPool.Put(eb)
 			}
@@ -299,7 +300,11 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// pooled arena), so eb and the scratch slices are safe to return only
 		// AFTER it returns (out's persist.Entry JSON fields alias eb.buf).
 		persisterSink(out, replayPhase)
-		putScratch()
+		if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
+			bs.out = out[:0]
+			bs.spans = spans[:0]
+			batchScratchPool.Put(bs)
+		}
 		if eb.buf.Cap() <= bridgeEncMaxCap {
 			bridgeEncPool.Put(eb)
 		}

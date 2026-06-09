@@ -49,7 +49,11 @@ func TestSendWithWatchdog_SuccessNoFire(t *testing.T) {
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer sendCancel()
 
-	result, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
+	// R20260607-GO-4 (#1904): sendWithWatchdog is now a *Scheduler method.
+	// A zero-value Scheduler reports a 0 timeout, which runDeadlineWatchdog
+	// falls back to the default — fine here since the deadline is ctx-driven.
+	s := &Scheduler{}
+	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -85,7 +89,8 @@ func TestSendWithWatchdog_DeadlineFiresInterrupt(t *testing.T) {
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer sendCancel()
 
-	_, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
+	s := &Scheduler{}
+	_, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
@@ -115,6 +120,7 @@ func TestSendWithWatchdog_SuccessStopsCallback(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 
+	s := &Scheduler{}
 	for i := 0; i < N; i++ {
 		sess := &fakeSendSession{
 			send: func(ctx context.Context, text string) (SendResult, error) {
@@ -122,7 +128,7 @@ func TestSendWithWatchdog_SuccessStopsCallback(t *testing.T) {
 			},
 		}
 		sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
+		_, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
 		if err != nil {
 			t.Fatalf("send %d: err = %v, want nil", i, err)
 		}

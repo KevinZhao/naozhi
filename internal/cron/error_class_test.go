@@ -95,6 +95,32 @@ func TestClassifyError_PersistFailedTakesPrecedence(t *testing.T) {
 	}
 }
 
+// TestErrCodeHTTP_Exhaustive asserts that every declared ErrCode constant
+// has an explicit entry in errCodeHTTP, catching the "add sentinel, forget
+// map entry" failure mode at test time rather than in production.
+func TestErrCodeHTTP_Exhaustive(t *testing.T) {
+	t.Parallel()
+	allCodes := []ErrCode{
+		CodeOK,
+		CodeJobNotFound,
+		CodeAmbiguousPrefix,
+		CodeJobAlreadyPaused,
+		CodeJobNotPaused,
+		CodeJobPaused,
+		CodeJobNoPrompt,
+		CodePersistFailed,
+		CodeInvalidPrompt,
+		CodePromptAlreadySet,
+		CodeSchedulerStopped,
+		CodeUnknown,
+	}
+	for _, code := range allCodes {
+		if _, ok := errCodeHTTP[code]; !ok {
+			t.Errorf("ErrCode %q has no entry in errCodeHTTP; add one", code)
+		}
+	}
+}
+
 // TestClassifyError_RealMutationFailures shape-tests the integration
 // with the Scheduler: build a *Scheduler that actually returns
 // ErrJobNotFound from PauseJobByID and verify the classifier picks it

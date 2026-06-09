@@ -28,15 +28,25 @@ type Config struct {
 
 // Slack implements Platform and RunnablePlatform via Socket Mode.
 type Slack struct {
-	cfg       Config
-	api       *slack.Client
-	handler   platform.MessageHandler
-	cancel    context.CancelFunc
-	ctx       context.Context // lifecycle context, cancelled on Stop
-	done      chan struct{}
-	startMu   sync.Mutex
-	started   bool
-	botID     string
+	cfg     Config
+	api     *slack.Client
+	handler platform.MessageHandler
+	cancel  context.CancelFunc
+	ctx     context.Context // lifecycle context, cancelled on Stop
+	done    chan struct{}
+	startMu sync.Mutex
+	started bool
+	// botID is the bot's own Slack user ID, used to detect @-mentions in
+	// group channels. Guarded by botIDMu because Start() (and the background
+	// self-heal goroutine, #1947) write it while handleMessage goroutines
+	// read it concurrently. Empty means AuthTest has not yet succeeded —
+	// see botIDOrEmpty / handleMessage's degraded fail-open branch.
+	botIDMu sync.RWMutex
+	botID   string
+	// botHealAt is the next wall-clock time the lazy AuthTest self-heal is
+	// allowed to run, rate-limiting the re-auth burst while botID is unknown.
+	// Guarded by botIDMu. #1947.
+	botHealAt time.Time
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 	// hookSem caps concurrent inbound message-handler goroutines to bound
 	// memory under burst load. Mirrors feishu.Feishu.hookSem (cap=20). Without
@@ -148,9 +158,11 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 	if err != nil {
 		slog.Warn("slack auth test failed — all channel messages will be processed (no mention filtering)", "err", err)
 	} else {
+		s.botIDMu.Lock()
 		s.botID = authResp.UserID
+		s.botIDMu.Unlock()
 		slog.Info("slack bot identity",
-			"user_id", s.botID,
+			"user_id", authResp.UserID,
 			"team", osutil.SanitizeForLog(authResp.Team, 128))
 	}
 
@@ -356,6 +368,50 @@ func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, 
 	}
 }
 
+// slackBotHealCooldown rate-limits the lazy AuthTest self-heal so a sustained
+// stream of group messages while botID is unknown can't hammer auth.test.
+// Mirrors feishu.botInfoRefreshCooldown (#1947).
+const slackBotHealCooldown = time.Minute
+
+// botIDOrEmpty returns the cached bot user ID under the read lock. Empty means
+// AuthTest has not yet succeeded.
+func (s *Slack) botIDOrEmpty() string {
+	s.botIDMu.RLock()
+	defer s.botIDMu.RUnlock()
+	return s.botID
+}
+
+// maybeHealBotID kicks a single rate-limited background AuthTest when botID is
+// unknown so the adapter recovers exact-mention filtering after a transient
+// Start-time auth failure (#1947). At most one re-auth runs per cooldown
+// window; a success populates botID and subsequent group messages match the
+// "<@BOT>" token strictly instead of riding the loose any-mention fallback.
+func (s *Slack) maybeHealBotID() {
+	s.botIDMu.Lock()
+	if s.botID != "" || time.Now().Before(s.botHealAt) {
+		s.botIDMu.Unlock()
+		return
+	}
+	s.botHealAt = time.Now().Add(slackBotHealCooldown)
+	s.botIDMu.Unlock()
+
+	s.handlerWg.Add(1)
+	go func() {
+		defer s.handlerWg.Done()
+		authResp, err := s.api.AuthTest()
+		if err != nil {
+			slog.Warn("slack auth test self-heal failed; staying fail-open", "err", err)
+			return
+		}
+		s.botIDMu.Lock()
+		s.botID = authResp.UserID
+		s.botIDMu.Unlock()
+		slog.Info("slack bot identity recovered",
+			"user_id", authResp.UserID,
+			"team", osutil.SanitizeForLog(authResp.Team, 128))
+	}()
+}
+
 func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	if ev.BotID != "" || ev.SubType != "" {
 		return
@@ -364,12 +420,25 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	text := ev.Text
 	mentionMe := false
 
-	if s.botID != "" {
-		mention := "<@" + s.botID + ">"
+	botID := s.botIDOrEmpty()
+	if botID != "" {
+		mention := "<@" + botID + ">"
 		if strings.Contains(text, mention) {
 			text = strings.ReplaceAll(text, mention, "")
 			mentionMe = true
 		}
+	} else {
+		// #1947: AuthTest failed at Start (transient network/5xx/rate-limit)
+		// so we don't know our own user ID and cannot match the exact
+		// "<@BOT>" mention token. The Start-time warn promises fail-open
+		// ("all channel messages will be processed, no mention filtering"),
+		// but leaving mentionMe=false here is fail-CLOSED: the dispatcher's
+		// group gate (ChatType=="group" && !MentionMe) then silently drops
+		// every group message until a restart. Degrade to any-mention=true —
+		// matching that log claim and Feishu's isBotMentioned fallback — and
+		// kick a rate-limited background AuthTest so botID self-heals.
+		mentionMe = true
+		s.maybeHealBotID()
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {

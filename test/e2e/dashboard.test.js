@@ -840,7 +840,7 @@ test.describe('Cron panel', () => {
     await page.waitForSelector('.session-card');
 
     // Click cron button
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
     // Should show "Cron Jobs" heading
@@ -856,7 +856,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
     // Wait for cron data to load and render
@@ -875,7 +875,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
     await page.waitForTimeout(500);
 
@@ -893,7 +893,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
     // Click "New" button in cron panel
@@ -912,7 +912,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
     await page.click('.cron-detail button');
     await page.waitForSelector('.freq-tabs');
@@ -934,7 +934,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
     await page.waitForTimeout(300);
     await page.click('.cron-detail button');
@@ -957,7 +957,7 @@ test.describe('Cron panel', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
     await page.click('.cron-detail button');
     await page.waitForSelector('.freq-advanced-toggle');
@@ -981,7 +981,7 @@ test.describe('Cron panel', () => {
     await page.goto(emptyCronMock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    await page.click('#btn-cron');
+    await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
     const text = await page.$eval('.cron-detail', el => el.textContent);

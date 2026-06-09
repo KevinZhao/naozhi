@@ -94,6 +94,26 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "rk_test_", minTail: 16},
 }
 
+// secretPrefixesByFirstByte indexes secretPrefixes by their first byte so the
+// RedactSecrets inner loop only probes the 1-3 candidates that can possibly
+// match the current byte instead of all 24 prefixes (R20260609-PERF-9 #1976).
+// Each bucket preserves secretPrefixes declaration order, so longest-match-wins
+// (`sk-ant-` before `sk-`) still holds within a bucket. Built once at package
+// init; never mutated afterwards so it is safe for concurrent reads.
+var secretPrefixesByFirstByte = buildSecretPrefixIndex()
+
+func buildSecretPrefixIndex() map[byte][]secretPrefix {
+	idx := make(map[byte][]secretPrefix)
+	for _, sp := range secretPrefixes {
+		if sp.prefix == "" {
+			continue
+		}
+		first := sp.prefix[0]
+		idx[first] = append(idx[first], sp)
+	}
+	return idx
+}
+
 // secretRedactedMarker replaces matched secret bytes. Distinct from
 // `…[truncated]` so dashboard / SIEM filters can spot redactions
 // independently of length-truncation.
@@ -117,7 +137,12 @@ func RedactSecrets(s string) string {
 	i := 0
 	for i < len(s) {
 		matched := false
-		for _, sp := range secretPrefixes {
+		// R20260609-PERF-9 (#1976): only the prefixes whose first byte equals
+		// s[i] can match here, so probe that bucket (typically 1-3 entries)
+		// instead of all 24 prefixes. A byte with no registered prefix (the
+		// common case for an IndexAny first-byte hit landing on prose) skips
+		// the inner loop entirely.
+		for _, sp := range secretPrefixesByFirstByte[s[i]] {
 			if !strings.HasPrefix(s[i:], sp.prefix) {
 				continue
 			}

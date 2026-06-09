@@ -126,11 +126,31 @@ func (m *CacheManager) RefreshAll() {
 	newDiscovered := make(map[string][]map[string]any, len(nodesCopy))
 	newStatus := make(map[string]string, len(nodesCopy))
 
+	// Snapshot current cache so transient FetchSessions errors preserve the
+	// node's last-known sessions/projects/discovered instead of dropping them
+	// (matching RefreshFor's per-key preserve-on-error behavior). Without this,
+	// rebuilding the maps from scratch and skipping failed nodes would erase a
+	// node's data from the dashboard until the next successful refresh.
+	m.mu.RLock()
+	prevSessions := m.sessions
+	prevProjects := m.projects
+	prevDiscovered := m.discovered
+	m.mu.RUnlock()
+
 	for i := 0; i < len(nodesCopy); i++ {
 		res := <-ch
 		if res.err != nil {
 			slog.Debug("node cache refresh", "node", res.nodeID, "err", res.err)
 			newStatus[res.nodeID] = "error"
+			if s, ok := prevSessions[res.nodeID]; ok {
+				newSessions[res.nodeID] = s
+			}
+			if p, ok := prevProjects[res.nodeID]; ok {
+				newProjects[res.nodeID] = p
+			}
+			if d, ok := prevDiscovered[res.nodeID]; ok {
+				newDiscovered[res.nodeID] = d
+			}
 			continue
 		}
 		newStatus[res.nodeID] = "ok"

@@ -588,6 +588,31 @@ func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded boo
 // observed during dispatch and the caller should unwind the read loop.
 //
 // Extracted from the inline switch body when Protocol.ReadEvent moved from a
+// passthroughShouldFanOut reports whether a passthrough-mode assistant event
+// should be delivered to onEvent callbacks. It mirrors the gate in the legacy
+// Send path (process_send.go:286-293): only events carrying a thinking or
+// tool_use content block, or an AskQuestion payload, warrant fan-out.
+// Plain text-only assistant events are intentionally excluded so that spurious
+// replyTracker walks and other onEvent side-effects do not fire for every
+// streamed text chunk.
+//
+// ev.Message may be nil for unexpected protocol extensions; in that case the
+// guard treats the event as not fan-out-worthy (safe default).
+func passthroughShouldFanOut(ev Event) bool {
+	if ev.AskQuestion != nil {
+		return true
+	}
+	if ev.Message == nil {
+		return false
+	}
+	for _, block := range ev.Message.Content {
+		if block.Type == "thinking" || block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
 // single Event to a slice (ACP turn-end emits assistant+result), so each
 // dispatched Event sees the full pipeline regardless of how many wire frames
 // fed it.
@@ -638,6 +663,34 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		p.handleReplayEventLocked(ev)
 		p.slotsMu.Unlock()
 		return false
+	}
+
+	// #1958: assistant interim events under passthrough: deliver to
+	// currentTurnSlots owners' onEvent so AskUserQuestion cards (and
+	// thinking/tool_use status banners) reach the IM tracker.
+	// The legacy Send path does this inside process_send.go's drain loop;
+	// passthrough's readLoop-only path was previously skipping these
+	// frames entirely, so AskUserQuestion never fired askQuestionFired and
+	// its bailout text was not suppressed. We do NOT skip legacy eventCh
+	// delivery — EventLog + eventCh consumers still need these events.
+	// Holding slotsMu only long enough to snapshot the owner slice so the
+	// onEvent callbacks run outside the lock (they may block on Reply).
+	//
+	// R20260608133928-GO-6: narrow the gate to match the legacy Send path
+	// (process_send.go:286-293) — only fan-out when the event carries a
+	// thinking/tool_use block or an AskQuestion payload. Plain-text assistant
+	// events (text-only content) must not trigger onEvent; that avoids spurious
+	// replyTracker walks and aligns passthrough behaviour with legacy.
+	if ev.Type == "assistant" && p.caps.Replay && passthroughShouldFanOut(ev) {
+		p.slotsMu.Lock()
+		owners := make([]*sendSlot, len(p.currentTurnSlots))
+		copy(owners, p.currentTurnSlots)
+		p.slotsMu.Unlock()
+		for _, owner := range owners {
+			if owner.onEvent != nil {
+				owner.onEvent(ev)
+			}
+		}
 	}
 
 	// result under passthrough: fan-out to claimed slots and skip
