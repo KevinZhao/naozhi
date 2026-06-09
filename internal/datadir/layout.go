@@ -69,6 +69,19 @@ func CronRunsRoot(dataDir string) string {
 	return filepath.Join(dataDir, "runs")
 }
 
+// CLIDebugRoot returns the per-session CLI debug-log directory
+// (<dataDir>/cli-debug). Populated only when the operator opts in via the
+// NAOZHI_CLI_DEBUG env var; the directory holds the raw `claude --debug-file`
+// output (HTTP request/response + retry status codes) for one spawned CLI per
+// session, so a leaked file would expose prompt/tool internals — hence it
+// inherits the same 0o700 EnsureDir hardening as the other state roots.
+func CLIDebugRoot(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "cli-debug")
+}
+
 // EnsureDir creates path (and parents) at DirMode and tightens it down to a
 // safe state, returning an error only when path cannot be made usable as a
 // private directory.

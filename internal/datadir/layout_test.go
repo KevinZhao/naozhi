@@ -18,6 +18,7 @@ func TestPathConstructors(t *testing.T) {
 		{"events", EventsRoot(root), "/data/naozhi/events"},
 		{"cron_jobs", CronJobsPath(root), "/data/naozhi/cron_jobs.json"},
 		{"cron_runs", CronRunsRoot(root), "/data/naozhi/runs"},
+		{"cli_debug", CLIDebugRoot(root), "/data/naozhi/cli-debug"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -27,7 +28,7 @@ func TestPathConstructors(t *testing.T) {
 }
 
 func TestPathConstructors_EmptyRoot(t *testing.T) {
-	if SessionsPath("") != "" || EventsRoot("") != "" || CronJobsPath("") != "" || CronRunsRoot("") != "" {
+	if SessionsPath("") != "" || EventsRoot("") != "" || CronJobsPath("") != "" || CronRunsRoot("") != "" || CLIDebugRoot("") != "" {
 		t.Error("empty data root must yield empty paths")
 	}
 }

@@ -123,6 +123,53 @@ func TestClaudeProtocol_BuildArgs_PermissionModeStandard(t *testing.T) {
 	}
 }
 
+func TestClaudeProtocol_BuildArgs_DebugFile(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	path := "/data/naozhi/cli-debug/abc123.log"
+	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: path})
+
+	// Expect the adjacent pair "--debug api" and "--debug-file <path>".
+	var sawDebugAPI, sawDebugFile bool
+	for i, a := range args {
+		if a == "--debug" && i+1 < len(args) && args[i+1] == "api" {
+			sawDebugAPI = true
+		}
+		if a == "--debug-file" && i+1 < len(args) && args[i+1] == path {
+			sawDebugFile = true
+		}
+	}
+	if !sawDebugAPI {
+		t.Errorf("DebugFile set: missing `--debug api`, got %v", args)
+	}
+	if !sawDebugFile {
+		t.Errorf("DebugFile set: missing `--debug-file %s`, got %v", path, args)
+	}
+}
+
+func TestClaudeProtocol_BuildArgs_NoDebugFileByDefault(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "opus"}) // DebugFile zero value
+	for _, a := range args {
+		if a == "--debug" || a == "--debug-file" {
+			t.Errorf("zero-value DebugFile leaked debug flags into argv: %v", args)
+		}
+	}
+}
+
+func TestClaudeProtocol_BuildArgs_DebugFileArgvInjectionGuard(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	// A path starting with '-' could be reinterpreted as a flag; reject it.
+	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: "-rf"})
+	for _, a := range args {
+		if a == "--debug-file" || a == "-rf" {
+			t.Errorf("DebugFile starting with '-' must be dropped, got %v", args)
+		}
+	}
+}
+
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}

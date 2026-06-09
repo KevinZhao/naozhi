@@ -38,6 +38,17 @@ type SpawnOptions struct {
 	//
 	// Only ClaudeProtocol consumes this field today; ACP backends ignore it.
 	PermissionMode PermissionMode
+
+	// DebugFile, when non-empty, is the path passed to the Claude CLI's
+	// `--debug-file` flag (implying `--debug api`). The CLI writes its raw
+	// HTTP request/response + retry diagnostics (Bedrock status codes that
+	// otherwise never surface in stream-json or stderr) to that file. Empty
+	// (the zero value) keeps debug off — the flags are omitted entirely, so
+	// every existing spawn stays bit-identical. The operator opts in per
+	// deployment via the NAOZHI_CLI_DEBUG env var, which the session router
+	// translates into a per-session path under <dataDir>/cli-debug. Only
+	// ClaudeProtocol consumes this; ACP backends ignore it.
+	DebugFile string
 }
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
