@@ -186,6 +186,41 @@ func TestPhaseStringRoundTrip(t *testing.T) {
 	}
 }
 
+// TestR20260607GO003_PhasePopulatingRemoved pins R20260607-GO-003: the
+// dead constant phasePopulating (formerly = phaseUnset = 0) has been
+// deleted. Its value was identical to phaseUnset so the switch in
+// String() could never distinguish it; keeping it around was a
+// maintenance trap. This test exhaustively confirms that:
+//   - runPhase(0) (phaseUnset) renders as "" — unchanged.
+//   - Every integer in [0, 4] that is not a canonical phase renders as "".
+//   - The four live phases (1-4) still round-trip correctly.
+func TestR20260607GO003_PhasePopulatingRemoved(t *testing.T) {
+	t.Parallel()
+
+	// phaseUnset (0) must render as "" — it is the sentinel for "no phase yet".
+	if got := runPhase(0).String(); got != "" {
+		t.Errorf("runPhase(0).String() = %q, want \"\" (phaseUnset must be empty)", got)
+	}
+
+	// Verify no integer in [0,4] accidentally introduces a new non-empty
+	// string that wasn't there before the deletion.
+	canonical := map[runPhase]string{
+		runPhase(1): PhaseQueued,
+		runPhase(2): PhaseJittering,
+		runPhase(3): PhaseSpawning,
+		runPhase(4): PhaseSending,
+	}
+	for i := runPhase(0); i <= runPhase(5); i++ {
+		want, ok := canonical[i]
+		if !ok {
+			want = ""
+		}
+		if got := i.String(); got != want {
+			t.Errorf("runPhase(%d).String() = %q, want %q", i, got, want)
+		}
+	}
+}
+
 // Compile-time check that runPhase is int32 — guards against a future
 // type change that would break atomic.Int32 storage.
 var _ = func() runPhase {

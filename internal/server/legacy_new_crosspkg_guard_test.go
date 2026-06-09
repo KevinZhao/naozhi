@@ -66,7 +66,11 @@ func TestLegacyServerNew_ZeroCrossPkgCallers(t *testing.T) {
 			// node_modules / .git / dist anyway, but explicit pruning
 			// keeps the walk fast on large worktrees.
 			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" || name == "build" {
+			// Skip nested git worktrees under .claude/worktrees — they are
+			// independent checkouts whose copy of this very test file (and any
+			// other server.New call sites) would otherwise be scanned as if it
+			// lived in the primary tree, producing false offenders.
+			if name == ".git" || name == ".claude" || name == "node_modules" || name == "vendor" || name == "dist" || name == "build" {
 				return filepath.SkipDir
 			}
 			return nil

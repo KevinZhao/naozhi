@@ -554,6 +554,62 @@ func TestUnbindAllChat_NotBound(t *testing.T) {
 	}
 }
 
+// TestUnbindAllChat_MultiProject is the regression guard for
+// R20260608-133914-LB-1 (#1961): a chat can be bound to more than one project
+// (BindChat does not reject cross-project duplicates), so the single-value
+// bindingIndex is not a reliable enumeration. UnbindAllChat must strip the
+// binding from EVERY project, not just the one the index happens to point at.
+func TestUnbindAllChat_MultiProject(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeProjectDir(t, root, "proj_a", &ProjectConfig{
+		ChatBindings: []ChatBinding{
+			{Platform: "feishu", ChatType: "group", ChatID: "shared"},
+			{Platform: "feishu", ChatType: "group", ChatID: "a_only"},
+		},
+	})
+	makeProjectDir(t, root, "proj_b", &ProjectConfig{
+		ChatBindings: []ChatBinding{
+			{Platform: "feishu", ChatType: "group", ChatID: "shared"},
+		},
+	})
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan = %v", err)
+	}
+
+	if err := m.UnbindAllChat("feishu", "group", "shared"); err != nil {
+		t.Fatalf("UnbindAllChat = %v", err)
+	}
+
+	// Both projects must have "shared" removed; proj_a keeps "a_only".
+	pa := m.Get("proj_a")
+	if len(pa.Config.ChatBindings) != 1 || pa.Config.ChatBindings[0].ChatID != "a_only" {
+		t.Errorf("proj_a bindings after unbind = %+v, want only a_only", pa.Config.ChatBindings)
+	}
+	pb := m.Get("proj_b")
+	if len(pb.Config.ChatBindings) != 0 {
+		t.Errorf("proj_b bindings after unbind = %+v, want empty", pb.Config.ChatBindings)
+	}
+
+	// Routing must be cleared (no residual binding leaves the chat routable).
+	if p := m.ProjectForChat("feishu", "group", "shared"); p != nil {
+		t.Errorf("ProjectForChat after UnbindAllChat = %q, want nil", p.Name)
+	}
+
+	// Persistence: reload from disk and confirm neither project.yaml retains it.
+	m2, _ := NewManager(root, PlannerDefaults{})
+	if err := m2.Scan(); err != nil {
+		t.Fatalf("reload Scan = %v", err)
+	}
+	if p := m2.ProjectForChat("feishu", "group", "shared"); p != nil {
+		t.Errorf("after reload ProjectForChat = %q, want nil (not persisted)", p.Name)
+	}
+	if p := m2.ProjectForChat("feishu", "group", "a_only"); p == nil || p.Name != "proj_a" {
+		t.Errorf("after reload a_only routing = %v, want proj_a", p)
+	}
+}
+
 // ---- UpdateConfig ----
 
 func TestUpdateConfig_Success(t *testing.T) {

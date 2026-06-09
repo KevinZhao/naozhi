@@ -386,7 +386,7 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 				return
 			}
 			if ready.Status == "error" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", osutil.SanitizeForLog(ready.Error, 256))}
 				return
 			}
 			if ready.Status != "ready" {
@@ -782,11 +782,11 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	}
 	if hello.Type == "auth_failed" {
 		conn.Close()
-		return nil, fmt.Errorf("shim auth failed: %s", hello.Msg)
+		return nil, fmt.Errorf("shim auth failed: %s", osutil.SanitizeForLog(hello.Msg, 128))
 	}
 	if hello.Type != "hello" {
 		conn.Close()
-		return nil, fmt.Errorf("unexpected message type: %s", hello.Type)
+		return nil, fmt.Errorf("unexpected message type: %s", osutil.SanitizeForLog(hello.Type, 64))
 	}
 	// RNEW-ARCH-403 (#427): reject hellos whose ProtocolVersion is outside
 	// the [MinSupportedProtocolVersion, ProtocolVersion] band. Older
@@ -955,13 +955,35 @@ func (m *Manager) Discover() ([]State, error) {
 }
 
 // SendMsg sends a ClientMsg over the handle's connection.
+//
+// R20260608133928-ARCH-1 (#1969): Close() does not take WriteMu, so a
+// SendMsg racing a concurrent Close (e.g. Detach/Shutdown overlapping a
+// StopAll/Reconnect-swap) could Flush onto an already-closed fd. Guard on
+// ClientDone before acquiring WriteMu (and re-check under the lock) so that
+// SendMsg after Close is a deterministic net.ErrClosed no-op rather than a
+// racy write to a closed connection. ClientDone is closed exactly once by
+// Close(), so the non-blocking select is a stable happens-before signal.
 func (h *ShimHandle) SendMsg(msg ClientMsg) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+	select {
+	case <-h.ClientDone:
+		return net.ErrClosed
+	default:
+	}
 	h.WriteMu.Lock()
 	defer h.WriteMu.Unlock()
+	// Re-check under the lock: a Close() may have landed between the select
+	// above and acquiring WriteMu. ClientDone is closed before Conn.Close()
+	// in Close(), so observing it closed here means the fd may already be
+	// gone; bail rather than Flush onto it.
+	select {
+	case <-h.ClientDone:
+		return net.ErrClosed
+	default:
+	}
 	h.Writer.Write(data)     //nolint:errcheck
 	h.Writer.WriteByte('\n') //nolint:errcheck
 	return h.Writer.Flush()

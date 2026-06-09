@@ -73,3 +73,65 @@ func TestBroadcastSessionReady_ViaMarshalHelper(t *testing.T) {
 		t.Errorf("Key/State = %q/%q, want feishu:p2p:bob/running", msg.Key, msg.State)
 	}
 }
+
+// TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic verifies R20260608133928-PERF-1:
+// when NewHub has no authenticated clients, BroadcastCronRunStarted must not
+// panic and must not deliver any frame. Uses a production hub (authClients != nil)
+// so the fast-path is exercised.
+func TestMarshalBroadcastAuth_ZeroAuthClients_NoPanic(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	// No clients registered — authClients exists but is empty.
+	// Must not panic.
+	hub.BroadcastCronRunStarted("aaaa", "bbbb", time.Now(), "manual", "", false)
+}
+
+// TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw confirms that with zero
+// authenticated clients BroadcastCronRunStarted does not attempt to deliver
+// any frame (the SendRaw path is never reached).
+func TestMarshalBroadcastAuth_ZeroAuthClients_NoSendRaw(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	// Register an unauthenticated client — authClients still empty.
+	c := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
+	hub.mu.Lock()
+	hub.clients[c] = struct{}{}
+	hub.mu.Unlock()
+
+	hub.BroadcastCronRunStarted("cccc", "dddd", time.Now(), "manual", "", false)
+
+	select {
+	case <-c.send:
+		t.Fatal("unauthenticated client received a frame; should not have")
+	default:
+		// expected: no frame sent
+	}
+}
+
+// TestMarshalBroadcastAuth_WithAuthClient_Delivers verifies that when at least
+// one authenticated client is present the fast-path does not fire and the frame
+// is delivered normally.
+func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	c := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c.authenticated.Store(true)
+	registerSub(hub, c, "")
+
+	hub.BroadcastCronRunStarted("eeee", "ffff", time.Now(), "manual", "", false)
+
+	data, ok := recvRaw(t, c)
+	if !ok {
+		t.Fatal("authenticated client received no frame")
+	}
+	var msg cronRunStartedMsg
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.Type != "cron_run_started" {
+		t.Errorf("Type = %q, want cron_run_started", msg.Type)
+	}
+}

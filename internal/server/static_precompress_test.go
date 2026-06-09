@@ -10,10 +10,12 @@ import (
 	"testing"
 )
 
-// TestDashboardHTML_ScriptsDeferred pins #1769: the three external dashboard
-// scripts must carry `defer` so the parser isn't blocked downloading/parsing
-// 759KB+ of JS. defer preserves execution order (dashboard.js exports symbols
-// the other two consume) and runs before DOMContentLoaded.
+// TestDashboardHTML_ScriptsDeferred pins #1769: the external dashboard scripts
+// must carry `defer` so the parser isn't blocked downloading/parsing 759KB+ of
+// JS. defer preserves execution order — nz_util.js loads first and exports the
+// shared util layer (RFC dashboard-cron-view-extraction PR-0a); dashboard.js
+// then exports symbols the other two modules consume — and runs before
+// DOMContentLoaded.
 func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	t.Parallel()
 	data := staticAssetBytes("dashboard.html")
@@ -21,7 +23,7 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 		t.Fatal("dashboard.html not embedded")
 	}
 	html := string(data)
-	for _, src := range []string{"/static/dashboard.js", "/static/agent_view.js", "/static/asset_browser.js"} {
+	for _, src := range []string{"/static/nz_util.js", "/static/dashboard.js", "/static/cron_view.js", "/static/agent_view.js", "/static/asset_browser.js"} {
 		want := `<script defer src="` + src + `">`
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html: %q must be loaded with defer; missing %q", src, want)
@@ -31,6 +33,15 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 		if strings.Contains(html, bad) {
 			t.Errorf("dashboard.html: %q is loaded WITHOUT defer (%q) — blocks the parser", src, bad)
 		}
+	}
+	// Load-order invariant (PR-0a): nz_util.js defines the shared util layer +
+	// the legacy top-level aliases (window.esc, window.fetchJSON, …) that
+	// dashboard.js's call sites depend on. It MUST appear before dashboard.js so
+	// the aliases exist by the time dashboard.js executes.
+	utilIdx := strings.Index(html, `/static/nz_util.js`)
+	dashIdx := strings.Index(html, `/static/dashboard.js`)
+	if utilIdx < 0 || dashIdx < 0 || utilIdx >= dashIdx {
+		t.Errorf("dashboard.html: nz_util.js must load before dashboard.js (util@%d, dashboard@%d)", utilIdx, dashIdx)
 	}
 }
 

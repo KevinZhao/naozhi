@@ -379,9 +379,6 @@ func (s *runStore) assertJobLockHeld(jobID string) {
 // 会重试）。MkdirAll 自身幂等，作为 fallback 是安全的；缓存用于减少
 // syscall，不是正确性保证。
 func (s *runStore) ensureJobDir(jobID, dir string) error {
-	if _, ok := s.jobDirEnsured.Load(jobID); ok {
-		return nil
-	}
 	// R250531-SEC-4 (#1504): mirror the runs/ root Lstat guard (newRunStore,
 	// line ~502) on the per-job subdir. MkdirAll does NOT error when dir
 	// already exists as a symlink to a directory, so a local attacker who
@@ -390,12 +387,26 @@ func (s *runStore) ensureJobDir(jobID, dir string) error {
 	// filepath.Rel guard at the call site is a pure path check that does not
 	// follow on-disk symlinks, so it cannot catch this. Lstat reports the
 	// link itself; reject anything that exists but is not a plain directory.
+	//
+	// R20260608133928-CR-4 (#1968): the symlink guard MUST run on EVERY Append,
+	// not just the first. The previous shape gated the entire function behind
+	// the jobDirEnsured cache, so an attacker who swapped runs/<jobID>/ for a
+	// symlink AFTER the first Append (cache already populated) would bypass the
+	// Lstat on every subsequent tick and have records land at the symlink
+	// target. Lstat at ~0.017Hz (1min jobs) is negligible, so we always
+	// re-verify; the cache only skips the (idempotent) MkdirAll + root fsync.
 	if fi, err := os.Lstat(dir); err == nil {
 		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
 			slog.Error("cron run: per-job runs dir is a symlink or non-directory; refusing append",
 				"dir", dir, "mode", fi.Mode().String(), "job_id", jobID)
+			// Drop any stale "ensured" marker so a later legitimate restore of
+			// the directory is re-validated rather than served from cache.
+			s.jobDirEnsured.Delete(jobID)
 			return fmt.Errorf("cron run: per-job dir %q is not a plain directory", dir)
 		}
+	}
+	if _, ok := s.jobDirEnsured.Load(jobID); ok {
+		return nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		// 不写入 cache：让下次 Append 重试。

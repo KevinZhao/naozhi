@@ -175,6 +175,14 @@ type QuestionCard struct {
 	// carried into card action callbacks so the handler knows which
 	// question the user answered.
 	ToolUseID string
+	// ChatType is the originating session's chat type ("direct" or "group").
+	// Adapters whose card-action callback can't recover the chat type from
+	// the transport envelope (e.g. Feishu WebSocket, where the callback only
+	// carries open_chat_id) embed it in the button value so the answer routes
+	// back to the same session key the question was asked in. Empty when the
+	// originating chat type is unknown; adapters then fall back to their own
+	// heuristic.
+	ChatType string
 	// Items is one or more questions. Adapters render each as its own
 	// labelled block.
 	Items []QuestionItem

@@ -556,3 +556,64 @@
 - [R20260606-SEC-12] memory handler 构造期 os.Getwd 固定 currentProject 非 session workspace — internal/memory/handler.go:166
 - [R20260606-PERF-13] storeAtomicString 每事件堆分配 string header — internal/cli/eventlog_append.go:167
 - [R20260606-PERF-14] drainInChannel 首批仍无条件调 time.Now — internal/eventlog/persist/persister.go:1157
+- [R20260607-GO-005] knownSessionsCache.publish 用 time.Now 而非可注入时钟，TTL 测试需 sleep — internal/cron/scheduler_session_cache.go:74
+- [R20260607-GO-015] runStore.Append 首次 json.Marshal 失败仅 slog.Warn 不 bump historyDropTotal（CronRun 几无 marshal 失败可能）— internal/cron/runstore.go:506
+- [R20260607-LOGIC-3] UpdateJob 中 applyTo(j) 先于 *upd.Schedule!=j.Schedule 比较，future-proof 隐患（applyTo 当前不改 Schedule）— internal/cron/scheduler_jobs.go:724
+- [R20260607-SEC-15] handleDashboard CSP script-src 仍含 unsafe-inline，待 strict-dynamic+nonce 迁移（已有 tracking 注释）— internal/server/routes.go:504
+- [R20260607-PERF-9] Snapshot() 每次 5 次 loadAtomicString barrier，>200 session 才显著 — internal/session/managed_query.go:194
+
+## cron-cr-20260607 (5-reviewer 全面 review)
+- [R20260607-GO-001] StartContext 在 Start() 失败时 watcher goroutine 可能驻留(需 ctx 长生命周期才触发,假设性) — internal/cron/scheduler.go:624
+- [R20260607-GO-002] telemetry 用 atomic.Pointer[Broadcaster] 指向接口,当前 SetTelemetry 已防护 nil-interface,未来脆弱 — internal/cron/scheduler_callbacks.go:83
+- [R20260607-CORR-7] redactPathsBuilderPool defer 超 cap 早返回未 Reset,backing array 留旧串到 GC(无数据外泄) — internal/cron/scheduler_finish.go:930
+- [R20260607-SEC-C3] wshub_send.go:229 dashboard interrupt 用 slog.Info 记 key,高频可降 Debug — internal/server/wshub_send.go:229
+- [R20260607-PERF-10] workDirResolveCache.store 过 cap 分支二次 count.Load 冗余(单 ticker goroutine 无并发改) — internal/cron/scheduler_workdir.go:148
+- [R050103S-PPROF-1] pprof 403 body "set a dashboard token to enable profiling" 暴露配置机制（loopback-gated，fingerprint 风险低）— internal/server/debug_pprof.go:69
+- [R050103G-SEC-1] NodeConfig/UpstreamConfig 仅 slog.LogValuer 防泄漏，fmt.Sprintf("%+v") 仍漏 Token（当前无 fmt 调用点，防未来）— internal/config/config.go:120
+- [R050103G-BUG-1] subagent_transcript openOrReuse 快路径非零字节读绕过 reprobeRotation（依赖 writer 停止追加不变量，无实际 trigger）— internal/cli/subagent_transcript.go:94
+- [R050103C-BUG-2] runStore.Append preflight_bytes 在 slog.Warn 重算 len 和（post-marshal gate 已兜底正确，微开销）— internal/cron/runstore.go:479
+- [R050103C-CORR-9] static_split_view_test 用 strings.Contains 而非结构唯一性，注释中 token 可假性满足（项目既定 contract-test 模式）— internal/server/static_split_view_test.go:42
+- [R20260607-SEC-6] serveRender CSP script-src 含冗余 data:（'unsafe-inline' 已覆盖内联）— internal/dashboard/project/files.go:1236
+- [R20260607-SEC-10] sensitiveNameSubstrings 含 "token" 误伤 tokenizer.py/token_parser.go 预览 — internal/dashboard/project/files.go:1613
+- [R20260607-GO-12] strings.Builder.Reset() 注释错误（称置 nil，实为 buf[:0]）— internal/cron/scheduler_finish.go:933
+- [R20260607-ARCH-6] project.Manager Bind/Unbind/Update in-place mutate 共享 Config，违 copy-on-write 但当前安全 — internal/project/manager.go:232
+- [R20260607-ARCH-7] upstream/dispatch/discovery/cron 各自 SessionRouter 同名异形接口，新人易混 — internal/cron/scheduler_config.go:98
+- [R20260607-CODE-001] applyTo 在 Schedule 比较前 mutate j，今天正确但 fragile，未来若把 Schedule 加入 applyTo 会静默破坏 re-registrati — internal/cron/scheduler_jobs.go:722
+- [R20260607-ARCH-5b] configMapsPtr atomic.Pointer 是为不存在的 hot-reload writer 准备的投机基础设施，应降级为不可变字段直到 writer 落地 — internal/cron/scheduler.go:125
+- [R20260607-ARCH-8] StopPolicyForceExit 是 doc-only 常量无人读，cron 侧缺对应常量，看似 typed-policy 实则未接线 — internal/sysession/manager.go:49
+- [R20260607-GO-010] parallelFsyncWorkers 是 package-level mutable var，并行 test 间可能 race（生产无并发改写，仅测试 seam）— internal/eventlog/persist/persister.go:1106
+- [R20260607-GO-014] redactAddrIPv6Re 字符类 [0-9a-fA-F:] 会误匹配 [bad:1] 等 hex-looking 括号 token，可能过度 redact — internal/cron/scheduler_finish.go:788
+- [R20260607-GO-005] heartbeatLoop 新建 pongTimer 后立即 Stop 冗余（freshly-created 无 pending tick），Go1.26 下无害 — internal/cli/process_readloop.go:921
+- [R20260607-SEC-12] buildShimArgs --cwd 经 exec.Command execve 直传无 shell 注入风险（已 validateWorkspace），false-positive — internal/shim/manager.go:342
+- [R090135-GO-4] warmCacheLocked stale-entry 理论窗口已被 cacheGet re-Load 缓解,无实害 — internal/cron/runstore_cache.go:284
+- [R090135-GO-5] 两锁不同时持有约束仅文档非类型,未来 caller 风险 — internal/cron/runstore.go:63
+- [R090135-GO-6] reapFreshSessionLocked register TOCTOU 与 preflight 同级已接受 — internal/cron/scheduler_run.go:1106
+- [R090135-GO-7] finalize done 非 atomic,单 goroutine 使用无实害 — internal/cron/runinflight.go:180
+- [R090135-GO-8] hasAddrTrigger [ 触发无谓 IPv4 regex 扫描,极小 — internal/cron/scheduler_finish.go:837
+- [R090135-LOGIC-6] endedAllCron 测试 helper 未被调用,godoc 称留给未来 — internal/cron/scheduler_telemetry_testutil_test.go:77
+- [R090135-SEC-1] CSP script-src unsafe-inline,已 NEEDS-DESIGN strict-dynamic+nonce — internal/server/routes.go:504
+- [R090135-SEC-3] pprof no-token 已 403 双门,仅 Warn 未硬失败 — internal/server/debug_pprof.go:55
+- [R090135-SEC-4] /health no-token 泄 workspace,已知 local-dev 限制 Warn — internal/server/server.go:764
+- [R090135-SEC-5] EvalSymlinks 最多 64 次/认证请求,已 capped 仅 amplification — internal/server/agent_tailer_pathcheck.go:101
+- [R090135-SEC-8] KaTeX 字体 CDN 无 SRI,@font-face 无法带 integrity,需 vendoring — internal/server/routes.go:504
+- [R090135-SEC-9] NotifyChatID WS 已 mask,speculative — internal/cron/scheduler_finish.go:431
+- [R090135-ARCH-3] Scheduler god-object ~40 字段,需 RFC 拆 jobIndex/persistState — internal/cron/scheduler.go:45
+- [R090135-PERF-002] missedScheduleVerdict 3段concat key alloc,RWMutex 已缓解竞争 — internal/dashboard/cron/handlers.go:770
+- [R090135-PERF-004] evictOldestMissedCache 持锁内 sort,稀发 — internal/dashboard/cron/handlers.go:816
+- [R090135-PERF-005] HandleList views slice 未 pool,15KB/req — internal/dashboard/cron/handlers.go:990
+- [R090135-PERF-009] batchRecentRuns out slice 未 pool,400B — internal/dashboard/cron/handlers.go:889
+- [R090135-PERF-010] missedScheduleVerdict miss 双 Lock,可 double-checked — internal/dashboard/cron/handlers.go:773
+- [R090135-GO-3] session error errMsg 未在调用点 sanitise,recordTerminalResult 已脱敏(GO-2 修后) — internal/cron/scheduler_run.go:1265
+- [R20260607-SEC-D] EvalSymlinks fallback 在 fs.ErrNotExist 用 raw allowedRoot — 仅目录不存在时触发,无可利用符号链接,假设性 hardening — internal/dashboard/cron/transcript.go:436
+- [R20260607-CORR-003] warmCacheLocked:300 注释称"another goroutine warmed before jobLock"实为不可能,误导未来 reviewer — internal/cron/runstore_cache.go:300
+- [R20260607-CORR-006] setWatchdogInterruptTimeoutForTest 入口断言在隔离运行时被旁路,seam 自测覆盖缺口 — internal/cron/scheduler_watchdog_timeout_seam_test.go:23
+- [R20260607-CORR-007] cacheGet RLock 在 disk-scan 窗口可观察 warm=false 触发 jobLock 重试,缺可观测点(FUSE 多秒 ReadDir) — internal/cron/runstore_cache.go:313
+- [R20260607-LOGIC-001] executeGetSession session-error errMsg 未在 call site 预脱敏(下游 recordTerminalResult 已脱敏),与 send-error 路径不对称,维护债 — internal/cron/scheduler_run.go:1265
+- [R20260607-PERF-011] knownSessionsCache.publish 用 time.Now() 而非注入时钟,测试 TTL 非确定 — internal/cron/scheduler_session_cache.go:74
+- [PR1953-GO-1] discovery.Scan 的 excludeSessionIDs / managedCWDs 移除 session-ID upgrade 后已成纯死参数,保留仅为不改 3 个调用点;若将来 CI 接入 unparam 会被标记,届时可一并清理签名 — internal/discovery/scanner.go:343
+- [R20260608133928-COS-1] cli.ImageData 已弃用，~20 处 dispatch/server/shim 用法待迁移到 cli.Attachment(SA1019) — internal/dispatch/dispatch.go
+- [R20260608133928-COS-2] session.CronKey 弃用，测试应改用 sessionkey.CronKey(SA1019) — internal/cron/ensure_stub_lockorder_test.go:43
+- [R20260608133928-COS-3] cronview_contract_test.go:78 SA4023 always-false 比较是有意的反模式文档，建议改 t.Log 措辞 — internal/server/cronview_contract_test.go:78
+- [R20260608133928-COS-4] rotate() reopen-fd 错误返回路径依赖单个 rotateOK=false defer 驱逐，建议加内联注释防未来 tidy 误删 — internal/eventlog/persist/rotate.go:164
+- [R20260608133928-COS-5] shim validateKeyForShim maxKeyBytes=515 硬编码魔数，建议契约测试数值断言 == session.MaxSessionKeyBytes — internal/shim/manager.go:58
+- [R20260608133928-COS-6] reapFreshSessionLocked warn 日志冗余重复 job_id(已在 lg context) — internal/cron/scheduler_run.go:1122

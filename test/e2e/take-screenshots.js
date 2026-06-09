@@ -40,7 +40,7 @@ async function main() {
   await dp.waitForTimeout(200);
 
   // 5. Cron panel
-  await dp.click('#btn-cron');
+  await dp.click('#abnav-cron');
   await dp.waitForSelector('.cron-detail');
   await dp.waitForTimeout(500);
   await dp.screenshot({ path: path.join(SHOTS_DIR, '05-desktop-cron-panel.png') });

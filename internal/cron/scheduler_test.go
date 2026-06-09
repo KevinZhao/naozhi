@@ -15,7 +15,7 @@ import (
 
 // realRouterAdapter wraps a real *session.Router into the post-Phase-B
 // cron.SessionRouter interface for integration tests that need the
-// router's stub-tracking semantics. Mirrors cmd/naozhi/cron_router_adapter.go
+// router's stub-tracking semantics. Mirrors internal/wireup/cron_router_adapter.go
 // without re-using main's adapter (cmd/* is not importable from internal/*).
 type realRouterAdapter struct{ r *session.Router }
 
@@ -1038,14 +1038,13 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	}
 }
 
-// TestIsExcluded_FastPathSkipsCacheBuild verifies the R245-GO-4 fast path:
-// when IsExcluded hits via Job.LastSessionID on a cold cache, it MUST
-// short-circuit without populating the TTL snapshot — leaving the cache
-// cold so a subsequent KnownSessionIDs() call still rebuilds the full
-// set (jobs + runningJobs + runStore.Recent). The previous implementation
-// always built the full set, paying the O(jobs × recentCap) cost on every
-// spawn-time probe. (#844)
-func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
+// TestIsExcluded_FastPathWarmsCache verifies the R20260609-COR-003 (#1978)
+// contract: when IsExcluded hits via Job.LastSessionID on a cold cache it
+// still returns true cheaply, but — unlike the original R245-GO-4 (#844)
+// fast path which left the cache cold — it now WARMS the TTL cache so a
+// steady-state probe stream that always hits LastSessionID no longer leaves
+// the dashboard's 1Hz KnownSessionIDs() cold-rebuilding on every tick.
+func TestIsExcluded_FastPathWarmsCache(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
@@ -1075,16 +1074,19 @@ func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
 	}
 	s.knownSessionsCache.mu.Unlock()
 
-	// Fast-path hit (LastSessionID match). Must return true without
-	// populating the TTL cache.
+	// Fast-path hit (LastSessionID match). Must return true AND warm the TTL
+	// cache (#1978) so subsequent KnownSessionIDs() callers reuse the build.
 	if !s.IsExcluded("fastpath-aaaa-bbbb-cccc-000000000001") {
 		t.Fatalf("IsExcluded did not match seeded LastSessionID")
 	}
 	s.knownSessionsCache.mu.Lock()
 	cached := s.knownSessionsCache.set
 	s.knownSessionsCache.mu.Unlock()
-	if cached != nil {
-		t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+	if cached == nil {
+		t.Fatalf("fast-path hit must warm the TTL cache (#1978); cache still cold")
+	}
+	if _, ok := cached["fastpath-aaaa-bbbb-cccc-000000000001"]; !ok {
+		t.Fatalf("warmed cache missing the fast-path session id; got %v", cached)
 	}
 
 	// Probe a sessionID that is NOT in any cheap source — the slow path
@@ -1149,14 +1151,17 @@ func TestLookupKnownSessionID(t *testing.T) {
 		if !s.LookupKnownSessionID("lookup-aaaa-bbbb-cccc-000000000001") {
 			t.Fatal("LookupKnownSessionID did not match seeded LastSessionID")
 		}
-		// Mirror the IsExcluded fast-path contract: LastSessionID hit must NOT
-		// poison the TTL cache, so a follow-up KnownSessionIDs() still rebuilds
-		// the full set.
+		// Mirror the IsExcluded fast-path contract (#1978): a LastSessionID hit
+		// now WARMS the TTL cache so a follow-up KnownSessionIDs() reuses the
+		// build instead of cold-rebuilding on every probe.
 		s.knownSessionsCache.mu.Lock()
 		cached := s.knownSessionsCache.set
 		s.knownSessionsCache.mu.Unlock()
-		if cached != nil {
-			t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+		if cached == nil {
+			t.Fatalf("fast-path hit must warm the TTL cache (#1978); cache still cold")
+		}
+		if _, ok := cached["lookup-aaaa-bbbb-cccc-000000000001"]; !ok {
+			t.Fatalf("warmed cache missing the fast-path session id; got %v", cached)
 		}
 	})
 

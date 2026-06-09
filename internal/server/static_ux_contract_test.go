@@ -63,41 +63,6 @@ func TestDashboardJS_NoPromptIsLocalized(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_CronBadgeAlertClass pins the R110-P1 fix that the cron
-// header badge toggles the .is-alert red variant when any jobs need attention
-// (paused or last_error). The history badge is intentionally left neutral
-// because it is a cumulative count, not an unread/failure signal — so this
-// test also asserts history-badge's classList is NOT being mutated toward
-// is-alert in the same render path.
-func TestDashboardJS_CronBadgeAlertClass(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-	if !strings.Contains(js, "cronBadge.classList.toggle('is-alert', attention > 0)") {
-		t.Error("dashboard.js: cron badge must toggle 'is-alert' based on attention count")
-	}
-	// History badge block (id 'history-badge') must not grow an is-alert
-	// toggle. Search within the surrounding neighborhood to keep the
-	// assertion robust against unrelated later references to the class.
-	hIdx := strings.Index(js, "history-badge")
-	if hIdx < 0 {
-		t.Fatal("history-badge reference not found in dashboard.js")
-	}
-	// Slice ~400 chars around the history-badge render site — that is the
-	// full block that writes textContent + style.display.
-	end := hIdx + 800
-	if end > len(js) {
-		end = len(js)
-	}
-	window := js[hIdx:end]
-	if strings.Contains(window, "hBadge.classList") && strings.Contains(window, "is-alert") {
-		t.Error("history-badge must stay neutral grey (no is-alert toggle); it is a cumulative count, not an alert")
-	}
-}
-
 // TestDashboardJS_FormatAbsTimeHoverTitles pins the R110-P3 time-format-unify
 // fix: relative labels ("3m ago", "next 2h") stay compact in the UI, but the
 // three surfaces that render them — history popover / session card / cron
@@ -106,11 +71,15 @@ func TestDashboardJS_CronBadgeAlertClass(t *testing.T) {
 // are what the test actually cares about.
 func TestDashboardJS_FormatAbsTimeHoverTitles(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 	// 1. Helper exists. Without this all three call sites are noise.
 	if !strings.Contains(js, "function formatAbsTime(ms)") {
 		t.Error("dashboard.js: formatAbsTime helper must be defined")
@@ -246,7 +215,10 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	// rollback doesn't accidentally de-fix code rendering.
 	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
 	// font-size:13px and the SF Mono stack are intentionally left as-is.
-	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
+	// R20260608: bg moved var(--nz-border)→var(--nz-bg-2) and color #e6edf3→
+	// var(--nz-code-fg) so inline code stays legible in light theme. The
+	// monospace stack (the actual subject of this guard) is unchanged.
+	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
@@ -390,7 +362,7 @@ func TestDashboardJS_AuthModalHintsAtConfig(t *testing.T) {
 // sub-hint explains the feature for unfamiliar operators.
 func TestDashboardJS_CronEmptyStateSub(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -1462,7 +1434,7 @@ func TestDashboardHTML_R122_FontMonoToken(t *testing.T) {
 // Chinese copy + accurate affordance.
 func TestDashboardJS_R122_CronEmptyPromptLocalized(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -1685,36 +1657,27 @@ func TestDashboardHTML_R110HeaderBadgePalette(t *testing.T) {
 // filesystem-stored sessions that are not in the live workspace — it
 // is not an unread / failure / alert signal. Red would misread as
 // "something needs attention" when the number has been sitting there
-// for months. The rendering path must:
+// for months. The rendering path must set textContent + display, but
+// NEVER add the .is-alert class.
 //
-//  1. Set textContent + display, but NEVER add the .is-alert class.
-//  2. The only `classList.toggle('is-alert', ...)` call in dashboard.js
-//     must be the cron attention one — the history badge must not
-//     acquire a second such site in the future.
+// (The sibling header cron-badge that used to be the file's one
+// legitimate is-alert site was removed when the sidebar 定时任务
+// quick-button folded into the rail's 自动化 entry; the rail mirror
+// uses a hidden flag, not the is-alert class.)
 func TestDashboardJS_R110HistoryBadgeIsNeutral(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
-	// The only is-alert toggle in the file should be the cron one.
-	// If somebody adds a `hBadge.classList.toggle('is-alert', ...)`
-	// or similar, count goes to ≥2 and the test flags it.
-	toggleCount := strings.Count(js, "classList.toggle('is-alert'")
-	if toggleCount != 1 {
-		t.Errorf("dashboard.js has %d `classList.toggle('is-alert'...)` sites — expected exactly 1 (cron attention). The history badge must stay neutral.", toggleCount)
-	}
-	// The single toggle must be on cronBadge, not on the history
-	// badge. If the target variable ever changes to hBadge the
-	// single-count check above would still pass, so pin the variable
-	// name directly.
-	if !strings.Contains(js, "cronBadge.classList.toggle('is-alert'") {
-		t.Error("dashboard.js is-alert toggle must target cronBadge (cron attention), not the history badge")
-	}
-	// Conversely, the history-badge pipeline must still be present
-	// and must not touch is-alert.
+	// The history-badge pipeline must still be present and must not
+	// touch is-alert.
 	hIdx := strings.Index(js, "getElementById('history-badge')")
 	if hIdx < 0 {
 		t.Fatal("dashboard.js missing history-badge pipeline")
@@ -2134,7 +2097,7 @@ func TestDashboardHTML_FileThumbHonorsEXIFOrientation(t *testing.T) {
 // NEVER wires into buildFreqSchedule.
 func TestDashboardJS_R110P1_CronStepValueHumanize(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -3046,7 +3009,7 @@ func TestDashboardHTML_UXP3_UploadReorderStyles(t *testing.T) {
 //     buttons carry data-status attributes matching the status filter domain.
 func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -3143,7 +3106,7 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 // a different template than the initial shell paint.
 func TestDashboardJS_R110P2_CronFilterBoundary(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -3536,15 +3499,18 @@ func TestDashboardHTML_R144_TopNavA11yLabelsLocalized(t *testing.T) {
 }
 
 // TestDashboardHTML_R149_HeaderIconA11yLocalized pins the Round 149
-// follow-on to Round 144: the hdr-btn icons `btn-history` and `btn-cron`
-// had `title="History"` / `"Cron Jobs"` + `aria-label="Show session
-// history"` / `"Cron jobs"` left in English, which clashed with the
-// otherwise-Chinese a11y surface (Round 116 did btn-mobile-back/nav-prev/
-// nav-next/btn-hold-talk; Round 144 did sf-help/resizer/main). The two
-// invisible badges nested inside (history-badge, cron-badge) also had
-// English aria-labels. This round localizes all four plus the nav's
+// follow-on to Round 144: the hdr-btn icon `btn-history` had
+// `title="History"` + `aria-label="Show session history"` left in English,
+// which clashed with the otherwise-Chinese a11y surface (Round 116 did
+// btn-mobile-back/nav-prev/nav-next/btn-hold-talk; Round 144 did
+// sf-help/resizer/main). The invisible history-badge nested inside also had
+// an English aria-label. This round localizes those plus the nav's
 // top-level `aria-label="Sessions"`, while the `+` New Session button
 // stays English (hard E2E contract — see Round 144 test).
+//
+// (The sibling btn-cron/cron-badge anchors this test used to pin were
+// dropped when the sidebar 定时任务 quick-button folded into the rail's
+// 自动化 entry.)
 //
 // The history popover header text "History (N)" → "历史 (N)" is covered
 // by the sibling TestDashboardJS_R149_HistoryPopoverHeaderLocalized so the
@@ -3567,9 +3533,6 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 		{"btn-history title", `title="历史会话"`},
 		{"btn-history aria-label", `aria-label="查看会话历史"`},
 		{"history-badge aria-label", `aria-label="历史记录数"`},
-		{"btn-cron title", `title="定时任务"`},
-		{"btn-cron aria-label", `aria-label="定时任务面板"`},
-		{"cron-badge aria-label", `aria-label="定时任务数"`},
 	}
 	for _, w := range wantChinese {
 		if !strings.Contains(html, w.fragment) {
@@ -3588,9 +3551,6 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 		{"btn-history title legacy", `title="History"`},
 		{"btn-history aria-label legacy", `aria-label="Show session history"`},
 		{"history-badge legacy", `aria-label="unread history count"`},
-		{"btn-cron title legacy", `title="Cron Jobs"`},
-		{"btn-cron aria-label legacy", `aria-label="Cron jobs"`},
-		{"cron-badge legacy", `aria-label="cron job count"`},
 	}
 	for _, f := range forbiddenEnglish {
 		if strings.Contains(html, f.fragment) {
@@ -3631,11 +3591,15 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 // were already locked by Round 153.
 func TestDashboard_R155_AuxLabelsLocalized(t *testing.T) {
 	t.Parallel()
-	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(jsBytes)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// Invariant 1: token input placeholder. Both initial and countdown
 	// reset must use the same string — inconsistency would surface on
@@ -3728,11 +3692,15 @@ func TestDashboard_R155_AuxLabelsLocalized(t *testing.T) {
 // are all id-based or class-based.
 func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 	t.Parallel()
-	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(jsBytes)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// Invariant 1: session-new modal + custom-workspace modal. The
 	// <h3>New Session</h3> is hard-locked by E2E so we both assert it
@@ -4735,7 +4703,7 @@ func TestDashboardHTML_R110P1_HdrBtnCoarsePointerSize(t *testing.T) {
 //     so a future untranslated toast regresses this test.
 func TestDashboardJS_R110P2_CronRunNowButton(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -4828,7 +4796,7 @@ func TestDashboardJS_R110P2_CronRunNowButton(t *testing.T) {
 // run button exists; it does not pin the surrounding zone structure.
 func TestDashboardJS_R110P2_CronCardV3LayoutAnchor(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -5497,7 +5465,7 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 // to nothing, show a placeholder instead of a blank pane.
 func TestDashboardJS_CronLiveAgentOnlyPlaceholder(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -5661,6 +5629,73 @@ func TestDashboardJS_SandboxedBlobRender(t *testing.T) {
 	staleChecks := strings.Count(helper, "mySeq !== _sandboxRenderSeq")
 	if staleChecks < 3 {
 		t.Errorf("renderSandboxedBlob must check mySeq !== _sandboxRenderSeq at every await boundary (got %d, want >=3)", staleChecks)
+	}
+}
+
+// TestDashboardJS_SandboxedBlobMobileSrcdoc pins the mobile-WebKit fallback in
+// renderSandboxedBlob. On iOS Safari and the in-app webviews Feishu / WeChat
+// use (all WebKit), a sandboxed iframe pointed at a parent-minted blob: URL is
+// treated as a cross-origin navigation and silently blocked — the frame stays
+// blank with no console error (WebKit bug 170075; cf. bulwarkmail/webmail
+// #253). The fix keeps the desktop blob: path (no inherited CSP → widest
+// capability) and, only when isMobile(), inlines the bytes via iframe.srcdoc,
+// which sidesteps the blob: scheme. Isolation is unchanged because the sandbox
+// still withholds the same-origin token in both paths (asserted by
+// TestDashboardJS_SandboxedBlobRender).
+//
+// This contract guards three regressions:
+//  1. The mobile branch exists and uses srcdoc (not frame.src = blob URL).
+//  2. The branch is gated on isMobile() so desktop keeps the blob: path —
+//     switching desktop to srcdoc would regress pages loading non-jsdelivr
+//     CDN scripts, which the inherited dashboard CSP blocks.
+//  3. The mobile srcdoc path allocates no blob URL, so the leak-tracking slot
+//     (_pendingSandboxBlobUrl) is only ever written on the desktop path.
+func TestDashboardJS_SandboxedBlobMobileSrcdoc(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	helperIdx := strings.Index(js, "async function renderSandboxedBlob(")
+	if helperIdx < 0 {
+		t.Fatal("dashboard.js missing renderSandboxedBlob — structural anchor for mobile srcdoc contract")
+	}
+	endIdx := strings.Index(js[helperIdx:], "\nfunction scrollToPreviewLine(")
+	if endIdx < 0 {
+		t.Fatal("dashboard.js missing scrollToPreviewLine — cannot bound renderSandboxedBlob body")
+	}
+	helper := js[helperIdx : helperIdx+endIdx]
+
+	// 1. Mobile fallback inlines bytes via iframe.srcdoc.
+	if !strings.Contains(helper, "frame.srcdoc") {
+		t.Error("renderSandboxedBlob must set frame.srcdoc on the mobile path — a sandboxed iframe pointed at a blob: URL is silently blocked on iOS/WebKit (WebKit bug 170075)")
+	}
+	// The bytes arrive as an ArrayBuffer; srcdoc needs a decoded string.
+	if !strings.Contains(helper, "TextDecoder") {
+		t.Error("renderSandboxedBlob mobile path must decode the ArrayBuffer (TextDecoder) before assigning frame.srcdoc")
+	}
+
+	// 2. The srcdoc path is gated behind isMobile() — desktop must keep the
+	// blob: path so workspace HTML loading third-party CDN scripts is not
+	// regressed by the dashboard CSP that a srcdoc document inherits.
+	if !strings.Contains(helper, "isMobile()") {
+		t.Error("renderSandboxedBlob must gate the srcdoc fallback on isMobile() — desktop keeps the blob: path (blob: documents carry no inherited CSP)")
+	}
+	// The blob: path (desktop) must still exist — frame.src assignment from a
+	// createObjectURL result. Guards against a regression that drops desktop
+	// blob rendering entirely in favour of srcdoc-everywhere.
+	if !strings.Contains(helper, "frame.src = url") {
+		t.Error("renderSandboxedBlob must keep the desktop blob: path (frame.src = url) — srcdoc-everywhere regresses desktop pages that load non-jsdelivr CDN scripts via the inherited CSP")
+	}
+
+	// 3. _pendingSandboxBlobUrl (the revoke-tracking slot) must be assigned
+	// only on the desktop blob path. The mobile srcdoc path allocates no blob
+	// URL, so tracking it there would be a dangling reference. Exactly one
+	// assignment (`_pendingSandboxBlobUrl = url`) should exist in the helper.
+	if assigns := strings.Count(helper, "_pendingSandboxBlobUrl = url"); assigns != 1 {
+		t.Errorf("renderSandboxedBlob must assign _pendingSandboxBlobUrl exactly once (desktop blob path); got %d — the mobile srcdoc path allocates no blob URL and must not track one", assigns)
 	}
 }
 
@@ -6192,30 +6227,38 @@ func TestDashboardJS_RNEW_UX015_HexBaseline(t *testing.T) {
 // sites migrate in later rounds.
 func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// PR-0a (RFC dashboard-cron-view-extraction): fetchJSON moved to the shared
+	// nz_util.js layer. The helper declaration now lives there; call sites stay
+	// in dashboard.js. Assert both halves of the contract across the two files.
+	utilData, err := nzUtilJS.ReadFile("static/nz_util.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read nz_util.js: %v", err)
 	}
-	js := string(data)
-	idx := strings.Index(js, "async function fetchJSON(url, opts")
+	util := string(utilData)
+	idx := strings.Index(util, "async function fetchJSON(url, opts")
 	if idx < 0 {
-		t.Fatalf("RNEW-UX-003: missing fetchJSON helper declaration")
+		t.Fatalf("RNEW-UX-003: missing fetchJSON helper declaration in nz_util.js")
 	}
 	end := idx + 4096
-	if end > len(js) {
-		end = len(js)
+	if end > len(util) {
+		end = len(util)
 	}
-	body := js[idx:end]
+	body := util[idx:end]
 	if !strings.Contains(body, "AbortController") {
 		t.Errorf("RNEW-UX-003: fetchJSON body missing AbortController reference")
 	}
 	if !strings.Contains(body, "timeoutMs = 10000") && !strings.Contains(body, "10000") {
 		t.Errorf("RNEW-UX-003: fetchJSON missing 10000ms default timeout")
 	}
-	// Helper's own declaration uses `function fetchJSON(`, so counting
-	// `fetchJSON(` occurrences must be >=2 to prove at least one caller.
-	if n := strings.Count(js, "fetchJSON("); n < 2 {
-		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller plus the definition, got %d total occurrences", n)
+	// At least one caller must remain in dashboard.js, proving the migrated
+	// helper is actually consumed (the bare alias window.fetchJSON keeps the
+	// call sites unchanged).
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	if n := strings.Count(string(data), "fetchJSON("); n < 1 {
+		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller in dashboard.js, got %d", n)
 	}
 }
 
@@ -6244,11 +6287,21 @@ func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
 //     for the "cron:" prefix check (used by the dismiss guard).
 func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): sidebar/session-list code (sessionCardHtml,
+	// renderMainShell, dismissSession) stayed in dashboard.js while cron render
+	// helpers (cronDrawerHtml, isCronSessionKey) moved to cron_view.js. This
+	// test spans both, so assert against their concatenation. All negative
+	// assertions below target strings absent from BOTH files, so the union is
+	// safe.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// 1. Retired UI-bandage helpers must be gone. The server now filters
 	//    cron stubs in /api/sessions (see TestSessionsList_CronFilteredOut),
@@ -6564,37 +6617,44 @@ func TestDashboardHTML_CronCardLegacyStylesStripped(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_CronOverviewBar pins cron-dashboard-redesign P0 §4.2:
-// the four-chip overview strip is rendered above the filter bar, including
-// counts for healthy + running buckets. The strip MUST always render (not
-// gated by the >5 jobs threshold filterBar uses) so users get status counts
-// at a glance even with a small number of jobs.
-func TestDashboardJS_CronOverviewBar(t *testing.T) {
+// TestDashboardJS_CronOverviewBarRemoved pins the removal of the cron
+// "任务概览" overview chip strip (formerly cron-dashboard-redesign P0 §4.2).
+// The 健康 / 运行中 chips and their healthy/running filter predicates were
+// dropped per product decision; this guards against any reintroduction so
+// the strip doesn't silently creep back via a future merge.
+func TestDashboardJS_CronOverviewBarRemoved(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read cron_view.js: %v", err)
 	}
 	js := string(data)
-	for _, want := range []string{
+	for _, gone := range []string{
 		"cron-overview",
 		"cron-ov-chip",
 		"healthyCount",
 		"runningCount",
 		"overviewBar",
+		"status !== 'healthy'",
+		"status !== 'running'",
+		"if (s === 'healthy')",
+		"if (s === 'running'",
 	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("dashboard.js missing P0 overview marker %q", want)
+		if strings.Contains(js, gone) {
+			t.Errorf("cron_view.js must no longer contain removed overview marker %q", gone)
 		}
 	}
-	if !strings.Contains(js, "status !== 'healthy'") || !strings.Contains(js, "status !== 'running'") {
-		t.Error("setCronStatusFilter must accept 'healthy' and 'running' status values")
+
+	// The CSS rules backing the strip must be gone from dashboard.html too.
+	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
 	}
-	if !strings.Contains(js, "if (s === 'healthy')") {
-		t.Error("filterCronJobs must implement the 'healthy' predicate")
-	}
-	if !strings.Contains(js, "if (s === 'running'") {
-		t.Error("filterCronJobs must implement the 'running' predicate")
+	html := string(htmlData)
+	for _, gone := range []string{".cron-overview", ".cron-ov-chip", ".cron-ov-num"} {
+		if strings.Contains(html, gone) {
+			t.Errorf("dashboard.html must no longer contain removed overview CSS rule %q", gone)
+		}
 	}
 }
 
@@ -6606,7 +6666,7 @@ func TestDashboardJS_CronOverviewBar(t *testing.T) {
 // future regression in any of the three is caught at compile time.
 func TestDashboardJS_CronCockpit(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -6661,11 +6721,15 @@ func TestDashboardHTML_CronCockpitAndStickyActionsCSS(t *testing.T) {
 // renderMd — to keep arbitrary subprocess stdout from injecting HTML.
 func TestDashboardJS_TranscriptTabs(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 	for _, want := range []string{
 		"function cronRunTranscriptHtml(",
 		"function cronRunTurnHtml(",
@@ -6783,9 +6847,12 @@ func TestDashboardJS_InlineMathAcceptsFunctionRefs(t *testing.T) {
 // silently re-introducing the reentrancy hazard.
 func TestDashboardJS_EscIsPureString(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// PR-0a (RFC dashboard-cron-view-extraction): esc/escAttr/escJs moved to the
+	// shared nz_util.js layer. The pure-string security contract follows the
+	// implementation there.
+	data, err := nzUtilJS.ReadFile("static/nz_util.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read nz_util.js: %v", err)
 	}
 	js := string(data)
 
@@ -6893,7 +6960,7 @@ func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 //     MUST NOT splice them through innerHTML).
 func TestDashboardJS_R243Perf8_CronTickScopedTextUpdate(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -6975,7 +7042,7 @@ func TestDashboardJS_R243Perf8_CronTickScopedTextUpdate(t *testing.T) {
 // invariants) instead of one omnibus assertion bundle.
 func TestDashboardJS_R243Perf8_CronTickPerformanceInvariants(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -7059,7 +7126,7 @@ func TestDashboardJS_R243Perf8_CronTickPerformanceInvariants(t *testing.T) {
 // to the ensureCronRunningTick function body.
 func TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -7124,11 +7191,18 @@ func TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard(t *testing.T) {
 //     undo the debounce no matter how thorough the wrapper itself is.
 func TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// cron extraction (PR-1): the debounced wrapper + fetcher moved to
+	// cron_view.js, but the WS cron_run_ended handler that routes through it
+	// stayed in dashboard.js (WS core). Assert on the union.
+	dashData, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	js := string(data)
+	cronData, err := cronViewJS.ReadFile("static/cron_view.js")
+	if err != nil {
+		t.Fatalf("read cron_view.js: %v", err)
+	}
+	js := string(dashData) + "\n" + string(cronData)
 
 	// (1) Wrapper exists.
 	if !strings.Contains(js, "function cronTimelineRefreshHeadDebounced(jobId)") {

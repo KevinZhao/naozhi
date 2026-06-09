@@ -61,11 +61,9 @@ func (b *blockingInterrupter) waitDrained(t *testing.T) {
 // promptly with fired=true and outcome=InterruptError, and finally
 // releases the stub so the inner goroutine drains cleanly.
 func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
-	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	// R20260607-GO-4 (#1904): timeout is now a per-call parameter, so this test
+	// is fully isolated and may run in parallel.
+	t.Parallel()
 
 	bi := &blockingInterrupter{release: make(chan struct{}), returned: make(chan struct{}), outcome: InterruptSent}
 	defer bi.waitDrained(t) // ensure the parked goroutine drains before returning
@@ -74,7 +72,7 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	ch, _ := runDeadlineWatchdog(ctx, bi)
+	ch, _ := runDeadlineWatchdog(ctx, bi, 50*time.Millisecond)
 
 	select {
 	case abort := <-ch:
@@ -97,14 +95,14 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 // R20260527122801-SEC-3 (#1327). The watchdog timeout branch publishes
 // CronWatchdogInterruptTimeoutTotal so operators can alert on wedged
 // InterruptViaControl events; pre-fix the timeout fired silently and the
-// only signal was a slow-rising goroutine count. NOT t.Parallel() —
-// mutates the package-level watchdogInterruptTimeoutAtomic and reads the
-// shared metric counter (which other tests may also touch but only via
-// strict deltas around this test).
+// only signal was a slow-rising goroutine count. NOT t.Parallel() — reads the
+// shared metric counter (which other tests may also touch but only via strict
+// deltas around this test). The timeout is now a per-call parameter (#1904).
 func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	// NOT t.Parallel() — reads the shared CronWatchdogInterruptTimeoutTotal
+	// counter with a strict delta assertion. The timeout itself is now a
+	// per-call parameter (#1904), so the metric — not a global timeout — is the
+	// only remaining reason this test stays serial.
 
 	before := metrics.CronWatchdogInterruptTimeoutTotal.Value()
 
@@ -115,7 +113,7 @@ func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	chBI, _ := runDeadlineWatchdog(ctx, bi)
+	chBI, _ := runDeadlineWatchdog(ctx, bi, 50*time.Millisecond)
 	abort := <-chBI
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
@@ -133,12 +131,11 @@ func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
 // bump the LIVE parked-goroutine gauge (so a persistent never-reset job's
 // permanent leak is observable as a rising current value), and when the
 // wedged InterruptViaControl finally unblocks the inner goroutine must
-// decrement the gauge back to baseline. NOT t.Parallel() — mutates
-// package-level watchdogInterruptTimeoutAtomic and the shared gauge.
+// decrement the gauge back to baseline. NOT t.Parallel() — reads the shared
+// gauge. The timeout is a per-call parameter now (#1904).
 func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	// NOT t.Parallel() — reads the shared parked-goroutine gauge. Timeout is a
+	// per-call parameter now (#1904).
 
 	// returned + waitDrained guarantee THIS test's parked inner goroutine
 	// (and its gauge -1) drains before the test returns, so it leaves no
@@ -158,7 +155,7 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 	// timeout this test used to flake on. Waiting for a stable value pins an
 	// honest baseline.
 	base := settleParkedGauge()
-	chBase, _ := runDeadlineWatchdog(ctx, bi)
+	chBase, _ := runDeadlineWatchdog(ctx, bi, 50*time.Millisecond)
 	abort := <-chBase
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
@@ -228,17 +225,15 @@ func settleParkedGauge() int64 {
 // the watchdog fires — the CAS(0→2) loses to the inner goroutine's
 // CAS(0→1) so no increment happens. R20260602-GO-005 (#1632).
 func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(200 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
-
+	// NOT t.Parallel() — reads the shared parked-goroutine gauge. Timeout is a
+	// per-call parameter now (#1904).
 	base := watchdogParkedInterruptGoroutines.Value()
 
 	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	chCI, _ := runDeadlineWatchdog(ctx, ci)
+	chCI, _ := runDeadlineWatchdog(ctx, ci, 200*time.Millisecond)
 	abort := <-chCI
 	if !abort.fired || abort.outcome != InterruptSent {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptSent}",
@@ -256,17 +251,15 @@ func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
 // path does NOT fire when InterruptViaControl returns promptly — the
 // real outcome is preserved, not overridden to InterruptError.
 func TestRunDeadlineWatchdog_FastInterruptStillWins(t *testing.T) {
-	// NOT t.Parallel() — mutates package-level watchdogInterruptTimeoutAtomic.
-
-	prev := watchdogInterruptTimeoutAtomic.Load()
-	watchdogInterruptTimeoutAtomic.Store(int64(200 * time.Millisecond))
-	defer watchdogInterruptTimeoutAtomic.Store(prev)
+	// R20260607-GO-4 (#1904): timeout is a per-call parameter, so this test is
+	// isolated and may run in parallel.
+	t.Parallel()
 
 	ci := &countingInterrupter{outcome: InterruptUnsupported}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	chUnsup, _ := runDeadlineWatchdog(ctx, ci)
+	chUnsup, _ := runDeadlineWatchdog(ctx, ci, 200*time.Millisecond)
 	abort := <-chUnsup
 	if !abort.fired {
 		t.Fatal("abort.fired = false; want true on DeadlineExceeded")

@@ -20,7 +20,7 @@ import (
 //  5. editCronJob 打开后不调用 freqUpdate()（避免覆盖 seed）
 func TestDashboardJS_CronEditScheduleSafety(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestDashboardJS_CronEditScheduleSafety(t *testing.T) {
 // 路径都不受影响。
 func TestDashboardJS_CronEditWorkDirSeed(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestDashboardJS_CronEditWorkDirSeed(t *testing.T) {
 // 表达式），用于卡片列表和 legacy hint 的视觉展示。
 func TestDashboardJS_CronHumanizeFallbacks(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestDashboardJS_CronHumanizeFallbacks(t *testing.T) {
 //   - 周末 "0,6" → null（v2 picker 无 Weekend mode）
 func TestDashboardJS_CronParseRoundTripGuards(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	data, err := cronViewJS.ReadFile("static/cron_view.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}

@@ -205,7 +205,13 @@ func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool)
 	if s == nil {
 		return workDirResolveUnderRoot(workDir, "", "")
 	}
-	now := time.Now()
+	// R050103P-ALLOC-2 (#1909): read the cache clock through the injectable
+	// s.now() seam (clock.go) rather than time.Now() directly, matching the
+	// #1731 clock-injection discipline introduced with these caches. This lets
+	// the workDirResolveCacheTTL boundary be exercised with a fake step clock
+	// instead of a real sleep. s != nil here (the nil branch returned above),
+	// so s.now() reads the wired clock with its own wall-clock fallback.
+	now := s.now()
 	// R20260526-PERF-002 (#1225): use precomputed suffix to avoid the
 	// three-segment concat allocation each tick. Equivalent to
 	// workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved).
@@ -233,7 +239,9 @@ func (s *Scheduler) workDirReachableCached(workDir string) bool {
 	if s == nil || workDir == "" {
 		return workDirReachable(workDir)
 	}
-	now := time.Now()
+	// R050103P-ALLOC-2 (#1909): use the injectable s.now() seam, see the sibling
+	// note in workDirResolveUnderRootCached. s != nil here.
+	now := s.now()
 	if _, ok := s.workDirReachableCache.lookup(workDir, now); ok {
 		return true
 	}

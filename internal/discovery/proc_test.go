@@ -122,30 +122,6 @@ func TestProcessAlive_DeadPID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// sortByLastActive
-// ---------------------------------------------------------------------------
-
-func TestSortByLastActive(t *testing.T) {
-	candidates := []scanCandidate{
-		{lastActive: 300},
-		{lastActive: 100},
-		{lastActive: 200},
-	}
-	indices := []int{0, 1, 2}
-	sortByLastActive(indices, candidates)
-	// Most stale first = smallest lastActive first
-	if candidates[indices[0]].lastActive != 100 {
-		t.Errorf("index[0] lastActive = %d, want 100", candidates[indices[0]].lastActive)
-	}
-	if candidates[indices[1]].lastActive != 200 {
-		t.Errorf("index[1] lastActive = %d, want 200", candidates[indices[1]].lastActive)
-	}
-	if candidates[indices[2]].lastActive != 300 {
-		t.Errorf("index[2] lastActive = %d, want 300", candidates[indices[2]].lastActive)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // WaitAndCleanup
 // ---------------------------------------------------------------------------
 

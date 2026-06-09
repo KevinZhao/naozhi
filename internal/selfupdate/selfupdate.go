@@ -600,6 +600,20 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 	for _, line := range strings.Split(string(sums), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[1] == asset {
+			// R20260608133928-SEC-6: validate fields[0] before accepting it as
+			// the expected checksum. A comment-style line "# asset" would set
+			// expected="#" and produce a misleading "checksum mismatch: expected #"
+			// error instead of a clean rejection. Guard: skip comment-prefix lines,
+			// and only accept exactly 64 lower-hex characters (SHA-256 output size).
+			if strings.HasPrefix(fields[0], "#") {
+				continue
+			}
+			if len(fields[0]) != 64 {
+				return fmt.Errorf("checksums.txt: malformed checksum field %q for asset %q (want 64 hex chars)", fields[0], asset)
+			}
+			if _, err := hex.DecodeString(fields[0]); err != nil {
+				return fmt.Errorf("checksums.txt: non-hex checksum field %q for asset %q", fields[0], asset)
+			}
 			if expected != "" {
 				dupSeen = true
 				break

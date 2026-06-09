@@ -578,12 +578,22 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	// S9 (#389): clearing the browser cookie alone left the underlying MAC
-	// valid for the full 24h MaxAge — a stolen cookie replayed freely after
-	// logout. Bump cookieGenSeq so the issued MAC no longer authenticates;
-	// IsAuthenticated's constant-time compare now fails for any outstanding
-	// cookie, making logout a real server-side revocation.
-	a.RotateCookieGen()
+	// R20260607-SEC-7 (#1913): logout MUST NOT call RotateCookieGen(). Because
+	// every authenticated browser is issued the *same* CookieMAC value (the MAC
+	// is HMAC(secret, token||gen||seq) with no per-session entropy), a global
+	// seq bump invalidates every outstanding cookie at once. The endpoint is
+	// only RequireAuth-gated, so any holder of any valid cookie — including a
+	// stolen one — could log out every concurrent operator (denial-of-
+	// authentication). RotateCookieGen stays reserved for genuine secret-
+	// rotation events (see server.go), which legitimately revoke all sessions.
+	//
+	// Tradeoff (re S9 / #389): clearing only the browser cookie leaves the
+	// shared MAC valid for its MaxAge, so a cookie captured before logout can
+	// still replay. True per-cookie server-side revocation needs per-session
+	// cookie identity (a nonce baked into the cookie value + a revocation set),
+	// which is a larger redesign tracked separately. The narrow clear here is
+	// strictly safer than the global bump: a stolen cookie can no longer be
+	// weaponised to evict every other authenticated user.
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    "",
@@ -612,6 +622,17 @@ input[type="password"]:focus{border-color:#4a9eff}
 button{width:100%;padding:.75rem;background:#4a9eff;color:#fff;border:none;border-radius:8px;font-size:.95rem;cursor:pointer;font-weight:500;transition:background .2s}
 button:hover{background:#3a8eef}button:active{background:#2a7edf}
 .error{color:#ef4444;font-size:.85rem;margin-top:.75rem;min-height:1.2em}
+/* The login page renders before any dashboard JS, so it can't read the
+   persisted nz_theme; follow the OS preference instead. Dark stays the
+   default above; light users no longer get a jarring near-black card. */
+@media (prefers-color-scheme:light){
+  body{background:#f6f8fa;color:#1f2328}
+  .login{background:#fff;border-color:#d0d7de;box-shadow:0 1px 3px rgba(27,31,36,.08)}
+  .login p{color:#656d76}
+  input[type="password"]{background:#fff;border-color:#d0d7de;color:#1f2328}
+  input[type="password"]:focus{border-color:#0969da}
+  button{background:#0969da}button:hover{background:#0860c9}button:active{background:#0757ba}
+}
 </style></head><body>
 <div class="login">
 <h1>naozhi</h1>

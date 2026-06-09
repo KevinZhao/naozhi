@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// TestJobResultSnapshotRestore pins the contract that jobResultSnapshot.restore
+// TestJobResultSnapshotRestore pins the contract that JobState.restore
 // returns every field captured at snapshot time back to the target Job. The
 // recordTerminalResult rollback path relies on this round-trip when
 // persistJobsLocked fails — drift between the field set captured here and the
@@ -13,7 +13,7 @@ import (
 // dashboard reads. R247-CR-14 (#586).
 func TestJobResultSnapshotRestore(t *testing.T) {
 	t0 := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
-	original := jobResultSnapshot{
+	original := JobState{
 		LastRunAt:      t0,
 		LastResult:     "prior-result",
 		LastError:      "prior-err",
@@ -55,7 +55,7 @@ func TestJobResultSnapshotRestore(t *testing.T) {
 }
 
 // TestJobSnapshotResultStateRoundTrip pins R249-ARCH-22 (#986): the capture
-// helper Job.snapshotResultState and jobResultSnapshot.restore must be exact
+// helper Job.snapshotResultState and JobState.restore must be exact
 // inverses over the runtime-mutable result-state cluster. If a future change
 // adds a Last* / RunCounters-style state field to either snapshotResultState
 // or restore without the other, a snapshot→mutate→restore cycle would no
@@ -108,20 +108,12 @@ func TestJobSnapshotResultStateRoundTrip(t *testing.T) {
 	}
 }
 
-// TestJobStateAliasIdentity pins R238-ARCH-13 (#764): the runtime-state
-// cluster's canonical exported name is JobState, and jobResultSnapshot is
-// retained only as an alias of it so the historical capture/rollback call
-// sites and the round-trip tests above keep compiling. The first slice of
-// the Job god-struct split names the state half (JobState) without changing
-// the on-disk wire schema; this test fails if a future change reintroduces
-// two distinct types (drift between the snapshot used at the capture site
-// and the one asserted by the rollback tests) or renames the canonical type
-// out from under the alias.
-//
-// The assertion is compile-time: snapshotResultState must return a value
-// assignable to JobState, and a JobState value must be assignable to the
-// jobResultSnapshot alias and back, with restore reachable on both spellings.
-func TestJobStateAliasIdentity(t *testing.T) {
+// TestJobStateSnapshotRestore pins R238-ARCH-13 (#764): the runtime-state
+// cluster's canonical exported name is JobState. snapshotResultState must
+// return a value assignable to JobState and restore must round-trip all
+// fields back to the Job. This test fails if a future change renames JobState
+// or drifts its field set from snapshotResultState.
+func TestJobStateSnapshotRestore(t *testing.T) {
 	j := &Job{
 		LastResult:    "x",
 		LastSessionID: "sess",
@@ -130,27 +122,20 @@ func TestJobStateAliasIdentity(t *testing.T) {
 
 	// snapshotResultState's declared return type is JobState — this binding
 	// would not compile if the return type drifted to a distinct struct.
-	var canonical JobState = j.snapshotResultState()
+	var snap JobState = j.snapshotResultState()
 
-	// jobResultSnapshot is an alias of JobState: cross-assignment compiles
-	// only while they are the identical type.
-	var aliased jobResultSnapshot = canonical
-	canonical = aliased
-
-	// restore is reachable via both spellings and round-trips through the
-	// alias identically.
 	target := &Job{
 		LastResult:    "mutated",
 		LastSessionID: "sess-mutated",
 		RunCounters:   JobRunCounters{Total: 99, Succeeded: 99},
 	}
-	aliased.restore(target)
+	snap.restore(target)
 	if target.LastResult != "x" || target.LastSessionID != "sess" {
-		t.Errorf("restore via alias did not round-trip: result=%q session=%q",
+		t.Errorf("restore did not round-trip: result=%q session=%q",
 			target.LastResult, target.LastSessionID)
 	}
 	wantCounters := JobRunCounters{Total: 1, Succeeded: 1}
 	if target.RunCounters != wantCounters {
-		t.Errorf("restore via alias counters = %+v, want %+v", target.RunCounters, wantCounters)
+		t.Errorf("restore counters = %+v, want %+v", target.RunCounters, wantCounters)
 	}
 }

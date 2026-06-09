@@ -153,17 +153,31 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// Card actions don't carry a chat_type; we infer from chat_id prefix:
-		// "oc_" is a group chat (open_chat_id), "ou_" would be direct (open_id
-		// used as chat target in 1:1). Feishu's card actions originate from a
-		// message in a chat, so oc_ indicates group; anything else we call
-		// direct. Defensive default: group chats get authorization via
-		// dispatch's own mention/owner rules.
-		chatType := "direct"
-		if strings.HasPrefix(chatID, "oc_") {
-			chatType = "group"
+		// The WS card-action callback envelope carries no chat_type, so we
+		// prefer the originating chat type embedded in the button value (see
+		// buildQuestionCardJSON) to route the answer back to the same session
+		// key the question was asked in.
+		//
+		// Fallback only when the value is absent (older cards / non-card
+		// clicks): default to "direct". The previous chat_id-prefix heuristic
+		// ("oc_" => group) was wrong — Feishu p2p (1:1) chats ALSO use an
+		// "oc_" open_chat_id, so it mis-routed 1:1 answers into a phantom
+		// group session. Genuine group chats still gate on dispatch's
+		// mention/owner rules, and MentionMe is set on the synthesised message
+		// regardless.
+		chatType := normalizeCardChatType(val.ChatType)
+		if chatType == "" {
+			chatType = "direct"
 		}
-		f.dispatchCardAction(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
+		// R20260608-133914-LB-4 (#1964): track + rate-limit the dispatch like
+		// the WS text/image/audio branches and the webhook card branch
+		// (transport_hook.go:367-383). The larkws SDK requires this callback to
+		// return its response synchronously (the SDK acks the frame on return),
+		// so we cannot simply spawn — dispatchCardActionTracked brackets the
+		// synchronous dispatch with wg.Add/Done + msgSem so Stop()'s wg.Wait()
+		// drains in-flight card dispatches and a burst of clicks can't exceed
+		// the shared 20-slot cap.
+		f.dispatchCardActionTracked(cardCtx, msgSem, val, chatID, messageID, chatType, operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
@@ -182,6 +196,42 @@ func (f *Feishu) startWebSocket() error {
 	}()
 
 	return nil
+}
+
+// dispatchCardActionTracked runs f.dispatchCardAction under the same wg +
+// semaphore discipline the WS message branches use, while preserving the
+// synchronous return the larkws SDK callback contract requires (the SDK acks
+// the frame only after OnP2CardActionTrigger returns, so the dispatch cannot
+// be detached into a fire-and-forget goroutine). R20260608-133914-LB-4 (#1964):
+//
+//   - wg.Add(1) precedes the sem select so a concurrent Stop()/wg.Wait()
+//     cannot observe counter=0 mid-dispatch (same invariant as the message
+//     branches). The drop branch balances with wg.Done().
+//   - sem (the WS handler's shared 20-slot msgSem) bounds concurrency so a
+//     burst of card clicks cannot spawn unbounded work; on a full sem the
+//     click is dropped best-effort (the user can re-click) rather than
+//     blocking the SDK read loop.
+//   - RecoverHandler keeps a panic in the dispatch from escaping into the SDK
+//     read loop and gives the same structured log the other branches emit.
+func (f *Feishu) dispatchCardActionTracked(
+	ctx context.Context,
+	sem chan struct{},
+	val cardActionPayload,
+	chatID, messageID, chatType, operatorID string,
+	handler platform.MessageHandler,
+) {
+	f.wg.Add(1)
+	select {
+	case sem <- struct{}{}:
+	default:
+		f.wg.Done()
+		slog.Warn("feishu ws: handler semaphore full, dropping card action")
+		return
+	}
+	defer f.wg.Done()
+	defer func() { <-sem }()
+	defer platform.RecoverHandler("feishu ws card_action")
+	f.dispatchCardAction(ctx, val, chatID, messageID, chatType, operatorID, handler)
 }
 
 // handleAudio downloads and transcribes audio, then calls handler with the text.

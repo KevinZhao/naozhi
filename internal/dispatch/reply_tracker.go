@@ -23,6 +23,11 @@ type replyTracker struct {
 	ctx    context.Context
 	p      platform.Platform
 	chatID string
+	// chatType is the originating session's chat type ("direct"/"group"),
+	// embedded into AskUserQuestion cards so transports that can't recover it
+	// from the card-action callback (Feishu WS) route the answer back to the
+	// same session key the question was asked in. See QuestionCard.ChatType.
+	chatType string
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
 	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
 	// When ctx cancels, waitReady can return before msgIDReady is closed,
@@ -108,12 +113,13 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	t := &replyTracker{
 		ctx:             ctx,
 		p:               p,
 		chatID:          chatID,
+		chatType:        chatType,
 		msgIDReady:      make(chan struct{}),
 		editCh:          make(chan struct{}, 1),
 		todoWake:        make(chan struct{}, 1),
@@ -216,6 +222,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 		if sender, ok := platform.AsCapability[platform.QuestionCardSender](p); ok {
 			card := platform.QuestionCard{
 				ToolUseID: aq.ToolUseID,
+				ChatType:  t.chatType,
 				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
 			}
 			for _, q := range aq.Items {
@@ -360,6 +367,17 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 	}
 
 	if !t.supportsInterim {
+		return
+	}
+
+	// #1957: Only assistant events carry meaningful status content.
+	// Result events and other non-assistant frames must not fire the
+	// initial Reply banner: in passthrough mode a result event is
+	// delivered to onEvent for each slot owner (including merged-follower
+	// slots), and result events have ev.Message==nil which would cause
+	// formatEventLine to return "" → fallback "💭 思考中..." → a permanent
+	// orphan banner on platforms that support interim edits (Feishu).
+	if ev.Type != "assistant" {
 		return
 	}
 

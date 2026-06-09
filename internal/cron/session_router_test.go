@@ -16,7 +16,7 @@ import (
 //
 // Post Phase B (docs/rfc/cron-sysession-merge.md §3.3) the SessionRouter
 // interface speaks in cron-local types (cron.AgentOpts, cron.Session,
-// cron.SessionStatus); the cmd/naozhi/cron_router_adapter.go bridges
+// cron.SessionStatus); the internal/wireup/cron_router_adapter.go bridges
 // against *session.Router for the production wiring.
 type fakeSessionRouter struct {
 	mu            sync.Mutex
@@ -151,4 +151,4 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 // The legacy "*session.Router satisfies cron.SessionRouter" compile-time
 // assertion was removed in Phase B: the interface now speaks in
 // cron-local types and the production glue lives in
-// cmd/naozhi/cron_router_adapter.go (with its own round-trip test).
+// internal/wireup/cron_router_adapter.go (with its own round-trip test).

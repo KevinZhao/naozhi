@@ -487,18 +487,74 @@ type Handlers struct {
 // orchestrator so reviewers don't have to hold the whole pipeline in their
 // head while reading a single concern.
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
-	// R246-PERF-15 (#726): read snapshots and storeGen in a single
-	// r.mu.RLock epoch via ListSessionsWithVersion. The pre-existing
-	// two-call pattern (Version → ListSessions) intentionally chose
-	// version-first ordering as the "version ≤ data" safer side per
-	// R60-GO-M3 — under that ordering a mutation landing between the
-	// two reads produced data at gen N+1 tagged with version N, which
-	// the next poll (seeing N+1) would re-fetch and catch up on. The
-	// new tuple closes the window entirely: response.version is
-	// exactly the version that produced the snapshot slice, so the
-	// dashboard's version-gate neither skips a refresh nor repeats a
-	// render.
-	snapshots, version := h.router.ListSessionsWithVersion()
+	// R20260607-PERF-1 (#1916): storeGen-gated REST poll. The dashboard polls
+	// /api/sessions at 1 Hz × N tabs; the WS push path already debounces on
+	// storeGen, but this handler used to rebuild the whole snapshot slice
+	// (make([]SessionSnapshot,N) + N×Snapshot() + json.Marshal — ~14 KB/poll
+	// for 50 sessions) on every tick even when nothing changed.
+	//
+	// We now publish an ETag that captures every input that can change the
+	// SINGLE-NODE response body — the session storeGen version plus a history
+	// fingerprint (the history cache epoch + length; a re-scan that produces
+	// identical content bumps the epoch and harmlessly falls through to a full
+	// rebuild ~once per 120 s TTL, never a stale 304). The multi-node response
+	// additionally folds in live node-connection status that has no version
+	// hook, so the conditional fast path is deliberately scoped to single-node
+	// deployments; multi-node always rebuilds. When the client echoes a
+	// matching If-None-Match the handler emits 304 and skips the snapshot
+	// build, filterAndCountSnapshots, fillProjectAndSummary, buildSessionStats
+	// and the JSON marshal entirely.
+	//
+	// Backward compatible: a client that omits If-None-Match (or a non-single-
+	// node deployment) always gets a full 200 with the ETag header set, so the
+	// optimisation engages only once both sides cooperate.
+	knownNodes := h.nodeAccess.KnownNodes()
+	singleNode := len(knownNodes) == 0
+
+	// sinceVersion is the storeGen the client last rendered, parsed back out of
+	// its If-None-Match validator. Zero (unparseable / absent header) means
+	// "client has nothing" and forces a full build. ListSessionsIfChanged does
+	// the wait-free gen.Load() compare and only rebuilds when it advanced.
+	clientETag := r.Header.Get("If-None-Match")
+	sinceVersion := parseETagVersion(clientETag)
+
+	snapshots, version, changed := h.router.ListSessionsIfChanged(sinceVersion)
+
+	var etag string
+	if singleNode {
+		// Warm the history cache BEFORE fingerprinting so the ETag reflects the
+		// exact history slice buildLocalResp will embed below (its own
+		// historySessions() call then hits the warm cache at the same epoch).
+		// Cheap: the wait-free atomic TTL fast-path returns the cached slice
+		// without an FS scan on the steady-state poll. Without this the ETag
+		// could be stamped from a pre-repopulation epoch while the body carries
+		// post-repopulation history.
+		h.historySessions()
+		etag = h.sessionsListETag(version)
+		// Snapshots unchanged AND the full validator (which also folds in the
+		// history fingerprint) still matches what the client holds → nothing in
+		// the single-node body moved, so 304 and skip the rebuild entirely.
+		if !changed && clientETag != "" && clientETag == etag {
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	// changed==false means ListSessionsIfChanged returned a nil snapshot slice
+	// (the gen had not advanced) but the request still needs a full body — e.g.
+	// a multi-node deployment, a first poll with no validator, or a single-node
+	// poll whose history fingerprint moved while storeGen held. Build the slice
+	// now via ListSessionsWithVersion so the (snapshots, version) pair stays in
+	// the same r.mu.RLock epoch (R246-PERF-15 #726): response.version is exactly
+	// the version that produced the snapshot slice, closing the gen/data race.
+	if !changed {
+		snapshots, version = h.router.ListSessionsWithVersion()
+		if singleNode {
+			etag = h.sessionsListETag(version)
+		}
+	}
 
 	// Capture once so downstream cutoff / uptime bucket computations share a
 	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.
@@ -519,19 +575,68 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	stats := h.buildSessionStats(now, version, running, ready)
 
-	// KnownNodes returns an immutable snapshot without acquiring the
-	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
-	// (the common case) have len(knownNodes)==0 and never need the live
-	// snapshot — check KnownNodes first and short-circuit before paying
-	// the NodesSnapshot RLock + map alloc.
-	knownNodes := h.nodeAccess.KnownNodes()
-
-	if len(knownNodes) == 0 {
+	// knownNodes was sampled once at the top (KnownNodes returns an immutable
+	// snapshot without the nodeAccess lock; NodesSnapshot would take it).
+	// Single-node deployments (the common case) have len(knownNodes)==0 and
+	// never need the live snapshot. R20260607-PERF-1 (#1916): stamp the ETag so
+	// the next poll's If-None-Match can match and 304 without a rebuild.
+	if singleNode {
+		w.Header().Set("ETag", etag)
 		httputil.WriteJSON(w, h.buildLocalResp(snapshots, stats))
 		return
 	}
 
 	httputil.WriteJSON(w, h.buildMultiNodeResp(snapshots, stats, knownNodes))
+}
+
+// parseETagVersion extracts the storeGen version embedded in a sessionsListETag
+// validator (`"v<N>-h<E>-n<L>"`). It is intentionally lenient: any header it
+// cannot parse — a weak validator, a future format, a stale value from an older
+// binary, or an absent header — yields 0, which forces ListSessionsIfChanged to
+// rebuild. The history epoch / length suffix is not parsed here; it only needs
+// to participate in the full-string equality check, not the gen gate.
+func parseETagVersion(etag string) uint64 {
+	etag = strings.TrimPrefix(etag, "W/")
+	etag = strings.Trim(etag, `"`)
+	if !strings.HasPrefix(etag, "v") {
+		return 0
+	}
+	rest := etag[1:]
+	if i := strings.IndexByte(rest, '-'); i >= 0 {
+		rest = rest[:i]
+	}
+	v, err := strconv.ParseUint(rest, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// sessionsListETag derives the conditional-GET validator for the single-node
+// /api/sessions response from the session storeGen version plus the history
+// cache fingerprint (epoch nanos + length). These are exactly the inputs that
+// vary the single-node body: snapshots are storeGen-gated, and history_sessions
+// changes only when the cache is repopulated (a new epoch) or invalidated
+// (epoch reset to 0). Stats fields are either static (sessionStatsStatic) or
+// derived from the same snapshots/version, and projects/uptime move at coarser
+// resolution than the snapshot version they ride alongside, so they never
+// change the body while version holds.
+//
+// Returning the same etag for an unchanged (version, history) pair lets a
+// cooperating client's If-None-Match short-circuit the rebuild; a mismatch (the
+// common change case, or a client that never sends the header) falls through to
+// a full 200. A re-scan that yields byte-identical history still bumps the
+// epoch and produces a fresh etag — a harmless ~1/120s missed optimisation, not
+// a stale read.
+func (h *Handlers) sessionsListETag(version uint64) string {
+	historyEpoch := h.historyCacheTimeUnixNano.Load()
+	h.historyCacheMu.Lock()
+	historyLen := len(h.historyCache)
+	h.historyCacheMu.Unlock()
+	// Quoted opaque validator per RFC 7232 §2.3.
+	return `"v` + strconv.FormatUint(version, 10) +
+		`-h` + strconv.FormatInt(historyEpoch, 10) +
+		`-n` + strconv.Itoa(historyLen) + `"`
 }
 
 // filterAndCountSnapshots walks the router snapshot exactly once to:

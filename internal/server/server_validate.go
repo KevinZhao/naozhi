@@ -21,8 +21,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -56,13 +56,16 @@ var (
 // filesystem entries.
 //
 // Symmetry with cron.workDirUnderRoot: both wsPath AND allowedRoot are
-// resolved via EvalSymlinks before the prefix check. Without this, a host
+// resolved via EvalSymlinks before the containment check. Without this, a host
 // where allowedRoot itself contains a symlinked component (e.g. `/home →
 // /var/home` on some distros, Docker bind-mounts, AMI-customized layouts)
 // would always fail the prefix check because resolved wsPath lands under
 // the canonical path while allowedRoot stays in the un-resolved form.
-// The resolved-root fallback chain (live EvalSymlinks → cached resolved →
-// raw) mirrors internal/cron/scheduler.go workDirUnderRoot:443.
+//
+// The containment test itself is the shared osutil.PathContainedInRoot —
+// the same implementation cron.workDirResolveUnderRoot now calls, so the
+// SHARED-ALGORITHM-WITH-SERVER contract is enforced by a single function
+// rather than two copies kept in sync by comment.
 //
 // Errors are sentinels — the resolved path and underlying os.PathError are
 // NOT included so a dashboard or IM user cannot enumerate host filesystem
@@ -119,8 +122,14 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 				"root", allowedRoot, "reason", pathErrReason(err))
 			rootResolved = allowedRoot
 		}
-		if wsPath != rootResolved &&
-			!strings.HasPrefix(wsPath, rootResolved+string(filepath.Separator)) {
+		// Containment honours filesystem semantics, not byte identity: the
+		// shared osutil.PathContainedInRoot falls back to an inode walk when
+		// the byte-wise prefix fails, so a case-insensitive fs (macOS APFS,
+		// Windows NTFS) where EvalSymlinks preserved user-typed case no longer
+		// rejects a legitimate child. Both sides are already EvalSymlinks-
+		// resolved above, which is the helper's input contract and what keeps
+		// the symlink-escape rejection intact.
+		if !osutil.PathContainedInRoot(wsPath, rootResolved) {
 			return "", ErrWorkspaceOutsideRoot
 		}
 	}

@@ -3,7 +3,6 @@ package discovery
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,10 +12,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -56,18 +57,33 @@ type Scanner struct {
 	promptCache  promptCacheState
 	summaryCache summaryCacheState
 	pathCache    pathCacheState
+
+	// summaryLoad collapses concurrent loads of the same sessions-index.json
+	// into one os.Stat + os.ReadFile + json.Unmarshal. Without it, the 4
+	// concurrent promptWg goroutines (plus repeated scans) each take the
+	// summary write lock on a cache miss and serialise behind the slowest
+	// stat+parse for the same workspace (PERF-10 #1967). Keyed by indexPath.
+	summaryLoad singleflight.Group
 }
 
 type promptCacheState struct {
 	sync.RWMutex
-	entries    map[string]promptCacheEntry
-	generation uint64
+	entries map[string]promptCacheEntry
+	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
+	// refresh a hit entry's generation without upgrading the RLock to a write
+	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
+	// gen-stale on first touch and forced a Lock(), serialising the concurrent
+	// promptWg goroutines behind a trivial map write.
+	generation atomic.Uint64
 }
 
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	gen    uint64
+	// gen is a heap-allocated atomic so its address stays stable while the
+	// entry lives in the map: getCachedPrompt refreshes it lock-free via
+	// Store, and evictPromptCache reads it via Load under the write lock.
+	gen *atomic.Uint64
 }
 
 type summaryCacheState struct {
@@ -230,8 +246,9 @@ func (s *Scanner) evictPromptCache() {
 	if len(s.promptCache.entries) <= 500 {
 		return
 	}
+	gen := s.promptCache.generation.Load()
 	for k, v := range s.promptCache.entries {
-		if v.gen+1 < s.promptCache.generation {
+		if v.gen.Load()+1 < gen {
 			delete(s.promptCache.entries, k)
 		}
 	}
@@ -337,11 +354,19 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 }
 
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
-// that are not managed by naozhi (excluded via excludePIDs).
-// excludeSessionIDs prevents the session-ID upgrade heuristic from assigning
-// a JSONL file that belongs to a naozhi-managed session to a CLI process.
-// managedCWDs is the set of working directories that have active managed sessions;
-// session ID upgrade is skipped entirely for these CWDs to prevent cross-contamination.
+// that are not managed by naozhi (excluded via excludePIDs). The discovered
+// SessionID is taken verbatim from each {pid}.json — modern Claude CLI keeps
+// that field accurate.
+//
+// excludeSessionIDs and managedCWDs are retained for signature/back-compat with
+// the existing call sites (server discoveryCache, upstream discover callback,
+// auto-takeover) but are no longer consulted: they previously fed a
+// "session-ID upgrade" heuristic that rewrote a process's
+// SessionID to the newest JSONL in its CWD. Because ~/.claude/projects/<cwd>/ is
+// shared by every session that ran in that directory, the heuristic mis-assigned
+// other sessions' transcripts to live processes (dashboard crosstalk) and is
+// removed. See the second-pass note in the body and
+// TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
@@ -354,9 +379,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
-	s.promptCache.Lock()
-	s.promptCache.generation++
-	s.promptCache.Unlock()
+	s.promptCache.generation.Add(1)
 
 	s.summaryCache.Lock()
 	s.summaryCache.generation++
@@ -437,76 +460,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		candidates = append(candidates, scanCandidate{sf: sf, lastActive: la})
 	}
 
-	// Second pass: upgrade stale session IDs. CLI doesn't update {pid}.json
-	// after /clear, so the session ID may be outdated. For each CWD, find
-	// recent JSONL files and assign them to PIDs.
-	// Strategy: sort PIDs by original staleness (most stale first = most
-	// likely to have done /clear), assign newest unassigned JSONL to each.
-	type cwdGroup struct {
-		indices []int // indices into candidates
-	}
-	groups := make(map[string]*cwdGroup, len(candidates))
-	for i, c := range candidates {
-		g, ok := groups[c.sf.CWD]
-		if !ok {
-			g = &cwdGroup{}
-			groups[c.sf.CWD] = g
-		}
-		g.indices = append(g.indices, i)
-	}
-
-	for cwd, g := range groups {
-		// Skip session ID upgrade when multiple processes share the same CWD.
-		// The heuristic is non-deterministic with multiple live processes and
-		// can swap session IDs between scans, causing takeover to target the
-		// wrong process.
-		if len(g.indices) > 1 {
-			continue
-		}
-
-		// Skip upgrade when a managed naozhi session is using the same CWD.
-		// Any recent JSONL in this directory likely belongs to the managed
-		// session, not the CLI process.
-		if managedCWDs[cwd] {
-			continue
-		}
-
-		recentJSONLs := listJSONLsByMtime(claudeDir, cwd)
-		if len(recentJSONLs) == 0 {
-			continue
-		}
-
-		// Build set of "claimed" session IDs (original assignments).
-		// Pre-claim managed naozhi session IDs so they are never assigned to
-		// a CLI process — the same workspace can have both a CLI and a managed
-		// session writing JSONL files to the same project directory.
-		claimed := map[string]bool{}
-		for id := range excludeSessionIDs {
-			claimed[id] = true
-		}
-		for _, idx := range g.indices {
-			claimed[candidates[idx].sf.SessionID] = true
-		}
-
-		// Sort group indices by staleness (most stale first)
-		sortByLastActive(g.indices, candidates)
-
-		for _, idx := range g.indices {
-			c := &candidates[idx]
-			// Find newest unclaimed JSONL newer than this PID's current session
-			for _, jl := range recentJSONLs {
-				if claimed[jl.id] {
-					continue
-				}
-				if jl.mtime > c.lastActive {
-					c.sf.SessionID = jl.id // will be used below
-					c.lastActive = jl.mtime
-					claimed[jl.id] = true
-					break
-				}
-			}
-		}
-	}
+	// Historical note: a "second pass" here used to upgrade a process's
+	// SessionID to the newest JSONL in its CWD, on the theory that the CLI
+	// failed to rewrite {pid}.json after /clear. Modern Claude CLI keeps
+	// {pid}.json's sessionId accurate, and ~/.claude/projects/<cwd>/ is shared
+	// by every session that ever ran in that directory (managed, closed, cron),
+	// so the heuristic routinely mis-assigned a *different* session's JSONL to
+	// a live process — the dashboard card and preview then showed someone
+	// else's conversation, and takeover --resume targeted the wrong session.
+	// The upgrade is removed; the SessionID is whatever {pid}.json records.
+	// Regression: TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 
 	// Batch-lookup summaries from sessions-index.json for all candidates.
 	candidateWorkspaces := make(map[string]string, len(candidates))
@@ -568,48 +531,6 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 // misreport phantom processes as alive) is consistent across packages.
 func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
-}
-
-type jsonlEntry struct {
-	id    string // session UUID (filename without .jsonl)
-	mtime int64  // unix ms
-}
-
-// listJSONLsByMtime returns JSONL files in the project dir sorted by mtime desc.
-func listJSONLsByMtime(claudeDir, cwd string) []jsonlEntry {
-	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
-	entries, err := os.ReadDir(projDir)
-	if err != nil {
-		return nil
-	}
-
-	var result []jsonlEntry
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		result = append(result, jsonlEntry{
-			id:    strings.TrimSuffix(name, ".jsonl"),
-			mtime: info.ModTime().UnixMilli(),
-		})
-	}
-
-	slices.SortFunc(result, func(a, b jsonlEntry) int {
-		return cmp.Compare(b.mtime, a.mtime) // newest first
-	})
-	return result
-}
-
-// sortByLastActive sorts candidate indices by lastActive ascending (most stale first).
-func sortByLastActive(indices []int, candidates []scanCandidate) {
-	slices.SortFunc(indices, func(a, b int) int {
-		return cmp.Compare(candidates[a].lastActive, candidates[b].lastActive)
-	})
 }
 
 // ClaudeProjectSlug converts a CWD path to the Claude project directory name.
@@ -732,19 +653,15 @@ func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (
 func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 	s.promptCache.RLock()
 	cached, ok := s.promptCache.entries[path]
-	gen := s.promptCache.generation
 	s.promptCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return "", false
 	}
-	if cached.gen != gen {
-		s.promptCache.Lock()
-		if e, ok2 := s.promptCache.entries[path]; ok2 && e.mtime == mtime {
-			e.gen = s.promptCache.generation
-			s.promptCache.entries[path] = e
-		}
-		s.promptCache.Unlock()
-	}
+	// Refresh the entry's generation lock-free so eviction keeps it alive.
+	// The *atomic.Uint64 address is stable for the entry's lifetime, so this
+	// Store needs no write lock — avoiding the per-hit Lock() upgrade that
+	// serialised concurrent promptWg goroutines (PERF-6 #1966).
+	cached.gen.Store(s.promptCache.generation.Load())
 	return cached.prompt, true
 }
 
@@ -752,7 +669,9 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
 	s.promptCache.Lock()
 	defer s.promptCache.Unlock()
-	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: s.promptCache.generation}
+	gen := new(atomic.Uint64)
+	gen.Store(s.promptCache.generation.Load())
+	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: gen}
 	s.evictPromptCache()
 }
 
@@ -855,13 +774,19 @@ func SanitizePromptForTransport(s string) string {
 	if s == "" {
 		return s
 	}
+	// R20260608133928-PERF-15: use rune-level iteration for the fast-path so
+	// that valid multi-byte UTF-8 (Chinese, emoji, accented chars) does not
+	// bail out early. The previous byte-level check treated any byte ≥ 0x80 as
+	// "dirty" and fell through to strings.Map unconditionally — for a Chinese
+	// prompt that is every call. We bail only when we encounter a rune that
+	// strings.Map would actually replace, keeping the predicate identical to
+	// the slow path to prevent fast/slow divergence.
 	clean := true
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\t' {
+	for _, r := range s {
+		if r == '\t' {
 			continue
 		}
-		if c < 0x20 || c == 0x7f || c >= 0x80 {
+		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
 			clean = false
 			break
 		}
@@ -1010,25 +935,9 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 
 	result := make(map[string]string, len(sessions))
 	for indexPath, sids := range byProjDir {
-		// Check mtime cache to avoid re-reading unchanged index files.
-		fi, err := os.Stat(indexPath)
-		if err != nil {
+		idx, ok := s.loadSummaryIndex(indexPath)
+		if !ok {
 			continue
-		}
-		mtime := fi.ModTime().UnixNano()
-
-		var idx sessionsIndex
-		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
-			idx = cachedIdx
-		} else {
-			data, err := os.ReadFile(indexPath)
-			if err != nil {
-				continue
-			}
-			if err := json.Unmarshal(data, &idx); err != nil {
-				continue
-			}
-			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
 		// Single-session projects (the common case) skip the map alloc: a
@@ -1061,6 +970,51 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 		}
 	}
 	return result
+}
+
+// loadSummaryIndex resolves indexPath to its parsed sessionsIndex, serving the
+// summary cache on an mtime hit and otherwise reading + parsing the file once.
+// Concurrent callers for the same indexPath are collapsed via singleflight so
+// they share a single os.Stat + os.ReadFile + json.Unmarshal instead of each
+// taking the summary write lock and serialising behind the slowest parse
+// (PERF-10 #1967). ok is false when the index is missing or unparseable.
+func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
+	// Fast path: stat once and serve a fresh cache hit without entering
+	// singleflight at all (the common steady-state case).
+	if fi, err := os.Stat(indexPath); err == nil {
+		mtime := fi.ModTime().UnixNano()
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, true
+		}
+	}
+
+	v, err, _ := s.summaryLoad.Do(indexPath, func() (any, error) {
+		fi, err := os.Stat(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		mtime := fi.ModTime().UnixNano()
+		// Re-check the cache inside the flight: an earlier flight for the same
+		// key may have just populated it, or a parallel fast-path missed by a
+		// hair. This keeps a burst from re-reading the file N times.
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
+			return cachedIdx, nil
+		}
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			return sessionsIndex{}, err
+		}
+		var idx sessionsIndex
+		if err := json.Unmarshal(data, &idx); err != nil {
+			return sessionsIndex{}, err
+		}
+		s.setCachedSummary(indexPath, mtime, idx)
+		return idx, nil
+	})
+	if err != nil {
+		return sessionsIndex{}, false
+	}
+	return v.(sessionsIndex), true
 }
 
 // getCachedSummary checks the summary cache. Reads use RLock; only the gen

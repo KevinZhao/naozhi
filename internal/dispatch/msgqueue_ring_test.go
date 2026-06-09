@@ -31,13 +31,15 @@ func TestMsgRing_PushDrainFIFO(t *testing.T) {
 func TestMsgRing_EvictsOldestOnFull(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	if ev := r.push(QueuedMsg{Text: "A"}, 3); ev {
+	if ev, _ := r.push(QueuedMsg{Text: "A"}, 3); ev {
 		t.Fatal("first push should not evict")
 	}
 	r.push(QueuedMsg{Text: "B"}, 3)
 	r.push(QueuedMsg{Text: "C"}, 3)
-	if ev := r.push(QueuedMsg{Text: "D"}, 3); !ev {
+	if ev, dropped := r.push(QueuedMsg{Text: "D"}, 3); !ev {
 		t.Fatal("push at capacity must report eviction")
+	} else if dropped.Text != "A" {
+		t.Fatalf("evicted message = %q, want oldest 'A'", dropped.Text)
 	}
 	out := r.drainAll()
 	if len(out) != 3 || out[0].Text != "B" || out[1].Text != "C" || out[2].Text != "D" {
@@ -175,7 +177,7 @@ func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(8, 0)
-	_, _, _, gen := q.Enqueue("k", QueuedMsg{Text: "owner"})
+	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
 
 	// Turn 1 follow-ups.
 	q.Enqueue("k", QueuedMsg{Text: "a1"})
@@ -207,7 +209,7 @@ func TestMsgQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 // scratch is warmed.
 func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
 	q := NewMessageQueue(8, 0)
-	_, _, _, gen := q.Enqueue("k", QueuedMsg{Text: "owner"})
+	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
 	// Warm the scratch.
 	q.Enqueue("k", QueuedMsg{Text: "w1"})
 	q.Enqueue("k", QueuedMsg{Text: "w2"})
@@ -232,7 +234,7 @@ func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
 func TestMsgQueue_Enqueue_RingPath_FullEvictsAndDrains(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(3, 0)
-	_, _, _, gen := q.Enqueue("k", QueuedMsg{Text: "owner"}) // owner
+	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"}) // owner
 
 	for i := 0; i < 10; i++ {
 		q.Enqueue("k", QueuedMsg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})

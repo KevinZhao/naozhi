@@ -31,3 +31,58 @@ func TestMayContainSecretPrefixCoversAllFirstBytes(t *testing.T) {
 		_ = strings.IndexAny(firstByte, "sgAxhny") // compile-time sanity only
 	}
 }
+
+// TestSecretPrefixIndexCoversAllPrefixes is a CI invariant for the
+// R20260609-PERF-9 (#1976) first-byte bucket optimization: RedactSecrets now
+// probes only secretPrefixesByFirstByte[s[i]] instead of the full table, so
+// every prefix MUST be reachable through its first-byte bucket. If a future
+// prefix were added to secretPrefixes but not the index (e.g. index built from
+// a stale copy), that secret would silently bypass redaction. This asserts the
+// index is a faithful, complete, order-preserving partition of secretPrefixes.
+func TestSecretPrefixIndexCoversAllPrefixes(t *testing.T) {
+	// Every prefix must appear in its first-byte bucket, in declaration order.
+	indexed := 0
+	for _, bucket := range secretPrefixesByFirstByte {
+		indexed += len(bucket)
+	}
+	if indexed != len(secretPrefixes) {
+		t.Fatalf("index holds %d prefixes, secretPrefixes has %d — index is not a complete partition", indexed, len(secretPrefixes))
+	}
+
+	for _, sp := range secretPrefixes {
+		if len(sp.prefix) == 0 {
+			continue
+		}
+		bucket := secretPrefixesByFirstByte[sp.prefix[0]]
+		found := false
+		for _, got := range bucket {
+			if got.prefix == sp.prefix && got.minTail == sp.minTail {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("prefix %q (first byte %q) is missing from its index bucket — RedactSecrets would never probe it", sp.prefix, string(sp.prefix[0]))
+		}
+	}
+
+	// Longest-match-wins ordering within a bucket must be preserved: in the 's'
+	// bucket "sk-ant-"/"sk-proj-" must precede the bare "sk-" fallback so a
+	// `sk-ant-…` token is not swallowed by the shorter prefix first.
+	sBucket := secretPrefixesByFirstByte['s']
+	posOf := func(p string) int {
+		for i, sp := range sBucket {
+			if sp.prefix == p {
+				return i
+			}
+		}
+		return -1
+	}
+	skAnt, skProj, sk := posOf("sk-ant-"), posOf("sk-proj-"), posOf("sk-")
+	if skAnt < 0 || skProj < 0 || sk < 0 {
+		t.Fatalf("expected sk-ant-/sk-proj-/sk- all in 's' bucket; got positions %d/%d/%d", skAnt, skProj, sk)
+	}
+	if !(skAnt < sk && skProj < sk) {
+		t.Errorf("longest-match ordering broken in 's' bucket: sk-ant-@%d, sk-proj-@%d must precede sk-@%d", skAnt, skProj, sk)
+	}
+}

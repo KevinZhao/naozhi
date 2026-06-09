@@ -237,6 +237,126 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 	return func() { s.saveMarshaledSeq(data, seq) }, nil
 }
 
+// jobsSnapshot is a marshal-ready capture of the persisted job set taken under
+// s.mu. The entries are value copies of *Job in sortedJobIDs order, fully
+// detached from s.jobs so json.Marshal can run AFTER the caller drops s.mu
+// (R20260607-PERF-005 / #1923) without racing concurrent mutators. The seq is
+// taken under the same critical section so saveMarshaledSeq's staleness gate
+// still total-orders this payload against every other persist (seq order ==
+// state order; s.mu linearises both the field mutation and this seq grab).
+type jobsSnapshot struct {
+	entries []*Job
+	seq     uint64
+	// pooled, when non-nil, is the *[]*Job handle from marshalEntriesPool that
+	// backs entries. persistSnapshot returns it via putMarshalEntries once
+	// marshal completes (R20260609-PERF-1 #1975), so the cap-len(jobs)
+	// backing array is recycled instead of freshly allocated on every
+	// finishRun → persist tick. nil when the slice was not pooled (so Put is a
+	// no-op), keeping the cold/test paths allocation-shaped exactly as before.
+	pooled *[]*Job
+}
+
+// snapshotJobsForSaveLocked captures the current job set into a detached
+// marshal-ready snapshot under the caller's s.mu, plus the persist seq.
+//
+// Unlike marshalJobsLocked (which marshals live *Job pointers inside the
+// critical section, valid because the lock is held throughout), the returned
+// entries are value copies so the caller can release s.mu and marshal them
+// off the hot lock. Job is a flat value type — the only pointer field is
+// Notify *bool, which mutators replace wholesale (j.Notify = &v) rather than
+// dereference-write, so the copied pointer keeps addressing an immutable bool
+// and json.Marshal can read it after unlock without a data race. entryID /
+// cachedPeriod / cachedSched are runtime-only and excluded from JSON anyway.
+//
+// The sorted-ID hint and drift fallback mirror marshalJobsLocked so the
+// on-disk ordering stays byte-identical regardless of which persist path ran.
+func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
+	// R20260609-PERF-1 (#1975): pull the snapshot's outer slice from
+	// marshalEntriesPool (the same pool marshalJobsLocked uses) so the
+	// cap-len(jobs) backing array is recycled across the finishRun → persist
+	// hot path instead of freshly allocated on every tick. persistSnapshot
+	// returns the handle once marshal completes. Grow exactly as
+	// marshalJobsLocked does when the pooled cap is below the current job
+	// count; the grown slice circulates back via the pooled handle below.
+	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
+	entries := *entriesPtr
+	if cap(entries) < len(s.jobs) {
+		entries = make([]*Job, 0, len(s.jobs))
+	} else {
+		entries = entries[:0]
+	}
+	useHint := len(s.sortedJobIDs) == len(s.jobs)
+	if useHint {
+		for _, id := range s.sortedJobIDs {
+			j, ok := s.jobs[id]
+			if !ok {
+				useHint = false
+				break
+			}
+			cp := *j
+			// R20260608133928-CR-5: deep-copy Notify (*bool) to avoid alias with
+			// live job during off-lock json.Marshal (R20260607-PERF-005 / #1923).
+			if j.Notify != nil {
+				v := *j.Notify
+				cp.Notify = &v
+			}
+			entries = append(entries, &cp)
+		}
+	}
+	if !useHint {
+		entries = entries[:0]
+		for _, j := range s.jobs {
+			cp := *j
+			// R20260608133928-CR-5: deep-copy Notify (*bool) to avoid alias with
+			// live job during off-lock json.Marshal (R20260607-PERF-005 / #1923).
+			if j.Notify != nil {
+				v := *j.Notify
+				cp.Notify = &v
+			}
+			entries = append(entries, &cp)
+		}
+		if len(entries) > 1 {
+			slices.SortFunc(entries, jobIDCmpForSort)
+		}
+	}
+	// Write the (possibly grown) slice back into the pooled handle so a grow
+	// circulates through the pool, mirroring marshalJobsLocked's
+	// `*entriesPtr = entries`. persistSnapshot returns entriesPtr via
+	// putMarshalEntries after marshal, which zeroes the *Job element pointers
+	// (no live-job aliasing — every element is a fresh &cp value copy).
+	*entriesPtr = entries
+	return jobsSnapshot{entries: entries, seq: s.saveSeq.Add(1), pooled: entriesPtr}
+}
+
+// persistSnapshot marshals a detached snapshot taken by
+// snapshotJobsForSaveLocked and returns the save func. It does NOT require
+// s.mu — the whole point (R20260607-PERF-005 / #1923) is to keep json.Marshal
+// out of the write critical section. On marshal failure it returns
+// (nil, ErrPersistFailed) so the caller can roll back the in-memory mutation,
+// preserving persistJobsLocked's rollback contract. The seq captured under
+// the lock is reused so saveMarshaledSeq's ordering gate is unaffected.
+func (s *Scheduler) persistSnapshot(snap jobsSnapshot) (func(), error) {
+	var data []byte
+	var err error
+	if fn := s.marshalJobs.Load(); fn != nil {
+		data, err = (*fn)(snap.entries)
+	} else {
+		data, err = defaultMarshalJobs(snap.entries)
+	}
+	// R20260609-PERF-1 (#1975): marshal has produced an independent `data`
+	// byte slice (or failed), so snap.entries is no longer referenced — return
+	// the pooled backing slice now (no-op when the snapshot was not pooled).
+	// putMarshalEntries zeroes the *Job element pointers so the pool does not
+	// pin the value copies. Must run on both success and failure paths.
+	putMarshalEntries(snap.pooled)
+	if err != nil {
+		slog.Error("marshal cron store", "err", err)
+		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
+	}
+	seq := snap.seq
+	return func() { s.saveMarshaledSeq(data, seq) }, nil
+}
+
 // saveMarshaledSeq is the mutation-path persist function. It skips the write
 // if lastSavedSeq has already advanced past our seq — this happens when Go's
 // sync.Mutex hands storeMu to a later writer (larger seq) before us, so our

@@ -190,13 +190,15 @@ func TestRunInflight_SetPhaseFastPath(t *testing.T) {
 	}
 }
 
-// TestRunInflight_ReleaseRun_ContractOrder pins the 3-step terminal
-// release contract that R246-CR-017 (#759) extracted into releaseRun:
-// after the call, the CAS gate must be released, snapshot() must return
-// ok=false (so list handlers stop surfacing stale RunID/Phase), and the
-// inflight gauge must have decremented once. Order matters — see
-// releaseRun's godoc and R238-GO-2.
-func TestRunInflight_ReleaseRun_ContractOrder(t *testing.T) {
+// TestRunInflight_FinalizeReleaseContract pins the live terminal release
+// path. R246-CR-017 (#759) once put this contract in a releaseRun method;
+// R246-GO-3 (#689) superseded it with the per-run runFinalizer (see the
+// anchor comment in runinflight.go), so the contract is now: after
+// finalize(), the CAS gate is released and snapshot() returns ok=false
+// (so list handlers stop surfacing stale RunID/Phase), and the gauge
+// Add(-1) at the defer site pairs with the CAS-true Add(+1). reset
+// happens BEFORE CAS-release inside finalize (R238-GO-2 ordering).
+func TestRunInflight_FinalizeReleaseContract(t *testing.T) {
 	inf := &runInflight{}
 	if !inf.running.CompareAndSwap(false, true) {
 		t.Fatal("CAS")
@@ -209,46 +211,52 @@ func TestRunInflight_ReleaseRun_ContractOrder(t *testing.T) {
 		Trigger:   TriggerScheduled,
 	})
 
-	gauge := expvar.NewInt("test_release_run_gauge_" + t.Name())
+	gauge := expvar.NewInt("test_finalize_release_gauge_" + t.Name())
 	gauge.Add(1) // mirror executeOpt's CAS-true Add(+1).
 
 	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
 		t.Fatalf("precondition: snapshot before release must be live: ok=%v v=%+v", ok, v)
 	}
 
-	inf.releaseRun(gauge)
+	// Live path: per-run finalizer does reset + CAS-release; the gauge
+	// Add(-1) is paired at the scheduler_run.go defer site.
+	finalizer := &runFinalizer{inflight: inf}
+	finalizer.finalize()
+	gauge.Add(-1)
 
 	if inf.running.Load() {
-		t.Errorf("releaseRun must Store(false) on running CAS gate")
+		t.Errorf("finalize must Store(false) on running CAS gate")
 	}
 	if v, ok := inf.snapshot(); ok || v.RunID != "" {
-		t.Errorf("releaseRun must reset view (no stale metadata): ok=%v v=%+v", ok, v)
+		t.Errorf("finalize must reset view (no stale metadata): ok=%v v=%+v", ok, v)
 	}
 	if got := gauge.Value(); got != 0 {
-		t.Errorf("releaseRun must decrement gauge: got=%d want=0", got)
+		t.Errorf("gauge must decrement to 0: got=%d", got)
 	}
 }
 
-// TestRunInflight_ReleaseRun_NilSafe locks in the nil-receiver and
-// nil-gauge contract documented on releaseRun. Test fixtures that build
-// a runInflight without wiring metrics rely on the nil-gauge branch.
-func TestRunInflight_ReleaseRun_NilSafe(t *testing.T) {
+// TestRunInflight_FinalizeNilSafe locks in the nil-safety of the live
+// release path: a nil finalizer and a finalizer over a nil inflight must
+// both no-op rather than panic (mirrors reset / populate nil-receiver).
+func TestRunInflight_FinalizeNilSafe(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
-			t.Errorf("releaseRun on nil receiver / nil gauge panicked: %v", r)
+			t.Errorf("finalize on nil finalizer / nil inflight panicked: %v", r)
 		}
 	}()
-	var inf *runInflight
-	inf.releaseRun(nil) // nil receiver
+	var nilFinalizer *runFinalizer
+	nilFinalizer.finalize() // nil finalizer
+
+	(&runFinalizer{inflight: nil}).finalize() // nil inflight
 
 	live := &runInflight{}
 	live.running.Store(true)
 	live.populate(runInflightView{RunID: "y"})
-	live.releaseRun(nil) // nil gauge — must still reset + release CAS
+	(&runFinalizer{inflight: live}).finalize() // must still reset + release CAS
 	if live.running.Load() {
-		t.Errorf("nil-gauge releaseRun must still release CAS gate")
+		t.Errorf("finalize must still release CAS gate")
 	}
 	if _, ok := live.snapshot(); ok {
-		t.Errorf("nil-gauge releaseRun must still reset view")
+		t.Errorf("finalize must still reset view")
 	}
 }

@@ -83,7 +83,11 @@ type batchArena struct {
 // steady-state heap churn (50 events/s × N sessions).
 var entryArenaPool = sync.Pool{
 	New: func() any {
-		return &batchArena{buf: bytes.NewBuffer(make([]byte, 0, 4*1024))}
+		return &batchArena{
+			buf:   bytes.NewBuffer(make([]byte, 0, 4*1024)),
+			owned: make([]Entry, 0, 32),
+			spans: make([]arenaSpan, 0, 32),
+		}
 	},
 }
 
@@ -1106,7 +1110,7 @@ const parallelFsyncMaxWorkers = 8
 var parallelFsyncWorkers = 0
 
 // parallelFsync fans `fn` over (keys[i], ws[i]) using a bounded
-// worker pool. Single-entry input skips the WaitGroup entirely so
+// worker pool. Inputs of 1-2 writers skip the WaitGroup entirely so
 // the typical "1-2 active sessions on Stop" footprint stays cheap.
 // Each fn call runs concurrently with at most workers-1 others; the
 // caller MUST guarantee that fn does not mutate any state shared
@@ -1119,8 +1123,16 @@ func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(str
 	if n == 0 {
 		return
 	}
-	if n == 1 {
-		fn(keys[0], ws[0])
+	if n <= 2 {
+		// R20260607-PERF-4: small deployments (1-2 active writers) flush
+		// serially. The goroutine + WaitGroup + atomic setup costs more
+		// than running two fsyncs back-to-back, and on the ~100ms
+		// tickFlush this overhead recurs steadily. Semantics match the
+		// worker-pool path: fn returns nothing and each index is invoked
+		// exactly once, so serial vs parallel are equivalent here.
+		for i := range ws {
+			fn(keys[i], ws[i])
+		}
 		return
 	}
 	workers := parallelFsyncWorkers
@@ -1142,6 +1154,11 @@ func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(str
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("persist: parallelFsync worker panic", "panic", r)
+				}
+			}()
 			for {
 				i := idx.Add(1) - 1
 				if i >= int64(n) {
@@ -1299,7 +1316,9 @@ const drainClockRefreshEvery = 16
 // underlying FS is slow on os.Remove.
 func (p *Persister) dropInMemoryLocked(key string) {
 	if w, ok := p.writers[key]; ok {
-		_ = w.close()
+		if err := w.close(); err != nil {
+			slog.Warn("event log persist: close on drop failed", "key", key, "err", err)
+		}
 		delete(p.writers, key)
 	}
 }
@@ -1652,7 +1671,14 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		})
 		w.bytes += n
 		w.nextSeq++
-		w.entriesSinceIdxWrite++
+		// NOTE: entriesSinceIdxWrite is NOT advanced here. It is a cursor
+		// into the stride cycle that records the absolute-stream phase of
+		// pendingIdx[0] (the first entry staged since the last successful
+		// idx append). flush() reads it as the selectForIdx start phase and
+		// then advances it by len(pendingIdx) modulo stride after a durable
+		// idx sync. Incrementing per entry here would double-count the batch
+		// (cursor advances by 2N per cycle instead of N) and offset the
+		// selectForIdx phase by N, breaking the stride alignment invariant.
 		written++
 	}
 	if written > 0 {

@@ -3,6 +3,7 @@ package cron
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The pure secret-redactor table tests now live in internal/textutil
@@ -171,5 +172,53 @@ func TestRedactSecrets_AliasDelegates(t *testing.T) {
 	got := RedactSecrets("token sk-ant-api03-abcdef0123456789 here")
 	if got != "token [REDACTED] here" {
 		t.Errorf("cron.RedactSecrets alias diverged: %q", got)
+	}
+}
+
+// TestRecordTerminalResult_ErrMsgSecretRedacted is the integration guard for
+// R090135-GO-2: a token (sk-ant-/ghp_/AKIA…) embedded in the errMsg argument
+// must not survive into Job.LastError → cron_jobs.json. Before the fix only
+// the result branch called redactSecretsInResult; the errMsg branch only called
+// redactPathsInCronError (path-redaction only), leaving tokens intact.
+func TestRecordTerminalResult_ErrMsgSecretRedacted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: dir + "/cron.json",
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	j := &Job{
+		ID:       "errredc01",
+		Schedule: "@every 1h",
+		Platform: "feishu",
+		ChatID:   "chat1",
+		ChatType: "direct",
+		Paused:   true,
+	}
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.mu.Unlock()
+
+	const rawToken = "sk-ant-api03-abcdef0123456789abcdef"
+	errInput := "session error: header " + rawToken + " rejected"
+
+	_, gotErrMsg, _ := s.recordTerminalResult(j, "", errInput, "", ErrClassSessionError, RunStateFailed, time.Now())
+	if strings.Contains(gotErrMsg, rawToken) {
+		t.Errorf("recordTerminalResult returned errMsg still contains token: %q", gotErrMsg)
+	}
+	if !strings.Contains(gotErrMsg, "[REDACTED]") {
+		t.Errorf("recordTerminalResult returned errMsg missing [REDACTED]: %q", gotErrMsg)
+	}
+	// Also assert the persisted Job field is clean.
+	s.mu.RLock()
+	lastErr := j.LastError
+	s.mu.RUnlock()
+	if strings.Contains(lastErr, rawToken) {
+		t.Errorf("Job.LastError still contains token after recordTerminalResult: %q", lastErr)
 	}
 }
