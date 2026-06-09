@@ -434,8 +434,12 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 // level, it tries consuming 1, 2, 3, ... consecutive parts as a single directory
 // name, verifying each candidate with os.Stat. Invalid branches are pruned
 // immediately, keeping the total stat calls manageable (~10-20 for typical paths).
-// dfsPathCache permanently caches the result of resolveWorkspaceByParts.
-// Encoded directory names never change, so the mapping is stable.
+// dfsPathCache caches successful results of resolveWorkspaceByParts.
+// Encoded directory names never change, so a resolved (non-empty) mapping is
+// stable and safe to cache permanently. Negative results ("") are intentionally
+// NOT cached: the workspace directory may be transiently absent (unmounted
+// removable/network drive, mid-rebuild git worktree, in-progress checkout) and
+// must be re-resolvable once it reappears. "" is the unresolvable sentinel.
 var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 
 func resolveWorkspaceByParts(dirName string) string {
@@ -451,7 +455,11 @@ func resolveWorkspaceByParts(dirName string) string {
 	}
 	statCount := 0
 	result := tryResolveParts(parts, "/", &statCount)
-	dfsPathCache.Store(dirName, result)
+	// Only cache successful resolutions; never cache the negative sentinel so a
+	// directory that reappears later can still be resolved within this process.
+	if result != "" {
+		dfsPathCache.Store(dirName, result)
+	}
 	return result
 }
 

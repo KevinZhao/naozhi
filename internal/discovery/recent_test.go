@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,66 @@ func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
 	got := resolveWorkspaceByParts(encoded)
 	if got != "" {
 		t.Errorf("expected empty for nonexistent path, got %q", got)
+	}
+
+	// Regression (#1994): a negative ("") result must NOT be cached, so a
+	// directory that is transiently absent during one scan stays unresolvable
+	// without poisoning future scans.
+	if _, ok := dfsPathCache.Load(encoded); ok {
+		t.Errorf("negative result was cached for %q; should be skipped", encoded)
+	}
+}
+
+// TestResolveWorkspaceByParts_NegativeNotCached verifies that a directory which
+// is absent on the first call (returns "") becomes resolvable once it reappears
+// on disk, instead of being permanently stuck at "" by a cached negative result
+// (regression for #1994: removable/network drive remount, git worktree
+// remove+recreate, mid-checkout transient absence).
+func TestResolveWorkspaceByParts_NegativeNotCached(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	target := filepath.Join(parent, "reappear")
+	encoded := "-" + strings.ReplaceAll(target[1:], "/", "-")
+	dfsPathCache.Delete(encoded)
+	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
+
+	// First call: target does not exist yet → unresolvable.
+	if got := resolveWorkspaceByParts(encoded); got != "" {
+		t.Fatalf("expected empty before dir exists, got %q", got)
+	}
+	if _, ok := dfsPathCache.Load(encoded); ok {
+		t.Fatalf("negative result was cached; should not be")
+	}
+
+	// Directory reappears (e.g. drive remounted / worktree recreated).
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Second call must now resolve it, proving the negative result was not cached.
+	if got := resolveWorkspaceByParts(encoded); got != target {
+		t.Errorf("after dir reappeared: got %q, want %q", got, target)
+	}
+}
+
+// TestResolveWorkspaceByParts_PositiveCached verifies successful resolutions are
+// still cached and served from the cache on subsequent calls.
+func TestResolveWorkspaceByParts_PositiveCached(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	encoded := "-" + strings.ReplaceAll(base[1:], "/", "-")
+	dfsPathCache.Delete(encoded)
+	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
+
+	if got := resolveWorkspaceByParts(encoded); got != base {
+		t.Fatalf("first resolution: got %q, want %q", got, base)
+	}
+	v, ok := dfsPathCache.Load(encoded)
+	if !ok || v.(string) != base {
+		t.Fatalf("positive result not cached: ok=%v v=%v", ok, v)
+	}
+	if got := resolveWorkspaceByParts(encoded); got != base {
+		t.Errorf("cached resolution: got %q, want %q", got, base)
 	}
 }
 
