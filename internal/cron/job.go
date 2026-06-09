@@ -683,6 +683,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
+		// R20260609-COR-004 (#1979): a paused never-run job has had no fair
+		// chance to fire. The startedAt suppression above only covers the
+		// process-startup window, not a job that was created paused and only
+		// just resumed, so guard the never-run branch on Paused to avoid a
+		// spurious missed badge the instant such a job resumes.
+		if j.Paused {
+			return false, time.Time{}
+		}
 		// R20260603140013-CR-5: never-run jobs must use the same slack factor as
 		// the already-run branch below. The bare `> period` threshold left no
 		// jitter headroom, so a healthy job whose first scheduled tick landed

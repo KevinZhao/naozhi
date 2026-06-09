@@ -140,6 +140,16 @@ type Scheduler struct {
 	// seam WithStopBudgetField, which the same test must serialise via
 	// t.Cleanup).
 	stopBudget time.Duration
+	// watchdogInterruptTimeoutNanos is the per-instance interrupt-call timeout
+	// (in nanoseconds) runDeadlineWatchdog bounds sess.InterruptViaControl at.
+	// R20260607-GO-4 (#1904): moved off the package-level
+	// watchdogInterruptTimeoutAtomic onto the Scheduler instance — mirroring
+	// stopBudget (#947) — so two t.Parallel() timeout tests that each shorten
+	// it on their own *Scheduler no longer clobber each other's override.
+	// Atomic because the production read happens on the AfterFunc watchdog
+	// goroutine concurrently with a test's per-instance Store. Initialised to
+	// watchdogInterruptTimeoutDefault in NewScheduler.
+	watchdogInterruptTimeoutNanos atomic.Int64
 	// location is the timezone used to interpret schedule expressions and to
 	// compute preview/next-run times exposed via the dashboard.
 	location *time.Location
@@ -483,6 +493,10 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R20260607-GO-4 (#1904): seed the per-instance watchdog interrupt timeout
+	// from the package-level default. Tests override it per-instance via
+	// setWatchdogInterruptTimeoutForScheduler, so no global mutation races.
+	s.watchdogInterruptTimeoutNanos.Store(int64(watchdogInterruptTimeoutDefault))
 	// R249-ARCH-27 (#991): publish the cloned config maps as one immutable
 	// snapshot. maps.Clone severs the alias to the caller-supplied maps so
 	// post-Start mutation of cfg.* cannot race the lock-free readers; the
