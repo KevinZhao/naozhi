@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -1577,6 +1578,20 @@ func TestShortPath(t *testing.T) {
 		if got := shortPath(tt.in); got != tt.want {
 			t.Errorf("shortPath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+
+	// #1988: a non-/home multi-byte path >50 bytes must truncate on a rune
+	// boundary so EventEntry.Detail stays valid UTF-8 (no mid-CJK byte slice).
+	cjk := "/data/" + strings.Repeat("中", 30) + "x.go" // 6 + 90 + 4 = 100 bytes
+	got := shortPath(cjk)
+	if !utf8.ValidString(got) {
+		t.Errorf("shortPath(multibyte) = %q is not valid UTF-8", got)
+	}
+	if !strings.HasPrefix(got, "...") {
+		t.Errorf("shortPath(multibyte) = %q, want \"...\" prefix", got)
+	}
+	if len(got) > 3+47 {
+		t.Errorf("shortPath(multibyte) tail = %d bytes, want <= 47", len(got)-3)
 	}
 }
 

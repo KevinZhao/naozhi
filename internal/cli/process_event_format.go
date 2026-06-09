@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -315,7 +316,14 @@ func shortPath(p string) string {
 		}
 	}
 	if len(p) > 50 {
-		return "..." + p[len(p)-47:]
+		// #1988: walk the start index forward to a rune boundary so a
+		// multi-byte (e.g. CJK) path doesn't get sliced mid-codepoint,
+		// which would emit invalid UTF-8 into EventEntry.Detail.
+		start := len(p) - 47
+		for start < len(p) && !utf8.RuneStart(p[start]) {
+			start++
+		}
+		return "..." + p[start:]
 	}
 	return p
 }
