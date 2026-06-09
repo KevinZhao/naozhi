@@ -223,6 +223,57 @@ func TestCacheManager_RefreshAll_preservesCacheOnTransientError(t *testing.T) {
 	}
 }
 
+// ---- RefreshAll preserves projects/discovered when only those RPCs fail (#1993) ----
+
+func TestCacheManager_RefreshAll_preservesProjectsOnPartialError(t *testing.T) {
+	node := &stubConn{
+		nodeID:   "partial",
+		sessions: []map[string]any{{"session_id": "s1"}},
+		projects: []map[string]any{{"name": "proj1"}},
+		disc:     []map[string]any{{"pid": 100}},
+	}
+	cm := NewCacheManager(
+		func() map[string]Conn { return map[string]Conn{"partial": node} },
+		nil,
+	)
+
+	// First refresh succeeds and populates the cache.
+	cm.RefreshAll()
+
+	// Next refresh: sessions succeed but projects/discovered RPCs fail
+	// independently. The node must NOT be blanked — it should keep its
+	// last-known projects/discovered (regression for #1993).
+	node.projErr = errors.New("projects 500")
+	node.discErr = errors.New("discovered timeout")
+	node.projects = nil
+	node.disc = nil
+	cm.RefreshAll()
+
+	_, status := cm.Sessions()
+	if status["partial"] != "ok" {
+		t.Errorf("expected status 'ok' (sessions succeeded), got %q", status["partial"])
+	}
+	if got := cm.Projects()["partial"]; len(got) != 1 {
+		t.Errorf("expected 1 preserved project on partial error, got %d", len(got))
+	}
+	if got := cm.Discovered()["partial"]; len(got) != 1 {
+		t.Errorf("expected 1 preserved discovered on partial error, got %d", len(got))
+	}
+
+	// Recovery: errors clear and fresh data replaces the preserved snapshot.
+	node.projErr = nil
+	node.discErr = nil
+	node.projects = []map[string]any{{"name": "proj1"}, {"name": "proj2"}}
+	node.disc = []map[string]any{{"pid": 100}, {"pid": 200}}
+	cm.RefreshAll()
+	if got := cm.Projects()["partial"]; len(got) != 2 {
+		t.Errorf("expected 2 fresh projects after recovery, got %d", len(got))
+	}
+	if got := cm.Discovered()["partial"]; len(got) != 2 {
+		t.Errorf("expected 2 fresh discovered after recovery, got %d", len(got))
+	}
+}
+
 // ---- RefreshAll with no nodes is a no-op ----
 
 func TestCacheManager_RefreshAll_noNodes(t *testing.T) {

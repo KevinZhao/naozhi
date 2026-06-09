@@ -70,6 +70,44 @@ func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
 	}
 }
 
+// TestResolveWorkspaceByParts_NegativeResultNotCached is a regression test for
+// #1994: a workspace dir absent during one scan (unmounted drive, worktree
+// mid-rebuild) must still resolve once it reappears, rather than being
+// permanently cached as unresolvable for the process lifetime.
+func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
+	// Not parallel: creates a real dir whose encoded name we control.
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "reappearing-project")
+	encoded := "-" + parent[1:] + "-reappearing-project"
+	for i := 0; i < len(encoded); i++ {
+		if encoded[i] == '/' {
+			encoded = encoded[:i] + "-" + encoded[i+1:]
+		}
+	}
+	dfsPathCache.Delete(encoded)
+	t.Cleanup(func() { dfsPathCache.Delete(encoded) })
+
+	// Dir absent: resolves to "" and must NOT be cached.
+	if got := resolveWorkspaceByParts(encoded); got != "" {
+		t.Fatalf("expected empty for absent dir, got %q", got)
+	}
+	if _, ok := dfsPathCache.Load(encoded); ok {
+		t.Fatal("negative result must not be cached (#1994)")
+	}
+
+	// Dir reappears: must now resolve instead of returning the stale "".
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveWorkspaceByParts(encoded); got != dir {
+		t.Errorf("after dir reappeared, resolveWorkspaceByParts(%q) = %q, want %q", encoded, got, dir)
+	}
+	// Positive result IS cached.
+	if _, ok := dfsPathCache.Load(encoded); !ok {
+		t.Error("positive result should be cached")
+	}
+}
+
 func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
