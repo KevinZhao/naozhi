@@ -152,37 +152,48 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// caller is rate-limited by user message frequency — paying ~500ns
 	// per probe is acceptable until the broader R250-PERF-7 cache
 	// refactor lands. Tracking via the issue title.
+	fastHit := false
 	s.mu.RLock()
 	for _, j := range s.jobs {
 		if j.LastSessionID == sessionID {
-			s.mu.RUnlock()
-			return true
+			fastHit = true
+			break
 		}
 	}
 	s.mu.RUnlock()
 
-	found := false
-	s.rangeRunningSessionIDs(func(sid string) bool {
-		if sid == sessionID {
-			found = true
-			return false
-		}
-		return true
-	})
-	if found {
-		return true
+	if !fastHit {
+		s.rangeRunningSessionIDs(func(sid string) bool {
+			if sid == sessionID {
+				fastHit = true
+				return false
+			}
+			return true
+		})
 	}
 
-	// Not in the cheap sources — pay the full build and populate the
-	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
-	// dashboard) reuse this work. Snapshot the cache generation BEFORE the
-	// build reads any source data so a concurrent invalidate() cannot be
-	// clobbered by our publish (R20260605B-CORR-7 #1811). The local `set`
-	// is still returned to the probe caller even if publish is rejected.
+	// R20260609-COR-003 (#1978): warm the TTL cache even on a fast-path hit.
+	// The cheap sources above (s.jobs walk, runningJobs) and the first two
+	// phases of buildKnownSessionsSet are both O(jobs), so the only extra cost
+	// of building here is the runStore.Recent walk — a cost the dashboard's
+	// 1Hz KnownSessionIDs() would otherwise pay on EVERY tick because a
+	// fast-path-only probe stream never populates the cache. Building once and
+	// serving from cache for the whole TTL is a strict net win in the
+	// steady-state deployment where probes keep hitting LastSessionID, and the
+	// auto-chain probe caller is rate-limited by user message frequency so the
+	// build never runs hotter than the dashboard already does.
+	//
+	// Snapshot the cache generation BEFORE the build reads any source data so a
+	// concurrent invalidate() cannot be clobbered by our publish
+	// (R20260605B-CORR-7 #1811). The local `set` is still consulted even if
+	// publish is rejected.
 	buildGen := s.knownSessionsCache.beginBuild()
 	set := s.buildKnownSessionsSet()
 	s.knownSessionsCache.publish(set, buildGen)
 
+	if fastHit {
+		return true
+	}
 	_, ok := set[sessionID]
 	return ok
 }
