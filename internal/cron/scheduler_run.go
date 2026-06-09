@@ -890,7 +890,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// accidentally reorder the lines and let the next Reset race the
 	// in-flight interrupt write. See sendWithWatchdog godoc for the
 	// invariant.
-	result, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
+	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress

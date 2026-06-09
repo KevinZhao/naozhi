@@ -247,6 +247,13 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 type jobsSnapshot struct {
 	entries []*Job
 	seq     uint64
+	// pooled, when non-nil, is the *[]*Job handle from marshalEntriesPool that
+	// backs entries. persistSnapshot returns it via putMarshalEntries once
+	// marshal completes (R20260609-PERF-1 #1975), so the cap-len(jobs)
+	// backing array is recycled instead of freshly allocated on every
+	// finishRun → persist tick. nil when the slice was not pooled (so Put is a
+	// no-op), keeping the cold/test paths allocation-shaped exactly as before.
+	pooled *[]*Job
 }
 
 // snapshotJobsForSaveLocked captures the current job set into a detached
@@ -264,7 +271,20 @@ type jobsSnapshot struct {
 // The sorted-ID hint and drift fallback mirror marshalJobsLocked so the
 // on-disk ordering stays byte-identical regardless of which persist path ran.
 func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
-	entries := make([]*Job, 0, len(s.jobs))
+	// R20260609-PERF-1 (#1975): pull the snapshot's outer slice from
+	// marshalEntriesPool (the same pool marshalJobsLocked uses) so the
+	// cap-len(jobs) backing array is recycled across the finishRun → persist
+	// hot path instead of freshly allocated on every tick. persistSnapshot
+	// returns the handle once marshal completes. Grow exactly as
+	// marshalJobsLocked does when the pooled cap is below the current job
+	// count; the grown slice circulates back via the pooled handle below.
+	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
+	entries := *entriesPtr
+	if cap(entries) < len(s.jobs) {
+		entries = make([]*Job, 0, len(s.jobs))
+	} else {
+		entries = entries[:0]
+	}
 	useHint := len(s.sortedJobIDs) == len(s.jobs)
 	if useHint {
 		for _, id := range s.sortedJobIDs {
@@ -299,7 +319,13 @@ func (s *Scheduler) snapshotJobsForSaveLocked() jobsSnapshot {
 			slices.SortFunc(entries, jobIDCmpForSort)
 		}
 	}
-	return jobsSnapshot{entries: entries, seq: s.saveSeq.Add(1)}
+	// Write the (possibly grown) slice back into the pooled handle so a grow
+	// circulates through the pool, mirroring marshalJobsLocked's
+	// `*entriesPtr = entries`. persistSnapshot returns entriesPtr via
+	// putMarshalEntries after marshal, which zeroes the *Job element pointers
+	// (no live-job aliasing — every element is a fresh &cp value copy).
+	*entriesPtr = entries
+	return jobsSnapshot{entries: entries, seq: s.saveSeq.Add(1), pooled: entriesPtr}
 }
 
 // persistSnapshot marshals a detached snapshot taken by
@@ -317,6 +343,12 @@ func (s *Scheduler) persistSnapshot(snap jobsSnapshot) (func(), error) {
 	} else {
 		data, err = defaultMarshalJobs(snap.entries)
 	}
+	// R20260609-PERF-1 (#1975): marshal has produced an independent `data`
+	// byte slice (or failed), so snap.entries is no longer referenced — return
+	// the pooled backing slice now (no-op when the snapshot was not pooled).
+	// putMarshalEntries zeroes the *Job element pointers so the pool does not
+	// pin the value copies. Must run on both success and failure paths.
+	putMarshalEntries(snap.pooled)
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
 		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)

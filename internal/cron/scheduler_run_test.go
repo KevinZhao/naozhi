@@ -43,7 +43,7 @@ func TestRunDeadlineWatchdog_NoIdleGoroutine_R247_GO_12(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancels = append(cancels, cancel)
 		ci := &countingInterrupter{outcome: InterruptSent}
-		ch, _ := runDeadlineWatchdog(ctx, ci)
+		ch, _ := runDeadlineWatchdog(ctx, ci, watchdogInterruptTimeoutDefault)
 		channels = append(channels, ch)
 	}
 
