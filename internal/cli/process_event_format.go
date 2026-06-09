@@ -315,7 +315,9 @@ func shortPath(p string) string {
 		}
 	}
 	if len(p) > 50 {
-		return "..." + p[len(p)-47:]
+		// Snap the tail start to a rune boundary so a multi-byte (e.g. CJK)
+		// path segment isn't sliced mid-codepoint into invalid UTF-8. R20260609-LB-2.
+		return "..." + p[textutil.TailAtRuneBoundary(p, len(p)-47):]
 	}
 	return p
 }

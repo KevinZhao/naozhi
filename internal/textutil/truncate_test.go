@@ -1,6 +1,9 @@
 package textutil
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 func TestTruncateRunes_Short(t *testing.T) {
 	t.Parallel()
@@ -107,6 +110,40 @@ func TestTruncateAtRuneBoundary(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("TruncateAtRuneBoundary(%q,%d) = %d, want %d",
 					tc.in, tc.maxBytes, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTailAtRuneBoundary(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		in       string
+		minStart int
+		want     int
+	}{
+		{"zero_returns_zero", "hello", 0, 0},
+		{"negative_returns_zero", "hello", -3, 0},
+		{"beyond_len_returns_len", "hello", 99, 5},
+		{"ascii_exact_boundary", "hello", 2, 2},
+		// "你好世界" = 4 runes x 3 bytes = 12 bytes. minStart=4 falls inside
+		// the 2nd rune (bytes 3..5); walk forward to byte 6.
+		{"cjk_walks_forward_to_boundary", "你好世界", 4, 6},
+		{"cjk_already_on_boundary", "你好世界", 3, 3},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := TailAtRuneBoundary(tc.in, tc.minStart)
+			if got != tc.want {
+				t.Errorf("TailAtRuneBoundary(%q,%d) = %d, want %d",
+					tc.in, tc.minStart, got, tc.want)
+			}
+			if got >= 0 && got <= len(tc.in) && !utf8.ValidString(tc.in[got:]) {
+				t.Errorf("TailAtRuneBoundary(%q,%d) tail %q is invalid UTF-8",
+					tc.in, tc.minStart, tc.in[got:])
 			}
 		})
 	}
