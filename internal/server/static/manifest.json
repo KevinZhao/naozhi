@@ -1,6 +1,6 @@
 {
-  "name": "naozhi dashboard",
-  "short_name": "naozhi",
+  "name": ">_naozhi dashboard",
+  "short_name": ">_naozhi",
   "start_url": "/dashboard",
   "display": "standalone",
   "background_color": "#0d1117",

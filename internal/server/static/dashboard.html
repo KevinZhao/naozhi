@@ -3,8 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
-<title>naozhi dashboard</title>
+<title>&gt;_naozhi · dashboard</title>
 <link rel="manifest" href="/manifest.json">
+<meta name="application-name" content="&gt;_naozhi">
+<meta name="apple-mobile-web-app-title" content="&gt;_naozhi">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -406,12 +408,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .sidebar-header{padding:16px;border-bottom:1px solid var(--nz-border)}
 .sidebar-header .header-row{display:flex;align-items:center;justify-content:space-between}
 /* Wordmark uses the brand mono stack (matching the login .ab-mark) and a
-   ›_ terminal bracket-mark prefix — the "brain juice / stream-json gateway"
+   >_ terminal bracket-mark prefix — the "brain juice / stream-json gateway"
    motif. Previously this was the one prominent spot that used the default UI
    font, which read as a generic app header and clashed with the mono login
    brand. R20260606. */
 .sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
-.sidebar-header h1::before{content:"›_";color:var(--nz-rust);margin-right:6px;font-weight:700}
+.sidebar-header h1::before{content:">_";color:var(--nz-rust);margin-right:6px;font-weight:700}
 .session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
 .sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
@@ -669,7 +671,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .event.user+.event.user,.event.text+.event.text{margin-top:2px}
 .event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
-/* Brand "›_" prompt motif for the quick-ask empty state. The underscore
+/* Brand ">_" prompt motif for the quick-ask empty state. The underscore
    blinks like a terminal cursor — the one ambient brand signature, hit every
    time the user lands on an empty session. Neutralised by the global
    prefers-reduced-motion guard. R20260606. */
