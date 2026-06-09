@@ -129,12 +129,17 @@ func (c *knownSessionsCache) publish(set map[string]struct{}, buildGen uint64) b
 }
 
 // invalidate marks the snapshot stale, coalescing bursts: it performs the
-// actual drop (nil set + gen bump) at most once per minInvalidateInterval. In
-// between, it records a pending `dirty` flag so the deferred drop is honoured
-// by lookupFresh once the interval elapses. This bounds the cold-rebuild rate
-// on append-heavy deployments while keeping staleness well below the TTL.
+// actual drop (nil set) at most once per minInvalidateInterval. In between, it
+// records a pending `dirty` flag so the deferred drop is honoured by
+// lookupFresh once the interval elapses. This bounds the cold-rebuild rate on
+// append-heavy deployments while keeping staleness well below the TTL.
 // R20260608133928-PERF-3 (#1965). Cheap (one mutex) so mutator paths call it
 // unconditionally.
+//
+// gen is bumped on BOTH the real-drop and coalesce branches so any in-flight
+// build that snapshotted gen via beginBuild() before this invalidate has its
+// publish() rejected — see R20260605B-CORR-7 (#1811) and R20260609-072532-LB-1
+// (#1987).
 func (c *knownSessionsCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -146,9 +151,16 @@ func (c *knownSessionsCache) invalidate() {
 		c.lastInvalidatedAt = time.Now()
 		return
 	}
-	// Within the coalescing window: defer the drop. The set stays live (and
-	// gen-protected) so concurrent publishers and lookupFresh callers keep
-	// serving it until lookupFresh flushes the dirty drop past the interval.
+	// Within the coalescing window: defer the drop. The set stays live so
+	// lookupFresh keeps serving it until it flushes the dirty drop past the
+	// interval. But we MUST still bump gen so an in-flight build that
+	// snapshotted gen via beginBuild() before this invalidate cannot publish()
+	// its now-stale set (it was built from source data older than this
+	// invalidate). Without this bump the CORR-7 invariant breaks: the stale
+	// publish installs a set missing a just-written sessionID AND clears dirty,
+	// so lookupFresh serves the stale set for the full TTL. R20260609-072532-LB-1
+	// (#1987); preserves R20260605B-CORR-7 (#1811).
+	c.gen++
 	c.dirty = true
 }
 

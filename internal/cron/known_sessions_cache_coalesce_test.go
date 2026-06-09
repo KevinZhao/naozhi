@@ -90,3 +90,53 @@ func TestKnownSessionsCache_CoalescedInvalidateGuardsLostBuild(t *testing.T) {
 		t.Fatal("lookupFresh after rejected publish = hit, want miss")
 	}
 }
+
+// TestKnownSessionsCache_CoalescedInvalidateGuardsInFlightBuild pins
+// R20260609-072532-LB-1 (#1987): the gen guard must also reject a build that
+// snapshotted gen before a *coalesced* (non-real-drop) invalidate. Before the
+// fix the coalesce branch only set dirty without bumping gen, so the in-flight
+// build's publish slipped through (gen unchanged), installed a set missing a
+// just-written sessionID, AND cleared dirty — serving the stale set for the
+// full TTL and breaking CORR-7 (#1811).
+func TestKnownSessionsCache_CoalescedInvalidateGuardsInFlightBuild(t *testing.T) {
+	var c knownSessionsCache
+
+	// Seed a live set, then perform a real drop + republish so the next
+	// invalidate lands inside minInvalidateInterval (the coalesce window).
+	c.invalidate() // cold: real drop, stamps lastInvalidatedAt = now.
+	if !c.publish(map[string]struct{}{"old": {}}, c.beginBuild()) {
+		t.Fatal("setup publish = false, want true")
+	}
+
+	// A build begins: it snapshots gen, then reads source data that does NOT
+	// yet contain the soon-to-be-written sessionID.
+	buildGen := c.beginBuild()
+
+	// A cron run finishes and writes a new LastSessionID, firing invalidate().
+	// This lands inside minInvalidateInterval of the cold drop, so it takes the
+	// coalesce branch (set stays live, dirty=true). It MUST still bump gen.
+	c.invalidate()
+
+	c.mu.RLock()
+	dirty := c.dirty
+	c.mu.RUnlock()
+	if !dirty {
+		t.Fatal("second invalidate did not take the coalesce branch; test precondition broken")
+	}
+
+	// The in-flight build now publishes its stale set (missing the new id).
+	// The gen bump in the coalesce branch must reject it.
+	if c.publish(map[string]struct{}{"old": {}}, buildGen) {
+		t.Fatal("publish installed a set built before a coalesced invalidate — gen guard broken (#1987)")
+	}
+
+	// dirty must remain set (the rejected publish must not clear it), so
+	// lookupFresh still honours the pending drop once the interval elapses
+	// rather than serving the stale set for the full TTL.
+	c.mu.RLock()
+	dirtyAfter := c.dirty
+	c.mu.RUnlock()
+	if !dirtyAfter {
+		t.Fatal("rejected publish cleared dirty; pending drop lost — stale set would serve full TTL (#1987)")
+	}
+}
