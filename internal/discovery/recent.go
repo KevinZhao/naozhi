@@ -434,8 +434,17 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 // level, it tries consuming 1, 2, 3, ... consecutive parts as a single directory
 // name, verifying each candidate with os.Stat. Invalid branches are pruned
 // immediately, keeping the total stat calls manageable (~10-20 for typical paths).
-// dfsPathCache permanently caches the result of resolveWorkspaceByParts.
-// Encoded directory names never change, so the mapping is stable.
+// dfsPathCache caches successful (non-empty) results of
+// resolveWorkspaceByParts. Encoded directory names never change, so a
+// resolved mapping is stable and safe to cache for the process lifetime.
+//
+// Negative results ("") are deliberately NOT cached: the empty string is an
+// "unresolvable right now" sentinel, not a stable fact. A workspace directory
+// may be temporarily absent during the scan (unmounted network/removable
+// drive, git worktree mid-rebuild/checkout) and reappear later. Caching the
+// negative result would permanently drop that project from the history
+// sidebar until the process restarts (#1994). Re-running the bounded DFS on a
+// cache miss is cheap (≤200 stats).
 var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 
 func resolveWorkspaceByParts(dirName string) string {
@@ -451,7 +460,9 @@ func resolveWorkspaceByParts(dirName string) string {
 	}
 	statCount := 0
 	result := tryResolveParts(parts, "/", &statCount)
-	dfsPathCache.Store(dirName, result)
+	if result != "" {
+		dfsPathCache.Store(dirName, result)
+	}
 	return result
 }
 
