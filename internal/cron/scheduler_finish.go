@@ -329,8 +329,12 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	if !a.skipPersist {
 		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state, endedAt)
 	} else {
-		persistedResult = sanitiseRunResult(persistedResult)
-		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
+		if persistedResult != "" {
+			persistedResult = sanitiseRunResult(persistedResult)
+		}
+		if persistedErrMsg != "" {
+			persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
+		}
 	}
 
 	// R230C-GO-8: bump per-state metric AFTER persistence settles. Previous
