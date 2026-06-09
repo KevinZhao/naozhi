@@ -54,26 +54,26 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, "job_id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id is required")
 		return
 	}
 	if len(jobID) > maxCronIDLenDashboard {
-		http.Error(w, "job_id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id too long")
 		return
 	}
 	if !cronpkg.IsValidID(jobID) {
-		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id must be lowercase hex")
 		return
 	}
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if len(raw) > 4 {
-			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "limit must be a positive integer")
 			return
 		}
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "limit must be a positive integer")
 			return
 		}
 		if n > cronpkg.DefaultRunsKeepCount {
@@ -84,12 +84,12 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 	var before time.Time
 	if raw := r.URL.Query().Get("before"); raw != "" {
 		if len(raw) > 16 {
-			http.Error(w, "before must be a unix-ms integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "before must be a unix-ms integer")
 			return
 		}
 		ms, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || ms <= 0 {
-			http.Error(w, "before must be a unix-ms integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "before must be a unix-ms integer")
 			return
 		}
 		before = time.UnixMilli(ms)
@@ -129,7 +129,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 	// Path param: /api/cron/runs/{run_id}; PathValue is supplied by the
@@ -137,41 +137,41 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	// pattern is changed without updating this handler.
 	runID := r.PathValue("run_id")
 	if runID == "" {
-		http.Error(w, "run_id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "run_id is required")
 		return
 	}
 	if len(runID) > runIDLenLimit {
-		http.Error(w, "run_id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "run_id too long")
 		return
 	}
 	if !cronpkg.IsValidID(runID) {
-		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "run_id must be lowercase hex")
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, "job_id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id is required")
 		return
 	}
 	if len(jobID) > maxCronIDLenDashboard {
-		http.Error(w, "job_id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id too long")
 		return
 	}
 	if !cronpkg.IsValidID(jobID) {
-		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "job_id must be lowercase hex")
 		return
 	}
 	run, err := h.scheduler.Run(jobID, runID)
 	if err != nil {
 		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
-			http.Error(w, "run record corrupt", http.StatusInternalServerError)
+			writeCronErr(w, http.StatusInternalServerError, "run record corrupt")
 			return
 		}
 		// Default: treat any non-corrupt error (incl. fs.ErrNotExist)
 		// as "not found" — distinguishing "not exist" vs "perm denied"
 		// would leak filesystem layout to a remote caller.
-		http.Error(w, "run not found", http.StatusNotFound)
+		writeCronErr(w, http.StatusNotFound, "run not found")
 		return
 	}
 	// SanitizeForLog the Prompt + WorkDir fields read off disk: dashboard
