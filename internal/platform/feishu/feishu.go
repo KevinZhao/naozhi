@@ -1403,15 +1403,21 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 		return nil
 	}
 	cacheKey := reactionCacheKey(messageID, emojiType)
-	v, ok := f.reactionIDs.LoadAndDelete(cacheKey)
+	// #1984: Load (not LoadAndDelete) so a failed DELETE keeps the
+	// reaction_id cached for a later retry. Evicting the entry only AFTER the
+	// API confirms removal makes "drop cache" strictly later than "confirm
+	// success" — otherwise a transient token/HTTP/business-code failure loses
+	// the reaction_id permanently and the ⏳ reaction can never be cleared.
+	v, ok := f.reactionIDs.Load(cacheKey)
 	if !ok {
 		return nil
 	}
 	entry, ok := v.(reactionCacheEntry)
 	if !ok || entry.id == "" {
 		// Defensive: a future refactor that stores a different value type
-		// should not wedge RemoveReaction. Silently drop — LoadAndDelete
-		// already removed the malformed entry from the map.
+		// should not wedge RemoveReaction. Drop the malformed entry — it can
+		// never produce a valid DELETE, so retaining it is pointless.
+		f.reactionIDs.Delete(cacheKey)
 		return nil
 	}
 	reactionID := entry.id
@@ -1444,5 +1450,7 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 		// R181-SEC-P2-4: %q escapes bidi/C1/newline in upstream msg so slog attrs stay safe.
 		return fmt.Errorf("feishu delete reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
+	// #1984: only now that the DELETE is confirmed do we evict the cache entry.
+	f.reactionIDs.Delete(cacheKey)
 	return nil
 }

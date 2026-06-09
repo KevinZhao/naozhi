@@ -1427,7 +1427,12 @@ func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.Man
 	if sess != nil {
 		backendID = sess.Backend()
 	}
-	if footer := d.caps.ReplyFooter(backendID); footer != "" {
+	// #1985: guard on replyText != "" (mirroring the merge-chip branch above)
+	// so an empty-text turn returns the empty "nothing to send" sentinel
+	// instead of an orphan "— cc" footer bubble. Without this guard a healthy
+	// empty result (e.g. error_max_turns) plus the default footer would emit a
+	// lone footer message to the IM channel.
+	if footer := d.caps.ReplyFooter(backendID); footer != "" && replyText != "" {
 		replyText += "\n\n— " + footer
 	}
 	return replyText
