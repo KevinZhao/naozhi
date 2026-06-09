@@ -3793,6 +3793,17 @@ async function sendMessage() {
     showToast('图片上传中，请稍候…', 'warning');
     return;
   }
+  // Auto-orient runs as a fire-and-forget vision side-call after upload
+  // (maybeAutoOrient). If the user hits send within its ~12s window, the
+  // server would TakeAll the upload BEFORE the rotation's in-place Replace
+  // lands — sending the original sideways image. Transparently wait for any
+  // in-flight orient to settle (hard-capped at ORIENT_MAX_WAIT_MS) so the
+  // rotated bytes are in the store before we consume the file_ids. Silent by
+  // design: no toast, the user already clicked send and the rotation is
+  // best-effort. Re-check selectedKey after the await in case the user
+  // switched sessions while waiting.
+  await awaitPendingOrients();
+  if (!selectedKey) return;
   const failed = pendingFiles.filter(f => f.status === 'error');
   if (failed.length > 0) {
     const detail = failed[0].error || '';
@@ -5021,6 +5032,15 @@ async function uploadEntry(entry) {
   renderFilePreviews();
 }
 
+// ORIENT_MAX_WAIT_MS bounds how long send() will block on an in-flight
+// auto-orient. The backend's vision side-call measured ~12s on Haiku; we
+// give it a shorter client budget so a slow/hung model never wedges send.
+// On timeout we abort the orient fetch, clear the flag, and let send proceed
+// with the original (unrotated) bytes — fully consistent with the
+// best-effort contract: a missed rotation is acceptable, a blocked send is
+// not.
+const ORIENT_MAX_WAIT_MS = 8000;
+
 // maybeAutoOrient asks the backend to auto-rotate a just-uploaded image that
 // lacks an EXIF orientation flag. Best-effort and silent: any failure leaves
 // the image as-is (it's already 'ready' and sendable). On a confirmed
@@ -5028,14 +5048,25 @@ async function uploadEntry(entry) {
 // swaps the preview thumbnail so the user sees the upright result that will
 // be sent. The entry's `id` is unchanged by rotation (server replaces bytes
 // in place), so send still references the same file_id.
+//
+// Concurrency: the entry is marked `orienting` for the whole call so send()
+// can block on it (see the gate in sendMessage). Without this, a user who
+// hits send within the ~12s vision window would TakeAll the upload BEFORE the
+// rotation lands — the server's in-place Replace then misses the consumed
+// entry and the original sideways image goes out. The flag is always cleared
+// in finally so a thrown/aborted call can never leave send permanently gated.
 async function maybeAutoOrient(entry) {
   if (!entry || !entry.id || entry.kind !== 'image') return;
+  entry.orienting = true;
+  renderFilePreviews();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ORIENT_MAX_WAIT_MS);
   try {
     const headers = { 'Content-Type': 'application/json' };
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch('/api/sessions/orient', {
-      method: 'POST', headers, body: JSON.stringify({ id: entry.id }),
+      method: 'POST', headers, body: JSON.stringify({ id: entry.id }), signal: ctrl.signal,
     });
     if (!r.ok) return; // 404/expired/etc — nothing to do
     const j = await r.json().catch(() => null);
@@ -5047,10 +5078,31 @@ async function maybeAutoOrient(entry) {
     if (!pendingFiles.includes(entry)) return;
     if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
     entry.blobUrl = j.image; // data: URL, no object URL to revoke later
-    renderFilePreviews();
   } catch (_) {
-    // Best-effort: swallow. The image is already sendable as-is.
+    // Best-effort: swallow (includes the AbortError on timeout). The image is
+    // already sendable as-is.
+  } finally {
+    clearTimeout(timer);
+    entry.orienting = false;
+    renderFilePreviews();
   }
+}
+
+// awaitPendingOrients resolves once no pending image is still auto-orienting,
+// or after ORIENT_MAX_WAIT_MS as a hard ceiling. send() awaits this so an
+// in-flight rotation lands (server Replace) BEFORE TakeAll consumes the
+// upload. Polling (rather than tracking promises) keeps it robust to entries
+// added/removed mid-wait — it simply re-reads the live pendingFiles each tick.
+function awaitPendingOrients() {
+  if (!pendingFiles.some(f => f.orienting)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const deadline = Date.now() + ORIENT_MAX_WAIT_MS;
+    const tick = () => {
+      if (!pendingFiles.some(f => f.orienting) || Date.now() >= deadline) { resolve(); return; }
+      setTimeout(tick, 120);
+    };
+    setTimeout(tick, 120);
+  });
 }
 
 function retryUpload(idx) {
