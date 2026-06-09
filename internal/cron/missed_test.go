@@ -114,6 +114,26 @@ func TestHasMissedSchedule_NeverRun_CreatedLongAgo(t *testing.T) {
 	}
 }
 
+// TestHasMissedSchedule_NeverRun_Paused_NotMissed 锁定 R20260609-COR-004
+// (#1979)：一个创建已久、从未运行、当前处于 paused 的 job 即便恢复（startedAt
+// 抑制窗口外）也不应被判 missed——它从未有机会运行。对照
+// TestHasMissedSchedule_NeverRun_CreatedLongAgo 是完全相同的时间形态，仅多了
+// Paused=true。
+func TestHasMissedSchedule_NeverRun_Paused_NotMissed(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	startedAt := now.Add(-10 * time.Hour) // 远超抑制窗口
+	j := &Job{
+		Schedule:  "@every 30m",
+		CreatedAt: now.Add(-5 * time.Hour), // 5h 前创建，远超一个 period
+		Paused:    true,
+	}
+	missed, _ := HasMissedSchedule(j, now, startedAt)
+	if missed {
+		t.Fatal("paused never-run job must not be flagged missed even after resume window")
+	}
+}
+
 // TestHasMissedSchedule_NeverRun_JitterSlack 锁定 R20260603140013-CR-5：
 // never-run 分支必须用与已跑分支相同的 slack（period*3/2），而不是裸
 // `> period`。否则首个 jitter 窗口内（默认最多 30s）的健康 job 会被误报
