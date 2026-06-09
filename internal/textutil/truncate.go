@@ -163,6 +163,27 @@ func TruncateAtRuneBoundary(s string, maxBytes int) int {
 	return 0
 }
 
+// TailAtRuneBoundary returns the smallest start index >= minStart such that
+// s[start:] begins on a rune boundary. Use when a caller wants a byte-sized
+// tail of s (e.g. shortPath's "..." + p[len(p)-47:] mid-path truncation) but
+// must not start the slice in the middle of a multi-byte UTF-8 codepoint,
+// which would emit invalid UTF-8 into downstream JSON / dashboard fields.
+// Clamps minStart into [0, len(s)]. Assumes s is valid UTF-8. R20260609-LB-2.
+func TailAtRuneBoundary(s string, minStart int) int {
+	if minStart <= 0 {
+		return 0
+	}
+	if minStart >= len(s) {
+		return len(s)
+	}
+	for n := minStart; n < len(s); n++ {
+		if utf8.RuneStart(s[n]) {
+			return n
+		}
+	}
+	return len(s)
+}
+
 // TruncateRunesBytes mirrors TruncateRunes for a []byte input: it returns a
 // string with at most maxRunes runes, appending "..." only when the input
 // was actually trimmed. The conversion to string is deferred to the result

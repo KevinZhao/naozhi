@@ -146,9 +146,16 @@ func (c *knownSessionsCache) invalidate() {
 		c.lastInvalidatedAt = time.Now()
 		return
 	}
-	// Within the coalescing window: defer the drop. The set stays live (and
-	// gen-protected) so concurrent publishers and lookupFresh callers keep
-	// serving it until lookupFresh flushes the dirty drop past the interval.
+	// Within the coalescing window: defer the actual set drop, but STILL bump
+	// gen so any in-flight build that snapshotted gen via beginBuild() before
+	// this call has its publish() rejected. The godoc on beginBuild()/publish()
+	// guarantees that "any invalidate() that lands after beginBuild() bumps
+	// gen" (R20260605B-CORR-7, #1811); a coalesced invalidate is still an
+	// invalidate, so it must uphold that strong invariant. Without the bump a
+	// build that read source data missing a just-written LastSessionID could
+	// publish its stale set (gen unchanged) AND clear dirty, serving the stale
+	// set for the full TTL. R20260609-072532-LB-1 (#1987).
+	c.gen++
 	c.dirty = true
 }
 
