@@ -481,6 +481,15 @@ type Router struct {
 	// 读写: core (init), lifecycle (installPersistSink), cleanup (Shutdown)
 	eventLogPersister *persist.Persister
 
+	// cliDebugDir, when non-empty, is the directory into which each spawned
+	// Claude CLI writes its `--debug-file` log. It is set only when the
+	// operator opts in via the NAOZHI_CLI_DEBUG env var at construction time
+	// (computed once from the data root); empty keeps CLI debug capture off so
+	// every spawn stays bit-identical. spawn() turns this + the session key
+	// into a per-session path passed through SpawnOptions.DebugFile.
+	// 读写: core (init only — immutable after NewRouter), lifecycle (spawn read)
+	cliDebugDir string
+
 	// attachmentTracker is the refcount tracker that bridges
 	// event-log persist events to .meta sidecar updates. nil when
 	// eventLogDir is unset (refcount tracking has no source of
@@ -997,6 +1006,14 @@ func NewRouter(cfg RouterConfig) *Router {
 			r.eventLogPersister = p
 		}
 	}
+	// CLI debug capture (opt-in via NAOZHI_CLI_DEBUG). Computed once here so
+	// the env var is read a single time at startup, not per-spawn. The data
+	// root is derived from the event-log dir's parent (<dataDir>/events →
+	// <dataDir>); when the event log is disabled there is no data root to
+	// anchor under, so debug capture stays off too. resolveCLIDebugDir creates
+	// + hardens the directory; on any failure it logs and returns "" so a
+	// debug-dir problem never blocks session spawning.
+	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.shutdownCond = sync.NewCond(&r.mu)
 	// historyCtx is cancelled by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.

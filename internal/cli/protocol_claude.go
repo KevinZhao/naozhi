@@ -143,6 +143,17 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 				"prefix", preview)
 		}
 	}
+	// Operator-opt-in CLI debug capture. When DebugFile is set the CLI writes
+	// its raw API request/response log (the only place Bedrock retry status
+	// codes — 429 throttles vs 5xx — are observable) to that file. `--debug
+	// api` scopes the categories so the file stays focused on the HTTP layer
+	// rather than the full firehose. The path is router-generated under the
+	// data root, but we still reject a leading '-' so a misconfigured / hostile
+	// value can never be reinterpreted as another flag (argv-injection guard,
+	// mirrors the --resume validator above). Empty = off, flags omitted.
+	if opts.DebugFile != "" && !strings.HasPrefix(opts.DebugFile, "-") {
+		args = append(args, "--debug", "api", "--debug-file", opts.DebugFile)
+	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
 }

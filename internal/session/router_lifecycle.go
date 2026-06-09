@@ -761,6 +761,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		WorkingDir:      workspace,
 		NoOutputTimeout: r.noOutputTimeout,
 		TotalTimeout:    r.totalTimeout,
+		// "" unless the operator opted into CLI debug capture via
+		// NAOZHI_CLI_DEBUG; only ClaudeProtocol acts on it (ACP ignores).
+		DebugFile: r.cliDebugFileFor(key),
 	}
 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
