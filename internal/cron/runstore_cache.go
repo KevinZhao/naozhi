@@ -46,8 +46,8 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 		return false
 	}
 	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	if !entry.warm {
 		return false
 	}
