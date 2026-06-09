@@ -75,6 +75,9 @@ const (
 	ErrClassCronWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassCronWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassCronOverlapSkipped     ErrorClass = "overlap_skipped"
+	ErrClassCronRouterMissing      ErrorClass = "router_missing"
+	ErrClassCronPausedConcurrent   ErrorClass = "paused_concurrent"
+	ErrClassCronDeletedConcurrent  ErrorClass = "deleted_concurrent"
 
 	// sysession-specific (wire values match current sysession package).
 	ErrClassSysessionUpstream   ErrorClass = "upstream"
