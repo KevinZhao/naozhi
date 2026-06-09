@@ -617,3 +617,13 @@
 - [R20260608133928-COS-4] rotate() reopen-fd 错误返回路径依赖单个 rotateOK=false defer 驱逐，建议加内联注释防未来 tidy 误删 — internal/eventlog/persist/rotate.go:164
 - [R20260608133928-COS-5] shim validateKeyForShim maxKeyBytes=515 硬编码魔数，建议契约测试数值断言 == session.MaxSessionKeyBytes — internal/shim/manager.go:58
 - [R20260608133928-COS-6] reapFreshSessionLocked warn 日志冗余重复 job_id(已在 lg context) — internal/cron/scheduler_run.go:1122
+## cron-cr-20260609-010210
+- [R20260609-GO-005] StartContext goroutine 不被 triggerWG 追踪,goleak 在 Start 前会误报 — internal/cron/scheduler.go:625
+- [R20260609-GO-009] reapFreshSessionLocked 在 sessionID=="" 警告前已无条件注册 stub,调用顺序读起来像前置检查 — internal/cron/scheduler_run.go:1114
+- [R20260609-GO-010] rangeRunningSessionIDs 对 ok=true+空 SessionID 的 torn-read 窗口缺注释 — internal/cron/runinflight.go:264
+- [R20260609-GO-011] emitSyntheticSkipped 传 finalizer:nil,nil 安全依赖 finalize() 守卫,缺 inline 注释 — internal/cron/scheduler_finish.go:576
+- [R20260609-GO-015] reapFreshSessionLocked 的 Reset-then-RLock 锁对契约缺注释(对照 freshContextPreflightP0) — internal/cron/scheduler_run.go:1110
+- [R20260609-GO-016] waitGCDrain 孤儿 goroutine 持 s 引用阻止 GC,测试短 budget 会累积 — internal/cron/scheduler.go:1005
+- [R20260609-ARCH-02] IsExcluded 与 LookupKnownSessionID 函数体逐字节相同(documented redundancy) — internal/cron/scheduler_session.go:81
+- [R20260609-ARCH-03] cron notify 成功投递无 metric,仅 partial-failure 有计数 — internal/cron/scheduler_notify.go:341
+- [R20260609-COR-002b] scheduler_session_cache.go 两处设 lastInvalidatedAt 仅 invalidate 守 IsZero,可统一 — internal/cron/scheduler_session_cache.go
