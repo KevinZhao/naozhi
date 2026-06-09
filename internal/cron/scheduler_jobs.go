@@ -794,19 +794,28 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			// Best-effort re-register old schedule outside lock (R112714-LOGIC-1).
 			s.mu.Lock()
 			if j2 := s.jobs[id]; j2 != nil {
+				doubleRegFailed := false
 				if reErr := s.registerJob(j2); reErr != nil {
 					slog.Error("cron: failed to restore previous schedule after UpdateJob rollback",
 						"job_id", id, "schedule", schedOldSchedule, "err", reErr)
-					// R20260607-LOGIC-1: both re-register attempts failed; the job has
-					// entryID=0 and will never fire again. Mark it Paused so the
-					// dashboard shows a degraded/paused state rather than falsely
-					// reporting it as active. persistJobsLocked below will write
-					// Paused=true to disk so a restart does not silently clear this.
-					j2.Paused = true
+					// R20260607-LOGIC-1 / R20260609-COR-001: both re-register
+					// attempts failed; the job has entryID=0 and will never fire
+					// again. We defer writing Paused=true until after
+					// persistJobsLocked succeeds so that memory and disk are
+					// always consistent. If persist also fails, Paused stays
+					// false in memory (matching the false on disk) and an error
+					// is logged — a restart will replay the old schedule and
+					// the operator is alerted via the logged error.
+					doubleRegFailed = true
 				}
 				// Re-persist with the rolled-back schedule so disk stays
 				// consistent with in-memory state.
 				if save2, perr2 := s.persistJobsLocked(); perr2 == nil {
+					if doubleRegFailed {
+						// Persist succeeded: now it is safe to mark Paused in
+						// memory and on disk atomically (next save2() writes it).
+						j2.Paused = true
+					}
 					s.mu.Unlock()
 					save2()
 				} else {
