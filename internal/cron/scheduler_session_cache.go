@@ -50,12 +50,13 @@ type knownSessionsCache struct {
 // cache own its own mutex instead of exposing c.mu to every Scheduler caller.
 func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 	c.mu.RLock()
-	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
+	now := time.Now() // R20260609-PERF-2: single vDSO call per method.
+	if c.set != nil && now.Sub(c.generatedAt) < knownSessionsCacheTTL {
 		// A coalesced invalidate (dirty) is honoured only once
 		// minInvalidateInterval has elapsed since the last real drop, so a
 		// burst of Appends does not force a rebuild on every probe.
 		// R20260608133928-PERF-3 (#1965).
-		if !c.dirty || time.Since(c.lastInvalidatedAt) < minInvalidateInterval {
+		if !c.dirty || now.Sub(c.lastInvalidatedAt) < minInvalidateInterval {
 			set := c.set
 			c.mu.RUnlock()
 			return set, true
@@ -80,13 +81,14 @@ func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 func (c *knownSessionsCache) lookupFreshFlush() (map[string]struct{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.set == nil || time.Since(c.generatedAt) >= knownSessionsCacheTTL {
+	now := time.Now() // R20260609-PERF-2: single vDSO call per method.
+	if c.set == nil || now.Sub(c.generatedAt) >= knownSessionsCacheTTL {
 		return nil, false
 	}
-	if c.dirty && time.Since(c.lastInvalidatedAt) >= minInvalidateInterval {
+	if c.dirty && now.Sub(c.lastInvalidatedAt) >= minInvalidateInterval {
 		c.set = nil
 		c.dirty = false
-		c.lastInvalidatedAt = time.Now()
+		c.lastInvalidatedAt = now
 		c.gen++
 		return nil, false
 	}
@@ -138,17 +140,21 @@ func (c *knownSessionsCache) publish(set map[string]struct{}, buildGen uint64) b
 func (c *knownSessionsCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.lastInvalidatedAt.IsZero() || time.Since(c.lastInvalidatedAt) >= minInvalidateInterval {
+	now := time.Now() // R20260609-PERF-2: single vDSO call per method.
+	if c.lastInvalidatedAt.IsZero() || now.Sub(c.lastInvalidatedAt) >= minInvalidateInterval {
 		// Far enough since the last real drop: drop now.
 		c.set = nil
 		c.gen++
 		c.dirty = false
-		c.lastInvalidatedAt = time.Now()
+		c.lastInvalidatedAt = now
 		return
 	}
-	// Within the coalescing window: defer the drop. The set stays live (and
-	// gen-protected) so concurrent publishers and lookupFresh callers keep
-	// serving it until lookupFresh flushes the dirty drop past the interval.
+	// Within the coalescing window: defer the drop. The set stays live but
+	// gen is bumped so any in-flight publish (beginBuild before this point)
+	// is rejected — it was built from data that predates this invalidate.
+	// R20260609-COR-002: always bump gen on invalidate, even coalesced, so
+	// publish's gen-guard catches stale sets built across the window boundary.
+	c.gen++
 	c.dirty = true
 }
 

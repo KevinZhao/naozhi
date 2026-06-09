@@ -90,3 +90,63 @@ func TestKnownSessionsCache_CoalescedInvalidateGuardsLostBuild(t *testing.T) {
 		t.Fatal("lookupFresh after rejected publish = hit, want miss")
 	}
 }
+
+// TestKnownSessionsCache_CoalescedInvalidateRejectsStalePublish is the
+// regression test for R20260609-COR-002: a coalesced invalidate (within
+// minInvalidateInterval, only sets dirty) must still bump gen so that a
+// publish whose beginBuild snapshot preceded that invalidate is rejected.
+//
+// Sequence:
+//  1. Publish a known-good set so the cache is warm.
+//  2. beginBuild() — snapshot gen before any invalidate.
+//  3. Force lastInvalidatedAt to be recent (within window) so the next
+//     invalidate() takes the coalescing path (dirty=true, no set=nil drop).
+//  4. invalidate() — coalesced path bumps gen (the fix), sets dirty.
+//  5. publish(stale, buildGen) — must return false: gen has advanced.
+//  6. lookupFresh() — must still serve the old set (set was not nil'd by
+//     the coalesced invalidate) — stale set remains until TTL or flush.
+func TestKnownSessionsCache_CoalescedInvalidateRejectsStalePublish(t *testing.T) {
+	var c knownSessionsCache
+
+	// Warm the cache.
+	seed := map[string]struct{}{"existing-sess": {}}
+	if !c.publish(seed, c.beginBuild()) {
+		t.Fatal("setup: initial publish failed")
+	}
+
+	// Snapshot gen — this is what a concurrent build would capture.
+	buildGen := c.beginBuild()
+
+	// Make the next invalidate fall inside the coalescing window by setting
+	// lastInvalidatedAt to just now.
+	c.mu.Lock()
+	c.lastInvalidatedAt = time.Now()
+	c.mu.Unlock()
+
+	// Coalesced invalidate: must bump gen even though it does not nil the set.
+	c.invalidate()
+
+	// Verify the set is still live (coalescing did not drop it).
+	if _, ok := c.lookupFresh(); !ok {
+		t.Fatal("coalesced invalidate dropped the set — coalescing broke (pre-condition)")
+	}
+
+	// Now try to publish a set built from data BEFORE the invalidate.
+	stale := map[string]struct{}{"new-sess-missed": {}}
+	if c.publish(stale, buildGen) {
+		t.Fatal("R20260609-COR-002: publish installed a set built before a coalesced invalidate — gen not bumped in coalescing path")
+	}
+
+	// The old set (seed) is still served — the coalesced invalidate only set
+	// dirty, so lookupFresh keeps returning it until the interval elapses.
+	got, ok := c.lookupFresh()
+	if !ok {
+		t.Fatal("lookupFresh after rejected coalesced publish = miss, want hit with old set")
+	}
+	if _, has := got["existing-sess"]; !has {
+		t.Fatal("lookupFresh returned wrong set after rejected publish")
+	}
+	if _, has := got["new-sess-missed"]; has {
+		t.Fatal("stale set was installed despite publish returning false")
+	}
+}
