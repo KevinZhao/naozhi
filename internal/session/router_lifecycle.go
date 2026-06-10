@@ -784,13 +784,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// slot.release() in defer will reacquire r.mu and decrement.
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
-	// Panic-safe Spawn: if wrapper.Spawn panics (shim exec failure, protocol
+	// Panic-safe Spawn: if the spawn path panics (shim exec failure, protocol
 	// Init crash, etc.) pendingSpawns must still be decremented or this
 	// router permanently refuses new sessions with ErrMaxProcs until the
 	// process restarts. Extracted to panicSafeSpawn so tests can exercise
 	// the recover path directly (wrapper itself has no panic injection
-	// seam). RES1.
-	proc, err := panicSafeSpawn(ctx, wrapper, spawnOpts, key, backendID)
+	// seam). RES1. Goes through wrapper.Runner() — the placement seam
+	// (agentcore-cloud-sandbox RFC §4.2); local placement delegates to
+	// (*Wrapper).Spawn unchanged.
+	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), spawnOpts, key, backendID)
 	r.mu.Lock()
 	slot.releaseLocked()
 	if err != nil {
