@@ -190,8 +190,11 @@ function parseDowField(field) {
     const m = part.match(/^(\d+)-(\d+)$/);
     if (!m) return null;
     let lo = parseInt(m[1], 10), hi = parseInt(m[2], 10);
-    if (lo === 7) lo = 0;
-    if (hi === 7) hi = 0;
+    // R20260610-CR-001: only normalize 7→0 when both ends are 7 (7-7 → Sunday).
+    // Validating after one-sided normalization silently turned the illegal
+    // range 7-5 into 0-5; single-7 ranges (0-7, 7-5) are rejected, matching
+    // robfig's 0-6 dow range bounds.
+    if (lo === 7 && hi === 7) { lo = 0; hi = 0; }
     if (lo > hi || lo < 0 || hi > 6) return null;
     for (let i = lo; i <= hi; i++) result.add(i);
   }
@@ -619,7 +622,7 @@ function openCronCreateModal(backendHtml) {
   overlay.className = 'modal-overlay';
   // Default "每小时" matches the most common ask and gives users an
   // immediate, meaningful preview on open.
-  const scheduleHtml = buildScheduleSection({ mode: 'interval', n: 1, unit: 'h' }, '');
+  const scheduleHtml = buildScheduleSection({ mode: 'hourly' }, '');
   const wsBody = buildCronWorkspaceBody();
   const notifyHtml = buildCronNotifyToggleHtml('', false);
   const contextHtml = buildCronContextToggleHtml(false);
@@ -873,6 +876,7 @@ function wireCronWsOutsideClick() {
 
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
+  if (!overlay) return;
   overlay._cronWorkDir = path;
   document.querySelectorAll('#cron-ws-list li').forEach(li => {
     li.classList.remove('selected');
@@ -1875,8 +1879,22 @@ const cronExpandedRunId = { jobId: null, runId: null };
 // 新 run，但本地状态仍 stale，timeline 不主动刷新。
 const CRON_TIMELINE_FRESH_MS = 30 * 1000;
 
+// R20260610-CR-005: cap the per-job timeline cache. Entries are only
+// evicted on cronDelete otherwise, so browsing many jobs accumulates
+// runs/details/lastRenderedHtml without bound. LRU by lastAccess.
+const CRON_TIMELINE_MAX_ENTRIES = 20;
+
 function getCronTimelineState(jobId) {
   if (!cronTimelineState[jobId]) {
+    const ids = Object.keys(cronTimelineState);
+    if (ids.length >= CRON_TIMELINE_MAX_ENTRIES) {
+      let oldest = null;
+      for (const id of ids) {
+        if (id === jobId) continue;
+        if (!oldest || cronTimelineState[id].lastAccess < cronTimelineState[oldest].lastAccess) oldest = id;
+      }
+      if (oldest) delete cronTimelineState[oldest];
+    }
     cronTimelineState[jobId] = {
       runs: [],
       nextBefore: 0,
@@ -1884,6 +1902,7 @@ function getCronTimelineState(jobId) {
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+      lastAccess: 0,        // LRU 时戳，每次 getCronTimelineState 命中更新
       // R243-PERF-12 (#817): cache the last innerHTML written by
       // renderCronTimelinePanel so a no-op re-render (e.g. WS broadcast
       // arrives but no run changed) skips the full innerHTML rewrite.
@@ -1892,6 +1911,7 @@ function getCronTimelineState(jobId) {
       lastRenderedHtml: '',
     };
   }
+  cronTimelineState[jobId].lastAccess = Date.now();
   return cronTimelineState[jobId];
 }
 
@@ -3865,7 +3885,7 @@ async function doEditCronJob(id) {
   const job = cronJobs.find(j => j.id === id);
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
-  const newPrompt = document.getElementById('edit-cron-prompt').value;
+  const newPrompt = document.getElementById('edit-cron-prompt')?.value || '';
   const newTitle = (document.getElementById('edit-cron-title')?.value || '').trim();
   // Advanced raw input wins over picker; if both empty use overlay cache
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
