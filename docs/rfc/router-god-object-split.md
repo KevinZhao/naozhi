@@ -1,15 +1,47 @@
 # RFC: session.Router god-object decomposition（合并 #383/#600/#805/#580/#577）
 
-> **状态**: Draft v1（待评审）
+> **状态**: Implemented v2（2026-06-10 订正：P0-P5 已全部落地，P6 实质完成，P7 经核实关闭 won't-do；#383/#600/#805/#580/#577 全部 CLOSED）
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
-> **范围**: 合并五个 Router 拆分锚点为单一拆分路线图；本轮纯设计不落地代码
+> **修订**: 2026-06-10（v2：按 master 实测把状态从 Draft 升为 Implemented；正文 §0-§8 保留为当时的设计路线图，"本轮不落地代码"等措辞是写作时点的承诺，已被后续 phase PR 兑现）
+> **范围**: 合并五个 Router 拆分锚点为单一拆分路线图；~~本轮纯设计不落地代码~~（设计已评审通过并分 phase 落地，见 §0.1）
 > **关联 issue**: #383, #600, #805, #580, #577
 > **关联代码**: internal/session/router_*.go, managed.go; dispatch/cron/server/upstream consumer.go; internal/discovery, internal/sysession
 
 ---
 
+## 0.1 实施状态（2026-06-10 对 master 逐项核实）
+
+§8.1 路线图的执行结果，候选 A（facet sub-struct 分组 + 单 `r.mu` 不变）路线：
+
+| Phase | 状态 | 落地 PR / 证据 |
+| :--- | :--- | :--- |
+| **P0** check-router-fields lint | ✅ landed | PR #1762（warn 模式）→ #1796（修 32 处注释漂移 + 翻 fail 模式）；工具在 `tools/check-router-fields/` |
+| **P1** WorkspaceStore | ✅ landed | PR #1802（`router_workspace.go` `type workspaceStore`，并扩展 lint 支持 sub-struct） |
+| **P2** KnownIDsStore | ✅ landed | PR #1837（`store.go` `type knownIDsStore`，字段 `kid`） |
+| **P3** BackendStore | ✅ landed | PR #1804（`router_backend.go` `type backendStore`，字段 `bkStore`） |
+| **P4** SessionStore | ✅ landed | PR #1841（`store.go` `type sessionStore`，字段 `ss`） |
+| **P5** ProcessPool | ✅ landed | PR #1852（`process_pool.go` `type processPool`，字段 `pp`） |
+| **P6** ManagedSession facet | ✅ 实质完成 | 文件级拆分由 `managed-session-split.md`（Implemented v2.3）交付；processIface facet 接口 `ProcessSender`/`ProcessEventReader`/`ProcessLifecycle`/`HistoryInjector` 均已在 `managed.go` 定义（processIface embed，附 contract test）。注：ManagedSession **struct 字段**未做 sub-struct 分组——按 managed-session-split.md 非目标处理，无独立 issue 跟踪 |
+| **P7** discovery↔sysession catalog | ✅ closed won't-do | §8.4 step 2 的 follow-up 设计（PR #1881，`session-catalog-boundary.md`）经对抗性核实得出"重叠技术上不成立"（discovery 与 sysession 零耦合、双视角实际在 discovery↔Router 且已被三重机制缝合、无统一类型消费者），#577 据此于 2026-06-07 永久关闭，重开判据写在 closure comment |
+
+验收对照（§8.5）：facet 分组 ✅ / 单 `r.mu` 不变 ✅ / consumer 接口签名不变 ✅ / `tools/check-router-fields` fail 模式绿 ✅；#383/#600/#805/#580 关闭 ✅，#577 收窄后关闭（won't-do，非移交）✅。
+
+遗留事项（不阻塞本 RFC 关闭）：
+
+- `router_core.go` 的 facet 字段仍背着长 UNION `// 读写:` 注释，靠 P0 lint
+  钉住——这是设计内权衡（候选 A 不动锁拓扑），非烂尾。
+- `RenameSession` 手工逐字段克隆 ManagedSession（`router_lifecycle.go`）与
+  `spawnSession` 226 行单方法不在本 RFC 范围（facet 拆的是字段分组非方法重组），
+  如需跟进应另立 issue。
+
+---
+
 ## 0. 本轮交付边界（先读这一段）
+
+> **（v2 注）** 本节及以下各节是 2026-06-04 写作时点的设计文档，"本轮不落地任何生产代码"
+> 指当时那一轮 RFC 交付，承诺已兑现——评审通过后各 phase 经独立 PR 落地，结果见 §0.1。
+> 以下正文保留原貌作为设计依据与锁序论证的记录。
 
 **本主题本轮不落地任何生产代码。** 这是一份合并五个独立 issue 锚点
 （#383/#600/#805/#580/#577）的设计路线图。god-object 拆分会改动
