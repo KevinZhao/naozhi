@@ -619,7 +619,7 @@ function openCronCreateModal(backendHtml) {
   overlay.className = 'modal-overlay';
   // Default "每小时" matches the most common ask and gives users an
   // immediate, meaningful preview on open.
-  const scheduleHtml = buildScheduleSection({ mode: 'interval', n: 1, unit: 'h' }, '');
+  const scheduleHtml = buildScheduleSection({ mode: 'hourly' }, '');
   const wsBody = buildCronWorkspaceBody();
   const notifyHtml = buildCronNotifyToggleHtml('', false);
   const contextHtml = buildCronContextToggleHtml(false);
