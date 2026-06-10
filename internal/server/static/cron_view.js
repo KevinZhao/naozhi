@@ -873,6 +873,7 @@ function wireCronWsOutsideClick() {
 
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
+  if (!overlay) return;
   overlay._cronWorkDir = path;
   document.querySelectorAll('#cron-ws-list li').forEach(li => {
     li.classList.remove('selected');
