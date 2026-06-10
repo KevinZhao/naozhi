@@ -190,8 +190,11 @@ function parseDowField(field) {
     const m = part.match(/^(\d+)-(\d+)$/);
     if (!m) return null;
     let lo = parseInt(m[1], 10), hi = parseInt(m[2], 10);
-    if (lo === 7) lo = 0;
-    if (hi === 7) hi = 0;
+    // R20260610-CR-001: only normalize 7→0 when both ends are 7 (7-7 → Sunday).
+    // Validating after one-sided normalization silently turned the illegal
+    // range 7-5 into 0-5; single-7 ranges (0-7, 7-5) are rejected, matching
+    // robfig's 0-6 dow range bounds.
+    if (lo === 7 && hi === 7) { lo = 0; hi = 0; }
     if (lo > hi || lo < 0 || hi > 6) return null;
     for (let i = lo; i <= hi; i++) result.add(i);
   }
