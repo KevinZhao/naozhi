@@ -1876,8 +1876,22 @@ const cronExpandedRunId = { jobId: null, runId: null };
 // 新 run，但本地状态仍 stale，timeline 不主动刷新。
 const CRON_TIMELINE_FRESH_MS = 30 * 1000;
 
+// R20260610-CR-005: cap the per-job timeline cache. Entries are only
+// evicted on cronDelete otherwise, so browsing many jobs accumulates
+// runs/details/lastRenderedHtml without bound. LRU by lastAccess.
+const CRON_TIMELINE_MAX_ENTRIES = 20;
+
 function getCronTimelineState(jobId) {
   if (!cronTimelineState[jobId]) {
+    const ids = Object.keys(cronTimelineState);
+    if (ids.length >= CRON_TIMELINE_MAX_ENTRIES) {
+      let oldest = null;
+      for (const id of ids) {
+        if (id === jobId) continue;
+        if (!oldest || cronTimelineState[id].lastAccess < cronTimelineState[oldest].lastAccess) oldest = id;
+      }
+      if (oldest) delete cronTimelineState[oldest];
+    }
     cronTimelineState[jobId] = {
       runs: [],
       nextBefore: 0,
@@ -1885,6 +1899,7 @@ function getCronTimelineState(jobId) {
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+      lastAccess: 0,        // LRU 时戳，每次 getCronTimelineState 命中更新
       // R243-PERF-12 (#817): cache the last innerHTML written by
       // renderCronTimelinePanel so a no-op re-render (e.g. WS broadcast
       // arrives but no run changed) skips the full innerHTML rewrite.
@@ -1893,6 +1908,7 @@ function getCronTimelineState(jobId) {
       lastRenderedHtml: '',
     };
   }
+  cronTimelineState[jobId].lastAccess = Date.now();
   return cronTimelineState[jobId];
 }
 
