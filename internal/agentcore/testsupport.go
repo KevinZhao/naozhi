@@ -2,7 +2,6 @@ package agentcore
 
 import (
 	"context"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
 )
@@ -21,5 +20,3 @@ func NewWithAPIForTest(api RuntimeAPI, cfg Config) *Client {
 	return newWithAPI(api, cfg)
 }
 
-// NewRunIDForTest returns a valid fresh run id for consumer-package tests.
-func NewRunIDForTest() string { return NewRunID(time.Now()) }

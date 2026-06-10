@@ -50,7 +50,9 @@ func sseBody(frames ...string) string {
 }
 
 func adapterJob() cron.SandboxJob {
-	return cron.SandboxJob{JobID: "j1", RunID: agentcore.NewRunIDForTest(), Prompt: "hi"}
+	// cron-shaped 16-hex run id: the adapter must derive an API-compliant
+	// runtime session id from it (≥33 chars, validation F3).
+	return cron.SandboxJob{JobID: "j1", RunID: "0123456789abcdef", Prompt: "hi"}
 }
 
 func TestAdapter_SuccessExtractsResultText(t *testing.T) {
@@ -106,8 +108,11 @@ func TestAdapter_TransportTriggersStopConfirm(t *testing.T) {
 	if !out.StopConfirmed {
 		t.Fatal("Stop succeeded; StopConfirmed must be true")
 	}
-	if len(api.stopped) != 1 || api.stopped[0] != job.RunID {
-		t.Fatalf("stop calls = %v, want [%s]", api.stopped, job.RunID)
+	// The adapter derives the runtime session id ("run-<cronRunID>-<nano>")
+	// to satisfy the ≥33-char API minimum while embedding the cron run id
+	// for correlation; Stop must target that derived id.
+	if len(api.stopped) != 1 || !strings.HasPrefix(api.stopped[0], "run-"+job.RunID+"-") {
+		t.Fatalf("stop calls = %v, want one with prefix run-%s-", api.stopped, job.RunID)
 	}
 }
 
