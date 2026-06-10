@@ -103,6 +103,14 @@ type runStore struct {
 	// copy so dashboard handlers can sort / filter without mutating cache.
 	recentCache sync.Map // jobID -> *recentCacheEntry
 
+	// cacheGetPostWarmHook is a test-only seam invoked by cacheGet right
+	// after warmCache returns and before the post-warm re-Load. Lets tests
+	// deterministically interleave a concurrent cacheInvalidate inside the
+	// warmCache→re-Load window (R20260610-GO-007 / #2000). Always nil in
+	// production; set only from tests, before the store is shared across
+	// goroutines.
+	cacheGetPostWarmHook func(jobID string)
+
 	// writeFailedTotal counts CronRun WriteFileAtomic failures (disk full,
 	// permission denied, ENOSPC, etc.). R20260527122801-CR-18 (#1338): Append
 	// historically only slog.Warn'd on a write failure, so an operator whose
