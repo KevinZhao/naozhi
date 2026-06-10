@@ -644,12 +644,24 @@ func (s *Server) Start(ctx context.Context) error {
 	// Resolver is constructed in buildServer and reused across the
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
+	//
+	// #1164: dispatch consumes the projection-typed CronCommands seam, so
+	// the concrete scheduler is wrapped in cronDispatchAdapter here — the
+	// server is the cron↔dispatch wiring point (see
+	// cron_dispatch_adapter.go). The nil guard must stay OUTSIDE the
+	// adapter: wrapping a nil scheduler in a struct adapter value would
+	// produce a non-nil interface, bypassing NewDispatcher's nil collapse
+	// and breaking the "nil disables /cron" contract.
+	var cronCommands dispatch.CronCommands
+	if s.scheduler != nil {
+		cronCommands = cronDispatchAdapter{s: s.scheduler}
+	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                s.router,
 		Platforms:             s.platforms,
 		Agents:                s.agents,
 		AgentCommands:         s.agentCommands,
-		Scheduler:             s.scheduler,
+		Scheduler:             cronCommands,
 		ProjectMgr:            s.projectMgr,
 		Resolver:              s.resolver,
 		Guard:                 s.sessionGuard,

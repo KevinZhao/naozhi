@@ -10,7 +10,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -475,13 +474,15 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
 		return
 	}
-	job := cron.NewJob(schedule, prompt, cron.JobIMContext{
+	job, next, err := d.scheduler.AddJob(CronJobRequest{
+		Schedule:  schedule,
+		Prompt:    prompt,
 		Platform:  msg.Platform,
 		ChatID:    msg.ChatID,
 		ChatType:  msg.ChatType,
 		CreatedBy: msg.UserID,
 	})
-	if err := d.scheduler.AddJob(job); err != nil {
+	if err != nil {
 		// AddJob wraps the raw schedule string + robfig/cron parser
 		// internals into the error; echoing that to IM leaks both the
 		// server-normalized form of the attacker's input and parser
@@ -491,25 +492,24 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		// only gates ASCII C0/DEL, leaving C1 controls / bidi / LS/PS
 		// that can fragment journald structured fields.
 		log.Warn("cron AddJob rejected", "err", err,
-			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+			"schedule", osutil.SanitizeForLog(schedule, 256))
 		// AddJob fails for distinct reasons (bad schedule, prompt policy
 		// violation, per-chat/global job limit). Collapsing them all into
 		// "请检查定时表达式格式" misleads a user whose schedule was fine but
 		// whose prompt was rejected — the same class of bug R20260531-ARCH-2
 		// fixed for the del/pause/resume handlers via cronMutationErrReply.
-		// CodeInvalidPrompt is the one cause that carries a sentinel through
-		// AddJob (ValidatePromptStrict → ErrInvalidPrompt); steer those to a
-		// prompt-specific hint. Raw err.Error() is never echoed (it can leak
-		// the normalized schedule / parser internals); the detail is already
-		// logged above for operator triage.
-		if cron.ClassifyError(err) == cron.CodeInvalidPrompt {
+		// CronCodeInvalidPrompt is the one cause that carries a sentinel
+		// through AddJob (ValidatePromptStrict → ErrInvalidPrompt); steer
+		// those to a prompt-specific hint. Raw err.Error() is never echoed
+		// (it can leak the normalized schedule / parser internals); the
+		// detail is already logged above for operator triage.
+		if d.scheduler.ClassifyError(err) == CronCodeInvalidPrompt {
 			reply("创建失败：任务内容不合法（为空、过长或含控制字符）")
 			return
 		}
 		reply("创建失败：请检查定时表达式格式")
 		return
 	}
-	next := d.scheduler.NextRun(job)
 	// R190-LOG-M1: even though ParseCronAdd rejects C0/C1/bidi runes now,
 	// defence-in-depth: any future parser change that relaxes the policy
 	// must not leak visual-spoofing bytes back into group-chat replies.
@@ -573,24 +573,27 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 }
 
 // cronMutationErrReply maps a /cron del|pause|resume failure to a specific
-// user-facing reply via cron.ClassifyError. R20260531-ARCH-2: the prior
-// handlers collapsed every error into one "请确认 ID 正确" string, so an
-// ambiguous-prefix match (multiple jobs) misleadingly told the user the ID
-// was wrong instead of "type a longer ID to disambiguate", and a
-// pause/resume state conflict was indistinguishable from a bad ID.
+// user-facing reply. R20260531-ARCH-2: the prior handlers collapsed every
+// error into one "请确认 ID 正确" string, so an ambiguous-prefix match
+// (multiple jobs) misleadingly told the user the ID was wrong instead of
+// "type a longer ID to disambiguate", and a pause/resume state conflict was
+// indistinguishable from a bad ID.
 //
-// Raw err.Error() is never echoed (it leaks normalized ID form / lock
-// annotations); the caller still logs the raw error at Warn. verb is the
-// Chinese action label ("删除" / "暂停" / "恢复") used in the generic fallback.
-func cronMutationErrReply(verb string, err error) string {
-	switch cron.ClassifyError(err) {
-	case cron.CodeAmbiguousPrefix:
+// code is the wire code from CronCommands.ClassifyError (#1164 — was
+// previously cron.ClassifyError called inline, which pinned the
+// dispatch→cron import). Raw err.Error() is never echoed (it leaks
+// normalized ID form / lock annotations); the caller still logs the raw
+// error at Warn. verb is the Chinese action label ("删除" / "暂停" /
+// "恢复") used in the generic fallback.
+func cronMutationErrReply(verb, code string) string {
+	switch code {
+	case CronCodeAmbiguousPrefix:
 		return "ID 前缀匹配到多个任务，请输入更长的 ID 以消歧。"
-	case cron.CodeJobAlreadyPaused:
+	case CronCodeJobAlreadyPaused:
 		return "该任务已处于暂停状态。"
-	case cron.CodeJobNotPaused:
+	case CronCodeJobNotPaused:
 		return "该任务未处于暂停状态，无需恢复。"
-	case cron.CodeJobNotFound:
+	case CronCodeJobNotFound:
 		return verb + "失败：未找到该 ID 对应的任务，请确认 ID 正确。"
 	default:
 		return verb + "失败：请确认 ID 正确。"
@@ -608,7 +611,7 @@ func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string,
 		// (normalized ID form, lock annotations). Dashboard already
 		// sanitises analogous handlers. Log raw, reply generic.
 		log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
-		reply(cronMutationErrReply("删除", err))
+		reply(cronMutationErrReply("删除", d.scheduler.ClassifyError(err)))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已删除。", j.ID))
@@ -623,7 +626,7 @@ func (d *Dispatcher) handleCronPause(msg platform.IncomingMessage, parts []strin
 	j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
-		reply(cronMutationErrReply("暂停", err))
+		reply(cronMutationErrReply("暂停", d.scheduler.ClassifyError(err)))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
@@ -635,13 +638,12 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	if !validateCronIDArg(parts, "resume", reply) {
 		return
 	}
-	j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
+	j, next, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
-		reply(cronMutationErrReply("恢复", err))
+		reply(cronMutationErrReply("恢复", d.scheduler.ClassifyError(err)))
 		return
 	}
-	next := d.scheduler.NextRun(j)
 	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
 	log.Info("cron job resumed", "id", j.ID)
 }

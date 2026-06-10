@@ -2,97 +2,96 @@ package dispatch
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/cron"
 )
 
-// fakeCronScheduler is a minimal CronScheduler test seam introduced by
-// R250-ARCH-17 (#1178). It captures the calls dispatch makes during
-// slash-command handling and lets each test choose a return value
-// without standing up a real cron.Scheduler (with its tempdir, persist
-// loop, and robfig parse harness).
+// fakeCronScheduler is a minimal CronCommands test seam, introduced as the
+// CronScheduler fake by R250-ARCH-17 (#1178) and migrated to the
+// projection-typed CronCommands interface by R250-ARCH-1 (#1164) — the
+// fixture now uses dispatch.CronJob so this file no longer imports
+// internal/cron. It captures the calls dispatch makes during slash-command
+// handling and lets each test choose a return value without standing up a
+// real cron.Scheduler (with its tempdir, persist loop, and robfig parse
+// harness).
 type fakeCronScheduler struct {
 	addJobErr      error
-	listJobsResult []cron.Job
+	listJobsResult []CronJob
 	deleteJobErr   error
 	pauseJobErr    error
 	resumeJobErr   error
 	nextRunResult  time.Time
+	// classifyResult is the wire code ClassifyError returns for any
+	// non-nil error; "" falls back to "unknown" mirroring the real
+	// classifier's CodeUnknown default for unmatched errors.
+	classifyResult string
 
 	addJobCalls    int
 	listJobsCalls  int
 	deleteJobCalls int
 	pauseJobCalls  int
 	resumeJobCalls int
-	nextRunCalls   int
+	classifyCalls  int
 }
 
-func (f *fakeCronScheduler) AddJob(j *cron.Job) error {
+func (f *fakeCronScheduler) AddJob(req CronJobRequest) (CronJob, time.Time, error) {
 	f.addJobCalls++
-	return f.addJobErr
+	if f.addJobErr != nil {
+		return CronJob{}, time.Time{}, f.addJobErr
+	}
+	return CronJob{ID: "fake-id", Schedule: req.Schedule, Prompt: req.Prompt}, f.nextRunResult, nil
 }
 
-func (f *fakeCronScheduler) NextRun(j *cron.Job) time.Time {
-	f.nextRunCalls++
-	return f.nextRunResult
-}
-
-func (f *fakeCronScheduler) ListJobs(plat, chatID string) []cron.Job {
+func (f *fakeCronScheduler) ListJobs(plat, chatID string) []CronJob {
 	f.listJobsCalls++
 	return f.listJobsResult
 }
 
-func (f *fakeCronScheduler) DeleteJob(idPrefix, plat, chatID string) (*cron.Job, error) {
+func (f *fakeCronScheduler) DeleteJob(idPrefix, plat, chatID string) (CronJob, error) {
 	f.deleteJobCalls++
 	if f.deleteJobErr != nil {
-		return nil, f.deleteJobErr
+		return CronJob{}, f.deleteJobErr
 	}
-	return &cron.Job{ID: idPrefix}, nil
+	return CronJob{ID: idPrefix}, nil
 }
 
-func (f *fakeCronScheduler) PauseJob(idPrefix, plat, chatID string) (*cron.Job, error) {
+func (f *fakeCronScheduler) PauseJob(idPrefix, plat, chatID string) (CronJob, error) {
 	f.pauseJobCalls++
 	if f.pauseJobErr != nil {
-		return nil, f.pauseJobErr
+		return CronJob{}, f.pauseJobErr
 	}
-	return &cron.Job{ID: idPrefix}, nil
+	return CronJob{ID: idPrefix}, nil
 }
 
-func (f *fakeCronScheduler) ResumeJob(idPrefix, plat, chatID string) (*cron.Job, error) {
+func (f *fakeCronScheduler) ResumeJob(idPrefix, plat, chatID string) (CronJob, time.Time, error) {
 	f.resumeJobCalls++
 	if f.resumeJobErr != nil {
-		return nil, f.resumeJobErr
+		return CronJob{}, time.Time{}, f.resumeJobErr
 	}
-	return &cron.Job{ID: idPrefix}, nil
+	return CronJob{ID: idPrefix}, f.nextRunResult, nil
 }
 
-// TestCronScheduler_Interface_SatisfiedByConcreteScheduler pins the
-// implicit-satisfaction contract that R250-ARCH-17 (#1178) relies on.
-// If a future cron.Scheduler refactor renames or removes any of the six
-// methods on the CronScheduler interface, this test fails at compile
-// time — no runtime cost, but caught by `go test` not just `go vet`.
-//
-// The compile-time assertion lives inside a test function (rather than
-// as a top-level _ = (CronScheduler)((*cron.Scheduler)(nil)) global)
-// so a build break surfaces with the test name in the failure log,
-// making the regression easier to bisect.
-func TestCronScheduler_Interface_SatisfiedByConcreteScheduler(t *testing.T) {
-	// Compile-time check. The right-hand side is a nil *cron.Scheduler
-	// typed pointer; if Scheduler stops satisfying CronScheduler, the
-	// build fails with a clear "wrong type" message at this line.
-	var _ CronScheduler = (*cron.Scheduler)(nil)
+func (f *fakeCronScheduler) ClassifyError(err error) string {
+	f.classifyCalls++
+	if err == nil {
+		return ""
+	}
+	if f.classifyResult != "" {
+		return f.classifyResult
+	}
+	return "unknown"
 }
 
-// TestCronScheduler_Interface_SatisfiedByFake verifies fakeCronScheduler
-// itself implements the interface — guards against silent drift if the
-// interface adds a method but the fake forgets to mirror it.
-func TestCronScheduler_Interface_SatisfiedByFake(t *testing.T) {
-	var _ CronScheduler = (*fakeCronScheduler)(nil)
+// TestCronCommands_Interface_SatisfiedByFake verifies fakeCronScheduler
+// implements CronCommands — guards against silent drift if the interface
+// adds a method but the fake forgets to mirror it. The production-side
+// satisfaction check (cronDispatchAdapter implements CronCommands) lives
+// with the adapter in internal/server/cron_dispatch_adapter_test.go, since
+// #1164 removed the concrete *cron.Scheduler from dispatch's view entirely.
+func TestCronCommands_Interface_SatisfiedByFake(t *testing.T) {
+	var _ CronCommands = (*fakeCronScheduler)(nil)
 }
 
 // TestFakeCronScheduler_RecordsCalls exercises the fake's call-counting
@@ -103,16 +102,27 @@ func TestCronScheduler_Interface_SatisfiedByFake(t *testing.T) {
 func TestFakeCronScheduler_RecordsCalls(t *testing.T) {
 	fake := &fakeCronScheduler{
 		addJobErr:      errors.New("add failed"),
-		listJobsResult: []cron.Job{{ID: "abc", Schedule: "@hourly"}},
+		listJobsResult: []CronJob{{ID: "abc", Schedule: "@hourly"}},
 		nextRunResult:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
 	// AddJob: the fake-injected error reaches the caller verbatim.
-	if err := fake.AddJob(&cron.Job{}); err == nil {
+	if _, _, err := fake.AddJob(CronJobRequest{}); err == nil {
 		t.Fatal("expected injected AddJob error")
 	}
 	if fake.addJobCalls != 1 {
 		t.Errorf("AddJob calls = %d, want 1", fake.addJobCalls)
+	}
+
+	// AddJob happy path: projection echoes the request and carries the
+	// configured next-run time (the AddJob/NextRun merge of #1164).
+	fake.addJobErr = nil
+	job, next, err := fake.AddJob(CronJobRequest{Schedule: "@hourly", Prompt: "p"})
+	if err != nil || job.Schedule != "@hourly" || job.Prompt != "p" {
+		t.Errorf("AddJob happy-path: got (%+v, %v), want schedule/prompt echoed", job, err)
+	}
+	if !next.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("AddJob next = %v, want 2026-01-01", next)
 	}
 
 	// ListJobs: returned slice flows through unchanged.
@@ -124,21 +134,25 @@ func TestFakeCronScheduler_RecordsCalls(t *testing.T) {
 		t.Errorf("ListJobs calls = %d, want 1", fake.listJobsCalls)
 	}
 
-	// NextRun: configured time round-trips.
-	if ts := fake.NextRun(&cron.Job{}); !ts.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("NextRun = %v, want 2026-01-01", ts)
-	}
-
 	// Delete / Pause / Resume: all return the prefix as ID with nil err
-	// on the happy path.
+	// on the happy path; Resume also carries the next-run time.
 	if j, err := fake.DeleteJob("xyz", "feishu", "chatX"); err != nil || j.ID != "xyz" {
-		t.Errorf("DeleteJob happy-path: got (%v, %v), want (&{ID:xyz}, nil)", j, err)
+		t.Errorf("DeleteJob happy-path: got (%+v, %v), want ({ID:xyz}, nil)", j, err)
 	}
 	if j, err := fake.PauseJob("xyz", "feishu", "chatX"); err != nil || j.ID != "xyz" {
-		t.Errorf("PauseJob happy-path: got (%v, %v), want (&{ID:xyz}, nil)", j, err)
+		t.Errorf("PauseJob happy-path: got (%+v, %v), want ({ID:xyz}, nil)", j, err)
 	}
-	if j, err := fake.ResumeJob("xyz", "feishu", "chatX"); err != nil || j.ID != "xyz" {
-		t.Errorf("ResumeJob happy-path: got (%v, %v), want (&{ID:xyz}, nil)", j, err)
+	if j, next, err := fake.ResumeJob("xyz", "feishu", "chatX"); err != nil || j.ID != "xyz" || next.IsZero() {
+		t.Errorf("ResumeJob happy-path: got (%+v, %v, %v), want ({ID:xyz}, non-zero, nil)", j, next, err)
+	}
+
+	// ClassifyError: nil maps to the CodeOK-equivalent empty string,
+	// unmatched non-nil errors fall back to "unknown".
+	if code := fake.ClassifyError(nil); code != "" {
+		t.Errorf("ClassifyError(nil) = %q, want \"\"", code)
+	}
+	if code := fake.ClassifyError(errors.New("boom")); code != "unknown" {
+		t.Errorf("ClassifyError(err) = %q, want \"unknown\"", code)
 	}
 }
 
@@ -146,25 +160,28 @@ func TestFakeCronScheduler_RecordsCalls(t *testing.T) {
 // R20260531-ARCH-2 fix on the create path: handleCronAdd must not collapse a
 // prompt-policy rejection into the "请检查定时表达式格式" schedule message.
 // A user whose schedule parsed fine but whose prompt was rejected
-// (ValidatePromptStrict → ErrInvalidPrompt) gets a prompt-specific hint;
+// (ClassifyError → CronCodeInvalidPrompt) gets a prompt-specific hint;
 // every other AddJob failure keeps the generic schedule message. Raw
 // err.Error() must never appear in the reply.
 func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
 	cases := []struct {
 		name       string
 		addJobErr  error
+		classify   string
 		wantSubstr string
 		notSubstr  string
 	}{
 		{
 			name:       "invalid_prompt",
-			addJobErr:  fmt.Errorf("wrapped: %w", cron.ErrInvalidPrompt),
+			addJobErr:  errors.New("wrapped: invalid prompt"),
+			classify:   CronCodeInvalidPrompt,
 			wantSubstr: "任务内容不合法",
 			notSubstr:  "定时表达式",
 		},
 		{
 			name:       "capacity_or_schedule_falls_back",
 			addJobErr:  errors.New("per-chat cron limit reached (10)"),
+			classify:   "", // fake falls back to "unknown"
 			wantSubstr: "请检查定时表达式格式",
 			notSubstr:  "per-chat", // raw err.Error() must not leak
 		},
@@ -174,7 +191,7 @@ func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			fp := &fakePlatform{}
 			d := newTestDispatcher(fp, nil)
-			d.scheduler = &fakeCronScheduler{addJobErr: c.addJobErr}
+			d.scheduler = &fakeCronScheduler{addJobErr: c.addJobErr, classifyResult: c.classify}
 
 			var got string
 			reply := func(s string) { got = s }
