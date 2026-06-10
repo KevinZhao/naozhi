@@ -1,0 +1,2 @@
+# build.sh stages the host claude CLI binary (~240MB) into the build context.
+claude
