@@ -101,12 +101,18 @@ func newTestServerWithToken(p *mockPlatform, token string) *Server {
 }
 
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
+	// #1164: mirror production wiring — wrap the concrete scheduler in the
+	// adapter, keeping the nil guard outside (see Server.Start).
+	var cronCommands dispatch.CronCommands
+	if srv.scheduler != nil {
+		cronCommands = cronDispatchAdapter{s: srv.scheduler}
+	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:        srv.router,
 		Platforms:     srv.platforms,
 		Agents:        srv.agents,
 		AgentCommands: srv.agentCommands,
-		Scheduler:     srv.scheduler,
+		Scheduler:     cronCommands,
 		ProjectMgr:    srv.projectMgr,
 		Guard:         srv.sessionGuard,
 		Dedup:         srv.dedup,

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -1053,22 +1052,16 @@ func TestDispatchCommand_Project_Handled(t *testing.T) {
 // handleCronCommand — via dispatchCommand with real scheduler
 // ---------------------------------------------------------------------------
 
-func makeTestScheduler(t *testing.T) *cron.Scheduler {
+func makeTestScheduler(t *testing.T) CronCommands {
 	t.Helper()
-	// StorePath must be a file path, not a directory. Previously the tests
-	// passed t.TempDir() and silently relied on loadJobs logging the
-	// "is a directory" read error and continuing with empty state; now
-	// Scheduler.Start surfaces load failures so point it at an explicit
-	// (non-existent) file inside the temp dir instead.
-	s := cron.NewScheduler(cron.SchedulerConfig{
-		StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
-		MaxJobs:   10,
-	})
-	if err := s.Start(); err != nil {
-		t.Fatalf("scheduler start: %v", err)
-	}
-	t.Cleanup(func() { s.Stop() })
-	return s
+	// #1164: previously stood up a real *cron.Scheduler (StorePath tempdir
+	// + Start/Stop lifecycle). The handler tests below only exercise
+	// dispatch-side parsing / usage-reply branches that never depend on
+	// real scheduling, so the projection-typed fake suffices and the
+	// dispatch test suite no longer imports internal/cron. The real
+	// adapter→scheduler integration is covered by
+	// internal/server/cron_dispatch_adapter_test.go.
+	return &fakeCronScheduler{}
 }
 
 func TestHandleCronCommand_Help(t *testing.T) {

@@ -15,7 +15,6 @@ package server
 
 import (
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
-	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -29,15 +28,21 @@ type CronView = cronview.CronView
 // (R20260603000023-ARCH-2 / #1648). Previously Server.scheduler and
 // ServerOptions.Scheduler held the concrete *cron.Scheduler — its full ~60
 // method surface — even though the server package only ever forwards the
-// value into already-narrowed interface fields (dispatch.CronScheduler,
-// cronview.CronView, wshub.CronView) and calls exactly one method on it
-// directly: SetTelemetry (routes.go). This aggregate embeds the two consumer
-// interfaces the value is forwarded into plus that one direct method, so the
-// field type now advertises only what the server actually depends on while
-// *cron.Scheduler continues to satisfy it implicitly (pinned by
-// cronview_contract_test.go). Mirrors the wshub Hub narrowing to CronView.
+// value into already-narrowed interface fields (cronCommandScheduler via
+// cronDispatchAdapter, cronview.CronView, wshub.CronView) and calls exactly
+// one method on it directly: SetTelemetry (routes.go). This aggregate embeds
+// the two consumer interfaces the value is forwarded into plus that one
+// direct method, so the field type now advertises only what the server
+// actually depends on while *cron.Scheduler continues to satisfy it
+// implicitly (pinned by cronview_contract_test.go). Mirrors the wshub Hub
+// narrowing to CronView.
+//
+// #1164: the dispatch.CronScheduler embed became the server-local
+// cronCommandScheduler (cron_dispatch_adapter.go) when dispatch's seam was
+// re-typed to the projection-based CronCommands — dispatch no longer names
+// cron types, so the concrete-typed subset now lives on this side.
 type cronScheduler interface {
 	cronview.CronView
-	dispatch.CronScheduler
+	cronCommandScheduler
 	SetTelemetry(b runtelemetry.Broadcaster)
 }
