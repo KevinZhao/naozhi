@@ -3866,7 +3866,7 @@ async function doEditCronJob(id) {
   const job = cronJobs.find(j => j.id === id);
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
-  const newPrompt = document.getElementById('edit-cron-prompt').value;
+  const newPrompt = document.getElementById('edit-cron-prompt')?.value || '';
   const newTitle = (document.getElementById('edit-cron-title')?.value || '').trim();
   // Advanced raw input wins over picker; if both empty use overlay cache
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
