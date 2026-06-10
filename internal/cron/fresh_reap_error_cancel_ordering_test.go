@@ -130,7 +130,7 @@ func TestFreshContextResetsOnSendError(t *testing.T) {
 		reapRouter: reapRouter{},
 		sess:       errSendSession{sendErr: errors.New("send failed: connection reset")},
 	}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-send-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()
@@ -174,7 +174,7 @@ func TestFreshContextResetsOnCancel(t *testing.T) {
 		reapRouter: reapRouter{},
 		sess:       cancelSendSession{},
 	}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-cancel", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()

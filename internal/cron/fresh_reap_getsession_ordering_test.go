@@ -110,7 +110,7 @@ func TestFreshGetSession_SessionError_ResetsBeforeFinishRun(t *testing.T) {
 		reapRouter: reapRouter{},
 		getErr:     errors.New("session backend unavailable"),
 	}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-getsess-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()
@@ -151,7 +151,7 @@ func TestFreshGetSession_CancelError_ResetsBeforeFinishRun(t *testing.T) {
 
 	rec := &recordingBroadcaster{}
 	router := &cancelGetSessionRouter{reapRouter: reapRouter{}}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-getsess-cancel", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()
@@ -195,7 +195,7 @@ func TestPersistentGetSession_SessionError_NoReset(t *testing.T) {
 		reapRouter: reapRouter{},
 		getErr:     errors.New("session backend unavailable"),
 	}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-persist-getsess-err", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
 	s.mu.Lock()

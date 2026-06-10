@@ -74,7 +74,7 @@ func newTestServer(p *mockPlatform) *Server {
 func newTestServerWithScheduler(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	sched := cron.NewScheduler(cron.SchedulerConfig{})
+	sched := cron.NewScheduler(cron.SchedulerConfig{}, cron.SchedulerDeps{})
 	s := NewWithOptions(ServerOptions{
 		Addr:      ":0",
 		Router:    router,

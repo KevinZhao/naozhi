@@ -19,7 +19,7 @@ func TestNewScheduler_AllowedRootNULBytePruned(t *testing.T) {
 		AllowedRoot:    "/tmp/safe\x00/etc",
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if s.allowedRoot != "" {
 		t.Fatalf("allowedRoot = %q, want empty (NUL byte should be rejected)", s.allowedRoot)
 	}

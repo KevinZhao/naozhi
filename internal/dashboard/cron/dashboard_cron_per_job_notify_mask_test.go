@@ -28,7 +28,7 @@ func TestHandleList_PerJobNotifyChatIDMasked(t *testing.T) {
 
 	const rawNotifyChatID = "oc_abcdefghijklmnop"
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 	if err := sched.AddJob(&cronpkg.Job{
 		ID:             "bb00000000000001",
 		Schedule:       "*/5 * * * *",

@@ -14,7 +14,7 @@ import (
 func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	t.Parallel()
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
@@ -52,7 +52,7 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: tmp + "/cron_jobs.json", Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -95,7 +95,7 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 func TestR220Arch2_PersistFailureSkipsCronRun(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: tmp + "/cron_jobs.json"})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: tmp + "/cron_jobs.json"}, SchedulerDeps{Router: &fakeRouter{}})
 
 	// Construct a job that's NOT registered in s.jobs — recordResultP0
 	// will hit the "_, ok := s.jobs[j.ID]; !ok" early-return path and

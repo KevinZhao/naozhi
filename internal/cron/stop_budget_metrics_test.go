@@ -29,7 +29,7 @@ func TestR250GO20_StopBudgetTriggerCounterBumps(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	withShortStopBudget(t, s, 30*time.Millisecond)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

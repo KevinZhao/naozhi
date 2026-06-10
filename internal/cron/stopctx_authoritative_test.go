@@ -22,7 +22,7 @@ func TestStopCtx_ParentCancelPropagates(t *testing.T) {
 		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   10,
 		ParentCtx: parent,
-	})
+	}, SchedulerDeps{})
 
 	if err := s.stopCtx.Err(); err != nil {
 		t.Fatalf("stopCtx must be live before any cancel, got %v", err)
@@ -47,7 +47,7 @@ func TestStopCtx_StopCancels(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

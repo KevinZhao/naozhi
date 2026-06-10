@@ -139,7 +139,7 @@ func TestTruncatePromptUTF8_MultiByteRuneBoundary(t *testing.T) {
 func TestHandleList_CompactMode(t *testing.T) {
 	t.Parallel()
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 	// 8 KiB prompt — same scale as the issue's bandwidth example, padded
 	// past the 256-byte compact cap so truncation is visible.
 	bigPrompt := strings.Repeat("xy", 4096)
@@ -215,7 +215,7 @@ func TestHandleList_CompactMode(t *testing.T) {
 func TestHandleList_CompactBandwidthBound(t *testing.T) {
 	t.Parallel()
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 	const N = 5 // small N keeps the test fast; the wire-shape pin is per-job
 	bigPrompt := strings.Repeat("z", 8192)
 	for i := 0; i < N; i++ {

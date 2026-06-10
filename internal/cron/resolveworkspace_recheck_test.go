@@ -42,9 +42,10 @@ func evalTempDir(t *testing.T) string {
 func newResolveWorkspaceFixture(t *testing.T, allowedRoot string) *Scheduler {
 	t.Helper()
 	s := NewScheduler(SchedulerConfig{
-		Router:      &fakeSessionRouter{},
 		MaxJobs:     5,
 		AllowedRoot: allowedRoot,
+	}, SchedulerDeps{
+		Router: &fakeSessionRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

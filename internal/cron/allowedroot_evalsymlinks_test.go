@@ -92,7 +92,7 @@ func TestNewScheduler_AllowedRootNonExistent_UsesRawFallback(t *testing.T) {
 		AllowedRoot:    nonExistentPath,
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	// Pre-fix: s.allowedRoot would be "" (sandbox disabled).
 	// Post-fix: s.allowedRoot should equal the raw path.
 	if s.allowedRoot == "" {

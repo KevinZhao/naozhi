@@ -18,7 +18,7 @@ func TestRunHistoryReader_SchedulerSatisfies(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 
 	jobID := mustGenerateID()
 	run := makeRun(jobID, time.Now())
@@ -56,7 +56,7 @@ func TestRunHistoryReader_MissingRun(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "cron_jobs.json")
-	var r RunHistoryReader = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	var r RunHistoryReader = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 
 	_, err := r.Run(mustGenerateID(), mustGenerateRunID())
 	if !errors.Is(err, fs.ErrNotExist) {

@@ -32,7 +32,7 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",
@@ -167,7 +167,7 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 	job := cronpkg.Job{
 		ID:       strings.Repeat("c", 16),
 		Schedule: "@every 1h",
@@ -277,7 +277,7 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 	job := cronpkg.Job{
 		ID:       strings.Repeat("e", 16),
 		Schedule: "@every 1h",
