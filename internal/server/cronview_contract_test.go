@@ -53,8 +53,8 @@ func TestCronView_NilZeroValueIsNil(t *testing.T) {
 // TestCronScheduler_SchedulerSatisfies pins the field-narrowing contract
 // introduced by R20260603000023-ARCH-2 (#1648): Server.scheduler is now the
 // cronScheduler consumer interface instead of the concrete *cron.Scheduler,
-// advertising only the CronView + dispatch.CronScheduler method sets plus the
-// single direct call (SetTelemetry) the server makes. *cron.Scheduler must
+// advertising only the CronView + cronCommandScheduler (#1164) method sets
+// plus the single direct call (SetTelemetry) the server makes. *cron.Scheduler must
 // continue to satisfy it implicitly; a cron-side rename / signature drift
 // fails to compile here, local to the interface declaration, rather than only
 // at the field assignment in server.go.

@@ -1,56 +1,60 @@
 package dispatch
 
 import (
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
 // TestCronMutationErrReply_ClassifiesError pins R20260531-ARCH-2: /cron
 // del|pause|resume must surface a specific, action-appropriate reply derived
-// from cron.ClassifyError rather than collapsing every failure into a single
-// "请确认 ID 正确" string. In particular an ambiguous-prefix match must tell
-// the user to type a longer ID, not that the ID is wrong.
+// from the ClassifyError wire code rather than collapsing every failure into
+// a single "请确认 ID 正确" string. In particular an ambiguous-prefix match
+// must tell the user to type a longer ID, not that the ID is wrong.
+//
+// #1164: the helper now takes the wire code (CronCommands.ClassifyError
+// output) instead of an error classified inline via cron.ClassifyError, so
+// the cases drive the dispatch-side CronCode* constants directly.
 func TestCronMutationErrReply_ClassifiesError(t *testing.T) {
 	cases := []struct {
 		name    string
 		verb    string
-		err     error
+		code    string
 		wantSub string
 		notWant string // a substring that the misleading collapsed reply had
 	}{
 		{
 			name:    "ambiguous_prefix",
 			verb:    "删除",
-			err:     cron.ErrAmbiguousPrefix,
+			code:    CronCodeAmbiguousPrefix,
 			wantSub: "更长的 ID",
 			notWant: "请确认 ID 正确",
 		},
 		{
 			name:    "already_paused",
 			verb:    "暂停",
-			err:     cron.ErrJobAlreadyPaused,
+			code:    CronCodeJobAlreadyPaused,
 			wantSub: "已处于暂停状态",
 		},
 		{
 			name:    "not_paused",
 			verb:    "恢复",
-			err:     cron.ErrJobNotPaused,
+			code:    CronCodeJobNotPaused,
 			wantSub: "未处于暂停状态",
 		},
 		{
 			name:    "not_found",
 			verb:    "删除",
-			err:     cron.ErrJobNotFound,
+			code:    CronCodeJobNotFound,
 			wantSub: "未找到",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := cronMutationErrReply(tc.verb, tc.err)
+			got := cronMutationErrReply(tc.verb, tc.code)
 			if !strings.Contains(got, tc.wantSub) {
 				t.Fatalf("reply = %q, want substring %q", got, tc.wantSub)
 			}
@@ -62,12 +66,13 @@ func TestCronMutationErrReply_ClassifiesError(t *testing.T) {
 }
 
 // TestHandleCronMutations_AmbiguousPrefix_EndToEnd drives the slash-command
-// handlers through a Dispatcher wired with a fake scheduler that returns
-// ErrAmbiguousPrefix, asserting the user-facing reply is the disambiguation
-// hint — not the old "请确认 ID 正确" text.
+// handlers through a Dispatcher wired with a fake scheduler whose mutation
+// errors classify as CronCodeAmbiguousPrefix, asserting the user-facing
+// reply is the disambiguation hint — not the old "请确认 ID 正确" text.
 func TestHandleCronMutations_AmbiguousPrefix_EndToEnd(t *testing.T) {
 	lg := slog.Default()
 	msg := platform.IncomingMessage{Platform: "feishu", ChatID: "c1"}
+	ambiguous := errors.New("ambiguous prefix")
 
 	type handler func(*Dispatcher, platform.IncomingMessage, []string, func(string), *slog.Logger)
 	steps := []struct {
@@ -79,7 +84,7 @@ func TestHandleCronMutations_AmbiguousPrefix_EndToEnd(t *testing.T) {
 		{
 			name: "del",
 			sub:  "del",
-			set:  func(f *fakeCronScheduler) { f.deleteJobErr = cron.ErrAmbiguousPrefix },
+			set:  func(f *fakeCronScheduler) { f.deleteJobErr = ambiguous },
 			call: func(d *Dispatcher, m platform.IncomingMessage, p []string, r func(string), l *slog.Logger) {
 				d.handleCronDel(m, p, r, l)
 			},
@@ -87,7 +92,7 @@ func TestHandleCronMutations_AmbiguousPrefix_EndToEnd(t *testing.T) {
 		{
 			name: "pause",
 			sub:  "pause",
-			set:  func(f *fakeCronScheduler) { f.pauseJobErr = cron.ErrAmbiguousPrefix },
+			set:  func(f *fakeCronScheduler) { f.pauseJobErr = ambiguous },
 			call: func(d *Dispatcher, m platform.IncomingMessage, p []string, r func(string), l *slog.Logger) {
 				d.handleCronPause(m, p, r, l)
 			},
@@ -95,7 +100,7 @@ func TestHandleCronMutations_AmbiguousPrefix_EndToEnd(t *testing.T) {
 		{
 			name: "resume",
 			sub:  "resume",
-			set:  func(f *fakeCronScheduler) { f.resumeJobErr = cron.ErrAmbiguousPrefix },
+			set:  func(f *fakeCronScheduler) { f.resumeJobErr = ambiguous },
 			call: func(d *Dispatcher, m platform.IncomingMessage, p []string, r func(string), l *slog.Logger) {
 				d.handleCronResume(m, p, r, l)
 			},
@@ -103,7 +108,7 @@ func TestHandleCronMutations_AmbiguousPrefix_EndToEnd(t *testing.T) {
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
-			fake := &fakeCronScheduler{}
+			fake := &fakeCronScheduler{classifyResult: CronCodeAmbiguousPrefix}
 			st.set(fake)
 			d := &Dispatcher{scheduler: fake}
 			var reply string
