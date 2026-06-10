@@ -39,7 +39,7 @@ func (f *fakeRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts
 func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 	t.Parallel()
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	// Manually trip the inflight gate as if a run were in flight.
 	inf := s.jobInflight("job-overlap")
@@ -135,7 +135,7 @@ func TestP0_InflightSnapshotReflectsCASState(t *testing.T) {
 func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 	t.Parallel()
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	prevRun := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	j := &Job{ID: "job-c", Schedule: "@every 5m", LastRunAt: prevRun}
 	s.mu.Lock()
@@ -172,7 +172,7 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	t.Parallel()
 	router := &fakeRouter{}
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-w", Schedule: "@every 5m", FreshContext: true, WorkDir: "/nonexistent-naozhi-test-dir-xyz"}
 	s.mu.Lock()

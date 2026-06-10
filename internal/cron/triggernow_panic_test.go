@@ -40,7 +40,7 @@ func (p *panickingRouter) GetOrCreate(context.Context, string, AgentOpts) (Sessi
 func TestR238GO9_TriggerNowRecoversExecuteOptPanic(t *testing.T) {
 	t.Parallel()
 	r := &panickingRouter{}
-	s := NewScheduler(SchedulerConfig{Router: r, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: r})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

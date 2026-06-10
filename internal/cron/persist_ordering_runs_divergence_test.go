@@ -27,7 +27,7 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: storePath,
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

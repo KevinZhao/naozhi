@@ -14,8 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
 // ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
@@ -152,18 +150,22 @@ type SessionRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error)
 }
 
-// SchedulerConfig holds configuration for the cron scheduler.
+// SchedulerConfig holds the value/scalar configuration for the cron
+// scheduler. Injected components (Router / NotifySender / Agents /
+// AgentCommands / Telemetry) live in SchedulerDeps — see deps.go for the
+// cfg/deps boundary rule (RFC cron-sysession-merge §3.5.1, #746).
 //
 // Config convention (RFC cron-config-and-structs Phase 1, ratified #776):
 // the scheduler stays struct-config rather than functional-options. Fields
 // split into two classes; the split is part of the API contract and is
 // pinned by scheduler_config_construction_test.go.
 //
-//   - REQUIRED (no zero-value fallback): Router. Omitting it (without
-//     AllowNilRouter) makes NewScheduler emit a boot-time slog.Error and
-//     leaves executeOpt/registerStub short-circuiting — there is no default
-//     router. StorePath is "soft-required": empty means in-memory only (no
-//     persistence), which is valid for tests but is a misconfig in prod.
+//   - REQUIRED (no zero-value fallback): SchedulerDeps.Router. Omitting it
+//     (without AllowNilRouter) makes NewScheduler emit a boot-time
+//     slog.Error and leaves executeOpt/registerStub short-circuiting —
+//     there is no default router. StorePath is "soft-required": empty means
+//     in-memory only (no persistence), which is valid for tests but is a
+//     misconfig in prod.
 //
 //   - OPTIONAL (documented zero-value fallback, applied in applyDefaults /
 //     resolveAllowedRoot):
@@ -175,34 +177,13 @@ type SessionRouter interface {
 //     AllowedRoot    — "" → no root constraint; NUL-bearing → cleared (loud).
 //     RunsKeepCount / RunsKeepWindow — <=0 → DefaultRunsKeepCount / DefaultRunsKeepWindow.
 //     JitterMax      — 0 → jitter disabled.
-//     Telemetry / NotifyDefault / Agents / NotifySender / AgentCommands /
-//     ParentCtx / AllowNilRouter — idiomatic-optional (nil/zero = feature off).
+//     NotifyDefault / ParentCtx / AllowNilRouter — idiomatic-optional
+//     (nil/zero = feature off).
 //
 // applyDefaults() is pure/idempotent and is the single source of truth for
 // the numeric/Location fallbacks above; AllowedRoot resolution lives in
 // resolveAllowedRoot() because it does a syscall.
 type SchedulerConfig struct {
-	// Router is the session router the scheduler talks to. Accepts the
-	// SessionRouter interface so tests can pass a minimal fake; production
-	// passes a *session.Router which satisfies it transparently.
-	Router SessionRouter
-	// NotifySender resolves a platform name to its PlatformReplier for cron
-	// completion notices. #725: replaces the former
-	// Platforms map[string]platform.Platform so internal/cron no longer
-	// imports internal/platform — the wireup layer builds a
-	// platformNotifySender adapter over the live platform map. nil = no
-	// notify delivery (the Lookup miss path keeps notifyTarget's existing
-	// "platform not found" WARN).
-	NotifySender  NotifySender
-	Agents        map[string]AgentOpts
-	AgentCommands map[string]string
-	// Telemetry receives RunStartedEvent / RunEndedEvent for every cron
-	// run via the shared runtelemetry shape. nil = no broadcast (tests /
-	// no-WS deployments). Replaces the legacy SetOnRunStarted /
-	// SetOnRunEnded / SetOnExecute setter trio. Late injection is also
-	// supported via SetTelemetry — cmd/naozhi builds the Scheduler before
-	// the Hub exists, then wires the broadcaster from dashboard.go. (RFC §3.5)
-	Telemetry runtelemetry.Broadcaster
 	StorePath string
 	MaxJobs   int
 	// MaxJobsPerChat overrides DefaultMaxJobsPerChat when > 0. Zero (and

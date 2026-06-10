@@ -14,7 +14,7 @@ import (
 // StartContext(ctx).
 func TestStopContext_CancelledCtxShortCircuitsDrain(t *testing.T) {
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 	// Use a long stopBudget so the test can only pass if the ctx-cancel arm
 	// (not the budget timer) is what unblocks the drain.
 	withShortStopBudget(t, s, 30*time.Second)
@@ -54,7 +54,7 @@ func TestStopContext_NilCtxBehavesLikeStop(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

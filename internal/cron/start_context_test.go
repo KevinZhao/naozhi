@@ -19,7 +19,7 @@ func TestStartContext_CtxCancelPropagates(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	t.Cleanup(s.Stop)
 
 	if err := s.StartContext(ctx); err != nil {
@@ -48,7 +48,7 @@ func TestStartContext_NilCtxBehavesLikeStart(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 
 	//nolint:staticcheck // intentionally passing nil ctx to exercise the no-watcher path.
 	if err := s.StartContext(nil); err != nil {
@@ -76,7 +76,7 @@ func TestStartContext_WatcherExitsOnStop(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(t.TempDir(), "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.StartContext(ctx); err != nil {
 		t.Fatalf("StartContext: %v", err)
 	}

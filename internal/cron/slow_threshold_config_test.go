@@ -18,7 +18,8 @@ func TestSlowThreshold_DefaultsTo30s(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs: 5,
-		Router:  &fakeRouter{},
+	}, SchedulerDeps{
+		Router: &fakeRouter{},
 	})
 	if s.slowThreshold != 0 {
 		t.Errorf("Scheduler.slowThreshold = %v; want 0 when SchedulerConfig.SlowThreshold unset (so callsite reads defaultCronSlowThreshold)", s.slowThreshold)
@@ -39,8 +40,9 @@ func TestSlowThreshold_ConfigOverride(t *testing.T) {
 	override := 5 * time.Minute
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:       5,
-		Router:        &fakeRouter{},
 		SlowThreshold: override,
+	}, SchedulerDeps{
+		Router: &fakeRouter{},
 	})
 	if s.slowThreshold != override {
 		t.Errorf("Scheduler.slowThreshold = %v; want %v from SchedulerConfig.SlowThreshold", s.slowThreshold, override)

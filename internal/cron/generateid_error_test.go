@@ -87,7 +87,7 @@ func TestAddJob_RandFailurePropagates(t *testing.T) {
 	sentinel := errors.New("getrandom: synthetic test failure")
 	withFailingRandReader(t, sentinel)
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 	j := &Job{
 		Schedule: "@every 5m",
 		Prompt:   "test",

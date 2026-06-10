@@ -146,7 +146,7 @@ func TestSchedulerConfigOptionalFieldDefaults(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewScheduler(tt.cfg)
+			s := NewScheduler(tt.cfg, SchedulerDeps{})
 			tt.assert(t, s)
 		})
 	}

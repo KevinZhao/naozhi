@@ -65,8 +65,9 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 10,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if s == nil {
 		t.Fatal("NewScheduler returned nil with fake router")
@@ -117,8 +118,9 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 10,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

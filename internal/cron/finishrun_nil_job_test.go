@@ -25,7 +25,8 @@ func TestFinishRun_NilJobNoPanicNoEmit(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-		Telemetry:      rec,
+	}, SchedulerDeps{
+		Telemetry: rec,
 	})
 
 	runID, err := generateRunID()
@@ -63,7 +64,8 @@ func TestFinishRun_NilJobFinalizesInflight(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-		Telemetry:      rec,
+	}, SchedulerDeps{
+		Telemetry: rec,
 	})
 
 	jobID := "job-nil-job-finalize"

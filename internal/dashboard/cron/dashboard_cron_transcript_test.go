@@ -33,7 +33,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 
 	// Persist a job so runStore.Get can resolve it.
 	job := cronpkg.Job{
@@ -253,7 +253,7 @@ func TestTranscript_RejectsCrossJobID(t *testing.T) {
 
 func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
 	cases := []struct{ runID, jobID string }{
 		{"GGGG", "aaaaaaaaaaaaaaaa"},                   // invalid run_id
 		{"aaaaaaaaaaaaaaaa", "GGGG"},                   // invalid job_id
@@ -275,7 +275,7 @@ func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 // envelope.
 func TestParseRunPathParams_JSONErrorContentType(t *testing.T) {
 	t.Parallel()
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
 	cases := []struct {
 		name  string
 		runID string
@@ -489,7 +489,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",

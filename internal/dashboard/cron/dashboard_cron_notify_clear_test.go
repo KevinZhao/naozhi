@@ -27,7 +27,7 @@ func TestHandleUpdate_NotifyClear_R103901_GO_1(t *testing.T) {
 	// (AddJob always overwrites Job.ID with a derived hex id).
 	newHandlers := func(t *testing.T) (*Handlers, string) {
 		t.Helper()
-		sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+		sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 		job := &cronpkg.Job{
 			Schedule: "*/10 * * * *",
 			Prompt:   "hi",

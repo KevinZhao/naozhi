@@ -17,7 +17,7 @@ func schedulerForJobsR241GO2Test(t *testing.T) *Scheduler {
 		StorePath:      filepath.Join(dir, "cron.json"),
 		MaxJobs:        8,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

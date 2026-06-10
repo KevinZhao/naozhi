@@ -92,7 +92,7 @@ func newAdapterTestScheduler(t *testing.T) *cron.Scheduler {
 	s := cron.NewScheduler(cron.SchedulerConfig{
 		StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
 		MaxJobs:   10,
-	})
+	}, cron.SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("scheduler start: %v", err)
 	}

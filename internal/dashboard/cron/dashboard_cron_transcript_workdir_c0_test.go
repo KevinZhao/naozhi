@@ -55,7 +55,7 @@ func TestTranscript_RejectsWorkDirWithC0(t *testing.T) {
 				t.Fatalf("mkdir workdir: %v", err)
 			}
 
-			sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+			sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 
 			// Add a clean job — its WorkDir is harmless. The injection point
 			// is the persisted run record below, which simulates an

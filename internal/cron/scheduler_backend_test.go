@@ -76,9 +76,10 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 			t.Parallel()
 			router := &backendCapturingRouter{}
 			s := NewScheduler(SchedulerConfig{
-				Router:    router,
 				StorePath: t.TempDir() + "/cron.json",
 				MaxJobs:   10,
+			}, SchedulerDeps{
+				Router: router,
 			})
 			if err := s.Start(); err != nil {
 				t.Fatalf("Start: %v", err)

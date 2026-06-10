@@ -35,11 +35,11 @@ func TestMarshalJobs_PerSchedulerIsolation(t *testing.T) {
 	sA := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dirA, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	sB := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dirB, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := sA.Start(); err != nil {
 		t.Fatalf("sA.Start: %v", err)
 	}
