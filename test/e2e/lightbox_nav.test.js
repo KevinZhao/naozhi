@@ -236,7 +236,11 @@ test.describe('Lightbox gallery navigation', () => {
         return;
       }
       const end = { x: start.x + dx, y: start.y + (opts.dy || 0) };
+      const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
       mk('touchstart', [start], [start]);
+      // Real gestures always emit touchmove between start and end; include
+      // one so the handler's move path (drag-pan branch) stays exercised.
+      mk('touchmove', [mid], [mid]);
       mk('touchend', [], [end]);
     }, [dx, opts]);
   }
@@ -266,6 +270,15 @@ test.describe('Lightbox gallery navigation', () => {
     // Two-finger gesture: pinch classification wins, no navigation.
     await dispatchSwipe(page, 0, { pinchFirst: true });
     await expect(page.locator('.lb-counter')).toHaveText('1 / 3');
+
+    // The swipe click-guard is time-boxed: once the synthesis window passes,
+    // a legitimate backdrop click must still close the lightbox (a leaked
+    // guard here would force users to tap twice).
+    await dispatchSwipe(page, -120);
+    await expect(page.locator('.lb-counter')).toHaveText('2 / 3');
+    await page.waitForTimeout(600);
+    await page.mouse.click(30, 700); // backdrop, away from img/buttons
+    await expect(page.locator('.lightbox-overlay')).not.toHaveClass(/active/);
 
     await ctx.close();
   });

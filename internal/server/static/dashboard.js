@@ -12249,8 +12249,10 @@ initSidebarSearch();
   }
   function zoomBy(f){scale=Math.min(Math.max(scale*f,.5),10);apply();showHint()}
   // ── Gallery group navigation (RFC lightbox-gallery-nav §3) ──
-  // preloaded dedupes warm-up requests across fast paging; the Image objects
-  // themselves are throwaway — the browser HTTP cache holds the bytes.
+  // preloaded dedupes warm-up requests across fast paging within one open
+  // gallery; the Image objects themselves are throwaway — the browser HTTP
+  // cache holds the bytes. Reset per openLightboxGroup: attachment URLs carry
+  // a ?v=<time> cache-buster, so a session-lifetime map would only grow.
   var preloaded={};
   function preload(i){
     if(i<0||i>=items.length)return;
@@ -12347,22 +12349,30 @@ initSidebarSearch();
     rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
   }
   ov.addEventListener('click',function(e){
+    // A horizontal swipe can land a browser-synthesized click anywhere on the
+    // overlay — backdrop (would close), or a nav rail at left/right where the
+    // finger lifted (would double-navigate). Swallow ANY click arriving within
+    // the synthesis window after a nav swipe. Time-based (not a boolean flag)
+    // because preventDefault in touchend suppresses the synthetic click on
+    // most engines: a leftover boolean would eat the NEXT legitimate click,
+    // while a timestamp simply expires.
+    if(Date.now()-swipeAt<500){swipeAt=0;return}
     var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
     if(btn){
       // Toolbar/nav click — handle action and don't fall through to backdrop close.
+      // prev/next respect aria-disabled (ARIA 1.2 §6.6.3): pointer-events:none
+      // blocks mouse, but the buttons stay focusable, so Enter would otherwise
+      // activate a control that announces itself as disabled.
       var action=btn.getAttribute('data-lb-action');
+      var dis=btn.getAttribute('aria-disabled')==='true';
       if(action==='rotate-left')rotateBy(-90);
       else if(action==='rotate-right')rotateBy(90);
       else if(action==='zoom-in')zoomBy(1.2);
       else if(action==='zoom-out')zoomBy(1/1.2);
-      else if(action==='prev')nav(-1);
-      else if(action==='next')nav(1);
+      else if(action==='prev'&&!dis)nav(-1);
+      else if(action==='next'&&!dis)nav(1);
       return;
     }
-    // A horizontal swipe that ends with the finger off the image lands the
-    // browser-synthesized click on the overlay; without this guard the swipe
-    // would navigate AND close the lightbox in one gesture.
-    if(swipeHandled){swipeHandled=false;return}
     if(e.target===ov)close();
   });
   // Scroll wheel zoom (toward cursor)
@@ -12382,7 +12392,7 @@ initSidebarSearch();
   //     gesture can never end as a navigation swipe.
   //   - scale < 1.05 (tolerance, not ===1): swipe navigates. Above it the
   //     single finger pans the zoomed image — mutually exclusive paths.
-  var iDist=0,iScale=1,lastTap=0,sx=0,sy=0,swipeScale=1,pinched=false,swipeHandled=false;
+  var iDist=0,iScale=1,lastTap=0,sx=0,sy=0,swipeScale=1,pinched=false,swipeAt=0;
   function t2d(t){return Math.hypot(t[1].clientX-t[0].clientX,t[1].clientY-t[0].clientY)}
   img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();pinched=true;iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1){pinched=false;sx=e.touches[0].clientX;sy=e.touches[0].clientY;swipeScale=scale;if(scale>1){lx=sx;ly=sy;dragging=true}}},{passive:false});
   img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
@@ -12397,21 +12407,23 @@ initSidebarSearch();
       nav(dx<0?1:-1);
       // A nav swipe must not double as the first/second tap of a double-tap
       // zoom (rapid successive swipes land within the 300ms window), nor may
-      // its synthesized click bubble into the backdrop-close path.
+      // its synthesized click reach the overlay click handler (backdrop close
+      // or a nav rail under the lifted finger).
       lastTap=0;
-      swipeHandled=true;
+      swipeAt=Date.now();
       return;
     }
     var now=Date.now();
     if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}
     lastTap=now;
-  });
+  },{passive:false});
   // openLightboxGroup(list, start) opens a gallery over `list`, an array of
   // {full, thumb} URL-string snapshots, starting at index `start`. Single
   // lightbox instance: calling while already open simply replaces the group.
   window.openLightboxGroup=function(list,start){
     items=(list&&list.length)?list:[];
     if(!items.length)return;
+    preloaded={};
     var wasOpen=ov.classList.contains('active');
     show(Math.min(Math.max(start||0,0),items.length-1));
     ov.classList.add('active');
@@ -12457,6 +12469,19 @@ initSidebarSearch();
       return;
     }
     if(e.key==='Escape'){close();return}
+    // Tab containment: aria-modal alone isn't honored by every AT, and a
+    // sighted keyboard user could Tab into the chat behind the overlay.
+    // nz_util's trapFocus is unsuitable here — its Escape branch removes the
+    // overlay element, but this lightbox is a persistent singleton.
+    if(e.key==='Tab'){
+      var nodes=Array.prototype.filter.call(ov.querySelectorAll('button'),function(n){return n.offsetParent!==null});
+      if(!nodes.length){e.preventDefault();return}
+      var first=nodes[0],last=nodes[nodes.length-1],cur=document.activeElement;
+      if(e.shiftKey&&(cur===first||cur===ov)){e.preventDefault();last.focus()}
+      else if(!e.shiftKey&&cur===last){e.preventDefault();first.focus()}
+      else if(!ov.contains(cur)){e.preventDefault();first.focus()}
+      return;
+    }
     if(e.key==='ArrowLeft'){e.preventDefault();nav(-1);return}
     if(e.key==='ArrowRight'){e.preventDefault();nav(1);return}
     if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint();return}
