@@ -62,11 +62,9 @@ func TestR247ARCH11_FinishRunUsesInjectedClock(t *testing.T) {
 
 	cfg := SchedulerConfig{
 		MaxJobs:   5,
-		Router:    &fakeRouter{},
 		StorePath: dir + "/cron_jobs.json",
-		Telemetry: bc,
 	}
-	sched := NewScheduler(cfg)
+	sched := NewScheduler(cfg, SchedulerDeps{Router: &fakeRouter{}, Telemetry: bc})
 	// Inject the fake clock after construction (the default real clock is
 	// installed by NewScheduler). Direct field write is safe: no tick
 	// goroutines run in this isolated finishRun test.
@@ -129,11 +127,9 @@ func TestR247ARCH11_SyntheticSkippedUsesInjectedClock(t *testing.T) {
 
 	cfg := SchedulerConfig{
 		MaxJobs:   5,
-		Router:    &fakeRouter{},
 		StorePath: dir + "/cron_jobs.json",
-		Telemetry: bc,
 	}
-	sched := NewScheduler(cfg)
+	sched := NewScheduler(cfg, SchedulerDeps{Router: &fakeRouter{}, Telemetry: bc})
 	sched.clock = clk
 
 	j := &Job{ID: "job-skip-clock", Schedule: "@every 5m", Prompt: "ping"}

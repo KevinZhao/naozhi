@@ -20,7 +20,7 @@ func TestMarshalJobsLocked_SkipSortEmpty(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestMarshalJobsLocked_SkipSortSingle(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -35,7 +35,7 @@ func TestExclusionSourceConsistency(t *testing.T) {
 		StorePath:      filepath.Join(dir, "cron.json"),
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

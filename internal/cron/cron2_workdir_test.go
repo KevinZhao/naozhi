@@ -61,8 +61,9 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -132,8 +133,9 @@ func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -183,8 +185,9 @@ func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

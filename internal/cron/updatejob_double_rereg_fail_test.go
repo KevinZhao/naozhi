@@ -31,7 +31,7 @@ func TestUpdateJob_DoubleReregFail_JobMarkedPaused(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

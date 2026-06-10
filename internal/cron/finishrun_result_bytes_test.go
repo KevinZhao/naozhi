@@ -56,10 +56,9 @@ func TestR050103C_FinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 			dir := t.TempDir()
 			cfg := SchedulerConfig{
 				MaxJobs:   5,
-				Router:    &fakeRouter{},
 				StorePath: filepath.Join(dir, "cron_jobs.json"),
 			}
-			sched := NewScheduler(cfg)
+			sched := NewScheduler(cfg, SchedulerDeps{Router: &fakeRouter{}})
 			if sched.runStore == nil || sched.runStore.disabled {
 				t.Fatal("runStore must be enabled for this test (StorePath set)")
 			}

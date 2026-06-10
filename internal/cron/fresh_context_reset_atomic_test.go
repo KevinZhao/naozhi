@@ -24,7 +24,7 @@ import (
 func TestCRON1_FreshResetSerializedByInflightCAS(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: fake})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: fake})
 
 	const id = "job-fresh-overlap"
 	j := &Job{

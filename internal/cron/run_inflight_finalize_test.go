@@ -25,13 +25,13 @@ func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	sawOK.Store(true)
 
 	var sched *Scheduler
-	cfg := SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: observingBroadcaster{onEnded: func() {
+	deps := SchedulerDeps{Router: &fakeRouter{}, Telemetry: observingBroadcaster{onEnded: func() {
 		v, ok := sched.CurrentRun("job-finalize")
 		sawOK.Store(ok)
 		phase := v.Phase
 		sawPhase.Store(&phase)
 	}}}
-	sched = NewScheduler(cfg)
+	sched = NewScheduler(SchedulerConfig{MaxJobs: 5}, deps)
 	s := sched
 
 	j := &Job{ID: "job-finalize", Schedule: "@every 5m"}
@@ -87,7 +87,7 @@ func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 // corrupt the in-flight metadata mid-run.
 func TestR246GO3_OverlapSkippedDoesNotReleaseOwnerGate(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 
 	j := &Job{ID: "job-overlap-noop", Schedule: "@every 5m"}
 	s.mu.Lock()

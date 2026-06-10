@@ -42,7 +42,8 @@ func TestExecuteGetSession_CanceledAbortsSkipPersist(t *testing.T) {
 	t.Parallel()
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{
-		MaxJobs:   5,
+		MaxJobs: 5,
+	}, SchedulerDeps{
 		Router:    &fakeRouter{getErr: context.Canceled},
 		Telemetry: rec,
 	})
@@ -79,8 +80,9 @@ func TestExecuteGetSession_SessionErrorAborts(t *testing.T) {
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:   5,
-		Router:    &fakeRouter{getErr: errors.New("spawn boom")},
 		StorePath: dir + "/cron_jobs.json",
+	}, SchedulerDeps{
+		Router:    &fakeRouter{getErr: errors.New("spawn boom")},
 		Telemetry: rec,
 	})
 	j := &Job{ID: "job-getsession-err", Schedule: "@every 5m"}

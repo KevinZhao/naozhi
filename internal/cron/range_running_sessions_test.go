@@ -19,7 +19,7 @@ func newRunningInflight(sessionID string) *runInflight {
 // R260528-ARCH-7 (#948 / #1368): it visits only running runs with a non-empty
 // SessionID, skips not-running guards, and honours an early-stop fn.
 func TestRangeRunningSessionIDs(t *testing.T) {
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
 
 	// running + session id -> visited
 	s.runningJobs.Store("a", newRunningInflight("sess-a"))

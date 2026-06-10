@@ -50,7 +50,7 @@ func (r concurrencyRouter) GetOrCreate(ctx context.Context, key string, opts Age
 // the same id always maps to the same shard.
 func TestJobGateLock_SameJobIDSharesMutex(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 	a := s.jobGateLock("job-x")
 	b := s.jobGateLock("job-x")
 	if a != b {
@@ -80,7 +80,7 @@ func TestJobGateLock_SameJobIDSharesMutex(t *testing.T) {
 // makes cleanup complete immediately and fails this test.
 func TestJobGate_CleanupSerialisedAgainstGate(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 
 	const jobID = "job-serialise"
 	// Seed an idle inflight entry so cleanup has something to delete once it
@@ -130,7 +130,7 @@ func TestJobGate_NoDoubleExecutionUnderDeleteTriggerRace(t *testing.T) {
 	var cur, peak atomic.Int32
 	router := concurrencyRouter{sess: concurrencySession{cur: &cur, peak: &peak, hold: 100 * time.Microsecond}}
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	const jobID = "job-race"
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}

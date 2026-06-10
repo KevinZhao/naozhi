@@ -108,7 +108,7 @@ func TestStubRefresher_R249_ARCH_25(t *testing.T) {
 	t.Parallel()
 
 	router := &stubRefreshCountingRouter{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router})
 
 	// Zero value: no-op.
 	var zero stubRefresher
@@ -151,7 +151,7 @@ func TestExecuteJobIDIfLive_SkipLogLabels_R243_ARCH_13(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	router := &stubRefreshCountingRouter{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router})
 
 	// Deleted job: not in s.jobs at all.
 	s.executeJobIDIfLive("missing-job", false, "cron")

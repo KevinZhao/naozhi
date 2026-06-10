@@ -163,7 +163,7 @@ func TestCronDeletePauseResumeTrigger_JSONEnvelope(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{AllowNilRouter: true})}
+			h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{AllowNilRouter: true}, cronpkg.SchedulerDeps{})}
 
 			var bodyReader *strings.Reader
 			if c.body != "" {

@@ -83,9 +83,11 @@ func TestAddJob_TitleLengthGuard(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{}, // 复用 jitter_test.go 里的 stub
+		// 复用 jitter_test.go 里的 stub
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -113,9 +115,10 @@ func TestAddJob_PromptLengthGuard(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{},
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -142,9 +145,10 @@ func TestUpdateJob_PromptLengthGuard(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{},
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -175,9 +179,10 @@ func TestUpdateJob_TitleOnly(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{},
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -216,9 +221,10 @@ func TestUpdateJob_ClearTitle(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{},
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -249,9 +255,10 @@ func TestUpdateJob_TitleLengthGuard(t *testing.T) {
 	t.Parallel()
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    &jitterStubRouter{},
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &jitterStubRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

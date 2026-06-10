@@ -28,7 +28,7 @@ func TestFindByPrefixLocked_FullIDFastPath(t *testing.T) {
 	// Build the scheduler with two jobs in the same chat plus one in a
 	// different chat — covers the in-scope hit, cross-chat probe guard,
 	// and ambiguous-prefix regression all at once.
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

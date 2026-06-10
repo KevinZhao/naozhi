@@ -18,7 +18,7 @@ func TestEnsureStub_NilRouterReturnsFalse(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 
 	// Inject a job directly so EnsureStub finds it under s.mu.RLock and
 	// proceeds to the registerStubByValue call. AddJob would also call
@@ -46,7 +46,7 @@ func TestEnsureStub_MissingJobStillReturnsFalse(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 
 	if got := s.EnsureStub("cron:nope"); got {
 		t.Error("EnsureStub for unknown job returned true; expected false")

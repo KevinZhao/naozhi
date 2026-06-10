@@ -75,7 +75,7 @@ func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
 
 	rec := &recordingBroadcaster{}
 	router := &reapRouter{sid: "sess-fresh-1"}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-fresh-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()
@@ -141,7 +141,7 @@ func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 	// post-success Reset(cronKey) fires, reproducing a concurrent Delete that
 	// lands in the Reset→register window.
 	router := &deleteOnResetRouter{reapRouter: reapRouter{sid: "sess-del-1"}}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 	router.s = s
 
 	j := &Job{ID: "job-deleted-mid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
@@ -181,7 +181,7 @@ func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
 	// Empty sid → okSession.Send returns SendResult{SessionID: ""}, so the
 	// success-tail reap sees result.SessionID == "".
 	router := &reapRouter{sid: ""}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-empty-sid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
 	s.mu.Lock()
@@ -228,7 +228,7 @@ func TestPersistentContextNotReapedAfterSuccess(t *testing.T) {
 
 	rec := &recordingBroadcaster{}
 	router := &reapRouter{sid: "sess-persist-1"}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-persist", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
 	s.mu.Lock()

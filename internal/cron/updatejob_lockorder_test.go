@@ -97,7 +97,7 @@ func TestUpdateJob_ScheduleChange_ConcurrentTickDoesNotDeadlock(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        10,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

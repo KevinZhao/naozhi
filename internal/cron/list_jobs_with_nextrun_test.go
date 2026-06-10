@@ -13,7 +13,7 @@ import (
 func TestListJobsWithNextRun(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestListJobsWithNextRun_LargeBucketMapPath(t *testing.T) {
 	t.Parallel()
 
 	const n = listNextRunMapThreshold + 5 // strictly above threshold → map path
-	s := NewScheduler(SchedulerConfig{MaxJobs: n + 5, MaxJobsPerChat: n + 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: n + 5, MaxJobsPerChat: n + 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestListJobsWithNextRun_LargeBucketMapPath(t *testing.T) {
 func TestListJobsWithNextRun_PausedJobZeroNextRun(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 4})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 4}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -162,7 +162,7 @@ func BenchmarkListJobsWithNextRun(b *testing.B) {
 	for _, bucket := range []int{1, 5, listNextRunMapThreshold, listNextRunMapThreshold + 5} {
 		bucket := bucket
 		b.Run(fmt.Sprintf("bucket=%d", bucket), func(b *testing.B) {
-			s := NewScheduler(SchedulerConfig{MaxJobs: 600, MaxJobsPerChat: 600})
+			s := NewScheduler(SchedulerConfig{MaxJobs: 600, MaxJobsPerChat: 600}, SchedulerDeps{})
 			if err := s.Start(); err != nil {
 				b.Fatalf("Start: %v", err)
 			}

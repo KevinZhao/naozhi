@@ -122,7 +122,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 				var logBuf bytes.Buffer
 				logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-				h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+				h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
 
 				var req *http.Request
 				if hc.body != nil {

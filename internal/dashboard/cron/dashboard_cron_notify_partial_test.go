@@ -26,7 +26,7 @@ func TestHandleCreate_NotifyHalfSetRejected(t *testing.T) {
 	// "cron not configured" 501 short-circuit. Empty config is fine —
 	// the test only cares about pre-persist validation, so we never
 	// reach AddJob.
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 
 	type tc struct {
 		name      string

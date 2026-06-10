@@ -17,7 +17,7 @@ func TestCronEntryGone_ZeroIDIsGone(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -37,8 +37,9 @@ func TestCronEntryGone_LiveEntryIsPresent(t *testing.T) {
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
-		Router:    &fakeRouter{},
 		MaxJobs:   5,
+	}, SchedulerDeps{
+		Router: &fakeRouter{},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -77,7 +78,7 @@ func TestCronEntryGone_OrphanIDReportsGone(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -7,7 +7,7 @@ import "testing"
 // structural: addToChatIndexLocked moves chatJobCount and jobsByChat in
 // lockstep, and deleteJobLocked is the exact inverse.
 func TestAddToChatIndexLocked_SyncsBothIndexes(t *testing.T) {
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
 	key := chatJobKey{Platform: "feishu", ChatID: "c1"}
 
 	jobs := []*Job{
