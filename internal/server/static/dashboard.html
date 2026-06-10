@@ -1596,6 +1596,12 @@ body.kbd-open .input-hints{display:none}
 .cj-sub .cj-schedule:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
 .cj-sub .cj-icon{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);flex-shrink:0}
 .cj-sub .cj-icon.notify-off{color:var(--nz-text-faint)}
+/* ☁️ 云沙箱 placement 徽标三态（agentcore-cloud-sandbox RFC §7.2）：
+   默认绿调 pill；pl-failed 黄（failed-clean，可直接重试）；
+   pl-transport 红（断流，microVM 状态未知 — §6.2 双跑风险信号）。 */
+.cj-placement-sandbox{font-size:var(--nz-fs-xs);padding:0 6px;border-radius:var(--nz-radius-md);flex-shrink:0;white-space:nowrap;background:color-mix(in srgb, var(--nz-ok, #2e7d32) 18%, transparent);color:var(--nz-ok, #2e7d32);border:1px solid color-mix(in srgb, var(--nz-ok, #2e7d32) 35%, transparent)}
+.cj-placement-sandbox.pl-failed{background:color-mix(in srgb, var(--nz-warn, #b26a00) 18%, transparent);color:var(--nz-warn, #b26a00);border-color:color-mix(in srgb, var(--nz-warn, #b26a00) 35%, transparent)}
+.cj-placement-sandbox.pl-transport{background:color-mix(in srgb, var(--nz-err, #c62828) 18%, transparent);color:var(--nz-err, #c62828);border-color:color-mix(in srgb, var(--nz-err, #c62828) 35%, transparent);font-weight:600}
 .cj-sub .cj-icon.fresh{color:var(--nz-green)}
 .cj-sub .cj-icon.missed{color:var(--nz-amber);font-weight:600}
 /* 下次运行时间列 */
