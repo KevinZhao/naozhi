@@ -2416,18 +2416,6 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
       st.details[runId].__transcript = data || { fallback: 'missing', turns: [] };
-      // First-render race: cronTimelineDetailHtml may have settled on
-      // __activeTab='raw' because the transcript hadn't arrived yet.
-      // Now that the turns are in, promote that initial-default to
-      // 'chat' so users don't have to manually click. We only do this
-      // when the user *hasn't* explicitly clicked a tab — heuristic:
-      // they haven't if the active tab is the same default we'd have
-      // chosen with no transcript present.
-      const turns = data && Array.isArray(data.turns) ? data.turns : [];
-      const det = st.details[runId];
-      if (turns.length > 0 && det.__activeTab === 'raw' && !det.__activeTabUserSet) {
-        det.__activeTab = 'chat';
-      }
     }
   } catch (err) {
     if (st.details && st.details[runId]) {
