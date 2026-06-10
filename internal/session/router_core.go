@@ -495,20 +495,30 @@ func (s *pendingSpawnSlot) release() {
 	s.r.mu.Unlock()
 }
 
-// panicSafeSpawn invokes wrapper.Spawn inside a deferred recover so a panic
-// from the wrapper (shim exec crash, bogus protocol Init, etc.) cannot leave
-// pendingSpawns stranded in spawnSession. A stranded counter would make the
-// router refuse every subsequent GetOrCreate with ErrMaxProcs until restart.
-// The recovered panic is translated into a regular error so the surrounding
-// control flow runs the standard "spawn process: %w" wrap + early return
-// without special-casing panic. RES1.
+// panicSafeSpawn invokes the runner's Spawn inside a deferred recover so a
+// panic from the spawn path (shim exec crash, bogus protocol Init, etc.)
+// cannot leave pendingSpawns stranded in spawnSession. A stranded counter
+// would make the router refuse every subsequent GetOrCreate with ErrMaxProcs
+// until restart. The recovered panic is translated into a regular error so
+// the surrounding control flow runs the standard "spawn process: %w" wrap +
+// early return without special-casing panic. RES1.
+//
+// Takes cli.Runner (the placement seam, agentcore-cloud-sandbox RFC §4.2)
+// instead of *cli.Wrapper so the sandbox placement reuses this exact
+// pendingSpawns/panic protection when agentcoreRunner lands. Callers pass
+// wrapper.Runner(); the nil-wrapper guard upstream keeps its semantics
+// because (*cli.Wrapper)(nil).Runner() returns nil and r == nil is checked
+// here before use.
 func panicSafeSpawn(
 	ctx context.Context,
-	w *cli.Wrapper,
+	r cli.Runner,
 	opts cli.SpawnOptions,
 	key, backendID string,
 ) (*cli.Process, error) {
-	return panicSafeSpawnFn(ctx, w.Spawn, opts, key, backendID)
+	if r == nil {
+		return nil, fmt.Errorf("no runner for backend %q", backendID)
+	}
+	return panicSafeSpawnFn(ctx, r.Spawn, opts, key, backendID)
 }
 
 // panicSafeSpawnFn is the testable core: tests inject a spawnerFunc that
