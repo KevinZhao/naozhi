@@ -68,7 +68,9 @@ func TestR250GO15_SpawnCancelInvokedBeforeSendCtx(t *testing.T) {
 	if idxHelperCall < 0 {
 		t.Fatal("executeOpt must delegate the spawn phase to executeGetSession — see #423")
 	}
-	idxSendCtx := strings.Index(src, "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, sendBudget)")
+	// Phase C (#734/#945): sendCtx creation lives in execSend (defined after
+	// executeOpt), so source order "helper call before sendCtx" still holds.
+	idxSendCtx := strings.Index(src, "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, a.sendBudget)")
 	if idxSendCtx < 0 {
 		t.Fatal("could not locate sendCtx WithTimeout — scheduler_run.go shape changed; revisit this test")
 	}
