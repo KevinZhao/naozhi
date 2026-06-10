@@ -279,9 +279,11 @@ job 模型下没有"重连续跑"——naozhi 必须把**输出流式落盘**（
 
 | 终态 | 判定依据 | 副作用可能性 | replay 安全性 |
 |---|---|---|---|
-| **success** | 收到 CC stream-json `result` 事件且非 error | 已完成（预期内） | 无需 replay |
-| **failed-clean** | 收到 `result` 但 `is_error`，或流干净结束（EOF）但无 `result`（handler 异常退出） | CC 自己报错/早退，副作用**大概率未发生或不完整** | 较安全，仍建议有副作用任务先核对 |
-| **failed-transport** | 传输层断流（连接 reset/超时），未见流尾 | **未知**——microVM 内 job 可能还在跑甚至已完成 | **不安全，必须走 §6.2 终止确认后才能 replay** |
+| **success** | 收到 CC stream-json `result` 事件且非 error，且流干净走到尾 | 已完成（预期内） | 无需 replay |
+| **failed-clean** | 收到 `result` 但 `is_error`（或 `error_*` subtype），或无 `result` 但收到 bootstrap `exit` 帧且流干净结束——CLI 死亡有 handler 见证 | CC 自己报错/早退，副作用**大概率未发生或不完整** | 较安全，仍建议有副作用任务先核对 |
+| **failed-transport** | 传输层断流（连接 reset/超时/ctx 取消），**或流干净 EOF 但既无 `result` 也无 `exit` 帧**（平台 idle-burn 形态，V8 实测：干净 FIN ≠ job 死亡有见证） | **未知**——microVM 内 job 可能还在跑甚至已完成 | **不安全，必须走 §6.2 终止确认后才能 replay** |
+
+> Phase 1 实现修订（PR-2a）：原 v1.2 文案把"流干净结束但无 result"笼统归 failed-clean——实测 V8 证明平台 idle-burn 也产生干净 EOF，二者不可区分。实现以 **bootstrap `exit` 帧**作为"handler 见证的死亡"凭据：有 exit 帧 → failed-clean；无 → failed-transport（保守）。
 
 ### 6.2 双跑漏洞：断流 ≠ job 死（v1.2 封堵）
 
