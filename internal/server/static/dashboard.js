@@ -3605,10 +3605,10 @@ function eventHtml(e, opts) {
   // per-event `?v=<time>` query string side-steps the negative cache
   // without invalidating legitimate hits.
   //
-  // Fallback to thumb on load failure: `openLightbox(full, thumb)` below
+  // Fallback to thumb on load failure: the lightbox's loadWithFallback
   // covers both HTTP 404 (attachment GC'd) and Content-Type mismatch
-  // (openLightbox checks naturalWidth===0 after onload). See
-  // dashboard.js's openLightbox comment for rationale. RFC §3.6.3.
+  // (it checks naturalWidth===0 after onload). See the lightbox IIFE's
+  // loadWithFallback comment for rationale. RFC §3.6.3.
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     const paths = e.image_paths || [];
@@ -3620,10 +3620,14 @@ function eventHtml(e, opts) {
         full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
           '&path=' + encodeURIComponent(p) + cacheBust;
       }
+      // No inline onclick: a document-level delegated listener in the
+      // lightbox IIFE handles clicks on .event-images img[data-full] and
+      // opens the whole group (RFC lightbox-gallery-nav §3). Delegation
+      // survives the poll-driven innerHTML re-renders that destroy and
+      // recreate these nodes.
       return '<img src="' + escAttr(src) + '" loading="lazy" ' +
         'data-full="' + escAttr(full) + '" ' +
-        'data-thumb="' + escAttr(src) + '" ' +
-        'onclick="openLightbox(this.dataset.full, this.dataset.thumb)">';
+        'data-thumb="' + escAttr(src) + '">';
     }).join('') + '</div>';
   }
 
@@ -12195,17 +12199,35 @@ initSidebarSearch();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
   ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
-  // Toolbar buttons sit absolute top-right; rotation buttons trigger 90° steps.
-  // The overlay's click-to-close handler ignores events that didn't target the
-  // overlay itself, so toolbar clicks won't propagate up and dismiss the modal.
+  // tabindex=-1 lets openLightboxGroup move focus onto the overlay, so the
+  // ←/→/r/+/- shortcuts work even when the click left focus in the chat
+  // textarea (the keydown handler skips editable elements by design).
+  ov.setAttribute('tabindex','-1');
+  // Toolbar buttons sit absolute top-right; rotation buttons trigger 90° steps,
+  // zoom buttons give pointer-only users (touch device + mouse without wheel)
+  // a clickable zoom entry. The overlay's click-to-close handler ignores events
+  // that didn't target the overlay itself, so toolbar clicks won't propagate up
+  // and dismiss the modal. The prev/next rails + counter belong to the gallery
+  // group model (RFC lightbox-gallery-nav): hidden via .lb-single when the
+  // group holds one image.
   ov.innerHTML='<div class="lb-toolbar">'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="Zoom out" title="缩小 (-)">−</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="Zoom in" title="放大 (+)">+</button>'
     +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">↺</button>'
     +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">↻</button>'
     +'</div>'
+    +'<button type="button" class="lb-nav lb-nav-prev" data-lb-action="prev" aria-label="上一张" title="上一张 (←)">‹</button>'
+    +'<button type="button" class="lb-nav lb-nav-next" data-lb-action="next" aria-label="下一张" title="下一张 (→)">›</button>'
+    +'<div class="lb-counter" aria-live="polite"></div>'
     +'<img alt=""><div class="lb-zoom-hint"></div>';
   document.body.appendChild(ov);
   var img=ov.querySelector('img'),hint=ov.querySelector('.lb-zoom-hint');
+  var counter=ov.querySelector('.lb-counter'),prevBtn=ov.querySelector('.lb-nav-prev'),nextBtn=ov.querySelector('.lb-nav-next');
   var scale=1,panX=0,panY=0,rotation=0,dragging=false,lx=0,ly=0,ht=null,rotateAnimTimer=null;
+  // Gallery group state: items is a click-time snapshot of {full, thumb} URL
+  // strings (no DOM references), so the poll-driven innerHTML re-renders that
+  // destroy the thumbnails cannot invalidate an open lightbox.
+  var items=[],idx=0,lastFocus=null;
   function showHint(text){hint.textContent=text||(Math.round(scale*100)+'%');hint.classList.add('visible');clearTimeout(ht);ht=setTimeout(function(){hint.classList.remove('visible')},1200)}
   function apply(){
     // Rotation always emits a transform — even at neutral pan/scale — because
@@ -12217,60 +12239,46 @@ initSidebarSearch();
     ov.classList.toggle('zoomed',scale>1);
   }
   function reset(){scale=1;panX=0;panY=0;rotation=0;dragging=false;img.style.transform='';img.classList.remove('lb-rotating');ov.classList.remove('zoomed','dragging');hint.classList.remove('visible');clearTimeout(ht);clearTimeout(rotateAnimTimer)}
-  function close(){ov.classList.remove('active');reset()}
-  function rotateBy(deg){
-    // Accumulate the raw angle without normalization so the CSS transition
-    // always rotates the visually shorter 90° path. If we wrapped to
-    // (-180, 180] the browser would interpolate a 270° spin in the wrong
-    // direction (e.g. -180 → +180 renders as +360 of CW spin).
-    rotation+=deg;
-    img.classList.add('lb-rotating');
-    apply();
-    // Display label normalized to (-180, 180] so the hint stays human-readable
-    // ("90°" beats "450°"). The stored `rotation` keeps growing.
-    var disp=((rotation%360)+360)%360;
-    if(disp>180)disp-=360;
-    showHint(disp+'°');
-    clearTimeout(rotateAnimTimer);
-    // Strip the transition class once the animation settles so subsequent
-    // pan/zoom interactions stay snappy (no easing on every drag frame).
-    rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
+  function close(){
+    ov.classList.remove('active');reset();
+    // Return focus to wherever the user was before the lightbox grabbed it,
+    // but only if focus is still inside the overlay — if the user already
+    // clicked elsewhere, stealing focus back would be hostile.
+    if(lastFocus&&ov.contains(document.activeElement)){try{lastFocus.focus()}catch(_){/* detached node */}}
+    lastFocus=null;
   }
-  ov.addEventListener('click',function(e){
-    var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
-    if(btn){
-      // Toolbar click — handle action and don't fall through to backdrop close.
-      var action=btn.getAttribute('data-lb-action');
-      if(action==='rotate-left')rotateBy(-90);
-      else if(action==='rotate-right')rotateBy(90);
-      return;
-    }
-    if(e.target===ov)close();
-  });
-  // Scroll wheel zoom (toward cursor)
-  ov.addEventListener('wheel',function(e){e.preventDefault();var f=e.deltaY<0?1.15:1/1.15,ns=Math.min(Math.max(scale*f,.5),10);var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);panX-=cx*(ns/scale-1);panY-=cy*(ns/scale-1);scale=ns;apply();showHint()},{passive:false});
-  // Mouse drag pan
-  img.addEventListener('mousedown',function(e){if(scale<=1)return;e.preventDefault();dragging=true;lx=e.clientX;ly=e.clientY;ov.classList.add('dragging')});
-  document.addEventListener('mousemove',function(e){if(!dragging)return;panX+=e.clientX-lx;panY+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply()});
-  document.addEventListener('mouseup',function(){if(dragging){dragging=false;ov.classList.remove('dragging')}});
-  // Double-click toggle zoom
-  img.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();if(scale>1.05){reset();apply()}else{var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);scale=2.5;panX=-cx*1.5;panY=-cy*1.5;apply()}showHint()});
-  // Touch: pinch zoom + drag pan + double-tap
-  var iDist=0,iScale=1,lastTap=0;
-  function t2d(t){return Math.hypot(t[1].clientX-t[0].clientX,t[1].clientY-t[0].clientY)}
-  img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1&&scale>1){lx=e.touches[0].clientX;ly=e.touches[0].clientY;dragging=true}},{passive:false});
-  img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
-  img.addEventListener('touchend',function(e){if(e.touches.length<2)iDist=0;if(e.touches.length===0){dragging=false;if(e.changedTouches.length===1){var now=Date.now();if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}lastTap=now}}});
-  // openLightbox(src, [fallback]) opens the full-size image at `src`.
-  //
-  // When the optional `fallback` argument is supplied and the primary
-  // `src` fails to load, the lightbox silently switches to the fallback
-  // and keeps the overlay open. This addresses the attachment-GC-expired
-  // path (RFC §3.6.3): the on-disk original at
-  // /api/sessions/attachment?... is gone, but the embedded thumbnail
-  // data URI was persisted alongside it and renders identically (though
-  // at 600px). Without the fallback the user would see a broken-image
-  // glyph.
+  function zoomBy(f){scale=Math.min(Math.max(scale*f,.5),10);apply();showHint()}
+  // ── Gallery group navigation (RFC lightbox-gallery-nav §3) ──
+  // preloaded dedupes warm-up requests across fast paging; the Image objects
+  // themselves are throwaway — the browser HTTP cache holds the bytes.
+  var preloaded={};
+  function preload(i){
+    if(i<0||i>=items.length)return;
+    var u=items[i].full;
+    if(!u||preloaded[u])return;
+    preloaded[u]=1;
+    var im=new Image();
+    // Swallow 404s (GC-expired attachments): a failed warm-up must not
+    // surface through the RNEW-UX-002 global error handler as a toast.
+    im.onerror=function(){};
+    im.src=u;
+  }
+  function updateNav(){
+    var multi=items.length>1;
+    ov.classList.toggle('lb-single',!multi);
+    if(!multi)return;
+    counter.textContent=(idx+1)+' / '+items.length;
+    // aria-disabled (not the disabled attribute) keeps boundary buttons in
+    // the tab order so screen-reader users can perceive the edge.
+    prevBtn.setAttribute('aria-disabled',idx<=0?'true':'false');
+    nextBtn.setAttribute('aria-disabled',idx>=items.length-1?'true':'false');
+  }
+  // loadWithFallback(item) loads item.full and silently degrades to
+  // item.thumb when the original is gone. The attachment-GC-expired path
+  // (RFC §3.6.3): the on-disk original at /api/sessions/attachment?... is
+  // gone, but the embedded thumbnail data URI was persisted alongside it
+  // and renders identically (though at 600px). Without the fallback the
+  // user would see a broken-image glyph.
   //
   // Two failure modes the handler has to cover:
   //   1. HTTP 404 / network error → <img>'s onerror fires.
@@ -12281,8 +12289,8 @@ initSidebarSearch();
   // The img element is reused across calls, so its onload / onerror
   // handlers are re-assigned (not addEventListener'd) to avoid
   // accumulating stale listeners when users open the lightbox repeatedly.
-  window.openLightbox=function(src,fallback){
-    reset();
+  function loadWithFallback(item){
+    var src=item.full,fallback=item.thumb;
     var primaryTried=false;
     function useFallback(){
       if(!fallback||fallback===src)return false;
@@ -12308,8 +12316,136 @@ initSidebarSearch();
       img.onerror=null;img.onload=null;
     };
     img.src=src;
+  }
+  function show(i,dir){
+    if(i<0||i>=items.length)return;
+    idx=i;
+    // Zoom/pan/rotation reset on every page turn — carrying the previous
+    // image's pan could push the next one fully off-screen.
+    reset();
+    loadWithFallback(items[idx]);
+    updateNav();
+    preload(idx+(dir||1));
+  }
+  function nav(dir){show(idx+dir,dir)}
+  function rotateBy(deg){
+    // Accumulate the raw angle without normalization so the CSS transition
+    // always rotates the visually shorter 90° path. If we wrapped to
+    // (-180, 180] the browser would interpolate a 270° spin in the wrong
+    // direction (e.g. -180 → +180 renders as +360 of CW spin).
+    rotation+=deg;
+    img.classList.add('lb-rotating');
+    apply();
+    // Display label normalized to (-180, 180] so the hint stays human-readable
+    // ("90°" beats "450°"). The stored `rotation` keeps growing.
+    var disp=((rotation%360)+360)%360;
+    if(disp>180)disp-=360;
+    showHint(disp+'°');
+    clearTimeout(rotateAnimTimer);
+    // Strip the transition class once the animation settles so subsequent
+    // pan/zoom interactions stay snappy (no easing on every drag frame).
+    rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
+  }
+  ov.addEventListener('click',function(e){
+    var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
+    if(btn){
+      // Toolbar/nav click — handle action and don't fall through to backdrop close.
+      var action=btn.getAttribute('data-lb-action');
+      if(action==='rotate-left')rotateBy(-90);
+      else if(action==='rotate-right')rotateBy(90);
+      else if(action==='zoom-in')zoomBy(1.2);
+      else if(action==='zoom-out')zoomBy(1/1.2);
+      else if(action==='prev')nav(-1);
+      else if(action==='next')nav(1);
+      return;
+    }
+    // A horizontal swipe that ends with the finger off the image lands the
+    // browser-synthesized click on the overlay; without this guard the swipe
+    // would navigate AND close the lightbox in one gesture.
+    if(swipeHandled){swipeHandled=false;return}
+    if(e.target===ov)close();
+  });
+  // Scroll wheel zoom (toward cursor)
+  ov.addEventListener('wheel',function(e){e.preventDefault();var f=e.deltaY<0?1.15:1/1.15,ns=Math.min(Math.max(scale*f,.5),10);var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);panX-=cx*(ns/scale-1);panY-=cy*(ns/scale-1);scale=ns;apply();showHint()},{passive:false});
+  // Mouse drag pan
+  img.addEventListener('mousedown',function(e){if(scale<=1)return;e.preventDefault();dragging=true;lx=e.clientX;ly=e.clientY;ov.classList.add('dragging')});
+  document.addEventListener('mousemove',function(e){if(!dragging)return;panX+=e.clientX-lx;panY+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply()});
+  document.addEventListener('mouseup',function(){if(dragging){dragging=false;ov.classList.remove('dragging')}});
+  // Double-click toggle zoom
+  img.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();if(scale>1.05){reset();apply()}else{var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);scale=2.5;panX=-cx*1.5;panY=-cy*1.5;apply()}showHint()});
+  // Touch: pinch zoom + drag pan + double-tap + horizontal swipe nav.
+  // Gesture arbitration (RFC lightbox-gallery-nav §3):
+  //   - swipeScale is captured at touchSTART. A pinch leaves `scale` at an
+  //     arbitrary float when the second finger lifts, so reading it at
+  //     touchend would misclassify a pinch-then-swipe as a pan.
+  //   - `pinched` marks any gesture that ever had two fingers down; such a
+  //     gesture can never end as a navigation swipe.
+  //   - scale < 1.05 (tolerance, not ===1): swipe navigates. Above it the
+  //     single finger pans the zoomed image — mutually exclusive paths.
+  var iDist=0,iScale=1,lastTap=0,sx=0,sy=0,swipeScale=1,pinched=false,swipeHandled=false;
+  function t2d(t){return Math.hypot(t[1].clientX-t[0].clientX,t[1].clientY-t[0].clientY)}
+  img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();pinched=true;iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1){pinched=false;sx=e.touches[0].clientX;sy=e.touches[0].clientY;swipeScale=scale;if(scale>1){lx=sx;ly=sy;dragging=true}}},{passive:false});
+  img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
+  img.addEventListener('touchend',function(e){
+    if(e.touches.length<2)iDist=0;
+    if(e.touches.length!==0)return;
+    dragging=false;
+    if(e.changedTouches.length!==1)return;
+    var t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;
+    if(!pinched&&items.length>1&&swipeScale<1.05&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.2){
+      e.preventDefault();
+      nav(dx<0?1:-1);
+      // A nav swipe must not double as the first/second tap of a double-tap
+      // zoom (rapid successive swipes land within the 300ms window), nor may
+      // its synthesized click bubble into the backdrop-close path.
+      lastTap=0;
+      swipeHandled=true;
+      return;
+    }
+    var now=Date.now();
+    if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}
+    lastTap=now;
+  });
+  // openLightboxGroup(list, start) opens a gallery over `list`, an array of
+  // {full, thumb} URL-string snapshots, starting at index `start`. Single
+  // lightbox instance: calling while already open simply replaces the group.
+  window.openLightboxGroup=function(list,start){
+    items=(list&&list.length)?list:[];
+    if(!items.length)return;
+    var wasOpen=ov.classList.contains('active');
+    show(Math.min(Math.max(start||0,0),items.length-1));
     ov.classList.add('active');
+    if(!wasOpen){
+      // Move focus onto the overlay so ←/→/Esc work immediately; remember
+      // where it came from so close() can restore it.
+      lastFocus=document.activeElement;
+      try{ov.focus()}catch(_){/* focus can throw on detached roots */}
+    }
   };
+  // openLightboxFromThumb(el) collects every sibling thumbnail inside the
+  // clicked .event-images container into a gallery group. dataset reads copy
+  // plain strings — no DOM references survive into `items`, so poll-driven
+  // innerHTML re-renders can't invalidate an open lightbox.
+  window.openLightboxFromThumb=function(el){
+    var box=el.closest&&el.closest('.event-images');
+    var imgs=box?Array.prototype.slice.call(box.querySelectorAll('img[data-full]')):[el];
+    var list=imgs.map(function(i){return{full:i.dataset.full||i.src,thumb:i.dataset.thumb||i.src}});
+    // indexOf can only miss if `el` somehow lacks data-full (not rendered by
+    // eventHtml); degrade to the first image rather than refusing to open.
+    window.openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
+  };
+  // Compatibility shell: the historical single-image entry point. Kept so
+  // any caller outside eventHtml (or user bookmarklets) keeps working.
+  window.openLightbox=function(src,fallback){
+    window.openLightboxGroup([{full:src,thumb:fallback}],0);
+  };
+  // Delegated thumbnail click handler — registered once on document, so it
+  // survives the chat transcript's innerHTML re-renders (eventHtml emits the
+  // thumbnails without inline onclick; RFC lightbox-gallery-nav §3).
+  document.addEventListener('click',function(e){
+    var t=e.target&&e.target.closest&&e.target.closest('.event-images img[data-full]');
+    if(t)window.openLightboxFromThumb(t);
+  });
   document.addEventListener('keydown',function(e){
     if(!ov.classList.contains('active'))return;
     // Skip shortcuts when an editable element holds focus — otherwise typing
@@ -12321,6 +12457,8 @@ initSidebarSearch();
       return;
     }
     if(e.key==='Escape'){close();return}
+    if(e.key==='ArrowLeft'){e.preventDefault();nav(-1);return}
+    if(e.key==='ArrowRight'){e.preventDefault();nav(1);return}
     if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint();return}
     if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint();return}
     if(e.key==='0'){reset();apply();showHint();return}

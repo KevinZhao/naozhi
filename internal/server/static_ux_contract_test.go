@@ -7376,3 +7376,34 @@ func TestStaticUXContract_FileHasDoNotAddBanner(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardJS_LightboxGalleryNav pins the two invariants of the lightbox
+// gallery navigation (RFC lightbox-gallery-nav) that cannot be expressed
+// behaviourally — interaction behavior itself lives in
+// test/e2e/lightbox_nav.test.js per the #388 banner above.
+func TestDashboardJS_LightboxGalleryNav(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Forbid-list: the legacy inline-onclick single-image call site must not
+	// reappear. Thumbnails are opened by the document-level delegated click
+	// listener; a re-introduced inline handler would create a second,
+	// group-unaware open path (and another CSP 'unsafe-inline' dependency).
+	if strings.Contains(js, `onclick="openLightbox(`) {
+		t.Error("dashboard.js must not render thumbnails with inline onclick=\"openLightbox(...)\" — clicks go through the delegated .event-images listener which opens the whole gallery group (RFC lightbox-gallery-nav §3)")
+	}
+
+	// Compatibility shell: window.openLightbox(src, fallback) is public API
+	// (external callers / bookmarklets) and must keep delegating to the group
+	// model. Two distinct witnesses: the assignment and the delegation call.
+	if !strings.Contains(js, "window.openLightbox=function(src,fallback)") {
+		t.Error("window.openLightbox(src,fallback) compatibility shell missing — the historical single-image entry point must keep working")
+	}
+	if !strings.Contains(js, "window.openLightboxGroup([{full:src,thumb:fallback}],0)") {
+		t.Error("openLightbox must delegate to openLightboxGroup with a single-item group — a parallel non-group implementation would drift from the gallery model")
+	}
+}
