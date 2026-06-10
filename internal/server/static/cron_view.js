@@ -1884,6 +1884,14 @@ const CRON_TIMELINE_FRESH_MS = 30 * 1000;
 // runs/details/lastRenderedHtml without bound. LRU by lastAccess.
 const CRON_TIMELINE_MAX_ENTRIES = 20;
 
+// R20260610-CR-007 (#1998): cap st.runs after the refreshHead merge.
+// Without a cap, deep loadMore paging (50/page) followed by repeated WS
+// cron_run_ended refreshes grows the merged array without bound, and every
+// WS event pays an O(n log n) sort + full re-render over it. When the cap
+// truncates the tail, pagination is re-armed (done=false, nextBefore=
+// new oldest started_at) so loadMore can still page past the cut.
+const CRON_TIMELINE_MAX_RUNS = 500;
+
 function getCronTimelineState(jobId) {
   if (!cronTimelineState[jobId]) {
     const ids = Object.keys(cronTimelineState);
@@ -2408,18 +2416,6 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
       st.details[runId].__transcript = data || { fallback: 'missing', turns: [] };
-      // First-render race: cronTimelineDetailHtml may have settled on
-      // __activeTab='raw' because the transcript hadn't arrived yet.
-      // Now that the turns are in, promote that initial-default to
-      // 'chat' so users don't have to manually click. We only do this
-      // when the user *hasn't* explicitly clicked a tab — heuristic:
-      // they haven't if the active tab is the same default we'd have
-      // chosen with no transcript present.
-      const turns = data && Array.isArray(data.turns) ? data.turns : [];
-      const det = st.details[runId];
-      if (turns.length > 0 && det.__activeTab === 'raw' && !det.__activeTabUserSet) {
-        det.__activeTab = 'chat';
-      }
     }
   } catch (err) {
     if (st.details && st.details[runId]) {
@@ -2606,6 +2602,17 @@ async function cronTimelineRefreshHead(jobId) {
       }
     }
     merged.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+    // R20260610-CR-007 (#1998): cap the merged list so repeated
+    // loadMore + WS refresh cycles can't grow st.runs without bound.
+    // Truncating drops the oldest tail, so re-arm pagination: the
+    // cursor moves to the new oldest entry and done resets to false
+    // so 加载更多 can re-fetch past the cut.
+    if (merged.length > CRON_TIMELINE_MAX_RUNS) {
+      merged.length = CRON_TIMELINE_MAX_RUNS;
+      const oldest = merged[merged.length - 1];
+      st.nextBefore = oldest && oldest.started_at ? oldest.started_at : 0;
+      st.done = false;
+    }
     st.runs = merged;
     renderCronTimelinePanel(jobId);
   } catch (e) {

@@ -226,6 +226,9 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// a defensive guard against a future warmCache change rather than a
 	// real disk-error fallback path.
 	s.warmCache(jobID)
+	if s.cacheGetPostWarmHook != nil {
+		s.cacheGetPostWarmHook(jobID)
+	}
 	// R247-GO-6 (#483): re-Load() after warmCache so a concurrent
 	// cacheInvalidate (DeleteJob path) that races between our initial
 	// LoadOrStore and warmCache's own LoadOrStore cannot leave us
@@ -233,9 +236,17 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// be flipped — warmCache populated a DIFFERENT entry under the same
 	// jobID. Without this re-Load the result was a silent permanent
 	// (nil, false) miss until the next Append re-seeded the cache.
-	if v2, ok := s.recentCache.Load(jobID); ok {
-		entry = v2.(*recentCacheEntry)
+	v2, ok := s.recentCache.Load(jobID)
+	if !ok {
+		// R20260610-GO-007 (#2000): the key vanished between warmCache and
+		// this re-Load — a concurrent cacheInvalidate (DeleteJob) deleted it.
+		// Falling through with the pre-warm `entry` pointer could serve the
+		// just-warmed rows of a job that is being deleted (warmCache's
+		// LoadOrStore may have reused that very pointer). The job is going
+		// away, so a cache miss is the correct semantic.
+		return nil, false
 	}
+	entry = v2.(*recentCacheEntry)
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
 	if !entry.warm {
