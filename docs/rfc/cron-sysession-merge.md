@@ -2,17 +2,69 @@
 
 | 字段 | 值 |
 | :--- | :--- |
-| 状态 | Implemented v3 (Phase A1/A2/B/D-prep/D-main/E landed; Phase C deferred to follow-up PR) |
+| 状态 | Partially Implemented v4 (A1/A2/B + D-main 的 Broadcaster 部分 landed；D-main 的 SchedulerDeps (#746) 与 E dispatch import 切断 (#1164) **未落地**；Phase C deferred) |
 | 作者 | naozhi team |
 | 创建日期 | 2026-05-26 |
-| 修订日期 | 2026-05-26（v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
+| 修订日期 | 2026-06-10（v4：按 master 实测订正实施状态；v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
 | 关联代码 | `internal/cron/scheduler.go`<br/>`internal/cron/scheduler_run.go`<br/>`internal/cron/scheduler_callbacks.go`<br/>`internal/cron/scheduler_finish.go`<br/>`internal/sysession/manager.go`<br/>`internal/sysession/run.go`<br/>`internal/server/wshub_broadcast.go`<br/>`internal/server/dashboard.go:405-435`<br/>`internal/dispatch/commands.go:13`<br/>`internal/session/router_lifecycle.go:265`<br/>`internal/session/key.go` |
 | 关联 RFC | `docs/rfc/consumer-interfaces.md`（同样的 IoC 思路）<br/>`docs/rfc/cron-run-history.md`（cron 终态与 RunState 来源）<br/>`docs/rfc/system-session.md`（sysession 设计） |
 | 关联 issue | #1166 (runtelemetry) · #1173 (cron→session) · #1164 (dispatch→cron) · #734/#945 (executeOpt) · #1036 (RegisterBroadcaster) · #746 (SchedulerDeps) · #583 (prefix DRY，撤出 RFC) |
 
 ## 0. 修订历史
 
-### v3 (2026-05-26) — implemented except Phase C
+### v4 (2026-06-10) — 状态订正：v3 状态表与 master 实际不符
+
+v3 的状态表（见下）把 D-main 标为 "close #1036, #746"、E 标为
+"close #1164"，但 **2026-06-10 对 master 的逐项核实表明 #746 与 #1164
+的交付物不存在**。v3 引用的 commit `ff93563`/`48a7492` 在开发分支上
+存在（squash 合入 PR #1264 前的中间 commit），但 PR #1264 实际合入
+master 的内容（merge commit `6ad825be`）只包含 A1/A2/B + D-main 的
+Broadcaster 统一部分——**不含任何 dispatch 包改动，也不含 cron/deps.go**。
+
+逐项核实结果（均可在 master 上复跑验证）：
+
+- **A1 runtelemetry**: ✅ 已落地 — `internal/runtelemetry/` 存在
+  （broadcaster.go / event.go / state.go），cron 经
+  `SchedulerConfig.Telemetry` 接入；sysession 后续经 PR #1754
+  （`SetTelemetry` + `atomic.Pointer[runtelemetry.Broadcaster]`，
+  legacy `SetCallbacks` 已删）收敛到同一 seam。#1166 关闭成立。
+- **A2 sessionkey**: ✅ 已落地 — `internal/sessionkey/` 存在，
+  depguard 钉死 leaf 属性。
+- **B cron 本地化**: ✅ 已落地 — `internal/cron` 不再 import
+  `internal/session`（grep 确认仅剩 `internal/sessionkey`）。#1173
+  关闭成立。
+- **D-prep**: ✅ — §3.5.3.1 grep 证据 + legacy `cron_result` WS
+  frame 已删。
+- **D-main（Broadcaster 部分）**: ✅ 已落地 — 三个 legacy
+  `SetOn*` setter 已删，`runtelemetry.Broadcaster` 单点注册，
+  `internal/server/hub_broadcaster.go` 存在。#1036 关闭成立。
+- **D-main（SchedulerDeps 部分，#746）**: ❌ **未落地** —
+  `internal/cron/deps.go` 不存在；`NewScheduler` 仍是单参
+  `NewScheduler(cfg SchedulerConfig)`（`scheduler.go:375`）；
+  `Router`/`NotifySender`/`Telemetry`/`Agents` 等接口与 map 仍全部
+  留在 `SchedulerConfig`（`scheduler_config.go`），违反 §3.5.1 自立
+  的 cfg/deps 判定规则。**#746 被 close 但交付物不存在，需重开或
+  开新 issue 跟踪。**
+- **E dispatch invert（#1164）**: ❌ **未落地** —
+  `internal/dispatch/cron_consumer.go` 不存在；§3.6 规划的
+  `CronCommands`/`CronPolicy`/`CronLimits` 接口均未创建。现状是
+  另一条独立路线：`dispatch.go` 内的 `CronScheduler` 接口
+  （R250-ARCH-17 #1178，测试 seam），其签名带 `*cron.Job`，故
+  dispatch.go 与 commands.go **仍 import internal/cron**——且
+  `dispatch.go` 的注释明确写 "#1164 ... tracked separately and out
+  of scope"。**#1164 被 close 但 import 边未切，需重开或开新 issue
+  跟踪。**
+- **C executeOpt 4-helper**: ⏸ deferred（同 v3）— `executeOpt`
+  现 589 行（`scheduler_run.go:495`），自 v3 记录的 484 行继续增长。
+  §6 的 cron-cr issue-rate gate 自 2026-05-26 起无 N_pre/N_post 度量
+  记录，gate 实际处于无限期搁置状态；应主动决策推进 4-helper 或正式
+  关闭 #734/#945。
+
+**结论**：本 RFC 真实完成度为 A1/A2/B/D-prep + D-main 半项。两条
+"close" 记录（#746/#1164）与代码事实不符，是后续排期决策的失真源，
+据此把状态从 "Implemented v3" 降为 "Partially Implemented v4"。
+
+### v3 (2026-05-26) — ~~implemented except Phase C~~（状态记录有误，见 v4）
 
 Implementation status as of 2026-05-26 evening:
 
@@ -20,8 +72,10 @@ Implementation status as of 2026-05-26 evening:
 - **A2 sessionkey**: ✅ landed (commit `7e87699`)
 - **B cron 本地化**: ✅ landed (commit `85cf01f`) — close #1173
 - **D-prep**: ✅ evidence in §3.5.3.1 of this RFC
-- **D-main**: ✅ landed (commit `ff93563`) — close #1036, #746
-- **E dispatch invert**: ✅ landed (commit `48a7492`) — close #1164
+- **D-main**: ~~✅ landed (commit `ff93563`) — close #1036, #746~~
+  （v4 订正：仅 Broadcaster/#1036 部分落地；SchedulerDeps/#746 未落地）
+- **E dispatch invert**: ~~✅ landed (commit `48a7492`) — close #1164~~
+  （v4 订正：未落地，cron_consumer.go 不存在，dispatch 仍 import cron）
 - **C executeOpt 4-helper**: ⏸ deferred — RFC §3.4 + §6 race × 100
   gate stand; recommend a separate focused PR after Phase A+B
   cron-cr issue-rate gate (§6) clears

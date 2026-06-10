@@ -42,13 +42,14 @@
 | [todo-to-issues-migration.md](todo-to-issues-migration.md) | 已实施（PR #370/#464/#1063/#1064） | 2026-05-26 | docs/TODO.md 1054 finding 迁移到 GitHub Issues：`triage-findings` skill 三桶分流 + 21 label 体系 + 4 cron prompt 改造（v8 GitHub Issues 单源 + v3 PR Merge cron-mergeable + verify Closes #N） + 6 并行 agent 处理 1042 Round dump finding + 581 issue 落地 / 200 cosmetic-backlog / 372 audit-trail discarded |
 | [envpolicy-consolidation.md](envpolicy-consolidation.md) | Draft v1（待评审） | 2026-06-04 | #891：抽 `internal/envpolicy` 收敛三处分散的 Claude env 过滤策略；Phase 1 可落地（共享叶子校验器 + per-backend 凭据矩阵，行为零变化） |
 | [cron-runstore-facade.md](cron-runstore-facade.md) | Draft v1（待评审） | 2026-06-04 | #509/#978：补全 runStore 半facade，4 个 scheduler 文件经 `*Scheduler` wrapper 访问 + AST gate 测试；Phase 1 可落地（包内 behavior-preserving forwarding） |
+| [cron-sysession-merge.md](cron-sysession-merge.md) | Partially Implemented v4（2026-06-10 订正） | 2026-05-26 | #1166/#1173/#1164/#734/#945/#1036/#746：cron+sysession 调度层合并 7 phase。A1 runtelemetry / A2 sessionkey / B cron 本地化 / D-main Broadcaster 部分已落地（PR #1264 + #1754）；**SchedulerDeps (#746) 与 dispatch→cron import 切断 (#1164) 未落地但 issue 已被误关**；Phase C executeOpt 拆分 deferred（gate 度量停摆，需重新决策） |
 | [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | Draft v1（待评审） | 2026-06-04 | #1723/#1169/#1055：sysession 收敛到 `runtelemetry.Broadcaster` seam（复刻 cron 范式，删镜像结构体/hook_holders）；Phase 1 可落地；hard-fail 统一留后续 |
 | [eventlog-subsystem-unify.md](eventlog-subsystem-unify.md) | Draft v1（待评审） | 2026-06-04 | #737/#1369：统一 eventlog 5-包散落 / 三层影子；Phase 1 仅 additive 编译期接口断言闸门 |
 | [cron-config-and-structs.md](cron-config-and-structs.md) | Draft v1（待评审） | 2026-06-04 | #776/#764/#1282/#1278/#837：cron config functional-options + Job god-struct 拆分 + 大文件拆 + Outbox saga；仅 #776 docstring+parity 测试可落地，余须先评审 |
 | [cron-notify-sender.md](cron-notify-sender.md) | Draft v1（待评审） | 2026-06-04 | #725：抽 NotifySender 接口斩 cron→platform 反向依赖；通知协议（chunk/retry/telemetry/stopCtx）迁移须先评审 |
 | [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（待评审） | 2026-06-04 | #1738：自更新二进制加密签名（cosign keyless vs 自管 ed25519）；须先评审密钥信任模型，本轮不落地 |
 | [dashboard-csp-strict.md](dashboard-csp-strict.md) | Draft v1（待评审） | 2026-06-04 | #1734/#922：dashboard CSP 去 unsafe-inline（nonce/strict-dynamic）；前端+CSP+鉴权联动 high risk，须先评审 |
-| [router-god-object-split.md](router-god-object-split.md) | Draft v1（待评审） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）；纯设计本轮不落地 |
+| [router-god-object-split.md](router-god-object-split.md) | Implemented v2（2026-06-10 订正） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）。P0-P5 已分 PR 落地（#1762/#1796/#1802/#1837/#1804/#1841/#1852），P6 由 managed-session-split 交付，P7 经核实关闭 won't-do（#577） |
 | [lifecycle-policy-and-naming.md](lifecycle-policy-and-naming.md) | Draft v1（待评审） | 2026-06-04 | #870/#463/#729：lifecycle policy 接口（须等 restart RFC）/ Get*Fetch*Load* 165处 rename ADR / AutoTitler 持久进程（撞 SharedCLI 决策）；均须先评审 |
 
 ## 已废弃 / 已被取代
