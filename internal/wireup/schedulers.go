@@ -172,7 +172,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 
 	// deps.Router is wrapped in the cron.SessionRouter adapter below and
-	// passed to cron.SchedulerConfig.Router. A nil router would not panic at
+	// passed to cron.SchedulerDeps.Router. A nil router would not panic at
 	// construction time but would panic at first job execution when the
 	// scheduler calls Router methods. Catch it at startup instead.
 	// R260528-ARCH-23 (#1382): the nil check moved from the caller-built
@@ -189,10 +189,6 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
-		Router:        newCronRouterAdapter(deps.Router),
-		NotifySender:  newPlatformNotifySender(deps.Platforms),
-		Agents:        deps.Agents,
-		AgentCommands: deps.Cfg.AgentCommands,
 		StorePath:     deps.CronStorePath,
 		MaxJobs:       deps.Cfg.Cron.MaxJobs,
 		ExecTimeout:   deps.Cfg.ParseExecutionTimeout(),
@@ -201,6 +197,11 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		AllowedRoot:   deps.Workspace,
 		JitterMax:     deps.Cfg.ParseCronJitterMax(),
 		ParentCtx:     deps.ParentCtx,
+	}, cron.SchedulerDeps{
+		Router:        newCronRouterAdapter(deps.Router),
+		NotifySender:  newPlatformNotifySender(deps.Platforms),
+		Agents:        deps.Agents,
+		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
 	})
 	if err := scheduler.Start(); err != nil {

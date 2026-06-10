@@ -23,7 +23,7 @@ func TestScheduler_Start_PrewarmsRecentCacheOnRestart(t *testing.T) {
 	storePath := filepath.Join(dir, "cron_jobs.json")
 
 	// --- First boot: create a job + persist a run record to disk. ---
-	s1 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5, Router: &fakeRouter{}})
+	s1 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("s1 Start: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestScheduler_Start_PrewarmsRecentCacheOnRestart(t *testing.T) {
 	s1.Stop()
 
 	// --- Restart: second scheduler boots against the same StorePath. ---
-	s2 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5, Router: &fakeRouter{}})
+	s2 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 	if err := s2.Start(); err != nil {
 		t.Fatalf("s2 Start: %v", err)
 	}

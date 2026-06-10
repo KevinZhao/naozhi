@@ -22,7 +22,7 @@ import (
 func TestPersistOnShutdown_DetectsWriteFailure(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron.json")
-	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

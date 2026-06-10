@@ -3,7 +3,7 @@
 //
 // Phase D (RFC §3.5) collapsed three legacy SetOn* setters
 // (SetOnExecute / SetOnRunStarted / SetOnRunEnded) and their
-// atomic.Pointer storage into a single SchedulerConfig.Telemetry
+// atomic.Pointer storage into a single SchedulerDeps.Telemetry
 // (runtelemetry.Broadcaster) injected at construction. The cron-local
 // Run{Started,Ended}Event types are kept for two reasons:
 //   - cron internals (executeOpt / finishRun / emitOverlapSkipped)
@@ -11,7 +11,7 @@
 //     ErrorClass=cron.ErrorClass) before translating to the wire
 //     runtelemetry.RunEndedEvent
 //   - the emit helpers are private (lowercase), so external callers
-//     reach the broadcast surface only through SchedulerConfig.Telemetry
+//     reach the broadcast surface only through SchedulerDeps.Telemetry
 //     or SetTelemetry
 //
 // No behaviour change vs the pre-Phase-D pipeline: per-state metrics

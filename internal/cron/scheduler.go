@@ -371,8 +371,10 @@ type Scheduler struct {
 	clock cronClock
 }
 
-// NewScheduler creates a scheduler. Call Start() to begin.
-func NewScheduler(cfg SchedulerConfig) *Scheduler {
+// NewScheduler creates a scheduler. Call Start() to begin. cfg carries the
+// value/scalar configuration; deps carries the injected components (cfg/deps
+// split per RFC cron-sysession-merge §3.5.1, #746 — see deps.go).
+func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
 	// at construction so the misconfiguration shows up at boot rather than
 	// as an opaque NPE stack trace from executeOpt the first time a job
@@ -394,8 +396,8 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// expectation: a missing router means the dashboard sidebar is empty
 	// for the lifetime of the process — that's a wireup bug, not a
 	// transient warning.
-	if cfg.Router == nil && !cfg.AllowNilRouter {
-		slog.Error("cron.NewScheduler: cfg.Router is nil; dashboard sidebar entries will not be created and executeOpt will short-circuit. Set SchedulerConfig.Router on the production wireup, or SchedulerConfig.AllowNilRouter=true on tests that intentionally exercise router-less paths.")
+	if deps.Router == nil && !cfg.AllowNilRouter {
+		slog.Error("cron.NewScheduler: deps.Router is nil; dashboard sidebar entries will not be created and executeOpt will short-circuit. Set SchedulerDeps.Router on the production wireup, or SchedulerConfig.AllowNilRouter=true on tests that intentionally exercise router-less paths.")
 	}
 	before := cfg.MaxJobs
 	if before > maxJobsHardCap {
@@ -424,9 +426,9 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// / Workspace) and the cron tick spawns with backend defaults
 	// silently. Logging at construction makes the misconfiguration visible
 	// without changing runtime behaviour.
-	if _, ok := cfg.Agents["general"]; !ok {
+	if _, ok := deps.Agents["general"]; !ok {
 		slog.Debug("cron: 'general' agent missing from agents map; cron jobs without slash-prefix will fall back to backend defaults",
-			"agent_count", len(cfg.Agents))
+			"agent_count", len(deps.Agents))
 	}
 	s := &Scheduler{
 		cron: robfigcron.New(
@@ -439,13 +441,13 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		jobs:         make(map[string]*Job),
 		chatJobCount: make(map[chatJobKey]int),
 		jobsByChat:   make(map[chatJobKey][]*Job),
-		router:       cfg.Router,
+		router:       deps.Router,
 		// R241-ARCH-3 (#506) + R249-ARCH-27 (#991): notifySender / agents /
 		// agentCommands are documented as immutable after NewScheduler so
 		// notifyTarget + executeOpt can read them lock-free. The constructor
 		// previously aliased the caller-supplied maps verbatim — leaving the
 		// immutability contract dependent on the caller's discipline. A
-		// late-binding wireup that re-assigned cfg.Agents[name]
+		// late-binding wireup that re-assigned deps.Agents[name]
 		// (legitimate at boot, dangerous post-Start) would race the lock-free
 		// reads in cron-package hot paths. maps.Clone severs the alias at
 		// construction so the contract is enforced by the receiver, not by
@@ -506,16 +508,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		// #725: NotifySender is an interface value, not a map — write it once
 		// into the snapshot (no maps.Clone: there is no backing array to alias
 		// away from a late-binding wireup writer).
-		notifySender:  cfg.NotifySender,
-		agents:        maps.Clone(cfg.Agents),
-		agentCommands: maps.Clone(cfg.AgentCommands),
+		notifySender:  deps.NotifySender,
+		agents:        maps.Clone(deps.Agents),
+		agentCommands: maps.Clone(deps.AgentCommands),
 	})
 	// R20260527-GO-1: install the broadcaster via atomic.Pointer so
 	// later SetTelemetry calls are race-free vs the cron-dispatch read
-	// path in emitRunStarted / emitRunEnded. nil cfg.Telemetry leaves
+	// path in emitRunStarted / emitRunEnded. nil deps.Telemetry leaves
 	// the pointer as zero-value (no broadcast).
-	if cfg.Telemetry != nil {
-		b := cfg.Telemetry
+	if deps.Telemetry != nil {
+		b := deps.Telemetry
 		s.telemetry.Store(&b)
 	}
 	// R238-SEC-12 (#834): close the startup permission window. The
@@ -823,7 +825,7 @@ func (s *Scheduler) Start() error {
 func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) bool {
 	if s.router == nil {
 		s.routerNilOnce.Do(func() {
-			slog.Error("cron: registerStubByValue called without a router; dashboard sidebar will be empty for this scheduler — wireup bug or missing SchedulerConfig.Router?",
+			slog.Error("cron: registerStubByValue called without a router; dashboard sidebar will be empty for this scheduler — wireup bug or missing SchedulerDeps.Router?",
 				"job_id", id)
 		})
 		return false

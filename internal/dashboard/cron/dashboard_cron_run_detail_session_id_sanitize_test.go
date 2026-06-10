@@ -36,7 +36,7 @@ func TestHandleRunDetail_SessionID_Sanitized(t *testing.T) {
 	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{
 		StorePath:      storePath,
 		AllowNilRouter: true,
-	})
+	}, cronpkg.SchedulerDeps{})
 
 	job := cronpkg.Job{
 		ID:       strings.Repeat("c", 16),
@@ -119,7 +119,7 @@ func TestHandleRunDetail_SessionID_Clean(t *testing.T) {
 	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{
 		StorePath:      storePath,
 		AllowNilRouter: true,
-	})
+	}, cronpkg.SchedulerDeps{})
 
 	job := cronpkg.Job{
 		ID:       strings.Repeat("e", 16),

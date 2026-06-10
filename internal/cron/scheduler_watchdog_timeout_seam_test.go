@@ -79,7 +79,7 @@ func TestWatchdogInterruptTimeout_PerSchedulerIsolation(t *testing.T) {
 // runDeadlineWatchdog timeout<=0 fallback.
 func TestNewScheduler_SeedsWatchdogTimeoutDefault(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{AllowNilRouter: true})
+	s := NewScheduler(SchedulerConfig{AllowNilRouter: true}, SchedulerDeps{})
 	if got := s.watchdogInterruptTimeout(); got != watchdogInterruptTimeoutDefault {
 		t.Fatalf("NewScheduler watchdog timeout=%v, want default %v", got, watchdogInterruptTimeoutDefault)
 	}

@@ -19,7 +19,7 @@ import (
 func TestUpdateJob_ScheduleChangeRollback_RestoresCachedSched(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

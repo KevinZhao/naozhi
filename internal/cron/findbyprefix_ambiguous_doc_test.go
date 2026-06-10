@@ -15,7 +15,7 @@ import (
 func TestFindByPrefixLocked_AmbiguousListsCollidingIDs(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

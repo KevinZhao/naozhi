@@ -37,7 +37,7 @@ func TestNewScheduler_MkdirAllFailure_StillReturnsScheduler(t *testing.T) {
 	})
 
 	storePath := filepath.Join(parent, "child", "cron.json")
-	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{})
 	if s == nil {
 		t.Fatalf("NewScheduler returned nil even though contract guarantees a *Scheduler")
 	}

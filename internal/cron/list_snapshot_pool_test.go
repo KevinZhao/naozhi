@@ -36,7 +36,7 @@ func TestListAllJobsWithNextRun_PoolReusable(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   16,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestListAllJobsWithNextRun_ValueCopyIsolated(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   8,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestListAllJobsWithNextRun_NextRunByEntryID(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   8,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestNextRun_LockOrderAndResult(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   8,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   4,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
 func TestListJobsWithNextRun_PoolReusable(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

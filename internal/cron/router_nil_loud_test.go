@@ -33,11 +33,11 @@ func TestNewScheduler_NilRouterEmitsError(t *testing.T) {
 	_ = NewScheduler(SchedulerConfig{
 		MaxJobs: 5,
 		// Router intentionally omitted, AllowNilRouter not set.
-	})
+	}, SchedulerDeps{})
 
 	got := read()
-	if !strings.Contains(got, "cfg.Router is nil") {
-		t.Errorf("expected slog.Error containing 'cfg.Router is nil'; got %q", got)
+	if !strings.Contains(got, "deps.Router is nil") {
+		t.Errorf("expected slog.Error containing 'deps.Router is nil'; got %q", got)
 	}
 	if !strings.Contains(got, "level=ERROR") {
 		t.Errorf("expected level=ERROR (not WARN/INFO); got %q", got)
@@ -56,10 +56,10 @@ func TestNewScheduler_NilRouterWithAllowNilRouterStaysSilent(t *testing.T) {
 	_ = NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 
 	got := read()
-	if strings.Contains(got, "cfg.Router is nil") {
+	if strings.Contains(got, "deps.Router is nil") {
 		t.Errorf("expected silence with AllowNilRouter=true; got %q", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestRegisterStubByValue_NilRouterLogsOnce(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 
 	read, restore := withCapturedSlog(t)
 	defer restore()

@@ -19,7 +19,8 @@ func TestExecuteOpt_RouterMissingEmitsTerminalEvent(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-		Telemetry:      rec,
+	}, SchedulerDeps{
+		Telemetry: rec,
 	})
 
 	j := &Job{ID: "job-router-missing", Schedule: "@every 5m"}
@@ -59,7 +60,8 @@ func TestExecuteOpt_RouterMissingNilJobNoPanic(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-		Telemetry:      rec,
+	}, SchedulerDeps{
+		Telemetry: rec,
 	})
 
 	// Must not panic.

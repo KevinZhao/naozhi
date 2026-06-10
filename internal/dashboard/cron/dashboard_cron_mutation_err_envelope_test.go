@@ -104,7 +104,7 @@ func TestCronMutationErr_JSONEnvelope(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+			h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
 
 			var bodyReader *strings.Reader
 			if c.body != "" {

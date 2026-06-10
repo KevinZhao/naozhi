@@ -17,7 +17,7 @@ func TestStart_MaxJobsCapEnforced(t *testing.T) {
 	path := filepath.Join(dir, "cron.json")
 
 	// Phase 1: persist 3 jobs at MaxJobs=10.
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10})
+	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestStart_MaxJobsCapEnforced(t *testing.T) {
 
 	// Phase 2: restart with MaxJobs=2. The third persisted entry must be
 	// skipped (logged as over-cap) and len(s.jobs) must clamp at 2.
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 2})
+	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 2}, SchedulerDeps{})
 	if err := s2.Start(); err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestStart_MaxJobsCapAllowsExactlyAtCap(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10})
+	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestStart_MaxJobsCapAllowsExactlyAtCap(t *testing.T) {
 	}
 	s1.Stop()
 
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 3})
+	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 3}, SchedulerDeps{})
 	if err := s2.Start(); err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
 	}

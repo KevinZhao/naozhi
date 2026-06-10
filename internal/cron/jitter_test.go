@@ -151,10 +151,11 @@ func TestExecuteOpt_TriggerNowSkipsJitter(t *testing.T) {
 	sr := &jitterStubRouter{}
 
 	s := NewScheduler(SchedulerConfig{
-		Router:    sr,
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   10,
 		JitterMax: time.Hour, // 如果走 jitter 路径，测试必超时
+	}, SchedulerDeps{
+		Router: sr,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

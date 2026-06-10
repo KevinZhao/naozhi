@@ -57,7 +57,7 @@ func TestChatJobCount_TracksJobsByChat(t *testing.T) {
 		StorePath:      filepath.Join(dir, "cron.json"),
 		MaxJobs:        50,
 		MaxJobsPerChat: 10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestChatJobCount_RollbackOnPersistFailure(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   50,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestPerChatJobCount_PublicAccessor(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   50,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestChatJobCount_StartLoadPopulates(t *testing.T) {
 	storePath := filepath.Join(dir, "cron.json")
 
 	// Phase 1: build a scheduler, add jobs, Stop to persist.
-	s1 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 50})
+	s1 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 50}, SchedulerDeps{})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("Start s1: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestChatJobCount_StartLoadPopulates(t *testing.T) {
 
 	// Phase 2: fresh scheduler reading the same store — counter must
 	// reflect the 3 jobs immediately, before any AddJob.
-	s2 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 50})
+	s2 := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 50}, SchedulerDeps{})
 	if err := s2.Start(); err != nil {
 		t.Fatalf("Start s2: %v", err)
 	}

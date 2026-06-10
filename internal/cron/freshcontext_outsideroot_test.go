@@ -28,9 +28,10 @@ func newFreshPreflightFixture(t *testing.T, allowedRoot string) (*Scheduler, *fa
 	t.Helper()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:      fake,
 		MaxJobs:     5,
 		AllowedRoot: allowedRoot,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

@@ -26,7 +26,7 @@ func TestDeleteJobLocked_ReturnsCronEntryID(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        10,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestDeleteJobByID_DoesNotHoldMuDuringCronRemove(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        10,
 		AllowNilRouter: true,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

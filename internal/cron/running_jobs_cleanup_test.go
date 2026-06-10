@@ -20,7 +20,7 @@ func TestRunningJobsCleanup_DeleteJobByIDClearsIdle(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRunningJobsCleanup_DeleteJobPrefixClearsIdle(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestRunningJobsCleanup_RetainsBusyEntry(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRunningJobsCleanup_RetainsBusyEntry(t *testing.T) {
 // panic.
 func TestRunningJobsCleanup_NoEntryNoOp(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
