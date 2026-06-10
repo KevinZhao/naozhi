@@ -114,6 +114,14 @@ func validateJobFields(j *Job) error {
 	if !utf8.ValidString(j.Backend) || containsCronUnsafe(j.Backend) {
 		return fmt.Errorf("cron: backend contains invalid bytes")
 	}
+	if err := validatePlacement(j.Placement); err != nil {
+		return fmt.Errorf("cron: %w", err)
+	}
+	// Phase 1 sandbox guardrail (RFC §4.4): cross-field combination gate,
+	// mirrored in UpdateJob's critical section for the patch path.
+	if placementIsSandbox(j.Placement) && j.WorkDir != "" {
+		return ErrSandboxWorkDir
+	}
 	if len(j.NotifyPlatform) > MaxNotifyTargetLen {
 		return fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(j.NotifyPlatform), MaxNotifyTargetLen)
 	}

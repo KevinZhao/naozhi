@@ -776,6 +776,30 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if snap.backend != "" {
 		opts.Backend = snap.backend
 	}
+
+	// Placement fork (agentcore-cloud-sandbox RFC §4.2): sandbox jobs are
+	// run-once microVM invocations that never touch the session router —
+	// no GetOrCreate, no fresh-context Reset, no stubs, no send watchdog.
+	// Branching here (after agent resolution, before any router state)
+	// keeps the entire local path below byte-identical for placement=local.
+	// executeSandbox routes every terminal through the same finishRun
+	// protocol, and the deferred finalizer above still releases the CAS
+	// gate on every path.
+	if placementIsSandbox(snap.placement) {
+		// Release the spawn-phase timer right away: the sandbox path derives
+		// its own run budget inside executeSandbox; keeping this one alive
+		// for jobTimeout would waste a runtime timer slot per in-flight job
+		// and hand any future code below a misleading ctx (review PR-2b F6).
+		spawnCancel()
+		s.executeSandbox(sandboxExecArgs{
+			job: j, snap: snap, runID: runID, startedAt: startedAt,
+			trigger: trigger, prompt: cleanText, model: opts.Model,
+			notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
+			lg: lg,
+		})
+		return
+	}
+
 	if snap.workDir != "" {
 		workDirForCLI, abort := s.resolveCronWorkspace(j, snap, runID, startedAt, trigger, lg, finalizer)
 		if abort {

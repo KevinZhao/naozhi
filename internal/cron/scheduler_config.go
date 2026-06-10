@@ -20,6 +20,14 @@ import (
 // Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
 var ErrJobNotFound = errors.New("cron: job not found")
 
+// ErrSandboxWorkDir rejects the placement=sandbox × work_dir≠"" combination
+// (agentcore-cloud-sandbox RFC §4.4 Phase 1 guardrail: no workspace until
+// clone-on-boot lands in Phase 1.5). Raised by AddJob/UpdateJob so both
+// the create and the patch path — including a patch that only flips
+// placement on a job that already has a work_dir — fail loudly at save
+// time instead of at the first run.
+var ErrSandboxWorkDir = errors.New("cron: sandbox placement does not support work_dir (Phase 1)")
+
 // ErrAmbiguousPrefix is returned by findByPrefixLocked when an ID prefix matches more
 // than one job in the same chat scope. Callers (CLI/HTTP) should use
 // errors.Is(err, cron.ErrAmbiguousPrefix) to surface a "please disambiguate"

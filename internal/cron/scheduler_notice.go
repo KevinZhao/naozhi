@@ -50,6 +50,9 @@ type jobSnapshot struct {
 	lastSessionID string
 	notify        *bool // nil = unset
 	fresh         bool
+	// placement 是 snapshot 时刻的 Job.Placement（""≡local）。executeOpt
+	// 据此在 router 路径前分流到 sandbox 执行器（RFC §4.2 placement 轴）。
+	placement string
 }
 
 // cronNoticePrefixFmt is the IM-notice prefix template every cron-side
@@ -188,6 +191,7 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 		fresh:         j.FreshContext,
 		schedule:      j.Schedule,
 		backend:       j.Backend,
+		placement:     j.Placement,
 		lastSessionID: j.LastSessionID,
 	}
 	// R090135-PERF-003 (#1931): alias j.Notify directly instead of deep-

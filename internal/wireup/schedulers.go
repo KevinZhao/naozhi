@@ -48,6 +48,7 @@ package wireup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -188,6 +189,17 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		ChatID:   deps.Cfg.Cron.NotifyDefault.ChatID,
 	}
 
+	// Sandbox placement (agentcore-cloud-sandbox RFC §4.2): build the
+	// AgentCore-backed runner when configured. Degradable like sysession —
+	// a bad sandbox config must not break naozhi startup; placement=sandbox
+	// jobs then fail per-run with ErrClassSandboxUnavailable instead.
+	sandboxRunner, sandboxErr := newAgentcoreSandboxRunner(deps.ParentCtx,
+		deps.Cfg.Cron.Sandbox.RuntimeARN, deps.Cfg.Cron.Sandbox.Region)
+	if sandboxErr != nil {
+		slog.Warn("cron sandbox placement unavailable; placement=sandbox jobs will fail until fixed",
+			"err", sandboxErr)
+	}
+
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
 		StorePath:     deps.CronStorePath,
 		MaxJobs:       deps.Cfg.Cron.MaxJobs,
@@ -203,6 +215,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
+		Sandbox:       sandboxRunner,
 	})
 	if err := scheduler.Start(); err != nil {
 		return out, fmt.Errorf("start cron scheduler: %w", err)

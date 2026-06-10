@@ -67,3 +67,21 @@ func isResultLine(line json.RawMessage) (isResult, isError bool) {
 	}
 	return true, p.IsError || strings.HasPrefix(p.Subtype, "error")
 }
+
+// ResultText extracts the final result text from a kind=cli envelope line
+// when that line is the stream-json result event. ok=false for every other
+// line. Consumers (cron run records) get the CLI's last-turn text without
+// growing their own stream-json knowledge.
+func ResultText(line json.RawMessage) (text string, ok bool) {
+	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
+		return "", false
+	}
+	var p struct {
+		Type   string `json:"type"`
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(line, &p); err != nil || p.Type != "result" {
+		return "", false
+	}
+	return p.Result, true
+}
