@@ -55,6 +55,21 @@ func (r *localRunner) Placement() Placement {
 // Nil-safe: a nil wrapper yields a nil Runner so callers can keep their
 // existing `wrapper == nil` guard semantics — mirrors Manager()'s
 // nil-receiver contract.
+//
+// Evolution note (RFC §4.2): this PR deliberately keeps runner construction
+// ON the wrapper — the shallowest behaviour-preserving seam. When
+// agentcoreRunner lands, placement selection moves UP to the spawn-params
+// resolution level (session.resolveSpawnParamsLocked returns a Runner
+// chosen from config `placement:`, falling back to wrapper.Runner() for
+// local) — the sandbox runner is constructed from profile/config, not from
+// a Wrapper. Callers should treat wrapper.Runner() as "the local runner",
+// not "the runner registry".
+//
+// Relation to the planned cli.Transport seam (R242-ARCH-3 / #721, see
+// Wrapper.ShimManager godoc): orthogonal axes. Transport = how bytes move
+// for a LOCAL process (shim socket vs direct exec); Runner = WHERE the job
+// executes (local vs sandbox microVM). agentcoreRunner bypasses Transport
+// entirely — its byte path is the AgentCore event-stream.
 func (w *Wrapper) Runner() Runner {
 	if w == nil {
 		return nil

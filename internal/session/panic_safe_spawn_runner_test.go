@@ -13,6 +13,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -31,6 +32,13 @@ func TestPanicSafeSpawn_NilRunnerFailsSoft(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no runner") {
 		t.Errorf("err = %q, want substring %q", err.Error(), "no runner")
+	}
+	// Classification contract: a nil runner means "no spawnable backend" —
+	// the same condition the upstream nil-wrapper guard reports — so it must
+	// wrap ErrNoCLIWrapper for usermsg/classify to map it to the same
+	// user-facing error code instead of a generic fallback.
+	if !errors.Is(err, ErrNoCLIWrapper) {
+		t.Errorf("errors.Is(err, ErrNoCLIWrapper) = false, want true — nil runner must classify like nil wrapper")
 	}
 }
 

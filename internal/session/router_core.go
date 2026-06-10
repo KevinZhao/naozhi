@@ -516,7 +516,11 @@ func panicSafeSpawn(
 	key, backendID string,
 ) (*cli.Process, error) {
 	if r == nil {
-		return nil, fmt.Errorf("no runner for backend %q", backendID)
+		// Wrap ErrNoCLIWrapper so error classification (usermsg/classify)
+		// treats a nil runner identically to the nil-wrapper guard upstream —
+		// both mean "no spawnable backend", and this branch is only reachable
+		// if that guard is ever dropped.
+		return nil, fmt.Errorf("no runner for backend %q: %w", backendID, ErrNoCLIWrapper)
 	}
 	return panicSafeSpawnFn(ctx, r.Spawn, opts, key, backendID)
 }
