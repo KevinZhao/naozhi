@@ -20,9 +20,10 @@ func TestExecuteOpt_PostCASPausedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	rec := &recordingBroadcaster{}
 	sr := &jitterStubRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:    sr,
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   10,
+	}, SchedulerDeps{
+		Router:    sr,
 		Telemetry: rec,
 	})
 	if err := s.Start(); err != nil {
@@ -74,9 +75,10 @@ func TestExecuteOpt_PostCASDeletedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	rec := &recordingBroadcaster{}
 	sr := &jitterStubRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:    sr,
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   10,
+	}, SchedulerDeps{
+		Router:    sr,
 		Telemetry: rec,
 	})
 	if err := s.Start(); err != nil {
@@ -132,9 +134,10 @@ func TestExecuteOpt_PostCASPausedRecheck_TriggerNow(t *testing.T) {
 
 	sr := &jitterStubRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:    sr,
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   10,
+	}, SchedulerDeps{
+		Router: sr,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -184,9 +187,10 @@ func TestExecuteOpt_PostCASDeletedRecheck_TriggerNow(t *testing.T) {
 
 	sr := &jitterStubRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:    sr,
 		StorePath: t.TempDir() + "/cron.json",
 		MaxJobs:   10,
+	}, SchedulerDeps{
+		Router: sr,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

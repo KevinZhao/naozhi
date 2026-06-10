@@ -25,7 +25,8 @@ func TestFinishRun_NilFinalizerNoPanic(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs:        5,
 		AllowNilRouter: true,
-		Telemetry:      rec,
+	}, SchedulerDeps{
+		Telemetry: rec,
 	})
 
 	j := &Job{ID: "job-nil-finalizer", Schedule: "@every 5m"}

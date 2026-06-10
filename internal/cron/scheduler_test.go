@@ -267,7 +267,7 @@ func TestSchedulerStartFailsOnOversize(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: path,
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err == nil {
 		// If Start unexpectedly succeeded, stop the cron goroutine before
 		// failing so the test doesn't leak a goroutine into sibling runs.
@@ -316,7 +316,7 @@ func TestSchedulerAddAndList(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestSchedulerAddAndList(t *testing.T) {
 
 func TestSchedulerMaxJobs(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 2})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 2}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestSchedulerMaxJobs(t *testing.T) {
 
 func TestSchedulerPauseResume(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestSchedulerPauseResume(t *testing.T) {
 
 func TestSchedulerDelete(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestSchedulerDelete(t *testing.T) {
 // the embedded atomic.Bool's semantics through jobInflight.
 func TestJobRunningGuardReentry(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 
 	g := s.jobInflight("job-x")
 	if !g.running.CompareAndSwap(false, true) {
@@ -475,7 +475,7 @@ func TestJobRunningGuardReentry(t *testing.T) {
 
 func TestSchedulerInvalidSchedule(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestSchedulerInvalidSchedule(t *testing.T) {
 
 func TestPreviewScheduleN(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -535,8 +535,9 @@ func TestEnsureStub(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
-		Router:  realRouterAdapter{r: router},
 		MaxJobs: 10,
+	}, SchedulerDeps{
+		Router: realRouterAdapter{r: router},
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -622,7 +623,7 @@ func TestNewScheduler_StoreParentDirHardenedEagerly(t *testing.T) {
 	// never call Start/Save. No-Start path is the worst case — the
 	// lazy storeDirOnce gate fires only on the first save, so without
 	// the eager fix the dir does not exist at this point.
-	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 
 	fi, err := os.Stat(parent)
 	if err != nil {
@@ -658,7 +659,7 @@ func TestNewScheduler_StoreParentDirChmodsExisting(t *testing.T) {
 	}
 	path := filepath.Join(parent, "cron.json")
 
-	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 
 	fi, err := os.Stat(parent)
 	if err != nil {
@@ -675,13 +676,13 @@ func TestSchedulerPersistence(t *testing.T) {
 	path := filepath.Join(dir, "cron.json")
 
 	// Create and add job
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10})
+	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
 	s1.Start()
 	s1.AddJob(&Job{Schedule: "@hourly", Prompt: "persist me", Platform: "p", ChatID: "c"})
 	s1.Stop()
 
 	// Reload
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10})
+	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 10}, SchedulerDeps{})
 	s2.Start()
 	defer s2.Stop()
 
@@ -825,7 +826,7 @@ func TestSchedulerMaxJobsPerChat(t *testing.T) {
 
 	t.Run("default_fallback", func(t *testing.T) {
 		t.Parallel()
-		s := NewScheduler(SchedulerConfig{MaxJobs: 500})
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500}, SchedulerDeps{})
 		if err := s.Start(); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
@@ -838,7 +839,7 @@ func TestSchedulerMaxJobsPerChat(t *testing.T) {
 
 	t.Run("override_lower", func(t *testing.T) {
 		t.Parallel()
-		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 5})
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 5}, SchedulerDeps{})
 		if err := s.Start(); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
@@ -853,7 +854,7 @@ func TestSchedulerMaxJobsPerChat(t *testing.T) {
 		t.Parallel()
 		// Explicit zero must behave identically to unset — no way to
 		// disable the cap without recompiling.
-		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 0})
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 0}, SchedulerDeps{})
 		if s.maxJobsPerChat != DefaultMaxJobsPerChat {
 			t.Errorf("zero cap: resolved to %d, want %d (default)", s.maxJobsPerChat, DefaultMaxJobsPerChat)
 		}
@@ -882,7 +883,7 @@ func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -920,7 +921,7 @@ func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -949,7 +950,7 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 		MaxJobs:        5,
 		RunsKeepCount:  17,
 		RunsKeepWindow: 3 * time.Hour,
-	})
+	}, SchedulerDeps{})
 	if got := custom.runStore.keepCount; got != 17 {
 		t.Errorf("keepCount: got %d, want 17", got)
 	}
@@ -961,7 +962,7 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 	dflt := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "default.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if got := dflt.runStore.keepCount; got != DefaultRunsKeepCount {
 		t.Errorf("default keepCount: got %d, want %d", got, DefaultRunsKeepCount)
 	}
@@ -982,7 +983,7 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1050,7 +1051,7 @@ func TestIsExcluded_FastPathWarmsCache(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1121,7 +1122,7 @@ func TestLookupKnownSessionID(t *testing.T) {
 
 	t.Run("empty_id_returns_false", func(t *testing.T) {
 		t.Parallel()
-		s := NewScheduler(SchedulerConfig{MaxJobs: 1})
+		s := NewScheduler(SchedulerConfig{MaxJobs: 1}, SchedulerDeps{})
 		if s.LookupKnownSessionID("") {
 			t.Fatal("empty sessionID must return false")
 		}
@@ -1133,7 +1134,7 @@ func TestLookupKnownSessionID(t *testing.T) {
 		s := NewScheduler(SchedulerConfig{
 			StorePath: filepath.Join(dir, "cron.json"),
 			MaxJobs:   5,
-		})
+		}, SchedulerDeps{})
 		if err := s.Start(); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
@@ -1167,7 +1168,7 @@ func TestLookupKnownSessionID(t *testing.T) {
 
 	t.Run("miss_returns_false", func(t *testing.T) {
 		t.Parallel()
-		s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+		s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
 		if s.LookupKnownSessionID("never-seen-aaaa-bbbb-cccc-000000000099") {
 			t.Fatal("LookupKnownSessionID matched an id that was never seen")
 		}
@@ -1182,7 +1183,7 @@ func TestLookupKnownSessionID(t *testing.T) {
 		s := NewScheduler(SchedulerConfig{
 			StorePath: filepath.Join(dir, "cron.json"),
 			MaxJobs:   5,
-		})
+		}, SchedulerDeps{})
 		if err := s.Start(); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
@@ -1210,7 +1211,7 @@ func TestLookupKnownSessionID(t *testing.T) {
 }
 
 // TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
-// when cfg.Router is nil and the resulting Scheduler stores a nil
+// when deps.Router is nil and the resulting Scheduler stores a nil
 // router for the executeOpt-side guard (R20260526-GO-004) to pick up.
 //
 // We intentionally do NOT panic at construction because dozens of
@@ -1226,7 +1227,7 @@ func TestNewSchedulerNilRouterWarns(t *testing.T) {
 			t.Fatalf("NewScheduler panicked on nil router: %v", r)
 		}
 	}()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
 	if s == nil {
 		t.Fatalf("NewScheduler returned nil")
 	}
@@ -1246,7 +1247,7 @@ func TestSchedulerStopIdempotent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

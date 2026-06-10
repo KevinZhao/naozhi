@@ -24,9 +24,11 @@ func TestR20260607GO002_SpawnStartUsesInjectedClock(t *testing.T) {
 	clk := &fakeClock{now: fixed}
 
 	sched := NewScheduler(SchedulerConfig{
-		MaxJobs:   5,
-		Router:    &fakeRouter{}, // GetOrCreate returns nil, SessionExisting, nil
+		MaxJobs: 5,
+		// GetOrCreate returns nil, SessionExisting, nil
 		StorePath: dir + "/cron_jobs.json",
+	}, SchedulerDeps{
+		Router: &fakeRouter{},
 	})
 	sched.clock = clk
 

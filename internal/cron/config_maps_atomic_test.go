@@ -40,7 +40,7 @@ func TestConfigMaps_AtomicSnapshotNeverNil(t *testing.T) {
 	cmds := map[string]string{"/foo": "foo-agent"}
 	sender := stubNotifySender{lookups: map[string]bool{"feishu": true}}
 
-	s := NewScheduler(SchedulerConfig{
+	s := NewScheduler(SchedulerConfig{}, SchedulerDeps{
 		Router:        &fakeRouter{},
 		Agents:        agents,
 		AgentCommands: cmds,
@@ -87,7 +87,7 @@ func (c *cronConfigMaps) configMapsAgentBackend() string {
 func TestConfigMaps_NilMapsTolerated(t *testing.T) {
 	t.Parallel()
 
-	s := NewScheduler(SchedulerConfig{Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{}, SchedulerDeps{Router: &fakeRouter{}})
 	cm := s.configMaps()
 	if cm == nil {
 		t.Fatal("configMaps() must be non-nil even with no maps configured")

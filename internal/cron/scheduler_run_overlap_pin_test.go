@@ -22,7 +22,7 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-overlap", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
 	s.mu.Lock()
@@ -99,7 +99,7 @@ func TestPerJobIDGate_RejectsConcurrentSameJob(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingBroadcaster{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 
 	j := &Job{ID: "job-gate", Schedule: "@every 5m", Prompt: "ping", Platform: "feishu", ChatID: "X"}
 	s.mu.Lock()

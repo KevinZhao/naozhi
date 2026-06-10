@@ -46,8 +46,10 @@ func TestR242ARCH10_FinishRunUpdatesJobBeforeEmit(t *testing.T) {
 	var sched *Scheduler
 	cfg := SchedulerConfig{
 		MaxJobs:   5,
-		Router:    &fakeRouter{},
 		StorePath: dir + "/cron_jobs.json",
+	}
+	deps := SchedulerDeps{
+		Router: &fakeRouter{},
 		Telemetry: observingBroadcaster{onEnded: func() {
 			sched.mu.RLock()
 			defer sched.mu.RUnlock()
@@ -59,7 +61,7 @@ func TestR242ARCH10_FinishRunUpdatesJobBeforeEmit(t *testing.T) {
 			}
 		}},
 	}
-	sched = NewScheduler(cfg)
+	sched = NewScheduler(cfg, deps)
 
 	j := &Job{
 		ID:            "job-finish-order",
@@ -119,13 +121,15 @@ func TestR242ARCH10_FinishRunPersistsBeforeEmit(t *testing.T) {
 	var sched *Scheduler
 	cfg := SchedulerConfig{
 		MaxJobs:   5,
-		Router:    &fakeRouter{},
 		StorePath: dir + "/cron_jobs.json",
+	}
+	deps := SchedulerDeps{
+		Router: &fakeRouter{},
 		Telemetry: observingBroadcaster{onEnded: func() {
 			seenSeq.Store(sched.lastSavedSeq.Load())
 		}},
 	}
-	sched = NewScheduler(cfg)
+	sched = NewScheduler(cfg, deps)
 
 	j := &Job{
 		ID:         "job-persist-order",

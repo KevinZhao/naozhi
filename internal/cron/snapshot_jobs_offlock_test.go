@@ -36,7 +36,7 @@ func TestSnapshotJobsForSaveLocked_MatchesMarshalLocked(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSnapshotJobsForSaveLocked_PoolReuse(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestSnapshotJobsForSaveLocked_NotifyDeepCopy(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestSnapshotJobsForSaveLocked_NotifyNilSafe(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

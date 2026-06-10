@@ -56,7 +56,8 @@ func TestR247ARCH11_RunDurationDeterministicUnderClock(t *testing.T) {
 	rec := &recordingBroadcaster{}
 	clk := &stepClock{cur: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), step: 250 * time.Millisecond}
 	s := NewScheduler(SchedulerConfig{
-		MaxJobs:   5,
+		MaxJobs: 5,
+	}, SchedulerDeps{
 		Router:    okRouter{sid: "sess-1"},
 		Telemetry: rec,
 	})

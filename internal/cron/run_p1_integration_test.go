@@ -16,7 +16,7 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	if s.runStore == nil || s.runStore.disabled {
 		t.Fatal("runStore should be enabled when StorePath is set")
 	}
@@ -65,7 +65,7 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -96,7 +96,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -137,7 +137,7 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -170,7 +170,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -214,7 +214,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -264,7 +264,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 // ListRuns / GetRun return empty.
 func TestP1_DisabledStoreNoOps(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
 	if s.runStore == nil || !s.runStore.disabled {
 		t.Fatal("runStore should be disabled when StorePath is empty")
 	}
@@ -295,7 +295,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	// Disable trim so we can observe all writes.
 	s.runStore.enableTrimGC = false
 	jobID := mustGenerateID()

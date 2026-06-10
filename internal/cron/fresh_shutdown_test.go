@@ -25,8 +25,9 @@ func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -92,8 +93,9 @@ func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -155,8 +157,9 @@ func TestCRON3_PersistentModeUnaffectedByGuard(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

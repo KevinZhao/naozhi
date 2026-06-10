@@ -17,7 +17,7 @@ import (
 func TestPersistOnShutdown_WritesPendingMutation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
-	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestPersistOnShutdown_WritesPendingMutation(t *testing.T) {
 // notifier. Bound the helper directly with a tight budget.
 func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 	withShortStopBudget(t, s, 30*time.Millisecond)
 
 	// Seed a triggerWG holder that outlives the test budget.
@@ -79,7 +79,7 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 // allow it to wait.
 func TestDrainTriggerWG_FastDrain(t *testing.T) {
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 	withShortStopBudget(t, s, 5*time.Second)
 
 	start := time.Now()
@@ -95,7 +95,7 @@ func TestDrainTriggerWG_FastDrain(t *testing.T) {
 // waitGCDrain returns essentially instantly, well under gcWaitBudget.
 func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 
 	start := time.Now()
 	s.waitGCDrain(nil)
@@ -112,7 +112,7 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 // drain channel doesn't.
 func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 
 	hold := make(chan struct{})
 	t.Cleanup(func() { close(hold) })

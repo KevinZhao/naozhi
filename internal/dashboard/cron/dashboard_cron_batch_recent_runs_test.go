@@ -23,7 +23,7 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 	t.Parallel()
 
 	// Empty input — must return nil without touching scheduler.
-	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})}
 	if got := h.batchRecentRuns(nil, recentRunsPerJob); got != nil {
 		t.Fatalf("batchRecentRuns(nil): expected nil, got %v", got)
 	}
@@ -101,7 +101,7 @@ func TestBatchRecentRuns_CompletenessMapping(t *testing.T) {
 
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 
 	jobs := make([]cronpkg.JobWithNextRun, nJobs)
 	wantLen := make([]int, nJobs)

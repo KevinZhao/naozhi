@@ -98,7 +98,7 @@ func TestMarshalJobsLocked_OutputUnchangedAcrossCalls(t *testing.T) {
 		StorePath:      filepath.Join(dir, "cron.json"),
 		MaxJobs:        50,
 		MaxJobsPerChat: 10,
-	})
+	}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

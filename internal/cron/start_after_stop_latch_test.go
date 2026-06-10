@@ -18,8 +18,9 @@ func TestStartAfterStop_RefusesRevive(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("first Start: %v", err)
@@ -42,8 +43,9 @@ func TestStartAfterStop_RefusesEvenWhenStartedReset(t *testing.T) {
 	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
-		Router:  fake,
 		MaxJobs: 5,
+	}, SchedulerDeps{
+		Router: fake,
 	})
 	s.Stop() // latch stopped without ever starting
 

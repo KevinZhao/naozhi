@@ -27,7 +27,7 @@ func TestHandleList_SourceChatIDMasked(t *testing.T) {
 
 	const rawChatID = "oc_sourcechat12345"
 
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{}, cronpkg.SchedulerDeps{})
 	if err := sched.AddJob(&cronpkg.Job{
 		ID:       "cc00000000000001",
 		Schedule: "*/5 * * * *",

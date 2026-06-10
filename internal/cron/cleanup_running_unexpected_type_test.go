@@ -16,7 +16,7 @@ import (
 // produced log handler in production; tests don't pin slog format.
 func TestCleanupRunningJobIfIdle_SweepsUnexpectedType(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestCleanupRunningJobIfIdle_SweepsUnexpectedType(t *testing.T) {
 // against the gate).
 func TestCleanupRunningJobIfIdle_SweepsNilInflight(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
