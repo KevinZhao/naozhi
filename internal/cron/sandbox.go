@@ -3,6 +3,7 @@ package cron
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,6 +22,20 @@ type SandboxJob struct {
 	Prompt string
 	// Model pins the CLI model inside the microVM ("" = image default).
 	Model string
+	// RuntimeSessionID is the platform session id for this run. Derived by
+	// cron (not the adapter) because the §6.5 pending record must hold it
+	// BEFORE the invoke is attempted — it is the only handle a restarted
+	// naozhi has to Stop an orphaned microVM. Unique per run (§4.1) and
+	// ≥33 chars (validation F3): "run-<cronRunID>-<unixnano>".
+	RuntimeSessionID string
+}
+
+// sandboxRuntimeSessionID derives the platform session id for one run.
+// Embeds the cron runID so CloudTrail / platform logs correlate back to
+// the run record; the nano suffix guarantees uniqueness even across a
+// hypothetical runID collision and pads past the 33-char API minimum.
+func sandboxRuntimeSessionID(runID string, startedAt time.Time) string {
+	return fmt.Sprintf("run-%s-%d", runID, startedAt.UnixNano())
 }
 
 // Sandbox terminal states, mirroring agentcore.TerminalState wire values
@@ -69,6 +84,10 @@ type SandboxOutcome struct {
 // cannot continue.
 type SandboxRunner interface {
 	RunJob(ctx context.Context, job SandboxJob, eventSink func(line []byte) error) (SandboxOutcome, error)
+	// StopSession terminates a runtime session by its platform id — the
+	// §6.2 rule-1 / §6.5 reconcile primitive. Idempotent server-side;
+	// callers treat an error as "fate unknown" and surface it.
+	StopSession(ctx context.Context, runtimeSessionID string) error
 }
 
 // sandboxMaxRunDuration is the Phase 1 wall-clock fence (RFC §6.2 rule 2):
@@ -99,16 +118,16 @@ type sandboxExecArgs struct {
 // microVM burns on completion, which is the whole point (RFC §3.3:
 // structural elimination of the cron session leak).
 //
-// Known Phase 1 gaps (deliberate, next PR — RFC §6.5):
-//   - no pending-record write before RunJob and no startup reconcile, so a
-//     naozhi restart mid-run orphans the held stream: the microVM keeps
-//     running (bounded by maxLifetime ≤ 60min) and the run record never
-//     gets a terminal frame. TODO(agentcore §6.5): pending file + reconcile.
-//   - DeleteJobByID during an in-flight sandbox run does not Stop the
-//     microVM; the run completes (or hits maxLifetime) and finishRun
-//     no-ops via recordTerminalResult's jobs[id] re-check. Cloud-side cost
-//     of one orphan run is bounded; wiring delete→Stop needs the pending
-//     record above to know the runtime session id.
+// §6.5 restart immunity: an in-flight record (sandboxpending/<run>.json,
+// see sandbox_pending.go) is written before the invoke and removed after
+// terminal state; startup reconcile Stops orphans and closes their run
+// records as failed-transport.
+//
+// Known Phase 1 gap (deliberate): DeleteJobByID during an in-flight
+// sandbox run does not Stop the microVM; the run completes (or hits
+// maxLifetime) and finishRun no-ops via recordTerminalResult's jobs[id]
+// re-check. The pending record now carries the runtime session id, so a
+// future delete→Stop wiring is a small follow-up.
 func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	a.lg.Info("cron job executing in sandbox", "prompt_len", len(a.prompt))
 
@@ -140,12 +159,26 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	ctx, cancel := context.WithTimeout(s.stopCtx, budget)
 	defer cancel()
 
+	// §6.5 in-flight record: persist {job, run, runtime session, started}
+	// BEFORE the invoke. If naozhi restarts mid-hold, startup reconcile
+	// finds this file, Stops the orphaned microVM, and closes the run.
+	// Best-effort: a write failure degrades to the pre-§6.5 behaviour
+	// (orphan bounded by maxLifetime) rather than failing the run.
+	runtimeSID := sandboxRuntimeSessionID(a.runID, a.startedAt)
+	pendingPath := s.writeSandboxPending(sandboxPending{
+		JobID:            a.snap.jobID,
+		RunID:            a.runID,
+		RuntimeSessionID: runtimeSID,
+		StartedAtMS:      a.startedAt.UnixMilli(),
+	}, a.lg)
+
 	sink, closeSink := s.sandboxEventSink(a.snap.jobID, a.runID, a.lg)
 	outcome, err := s.sandbox.RunJob(ctx, SandboxJob{
-		JobID:  a.snap.jobID,
-		RunID:  a.runID,
-		Prompt: a.prompt,
-		Model:  a.model,
+		JobID:            a.snap.jobID,
+		RunID:            a.runID,
+		Prompt:           a.prompt,
+		Model:            a.model,
+		RuntimeSessionID: runtimeSID,
 	}, sink)
 	// Close (flush) the event log BEFORE any finishRun below broadcasts the
 	// terminal frame — a dashboard client reacting to RunEnded must find the
@@ -153,7 +186,9 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	closeSink()
 	if err != nil {
 		// Pre-flight failure: the job never reached the platform (invalid
-		// payload — e.g. empty prompt). Permanent, not transport.
+		// payload — e.g. empty prompt). Permanent, not transport. The
+		// microVM was never created, so the pending handle is moot.
+		removeSandboxPending(pendingPath, a.lg)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
 			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()))
 		return
@@ -161,8 +196,10 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 
 	switch outcome.State {
 	case SandboxStateSuccess:
+		removeSandboxPending(pendingPath, a.lg)
 		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "")
 	case SandboxStateFailedClean:
+		removeSandboxPending(pendingPath, a.lg)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
 			sanitiseRunErrMsg(outcome.ErrMsg))
 	default: // SandboxStateFailedTransport and any future unknown state: conservative.
@@ -176,8 +213,16 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 			msg = sanitiseRunErrMsg(outcome.ErrMsg)
 		}
 		if outcome.StopConfirmed {
+			// §6.2 rule 1 satisfied in-process — the retry handle is spent.
+			removeSandboxPending(pendingPath, a.lg)
 			msg += " (microVM termination confirmed)"
 		} else {
+			// Stop unconfirmed: KEEP the pending file. The next startup's
+			// reconcile retries StopSession until it confirms — removing it
+			// here would permanently discard the §6.2 retry handle for a
+			// microVM whose fate is unknown (review §6.5 F2).
+			a.lg.Warn("cron sandbox: termination unconfirmed; pending record kept for startup reconcile",
+				"pending", pendingPath != "")
 			msg += " (microVM fate UNKNOWN — termination unconfirmed; check for side effects before re-running)"
 		}
 		state := RunStateFailed

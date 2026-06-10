@@ -7,9 +7,12 @@ package wireup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
+
+	bedrockagentcoretypes "github.com/aws/aws-sdk-go-v2/service/bedrockagentcore/types"
 
 	"github.com/naozhi/naozhi/internal/agentcore"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -74,12 +77,13 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		Model:    job.Model,
 	}
 
-	// runtimeSessionId: cron run IDs are 16-hex (generateRunID) but the
-	// AgentCore API requires ≥33 chars (validation F3). Derive a compliant
-	// id that EMBEDS the cron runID so logs/CloudTrail correlate back to
-	// the run record: "run-<cronRunID>-<unixnano>" ≈ 40 chars, unique per
-	// invocation (RFC §4.1 — never reuse across runs).
-	runtimeID := fmt.Sprintf("run-%s-%d", job.RunID, time.Now().UnixNano())
+	// runtimeSessionId is derived by cron (sandboxRuntimeSessionID) so the
+	// §6.5 pending record can hold it before the invoke; the adapter only
+	// guards against an unset value from a hand-built caller.
+	runtimeID := job.RuntimeSessionID
+	if runtimeID == "" {
+		runtimeID = fmt.Sprintf("run-%s-%d", job.RunID, time.Now().UnixNano())
+	}
 
 	var resultText string
 	sink := func(env *agentcore.Envelope) error {
@@ -139,6 +143,22 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		}
 		return out, nil
 	}
+}
+
+// StopSession implements the cron.SandboxRunner §6.5 reconcile primitive:
+// terminate a runtime session by its platform id (orphan cleanup after a
+// naozhi restart). ResourceNotFoundException maps to success: a pending
+// record can be written microseconds before the invoke RPC ever reaches
+// the platform — Stop-of-never-started means there is nothing to contain,
+// and treating it as an error would park that pending file in an infinite
+// every-boot retry loop (review §6.5 F3).
+func (r *agentcoreSandboxRunner) StopSession(ctx context.Context, runtimeSessionID string) error {
+	err := r.client.Stop(ctx, runtimeSessionID)
+	var nf *bedrockagentcoretypes.ResourceNotFoundException
+	if errors.As(err, &nf) {
+		return nil
+	}
+	return err
 }
 
 // envelopeLine re-encodes one envelope as a single NDJSON line for cron's

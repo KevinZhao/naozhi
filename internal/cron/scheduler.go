@@ -796,6 +796,15 @@ func (s *Scheduler) Start() error {
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}
+	// agentcore-cloud-sandbox §6.5: reconcile sandbox runs orphaned by the
+	// previous process (pending files whose streams died with it). Async
+	// like the GC pass above — each orphan costs a StopRuntimeSession
+	// network call and must not block Start. gcWG-tracked so Stop() waits.
+	s.gcWG.Add(1)
+	go func() {
+		defer s.gcWG.Done()
+		s.reconcileSandboxPending()
+	}()
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }

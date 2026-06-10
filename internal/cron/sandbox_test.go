@@ -16,9 +16,18 @@ import (
 type fakeSandboxRunner struct {
 	mu      sync.Mutex
 	gotJobs []SandboxJob
+	stopped []string
 	lines   []string
 	outcome SandboxOutcome
 	err     error
+	stopErr error
+}
+
+func (f *fakeSandboxRunner) StopSession(_ context.Context, runtimeSessionID string) error {
+	f.mu.Lock()
+	f.stopped = append(f.stopped, runtimeSessionID)
+	f.mu.Unlock()
+	return f.stopErr
 }
 
 func (f *fakeSandboxRunner) RunJob(_ context.Context, job SandboxJob, sink func([]byte) error) (SandboxOutcome, error) {
