@@ -35,6 +35,14 @@ import (
 // could race trimJobLocked against a fresh Append's WriteFileAtomic. Today
 // the sole caller is Append (runstore.go:252) which acquires jobLock at line
 // 213; any future helper must do the same. R239-GO-5.
+//
+// LOCK CHOICE (R20260610-GO-004): entry.mu is taken in READ mode. This
+// function is a pure reader of entry state (warm / count / ringRead — the
+// warnRingCapZero defensive path writes only an atomic.Bool), and every
+// entry WRITER (cacheHeadPush, warmCacheLocked, cacheTrimAfterDisk) holds
+// jobLock(jobID), which the caller contract above already grants us
+// exclusively. RLock is therefore sufficient for correctness and avoids
+// blocking concurrent dashboard cacheGet/cacheGetBefore RLock readers.
 func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
@@ -46,8 +54,8 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 		return false
 	}
 	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	if !entry.warm {
 		return false
 	}
