@@ -617,3 +617,17 @@
 - [R20260608133928-COS-4] rotate() reopen-fd 错误返回路径依赖单个 rotateOK=false defer 驱逐，建议加内联注释防未来 tidy 误删 — internal/eventlog/persist/rotate.go:164
 - [R20260608133928-COS-5] shim validateKeyForShim maxKeyBytes=515 硬编码魔数，建议契约测试数值断言 == session.MaxSessionKeyBytes — internal/shim/manager.go:58
 - [R20260608133928-COS-6] reapFreshSessionLocked warn 日志冗余重复 job_id(已在 lg context) — internal/cron/scheduler_run.go:1122
+- [R20260610-GO-001] nil-job 防御路径缺 CronRunEndedTotal 平衡（无现实触发,future call site 假设） — internal/cron/scheduler_finish.go:282
+- [R20260610-GO-003] reap→finishRun 顺序契约靠注释+test 钉，可抽 helper 结构化（future refactor 假设） — internal/cron/scheduler_run.go:1056
+- [R20260610-GO-005] getAbortChan godoc 应注明 nil-guard 路径下池化 channel 可能预填一值 — internal/cron/scheduler_watchdog.go:213
+- [R20260610-SEC-001] transcript Input 当前消费方 esc() 安全;future innerHTML viewer 假设性 XSS — internal/dashboard/cron/transcript.go:210
+- [R20260610-SEC-002] no-token 模式 pprof 路由仍注册,403/404 区分泄漏路由存在性（开源项目路由公开） — internal/server/debug_pprof.go:47
+- [R20260610-SEC-004] isLoopbackRemote 可被 future 代码误用于 trustedProxy 场景（当前用法正确） — internal/server/debug_pprof.go:149
+- [R20260610-SEC-009] "not wired" 内部实现细节文案泄漏（仅措辞） — internal/dashboard/cron/handlers.go:1246
+- [R20260610-PERF-004] invalidate 每次 mutex+vDSO,50次/分量级可忽略 — internal/cron/scheduler_session_cache.go:138
+- [R20260610-PERF-010] Append 锁内 time.Now ~20ns,可挪锁外（微优化） — internal/cli/eventlog_append.go:122
+- [R20260610-PERF-012] redactPaths 池只省 Builder header 24B,可换 bytes.Buffer（失败路径低频） — internal/cron/scheduler_finish.go:1000
+- [R20260610-PERF-015] listNextByIDPool Get 后与 Put 前双 clear 冗余一次 O(n) walk — internal/cron/scheduler_jobs_list.go:178
+- [R20260610-CR-009] knownSessionsCache 用 time.Now 非注入 clock,future fake-clock 测试会 flaky — internal/cron/scheduler_session_cache.go:89
+- [R20260610-ARCH-001] DaemonErrorClass 类型别名使 timeout 字面量可绕过 mapSysessionErrorClass 不报编译错 — internal/sysession/run.go:51
+- [R20260610-ARCH-002] Reset 同步最坏 ~10s,future 用户直发 cron: 会话场景会叠加 tick 卡顿 — internal/session/router_lifecycle.go:1218
