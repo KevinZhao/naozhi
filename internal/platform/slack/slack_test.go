@@ -152,6 +152,36 @@ func TestHandleMessage_MentionStrip(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_EventIDIsChannelScoped pins #2015: the global dedup key
+// (EventID) must be channel-scoped, not a bare Slack ts. Slack documents that
+// two messages in different channels can share a ts, so a bare-ts EventID would
+// let the second channel's message dedup against the first and be silently
+// dropped. EventID must equal the (channel,ts) composite — the same key
+// MessageID already uses.
+func TestHandleMessage_EventIDIsChannelScoped(t *testing.T) {
+	t.Parallel()
+	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
+	s.botID = "U123"
+	var received platform.IncomingMessage
+	done := make(chan struct{})
+	s.handler = func(_ context.Context, msg platform.IncomingMessage) {
+		received = msg
+		close(done)
+	}
+	s.handleMessage(&slackevents.MessageEvent{
+		User: "U456", Channel: "C789", ChannelType: "im",
+		Text: "hi", TimeStamp: "1234567890.000100",
+	})
+	<-done
+	want := "C789:1234567890.000100"
+	if received.EventID != want {
+		t.Errorf("EventID = %q, want %q (must be channel-scoped, not bare ts)", received.EventID, want)
+	}
+	if received.EventID == "1234567890.000100" {
+		t.Error("EventID is a bare ts — collides across channels (#2015)")
+	}
+}
+
 func TestHandleMessage_DirectMessage(t *testing.T) {
 	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
