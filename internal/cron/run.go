@@ -58,6 +58,21 @@ type CronRun struct {
 	ResultBytes int        `json:"result_bytes,omitempty"`
 	ErrorClass  ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string     `json:"error_msg,omitempty"`
+
+	// ReplayOf links a replay run to the original run it re-executed
+	// (agentcore-cloud-sandbox §7.3). Empty for original runs. The
+	// dashboard renders a source-chain badge from it, so it lives on both
+	// CronRun and CronRunSummary (the list view shows the chain too).
+	ReplayOf string `json:"replay_of,omitempty"`
+
+	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs
+	// (RFC §5.1/§7.3): runtime arn, image version, exit status, cost,
+	// duration, peak memory. Pointer + omitempty so local runs persist NO
+	// sandbox_meta key (wire-read-safe: old readers skip it, and a local
+	// run's JSON is byte-identical to pre-Phase-2). The detail endpoint
+	// surfaces it; summary() deliberately drops it (list endpoints load
+	// 50 jobs × 5 recent runs — receipts would bloat the payload).
+	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
 }
 
 // CronRunSummary is the slim shape returned by list endpoints + the
@@ -74,13 +89,22 @@ type CronRunSummary struct {
 	DurationMS int64       `json:"duration_ms,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	ErrorClass ErrorClass  `json:"error_class,omitempty"`
+	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
+	// dashboard draws a "replay of …" badge directly off the summary.
+	ReplayOf string `json:"replay_of,omitempty"`
+	// CostUSD is the per-run sandbox cost (from SandboxMeta.CostUSD), carried
+	// in the slim summary so the §7.5 per-run cost小字 + the per-job monthly
+	// aggregate (pure front-end sum over recent_runs) need no detail fetch.
+	// Just a float — the full receipt stays out of the summary. 0/omitted for
+	// local runs and for sandbox runs that produced no cost (transport fail).
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // summary derives a CronRunSummary from a CronRun. Centralised so any
 // future field addition stays in lockstep across list endpoint, recent_runs
 // nested array, and any test fixtures.
 func (r *CronRun) summary() CronRunSummary {
-	return CronRunSummary{
+	s := CronRunSummary{
 		RunID:      r.RunID,
 		JobID:      r.JobID,
 		State:      r.State,
@@ -90,5 +114,10 @@ func (r *CronRun) summary() CronRunSummary {
 		DurationMS: r.DurationMS,
 		SessionID:  r.SessionID,
 		ErrorClass: r.ErrorClass,
+		ReplayOf:   r.ReplayOf,
 	}
+	if r.SandboxMeta != nil {
+		s.CostUSD = r.SandboxMeta.CostUSD
+	}
+	return s
 }

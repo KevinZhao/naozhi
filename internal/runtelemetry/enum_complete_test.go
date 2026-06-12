@@ -27,7 +27,7 @@ func TestRunStateCount(t *testing.T) {
 }
 
 func TestErrorClassCount(t *testing.T) {
-	const want = 11 // None + 3 shared + 5 cron + 2 sysession
+	const want = 14 // None + 3 shared + 8 cron (5 local + 3 sandbox) + 2 sysession
 	got := len(allErrorClasses())
 	if got != want {
 		t.Errorf("ErrorClass count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
@@ -76,6 +76,9 @@ func allErrorClasses() []ErrorClass {
 		ErrClassCronWorkDirUnreachable,
 		ErrClassCronWorkDirOutsideRoot,
 		ErrClassCronOverlapSkipped,
+		ErrClassCronSandboxFailed,
+		ErrClassCronSandboxTransport,
+		ErrClassCronSandboxUnavailable,
 
 		ErrClassSysessionUpstream,
 		ErrClassSysessionValidation,

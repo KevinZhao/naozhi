@@ -125,6 +125,11 @@ type Scheduler struct {
 	configMapsPtr atomic.Pointer[cronConfigMaps]
 	storePath     string
 	maxJobs       int
+	// sandbox executes placement=sandbox jobs (agentcore-cloud-sandbox RFC
+	// §4.2). Set once from SchedulerDeps.Sandbox in NewScheduler, never
+	// reassigned — executeOpt reads it lock-free. nil = sandbox placement
+	// unavailable (jobs fail with ErrClassCronSandboxUnavailable).
+	sandbox SandboxRunner
 	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
 	// MaxJobsPerChat when > 0, otherwise DefaultMaxJobsPerChat. Immutable
 	// after NewScheduler returns, so AddJob can read it lock-free.
@@ -463,6 +468,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
 		execTimeout:    cfg.ExecTimeout,
+		sandbox:        deps.Sandbox,
 		// R249-CR-3 (#947): seed the per-instance field so tests in
 		// t.Parallel can override their own Scheduler's budget without
 		// racing each other on a global.
@@ -790,6 +796,15 @@ func (s *Scheduler) Start() error {
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}
+	// agentcore-cloud-sandbox §6.5: reconcile sandbox runs orphaned by the
+	// previous process (pending files whose streams died with it). Async
+	// like the GC pass above — each orphan costs a StopRuntimeSession
+	// network call and must not block Start. gcWG-tracked so Stop() waits.
+	s.gcWG.Add(1)
+	go func() {
+		defer s.gcWG.Done()
+		s.reconcileSandboxPending()
+	}()
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }

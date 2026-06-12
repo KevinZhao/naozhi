@@ -127,7 +127,8 @@ func TestDashboardHTML_BannerVisualEmphasis(t *testing.T) {
 	if !strings.Contains(css, "@keyframes rb-dot-ripple") {
 		t.Error("dashboard.html must define @keyframes rb-dot-ripple — the expanding ring makes the status dot read as actively working")
 	}
-	if !strings.Contains(css, "rb-dot-ripple") || !strings.Contains(css, "animation:pulse 1.5s ease-in-out infinite,rb-dot-ripple") {
+	// --nz-dur-loop resolves to 1.5s (#2029 cadence unification); render unchanged.
+	if !strings.Contains(css, "rb-dot-ripple") || !strings.Contains(css, "animation:pulse var(--nz-dur-loop) ease-in-out infinite,rb-dot-ripple") {
 		t.Error(".running-dot must layer rb-dot-ripple on top of the existing pulse so the working indicator is unmistakable")
 	}
 }

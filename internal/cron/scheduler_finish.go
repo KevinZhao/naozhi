@@ -184,6 +184,21 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 		return
 	}
 	s.runStore.DeleteJob(jobID)
+	// agentcore §5.1: also drop this job's input-snapshot manifests so a
+	// deleted job leaves no orphaned snapshot tree alongside its purged
+	// runs/. Blobs are content-addressed and shared across jobs, so they
+	// are NOT removed here — a deduped blob may still back another job's
+	// snapshot. TODO(agentcore §5.2): a blob GC pass (refcount or
+	// mark-sweep against live manifests) for the runsnapshots/blobs/ tree;
+	// Phase 1 accepts blob accumulation (one ≤MaxPromptBytes blob per
+	// distinct prompt, deduped) as bounded-in-practice.
+	s.deleteJobSnapshots(jobID)
+	// §7.4: drop any unresolved confirmation-queue records for this job — a
+	// deleted job has nothing left to confirm or replay, and a stale queue
+	// entry would let the operator "replay" a run whose job no longer exists
+	// (ReplaySandboxRun would then fail ErrJobNotFound, but better to not show
+	// it at all).
+	s.deleteJobAttention(jobID)
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
@@ -252,6 +267,14 @@ type finishArgs struct {
 	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
 	// 路径释放）。R246-GO-3 (#689).
 	finalizer *runFinalizer
+	// replayOf links this run to the original it replayed (agentcore §7.3).
+	// "" for normal runs. finishRun copies it into the CronRun record so the
+	// dashboard can render the replay chain.
+	replayOf string
+	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
+	// (RFC §7.3). nil for local runs — finishRun attaches it to the CronRun
+	// only when non-nil, so a local run's record carries no sandbox_meta.
+	sandboxMeta *SandboxRunMeta
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -403,6 +426,10 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
+			ReplayOf:    a.replayOf,
+			// Sandbox execution receipt (RFC §7.3) — nil for local runs, so
+			// their record carries no sandbox_meta key (wire-read-safe).
+			SandboxMeta: a.sandboxMeta,
 		})
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next

@@ -2,15 +2,46 @@
 
 | 字段 | 值 |
 | :--- | :--- |
-| 状态 | Partially Implemented v4 (A1/A2/B + D-main 的 Broadcaster 部分 landed；D-main 的 SchedulerDeps (#746) 与 E dispatch import 切断 (#1164) **未落地**；Phase C deferred) |
+| 状态 | Implemented v5（全部 7 phase 落地；残留项经 PR #2002/#2004/#2017 清偿，见 v5 修订历史） |
 | 作者 | naozhi team |
 | 创建日期 | 2026-05-26 |
-| 修订日期 | 2026-06-10（v4：按 master 实测订正实施状态；v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
+| 修订日期 | 2026-06-10（v5：残留 phase 全部落地，状态升 Implemented；v4：按 master 实测订正实施状态；v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
 | 关联代码 | `internal/cron/scheduler.go`<br/>`internal/cron/scheduler_run.go`<br/>`internal/cron/scheduler_callbacks.go`<br/>`internal/cron/scheduler_finish.go`<br/>`internal/sysession/manager.go`<br/>`internal/sysession/run.go`<br/>`internal/server/wshub_broadcast.go`<br/>`internal/server/dashboard.go:405-435`<br/>`internal/dispatch/commands.go:13`<br/>`internal/session/router_lifecycle.go:265`<br/>`internal/session/key.go` |
 | 关联 RFC | `docs/rfc/consumer-interfaces.md`（同样的 IoC 思路）<br/>`docs/rfc/cron-run-history.md`（cron 终态与 RunState 来源）<br/>`docs/rfc/system-session.md`（sysession 设计） |
 | 关联 issue | #1166 (runtelemetry) · #1173 (cron→session) · #1164 (dispatch→cron) · #734/#945 (executeOpt) · #1036 (RegisterBroadcaster) · #746 (SchedulerDeps) · #583 (prefix DRY，撤出 RFC) |
 
 ## 0. 修订历史
+
+### v5 (2026-06-10) — 残留 phase 全部落地，状态升 Implemented
+
+v4 订正后识别出的三个残留项在同日全部清偿（三个 PR 文件零交集，
+按序合入 master）：
+
+- **D-main（SchedulerDeps 部分，#746）**: ✅ landed — PR #2002。
+  `internal/cron/deps.go` 新建，5 个组件依赖（Router / NotifySender /
+  Agents / AgentCommands / Telemetry）从 `SchedulerConfig` 移入
+  `SchedulerDeps`，`NewScheduler(cfg, deps)` 双参；AST 工具机械迁移
+  106 个测试文件 ~233 处调用；新增 reflect 护栏测试钉死 cfg/deps
+  边界（SchedulerConfig 不许再含接口字段）。#746 关闭成立。
+- **E dispatch invert（#1164）**: ✅ landed — PR #2004。dispatch 侧
+  `CronJob` 投影 + `CronCommands` 接口取代带 `*cron.Job` 签名的
+  `CronScheduler` 测试 seam（#1178），server 侧薄 adapter 做翻译；
+  `go list -deps` 验证 dispatch 对 internal/cron 直接+传递依赖均为
+  0；新增 import 契约测试防回归。#1164 关闭成立。
+- **C executeOpt helper 拆分（#734/#945）**: ✅ landed — PR #2017。
+  589 行 executeOpt 拆为编排器 + 7 个 exec* helper（F1 决议：plain
+  methods，无 Stage 接口）。finalizer defer / spawn-ctx defer / gauge
+  配对留在编排器帧（生命周期=整个 run）；#1956/#1911 的
+  Reset-before-finishRun 源序、H1 双独立 ctx 预算、H6 phase 切点全
+  保留（新增 inflight_phase_test.go 钉序列，3 个既有 source-anchor
+  测试零改动通过）。§6 的 cron-cr issue-rate gate 因度量停摆，按
+  §3.4 自带 race gate 取代：`-race -count=10` 全包 + `-race
+  -count=100` 定向（watchdog/p1 套件）全绿。唯一例外
+  `TestSendWithWatchdog_DeadlineFiresInterrupt` 为既有 flake（干净
+  master 同样复现，#2021 跟踪）。#734/#945 关闭成立。
+
+至此 RFC 全部 phase（A1/A2/B/D-prep/D-main/E/C）落地，状态升
+Implemented v5。
 
 ### v4 (2026-06-10) — 状态订正：v3 状态表与 master 实际不符
 

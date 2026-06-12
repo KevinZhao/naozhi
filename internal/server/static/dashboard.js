@@ -1048,6 +1048,48 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
+// ICONS — single source of truth for the non-SVG glyph set (#2027). Before
+// this map the dashboard carried four parallel icon notations (SVG consts,
+// `&#x..;` / `&#..;` HTML entities, bare Unicode glyphs like `✎ ⎘`, and raw
+// `\u{..}` escapes) with the same semantic icon spelled differently at each
+// call site. Centralising here means one icon → one definition → one notation.
+//
+// Notation rule: literal Unicode glyph characters (one form, no mixing decimal
+// `&#128277;` with hex `&#x2328;`, no mixing `\u{1f464}` lowercase with
+// `\u{1F916}` uppercase). Literal glyphs are the only notation that renders
+// correctly in BOTH consumption contexts used here: dropped raw into innerHTML
+// / template strings, and passed through esc() (which would HTML-escape an
+// entity's `&` into `&amp;` and show it verbatim). SVG-backed icons
+// (star/github/chevron/clawd) keep their dedicated *_SVG consts above.
+const ICONS = {
+  close:    '×', // dismiss / close affordance
+  back:     '←', // mobile back
+  navUp:    '▲', // previous user message
+  navDown:  '▼', // next user message
+  edit:     '✎', // rename / edit
+  copy:     '⎘', // copy key
+  trash:    '🗑', // delete
+  attach:   '📎', // attach file
+  mic:      '🎤', // voice input
+  keyboard: '⌨', // keyboard input
+  send:     '➤', // send message
+  stop:     '■', // interrupt turn
+  download: '⬇', // download
+  downArrow:'↓', // file-row download (thinner, paired with ↗)
+  preview:  '↗', // preview / ask-aside
+  gear:     '⚙', // init / system event
+  user:     '&gt;_', // user event — brand ">_" terminal prompt mark (rust mono, see .event.user .event-icon)
+  spark:    '✦', // assistant text event (non-claude backends)
+  todo:     '☰', // todo event
+  robot:    '🤖', // subagent badge / agent count
+  galleryPrev:  '‹', // lightbox previous image
+  galleryNext:  '›', // lightbox next image
+  zoomOut:      '−', // lightbox zoom out
+  zoomIn:       '+', // lightbox zoom in
+  rotateLeft:   '↺', // lightbox rotate left
+  rotateRight:  '↻', // lightbox rotate right
+};
+
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
 // workspace basename — it is NOT a registered ProjectManager project — so
@@ -1724,11 +1766,11 @@ function sessionCardHtml(s) {
   // template) so the surrounding .sc-meta layout stays identical.
   const nodeBadge = '';
 
-  const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
+  const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
-  const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
+  const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
   // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
   // slack / discord / weixin so operators can eyeball which cards are real
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
@@ -2607,7 +2649,7 @@ function renderMainShell() {
   // with no backend label storage, and we intentionally hide the control there.
   const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
   const renameBtn = canRename
-    ? '<button class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">✎</button>'
+    ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
   // UX P2 Markdown export: any session that has an addressable key can be
   // exported — no dependency on managed status because the /api/sessions/events
@@ -2615,12 +2657,12 @@ function renderMainShell() {
   // shares the .btn-rename hover-reveal treatment so the header stays calm
   // by default.
   const downloadBtn = selectedKey
-    ? '<button class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="Download session as Markdown">⬇</button>'
+    ? '<button type="button" class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
+      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
@@ -2639,9 +2681,9 @@ function renderMainShell() {
     // is reserved for human conversation surfaces.
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
+      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
@@ -2655,12 +2697,12 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">&#x1f4ce;</button>' +
-        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
+        '<button type="button" class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
+        '<button type="button" class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
-        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
+        '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
+        '<button type="button" class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
       '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
@@ -2745,8 +2787,20 @@ async function fetchEvents(full) {
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
     let events;
+    // The initial (`full`) fetch reads the X-Events-Has-More header so it can
+    // mount "load earlier" off the server's truncation decision rather than the
+    // brittle len>=INITIAL_HISTORY_LIMIT guess. _eventsHeaders captures the raw
+    // Response headers for that one call; incremental polls don't need them.
+    let hasMoreHeader = null;
     try {
-      events = await fetchJSON(url, { headers, timeoutMs: 5000 });
+      const onResp = full ? (resp) => {
+        // null when the header is absent (legacy server / remote-node relay) —
+        // leave hasMoreHeader null so renderEvents falls back to the length
+        // heuristic rather than treating "absent" as an authoritative false.
+        const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
+        if (v != null) hasMoreHeader = (v === '1' || v === 'true');
+      } : null;
+      events = await fetchJSON(url, { headers, timeoutMs: 5000, onResponse: onResp });
     } catch (err) {
       if (err.status) return; // HTTP non-2xx — mirror legacy !r.ok early-return
       throw err;              // timeout / network — surface via outer catch
@@ -2758,7 +2812,9 @@ async function fetchEvents(full) {
     if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
 
     if (full) {
-      renderEvents(events);
+      // Pass the server's authoritative hasMore when the header was present;
+      // null means "fall back to the length heuristic" (legacy / remote node).
+      renderEvents(events, hasMoreHeader);
     } else {
       appendEvents(events);
     }
@@ -2967,7 +3023,11 @@ function updateEarlierButton(state) {
   }
 }
 
-function renderEvents(events) {
+// renderEvents replaces the whole events pane on the initial / full-fetch path.
+// hasMore (when not null) is the server's authoritative "older history exists"
+// signal from the X-Events-Has-More header; null means the header was absent
+// (legacy server or remote node) and we fall back to the length heuristic.
+function renderEvents(events, hasMore) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
   // RNEW-UX-007 — innerHTML replace below wipes any live text selection
@@ -2985,6 +3045,15 @@ function renderEvents(events) {
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
+  // Decide whether "load earlier" will mount BEFORE rendering the all-internal
+  // placeholder, so its copy never promises a button that won't appear. Mount
+  // off the server's hasMore flag when present — it knows the slice was
+  // truncated by visible-bubble count, catching the case the old length
+  // heuristic missed (more visible bubbles than DefaultVisibleTarget but fewer
+  // total events than INITIAL_HISTORY_LIMIT). Fall back to the length heuristic
+  // only when the header was absent (hasMore === null).
+  const showEarlier = (hasMore === true) ||
+    (hasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
   if (html) {
     el.innerHTML = html;
   } else if (events.length === 0) {
@@ -2993,10 +3062,13 @@ function renderEvents(events) {
     // The server returned events but every one was filtered out by
     // INTERNAL_EVENT_TYPES — typically a parallel agent team where the
     // visible tail of the log is all tool_use / task_progress. Render a
-    // neutral placeholder so the panel isn't a blank void, and still
-    // show the "load earlier" affordance below so the operator can
-    // page back to the real messages.
-    el.innerHTML = '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>';
+    // neutral placeholder so the panel isn't a blank void. Only invite the
+    // user to "click below" when the button will actually mount; otherwise the
+    // whole remembered history is internal activity with nothing older to page
+    // to, so promise nothing.
+    el.innerHTML = showEarlier
+      ? '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>'
+      : '<div class="empty-state">该会话仅有 agent 活动，暂无对话消息</div>';
   }
   if (events.length > 0) {
     const last = events[events.length - 1];
@@ -3006,9 +3078,7 @@ function renderEvents(events) {
       oldestFetchedEventTime = first.time;
     }
   }
-  // Mount "load earlier" whenever we got a full page — more history likely
-  // exists, regardless of whether the visible slice survived the filter.
-  if (events.length >= INITIAL_HISTORY_LIMIT) {
+  if (showEarlier) {
     ensureEarlierButton();
   }
   runPendingAsync();
@@ -3473,7 +3543,7 @@ function eventHtml(e, opts) {
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
   // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
-  const icons = {init:'\u2699',system:'\u2699',user:'&gt;_',text:'\u2726',todo:'\u2630'};
+  const icons = {init:ICONS.gear,system:ICONS.gear,user:ICONS.user,text:ICONS.spark,todo:ICONS.todo};
   let icon = icons[e.type] || '';
   // Assistant turns on the claude backend get the clawd mascot instead of
   // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
@@ -3605,10 +3675,10 @@ function eventHtml(e, opts) {
   // per-event `?v=<time>` query string side-steps the negative cache
   // without invalidating legitimate hits.
   //
-  // Fallback to thumb on load failure: `openLightbox(full, thumb)` below
+  // Fallback to thumb on load failure: the lightbox's loadWithFallback
   // covers both HTTP 404 (attachment GC'd) and Content-Type mismatch
-  // (openLightbox checks naturalWidth===0 after onload). See
-  // dashboard.js's openLightbox comment for rationale. RFC §3.6.3.
+  // (it checks naturalWidth===0 after onload). See the lightbox IIFE's
+  // loadWithFallback comment for rationale. RFC §3.6.3.
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     const paths = e.image_paths || [];
@@ -3620,10 +3690,14 @@ function eventHtml(e, opts) {
         full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
           '&path=' + encodeURIComponent(p) + cacheBust;
       }
+      // No inline onclick: a document-level delegated listener in the
+      // lightbox IIFE handles clicks on .event-images img[data-full] and
+      // opens the whole group (RFC lightbox-gallery-nav §3). Delegation
+      // survives the poll-driven innerHTML re-renders that destroy and
+      // recreate these nodes.
       return '<img src="' + escAttr(src) + '" loading="lazy" ' +
         'data-full="' + escAttr(full) + '" ' +
-        'data-thumb="' + escAttr(src) + '" ' +
-        'onclick="openLightbox(this.dataset.full, this.dataset.thumb)">';
+        'data-thumb="' + escAttr(src) + '">';
     }).join('') + '</div>';
   }
 
@@ -3637,10 +3711,10 @@ function eventHtml(e, opts) {
   // the contract — don't let them diverge.
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
-    ? '<button class="event-copy-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
+    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && e.type === 'text'
-    ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
+    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
@@ -4285,7 +4359,7 @@ function updateSidebarAgentBadge() {
   var count = turnState.agents.length;
   var existing = meta.querySelector('.sc-agents');
   if (count > 0) {
-    var html = '\u{1F916}\u00D7' + count;
+    var html = ICONS.robot + '\u00D7' + count;
     if (existing) { existing.innerHTML = html; }
     else { var span = document.createElement('span'); span.className = 'sc-agents'; span.innerHTML = html; meta.appendChild(span); }
   } else if (existing) { existing.remove(); }
@@ -4801,6 +4875,21 @@ document.addEventListener('keydown', function(e) {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
   let closed = false;
+  // voice-overlay (R20260610-UI-3): the recording overlay had no Esc handler,
+  // so a stuck recording could only be dismissed by clicking it. Mirror the
+  // click escape-hatch (see #voice-overlay click listener) on Esc for parity
+  // with every other overlay.
+  const voiceOv = document.getElementById('voice-overlay');
+  if (voiceOv && voiceOv.classList.contains('show')) {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      voiceActive = false;
+      cleanupVoiceTouchListeners();
+      stopVoiceRecording(false);
+    } else {
+      hideVoiceOverlay();
+    }
+    closed = true;
+  }
   if (activePopover) { closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
   // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
@@ -5373,7 +5462,7 @@ function renderFilePreviews() {
       '>' +
       body +
       overlay +
-      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">\u00d7</button>' +
+      '<button class="remove" type="button" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + ICONS.close + '</button>' +
       '</div>';
   }).join('');
 }
@@ -5428,7 +5517,7 @@ function toggleInputMode() {
   if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
   const btn = document.getElementById('btn-mic');
   if (btn) {
-    btn.innerHTML = voiceInputMode ? '&#x2328;' : '&#x1f3a4;';
+    btn.innerHTML = voiceInputMode ? ICONS.keyboard : ICONS.mic;
     btn.title = voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
   }
   if (voiceInputMode) {
@@ -5757,7 +5846,7 @@ function showAuthModal() {
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
         '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
@@ -5931,6 +6020,11 @@ async function fetchCLIBackends() {
 //     a saved Job.Backend choice. Falls through to default when the
 //     value doesn't match any enabled backend (e.g. operator removed
 //     that backend from config.yaml).
+// PICKER_SELECT_STYLE is the shared inline style for the modal backend/agent
+// <select> controls (full-width, design-token surface). Defined once so the
+// backend and agent pickers can't drift apart (R20260610-UI-5).
+const PICKER_SELECT_STYLE = 'width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px';
+
 function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
   const list = backendsData.backends;
@@ -5954,7 +6048,7 @@ function renderBackendPicker(backendsData, opts) {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">CLI backend</label>' +
-    '<select id="' + escAttr(selectId) + '" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+    '<select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
@@ -6028,7 +6122,7 @@ function renderAgentPicker() {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
-    '<select id="new-agent" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+    '<select id="new-agent" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
@@ -6464,7 +6558,7 @@ function buildCustomRow(query, idx) {
   el.dataset.idx = String(idx);
   const looksLikePath = query && (query.startsWith('/') || query.startsWith('~'));
   const label = looksLikePath
-    ? '打开自定义工作目录：<span style="color:#79c0ff">' + esc(query) + '</span>'
+    ? '打开自定义工作目录：<span style="color:var(--nz-accent)">' + esc(query) + '</span>'
     : '打开自定义工作目录…';
   el.innerHTML =
     '<span class="cp-icon">+</span>' +
@@ -7758,6 +7852,14 @@ function promptDialog(opts) {
 // chat grouping — tight enough to separate turns, loose enough to not spam.
 const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
 
+// Avatar-grouping threshold (WeChat-style): when a bubble follows another from
+// the SAME sender within this gap, its repeated avatar is hidden via the
+// .nz-grouped class (see regroupAvatars). Deliberately MUCH tighter than
+// EVENT_DIVIDER_GAP_MS — grouping reacts to rapid-fire turns (sub-minute),
+// while the time divider marks coarse conversation breaks. The two are
+// independent: a 30s gap groups avatars but emits no divider.
+const AVATAR_GROUP_GAP_MS = 30 * 1000;
+
 // INITIAL_HISTORY_LIMIT caps how many events the server sends on a fresh
 // subscribe / first fetch. Keeps big sessions snappy on first paint; older
 // pages load lazily via the "load earlier" button. Server caps at 500
@@ -8488,7 +8590,7 @@ function applyFileRefResult(wrapEl, entry) {
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
-  preview.textContent = '\u2197'; // paired with download '\u2193' for symmetric arrow look
+  preview.textContent = ICONS.preview; // paired with ICONS.downArrow for symmetric arrow look
   preview.setAttribute('aria-label', 'Preview ' + label);
   preview.title = 'Preview ' + label;
   preview.addEventListener('click', evt => {
@@ -8499,7 +8601,7 @@ function applyFileRefResult(wrapEl, entry) {
   const download = document.createElement('button');
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
-  download.textContent = '\u2193'; // \u2193
+  download.textContent = ICONS.downArrow;
   download.setAttribute('aria-label', 'Download ' + label);
   download.title = 'Download ' + label;
   download.addEventListener('click', evt => {
@@ -8845,6 +8947,9 @@ function closeFilePreview() {
   drawer.classList.add('hidden');
   // Undock the split (no-op if the 追问 drawer is still open).
   if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+  // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
+  // 追问 drawer is still open or the user collapsed it themselves).
+  restoreSidebarAfterDrawer();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
@@ -8943,13 +9048,54 @@ function startFileRefObserver() {
         }
       });
     }
+    // Re-evaluate avatar grouping whenever bubbles are inserted/removed. The
+    // decision is relative to the PREVIOUS visible same-sender bubble, which
+    // an incremental append can't know without looking back — so we rescan
+    // the (DOM-bounded, ≤MAX_LIVE_DOM_EVENTS) container rather than diffing.
+    regroupAvatars(target);
   });
   mo.observe(target, { childList: true, subtree: false });
   _fileRefObserver = mo;
   // Initial scan for bubbles rendered synchronously before the observer
   // attached (e.g. the full-history render on session select).
   target.querySelectorAll('.event').forEach(scanEventForFileRefs);
+  regroupAvatars(target);
 }
+
+// regroupAvatars walks the rendered transcript and tags each .event bubble
+// with .nz-grouped when it continues a same-sender run within
+// AVATAR_GROUP_GAP_MS — the CSS then hides the repeated avatar. Only "user"
+// and "text" (assistant) bubbles carry avatars and participate; any other
+// visible bubble type (system/init/todo/result/…) or a sender switch or a
+// time gap ≥ threshold resets the run so the next same-sender bubble shows
+// its avatar again. Bubbles without a data-time are treated as run-breakers
+// (conservatively keep their avatar). Idempotent: safe to call on every
+// mutation; it toggles the class to match current DOM order.
+function regroupAvatars(container) {
+  const el = container || document.getElementById('events-scroll');
+  if (!el) return;
+  let prevSender = '';
+  let prevTime = 0;
+  for (const node of el.children) {
+    if (!node.classList || !node.classList.contains('event')) continue;
+    const isUser = node.classList.contains('user');
+    const isText = node.classList.contains('text');
+    if (!isUser && !isText) {
+      // A non-avatar bubble (system/divider handled separately) breaks the run.
+      prevSender = '';
+      prevTime = 0;
+      continue;
+    }
+    const sender = isUser ? 'user' : 'text';
+    const t = Number(node.getAttribute('data-time') || 0);
+    const grouped = !!t && sender === prevSender && prevTime > 0 &&
+      (t - prevTime) < AVATAR_GROUP_GAP_MS;
+    node.classList.toggle('nz-grouped', grouped);
+    prevSender = sender;
+    prevTime = t; // 0 when undated → next bubble can't group against it
+  }
+}
+window.regroupAvatars = regroupAvatars;
 
 // KaTeX environment names we split out as block-level math. Whitelisted —
 // feeding KaTeX an environment it doesn't support just emits an error span
@@ -9068,14 +9214,14 @@ function renderMdUncached(s) {
         }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
-            '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
+            '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
           '</div>' +
           '</div>';
       }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +
-          '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
+          '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
         '</div>' +
         '</div>';
     }
@@ -10468,6 +10614,17 @@ const wsm = {
     if (isInitial) {
       // Full render replaces everything — remove any optimistic messages
       const html = renderEventsWithDividers(display, 0);
+      // Decide "load earlier" mounting BEFORE the all-internal placeholder so
+      // its copy never invites a click on a button that won't appear. Mount off
+      // the server's has_more flag \u2014 it knows the frame was truncated by
+      // visible-bubble count (DefaultVisibleTarget), catching the case the old
+      // length heuristic missed: more visible bubbles than the target but fewer
+      // total events than INITIAL_HISTORY_LIMIT. Fall back to the length
+      // heuristic only for older servers / relayed nodes that don't set
+      // has_more (the field is absent \u2192 undefined).
+      const wsHasMore = (typeof msg.has_more === 'boolean') ? msg.has_more : null;
+      const showEarlier = (wsHasMore === true) ||
+        (wsHasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
       // Only show "no events yet" when the server returned zero events and the session
       // is idle. For running sessions, show "loading events..." since eventPushLoop will
       // deliver events shortly (fixes blank-then-"no events yet" flash on click).
@@ -10481,9 +10638,12 @@ const wsm = {
       } else {
         // Server returned events but every one was internal-filtered
         // (parallel agent team tail). Placeholder keeps the pane from
-        // looking broken; the "load earlier" button mounted below is the
-        // path back to real messages.
-        el.innerHTML = '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>';
+        // looking broken. Invite "click below" only when the button will
+        // mount; otherwise the whole history is internal activity with nothing
+        // older to reach, so promise nothing.
+        el.innerHTML = showEarlier
+          ? '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>'
+          : '<div class="empty-state">\u8be5\u4f1a\u8bdd\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u6682\u65e0\u5bf9\u8bdd\u6d88\u606f</div>';
       }
       // Reset dedup tracker on full render and anchor the pagination
       // cursor to the earliest event we received, independent of DOM
@@ -10497,10 +10657,7 @@ const wsm = {
           oldestFetchedEventTime = first.time;
         }
       }
-      // Mount "load earlier" affordance when the server returned a full page
-      // (more history likely exists). Skipped for short histories so we don't
-      // surface a useless button.
-      if (events.length >= INITIAL_HISTORY_LIMIT) {
+      if (showEarlier) {
         ensureEarlierButton();
       }
       runPendingAsync();
@@ -11144,7 +11301,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
+      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
@@ -11152,17 +11309,17 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll"><div class="empty-state">加载中...</div></div>' +
+    '<div class="events" id="events-scroll"><div class="empty-state">加载中…</div></div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
+      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
       '</div>' +
     '</div>';
   navRebuild(); // clear stale nav state before async preview fetch
@@ -11486,7 +11643,7 @@ function openSessionContextMenu(card, x, y) {
   if (!key) return;
   showSessionContextMenu(x, y, [
     {
-      label: '重命名', icon: '✎',
+      label: '重命名', icon: ICONS.edit,
       action: () => {
         // renameSession() reads selectedKey/selectedNode, so we flip the
         // selection first. Keeps the prompt simple (same input widget the
@@ -11499,14 +11656,14 @@ function openSessionContextMenu(card, x, y) {
       },
     },
     {
-      label: '复制 key', icon: '⎘',
+      label: '复制 key', icon: ICONS.copy,
       action: async () => {
         const ok = await copyStringToClipboard(key);
         showToast(ok ? '已复制 key' : '复制失败', ok ? 'success' : 'warning');
       },
     },
     {
-      label: '删除', icon: '🗑', danger: true,
+      label: '删除', icon: ICONS.trash, danger: true,
       action: () => { dismissSession(key, node); },
     },
   ]);
@@ -11787,6 +11944,10 @@ function initSwipeBack() {
     return (fv && fv.classList.contains('fv-open')) ||
            (ad && ad.classList.contains('visible'));
   }
+  // Exported for restoreSidebarAfterDrawer — keeps the "which drawers exist"
+  // knowledge in one place so adding a third drawer can't drift between the
+  // split-exit guard and the sidebar-restore guard.
+  window.nzAnyDrawerOpen = anyDrawerOpen;
   // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
   // the main-window wasBottom checks elsewhere in this file.
   function eventsAtBottom() {
@@ -11942,10 +12103,20 @@ function toggleSidebarCollapsed() {
   // Mobile drawer has its own list/chat-view contract — do not piggyback on
   // it; just bail so the existing back-button + drawer flow stays canonical.
   if (isMobileViewport()) return;
+  // A manual toggle means the user took control of the sidebar state — a
+  // pending drawer-driven collapse must no longer be undone on drawer close.
+  _sidebarAutoCollapsed = false;
   const next = !document.body.classList.contains('sidebar-collapsed');
   applySidebarCollapsed(next, true);
   lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
 }
+
+// _sidebarAutoCollapsed tracks whether the CURRENT collapse was applied by
+// collapseSidebarForDrawer (drawer-driven) rather than the user's own toggle.
+// Only a drawer-driven collapse is undone by restoreSidebarAfterDrawer when
+// the last drawer closes; a user-chosen collapse (persisted preference, or a
+// manual `[` while a drawer was open) is left alone.
+let _sidebarAutoCollapsed = false;
 
 // collapseSidebarForDrawer auto-collapses the sidebar when a right-side drawer
 // (追问 / file preview / code-block preview) opens, freeing horizontal space
@@ -11957,7 +12128,23 @@ function toggleSidebarCollapsed() {
 function collapseSidebarForDrawer() {
   if (isMobileViewport()) return;
   if (document.body.classList.contains('sidebar-collapsed')) return;
+  _sidebarAutoCollapsed = true;
   applySidebarCollapsed(true, false);
+}
+
+// restoreSidebarAfterDrawer re-expands the sidebar when a right-side drawer
+// closes, undoing a collapse that collapseSidebarForDrawer applied. Preview
+// and 追问 can be docked at once, so bail while either is still open — only
+// the LAST close restores (same nzAnyDrawerOpen guard nzSplitExit uses; the
+// close paths strip their open class before calling here). Like the collapse,
+// intentionally no localStorage write: the user's persisted preference was
+// never touched, the screen just returns to it.
+function restoreSidebarAfterDrawer() {
+  if (isMobileViewport()) return;
+  if (!_sidebarAutoCollapsed) return;
+  if (typeof window.nzAnyDrawerOpen === 'function' && window.nzAnyDrawerOpen()) return;
+  _sidebarAutoCollapsed = false;
+  applySidebarCollapsed(false, false);
 }
 
 (function initSidebarCollapsed(){
@@ -11976,6 +12163,10 @@ function collapseSidebarForDrawer() {
 if (window.matchMedia) {
   const mql = window.matchMedia('(max-width: 768px)');
   const onMqlChange = (e) => {
+    // Crossing the boundary re-derives the sidebar state below (mobile drawer
+    // rules / persisted preference), so a pending drawer-driven collapse is
+    // moot — disarm it so a later drawer close can't replay a stale restore.
+    _sidebarAutoCollapsed = false;
     if (e.matches) {
       document.body.classList.remove('sidebar-collapsed');
     } else {
@@ -12195,17 +12386,35 @@ initSidebarSearch();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
   ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
-  // Toolbar buttons sit absolute top-right; rotation buttons trigger 90° steps.
-  // The overlay's click-to-close handler ignores events that didn't target the
-  // overlay itself, so toolbar clicks won't propagate up and dismiss the modal.
+  // tabindex=-1 lets openLightboxGroup move focus onto the overlay, so the
+  // ←/→/r/+/- shortcuts work even when the click left focus in the chat
+  // textarea (the keydown handler skips editable elements by design).
+  ov.setAttribute('tabindex','-1');
+  // Toolbar buttons sit absolute top-right; rotation buttons trigger 90° steps,
+  // zoom buttons give pointer-only users (touch device + mouse without wheel)
+  // a clickable zoom entry. The overlay's click-to-close handler ignores events
+  // that didn't target the overlay itself, so toolbar clicks won't propagate up
+  // and dismiss the modal. The prev/next rails + counter belong to the gallery
+  // group model (RFC lightbox-gallery-nav): hidden via .lb-single when the
+  // group holds one image.
   ov.innerHTML='<div class="lb-toolbar">'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">↺</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">↻</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="Zoom out" title="缩小 (-)">' + ICONS.zoomOut + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="Zoom in" title="放大 (+)">' + ICONS.zoomIn + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">' + ICONS.rotateLeft + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">' + ICONS.rotateRight + '</button>'
     +'</div>'
+    +'<button type="button" class="lb-nav lb-nav-prev" data-lb-action="prev" aria-label="上一张" title="上一张 (←)">' + ICONS.galleryPrev + '</button>'
+    +'<button type="button" class="lb-nav lb-nav-next" data-lb-action="next" aria-label="下一张" title="下一张 (→)">' + ICONS.galleryNext + '</button>'
+    +'<div class="lb-counter" aria-live="polite"></div>'
     +'<img alt=""><div class="lb-zoom-hint"></div>';
   document.body.appendChild(ov);
   var img=ov.querySelector('img'),hint=ov.querySelector('.lb-zoom-hint');
+  var counter=ov.querySelector('.lb-counter'),prevBtn=ov.querySelector('.lb-nav-prev'),nextBtn=ov.querySelector('.lb-nav-next');
   var scale=1,panX=0,panY=0,rotation=0,dragging=false,lx=0,ly=0,ht=null,rotateAnimTimer=null;
+  // Gallery group state: items is a click-time snapshot of {full, thumb} URL
+  // strings (no DOM references), so the poll-driven innerHTML re-renders that
+  // destroy the thumbnails cannot invalidate an open lightbox.
+  var items=[],idx=0,lastFocus=null;
   function showHint(text){hint.textContent=text||(Math.round(scale*100)+'%');hint.classList.add('visible');clearTimeout(ht);ht=setTimeout(function(){hint.classList.remove('visible')},1200)}
   function apply(){
     // Rotation always emits a transform — even at neutral pan/scale — because
@@ -12217,60 +12426,48 @@ initSidebarSearch();
     ov.classList.toggle('zoomed',scale>1);
   }
   function reset(){scale=1;panX=0;panY=0;rotation=0;dragging=false;img.style.transform='';img.classList.remove('lb-rotating');ov.classList.remove('zoomed','dragging');hint.classList.remove('visible');clearTimeout(ht);clearTimeout(rotateAnimTimer)}
-  function close(){ov.classList.remove('active');reset()}
-  function rotateBy(deg){
-    // Accumulate the raw angle without normalization so the CSS transition
-    // always rotates the visually shorter 90° path. If we wrapped to
-    // (-180, 180] the browser would interpolate a 270° spin in the wrong
-    // direction (e.g. -180 → +180 renders as +360 of CW spin).
-    rotation+=deg;
-    img.classList.add('lb-rotating');
-    apply();
-    // Display label normalized to (-180, 180] so the hint stays human-readable
-    // ("90°" beats "450°"). The stored `rotation` keeps growing.
-    var disp=((rotation%360)+360)%360;
-    if(disp>180)disp-=360;
-    showHint(disp+'°');
-    clearTimeout(rotateAnimTimer);
-    // Strip the transition class once the animation settles so subsequent
-    // pan/zoom interactions stay snappy (no easing on every drag frame).
-    rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
+  function close(){
+    ov.classList.remove('active');reset();
+    // Return focus to wherever the user was before the lightbox grabbed it,
+    // but only if focus is still inside the overlay — if the user already
+    // clicked elsewhere, stealing focus back would be hostile.
+    if(lastFocus&&ov.contains(document.activeElement)){try{lastFocus.focus()}catch(_){/* detached node */}}
+    lastFocus=null;
   }
-  ov.addEventListener('click',function(e){
-    var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
-    if(btn){
-      // Toolbar click — handle action and don't fall through to backdrop close.
-      var action=btn.getAttribute('data-lb-action');
-      if(action==='rotate-left')rotateBy(-90);
-      else if(action==='rotate-right')rotateBy(90);
-      return;
-    }
-    if(e.target===ov)close();
-  });
-  // Scroll wheel zoom (toward cursor)
-  ov.addEventListener('wheel',function(e){e.preventDefault();var f=e.deltaY<0?1.15:1/1.15,ns=Math.min(Math.max(scale*f,.5),10);var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);panX-=cx*(ns/scale-1);panY-=cy*(ns/scale-1);scale=ns;apply();showHint()},{passive:false});
-  // Mouse drag pan
-  img.addEventListener('mousedown',function(e){if(scale<=1)return;e.preventDefault();dragging=true;lx=e.clientX;ly=e.clientY;ov.classList.add('dragging')});
-  document.addEventListener('mousemove',function(e){if(!dragging)return;panX+=e.clientX-lx;panY+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply()});
-  document.addEventListener('mouseup',function(){if(dragging){dragging=false;ov.classList.remove('dragging')}});
-  // Double-click toggle zoom
-  img.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();if(scale>1.05){reset();apply()}else{var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);scale=2.5;panX=-cx*1.5;panY=-cy*1.5;apply()}showHint()});
-  // Touch: pinch zoom + drag pan + double-tap
-  var iDist=0,iScale=1,lastTap=0;
-  function t2d(t){return Math.hypot(t[1].clientX-t[0].clientX,t[1].clientY-t[0].clientY)}
-  img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1&&scale>1){lx=e.touches[0].clientX;ly=e.touches[0].clientY;dragging=true}},{passive:false});
-  img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
-  img.addEventListener('touchend',function(e){if(e.touches.length<2)iDist=0;if(e.touches.length===0){dragging=false;if(e.changedTouches.length===1){var now=Date.now();if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}lastTap=now}}});
-  // openLightbox(src, [fallback]) opens the full-size image at `src`.
-  //
-  // When the optional `fallback` argument is supplied and the primary
-  // `src` fails to load, the lightbox silently switches to the fallback
-  // and keeps the overlay open. This addresses the attachment-GC-expired
-  // path (RFC §3.6.3): the on-disk original at
-  // /api/sessions/attachment?... is gone, but the embedded thumbnail
-  // data URI was persisted alongside it and renders identically (though
-  // at 600px). Without the fallback the user would see a broken-image
-  // glyph.
+  function zoomBy(f){scale=Math.min(Math.max(scale*f,.5),10);apply();showHint()}
+  // ── Gallery group navigation (RFC lightbox-gallery-nav §3) ──
+  // preloaded dedupes warm-up requests across fast paging within one open
+  // gallery; the Image objects themselves are throwaway — the browser HTTP
+  // cache holds the bytes. Reset per openLightboxGroup: attachment URLs carry
+  // a ?v=<time> cache-buster, so a session-lifetime map would only grow.
+  var preloaded={};
+  function preload(i){
+    if(i<0||i>=items.length)return;
+    var u=items[i].full;
+    if(!u||preloaded[u])return;
+    preloaded[u]=1;
+    var im=new Image();
+    // Swallow 404s (GC-expired attachments): a failed warm-up must not
+    // surface through the RNEW-UX-002 global error handler as a toast.
+    im.onerror=function(){};
+    im.src=u;
+  }
+  function updateNav(){
+    var multi=items.length>1;
+    ov.classList.toggle('lb-single',!multi);
+    if(!multi)return;
+    counter.textContent=(idx+1)+' / '+items.length;
+    // aria-disabled (not the disabled attribute) keeps boundary buttons in
+    // the tab order so screen-reader users can perceive the edge.
+    prevBtn.setAttribute('aria-disabled',idx<=0?'true':'false');
+    nextBtn.setAttribute('aria-disabled',idx>=items.length-1?'true':'false');
+  }
+  // loadWithFallback(item) loads item.full and silently degrades to
+  // item.thumb when the original is gone. The attachment-GC-expired path
+  // (RFC §3.6.3): the on-disk original at /api/sessions/attachment?... is
+  // gone, but the embedded thumbnail data URI was persisted alongside it
+  // and renders identically (though at 600px). Without the fallback the
+  // user would see a broken-image glyph.
   //
   // Two failure modes the handler has to cover:
   //   1. HTTP 404 / network error → <img>'s onerror fires.
@@ -12281,8 +12478,8 @@ initSidebarSearch();
   // The img element is reused across calls, so its onload / onerror
   // handlers are re-assigned (not addEventListener'd) to avoid
   // accumulating stale listeners when users open the lightbox repeatedly.
-  window.openLightbox=function(src,fallback){
-    reset();
+  function loadWithFallback(item){
+    var src=item.full,fallback=item.thumb;
     var primaryTried=false;
     function useFallback(){
       if(!fallback||fallback===src)return false;
@@ -12308,8 +12505,146 @@ initSidebarSearch();
       img.onerror=null;img.onload=null;
     };
     img.src=src;
+  }
+  function show(i,dir){
+    if(i<0||i>=items.length)return;
+    idx=i;
+    // Zoom/pan/rotation reset on every page turn — carrying the previous
+    // image's pan could push the next one fully off-screen.
+    reset();
+    loadWithFallback(items[idx]);
+    updateNav();
+    preload(idx+(dir||1));
+  }
+  function nav(dir){show(idx+dir,dir)}
+  function rotateBy(deg){
+    // Accumulate the raw angle without normalization so the CSS transition
+    // always rotates the visually shorter 90° path. If we wrapped to
+    // (-180, 180] the browser would interpolate a 270° spin in the wrong
+    // direction (e.g. -180 → +180 renders as +360 of CW spin).
+    rotation+=deg;
+    img.classList.add('lb-rotating');
+    apply();
+    // Display label normalized to (-180, 180] so the hint stays human-readable
+    // ("90°" beats "450°"). The stored `rotation` keeps growing.
+    var disp=((rotation%360)+360)%360;
+    if(disp>180)disp-=360;
+    showHint(disp+'°');
+    clearTimeout(rotateAnimTimer);
+    // Strip the transition class once the animation settles so subsequent
+    // pan/zoom interactions stay snappy (no easing on every drag frame).
+    rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
+  }
+  ov.addEventListener('click',function(e){
+    // A horizontal swipe can land a browser-synthesized click anywhere on the
+    // overlay — backdrop (would close), or a nav rail at left/right where the
+    // finger lifted (would double-navigate). Swallow ANY click arriving within
+    // the synthesis window after a nav swipe. Time-based (not a boolean flag)
+    // because preventDefault in touchend suppresses the synthetic click on
+    // most engines: a leftover boolean would eat the NEXT legitimate click,
+    // while a timestamp simply expires.
+    if(Date.now()-swipeAt<500){swipeAt=0;return}
+    var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
+    if(btn){
+      // Toolbar/nav click — handle action and don't fall through to backdrop close.
+      // prev/next respect aria-disabled (ARIA 1.2 §6.6.3): pointer-events:none
+      // blocks mouse, but the buttons stay focusable, so Enter would otherwise
+      // activate a control that announces itself as disabled.
+      var action=btn.getAttribute('data-lb-action');
+      var dis=btn.getAttribute('aria-disabled')==='true';
+      if(action==='rotate-left')rotateBy(-90);
+      else if(action==='rotate-right')rotateBy(90);
+      else if(action==='zoom-in')zoomBy(1.2);
+      else if(action==='zoom-out')zoomBy(1/1.2);
+      else if(action==='prev'&&!dis)nav(-1);
+      else if(action==='next'&&!dis)nav(1);
+      return;
+    }
+    if(e.target===ov)close();
+  });
+  // Scroll wheel zoom (toward cursor)
+  ov.addEventListener('wheel',function(e){e.preventDefault();var f=e.deltaY<0?1.15:1/1.15,ns=Math.min(Math.max(scale*f,.5),10);var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);panX-=cx*(ns/scale-1);panY-=cy*(ns/scale-1);scale=ns;apply();showHint()},{passive:false});
+  // Mouse drag pan
+  img.addEventListener('mousedown',function(e){if(scale<=1)return;e.preventDefault();dragging=true;lx=e.clientX;ly=e.clientY;ov.classList.add('dragging')});
+  document.addEventListener('mousemove',function(e){if(!dragging)return;panX+=e.clientX-lx;panY+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply()});
+  document.addEventListener('mouseup',function(){if(dragging){dragging=false;ov.classList.remove('dragging')}});
+  // Double-click toggle zoom
+  img.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();if(scale>1.05){reset();apply()}else{var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);scale=2.5;panX=-cx*1.5;panY=-cy*1.5;apply()}showHint()});
+  // Touch: pinch zoom + drag pan + double-tap + horizontal swipe nav.
+  // Gesture arbitration (RFC lightbox-gallery-nav §3):
+  //   - swipeScale is captured at touchSTART. A pinch leaves `scale` at an
+  //     arbitrary float when the second finger lifts, so reading it at
+  //     touchend would misclassify a pinch-then-swipe as a pan.
+  //   - `pinched` marks any gesture that ever had two fingers down; such a
+  //     gesture can never end as a navigation swipe.
+  //   - scale < 1.05 (tolerance, not ===1): swipe navigates. Above it the
+  //     single finger pans the zoomed image — mutually exclusive paths.
+  var iDist=0,iScale=1,lastTap=0,sx=0,sy=0,swipeScale=1,pinched=false,swipeAt=0;
+  function t2d(t){return Math.hypot(t[1].clientX-t[0].clientX,t[1].clientY-t[0].clientY)}
+  img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();pinched=true;iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1){pinched=false;sx=e.touches[0].clientX;sy=e.touches[0].clientY;swipeScale=scale;if(scale>1){lx=sx;ly=sy;dragging=true}}},{passive:false});
+  img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
+  img.addEventListener('touchend',function(e){
+    if(e.touches.length<2)iDist=0;
+    if(e.touches.length!==0)return;
+    dragging=false;
+    if(e.changedTouches.length!==1)return;
+    var t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;
+    if(!pinched&&items.length>1&&swipeScale<1.05&&Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.2){
+      e.preventDefault();
+      nav(dx<0?1:-1);
+      // A nav swipe must not double as the first/second tap of a double-tap
+      // zoom (rapid successive swipes land within the 300ms window), nor may
+      // its synthesized click reach the overlay click handler (backdrop close
+      // or a nav rail under the lifted finger).
+      lastTap=0;
+      swipeAt=Date.now();
+      return;
+    }
+    var now=Date.now();
+    if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}
+    lastTap=now;
+  },{passive:false});
+  // openLightboxGroup(list, start) opens a gallery over `list`, an array of
+  // {full, thumb} URL-string snapshots, starting at index `start`. Single
+  // lightbox instance: calling while already open simply replaces the group.
+  window.openLightboxGroup=function(list,start){
+    items=(list&&list.length)?list:[];
+    if(!items.length)return;
+    preloaded={};
+    var wasOpen=ov.classList.contains('active');
+    show(Math.min(Math.max(start||0,0),items.length-1));
     ov.classList.add('active');
+    if(!wasOpen){
+      // Move focus onto the overlay so ←/→/Esc work immediately; remember
+      // where it came from so close() can restore it.
+      lastFocus=document.activeElement;
+      try{ov.focus()}catch(_){/* focus can throw on detached roots */}
+    }
   };
+  // openLightboxFromThumb(el) collects every sibling thumbnail inside the
+  // clicked .event-images container into a gallery group. dataset reads copy
+  // plain strings — no DOM references survive into `items`, so poll-driven
+  // innerHTML re-renders can't invalidate an open lightbox.
+  window.openLightboxFromThumb=function(el){
+    var box=el.closest&&el.closest('.event-images');
+    var imgs=box?Array.prototype.slice.call(box.querySelectorAll('img[data-full]')):[el];
+    var list=imgs.map(function(i){return{full:i.dataset.full||i.src,thumb:i.dataset.thumb||i.src}});
+    // indexOf can only miss if `el` somehow lacks data-full (not rendered by
+    // eventHtml); degrade to the first image rather than refusing to open.
+    window.openLightboxGroup(list,Math.max(0,imgs.indexOf(el)));
+  };
+  // Compatibility shell: the historical single-image entry point. Kept so
+  // any caller outside eventHtml (or user bookmarklets) keeps working.
+  window.openLightbox=function(src,fallback){
+    window.openLightboxGroup([{full:src,thumb:fallback}],0);
+  };
+  // Delegated thumbnail click handler — registered once on document, so it
+  // survives the chat transcript's innerHTML re-renders (eventHtml emits the
+  // thumbnails without inline onclick; RFC lightbox-gallery-nav §3).
+  document.addEventListener('click',function(e){
+    var t=e.target&&e.target.closest&&e.target.closest('.event-images img[data-full]');
+    if(t)window.openLightboxFromThumb(t);
+  });
   document.addEventListener('keydown',function(e){
     if(!ov.classList.contains('active'))return;
     // Skip shortcuts when an editable element holds focus — otherwise typing
@@ -12321,6 +12656,21 @@ initSidebarSearch();
       return;
     }
     if(e.key==='Escape'){close();return}
+    // Tab containment: aria-modal alone isn't honored by every AT, and a
+    // sighted keyboard user could Tab into the chat behind the overlay.
+    // nz_util's trapFocus is unsuitable here — its Escape branch removes the
+    // overlay element, but this lightbox is a persistent singleton.
+    if(e.key==='Tab'){
+      var nodes=Array.prototype.filter.call(ov.querySelectorAll('button'),function(n){return n.offsetParent!==null});
+      if(!nodes.length){e.preventDefault();return}
+      var first=nodes[0],last=nodes[nodes.length-1],cur=document.activeElement;
+      if(e.shiftKey&&(cur===first||cur===ov)){e.preventDefault();last.focus()}
+      else if(!e.shiftKey&&cur===last){e.preventDefault();first.focus()}
+      else if(!ov.contains(cur)){e.preventDefault();first.focus()}
+      return;
+    }
+    if(e.key==='ArrowLeft'){e.preventDefault();nav(-1);return}
+    if(e.key==='ArrowRight'){e.preventDefault();nav(1);return}
     if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint();return}
     if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint();return}
     if(e.key==='0'){reset();apply();showHint();return}
@@ -12393,6 +12743,9 @@ initSidebarSearch();
   function hideDrawer() {
     drawer.classList.remove('visible');
     if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+    // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
+    // preview drawer is still open or the user collapsed it themselves).
+    restoreSidebarAfterDrawer();
   }
 
   function stopPolling() {
@@ -12531,6 +12884,10 @@ initSidebarSearch();
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
     for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
+    // Apply WeChat-style avatar grouping in the aside too (it reuses eventHtml
+    // and the same .nz-grouped CSS, but lives outside the #events-scroll
+    // observer, so tag it explicitly).
+    if (typeof regroupAvatars === 'function') regroupAvatars(elMsgs);
     // Scroll policy, aligned with main window:
     //  - the user just sent (sawUser on a local-render call): force-pin.
     //  - otherwise: only stick if they were already at the bottom.

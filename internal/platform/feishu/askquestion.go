@@ -314,8 +314,12 @@ type cardActionPayload struct {
 //
 //  1. v1 card action: {"action":{"value":{...}},"open_chat_id":"oc_...",
 //     "open_message_id":"om_...","operator":{"open_id":"ou_..."}}
-//  2. v2 card action: {"event":{"action":{"value":{...}},...}} — the
-//     envelope's top-level Event is already the inner object.
+//  2. v2 card action: {"action":{"value":{...}},"context":{
+//     "open_chat_id":"oc_...","open_message_id":"om_..."},"operator":{...}} —
+//     the larksuite oapi-sdk-go v3 CardActionTriggerRequest nests
+//     open_chat_id/open_message_id inside a `context` object; the top level
+//     carries neither. Without the fallback below the chat/message ids decode
+//     to "" and the answer routes into a phantom direct session (#2006).
 //
 // Both land on the same payload shape once `action.value` is pulled out.
 func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessage, handler platform.MessageHandler) {
@@ -326,7 +330,11 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 		OpenChatID    string `json:"open_chat_id"`
 		OpenMessageID string `json:"open_message_id"`
 		ChatType      string `json:"chat_type"`
-		Operator      struct {
+		Context       struct {
+			OpenChatID    string `json:"open_chat_id"`
+			OpenMessageID string `json:"open_message_id"`
+		} `json:"context"`
+		Operator struct {
 			OpenID string `json:"open_id"`
 		} `json:"operator"`
 	}
@@ -334,7 +342,17 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 		slog.Warn("feishu card_action: parse failed", "err", err)
 		return
 	}
-	f.dispatchCardAction(ctx, outer.Action.Value, outer.OpenChatID, outer.OpenMessageID,
+	// v2 envelopes nest the ids under `context`; fall back when the top-level
+	// (v1) fields are absent so both shapes resolve real routing ids (#2006).
+	chatID := outer.OpenChatID
+	if chatID == "" {
+		chatID = outer.Context.OpenChatID
+	}
+	messageID := outer.OpenMessageID
+	if messageID == "" {
+		messageID = outer.Context.OpenMessageID
+	}
+	f.dispatchCardAction(ctx, outer.Action.Value, chatID, messageID,
 		outer.ChatType, outer.Operator.OpenID, handler)
 }
 
@@ -358,9 +376,17 @@ func (f *Feishu) dispatchCardAction(
 			"tool_use_id", osutil.SanitizeForLog(val.ToolUseID, 64))
 		return
 	}
-	ct := "direct"
-	if chatType == "group" {
-		ct = "group"
+	// Resolve chat type. The v2 card.action.trigger envelope carries no
+	// chat_type at any level, so the webhook path (like the WS path) must fall
+	// back to the chat_type embedded in the button value before defaulting to
+	// "direct" — otherwise a group card answer routes into a phantom direct
+	// session and the originating group session never sees the reply (#2007).
+	ct := chatType
+	if ct == "" {
+		ct = normalizeCardChatType(val.ChatType)
+	}
+	if ct != "group" {
+		ct = "direct"
 	}
 	// Stable-ish dedup key. Lark SDK can re-deliver the same card_action on
 	// WS reconnect; without this, a click gets forwarded twice. Derive the
