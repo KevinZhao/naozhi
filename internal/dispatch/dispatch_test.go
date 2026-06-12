@@ -742,7 +742,7 @@ func TestDiscardQueue_Nil(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	d.queue = nil
-	d.discardQueue("any-key") // must not panic
+	d.discardQueue(context.Background(), platform.IncomingMessage{}, "any-key") // must not panic
 }
 
 func TestDiscardQueue_WithQueue(t *testing.T) {
@@ -752,7 +752,7 @@ func TestDiscardQueue_WithQueue(t *testing.T) {
 	d.queue = q
 	key := "test-key"
 	q.Enqueue(key, QueuedMsg{Text: "m"})
-	d.discardQueue(key)
+	d.discardQueue(context.Background(), platform.IncomingMessage{}, key)
 	if q.Depth(key) != 0 {
 		t.Errorf("depth = %d after discard, want 0", q.Depth(key))
 	}

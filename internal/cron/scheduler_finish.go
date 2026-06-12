@@ -256,6 +256,10 @@ type finishArgs struct {
 	// "" for normal runs. finishRun copies it into the CronRun record so the
 	// dashboard can render the replay chain.
 	replayOf string
+	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
+	// (RFC §7.3). nil for local runs — finishRun attaches it to the CronRun
+	// only when non-nil, so a local run's record carries no sandbox_meta.
+	sandboxMeta *SandboxRunMeta
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -408,6 +412,9 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
 			ReplayOf:    a.replayOf,
+			// Sandbox execution receipt (RFC §7.3) — nil for local runs, so
+			// their record carries no sandbox_meta key (wire-read-safe).
+			SandboxMeta: a.sandboxMeta,
 		})
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next
