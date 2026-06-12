@@ -64,6 +64,39 @@ type SandboxOutcome struct {
 	// the microVM's fate is UNKNOWN and any replay machinery must refuse
 	// to act on this run until a Stop succeeds.
 	StopConfirmed bool
+	// Meta is the per-run execution receipt (cost / memory peak / image /
+	// exit) surfaced into the run record (RFC §7.3/§7.5). Zero-valued
+	// fields render as "unknown" — a transport failure with no result
+	// event carries no cost, an old image carries no version. The adapter
+	// (wireup) populates this from agentcore.RunResult.
+	Meta SandboxRunMeta
+}
+
+// SandboxRunMeta is the cloud-execution receipt for one sandbox run
+// (RFC §5.1 meta block). cron re-declares it (rather than importing an
+// agentcore type) so the scheduler stays compile-time independent of the
+// AWS SDK — the wireup adapter maps agentcore.RunResult → this struct.
+// Every field omitempty: a partial receipt (transport failure: cost/exit
+// unknown) persists only what it knows. NO secrets, NO AWS-internal IDs.
+type SandboxRunMeta struct {
+	RuntimeARN   string `json:"runtime_arn,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
+	// ExitStatus has NO omitempty: exit 0 is the meaningful "success"
+	// value, and a missing key would be indistinguishable from "exit
+	// unknown" (transport failure). The enclosing *SandboxRunMeta is
+	// itself omitempty, so local runs still carry no exit_status at all —
+	// only attested sandbox runs record it, and they record it always.
+	ExitStatus      int     `json:"exit_status"`
+	CostUSD         float64 `json:"cost_usd,omitempty"`
+	DurationMS      int64   `json:"duration_ms,omitempty"`
+	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
+}
+
+// isZero reports whether the receipt carries no information (every field
+// at its zero value) — used to decide whether to attach it to the run
+// record at all, so non-sandbox runs never grow a `sandbox_meta` key.
+func (m SandboxRunMeta) isZero() bool {
+	return m == SandboxRunMeta{}
 }
 
 // SandboxRunner executes run-once jobs at the sandbox placement. The
@@ -141,12 +174,12 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		// Unavailable — the executor may be perfectly healthy; alerting
 		// keyed on sandbox_unavailable must mean "wire the config".
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
-			"sandbox placement does not support work_dir (Phase 1; use placement=local)")
+			"sandbox placement does not support work_dir (Phase 1; use placement=local)", nil)
 		return
 	}
 	if s.sandbox == nil {
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxUnavailable, "",
-			"sandbox placement not configured (cron.sandbox in config)")
+			"sandbox placement not configured (cron.sandbox in config)", nil)
 		return
 	}
 
@@ -190,18 +223,25 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		// microVM was never created, so the pending handle is moot.
 		removeSandboxPending(pendingPath, a.lg)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
-			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()))
+			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()), nil)
 		return
 	}
+
+	// Run-record receipt (RFC §7.3): meta the adapter filled from the
+	// agentcore result. A transport failure may carry only partial meta
+	// (no cost/exit) — still worth persisting what arrived. nil when the
+	// receipt is entirely empty so a degenerate run never grows a
+	// sandbox_meta key.
+	metaPtr := sandboxMetaPtr(outcome.Meta)
 
 	switch outcome.State {
 	case SandboxStateSuccess:
 		removeSandboxPending(pendingPath, a.lg)
-		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "")
+		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "", metaPtr)
 	case SandboxStateFailedClean:
 		removeSandboxPending(pendingPath, a.lg)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
-			sanitiseRunErrMsg(outcome.ErrMsg))
+			sanitiseRunErrMsg(outcome.ErrMsg), metaPtr)
 	default: // SandboxStateFailedTransport and any future unknown state: conservative.
 		// §6.2 containment: the runner already attempted StopRuntimeSession;
 		// surface whether the termination was confirmed. Phase 1 has no
@@ -229,14 +269,26 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		if ctx.Err() == context.DeadlineExceeded {
 			state = RunStateTimedOut
 		}
-		s.finishSandboxRun(a, state, ErrClassSandboxTransport, outcome.ResultText, msg)
+		s.finishSandboxRun(a, state, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 	}
+}
+
+// sandboxMetaPtr returns &meta when the receipt carries any information,
+// else nil — so a run that produced no receipt (preflight failure,
+// unavailable executor) never grows a sandbox_meta key in its record.
+func sandboxMetaPtr(meta SandboxRunMeta) *SandboxRunMeta {
+	if meta.isZero() {
+		return nil
+	}
+	m := meta
+	return &m
 }
 
 // finishSandboxRun funnels every sandbox terminal path through finishRun
 // (same three-write protocol as local runs: persist → metrics → broadcast)
-// plus the completion notice.
-func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string) {
+// plus the completion notice. meta is the cloud-execution receipt (nil for
+// pre-invoke failures that produced no receipt).
+func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string, meta *SandboxRunMeta) {
 	if state == RunStateSucceeded {
 		s.observeSuccessLatency(s.now().Sub(a.startedAt), SendResult{Text: result}, a.snap, a.lg)
 	} else {
@@ -248,7 +300,8 @@ func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass
 		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
 		prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
-		finalizer: a.finalizer,
+		finalizer:   a.finalizer,
+		sandboxMeta: meta,
 	})
 	notice := "执行失败，请稍后重试。"
 	if state == RunStateSucceeded {

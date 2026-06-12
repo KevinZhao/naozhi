@@ -66,6 +66,18 @@ type RunResult struct {
 	State TerminalState
 	// ExitCode is the CLI exit code when an exit frame arrived (else 0).
 	ExitCode int
+	// CostUSD is the CLI-reported total cost (total_cost_usd from the
+	// result event); 0 when no result event arrived (transport failure /
+	// idle-burn). RFC §7.3/§7.5 run-record meta.
+	CostUSD float64
+	// DurationMS is the CLI-reported run wall-clock (duration_ms from the
+	// result event); 0 when no result event arrived.
+	DurationMS int64
+	// ImageVersion / MemoryPeakBytes come from the bootstrap kind=meta
+	// frame (microVM execution receipt the CLI stream cannot supply).
+	// Zero when the image predates the meta frame or the frame was cut.
+	ImageVersion    string
+	MemoryPeakBytes int64
 	// Err is the underlying failure. Invariant: non-nil if and only if
 	// State == FailedTransport (a clean-EOF cut with no terminal
 	// attestation carries ErrNoTerminalAttestation). Callers may branch on
@@ -171,8 +183,24 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 			continue
 		}
 		cls.observe(&env)
-		if env.Kind == KindExit {
+		switch env.Kind {
+		case KindExit:
 			res.ExitCode = env.Code
+		case KindMeta:
+			// Execution receipt (RFC §7.3): image version + peak RSS the
+			// CLI stream cannot supply. Last-writer-wins (one per run).
+			if env.ImageVersion != "" {
+				res.ImageVersion = env.ImageVersion
+			}
+			if env.MemoryPeakBytes > 0 {
+				res.MemoryPeakBytes = env.MemoryPeakBytes
+			}
+		case KindCLI:
+			// Cost/duration receipt rides the stream-json result event.
+			if m, ok := ResultMetaOf(env.Line); ok {
+				res.CostUSD = m.CostUSD
+				res.DurationMS = m.DurationMS
+			}
 		}
 		if env.Kind == KindKeepalive {
 			continue // liveness only — never reaches the sink
@@ -201,6 +229,10 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 	}
 	return res
 }
+
+// RuntimeARN returns the configured runtime ARN. Used by the cron adapter
+// to stamp the run-record meta (RFC §7.3) with the runtime a job targeted.
+func (c *Client) RuntimeARN() string { return c.cfg.RuntimeARN }
 
 // Stop tears down a runtime session. This is the §6.2 rule-1 termination
 // primitive: after FailedTransport, Stop MUST succeed before the run is
