@@ -392,6 +392,105 @@ func TestWS_SubscribeWithLimit(t *testing.T) {
 	}
 }
 
+// TestWS_SubscribeLimitHasMore is the WS twin of the stranded-opening-messages
+// regression: a limit=2 subscribe over a 5-event log returns the newest 2 and
+// the history frame's has_more must be true so the dashboard mounts "load
+// earlier". The old client heuristic (len>=INITIAL_HISTORY_LIMIT) would have
+// hidden the button because only 2 events came back.
+func TestWS_SubscribeLimitHasMore(t *testing.T) {
+	hub, router := newTestHub("")
+	proc := session.NewTestProcess()
+	for i := 1; i <= 5; i++ {
+		proc.EventLog.Append(cli.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
+	}
+	router.InjectSession("test:d:u:general", proc)
+
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", Limit: 2})
+
+	resp := wsRead(t, conn)
+	if resp.Type != "subscribed" {
+		t.Fatalf("type = %q, want subscribed", resp.Type)
+	}
+	resp = wsRead(t, conn)
+	if resp.Type != "history" {
+		t.Fatalf("type = %q, want history", resp.Type)
+	}
+	if resp.HasMore == nil {
+		t.Fatal("has_more is nil on an initial limited history frame, want non-nil *bool")
+	}
+	if !*resp.HasMore {
+		t.Error("has_more = false, want true (3 older events exist beyond the limit=2 page)")
+	}
+}
+
+// TestWS_SubscribeLimitNoMore: the whole log fits in the page → has_more is a
+// non-nil false (the modern "no more" answer must survive serialization).
+func TestWS_SubscribeLimitNoMore(t *testing.T) {
+	hub, router := newTestHub("")
+	proc := session.NewTestProcess()
+	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "text", Summary: "only"})
+	router.InjectSession("test:d:u:general", proc)
+
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", Limit: 100})
+
+	resp := wsRead(t, conn)
+	if resp.Type != "subscribed" {
+		t.Fatalf("type = %q, want subscribed", resp.Type)
+	}
+	resp = wsRead(t, conn)
+	if resp.Type != "history" {
+		t.Fatalf("type = %q, want history", resp.Type)
+	}
+	if resp.HasMore == nil {
+		t.Fatal("has_more is nil on an initial history frame, want non-nil *bool false")
+	}
+	if *resp.HasMore {
+		t.Error("has_more = true, want false (the single event is the whole history)")
+	}
+}
+
+// TestWS_SubscribeAfterOmitsHasMore: an after-cursor catch-up is not an initial
+// page, so has_more must be omitted (nil) — the client keeps its fallback.
+func TestWS_SubscribeAfterOmitsHasMore(t *testing.T) {
+	hub, router := newTestHub("")
+	proc := session.NewTestProcess()
+	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "text"})
+	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text"})
+	router.InjectSession("test:d:u:general", proc)
+
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", After: 500})
+
+	resp := wsRead(t, conn)
+	if resp.Type != "subscribed" {
+		t.Fatalf("type = %q, want subscribed", resp.Type)
+	}
+	resp = wsRead(t, conn)
+	if resp.Type != "history" {
+		t.Fatalf("type = %q, want history", resp.Type)
+	}
+	if resp.HasMore != nil {
+		t.Errorf("has_more = %v, want nil (after-cursor catch-up is not an initial page)", *resp.HasMore)
+	}
+}
+
 // ─── Event push tests ────────────────────────────────────────────────────────
 
 func TestWS_EventPush(t *testing.T) {

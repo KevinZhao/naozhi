@@ -758,6 +758,53 @@ func countVisibleEntries(entries []cli.EventEntry) int {
 // bounds disk I/O — callers on the WS subscribe handshake pass a short
 // timeout so a slow filesystem can't stall the first frame.
 func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []cli.EventEntry {
+	return s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
+}
+
+// EventInitialPageCtx returns the dashboard's initial-history slice together
+// with a hasMore flag stating whether any entry strictly older than the slice
+// still exists (in the ring or on disk). It is the authoritative replacement
+// for the client-side `len(events) >= INITIAL_HISTORY_LIMIT` heuristic, which
+// guessed "more history exists" from the *total* event count while the server
+// truncates the slice by *visible-bubble* count (DefaultVisibleTarget). When a
+// session has more visible bubbles than DefaultVisibleTarget but fewer total
+// events than the client's page-size hint, that heuristic wrongly suppressed
+// the "load earlier" affordance, stranding the opening messages with no way to
+// reach them. Deciding hasMore on the server — which is the side that performed
+// the truncation — closes that gap.
+//
+// The probe is one extra limit=1 reverse lookup anchored at the earliest entry
+// in the returned slice; EventEntriesBeforeCtx handles the ring→disk fallback,
+// so the probe sees disk history even when the ring is short. An empty slice
+// (idle/empty session) reports hasMore=false. The ctx bounds both the initial
+// visible-aware read and the probe.
+func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]cli.EventEntry, bool) {
+	entries := s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
+	if len(entries) == 0 {
+		return entries, false
+	}
+	oldest := entries[0].Time
+	if older := s.EventEntriesBeforeCtx(ctx, oldest, 1); len(older) > 0 {
+		return entries, true
+	}
+	// The probe came back empty. EventEntriesBeforeCtx swallows ctx
+	// cancellation and disk errors as "nil" — indistinguishable from a genuine
+	// end-of-history. The visible-aware walk above shares this same ctx (bounded
+	// by initialHistoryDiskTimeout on the WS handshake), so on a slow filesystem
+	// the walk can drain the budget and starve the probe. Fail OPEN in that
+	// case: report hasMore=true so the dashboard still mounts "load earlier"
+	// rather than authoritatively hiding it and re-stranding the opening
+	// messages — the exact regression this whole change exists to prevent. A
+	// button that pages into an already-exhausted history is a benign no-op
+	// (loadEarlierEvents marks it "done"); a wrongly hidden button is not
+	// recoverable. Only a clean (non-cancelled) empty probe means "no more".
+	if ctx.Err() != nil {
+		return entries, true
+	}
+	return entries, false
+}
+
+func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []cli.EventEntry {
 	if maxTotal <= 0 {
 		maxTotal = maxVisibleTotal
 	}

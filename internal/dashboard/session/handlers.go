@@ -1162,7 +1162,24 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		// than the client's page-size hint, so visible bubbles sitting beyond
 		// `limit` positions under an internal flood are still surfaced. The
 		// result is still bounded by maxEventsPageLimit (== ring size).
-		entries = sess.EventLastNVisibleCtx(r.Context(), visTarget, 0)
+		//
+		// X-Events-Has-More mirrors the WS "history" frame's has_more field:
+		// it tells the dashboard whether older history exists so it can mount
+		// the "load earlier" affordance without the brittle len>=limit guess.
+		// The body stays a bare JSON array — the flag rides a response header
+		// so the three existing array consumers (initial / incremental /
+		// pagination) keep their contract. Always set it ("0" or "1") on this
+		// branch so a modern client treats it as authoritative; an absent header
+		// then unambiguously means a legacy server or remote-node relay, where
+		// the client falls back to the length heuristic. Set before WriteJSON
+		// writes headers.
+		var hasMore bool
+		entries, hasMore = sess.EventInitialPageCtx(r.Context(), visTarget, 0)
+		if hasMore {
+			w.Header().Set("X-Events-Has-More", "1")
+		} else {
+			w.Header().Set("X-Events-Has-More", "0")
+		}
 	case beforeStr != "":
 		pageLimit := limit
 		if pageLimit == 0 {
