@@ -102,6 +102,26 @@
   --nz-ease-out:cubic-bezier(.16,1,.3,1);
   --nz-dur:.15s;
   --nz-selection-bar:3px; /* single source for the selected-row left edge */
+  /* ---------- Overlay z-index scale (R20260610-UI-2) ----------
+     Overlays previously each picked an ad-hoc z-index (lightbox shipped a
+     wild 9999), so multi-layer stacking order was unpredictable. These tokens
+     give a single ordered scale; rules reference the token nearest their tier
+     instead of a literal. Order, low→high:
+       popover  (transient list anchored to a trigger, e.g. history popover)
+       drawer   (side/bottom panels: fv-drawer, aside, cmd-palette, modal,
+                 history sheet, cj-menu — all share the blocking-surface tier)
+       toast    (transient status, must clear a docked drawer)
+       menu     (context menu — above toast so a right-click on a toast works)
+       overlay  (full-screen capture: voice, mem-popover)
+       lightbox (image viewer — the topmost surface; replaces the 9999 wild value)
+     Sub-steps (+1/+2) stay as literal offsets at the rule (e.g. ctx-menu sits
+     one above its overlay) to avoid a token per micro-layer. */
+  --nz-z-popover:100;
+  --nz-z-drawer:200;
+  --nz-z-toast:210;
+  --nz-z-menu:211;
+  --nz-z-overlay:300;
+  --nz-z-lightbox:400;
   /* ---------- Light-theme parity tokens (R20260608) ----------
      #453 shipped light theme as a "minimal scaffold": many component rules
      still hard-coded GitHub-Dark hex (near-white text, dark-blue fills) that
@@ -719,7 +739,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .event-images{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .event-images img{max-width:300px;max-height:240px;border-radius:6px;border:1px solid var(--nz-border);cursor:pointer;transition:opacity .15s}
 .event-images img:hover{opacity:.85}
-.lightbox-overlay{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);align-items:center;justify-content:center;cursor:zoom-in}
+.lightbox-overlay{display:none;position:fixed;inset:0;z-index:var(--nz-z-lightbox);background:rgba(0,0,0,.85);align-items:center;justify-content:center;cursor:zoom-in}
 .lightbox-overlay.active{display:flex}
 .lightbox-overlay.zoomed{cursor:grab}
 .lightbox-overlay.dragging{cursor:grabbing!important}
@@ -779,7 +799,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .fr-slot.fr-missing{display:none}
 
 /* File viewer drawer — side panel for previewing workspace files */
-.fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:200;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
+.fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
 .fv-drawer.fv-open{transform:translateX(0)}
 .fv-drawer.hidden{pointer-events:none;visibility:hidden}
 .fv-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);flex-shrink:0;min-height:48px}
@@ -845,7 +865,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 }
 
 /* Voice recording overlay */
-.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:300;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:var(--nz-z-overlay);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
 .voice-overlay.show{opacity:1;pointer-events:auto}
 .vo-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xl);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
 .vo-timer{font-size:48px;color:var(--nz-text-strong);font-weight:300;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:2px}
@@ -921,7 +941,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* z-index 210 keeps the toast above a docked split drawer (z-index 200) so
    feedback (errors, "copied", cron results) stays visible while a preview /
    追问 pane occupies the right strip; still below ctx-menu (211). */
-.toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:210;opacity:0;pointer-events:none;transition:opacity .3s}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:var(--nz-z-toast);opacity:0;pointer-events:none;transition:opacity .3s}
 .toast.show{opacity:1;pointer-events:auto}
 /* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
@@ -946,7 +966,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    (background:var(--nz-bg-1)) so this value only controls the dim behind
    the card. Don't push above 0.8 — that reads as "page has crashed / is
    disabled" rather than "focus on this dialog". */
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:200}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:var(--nz-z-drawer)}
 .modal{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);padding:24px;width:360px}
 .modal h3{font-size:15px;color:var(--nz-text-strong);margin-bottom:12px}
 .modal input{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
@@ -1008,8 +1028,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
    perceived latency on the long-press target state that already takes 500ms
    to trigger. */
-.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:210}
-.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:0 12px 32px rgba(0,0,0,.5);z-index:211;user-select:none;-webkit-user-select:none}
+.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}
+.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:0 12px 32px rgba(0,0,0,.5);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
 .ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:6px;cursor:pointer;color:var(--nz-text);font-size:var(--nz-fs-base);min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
 .ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
 .ctx-menu-item.danger{color:var(--nz-red)}
@@ -1027,7 +1047,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .proj-pick .pp-custom{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:6px}
 .proj-pick .pp-custom-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);line-height:1;flex-shrink:0}
 /* New session command palette */
-.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;z-index:200;padding-top:12vh}
+.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;z-index:var(--nz-z-drawer);padding-top:12vh}
 .cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 .cmd-palette-header{padding:14px 16px;border-bottom:1px solid var(--nz-bg-2);flex-shrink:0}
 .cmd-palette-header input{width:100%;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
@@ -1076,7 +1096,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .history-backdrop{position:fixed;inset:0;z-index:99;background:transparent;animation:fade-in .15s ease}
 .history-backdrop.is-sheet{z-index:199;background:rgba(0,0,0,.4)}
 @keyframes fade-in{from{opacity:0}to{opacity:1}}
-.history-popover{position:absolute;top:100%;left:0;z-index:100;min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
+.history-popover{position:absolute;top:100%;left:0;z-index:var(--nz-z-popover);min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .history-popover-header{padding:8px 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:8px 8px 0 0}
 .history-popover-header .hp-count{color:var(--nz-text-dim);font-weight:500;margin-left:4px}
@@ -1341,7 +1361,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .sc-origin.kind-discord{color:#b4c0ff;background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
 .sc-origin.kind-weixin{color:#a7f3d0;background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
 /* History bottom sheet (mobile) */
-.history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:200;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-radius:16px 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+.history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:var(--nz-z-drawer);background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-radius:16px 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
 .sheet-handle{width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto}
 
 /* ===== Tablet / narrow desktop (≤1024px) ===== */
@@ -1630,7 +1650,7 @@ body.kbd-open .input-hints{display:none}
 /* ⋯ popover menu —— 用 position:fixed 加 JS 定位，避免 .cron-detail-body
  * 的 overflow:auto 把行底部的菜单剪掉。JS 负责 top/left 计算 + 空间不够
  * 时向上翻转。 */
-.cj-menu{position:fixed;z-index:200;min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
+.cj-menu{position:fixed;z-index:var(--nz-z-drawer);min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
 .cj-menu.open{display:block}
 .cj-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:none;border-radius:6px;color:var(--nz-text);font-size:13px;font-family:inherit;cursor:pointer;text-align:left;min-height:34px}
 .cj-menu-item:hover{background:var(--nz-bg-2)}
@@ -2416,7 +2436,7 @@ body.kbd-open .sidebar-footer{display:none}
    box-shadow, z-index, slide transition) so the dashboard has a single
    "drawer" visual vocabulary, and reuses .main-header + .input-area token
    spacing so the input/header feel matches the main transcript. */
-.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:200;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
+.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
 .aside-drawer.visible{transform:translateX(0)}
 /* Header shares .fv-header's proportions (10px 14px padding, min-height 48px,
    13px title). Background inherits .aside-drawer bg-1; no separate color so
@@ -2570,7 +2590,7 @@ body.kbd-open .sidebar-footer{display:none}
   border:1px dashed var(--nz-text-mute);cursor:not-allowed}
 .md-memlink-broken .md-memlink-icon{filter:grayscale(1) opacity(.6)}
 .md-memlink-broken:hover{background:rgba(139,148,158,.08) !important}
-#mem-popover{position:fixed;z-index:300;max-width:560px;min-width:320px;
+#mem-popover{position:fixed;z-index:var(--nz-z-overlay);max-width:560px;min-width:320px;
   max-height:60vh;overflow:auto;background:var(--nz-bg-1);
   border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);
   box-shadow:0 8px 32px rgba(0,0,0,.6);padding:14px 16px;
