@@ -364,6 +364,20 @@ type CronConfig struct {
 	// "run now") bypasses jitter for responsiveness. See
 	// docs/rfc/cron-v2-polish.md §3.2.
 	JitterMax string `yaml:"jitter_max,omitempty"`
+	// Sandbox enables the AgentCore cloud-sandbox placement for cron jobs
+	// (docs/rfc/agentcore-cloud-sandbox.md). Both fields required to
+	// enable; leave empty to keep placement=sandbox jobs failing with a
+	// clear "not configured" error. Credentials come from the standard
+	// AWS chain (env → IAM role → profile) — never from this file.
+	Sandbox CronSandboxConfig `yaml:"sandbox,omitempty"`
+}
+
+// CronSandboxConfig points cron's sandbox placement at an AgentCore
+// Runtime. RuntimeARN identifies the runtime (its container must run the
+// naozhi bootstrap handler); Region is the runtime's AWS region.
+type CronSandboxConfig struct {
+	RuntimeARN string `yaml:"runtime_arn"`
+	Region     string `yaml:"region"`
 }
 
 // CronNotifyTarget identifies an IM channel used as the fallback delivery

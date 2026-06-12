@@ -45,4 +45,10 @@ type SchedulerDeps struct {
 	// field is the construction-time injection seam for tests and simple
 	// wirings, and the two paths coexist. (RFC §3.5)
 	Telemetry runtelemetry.Broadcaster
+	// Sandbox executes placement=sandbox jobs on AgentCore microVMs
+	// (agentcore-cloud-sandbox RFC §4.2). The wireup layer builds it over
+	// internal/agentcore so cron never imports the AWS SDK. nil = sandbox
+	// placement unavailable; such jobs terminate with
+	// ErrClassCronSandboxUnavailable instead of silently running locally.
+	Sandbox SandboxRunner
 }

@@ -604,7 +604,14 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	ctx, spawnCancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer spawnCancel()
 
-	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(j, snap, runID, startedAt, trigger, lg, notifyTo, finalizer)
+	// execPrepareSpawn resolves agent/backend/workspace options and runs the
+	// fresh-context preflight. It also owns the sandbox placement fork (RFC
+	// §4.2): a sandbox job self-terminates via finishRun inside the helper
+	// and returns okSpawnPrep=false, so the same caller-return below covers
+	// it — no local router state is ever touched. inflight + spawnCancel are
+	// threaded in so the helper can release the spawn-phase timer before the
+	// (long) sandbox invoke and hand executeSandbox the in-flight handle.
+	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(j, snap, runID, startedAt, trigger, lg, notifyTo, finalizer, inflight, spawnCancel)
 	if !okSpawnPrep {
 		return
 	}
@@ -898,9 +905,15 @@ func (s *Scheduler) execSnapshotAndEmit(j *Job, viaTriggerNow bool, runID string
 // fresh-context preflight for a run (Phase C #734/#945 split; semantics
 // unchanged).
 //
-// ok=false → resolveCronWorkspace or freshContextPreflightP0 already drove
-// finishRun (and ran stubRefresh where applicable); the caller must return.
-func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+// ok=false → resolveCronWorkspace, freshContextPreflightP0, or the sandbox
+// placement fork already drove finishRun (and ran stubRefresh where
+// applicable); the caller must return.
+//
+// inflight + spawnCancel are threaded in for the sandbox fork only: a sandbox
+// job releases the spawn-phase timer up front (its run budget is derived
+// inside executeSandbox) and hands the in-flight handle to the run-once
+// microVM path, which never touches the session router.
+func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, startedAt time.Time, trigger TriggerKind, lg *slog.Logger, notifyTo NotifyTarget, finalizer *runFinalizer, inflight *runInflight, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
 	// agentCommands and agents are published once at scheduler construction
 	// (deps.AgentCommands / deps.Agents) via configMapsPtr and never swapped
 	// today; reading them lock-free through configMaps() is safe. A future
@@ -921,6 +934,30 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 	if snap.backend != "" {
 		opts.Backend = snap.backend
 	}
+
+	// Placement fork (agentcore-cloud-sandbox RFC §4.2): sandbox jobs are
+	// run-once microVM invocations that never touch the session router —
+	// no GetOrCreate, no fresh-context Reset, no stubs, no send watchdog.
+	// Branching here (after agent resolution, before any router state)
+	// keeps the entire local path below byte-identical for placement=local.
+	// executeSandbox routes every terminal through the same finishRun
+	// protocol, and the caller's deferred finalizer still releases the CAS
+	// gate on every path. ok=false signals the caller to return immediately.
+	if placementIsSandbox(snap.placement) {
+		// Release the spawn-phase timer right away: the sandbox path derives
+		// its own run budget inside executeSandbox; keeping this one alive
+		// for jobTimeout would waste a runtime timer slot per in-flight job
+		// and hand any future code a misleading ctx (review PR-2b F6).
+		spawnCancel()
+		s.executeSandbox(sandboxExecArgs{
+			job: j, snap: snap, runID: runID, startedAt: startedAt,
+			trigger: trigger, prompt: cleanText, model: opts.Model,
+			notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
+			lg: lg,
+		})
+		return AgentOpts{}, "", "", stubRefresher{}, false
+	}
+
 	if snap.workDir != "" {
 		workDirForCLI, abort := s.resolveCronWorkspace(j, snap, runID, startedAt, trigger, lg, finalizer)
 		if abort {

@@ -626,6 +626,7 @@ function openCronCreateModal(backendHtml) {
   const wsBody = buildCronWorkspaceBody();
   const notifyHtml = buildCronNotifyToggleHtml('', false);
   const contextHtml = buildCronContextToggleHtml(false);
+  const placementHtml = buildCronPlacementHtml('', 'cron-placement');
 
   // Title + aria-label are inlined as literals (not passed through esc())
   // so the static UX contract test can grep the exact fragments in source.
@@ -638,7 +639,7 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml,
+        backendHtml, placementHtml,
         promptId: 'cron-prompt',
         promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
       }) +
@@ -648,6 +649,7 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  cronPlacementBindHint('cron-placement');
   trapFocus(overlay);
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
@@ -703,6 +705,8 @@ function renderCronModalBody(opts) {
   // 区与 notify / fresh-context 同列，因为 backend 是 "怎么跑" 的运行时
   // 设定，与 work_dir（"在哪里"）的资源/路径含义不同。
   const backendBlock = opts.backendHtml ? opts.backendHtml : '';
+  // placement 选择器与 backend 同区（都是"怎么跑"的运行时设定，RFC §7.1）。
+  const placementBlock = opts.placementHtml ? opts.placementHtml : '';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
         titleField +
@@ -722,6 +726,7 @@ function renderCronModalBody(opts) {
           '<div class="cf-label">其他设置</div>' +
           '<div class="cron-more-stack">' +
             backendBlock +
+            placementBlock +
             opts.notifyHtml +
             opts.contextHtml +
           '</div>' +
@@ -741,6 +746,44 @@ function buildCronContextToggleHtml(initialFresh) {
         '<span class="ct-hint">勾选后每次运行前重置会话；不勾则复用会话并保留历史。</span>' +
       '</span>' +
     '</label>';
+}
+
+// buildCronPlacementHtml renders the 运行位置 selector (agentcore-cloud-
+// sandbox RFC §7.1): 本机 (default) / 云沙箱 ☁️. The sandbox option carries
+// the Phase 1 fence hint (≤60min / no work_dir / remote-only MCP). The
+// fence is enforced server-side (validateCronPlacement + ErrSandboxWorkDir);
+// the client mirrors the work_dir conflict check at submit time so the
+// user gets a precise toast instead of a 400 round-trip.
+function buildCronPlacementHtml(initialPlacement, selectId) {
+  const sandboxSel = initialPlacement === 'sandbox' ? ' selected' : '';
+  const localSel = sandboxSel ? '' : ' selected';
+  return '<div class="cron-placement-block" style="margin-bottom:12px">' +
+      '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">运行位置</label>' +
+      '<select id="' + escAttr(selectId) + '" aria-label="运行位置" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+        '<option value=""' + localSel + '>本机</option>' +
+        '<option value="sandbox"' + sandboxSel + '>云沙箱 ☁️</option>' +
+      '</select>' +
+      '<span class="ct-hint" id="' + escAttr(selectId) + '-hint" style="display:' + (sandboxSel ? 'block' : 'none') + ';margin-top:4px">云沙箱为一次性隔离运行（跑完即焚）：限 60 分钟内任务，暂不支持工作目录与本地 MCP。</span>' +
+    '</div>';
+}
+
+// collectCronPlacementValue returns the placement value, or null when the
+// selector is absent.
+function collectCronPlacementValue(selectId) {
+  const el = document.getElementById(selectId);
+  if (!el) return null;
+  return el.value || '';
+}
+
+// cronPlacementBindHint toggles the fence hint under the selector when the
+// user flips to 云沙箱. Called once after the modal mounts.
+function cronPlacementBindHint(selectId) {
+  const el = document.getElementById(selectId);
+  const hint = document.getElementById(selectId + '-hint');
+  if (!el || !hint) return;
+  el.addEventListener('change', function() {
+    hint.style.display = el.value === 'sandbox' ? 'block' : 'none';
+  });
 }
 
 // collectCronContextValue returns the fresh_context flag, or null when the
@@ -980,6 +1023,13 @@ async function doCreateCronJob() {
     const backendEl = document.getElementById('cron-backend');
     const backendVal = backendEl && backendEl.value ? backendEl.value : '';
     if (backendVal) body.backend = backendVal;
+    // placement（RFC §7.1）：默认本机省略字段；云沙箱时前端先行围栏校验
+    // （与服务端 validateCronPlacement 同语义），给出精确 toast。
+    const placementVal = collectCronPlacementValue('cron-placement');
+    if (placementVal === 'sandbox') {
+      if (workDir) { showToast('云沙箱暂不支持工作目录：请清空"在哪里"或改用本机运行', 'warning'); return; }
+      body.placement = 'sandbox';
+    }
     let data;
     try {
       data = await fetchJSON('/api/cron', {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
@@ -1695,6 +1745,9 @@ function cronJobCardHtml(j) {
     ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')}"' +
     ' title="点击修改时间">' + esc(human) + '</span>';
   let iconGlyphs = '';
+  // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
+  // last_error_class 提供 terminal 着色（transport 红+⚠）。
+  iconGlyphs += cronPlacementBadgeHtml(j.placement || '', j.last_error_class || '');
   if (j.notify === false) {
     iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
   }
@@ -1847,8 +1900,31 @@ function cronErrorClassLabel(cls) {
     case 'overlap_skipped': return '重叠跳过';
     case 'paused_concurrent': return '暂停时被抢';
     case 'panic': return '内部异常';
+    // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
+    // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
+    case 'sandbox_failed': return '云沙箱任务失败';
+    case 'sandbox_transport': return '云沙箱断流（状态未知）';
+    case 'sandbox_unavailable': return '云沙箱未配置';
     default: return cls || '';
   }
+}
+
+// cronPlacementBadgeHtml —— ☁️ 云沙箱徽标（RFC §7.2）。placement 是与
+// backend pill / origin badge 正交的第三个标识：本机任务返回空串（零增量），
+// 云沙箱任务渲染 ☁️ pill；terminal 三态由 error_class 着色：
+//   success → 绿（默认 pill 色） / sandbox_failed → 黄 / sandbox_transport → 红+⚠
+// （禁止一键重放的引导属于 Phase 3 确认队列，这里只做视觉信号。）
+function cronPlacementBadgeHtml(placement, errorClass) {
+  if (placement !== 'sandbox') return '';
+  let cls = 'cj-placement-sandbox';
+  let label = '☁️ 沙箱';
+  if (errorClass === 'sandbox_transport') {
+    cls += ' pl-transport';
+    label = '☁️ 沙箱 ⚠';
+  } else if (errorClass === 'sandbox_failed' || errorClass === 'sandbox_unavailable') {
+    cls += ' pl-failed';
+  }
+  return '<span class="' + cls + '" title="' + escAttr('云沙箱运行（跑完即焚）' + (errorClass ? ' · ' + cronErrorClassLabel(errorClass) : '')) + '">' + label + '</span>';
 }
 
 // formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
@@ -3788,6 +3864,7 @@ function openCronEditModal(id, job, backendHtml) {
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
   const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
   const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
+  const placementHtml = buildCronPlacementHtml(job.placement || '', 'edit-cron-placement');
 
   // Round-trip attempt: if the saved expression matches a v2 picker shape
   // we pre-fill the picker; otherwise render the default picker and add a
@@ -3818,7 +3895,7 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml,
+        backendHtml, placementHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
         titleId: 'edit-cron-title',
@@ -3829,6 +3906,7 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  cronPlacementBindHint('edit-cron-placement');
   trapFocus(overlay);
   fillCronPrompt('edit-cron-prompt', job.prompt);
   // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
@@ -3952,6 +4030,21 @@ async function doEditCronJob(id) {
     const newBackend = backendEl.value || '';
     const origBackend = job.backend || '';
     if (newBackend !== origBackend) body.backend = newBackend;
+  }
+
+  // placement（RFC §7.1）：仅在变化时 PATCH；切到云沙箱时按 EFFECTIVE
+  // work_dir（本次编辑后的值，否则 job 现值）做前端围栏，与服务端
+  // UpdateJob 临界区的原子检查同语义。
+  const newPlacement = collectCronPlacementValue('edit-cron-placement');
+  if (newPlacement !== null) {
+    const origPlacement = job.placement || '';
+    if (newPlacement !== origPlacement) {
+      if (newPlacement === 'sandbox') {
+        const effWorkDir = ('work_dir' in body) ? body.work_dir : (job.work_dir || '');
+        if (effWorkDir) { showToast('云沙箱暂不支持工作目录：请先清空"在哪里"', 'warning'); return; }
+      }
+      body.placement = newPlacement;
+    }
   }
 
   if (Object.keys(body).length === 0) { overlay.remove(); return; }

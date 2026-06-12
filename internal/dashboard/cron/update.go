@@ -71,6 +71,9 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		// nil omits, pointer-to-"" clears the override (router default),
 		// pointer to a non-empty string sets it.
 		Backend *string `json:"backend,omitempty"`
+		// Placement: nil omits; ""/"local" 本机；"sandbox" 云沙箱
+		// (agentcore-cloud-sandbox RFC §4.2)。
+		Placement *string `json:"placement,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -79,7 +82,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
 		req.Notify == nil && req.NotifyClear == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
-		req.FreshContext == nil && req.Backend == nil {
+		req.FreshContext == nil && req.Backend == nil && req.Placement == nil {
 		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
 	}
@@ -107,6 +110,19 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Backend != nil {
 		if err := ValidateCronBackend(*req.Backend); err != nil {
+			writeCronErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.Placement != nil {
+		// Shape gate only ("", local, sandbox). The Phase 1 sandbox
+		// guardrail (no work_dir) needs the EFFECTIVE post-patch values —
+		// a PATCH flipping placement=sandbox on a job that already has a
+		// work_dir is as invalid as setting both at once. That cross-field
+		// check lives in Scheduler.UpdateJob's critical section, the only
+		// place that sees the live job and the patch atomically; it
+		// surfaces here as ErrSandboxWorkDir → a precise 400.
+		if err := validateCronPlacement(*req.Placement, ""); err != nil {
 			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -205,6 +221,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		NotifyChatID:   req.NotifyChatID,
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
+		Placement:      req.Placement,
 	})
 	if err != nil {
 		switch {
@@ -216,6 +233,10 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron UpdateJob update not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "updated")
+		case errors.Is(err, cronpkg.ErrSandboxWorkDir):
+			// Phase 1 sandbox guardrail (effective placement×work_dir
+			// combination rejected inside UpdateJob's critical section).
+			writeCronErr(w, http.StatusBadRequest, "云沙箱暂不支持工作目录（Phase 1）：请先清空 work_dir 或改用本机运行")
 		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.

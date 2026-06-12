@@ -351,6 +351,9 @@ type cronJobView struct {
 	// explicit true/false). nil renders as "legacy default" on the client.
 	Notify       *bool `json:"notify,omitempty"`
 	FreshContext bool  `json:"fresh_context,omitempty"`
+	// Placement 是运行位置（agentcore-cloud-sandbox RFC §7.2 徽标数据源）。
+	// ""/"local" 本机；"sandbox" 云沙箱。
+	Placement string `json:"placement,omitempty"`
 	// Missed / MissedSince: cron-v2-polish §3.3 Increment C.
 	// missed=true 表示进程休眠 / 重启空窗期该 job 错过了至少一次调度。
 	// MissedSince 是"按 schedule 算上一次应跑的毫秒时刻"，UI 可以用来
@@ -506,6 +509,28 @@ func ValidateCronBackend(backend string) error {
 		return fmt.Errorf("invalid backend identifier")
 	}
 	return nil
+}
+
+// validateCronPlacement gates the placement field at the HTTP edge
+// (agentcore-cloud-sandbox RFC §7.1: form-submit validation must reject a
+// job that is destined to fail, not let the user save it). Two checks:
+// value shape (""/"local"/"sandbox") and the Phase 1 sandbox guardrail —
+// no work_dir at sandbox placement until clone-on-boot lands (Phase 1.5,
+// RFC §4.4 B10-a). The scheduler re-validates both at AddJob/run time;
+// this copy exists to give the dashboard a precise 400 instead of a
+// generic save error.
+func validateCronPlacement(placement, workDir string) error {
+	switch placement {
+	case "", cronpkg.PlacementLocal:
+		return nil
+	case cronpkg.PlacementSandbox:
+		if workDir != "" {
+			return fmt.Errorf("云沙箱暂不支持工作目录（Phase 1）：请清空 work_dir 或改用本机运行")
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid placement %q", placement)
+	}
 }
 
 // validateCronPrompt rejects prompts larger than the dashboard cap or
@@ -1023,6 +1048,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Notify:          j.Notify,
 			FreshContext:    j.FreshContext,
 			Backend:         j.Backend,
+			Placement:       j.Placement,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
@@ -1200,6 +1226,11 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// Per docs/rfc/multi-backend.md §9 cron RPC contract. Validated
 		// by ValidateCronBackend to match the send.go shape contract.
 		Backend string `json:"backend,omitempty"`
+		// Placement selects where the job runs (agentcore-cloud-sandbox
+		// RFC §4.2): ""/"local" = this host, "sandbox" = AgentCore
+		// microVM. validateCronPlacement gates values and the Phase 1
+		// sandbox guardrails (no work_dir).
+		Placement string `json:"placement,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -1231,6 +1262,10 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ValidateCronBackend(req.Backend); err != nil {
+		writeCronErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateCronPlacement(req.Placement, req.WorkDir); err != nil {
 		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1300,6 +1335,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Notify:         req.Notify,
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
+		Placement:      req.Placement,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
