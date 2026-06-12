@@ -8845,6 +8845,9 @@ function closeFilePreview() {
   drawer.classList.add('hidden');
   // Undock the split (no-op if the 追问 drawer is still open).
   if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+  // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
+  // 追问 drawer is still open or the user collapsed it themselves).
+  restoreSidebarAfterDrawer();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
@@ -11787,6 +11790,10 @@ function initSwipeBack() {
     return (fv && fv.classList.contains('fv-open')) ||
            (ad && ad.classList.contains('visible'));
   }
+  // Exported for restoreSidebarAfterDrawer — keeps the "which drawers exist"
+  // knowledge in one place so adding a third drawer can't drift between the
+  // split-exit guard and the sidebar-restore guard.
+  window.nzAnyDrawerOpen = anyDrawerOpen;
   // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
   // the main-window wasBottom checks elsewhere in this file.
   function eventsAtBottom() {
@@ -11942,10 +11949,20 @@ function toggleSidebarCollapsed() {
   // Mobile drawer has its own list/chat-view contract — do not piggyback on
   // it; just bail so the existing back-button + drawer flow stays canonical.
   if (isMobileViewport()) return;
+  // A manual toggle means the user took control of the sidebar state — a
+  // pending drawer-driven collapse must no longer be undone on drawer close.
+  _sidebarAutoCollapsed = false;
   const next = !document.body.classList.contains('sidebar-collapsed');
   applySidebarCollapsed(next, true);
   lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
 }
+
+// _sidebarAutoCollapsed tracks whether the CURRENT collapse was applied by
+// collapseSidebarForDrawer (drawer-driven) rather than the user's own toggle.
+// Only a drawer-driven collapse is undone by restoreSidebarAfterDrawer when
+// the last drawer closes; a user-chosen collapse (persisted preference, or a
+// manual `[` while a drawer was open) is left alone.
+let _sidebarAutoCollapsed = false;
 
 // collapseSidebarForDrawer auto-collapses the sidebar when a right-side drawer
 // (追问 / file preview / code-block preview) opens, freeing horizontal space
@@ -11957,7 +11974,23 @@ function toggleSidebarCollapsed() {
 function collapseSidebarForDrawer() {
   if (isMobileViewport()) return;
   if (document.body.classList.contains('sidebar-collapsed')) return;
+  _sidebarAutoCollapsed = true;
   applySidebarCollapsed(true, false);
+}
+
+// restoreSidebarAfterDrawer re-expands the sidebar when a right-side drawer
+// closes, undoing a collapse that collapseSidebarForDrawer applied. Preview
+// and 追问 can be docked at once, so bail while either is still open — only
+// the LAST close restores (same nzAnyDrawerOpen guard nzSplitExit uses; the
+// close paths strip their open class before calling here). Like the collapse,
+// intentionally no localStorage write: the user's persisted preference was
+// never touched, the screen just returns to it.
+function restoreSidebarAfterDrawer() {
+  if (isMobileViewport()) return;
+  if (!_sidebarAutoCollapsed) return;
+  if (typeof window.nzAnyDrawerOpen === 'function' && window.nzAnyDrawerOpen()) return;
+  _sidebarAutoCollapsed = false;
+  applySidebarCollapsed(false, false);
 }
 
 (function initSidebarCollapsed(){
@@ -11976,6 +12009,10 @@ function collapseSidebarForDrawer() {
 if (window.matchMedia) {
   const mql = window.matchMedia('(max-width: 768px)');
   const onMqlChange = (e) => {
+    // Crossing the boundary re-derives the sidebar state below (mobile drawer
+    // rules / persisted preference), so a pending drawer-driven collapse is
+    // moot — disarm it so a later drawer close can't replay a stale restore.
+    _sidebarAutoCollapsed = false;
     if (e.matches) {
       document.body.classList.remove('sidebar-collapsed');
     } else {
@@ -12393,6 +12430,9 @@ initSidebarSearch();
   function hideDrawer() {
     drawer.classList.remove('visible');
     if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+    // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
+    // preview drawer is still open or the user collapsed it themselves).
+    restoreSidebarAfterDrawer();
   }
 
   function stopPolling() {
