@@ -1078,7 +1078,7 @@ const ICONS = {
   downArrow:'↓', // file-row download (thinner, paired with ↗)
   preview:  '↗', // preview / ask-aside
   gear:     '⚙', // init / system event
-  user:     '👤', // user event
+  user:     '&gt;_', // user event — brand ">_" terminal prompt mark (rust mono, see .event.user .event-icon)
   spark:    '✦', // assistant text event (non-claude backends)
   todo:     '☰', // todo event
   robot:    '🤖', // subagent badge / agent count
