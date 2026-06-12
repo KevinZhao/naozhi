@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -86,9 +87,20 @@ type Wrapper struct {
 	BackendID   string // "claude" | "kiro" | future backends
 	CLIPath     string
 	CLIName     string // display name: "claude-code", "kiro"
-	CLIVersion  string // semver from --version, e.g. "2.1.92"
+	CLIVersion  string // semver from --version, e.g. "2.1.92" (spawn-time, immutable)
 	Protocol    Protocol
 	ShimManager *shim.Manager
+
+	// liveVersion holds the most recent CLI binary version self-reported by
+	// a process this wrapper spawned (system/init claude_code_version),
+	// pushed via ObserveLiveVersion from Process.onLiveVersion. CLIVersion
+	// is detected once at naozhi startup and goes stale after a host claude
+	// upgrade under a long-lived naozhi; this atomic carries the live value
+	// for the global dashboard banner. nil until the first init frame is
+	// observed, at which point EffectiveVersion prefers it. The one mutable
+	// field on an otherwise-immutable Wrapper — kept lock-free via
+	// atomic.Pointer. R20260612-global-version.
+	liveVersion atomic.Pointer[string]
 
 	// History factories are looked up by BackendID via
 	// pickHistoryFactory(BackendID) inside NewHistorySource on every call,
@@ -98,6 +110,30 @@ type Wrapper struct {
 	// that register replacement factories per-t.Run and any future
 	// blank-import / wireup-staged init ordering. The registry RWMutex
 	// makes the per-call lookup cheap.
+}
+
+// ObserveLiveVersion records a CLI binary version self-reported by a process
+// this wrapper spawned. Wired into Process.onLiveVersion by Spawn; fires only
+// on a distinct version (the Process side already change-gates), so the
+// store is rare. Lock-free. R20260612-global-version.
+func (w *Wrapper) ObserveLiveVersion(v string) {
+	if v == "" {
+		return
+	}
+	s := v
+	w.liveVersion.Store(&s)
+}
+
+// EffectiveVersion returns the live version observed from a spawned process
+// when available, falling back to the spawn-time CLIVersion detected at
+// startup. This is what the global dashboard banner should display so a host
+// claude upgrade under a long-lived naozhi is reflected without a restart.
+// R20260612-global-version.
+func (w *Wrapper) EffectiveVersion() string {
+	if v := w.liveVersion.Load(); v != nil && *v != "" {
+		return *v
+	}
+	return w.CLIVersion
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
@@ -595,6 +631,10 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// cli.backends[].model first, falling back to top-level cli.model.
 	// "" means the operator left it unconfigured.
 	proc.setModel(opts.Model)
+	// R20260612-global-version: let this process push its self-reported
+	// binary version (init frame) up to the wrapper so the global dashboard
+	// banner reflects a host claude upgrade without a naozhi restart.
+	proc.SetOnLiveVersion(w.ObserveLiveVersion)
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
@@ -674,6 +714,10 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// session record is reloaded; until then SubagentLinker.Resolve bails out
 	// with projectDir=="" and the dashboard falls back to the tombstone UX.
 	proc.InitLinker("")
+	// R20260612-global-version: mirror the fresh-spawn wiring so a process
+	// re-attached after a shim reconnect also feeds its live binary version
+	// to the wrapper (the init frame replays / re-emits on the live socket).
+	proc.SetOnLiveVersion(w.ObserveLiveVersion)
 
 	if handle.Hello.SessionID != "" {
 		proc.sessionID = handle.Hello.SessionID
