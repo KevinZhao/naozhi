@@ -1082,6 +1082,19 @@ func (s *Scheduler) cronEntryGoneLocked(id cronEntryID) bool {
 // Returns an error if the job is not found, paused, or has no prompt.
 func (s *Scheduler) TriggerNow(id string) error {
 	s.mu.RLock()
+	// R20260610-085718-LB-7 (#2012): gate triggerWG.Add behind the stopped
+	// flag. stopWithCtx sets s.stopped (CAS) before draining triggerWG via
+	// triggerWG.Wait(); net/http does not interrupt in-flight handlers, so an
+	// in-flight HandleTrigger could otherwise land triggerWG.Add(1) — a
+	// positive delta from a zero counter — concurrently with that Wait,
+	// violating sync.WaitGroup's "Add-before-Wait" contract and letting a
+	// trigger goroutine escape the drain barrier into router.Shutdown /
+	// persistOnShutdown. Reading s.stopped under s.mu.RLock pairs the gate
+	// with the consistent-instant snapshot the rest of TriggerNow relies on.
+	if s.stopped.Load() {
+		s.mu.RUnlock()
+		return ErrSchedulerStopped
+	}
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.RUnlock()

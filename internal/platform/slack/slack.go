@@ -466,9 +466,17 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		chatType = "group"
 	}
 
+	// EventID is the global dedup key (dispatch.go shares one Dedup instance
+	// across all platforms). A bare ts is NOT unique across channels — Slack
+	// documents that two messages in different channels can share a TS, since
+	// the fractional part is a per-channel sequence. Using the (channel,ts)
+	// composite (same key MessageID already uses) keeps cross-channel messages
+	// from deduping each other into silence. #2015.
+	eventID := ev.Channel + ":" + ev.TimeStamp
+
 	msg := platform.IncomingMessage{
 		Platform:  "slack",
-		EventID:   ev.TimeStamp,
+		EventID:   eventID,
 		MessageID: ev.Channel + ":" + ev.TimeStamp,
 		UserID:    ev.User,
 		ChatID:    ev.Channel,

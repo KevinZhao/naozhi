@@ -36,6 +36,9 @@ var lightParityTokens = []string{
 	"--nz-overlay-pill-bg",
 	"--nz-badge-info",
 	"--nz-badge-info-text",
+	// R20260610-UI-1: history-popover project label gold. Was a bare #d4a017
+	// with no light override; tokenised + remapped to a deeper gold for light.
+	"--nz-project-label-fg",
 }
 
 // Literals that the sweep removed from rule bodies. They legitimately remain as
@@ -48,6 +51,7 @@ var forbiddenLightLiterals = []string{
 	"#1a2332", // dark-blue running banner
 	"#1c2128", // dark voice card
 	"#1f2937", // alien dark-blue hover / active fill
+	"#d4a017", // history-popover project label gold (no light override) — R20260610-UI-1
 }
 
 var reColorOrBgLiteral = regexp.MustCompile(`(?:color|background(?:-color)?):#[0-9a-fA-F]{3,8}`)

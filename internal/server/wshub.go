@@ -815,6 +815,13 @@ func (h *Hub) unregister(c *wsClient) {
 	h.mu.Lock()
 	removed := false
 	var unsubs []func()
+	// R20260610-085718-LB-5 (#2010): collect keys whose subscriber count hits
+	// zero so we can drop their historyMarshalCache slot after releasing h.mu —
+	// mirroring handleUnsubscribe (wshub_subscribe.go). The abrupt-disconnect
+	// path previously only decremented the counter, pinning the cache slot to
+	// Shutdown for any multi-tab session that bypassed the singleSubscriber
+	// fast path.
+	var dropKeys []string
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
 		// R040034-PERF-23 (#1409): keep authClients consistent with the
@@ -832,6 +839,9 @@ func (h *Hub) unregister(c *wsClient) {
 			for key, unsub := range c.subscriptions {
 				unsubs = append(unsubs, unsub)
 				h.decSubscriberCountLocked(key)
+				if !h.enforceCaps || h.subscriberCount[key] == 0 {
+					dropKeys = append(dropKeys, key)
+				}
 			}
 		}
 		c.subscriptions = nil
@@ -840,6 +850,11 @@ func (h *Hub) unregister(c *wsClient) {
 	h.mu.Unlock()
 	for _, unsub := range unsubs {
 		unsub()
+	}
+	if len(dropKeys) > 0 && h.historyMarshalCache != nil {
+		for _, key := range dropKeys {
+			h.historyMarshalCache.drop(key)
+		}
 	}
 	if removed {
 		// Release the connCount slot reserved at upgrade time. Guarded on

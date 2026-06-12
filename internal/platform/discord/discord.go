@@ -32,6 +32,11 @@ type Config struct {
 // R235-SEC-3.
 const discordHookConcurrency = 20
 
+// discordBotHealCooldown rate-limits the lazy bot-identity self-heal so a
+// sustained stream of group messages while botID is unknown can't hammer the
+// REST API. Mirrors slackBotHealCooldown. #2009.
+const discordBotHealCooldown = time.Minute
+
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
 	cfg     Config
@@ -46,7 +51,13 @@ type Discord struct {
 	// a data race — Go string assignment is two words (ptr+len), not atomic —
 	// so we store it through an atomic.Pointer for a torn-read-free handoff.
 	// #1814.
-	botID      atomic.Pointer[string]
+	botID atomic.Pointer[string]
+	// botHealAt is the next wall-clock time the lazy bot-identity self-heal is
+	// allowed to run, rate-limiting the re-fetch burst while botID is unknown.
+	// Guarded by botHealMu. #2009 (mirrors slack #1947).
+	botHealMu sync.Mutex
+	botHealAt time.Time
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	handlerWg  sync.WaitGroup
@@ -74,6 +85,54 @@ func (d *Discord) getBotID() string {
 		return *p
 	}
 	return ""
+}
+
+// setBotID stores the connected bot's user ID through the atomic pointer.
+// Shared by Start() and the Ready-event backfill so a late READY (after Open()
+// returned without State.User) still populates the id used for mention
+// matching. #2009.
+func (d *Discord) setBotID(id string) {
+	if id == "" {
+		return
+	}
+	d.botID.Store(&id)
+}
+
+// maybeHealBotID kicks a single rate-limited background fetch of the bot's own
+// identity when botID is unknown, so the adapter recovers exact-mention
+// filtering after Open() returned without a READY frame (discordgo treats a
+// non-READY first packet as non-fatal). At most one re-fetch runs per cooldown
+// window. Mirrors slack.maybeHealBotID (#1947). #2009.
+func (d *Discord) maybeHealBotID() {
+	if d.getBotID() != "" {
+		return
+	}
+	d.botHealMu.Lock()
+	if d.getBotID() != "" || time.Now().Before(d.botHealAt) {
+		d.botHealMu.Unlock()
+		return
+	}
+	d.botHealAt = time.Now().Add(discordBotHealCooldown)
+	d.botHealMu.Unlock()
+
+	sess := d.session
+	if sess == nil {
+		return
+	}
+	d.handlerWg.Add(1)
+	go func() {
+		defer d.handlerWg.Done()
+		defer platform.RecoverHandler("discord bot heal")
+		u, err := sess.User("@me")
+		if err != nil || u == nil {
+			slog.Warn("discord bot identity self-heal failed; staying fail-open", "err", err)
+			return
+		}
+		d.setBotID(u.ID)
+		slog.Info("discord bot identity recovered",
+			"bot_id", u.ID,
+			"bot_name", osutil.SanitizeForLog(u.Username, 128))
+	}()
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -127,6 +186,20 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		discordgo.IntentMessageContent
 
 	sess.AddHandler(d.onMessageCreate)
+	// Backfill botID from a (possibly late) READY frame. discordgo's Open()
+	// returns successfully even when the first gateway packet is not READY
+	// (documented Op 9 Invalid Session / Op 1 heartbeat-request cases), leaving
+	// State.User nil; the READY then arrives on the listen goroutine after
+	// Start() returned. Without this handler botID would stay empty and every
+	// guild message would be silently dropped by the mention gate. #2009.
+	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
+		if r != nil && r.User != nil {
+			d.setBotID(r.User.ID)
+			slog.Info("discord ready: bot identity set",
+				"bot_id", r.User.ID,
+				"bot_name", osutil.SanitizeForLog(r.User.Username, 128))
+		}
+	})
 
 	// Assign session BEFORE Open() so handlers don't hit nil d.session.
 	// If Open() fails, nil it out.
@@ -138,13 +211,15 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 	}
 
 	if sess.State != nil && sess.State.User != nil {
-		botID := sess.State.User.ID
-		d.botID.Store(&botID)
+		d.setBotID(sess.State.User.ID)
 		slog.Info("discord gateway connected",
-			"bot_id", botID,
+			"bot_id", sess.State.User.ID,
 			"bot_name", osutil.SanitizeForLog(sess.State.User.Username, 128))
 	} else {
-		slog.Warn("discord gateway connected but bot identity unavailable")
+		// Not fatal: the Ready handler above (or maybeHealBotID on the first
+		// group message) backfills botID. Until then group messages fail-open
+		// rather than being dropped. #2009.
+		slog.Warn("discord gateway connected but bot identity unavailable; will backfill on READY")
 	}
 
 	return nil
@@ -295,13 +370,26 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	text := m.Content
 	mentionMe := false
 
-	for _, u := range m.Mentions {
-		if u.ID == botID {
-			mentionMe = true
-			text = strings.ReplaceAll(text, "<@"+botID+">", "")
-			text = strings.ReplaceAll(text, "<@!"+botID+">", "")
-			break
+	if botID != "" {
+		for _, u := range m.Mentions {
+			if u.ID == botID {
+				mentionMe = true
+				text = strings.ReplaceAll(text, "<@"+botID+">", "")
+				text = strings.ReplaceAll(text, "<@!"+botID+">", "")
+				break
+			}
 		}
+	} else {
+		// #2009: Open() returned without a READY frame so we don't know our own
+		// user ID and cannot match the exact mention token. Leaving
+		// mentionMe=false here is fail-CLOSED: dispatch's group gate
+		// (ChatType=="group" && !MentionMe) would then silently drop every
+		// guild message until a restart, with no log or metric. Mirror the
+		// slack #1947 fix — fail-open (treat as mentioned) and kick a
+		// rate-limited background self-heal so botID recovers and strict
+		// matching resumes. DMs are unaffected (they don't gate on mention).
+		mentionMe = true
+		d.maybeHealBotID()
 	}
 	text = strings.TrimSpace(text)
 	// Match platform.DefaultMaxIncomingBytes: bots posting via the Discord API
