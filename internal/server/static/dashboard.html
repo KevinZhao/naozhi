@@ -122,6 +122,13 @@
   --nz-z-menu:211;
   --nz-z-overlay:300;
   --nz-z-lightbox:400;
+  /* Blocking-modal scrim (R20260610-UI-3). modal / voice / cmd-palette each
+     dimmed the background at a different opacity (.75 / .75 / .6), giving the
+     same "a blocking layer is open" cue inconsistent weight. One token unifies
+     them at .75. NOT applied to the lightbox (.85 — image viewing wants a
+     darker theatre) or the mobile history sheet (.4 — a transient popover, not
+     a blocking modal); those keep their intentional values. */
+  --nz-scrim:rgba(0,0,0,.75);
   /* ---------- Light-theme parity tokens (R20260608) ----------
      #453 shipped light theme as a "minimal scaffold": many component rules
      still hard-coded GitHub-Dark hex (near-white text, dark-blue fills) that
@@ -865,7 +872,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 }
 
 /* Voice recording overlay */
-.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:var(--nz-z-overlay);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);z-index:var(--nz-z-overlay);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
 .voice-overlay.show{opacity:1;pointer-events:auto}
 .vo-card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xl);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
 .vo-timer{font-size:48px;color:var(--nz-text-strong);font-weight:300;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:2px}
@@ -966,7 +973,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    (background:var(--nz-bg-1)) so this value only controls the dim behind
    the card. Don't push above 0.8 — that reads as "page has crashed / is
    disabled" rather than "focus on this dialog". */
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:var(--nz-z-drawer)}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);display:flex;align-items:center;justify-content:center;z-index:var(--nz-z-drawer)}
 .modal{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);padding:24px;width:360px}
 .modal h3{font-size:15px;color:var(--nz-text-strong);margin-bottom:12px}
 .modal input{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
@@ -1047,7 +1054,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .proj-pick .pp-custom{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:6px}
 .proj-pick .pp-custom-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);line-height:1;flex-shrink:0}
 /* New session command palette */
-.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;z-index:var(--nz-z-drawer);padding-top:12vh}
+.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);display:flex;align-items:flex-start;justify-content:center;z-index:var(--nz-z-drawer);padding-top:12vh}
 .cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 .cmd-palette-header{padding:14px 16px;border-bottom:1px solid var(--nz-bg-2);flex-shrink:0}
 .cmd-palette-header input{width:100%;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}

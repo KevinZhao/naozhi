@@ -4805,6 +4805,21 @@ document.addEventListener('keydown', function(e) {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
   let closed = false;
+  // voice-overlay (R20260610-UI-3): the recording overlay had no Esc handler,
+  // so a stuck recording could only be dismissed by clicking it. Mirror the
+  // click escape-hatch (see #voice-overlay click listener) on Esc for parity
+  // with every other overlay.
+  const voiceOv = document.getElementById('voice-overlay');
+  if (voiceOv && voiceOv.classList.contains('show')) {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      voiceActive = false;
+      cleanupVoiceTouchListeners();
+      stopVoiceRecording(false);
+    } else {
+      hideVoiceOverlay();
+    }
+    closed = true;
+  }
   if (activePopover) { closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
   // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
