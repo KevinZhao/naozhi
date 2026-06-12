@@ -22,6 +22,13 @@ const (
 	// calls — validation F6: the platform judges idleness by stream silence,
 	// not process liveness. Keepalives are dropped before event fan-out.
 	KindKeepalive EnvelopeKind = "keepalive"
+	// KindMeta carries microVM execution receipt fields the CLI stream
+	// itself cannot supply: the baked image version and the process peak
+	// RSS (RFC §5.1/§7.3 run-record meta). Emitted once by the bootstrap
+	// just before the exit frame. Additive: pre-Phase-2 readers skip the
+	// unknown kind, so an old cron talking to a new image is unaffected
+	// and a new cron talking to an old image simply gets zero meta.
+	KindMeta EnvelopeKind = "meta"
 )
 
 // Envelope is one decoded SSE frame from the bootstrap handler.
@@ -30,7 +37,12 @@ type Envelope struct {
 	Line json.RawMessage `json:"line,omitempty"` // raw stream-json (kind=cli)
 	Msg  string          `json:"msg,omitempty"`  // diagnostics (boot/exit)
 	Code int             `json:"code,omitempty"` // CLI exit code (kind=exit)
-	TS   string          `json:"ts"`
+	// ImageVersion / MemoryPeakBytes are populated only on kind=meta
+	// (bootstrap execution receipt). omitempty so non-meta frames stay
+	// byte-identical to the pre-Phase-2 wire shape.
+	ImageVersion    string `json:"image_version,omitempty"`
+	MemoryPeakBytes int64  `json:"memory_peak_bytes,omitempty"`
+	TS              string `json:"ts"`
 }
 
 // resultProbe is the minimal projection of a claude stream-json `result`
@@ -84,4 +96,31 @@ func ResultText(line json.RawMessage) (text string, ok bool) {
 		return "", false
 	}
 	return p.Result, true
+}
+
+// ResultMeta is the cost/duration receipt carried by the claude stream-json
+// result event (RFC §7.3/§7.5/§10). The CLI emits total_cost_usd and the
+// run wall-clock; the sandbox run record surfaces them per-run.
+type ResultMeta struct {
+	CostUSD    float64
+	DurationMS int64
+}
+
+// ResultMetaOf extracts the cost/duration receipt from a kind=cli envelope
+// line when that line is the stream-json result event. Same marker-gated
+// fast path as ResultText so the thousands of non-result lines per run pay
+// only a bytes.Contains. ok=false for every other line.
+func ResultMetaOf(line json.RawMessage) (m ResultMeta, ok bool) {
+	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
+		return ResultMeta{}, false
+	}
+	var p struct {
+		Type       string  `json:"type"`
+		CostUSD    float64 `json:"total_cost_usd"`
+		DurationMS int64   `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(line, &p); err != nil || p.Type != "result" {
+		return ResultMeta{}, false
+	}
+	return ResultMeta{CostUSD: p.CostUSD, DurationMS: p.DurationMS}, true
 }

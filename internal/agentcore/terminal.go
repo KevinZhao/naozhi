@@ -50,8 +50,12 @@ func (c *classifier) observe(env *Envelope) {
 	case KindExit:
 		c.sawExit = true
 		c.exitCode = env.Code
-	case KindBoot, KindKeepalive:
-		// Diagnostics and liveness only — no bearing on classification.
+	case KindBoot, KindKeepalive, KindMeta:
+		// Diagnostics, liveness, and the execution receipt (image/memory)
+		// carry no terminal-state signal — only result/exit decide the
+		// §6.1 classification. KindMeta is listed explicitly so a future
+		// editor does not mistake its absence for an oversight and wire it
+		// into sawResult/sawExit.
 	}
 }
 

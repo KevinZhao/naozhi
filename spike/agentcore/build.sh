@@ -19,6 +19,8 @@ aws ecr describe-repositories --repository-names "$REPO" --region "$REGION" >/de
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ECR"
 
-docker build -t "$ECR/$REPO:$TAG" "$DIR"
+# Stamp the image version (RFC §7.3 run-record meta) = the pushed tag, so a
+# run record records which image produced it.
+docker build --build-arg "IMAGE_VERSION=$TAG" -t "$ECR/$REPO:$TAG" "$DIR"
 docker push "$ECR/$REPO:$TAG"
 echo "pushed: $ECR/$REPO:$TAG"

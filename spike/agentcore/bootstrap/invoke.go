@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,15 @@ type payload struct {
 // sseEvent wraps every line we stream back so the caller can split
 // CLI stream-json events from bootstrap diagnostics.
 type sseEvent struct {
-	Kind string          `json:"kind"`           // "cli" | "boot" | "exit"
+	Kind string          `json:"kind"`           // "cli" | "boot" | "exit" | "meta" | "keepalive"
 	Line json.RawMessage `json:"line,omitempty"` // raw stream-json event (kind=cli)
 	Msg  string          `json:"msg,omitempty"`  // diagnostics (kind=boot/exit)
 	Code int             `json:"code,omitempty"` // exit code (kind=exit)
-	TS   string          `json:"ts"`
+	// ImageVersion / MemoryPeakBytes are populated only on kind=meta — the
+	// microVM execution receipt the CLI stream cannot supply (RFC §7.3).
+	ImageVersion    string `json:"image_version,omitempty"`
+	MemoryPeakBytes int64  `json:"memory_peak_bytes,omitempty"`
+	TS              string `json:"ts"`
 }
 
 func handleInvocation(w http.ResponseWriter, r *http.Request) {
@@ -264,11 +269,95 @@ func runCLI(r *http.Request, p payload, emit func(sseEvent)) error {
 	}
 
 	stderrWG.Wait()
+	// Peak memory (RFC §7.3): sample BEFORE cmd.Wait() reaps the child — once
+	// reaped, /proc/<cli-pid>/status is gone. Prefer the cgroup peak (covers
+	// the whole claude + MCP subtree, which is what 8GB-per-microVM accounting
+	// actually cares about); fall back to the CLI parent's VmHWM. Reading our
+	// own /proc/self (the prior shape) measured the wrong process — the
+	// bootstrap's ~7MB RSS, not the CLI's ~250MB+ (review PR-1 F4).
+	memPeak := peakRSSBytes(cmd.Process.Pid)
 	waitErr := cmd.Wait()
 	code := 0
 	if waitErr != nil {
 		code = cmd.ProcessState.ExitCode()
 	}
+	// Execution receipt (RFC §7.3): emit image version + peak RSS just before
+	// the exit frame. Both are best-effort — a read failure omits the field
+	// rather than failing the run; the agentcore client
+	// treats zero values as "unknown".
+	emit(sseEvent{
+		Kind:            "meta",
+		ImageVersion:    imageVersion(),
+		MemoryPeakBytes: memPeak,
+	})
 	emit(sseEvent{Kind: "exit", Code: code, Msg: "cli-exited"})
 	return waitErr
+}
+
+// imageVersion returns the baked base-image tag, stamped at build time via
+// the NAOZHI_SANDBOX_IMAGE_VERSION env (set in the Dockerfile / runtime
+// config). Empty when unset — the client records "unknown".
+func imageVersion() string {
+	return os.Getenv("NAOZHI_SANDBOX_IMAGE_VERSION")
+}
+
+// peakRSSBytes returns the peak memory of the CLI job for the run record
+// (RFC §7.3). It prefers the cgroup memory peak — in a microVM the cgroup
+// spans the whole claude + MCP subtree, which is what the 8GB-per-session
+// ceiling (§1.3) actually constrains — and falls back to the CLI parent's
+// VmHWM (cliPID's /proc status) when no cgroup peak file exists. Caller
+// MUST invoke this BEFORE cmd.Wait() reaps cliPID, otherwise the proc
+// fallback reads a dead PID. Linux-only, best-effort: any failure yields 0,
+// which the client records as "unknown" and omits.
+func peakRSSBytes(cliPID int) int64 {
+	if v := cgroupMemoryPeak(); v > 0 {
+		return v
+	}
+	return procVmHWM(cliPID)
+}
+
+// cgroupMemoryPeak reads memory.peak (cgroup v2). Returns 0 when absent
+// (cgroup v1, no cgroupfs, or the kernel predates memory.peak).
+func cgroupMemoryPeak() int64 {
+	for _, p := range []string{
+		"/sys/fs/cgroup/memory.peak",                      // v2 unified, our cgroup
+		"/sys/fs/cgroup/memory/memory.max_usage_in_bytes", // v1 fallback
+	} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if v, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+// procVmHWM reads VmHWM (peak RSS) from /proc/<pid>/status for the CLI
+// process. Note this captures only the claude parent, not its MCP children
+// — that is why cgroupMemoryPeak is preferred. Best-effort: 0 on any
+// read/parse failure.
+func procVmHWM(pid int) int64 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "VmHWM:")
+		if !ok {
+			continue
+		}
+		// Format: "VmHWM:\t   12345 kB"
+		fields := strings.Fields(rest)
+		if len(fields) < 1 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
 }

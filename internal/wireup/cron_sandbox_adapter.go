@@ -112,19 +112,33 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		return cron.SandboxOutcome{}, err
 	}
 
+	// Cloud-execution receipt (RFC §7.3): map the agentcore result into
+	// cron's SDK-free meta struct. RuntimeARN comes from the client config
+	// (the run targeted r.client's runtime); the rest from the stream.
+	meta := cron.SandboxRunMeta{
+		RuntimeARN:      r.client.RuntimeARN(),
+		ImageVersion:    res.ImageVersion,
+		ExitStatus:      res.ExitCode,
+		CostUSD:         res.CostUSD,
+		DurationMS:      res.DurationMS,
+		MemoryPeakBytes: res.MemoryPeakBytes,
+	}
+
 	switch res.State {
 	case agentcore.Success:
-		return cron.SandboxOutcome{State: cron.SandboxStateSuccess, ResultText: resultText}, nil
+		return cron.SandboxOutcome{State: cron.SandboxStateSuccess, ResultText: resultText, Meta: meta}, nil
 	case agentcore.FailedClean:
 		return cron.SandboxOutcome{
 			State:      cron.SandboxStateFailedClean,
 			ResultText: resultText,
 			ErrMsg:     fmt.Sprintf("sandbox job failed (exit %d)", res.ExitCode),
+			Meta:       meta,
 		}, nil
 	default: // agentcore.FailedTransport
 		out := cron.SandboxOutcome{
 			State:      cron.SandboxStateFailedTransport,
 			ResultText: resultText,
+			Meta:       meta,
 		}
 		if res.Err != nil {
 			out.ErrMsg = res.Err.Error()

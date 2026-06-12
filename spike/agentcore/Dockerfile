@@ -25,6 +25,12 @@ RUN useradd -m -u 1001 agent
 USER agent
 WORKDIR /home/agent
 
+# Image version stamp (RFC §7.3 run-record meta): build.sh passes the image
+# tag via --build-arg; the bootstrap reads NAOZHI_SANDBOX_IMAGE_VERSION and
+# emits it in the meta frame so the run record records which image ran.
+ARG IMAGE_VERSION=unknown
+ENV NAOZHI_SANDBOX_IMAGE_VERSION=$IMAGE_VERSION
+
 ENV PORT=8080
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/bootstrap"]
