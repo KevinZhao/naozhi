@@ -156,6 +156,24 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	msg := "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
 	if j != nil {
+		// §6.2 rule 3 + §7.4: a side-effecting orphan enters the human
+		// confirmation queue. The microVM was Stopped above, but it may have
+		// completed and produced its side effect (PR push, etc.) before naozhi
+		// died — only a human can tell. A side-effect-free orphan is safe to
+		// leave as a plain failed-transport record (it re-runs next tick).
+		// RuntimeSessionID is already spent (we Stopped it); kept on the record
+		// for symmetry — the queue's replay action re-Stops idempotently.
+		if j.SideEffects != nil && *j.SideEffects {
+			s.writeSandboxAttention(sandboxAttention{
+				JobID:            p.JobID,
+				RunID:            p.RunID,
+				RuntimeSessionID: p.RuntimeSessionID,
+				Reason:           attentionReasonOrphaned,
+				JobLabel:         jobTitleOrFallback(j),
+				StartedAtMS:      p.StartedAtMS,
+				CreatedAtMS:      s.attentionNowMS(),
+			}, lg)
+		}
 		// Synthetic started so subscribers get a paired lifecycle (the real
 		// started frame belonged to the previous process's broadcaster).
 		s.emitRunStarted(RunStartedEvent{

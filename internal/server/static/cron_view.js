@@ -2049,12 +2049,176 @@ function cronTimelineHtml(jobId, job, st) {
       '</button>';
     }
   }
-  return '<div class="ct-head">' +
+  // §7.4 confirmation queue banner (PR-6) — prepended above the timeline so a
+  // failed-transport / orphaned side-effecting run is visible the moment the
+  // operator opens any cron panel. Global (cross-job); '' when the queue is
+  // empty. Fetched independently by cronAttentionRefresh().
+  const queueBanner = cronAttentionQueueHtml();
+  return queueBanner +
+    '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
       costSummary +
     '</div>' +
     '<div class="ct-rows" data-collapsed="' + initiallyCollapsed + '" data-job-id="' + escAttr(jobId) + '">' + rowsHtml + '</div>' +
     (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
+}
+
+// ── §7.4 人工确认队列 (PR-6) ────────────────────────────────────────────────
+// The confirmation queue is the UI face of §6.2 double-run containment: a
+// side-effecting sandbox run that ended failed-transport (or was orphaned by a
+// naozhi restart) waits here for a human to decide. Two actions per card:
+//   确认已完成 → POST /confirm (no replay; operator verified the side effect
+//                landed already)
+//   确认未完成，重放 → POST /replay (server Stops the original microVM first
+//                       — §6.2 rule 1 — then re-injects the input snapshot)
+//
+// cronAttentionState holds the last fetched queue (array of items) so the
+// banner renders synchronously inside cronTimelineHtml; cronAttentionRefresh
+// repopulates it.
+let cronAttentionState = { items: [], loaded: false };
+
+// isAttentionRun is the tri-state predicate the queue + run rows share: a run
+// needs human attention iff its terminal class is the §6.2 unknown-fate state
+// (sandbox_transport) OR it was reconciled as an orphan. error_class is the
+// authoritative signal on the run record; the queue's `reason` is the
+// authoritative signal on a queue item. Both map to the same "needs a human".
+function isAttentionRun(errorClassOrReason) {
+  return errorClassOrReason === 'sandbox_transport' ||
+    errorClassOrReason === 'transport' ||
+    errorClassOrReason === 'orphaned';
+}
+
+// cronAttentionReasonLabel maps a queue item's reason to operator-facing text.
+function cronAttentionReasonLabel(reason) {
+  switch (reason) {
+    case 'transport': return '断流（云端状态未知）';
+    case 'orphaned': return '重启中断（孤儿 run）';
+    default: return reason || '待确认';
+  }
+}
+
+// cronAttentionQueueHtml renders the queue banner from cronAttentionState.
+// Returns '' when the queue is empty so a healthy setup shows nothing.
+function cronAttentionQueueHtml() {
+  const items = (cronAttentionState && Array.isArray(cronAttentionState.items)) ? cronAttentionState.items : [];
+  if (items.length === 0) return '';
+  const cards = items.map(cronAttentionCardHtml).join('');
+  return '<div class="ctr-queue" role="region" aria-label="待确认的云沙箱 run">' +
+      '<div class="ctr-queue-head">' +
+        '<span class="ctr-queue-title">⚠ 待确认 ' + items.length + ' 项</span>' +
+        '<span class="ctr-queue-sub">断流或重启中断的有副作用任务——请先确认副作用是否已发生</span>' +
+      '</div>' +
+      '<div class="ctr-queue-list">' + cards + '</div>' +
+    '</div>';
+}
+
+// cronAttentionCardHtml renders one queue card with both resolve actions.
+function cronAttentionCardHtml(it) {
+  if (!it || !it.run_id || !it.job_id) return '';
+  const label = it.job_label ? esc(it.job_label) : esc(it.job_id.slice(0, 8));
+  const reason = cronAttentionReasonLabel(it.reason);
+  const when = it.started_at_ms ? cronFormatTime(it.started_at_ms) : '';
+  return '<div class="ctr-queue-card" data-run-id="' + escAttr(it.run_id) + '">' +
+      '<div class="ctr-queue-card-main">' +
+        '<span class="ctr-queue-job">' + label + '</span>' +
+        '<span class="ctr-queue-reason">' + esc(reason) + '</span>' +
+        (when ? '<span class="ctr-queue-when">' + esc(when) + '</span>' : '') +
+      '</div>' +
+      '<div class="ctr-queue-actions">' +
+        '<button type="button" class="ctr-queue-confirm"' +
+          ' onclick="cronAttentionConfirm(\'' + escJs(it.run_id) + '\')"' +
+          ' title="' + escAttr('副作用已发生 / 不需重跑——从队列移除') + '">确认已完成</button>' +
+        '<button type="button" class="ctr-queue-replay"' +
+          ' onclick="cronAttentionReplay(\'' + escJs(it.job_id) + '\',\'' + escJs(it.run_id) + '\')"' +
+          ' title="' + escAttr('副作用未发生——先终止原微VM再用快照重放') + '">确认未完成，重放</button>' +
+      '</div>' +
+    '</div>';
+}
+
+// cronFormatTime renders a unix-ms timestamp as a short local time for queue
+// cards. Defensive against bad input.
+function cronFormatTime(ms) {
+  if (!ms || ms <= 0) return '';
+  try {
+    return new Date(ms).toLocaleString();
+  } catch (e) {
+    return '';
+  }
+}
+
+// cronAttentionRefresh fetches GET /api/cron/attention and repaints the queue
+// banner if the open cron panel is showing. Best-effort; auth errors are
+// swallowed (the periodic poll retries).
+async function cronAttentionRefresh() {
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const data = await fetchJSON('/api/cron/attention', { headers, timeoutMs: 8000 });
+    cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
+  } catch (e) {
+    if (e && e.status) return; // auth / rate-limit — leave the last good state
+    cronAttentionState = { items: [], loaded: true };
+  }
+  if (cronDetailJobId !== null) renderCronTimelinePanel(cronDetailJobId);
+}
+
+// cronAttentionConfirm resolves a queue item as "already done" (no replay).
+async function cronAttentionConfirm(runId) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('确认 run', r.status, raw);
+      return;
+    }
+  } catch (e) {
+    showAPIError('确认 run', 0, String(e));
+    return;
+  }
+  await cronAttentionRefresh();
+}
+
+// cronAttentionReplay triggers a replay from the queue card (§7.4 `确认未完成，
+// 重放`). The server embeds the §6.2 rule-1 Stop-confirm; a 409 means the
+// original microVM could not be confirmed dead — surface it and keep the card.
+async function cronAttentionReplay(jobId, runId) {
+  await cronReplayRunInner(jobId, runId, true);
+}
+
+// cronReplayRun is the §7.3 detail-view replay button handler (success /
+// failed-clean runs). Thin wrapper over the shared inner so both entry points
+// share the POST + error mapping.
+async function cronReplayRun(jobId, runId) {
+  await cronReplayRunInner(jobId, runId, false);
+}
+
+// cronReplayRunInner POSTs /replay and reconciles UI. fromQueue=true also
+// refreshes the queue banner after a successful replay (the card disappears).
+async function cronReplayRunInner(jobId, runId, fromQueue) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/replay',
+      { method: 'POST', headers, body: JSON.stringify({ job_id: jobId }) });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('重放 run', r.status, raw);
+      return;
+    }
+  } catch (e) {
+    showAPIError('重放 run', 0, String(e));
+    return;
+  }
+  if (fromQueue) {
+    await cronAttentionRefresh();
+  }
+  // Refresh the timeline so the new replay run shows up at the head.
+  if (cronDetailJobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
 }
 
 // cronTimelineCostSummaryHtml sums cost_usd over the loaded runs for the
@@ -2225,6 +2389,12 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   // metaBar (above) is prepended. Both empty for local / pre-snapshot runs.
   const snapshotPanel = cronSnapshotPanelHtml(detail.__snapshot);
 
+  // §7.3 replay chain + action row (PR-6). The replay-of badge links this run
+  // to the original it re-executed; the replay button re-injects the input
+  // snapshot. failed-transport runs DISABLE the button (§6.2: fate unknown —
+  // route through the §7.4 queue), success/failed-clean ENABLE it.
+  const replayBar = cronReplayBarHtml(jobId, runId, detail);
+
   let body;
   if (detail.error_msg) {
     const errLabel = detail.error_class
@@ -2253,7 +2423,40 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     // transcript 字段未定义 = fetch 还在飞，给加载态。
     body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
-  return metaBar + body + snapshotPanel;
+  return metaBar + replayBar + body + snapshotPanel;
+}
+
+// cronReplayBarHtml renders the §7.3 replay action row for a sandbox run.
+// Returns '' for non-sandbox runs (detail.sandbox absent) so local runs carry
+// no replay UI. Three states drive the button (§6.2 safety on the UI face):
+//
+//   - failed-transport (error_class === 'sandbox_transport'): button DISABLED,
+//     tooltip routes the operator to the §7.4 confirmation queue (replaying a
+//     run whose microVM fate is unknown could double-run; the queue does the
+//     Stop-confirm first).
+//   - success / failed-clean: button ENABLED — safe to re-inject the snapshot.
+//
+// The replay-of badge (when detail.replay_of is set) shows this run was itself
+// a replay, linking back to the original (click jumps to it).
+function cronReplayBarHtml(jobId, runId, detail) {
+  if (!detail || !detail.sandbox) return '';
+  const parts = [];
+  if (detail.replay_of) {
+    parts.push('<button type="button" class="ctr-replay-of"' +
+      ' onclick="cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(detail.replay_of) + '\')"' +
+      ' title="' + escAttr('这是一次重放，点击查看原始 run') + '">↩ 重放自 ' + esc(String(detail.replay_of).slice(0, 8)) + '</button>');
+  }
+  const isTransport = detail.error_class === 'sandbox_transport';
+  if (isTransport) {
+    parts.push('<button type="button" class="ctr-replay-btn" disabled' +
+      ' title="' + escAttr('断流，云端状态未知——请到「待确认」队列先确认终止再重放') + '">↻ 重放（已禁用）</button>');
+    parts.push('<span class="ctr-replay-hint">⚠ 状态未知，走待确认队列</span>');
+  } else {
+    parts.push('<button type="button" class="ctr-replay-btn"' +
+      ' onclick="cronReplayRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' title="' + escAttr('用同一份输入快照重新跑一遍（进全新微VM）') + '">↻ 重放</button>');
+  }
+  return '<div class="ctr-replay-bar">' + parts.join('') + '</div>';
 }
 
 // cronSandboxMetaBarHtml renders the §7.3 run-detail meta bar from the
@@ -3564,6 +3767,7 @@ function openCronDetail(jobId, originRow) {
     cronExpandedRunId.runId = null;
   }
   cronDetailJobId = jobId;
+  cronAttentionRefresh().catch(() => {}); // §7.4: pull confirmation queue on open
   // openCronPanel handles selectedKey reset / WS unsubscribe / mobile
   // shell push and triggers renderCronPanel — that path repaints both
   // the list (with .is-active on the new row) AND the drawer in one

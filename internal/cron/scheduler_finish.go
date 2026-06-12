@@ -193,6 +193,12 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 	// Phase 1 accepts blob accumulation (one ≤MaxPromptBytes blob per
 	// distinct prompt, deduped) as bounded-in-practice.
 	s.deleteJobSnapshots(jobID)
+	// §7.4: drop any unresolved confirmation-queue records for this job — a
+	// deleted job has nothing left to confirm or replay, and a stale queue
+	// entry would let the operator "replay" a run whose job no longer exists
+	// (ReplaySandboxRun would then fail ErrJobNotFound, but better to not show
+	// it at all).
+	s.deleteJobAttention(jobID)
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
