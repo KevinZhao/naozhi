@@ -233,6 +233,8 @@ type cronRunSummaryView struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	ErrorClass string `json:"error_class,omitempty"`
+	// ReplayOf links a replay run to its origin (agentcore §7.3 chain badge).
+	ReplayOf string `json:"replay_of,omitempty"`
 }
 
 // cronSummaryToView projects a cronpkg.CronRunSummary into the wire shape used
@@ -248,6 +250,7 @@ func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 		DurationMS: r.DurationMS,
 		SessionID:  r.SessionID,
 		ErrorClass: string(r.ErrorClass),
+		ReplayOf:   r.ReplayOf,
 	}
 	if !r.EndedAt.IsZero() {
 		row.EndedAt = r.EndedAt.UnixMilli()
@@ -322,6 +325,8 @@ type cronRunDetailView struct {
 	ResultBytes int    `json:"result_bytes,omitempty"`
 	ErrorClass  string `json:"error_class,omitempty"`
 	ErrorMsg    string `json:"error_msg,omitempty"`
+	// ReplayOf links a replay run to its origin (agentcore §7.3 chain badge).
+	ReplayOf string `json:"replay_of,omitempty"`
 }
 
 // cronJobView is the per-job element inside cronListResp.Jobs. Promoted to
@@ -354,6 +359,9 @@ type cronJobView struct {
 	// Placement 是运行位置（agentcore-cloud-sandbox RFC §7.2 徽标数据源）。
 	// ""/"local" 本机；"sandbox" 云沙箱。
 	Placement string `json:"placement,omitempty"`
+	// SideEffects 是"有外部副作用"声明（agentcore §6.2 双跑围栏）。tri-state
+	// pointer：nil 渲染为 legacy-default(关)，与 Notify 一致。
+	SideEffects *bool `json:"side_effects,omitempty"`
 	// Missed / MissedSince: cron-v2-polish §3.3 Increment C.
 	// missed=true 表示进程休眠 / 重启空窗期该 job 错过了至少一次调度。
 	// MissedSince 是"按 schedule 算上一次应跑的毫秒时刻"，UI 可以用来
@@ -1049,6 +1057,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			FreshContext:    j.FreshContext,
 			Backend:         j.Backend,
 			Placement:       j.Placement,
+			SideEffects:     j.SideEffects,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
@@ -1231,6 +1240,9 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// microVM. validateCronPlacement gates values and the Phase 1
 		// sandbox guardrails (no work_dir).
 		Placement string `json:"placement,omitempty"`
+		// SideEffects declares external mutation (agentcore §6.2). nil =
+		// off; the §7.4 confirmation queue keys off it for sandbox jobs.
+		SideEffects *bool `json:"side_effects,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -1336,6 +1348,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
 		Placement:      req.Placement,
+		SideEffects:    req.SideEffects,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
