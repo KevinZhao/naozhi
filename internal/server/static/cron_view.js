@@ -2180,47 +2180,48 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
 
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
-
-  if (detail.error_msg) {
-    const errLabel = detail.error_class
-      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
-      : '';
-    return '<div class="ctr-final err">' +
-        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
-        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
-      '</div>';
-  }
-
-  if (detail.result) {
-    return '<div class="ctr-final">' +
-        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
-      '</div>';
-  }
-
+  let lastAssistant = null;
   if (hasTurns) {
     const turns = transcript.turns;
-    let lastAssistant = null;
     for (let i = turns.length - 1; i >= 0; i--) {
       const t = turns[i];
       if (t && t.kind === 'assistant' && t.text) { lastAssistant = t; break; }
     }
-    if (lastAssistant) {
-      return '<div class="ctr-final">' +
-          '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
-        '</div>';
-    }
   }
 
-  // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
-  // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
-  if (transcript) {
+  // §7.3 input-snapshot collapsible — appended below the output for sandbox
+  // runs (empty for local / pre-snapshot runs).
+  const snapshotPanel = cronSnapshotPanelHtml(detail.__snapshot);
+
+  let body;
+  if (detail.error_msg) {
+    const errLabel = detail.error_class
+      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
+      : '';
+    body = '<div class="ctr-final err">' +
+        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
+        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
+      '</div>';
+  } else if (detail.result) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
+      '</div>';
+  } else if (lastAssistant) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
+      '</div>';
+  } else if (transcript) {
+    // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
+    // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
     const msg = transcript.fallback === 'raw'
       ? '对话流无法解析，没有可展示的最终输出。'
       : '这次 run 没有保存最终输出。';
-    return '<div class="ctr-empty-detail">' + msg + '</div>';
+    body = '<div class="ctr-empty-detail">' + msg + '</div>';
+  } else {
+    // transcript 字段未定义 = fetch 还在飞，给加载态。
+    body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
-  // transcript 字段未定义 = fetch 还在飞，给加载态。
-  return '<div class="ctr-empty-detail">正在加载最终输出…</div>';
+  return body + snapshotPanel;
 }
 
 // cronRunTranscriptHtml renders a list of transcript turns as a vertical
@@ -2453,10 +2454,22 @@ async function cronTimelineFetchDetail(jobId, runId) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    // Preserve sticky annotations (__transcript / __snapshot) across a
+    // collapse→re-expand re-fetch: wholesale replacement would drop them
+    // and make the snapshot panel flicker/disappear if its re-fetch fails
+    // (review PR-4 F5). The annotation fetchers below re-stash fresh data.
+    const prevDetail = st.details[runId];
     st.details[runId] = data || { __error: 'empty response' };
+    if (prevDetail && st.details[runId] && !st.details[runId].__error) {
+      if (prevDetail.__transcript) st.details[runId].__transcript = prevDetail.__transcript;
+      if (prevDetail.__snapshot) st.details[runId].__snapshot = prevDetail.__snapshot;
+    }
     // Fire-and-forget transcript fetch. Silent on failure; the 4-tab
     // renderer falls back to the raw view automatically.
     cronTimelineFetchTranscript(jobId, runId).catch(() => {});
+    // §7.3 input-snapshot fetch (sandbox runs only; local runs get
+    // available:false). Independent fire-and-forget like the transcript.
+    cronTimelineFetchSnapshot(jobId, runId).catch(() => {});
   } catch (err) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
@@ -2502,6 +2515,66 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     }
   }
   if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+}
+
+// cronTimelineFetchSnapshot fetches the §7.3 input snapshot (content-
+// addressed prompt + model + secret ref names) for one run and stashes it
+// on detail.__snapshot. Independent of the detail/transcript fetches so a
+// snapshot miss never cascades. available:false for local / pre-snapshot
+// runs — the renderer then omits the panel.
+async function cronTimelineFetchSnapshot(jobId, runId) {
+  const st = getCronTimelineState(jobId);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
+    const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    if (st.details && st.details[runId]) {
+      st.details[runId].__snapshot = data || { available: false };
+    }
+  } catch (_err) {
+    if (st.details && st.details[runId]) {
+      st.details[runId].__snapshot = { available: false };
+    }
+  }
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+}
+
+// cronSnapshotPanelHtml renders the §7.3 input-snapshot collapsible from a
+// run's __snapshot. Returns '' when the run has no snapshot (local run /
+// pre-snapshot / fetch in flight) so nothing renders for those.
+//
+// SECURITY: secret_refs are NAMES only (server never sends values, §5.1);
+// the panel renders them as plain labels — there is no value to leak.
+function cronSnapshotPanelHtml(snap) {
+  if (!snap || !snap.available) return '';
+  const rows = [];
+  if (snap.model) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">模型</span>' +
+      '<span class="ctr-snap-v">' + esc(snap.model) + '</span></div>');
+  }
+  if (snap.image_version) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">镜像</span>' +
+      '<span class="ctr-snap-v">' + esc(snap.image_version) + '</span></div>');
+  }
+  if (snap.prompt_hash) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">提示词哈希</span>' +
+      '<span class="ctr-snap-v mono">' + esc(snap.prompt_hash.slice(0, 16)) + '…</span></div>');
+  }
+  if (Array.isArray(snap.secret_refs) && snap.secret_refs.length > 0) {
+    const names = snap.secret_refs.map(n => '<code>' + esc(n) + '</code>').join(' ');
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">密钥引用</span>' +
+      '<span class="ctr-snap-v">' + names + '</span></div>');
+  }
+  const promptBlock = snap.prompt
+    ? '<div class="ctr-snap-prompt"><div class="ctr-snap-k">输入提示词</div>' +
+        '<pre class="ctr-snap-pre">' + esc(snap.prompt) + '</pre></div>'
+    : '';
+  return '<details class="ctr-snapshot">' +
+      '<summary>输入快照（可重放）</summary>' +
+      '<div class="ctr-snap-body">' + rows.join('') + promptBlock + '</div>' +
+    '</details>';
 }
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。

@@ -207,3 +207,69 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	httputil.WriteJSON(w, out)
 }
+
+// cronRunSnapshotResp is the wire shape for GET /api/cron/runs/{run}/snapshot
+// — the §7.3 input-snapshot panel (debug / replay preview). Carries the
+// content-addressed manifest fields plus the resolved prompt text. Secrets
+// appear ONLY as reference names (secret_refs), never values (§5.1 red line);
+// the panel renders the names and the UI never has a value to leak.
+type cronRunSnapshotResp struct {
+	Available    bool     `json:"available"`
+	Prompt       string   `json:"prompt,omitempty"`
+	PromptHash   string   `json:"prompt_hash,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	ImageVersion string   `json:"image_version,omitempty"`
+	SecretRefs   []string `json:"secret_refs,omitempty"`
+}
+
+// HandleRunSnapshot serves GET /api/cron/runs/{run_id}/snapshot?job_id= —
+// the §7.3 input-snapshot view. Shares the runs rate limiter (FS I/O).
+// Returns {available:false} (not 404) for a run with no snapshot (local run
+// / snapshots-disabled / pre-snapshot run) so the panel renders a
+// deterministic "unavailable" state.
+func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	runID := r.PathValue("run_id")
+	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
+		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+
+	man, ok, err := h.scheduler.SandboxRunSnapshotManifest(jobID, runID)
+	if err != nil {
+		slog.Warn("cron sandbox: snapshot manifest read error", "job_id", jobID, "run_id", runID, "err", err)
+		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
+		return
+	}
+	if !ok {
+		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
+		return
+	}
+	prompt, perr := h.scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
+	if perr != nil {
+		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
+		// Still return the manifest metadata; prompt blob may have been GC'd.
+	}
+	httputil.WriteJSON(w, cronRunSnapshotResp{
+		Available: true,
+		// Prompt was validated non-control at the cron write edge, but
+		// SanitizeForLog defensively in case a blob predates that policy.
+		Prompt:       osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
+		PromptHash:   man.PromptHash,
+		Model:        osutil.SanitizeForLog(man.Model, 128),
+		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),
+		SecretRefs:   man.SecretRefs,
+	})
+}

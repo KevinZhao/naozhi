@@ -66,6 +66,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/cron/runs/{run_id}/snapshot",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/cron/runs/{run_id}/transcript",
     "handler_type": "*dashcron.Handlers"
   },

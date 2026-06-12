@@ -205,6 +205,14 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		StartedAtMS:      a.startedAt.UnixMilli(),
 	}, a.lg)
 
+	// §5.1/§5.2 input snapshot: persist the run's INPUT (content-addressed
+	// prompt + model) BEFORE the invoke so a replay re-injects the exact
+	// payload. Phase 1 has no injected secrets, so SecretRefs is empty; the
+	// image version is unknown until the run reports it (the meta frame), so
+	// it is "" here — replay falls back to the runtime's current image.
+	// Best-effort (logs on failure, never fails the run).
+	s.writeSandboxSnapshot(a.snap.jobID, a.runID, a.prompt, a.model, "", nil, a.lg)
+
 	sink, closeSink := s.sandboxEventSink(a.snap.jobID, a.runID, a.lg)
 	outcome, err := s.sandbox.RunJob(ctx, SandboxJob{
 		JobID:            a.snap.jobID,

@@ -1919,6 +1919,16 @@ body.kbd-open .input-hints{display:none}
 .ctr-detail .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
 .ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
 /* 最终输出单屏视图：error → result → 兜底 assistant 文本（cronTimelineDetailHtml 决策链）*/
+/* §7.3 input-snapshot collapsible (replay preview). */
+.ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
+.ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}
+.ctr-detail .ctr-snap-body{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.ctr-detail .ctr-snap-row{display:flex;gap:8px;font-size:var(--nz-fs-xs)}
+.ctr-detail .ctr-snap-k{color:var(--nz-text-mute);min-width:72px;flex-shrink:0}
+.ctr-detail .ctr-snap-v{color:var(--nz-text);word-break:break-word}
+.ctr-detail .ctr-snap-v.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.ctr-detail .ctr-snap-prompt{margin-top:4px}
+.ctr-detail .ctr-snap-pre{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto}
 .ctr-detail .ctr-final{padding:2px 0}
 .ctr-detail .ctr-final-label{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .ctr-detail .ctr-final.err .ctr-final-label{color:var(--nz-red)}
