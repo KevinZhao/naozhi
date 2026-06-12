@@ -21,7 +21,7 @@ func TestDashboardJS_CronRunDetailMetaBar(t *testing.T) {
 		// meta bar builder reads the detail endpoint's `sandbox` receipt.
 		"function cronSandboxMetaBarHtml(sb)",
 		"const metaBar = cronSandboxMetaBarHtml(detail.sandbox);",
-		"return metaBar + body;",
+		"return metaBar + body", // metaBar prepended; snapshotPanel appended after (PR-4)
 		// receipt fields surfaced.
 		"sb.image_version",
 		"sb.memory_peak_bytes",
