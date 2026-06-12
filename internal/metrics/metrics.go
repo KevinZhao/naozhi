@@ -339,6 +339,14 @@ var (
 	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
 
+	// CronSandboxRunFailedTotal counts sandbox-placement cron runs that
+	// ended in any non-success state (failed-clean, failed-transport,
+	// unavailable). Sandbox failures additionally land in the per-state
+	// counters above; this dedicated counter exists because transport
+	// failures carry §6.2 double-run risk and operators alert on them
+	// specifically (agentcore-cloud-sandbox RFC §6.2).
+	CronSandboxRunFailedTotal = expvar.NewInt("naozhi_cron_sandbox_run_failed_total")
+
 	// SysessionRunStartedTotal counts sysession daemon run starts (after the
 	// per-daemon CAS gate, before tick IO). Mirrors CronRunStartedTotal for
 	// the sysession subsystem (#1723 RFC §6 Phase 1.5). Bumped unconditionally

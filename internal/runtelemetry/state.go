@@ -76,6 +76,22 @@ const (
 	ErrClassCronWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassCronOverlapSkipped     ErrorClass = "overlap_skipped"
 
+	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): the two
+	// failure shapes of a run-once cloud job. Distinct classes because they
+	// differ in replay safety — "sandbox_failed" is the CLI's own attested
+	// failure (failed-clean, replay reasonably safe); "sandbox_transport"
+	// means the stream broke without attestation (failed-transport, §6.2
+	// containment applies and the dashboard badge goes red, RFC §7.2).
+	// success needs no class. RunState stays within the existing wire set
+	// (failed) — the three-state badge derives from error_class, avoiding
+	// a coordinated RunState wire bump.
+	ErrClassCronSandboxFailed    ErrorClass = "sandbox_failed"
+	ErrClassCronSandboxTransport ErrorClass = "sandbox_transport"
+	// ErrClassCronSandboxUnavailable: job declared placement=sandbox but
+	// the scheduler has no sandbox executor wired (config missing /
+	// disabled). Permanent config error, not a transient failure.
+	ErrClassCronSandboxUnavailable ErrorClass = "sandbox_unavailable"
+
 	// sysession-specific (wire values match current sysession package).
 	ErrClassSysessionUpstream   ErrorClass = "upstream"
 	ErrClassSysessionValidation ErrorClass = "validation"

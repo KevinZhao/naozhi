@@ -211,7 +211,16 @@ func TestRunInflight_FinalizeReleaseContract(t *testing.T) {
 		Trigger:   TriggerScheduled,
 	})
 
-	gauge := expvar.NewInt("test_finalize_release_gauge_" + t.Name())
+	// Get-or-New: expvar.NewInt panics on re-registration, and `go test
+	// -count>1` (the RFC §3.4 Phase C race gate runs -count=10) re-enters
+	// this test in the same process — the expvar registry is global and
+	// survives iterations. Reuse is sound: each iteration nets the gauge
+	// back to 0 via the paired Add(1)/Add(-1) below.
+	gaugeName := "test_finalize_release_gauge_" + t.Name()
+	gauge, _ := expvar.Get(gaugeName).(*expvar.Int)
+	if gauge == nil {
+		gauge = expvar.NewInt(gaugeName)
+	}
 	gauge.Add(1) // mirror executeOpt's CAS-true Add(+1).
 
 	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
