@@ -210,7 +210,7 @@
       state.activeStatus = row.status || '';
     }
     showBreadcrumb();
-    el.innerHTML = '<div class="empty-state loading-indicator">正在加载 agent 内部事件…</div>';
+    el.innerHTML = '<div class="empty-state loading-indicator">加载中…</div>';
 
     // Fetch the initial event slice via HTTP; WS subscribe runs in parallel
     // and catches up afterwards. The HTTP path handles 202/404/tombstone.

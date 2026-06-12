@@ -81,7 +81,7 @@
       return a.kind === state.kind &&
         (!q || a.name.toLowerCase().indexOf(q) >= 0 || (a.description || '').toLowerCase().indexOf(q) >= 0);
     });
-    if (!items.length) { box.innerHTML = '<div class="asset-empty">没有 ' + esc(state.kind) + ' 资产</div>'; return; }
+    if (!items.length) { box.innerHTML = '<div class="asset-empty">暂无 ' + esc(state.kind) + ' 资产</div>'; return; }
 
     var groups = {}, order = [];
     items.forEach(function (a) {
@@ -106,7 +106,7 @@
       html += '<div class="asset-grpitems ' + (collapsed ? 'collapsed' : '') + '" data-gi="' + esc(g) + '">';
       grp.items.forEach(function (a, i) {
         var d = a.description ? '<div class="asset-rdesc">' + esc(a.description) + '</div>'
-          : '<div class="asset-rdesc asset-nodesc">（无 frontmatter — 名取目录名）</div>';
+          : '<div class="asset-rdesc asset-nodesc">（无描述信息，名称取自目录名）</div>';
         html += '<div class="asset-row' + (state.sel === a ? ' active' : '') + '" data-g="' + esc(g) + '" data-i="' + i + '">' +
           '<div class="asset-rname">' + esc(a.name) + '</div>' + d + '</div>';
       });
@@ -118,7 +118,7 @@
 
   function renderPlugins(cards) {
     var plugins = (state.inv && state.inv.plugins) || [];
-    if (!plugins.length) { cards.innerHTML = '<div class="asset-empty">没有已安装插件</div>'; return; }
+    if (!plugins.length) { cards.innerHTML = '<div class="asset-empty">暂无已安装插件</div>'; return; }
     cards.innerHTML = plugins.map(function (p) {
       var counts = Object.keys(p.asset_counts || {}).map(function (k) {
         return '<span class="acc"><b>' + p.asset_counts[k] + '</b> ' + esc(k) + '</span>';
@@ -164,7 +164,7 @@
         html += '<pre class="araw">' + esc(txt) + '</pre>';
         body.innerHTML = html;
       })
-      .catch(function (e) { body.innerHTML = '<div class="asset-empty">读取失败：' + esc(e.message) + '</div>'; });
+      .catch(function (e) { body.innerHTML = '<div class="asset-empty">加载失败：' + esc(e.message) + '</div>'; });
   }
 
   function backToList() {
