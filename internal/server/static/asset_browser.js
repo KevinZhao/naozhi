@@ -159,7 +159,7 @@
       .then(function (txt) {
         var html = '';
         if (a.anchor) {
-          html += '<div class="asset-anchor-note">该资产位于含多条目的文件，已返回整文件；定位条目：<code>' + esc(a.anchor) + '</code></div>';
+          html += '<div class="asset-anchor-note">该资产位于含多条目的文件，已返回整文件；定位条目：<code class="md-code">' + esc(a.anchor) + '</code></div>';
         }
         html += '<pre class="araw">' + esc(txt) + '</pre>';
         body.innerHTML = html;
