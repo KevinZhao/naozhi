@@ -1724,7 +1724,7 @@ function sessionCardHtml(s) {
   // template) so the surrounding .sc-meta layout stays identical.
   const nodeBadge = '';
 
-  const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
+  const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">&times;</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
@@ -2615,7 +2615,7 @@ function renderMainShell() {
   // shares the .btn-rename hover-reveal treatment so the header stays calm
   // by default.
   const downloadBtn = selectedKey
-    ? '<button class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="Download session as Markdown">⬇</button>'
+    ? '<button class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">⬇</button>'
     : '';
 
   main.innerHTML =
@@ -2660,7 +2660,7 @@ function renderMainShell() {
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
         '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
         '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
-        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
+        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="停止" aria-label="停止当前回合">&#x25A0;</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
       '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
@@ -5804,7 +5804,7 @@ function showAuthModal() {
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
         '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
@@ -11218,7 +11218,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll"><div class="empty-state">加载中...</div></div>' +
+    '<div class="events" id="events-scroll"><div class="empty-state">加载中…</div></div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
