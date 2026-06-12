@@ -216,23 +216,13 @@ function startMockServer(overrides = {}) {
       res.end(manifest);
       return;
     }
-    if (pathname === '/static/dashboard.js') {
+    // dashboard.html 引用 5 个 /static/*.js（nz_util / dashboard / cron_view /
+    // agent_view / asset_browser，PR#1954 拆分后）。逐个白名单伺服跟不上拆分
+    // 节奏：漏掉 nz_util.js 时 dashboard.js 因 window.nz 未定义直接崩，所有
+    // e2e 卡在 .session-card 不出现。改为目录伺服（仅 .js、basename 防穿越）。
+    if (pathname.startsWith('/static/') && pathname.endsWith('.js')) {
       try {
-        const js = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.js'));
-        res.writeHead(200, { 'Content-Type': 'application/javascript' });
-        res.end(js);
-      } catch {
-        res.writeHead(404);
-        res.end();
-      }
-      return;
-    }
-    // dashboard.html 末尾还引用 agent_view.js — 不伺服会触发 global-error
-    // toast 干扰 e2e 视觉截图（CSP script-src sha256 也无法拦下 404 触发的
-    // requestfailed 路径走 window.error handler）。
-    if (pathname === '/static/agent_view.js') {
-      try {
-        const js = fs.readFileSync(path.join(STATIC_DIR, 'agent_view.js'));
+        const js = fs.readFileSync(path.join(STATIC_DIR, path.basename(pathname)));
         res.writeHead(200, { 'Content-Type': 'application/javascript' });
         res.end(js);
       } catch {
@@ -296,6 +286,26 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(eventsData));
+      return;
+    }
+
+    // Full-size attachment fetch used by the lightbox (data-full URL).
+    // Serves a tiny valid PNG so naturalWidth>0; ?path=missing.png returns
+    // 404 to exercise the thumb-fallback path.
+    if (pathname === '/api/sessions/attachment' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const p = url.searchParams.get('path') || '';
+      if (p.includes('missing')) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      );
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(png);
       return;
     }
 

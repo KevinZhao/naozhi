@@ -731,6 +731,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .lb-tool-btn{width:36px;height:36px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.55);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,border-color .15s;-webkit-tap-highlight-color:transparent;line-height:1}
 .lb-tool-btn:hover{background:rgba(0,0,0,.8);border-color:rgba(255,255,255,.45)}
 .lb-tool-btn:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+.lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.55);color:#fff;font-size:var(--nz-fs-xl);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1;transition:background .15s,border-color .15s,opacity .15s;-webkit-tap-highlight-color:transparent;line-height:1;padding:0 0 3px}
+.lb-nav:hover{background:rgba(0,0,0,.8);border-color:rgba(255,255,255,.45)}
+.lb-nav:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+.lb-nav[aria-disabled="true"]{opacity:.3;cursor:default;pointer-events:none}
+.lb-nav-prev{left:14px}
+.lb-nav-next{right:14px}
+.lb-counter{position:absolute;top:18px;left:18px;color:rgba(255,255,255,.85);font-size:var(--nz-fs-sm);background:rgba(0,0,0,.55);padding:6px 14px;border-radius:var(--nz-radius-lg);pointer-events:none;z-index:1}
+.lightbox-overlay.lb-single .lb-nav,.lightbox-overlay.lb-single .lb-counter{display:none}
 .input-row{display:flex;gap:8px;align-items:flex-end}
 .input-row #msg-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:120px;outline:none;line-height:1.4;overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
 .input-row #msg-input:focus{border-color:var(--nz-accent)}
