@@ -56,9 +56,11 @@ type JobInit struct {
 	Title          string
 	WorkDir        string
 	Backend        string
+	Placement      string
 	NotifyPlatform string
 	NotifyChatID   string
 	Notify         *bool
+	SideEffects    *bool
 	FreshContext   bool
 	Paused         bool
 }
@@ -98,9 +100,11 @@ func NewJobFull(in JobInit) *Job {
 		Title:          in.Title,
 		WorkDir:        in.WorkDir,
 		Backend:        in.Backend,
+		Placement:      in.Placement,
 		NotifyPlatform: in.NotifyPlatform,
 		NotifyChatID:   in.NotifyChatID,
 		Notify:         in.Notify,
+		SideEffects:    in.SideEffects,
 		FreshContext:   in.FreshContext,
 		Paused:         in.Paused,
 	}
@@ -149,6 +153,27 @@ type Job struct {
 	// unknown but well-formed backend IDs.
 	// 引入背景：docs/rfc/multi-backend.md §9 Sprint 6c。
 	Backend string `json:"backend,omitempty"`
+
+	// Placement selects WHERE the job runs — the second axis of the
+	// flavor × placement model (docs/rfc/agentcore-cloud-sandbox.md §4.2).
+	// "" / "local" = this host via the session router (historical
+	// behaviour, zero migration for existing cron_jobs.json);
+	// "sandbox" = run-once AgentCore microVM (payload injection, held
+	// event stream, burn on completion — §3.1). validatePlacement gates
+	// every write path; executeOpt branches on it before touching the
+	// router. Phase 1 sandbox guardrails (≤60min, no local MCP, no
+	// workspace) are enforced by the sandbox executor, not here.
+	Placement string `json:"placement,omitempty"`
+
+	// SideEffects declares that this job mutates external state (pushes a
+	// branch, opens a PR, sends a message…). Tri-state pointer like Notify:
+	// nil = legacy default (treated as false). It is the §6.2 double-run
+	// fence input: a sandbox run that ends failed-transport (microVM fate
+	// unknown) goes to the human confirmation queue instead of being
+	// silently eligible for auto-replay when SideEffects is true. Only
+	// meaningful for placement=sandbox today, but stored on every job so a
+	// future local-placement use can read it too.
+	SideEffects *bool `json:"side_effects,omitempty"`
 
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
@@ -306,6 +331,13 @@ const (
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
 	ErrClassPanic ErrorClass = "panic"
+	// Sandbox placement classes (agentcore-cloud-sandbox RFC §6.1/§6.2).
+	// Wire values mirror runtelemetry.ErrClassCronSandbox* — see the
+	//三态 rationale there. Transport is the §6.2 double-run-risk state;
+	// the dashboard renders it as the red ☁️ badge (RFC §7.2).
+	ErrClassSandboxFailed      ErrorClass = "sandbox_failed"
+	ErrClassSandboxTransport   ErrorClass = "sandbox_transport"
+	ErrClassSandboxUnavailable ErrorClass = "sandbox_unavailable"
 )
 
 // hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是

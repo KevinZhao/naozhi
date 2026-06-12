@@ -412,6 +412,12 @@ func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID
 		s.cron.Remove(removeEntryID)
 	}
 	s.resetRouterStub(jobID)
+	// agentcore §6.2: a sandbox job deleted mid-run must Stop its microVM
+	// (the deliberate Phase 1 gap, now closeable via the pending record's
+	// runtime session id). Best-effort + idempotent; runs before
+	// deleteJobRuns so the pending file is resolved before the runs/ tree
+	// (where Phase 2 will park snapshots) is swept.
+	s.stopSandboxRunsForJob(jobID)
 	s.deleteJobRuns(jobID)
 	s.cleanupRunningJobIfIdle(jobID)
 }
@@ -511,6 +517,14 @@ type JobUpdate struct {
 	// 字符/长度由 dashboard handler 的 validateCronBackend 先行把关；
 	// 未知 backend 不在此处拒绝（router wrapperFor 会 fallback）。
 	Backend *string
+	// Placement 是运行位置（agentcore-cloud-sandbox RFC §4.2）。nil 保持
+	// 原值；pointer 到 "" 或 "local" 回落本机；"sandbox" 走 AgentCore
+	// run-once。validatePlacement 在 UpdateJob 入口拒绝未知值。
+	Placement *string
+	// SideEffects 切换"任务有外部副作用"声明（agentcore §6.2 双跑围栏）。
+	// nil 保持原值；pointer 到 true/false 写显式三态。无 clear 语义——
+	// 与 Placement 一样属"运行属性"，不像 Notify 需要回 legacy-default。
+	SideEffects *bool
 }
 
 // applyTo writes every non-nil JobUpdate field onto j. R238-ARCH-14
@@ -568,6 +582,13 @@ func (upd JobUpdate) applyTo(j *Job) {
 	}
 	if upd.Backend != nil {
 		j.Backend = *upd.Backend
+	}
+	if upd.Placement != nil {
+		j.Placement = *upd.Placement
+	}
+	if upd.SideEffects != nil {
+		v := *upd.SideEffects
+		j.SideEffects = &v
 	}
 }
 
@@ -661,6 +682,11 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, fmt.Errorf("cron: backend contains invalid characters")
 		}
 	}
+	if upd.Placement != nil {
+		if err := validatePlacement(*upd.Placement); err != nil {
+			return nil, fmt.Errorf("cron: %w", err)
+		}
+	}
 
 	// R239-GO-4: critical section uses defer Unlock so any future return
 	// path added inside this block stays correctly unlocked. The closure
@@ -720,6 +746,16 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		// the correct ones to keep.
 		preUpdate := *j
 		upd.applyTo(j)
+
+		// agentcore-cloud-sandbox §4.4 Phase 1 guardrail on the EFFECTIVE
+		// post-patch combination: a patch that flips placement=sandbox on a
+		// job that already has a work_dir (or adds a work_dir to a sandbox
+		// job) must fail atomically. Restore the pre-patch job — this
+		// return aborts before persist and before any re-registration.
+		if placementIsSandbox(j.Placement) && j.WorkDir != "" {
+			*j = preUpdate
+			return Job{}, nil, ErrSandboxWorkDir
+		}
 
 		if upd.Schedule != nil && *upd.Schedule != j.Schedule {
 			// R236-QA-08: snapshot the old schedule for rollback.
@@ -1060,6 +1096,19 @@ func (s *Scheduler) cronEntryGoneLocked(id cronEntryID) bool {
 // Returns an error if the job is not found, paused, or has no prompt.
 func (s *Scheduler) TriggerNow(id string) error {
 	s.mu.RLock()
+	// R20260610-085718-LB-7 (#2012): gate triggerWG.Add behind the stopped
+	// flag. stopWithCtx sets s.stopped (CAS) before draining triggerWG via
+	// triggerWG.Wait(); net/http does not interrupt in-flight handlers, so an
+	// in-flight HandleTrigger could otherwise land triggerWG.Add(1) — a
+	// positive delta from a zero counter — concurrently with that Wait,
+	// violating sync.WaitGroup's "Add-before-Wait" contract and letting a
+	// trigger goroutine escape the drain barrier into router.Shutdown /
+	// persistOnShutdown. Reading s.stopped under s.mu.RLock pairs the gate
+	// with the consistent-instant snapshot the rest of TriggerNow relies on.
+	if s.stopped.Load() {
+		s.mu.RUnlock()
+		return ErrSchedulerStopped
+	}
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.RUnlock()

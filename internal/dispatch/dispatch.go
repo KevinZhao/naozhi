@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -867,9 +868,16 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 // In passthrough mode it also fires ErrSessionReset to any in-flight
 // SendPassthrough callers so the IM user sees the turn as cancelled rather
 // than silently hanging.
-func (d *Dispatcher) discardQueue(key string) {
+//
+// #2013: it also clears the HOURGLASS reaction of every dropped message so a
+// /new or /clear issued while follow-ups are queued does not leave dangling
+// ⏳ marks. ctx/msg supply the platform and a cleanup deadline; both are the
+// command handler's live request context (not yet Done) so no detach is
+// needed here.
+func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMessage, key string) {
 	if d.queue != nil {
-		d.queue.Discard(key)
+		dropped := d.queue.DiscardAndReturn(key)
+		d.clearQueuedReactions(ctx, msg.Platform, dropped, nil)
 	}
 	if d.router != nil {
 		d.router.DiscardPassthroughPending(key, cli.ErrSessionReset)
@@ -938,7 +946,16 @@ func (d *Dispatcher) ownerLoop(
 	for {
 		select {
 		case <-ctx.Done():
-			d.queue.Discard(key)
+			// #2013: clear the HOURGLASS reactions of any messages still
+			// queued when the turn ctx is cancelled (e.g. a systemctl
+			// restart cancelling the process-level stopCtx). Without this
+			// the ⏳ hangs — and survives the restart in the platform's
+			// reaction cache while our in-memory bookkeeping is gone —
+			// falsely telling the user the message is still queued. The
+			// turn ctx is already Done, so detach via WithoutCancel for the
+			// best-effort cleanup (mirrors the passthrough discard path).
+			dropped := d.queue.DiscardAndReturn(key)
+			d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, dropped, lg)
 			return
 		case <-collectTimer.C:
 		}
@@ -986,7 +1003,14 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}
 	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
-		d.queue.Discard(key)
+		// #2013: the process survives a recovered panic and the platform is
+		// still reachable, so we CAN (and must) clear the HOURGLASS reactions
+		// of the messages this discard drops — otherwise they hang as a
+		// permanent "still queued" signal. Detach the cleanup ctx from any
+		// turn ctx via WithoutCancel; this helper runs from a defer with no
+		// live request ctx in scope.
+		dropped := d.queue.DiscardAndReturn(key)
+		d.clearQueuedReactions(context.WithoutCancel(context.Background()), msg.Platform, dropped, lg)
 	}
 	func() {
 		defer func() {
@@ -1401,6 +1425,31 @@ func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.Man
 	return replyText
 }
 
+// pageSuffixRuneWidth returns the rune width of the worst-case page suffix
+// "\n— [i/total]" for a reply split into total chunks. i can be at most
+// total, so the widest "i" has the same digit count as total. The fixed
+// glyphs are: '\n' + '—' + ' ' + '[' + '/' + ']' = 6 runes (the em dash is a
+// single rune); plus the two numbers. #2008.
+func pageSuffixRuneWidth(total int) int {
+	if total < 1 {
+		total = 1
+	}
+	digits := len(strconv.Itoa(total))
+	return 6 + 2*digits
+}
+
+// upperBoundChunks returns a ceiling estimate of how many chunks SplitText
+// would produce for runeCount runes at the given split width. It never
+// under-estimates (SplitText may produce fewer when it breaks early at a
+// newline, but never more than ceil), so reserving the suffix budget for
+// this count is always safe. #2008.
+func upperBoundChunks(runeCount, splitWidth int) int {
+	if splitWidth <= 0 {
+		return runeCount + 1
+	}
+	return (runeCount + splitWidth - 1) / splitWidth
+}
+
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
@@ -1411,7 +1460,34 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		maxLen = platform.DefaultMaxReplyLen
 	}
 
-	chunks := platform.SplitText(text, maxLen)
+	// #2008: when the reply needs splitting we append a "\n— [i/N]" page
+	// suffix to each chunk. Splitting at the raw platform limit yields a
+	// full chunk of exactly maxLen runes; the suffix then pushes it to
+	// maxLen+len(suffix), which on platforms with a hard API ceiling (e.g.
+	// Discord, MaxReplyLen=2000 with zero headroom) is rejected outright
+	// (400 BASE_TYPE_MAX_LENGTH) rather than truncated — and ReplyWithRetry
+	// blindly re-sends the same oversized payload, losing the chunk. Reserve
+	// room for the worst-case suffix before splitting so every emitted
+	// message stays within the platform limit.
+	//
+	// The suffix width depends on the digit count of total, which in turn
+	// depends on the split width — a mild circularity. We break it with a
+	// conservative upper bound on the chunk count (rune length / split
+	// width, rounded up) computed at the reduced width, then reserve for the
+	// worst-case suffix of that count. Reserving at the upper-bound count can
+	// only over-reserve, never under-reserve, so every emitted chunk stays
+	// within maxLen.
+	splitLen := maxLen
+	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
+		// First-pass reservation assuming a 1-digit count, then widen the
+		// reservation to the worst-case suffix for the resulting chunk count.
+		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
+		if reserved > 0 {
+			splitLen = reserved
+		}
+	}
+
+	chunks := platform.SplitText(text, splitLen)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 {

@@ -50,6 +50,12 @@ type jobSnapshot struct {
 	lastSessionID string
 	notify        *bool // nil = unset
 	fresh         bool
+	// placement 是 snapshot 时刻的 Job.Placement（""≡local）。executeOpt
+	// 据此在 router 路径前分流到 sandbox 执行器（RFC §4.2 placement 轴）。
+	placement string
+	// sideEffects 是 snapshot 时刻的 Job.SideEffects（nil→false）。sandbox
+	// failed-transport 路径据此决定是否进人工确认队列（§6.2 双跑围栏）。
+	sideEffects bool
 }
 
 // cronNoticePrefixFmt is the IM-notice prefix template every cron-side
@@ -188,6 +194,8 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 		fresh:         j.FreshContext,
 		schedule:      j.Schedule,
 		backend:       j.Backend,
+		placement:     j.Placement,
+		sideEffects:   j.SideEffects != nil && *j.SideEffects,
 		lastSessionID: j.LastSessionID,
 	}
 	// R090135-PERF-003 (#1931): alias j.Notify directly instead of deep-

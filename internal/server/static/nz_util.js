@@ -50,7 +50,7 @@
   // error paths fire deterministically. Returns parsed JSON on 2xx, throws
   // with the response body (and .status) on non-2xx.
   async function fetchJSON(url, opts = {}) {
-    const { timeoutMs = 10000, signal: parentSignal, ...rest } = opts;
+    const { timeoutMs = 10000, signal: parentSignal, onResponse, ...rest } = opts;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
     // Chain caller-provided signal so e.g. component-unmount can abort too.
@@ -61,6 +61,12 @@
     try {
       const r = await fetch(url, { ...rest, signal: ctrl.signal });
       clearTimeout(timer);
+      // onResponse lets callers inspect response headers/status before the
+      // body is parsed (the parsed JSON discards them). Invoked only on a
+      // successful fetch; guarded so a caller bug can't mask the response.
+      if (typeof onResponse === 'function') {
+        try { onResponse(r); } catch (_) { /* caller hook must not break the fetch */ }
+      }
       const text = await r.text();
       if (!r.ok) { const err = new Error('HTTP ' + r.status + ': ' + text.slice(0, 500)); err.status = r.status; throw err; }
       return text ? JSON.parse(text) : null;

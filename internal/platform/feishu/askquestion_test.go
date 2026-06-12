@@ -384,3 +384,53 @@ func TestHandleCardActionWebhook_ParsesShape(t *testing.T) {
 	// via its sanitised debug log (see askquestion.go). The deferred SDK edit
 	// is a best-effort polish, not behaviour we assert here.
 }
+
+// TestHandleCardActionWebhook_V2ContextNesting pins #2006: the v2
+// card.action.trigger envelope nests open_chat_id/open_message_id under a
+// `context` object and carries neither at top level. Without the context
+// fallback the answer routes into a phantom session with an empty chat id.
+func TestHandleCardActionWebhook_V2ContextNesting(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	var called atomic.Int32
+	var got platform.IncomingMessage
+	handler := func(_ context.Context, m platform.IncomingMessage) {
+		called.Add(1)
+		got = m
+	}
+	// open_message_id intentionally empty (in context) — a populated id would
+	// spawn an async EditMessage needing a configured Feishu client.
+	raw := json.RawMessage(`{
+      "action":{"value":{"kind":"ask_answer","tool_use_id":"t1","header":"H","label":"L"}},
+      "context":{"open_chat_id":"oc_v2chat"},
+      "operator":{"open_id":"ou_operator"}
+    }`)
+	f.handleCardActionWebhook(context.Background(), raw, handler)
+	if called.Load() != 1 {
+		t.Fatalf("handler called %d times, want 1", called.Load())
+	}
+	if got.ChatID != "oc_v2chat" {
+		t.Errorf("ChatID = %q, want oc_v2chat (context fallback failed)", got.ChatID)
+	}
+	if got.UserID != "ou_operator" {
+		t.Errorf("UserID = %q, want ou_operator", got.UserID)
+	}
+}
+
+// TestDispatchCardAction_FallsBackToValueChatType pins #2007: when the
+// envelope chat_type is empty (v2 card.action.trigger has none), the chat type
+// must fall back to the whitelisted value embedded in the button so a group
+// card answer routes back to the group session instead of a phantom direct one.
+func TestDispatchCardAction_FallsBackToValueChatType(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{}
+	var got platform.IncomingMessage
+	handler := func(_ context.Context, m platform.IncomingMessage) { got = m }
+	// Envelope chatType empty; value carries the originating "group".
+	f.dispatchCardAction(context.Background(),
+		cardActionPayload{Kind: "ask_answer", Label: "L", ChatType: "group"},
+		"oc_grp", "", "", "ou_user", handler)
+	if got.ChatType != "group" {
+		t.Errorf("ChatType = %q, want group (value fallback failed)", got.ChatType)
+	}
+}

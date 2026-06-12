@@ -224,76 +224,97 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter, timeout 
 			ch <- abortResult{}
 			return
 		}
-		// R236-GO-09 (#507) / R247-GO-5 (#476) / R246-GO-6: InterruptViaControl
-		// can block indefinitely when the protocol channel is wedged
-		// (kernel-blocked stdin write, control_request never acked). Bound
-		// it so the caller always observes a result on abortCh and
-		// finishRun runs — otherwise inflight.running stays true and every
-		// subsequent tick silently skips the job AND the wrapper goroutine
-		// holds the abortCh slot past Stop's stopBudget during scheduler
-		// shutdown (the systemd TimeoutStopSec failure mode the R247-GO-5
-		// anchor explicitly cited). The done channel is buffered=1 so the
-		// inner goroutine never blocks on send: it returns whenever
-		// InterruptViaControl finishes, even after the timeout branch has
-		// already published an InterruptError outcome.
-		done := make(chan InterruptOutcome, 1)
-		// state coordinates the live leak-gauge accounting between this
-		// inner goroutine and the timeout branch below (R20260602-GO-005,
-		// #1632). It is a 3-state CAS race resolver:
-		//   0 = neither side has acted yet
-		//   1 = inner goroutine returned first (watchdog must NOT park it)
-		//   2 = watchdog fired first and parked the inner goroutine
-		//       (gauge incremented; inner goroutine must decrement on exit)
-		// Exactly one of the two CAS(0→1)/CAS(0→2) wins, so the gauge is
-		// incremented and later decremented at most once per park — no
-		// leak under any interleaving of "inner returns" vs "watchdog
-		// fires".
-		var state atomic.Int32
-		go func() {
-			outcome := sess.InterruptViaControl()
-			if !state.CompareAndSwap(0, 1) {
-				// Lost the race: watchdog already parked us (state==2) and
-				// incremented the gauge. We outlived the watchdog but the
-				// wedged write finally unblocked — undo the increment.
-				watchdogParkedInterruptGoroutines.Add(-1)
-			}
-			done <- outcome
-		}()
-		// R20260527122801-GO-001: NewTimer + defer Stop mirrors
-		// scheduler.go:1337 — time.After leaks a *Timer slot until
-		// expiry on the success path.
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		select {
-		case outcome := <-done:
-			ch <- abortResult{outcome: outcome, fired: true}
-		case <-t.C:
-			// R20260527122801-SEC-3 (#1327): the inner goroutine above
-			// is still parked on InterruptViaControl and will outlive
-			// this watchdog goroutine until the wedged stdin write
-			// unblocks (typically on the next session.Reset; for non-
-			// fresh jobs that may never happen on its own). Surface the
-			// event via a metric + Warn log so operators can alert on
-			// rising deltas rather than discovering it via slow goroutine
-			// growth. The metric lives next to other cron counters in
-			// internal/metrics so the dashboard wireup is identical.
-			metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
-			// R20260602-GO-005 (#1632): record the parked goroutine on a
-			// LIVE gauge so a persistent (never-reset) job's permanent
-			// leak is observable as a rising current count, not just a
-			// cumulative timeout total. CAS(0→2) only wins if the inner
-			// goroutine has not already returned; if it lost the race the
-			// goroutine is gone and there is nothing to count. The matching
-			// Add(-1) lives in the inner goroutine's lost-race branch.
-			if state.CompareAndSwap(0, 2) {
-				watchdogParkedInterruptGoroutines.Add(1)
-			}
-			slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
-				"timeout", timeout)
-			ch <- abortResult{outcome: InterruptError, fired: true}
-		}
+		ch <- fireBoundedInterrupt(sess, timeout)
 	})
 	return ch, stop
+}
+
+// fireBoundedInterrupt invokes sess.InterruptViaControl under a timeout
+// and returns the abortResult the caller should publish. It is shared by
+// runDeadlineWatchdog's AfterFunc callback (the normal deadline path) and
+// sendWithWatchdog's synchronous deadline-recovery branch (R20260612-GO-1
+// / #2021): when stopWatchdog() races the AfterFunc callback's goroutine
+// start and wins (stop()==true) on a deadline-exceeded ctx, the callback
+// never runs, so sendWithWatchdog must fire the interrupt itself rather
+// than synthesizing abortResult{fired:false} — the latter degrades the
+// deadline path to "interrupt silently skipped", the mirror of the #1705
+// pre-fix behaviour this very window reintroduced.
+//
+// R236-GO-09 (#507) / R247-GO-5 (#476) / R246-GO-6: InterruptViaControl
+// can block indefinitely when the protocol channel is wedged
+// (kernel-blocked stdin write, control_request never acked). Bound it so
+// the caller always observes a result and finishRun runs — otherwise
+// inflight.running stays true and every subsequent tick silently skips
+// the job AND the wrapper goroutine holds the abortCh slot past Stop's
+// stopBudget during scheduler shutdown (the systemd TimeoutStopSec
+// failure mode the R247-GO-5 anchor explicitly cited). The done channel
+// is buffered=1 so the inner goroutine never blocks on send: it returns
+// whenever InterruptViaControl finishes, even after the timeout branch
+// has already published an InterruptError outcome.
+func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abortResult {
+	// A non-positive timeout falls back to the default so a zero-value
+	// Scheduler (tests) or any future caller cannot accidentally pass 0 and
+	// fire the timeout branch instantly via NewTimer(0). Mirrors the guard
+	// runDeadlineWatchdog applies before handing the timeout to its callback.
+	if timeout <= 0 {
+		timeout = watchdogInterruptTimeoutDefault
+	}
+	done := make(chan InterruptOutcome, 1)
+	// state coordinates the live leak-gauge accounting between this
+	// inner goroutine and the timeout branch below (R20260602-GO-005,
+	// #1632). It is a 3-state CAS race resolver:
+	//   0 = neither side has acted yet
+	//   1 = inner goroutine returned first (watchdog must NOT park it)
+	//   2 = watchdog fired first and parked the inner goroutine
+	//       (gauge incremented; inner goroutine must decrement on exit)
+	// Exactly one of the two CAS(0→1)/CAS(0→2) wins, so the gauge is
+	// incremented and later decremented at most once per park — no
+	// leak under any interleaving of "inner returns" vs "watchdog
+	// fires".
+	var state atomic.Int32
+	go func() {
+		outcome := sess.InterruptViaControl()
+		if !state.CompareAndSwap(0, 1) {
+			// Lost the race: watchdog already parked us (state==2) and
+			// incremented the gauge. We outlived the watchdog but the
+			// wedged write finally unblocked — undo the increment.
+			watchdogParkedInterruptGoroutines.Add(-1)
+		}
+		done <- outcome
+	}()
+	// R20260527122801-GO-001: NewTimer + defer Stop mirrors
+	// scheduler.go:1337 — time.After leaks a *Timer slot until
+	// expiry on the success path.
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case outcome := <-done:
+		return abortResult{outcome: outcome, fired: true}
+	case <-t.C:
+		// R20260527122801-SEC-3 (#1327): the inner goroutine above
+		// is still parked on InterruptViaControl and will outlive
+		// this watchdog goroutine until the wedged stdin write
+		// unblocks (typically on the next session.Reset; for non-
+		// fresh jobs that may never happen on its own). Surface the
+		// event via a metric + Warn log so operators can alert on
+		// rising deltas rather than discovering it via slow goroutine
+		// growth. The metric lives next to other cron counters in
+		// internal/metrics so the dashboard wireup is identical.
+		metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
+		// R20260602-GO-005 (#1632): record the parked goroutine on a
+		// LIVE gauge so a persistent (never-reset) job's permanent
+		// leak is observable as a rising current count, not just a
+		// cumulative timeout total. CAS(0→2) only wins if the inner
+		// goroutine has not already returned; if it lost the race the
+		// goroutine is gone and there is nothing to count. The matching
+		// Add(-1) lives in the inner goroutine's lost-race branch.
+		if state.CompareAndSwap(0, 2) {
+			watchdogParkedInterruptGoroutines.Add(1)
+		}
+		slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
+			"timeout", timeout)
+		return abortResult{outcome: InterruptError, fired: true}
+	}
 }
 
 // sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
@@ -347,6 +368,17 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 		// stop() == true: the AfterFunc callback will NOT run, so abortCh
 		// received no send and is clean — recycle it for the next tick.
 		putAbortChan(abortCh)
+		// R20260612-GO-1 (#2021): stop()==true means "callback deregistered",
+		// NOT "deadline never fired". When Send returned because sendCtx hit
+		// its deadline but stopWatchdog() raced the AfterFunc callback's
+		// goroutine start and won, the deadline IS exceeded yet no interrupt
+		// was sent — synthesizing abortResult{fired:false} here degrades the
+		// deadline path to a silent no-interrupt (the mirror of the #1705
+		// pre-fix behaviour). Fire the interrupt synchronously so the
+		// in-flight CLI turn is still aborted and abort.fired reflects reality.
+		if errors.Is(sendCtx.Err(), context.DeadlineExceeded) {
+			return result, fireBoundedInterrupt(sess, s.watchdogInterruptTimeout()), err
+		}
 		return result, abortResult{}, err
 	}
 
