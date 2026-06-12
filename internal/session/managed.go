@@ -266,6 +266,11 @@ type processIface interface {
 	// "claude-opus-4.7", "claude-sonnet-4.6") or "" when unconfigured.
 	// UI Round 5 R5-3.
 	Model() string
+	// LiveVersion returns the CLI binary version self-reported in the
+	// process's system/init frame (claude_code_version), or "" before the
+	// init frame arrives / on backends that don't self-report.
+	// R20260612-live-version.
+	LiveVersion() string
 }
 
 // Compile-time guarantee that ProcessEventReader is a strict subset of

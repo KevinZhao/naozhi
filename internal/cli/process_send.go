@@ -277,6 +277,13 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				if ev.Model != "" {
 					p.setModel(ev.Model)
 				}
+				// R20260612-live-version: parallel hook to readLoop's —
+				// capture the self-reported CLI binary version here too
+				// for the case where Send() drains the init frame before
+				// readLoop observes it. First writer wins; identical value.
+				if ev.ClaudeCodeVersion != "" {
+					p.setLiveVersion(ev.ClaudeCodeVersion)
+				}
 				continue
 			}
 

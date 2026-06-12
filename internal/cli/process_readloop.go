@@ -758,6 +758,13 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	if isSystemInit && ev.Model != "" {
 		p.setModel(ev.Model)
 	}
+	// R20260612-live-version: the same init frame self-reports the running
+	// CLI binary version. Capture it so the dashboard reflects the version
+	// THIS process exec'd, not the spawn-time Wrapper.CLIVersion detected
+	// once at naozhi startup (stale after a host claude upgrade).
+	if isSystemInit && ev.ClaudeCodeVersion != "" {
+		p.setLiveVersion(ev.ClaudeCodeVersion)
+	}
 	// R237-GO-5 (#628): linker plumbing extracted into notifyLinker so
 	// dispatchProtocolEvent stays focused on the EventLog/eventCh dispatch
 	// pipeline. Behaviour is byte-identical; the helper internally re-
