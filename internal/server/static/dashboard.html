@@ -2377,6 +2377,10 @@ body.kbd-open .sidebar-footer{display:none}
      coarse pointers so desktop keeps the compact 11px / 22px chrome. */
   .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
   .empty-cta-btn{min-height:44px}
+  /* R20260610-UI-8: cron-job kebab + cron-drawer header icon buttons were
+     28/32px hard targets with no coarse bump — below the WCAG 2.5.5 floor.
+     Widen only the hit-box on touch; the glyph/footprint is unchanged. */
+  .cj-menu-btn,.cron-drawer-header .cdh-btn-icon{min-width:44px;min-height:44px}
   .fv-btn{min-width:40px;min-height:40px}
   /* Inline @file reference chips: keep the visual small but grow the tap area. */
   .file-ref .fr-btn{min-width:32px;min-height:32px;padding:4px 8px}
