@@ -7852,6 +7852,14 @@ function promptDialog(opts) {
 // chat grouping — tight enough to separate turns, loose enough to not spam.
 const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
 
+// Avatar-grouping threshold (WeChat-style): when a bubble follows another from
+// the SAME sender within this gap, its repeated avatar is hidden via the
+// .nz-grouped class (see regroupAvatars). Deliberately MUCH tighter than
+// EVENT_DIVIDER_GAP_MS — grouping reacts to rapid-fire turns (sub-minute),
+// while the time divider marks coarse conversation breaks. The two are
+// independent: a 30s gap groups avatars but emits no divider.
+const AVATAR_GROUP_GAP_MS = 30 * 1000;
+
 // INITIAL_HISTORY_LIMIT caps how many events the server sends on a fresh
 // subscribe / first fetch. Keeps big sessions snappy on first paint; older
 // pages load lazily via the "load earlier" button. Server caps at 500
@@ -9040,13 +9048,54 @@ function startFileRefObserver() {
         }
       });
     }
+    // Re-evaluate avatar grouping whenever bubbles are inserted/removed. The
+    // decision is relative to the PREVIOUS visible same-sender bubble, which
+    // an incremental append can't know without looking back — so we rescan
+    // the (DOM-bounded, ≤MAX_LIVE_DOM_EVENTS) container rather than diffing.
+    regroupAvatars(target);
   });
   mo.observe(target, { childList: true, subtree: false });
   _fileRefObserver = mo;
   // Initial scan for bubbles rendered synchronously before the observer
   // attached (e.g. the full-history render on session select).
   target.querySelectorAll('.event').forEach(scanEventForFileRefs);
+  regroupAvatars(target);
 }
+
+// regroupAvatars walks the rendered transcript and tags each .event bubble
+// with .nz-grouped when it continues a same-sender run within
+// AVATAR_GROUP_GAP_MS — the CSS then hides the repeated avatar. Only "user"
+// and "text" (assistant) bubbles carry avatars and participate; any other
+// visible bubble type (system/init/todo/result/…) or a sender switch or a
+// time gap ≥ threshold resets the run so the next same-sender bubble shows
+// its avatar again. Bubbles without a data-time are treated as run-breakers
+// (conservatively keep their avatar). Idempotent: safe to call on every
+// mutation; it toggles the class to match current DOM order.
+function regroupAvatars(container) {
+  const el = container || document.getElementById('events-scroll');
+  if (!el) return;
+  let prevSender = '';
+  let prevTime = 0;
+  for (const node of el.children) {
+    if (!node.classList || !node.classList.contains('event')) continue;
+    const isUser = node.classList.contains('user');
+    const isText = node.classList.contains('text');
+    if (!isUser && !isText) {
+      // A non-avatar bubble (system/divider handled separately) breaks the run.
+      prevSender = '';
+      prevTime = 0;
+      continue;
+    }
+    const sender = isUser ? 'user' : 'text';
+    const t = Number(node.getAttribute('data-time') || 0);
+    const grouped = !!t && sender === prevSender && prevTime > 0 &&
+      (t - prevTime) < AVATAR_GROUP_GAP_MS;
+    node.classList.toggle('nz-grouped', grouped);
+    prevSender = sender;
+    prevTime = t; // 0 when undated → next bubble can't group against it
+  }
+}
+window.regroupAvatars = regroupAvatars;
 
 // KaTeX environment names we split out as block-level math. Whitelisted —
 // feeding KaTeX an environment it doesn't support just emits an error span
@@ -12835,6 +12884,10 @@ initSidebarSearch();
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
     for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
+    // Apply WeChat-style avatar grouping in the aside too (it reuses eventHtml
+    // and the same .nz-grouped CSS, but lives outside the #events-scroll
+    // observer, so tag it explicitly).
+    if (typeof regroupAvatars === 'function') regroupAvatars(elMsgs);
     // Scroll policy, aligned with main window:
     //  - the user just sent (sawUser on a local-render call): force-pin.
     //  - otherwise: only stick if they were already at the bottom.
