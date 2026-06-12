@@ -1182,6 +1182,19 @@ func (m *Manager) CLIPath() string {
 // subprocesses. Variables not matching any prefix are filtered out to reduce
 // the risk of leaking unrelated secrets (database passwords, third-party tokens)
 // to the Claude CLI process which has Bash tool access.
+//
+// CONTRACT — do NOT grow this list to make a settings.json value "take effect"
+// in naozhi sessions. The spawned claude reads ~/.claude/settings.json itself
+// via `--setting-sources user` (see protocol_claude.go BuildArgs), and a
+// settings.json `env` value WINS over the inherited process env (verified: a
+// settings.json key overrides the same key passed through execve). So model
+// pins, API_TIMEOUT_MS, prompt-caching flags, output-token caps, etc. already
+// reach the CLI the same way they reach the TUI claude — forwarding them here
+// is redundant at best and, for any key the CLI's Bash tool can read back,
+// re-widens the secret-leak surface this allowlist exists to bound. The
+// entries below are limited to system/toolchain plumbing and raw Bedrock
+// credentials that settings.json does NOT carry and the CLI cannot otherwise
+// obtain. New functional knobs belong in ~/.claude/settings.json, not here.
 var shimEnvAllowedPrefixes = []string{
 	// System essentials
 	"HOME=", "USER=", "LOGNAME=", "PATH=", "SHELL=",
