@@ -139,6 +139,10 @@
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
+  // #2030: the "no internal record" toast was copied verbatim at 3 call sites
+  // (HTTP 202 ceiling / HTTP 404 / WS subscribe rejected). Single source of
+  // truth so the wording can't drift between paths.
+  var TOAST_NO_RECORD = '该 agent 暂无内部记录';
   // §#398-sibling: the agent drill-in panel renders ALL internal events
   // (tool_use / thinking / task_*), so its DOM grows even faster than the
   // main panel. Neither renderAgentEvents (reset render) nor appendAgentEvent
@@ -227,7 +231,7 @@
         if (r.status === 202) {
           state.retries++;
           if (state.retries >= MAX_SWITCH_RETRIES) {
-            showToast('该 agent 暂无内部记录', 'warning');
+            showToast(TOAST_NO_RECORD, 'warning');
             switchTo(null);
             return;
           }
@@ -252,7 +256,7 @@
           return;
         }
         if (r.status === 404) {
-          showToast('该 agent 暂无内部记录', 'warning');
+          showToast(TOAST_NO_RECORD, 'warning');
           switchTo(null);
           return;
         }
@@ -519,7 +523,7 @@
       case 'tombstone':
       case 'no_linker':
       case 'closed':
-        showToast('该 agent 暂无内部记录', 'warning');
+        showToast(TOAST_NO_RECORD, 'warning');
         switchTo(null);
         break;
       case 'pending':
