@@ -59,6 +59,12 @@ type CronRun struct {
 	ErrorClass  ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string     `json:"error_msg,omitempty"`
 
+	// ReplayOf links a replay run to the original run it re-executed
+	// (agentcore-cloud-sandbox §7.3). Empty for original runs. The
+	// dashboard renders a source-chain badge from it, so it lives on both
+	// CronRun and CronRunSummary (the list view shows the chain too).
+	ReplayOf string `json:"replay_of,omitempty"`
+
 	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs
 	// (RFC §5.1/§7.3): runtime arn, image version, exit status, cost,
 	// duration, peak memory. Pointer + omitempty so local runs persist NO
@@ -83,6 +89,9 @@ type CronRunSummary struct {
 	DurationMS int64       `json:"duration_ms,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	ErrorClass ErrorClass  `json:"error_class,omitempty"`
+	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
+	// dashboard draws a "replay of …" badge directly off the summary.
+	ReplayOf string `json:"replay_of,omitempty"`
 	// CostUSD is the per-run sandbox cost (from SandboxMeta.CostUSD), carried
 	// in the slim summary so the §7.5 per-run cost小字 + the per-job monthly
 	// aggregate (pure front-end sum over recent_runs) need no detail fetch.
@@ -105,6 +114,7 @@ func (r *CronRun) summary() CronRunSummary {
 		DurationMS: r.DurationMS,
 		SessionID:  r.SessionID,
 		ErrorClass: r.ErrorClass,
+		ReplayOf:   r.ReplayOf,
 	}
 	if r.SandboxMeta != nil {
 		s.CostUSD = r.SandboxMeta.CostUSD
