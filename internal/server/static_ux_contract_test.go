@@ -214,11 +214,12 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	// Sanity: code-oriented selectors still use monospace internally so this
 	// rollback doesn't accidentally de-fix code rendering.
 	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
-	// font-size:13px and the SF Mono stack are intentionally left as-is.
+	// font-size migrated to --nz-fs-sm2 (=13px, unchanged render, #2024);
+	// the SF Mono stack — the actual subject of this guard — is unchanged.
 	// R20260608: bg moved var(--nz-border)→var(--nz-bg-2) and color #e6edf3→
 	// var(--nz-code-fg) so inline code stays legible in light theme. The
 	// monospace stack (the actual subject of this guard) is unchanged.
-	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
+	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-sm2);font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
@@ -1557,7 +1558,8 @@ func TestDashboardHTML_R110StatusDotPalette(t *testing.T) {
 	// The three dot rules must consume the tokens — if somebody drops a
 	// raw hex back in, this test fails so the review catches it.
 	for _, want := range []string{
-		".dot-running{background:var(--nz-status-running);animation:pulse 1.5s ease-in-out infinite}",
+		// --nz-dur-loop resolves to 1.5s (#2029 cadence unification); render unchanged.
+		".dot-running{background:var(--nz-status-running);animation:pulse var(--nz-dur-loop) ease-in-out infinite}",
 		".dot-ready{background:var(--nz-status-ready)}",
 		// dot-new keeps the dashed accent border so it still reads as
 		// "not yet started" even with the token migration.
@@ -4038,8 +4040,9 @@ func TestDashboard_R151_EventStreamAndBannerLocalized(t *testing.T) {
 		},
 		{
 			"discovered shell loading",
-			`<div class="empty-state">加载中...</div>`,
-			`<div class="empty-state">\u52a0\u8f7d\u4e2d...</div>`,
+			// #2026 standardized the ellipsis to the … glyph (U+2026).
+			`<div class="empty-state">加载中…</div>`,
+			`<div class="empty-state">\u52a0\u8f7d\u4e2d\u2026</div>`,
 		},
 	} {
 		if !strings.Contains(js, want.utf8) && !strings.Contains(js, want.esc) {
@@ -4682,7 +4685,8 @@ func TestDashboardHTML_R110P1_HdrBtnCoarsePointerSize(t *testing.T) {
 
 	// Invariant 3: base + 480px desktop-narrow rules keep compact sizing.
 	// Scope each check to the specific rule string.
-	if !strings.Contains(css, `.hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px`) {
+	// --nz-radius-ms resolves to 6px (#2024 token migration); width/height:32px is the actual subject of this guard.
+	if !strings.Contains(css, `.hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px`) {
 		t.Error("base `.hdr-btn` rule must stay at width:32px;height:32px — mouse users keep the compact density")
 	}
 	if !strings.Contains(css, ".hdr-btn{width:36px;height:36px}") {
