@@ -188,3 +188,72 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		lg.Warn("cron sandbox: reconciled pending remove failed", "err", err)
 	}
 }
+
+// stopSandboxRunsForJob terminates any in-flight sandbox microVM(s) for a
+// job being deleted, closing the Phase 1 gap (executeSandbox godoc): until
+// now DeleteJobByID left a live run to finish or hit maxLifetime, burning
+// cloud cost and possibly producing side effects the operator no longer
+// wants. The §6.5 pending record carries the runtime session id, so delete
+// can now Stop the microVM directly.
+//
+// Runs lock-free from deleteJobPostCleanup. Best-effort and idempotent:
+//
+//   - Scans the pending dir for records whose JobID matches (a job has at
+//     most one in-flight run under the per-job CAS, but scan-by-jobID is
+//     robust to any future fan-out and needs no jobID→runID index).
+//   - StopSession is idempotent server-side and maps ResourceNotFound→nil
+//     (adapter), so a run that finished + removed its pending file between
+//     our scan and the Stop is harmless.
+//   - Removes the pending file after a confirmed Stop so startup reconcile
+//     does not later re-Stop a session for a job that no longer exists. On
+//     Stop failure the file is KEPT (mirrors reconcile / §6.2): the microVM
+//     fate is unknown and the next startup must retry.
+//
+// No terminal CronRun is written here: the in-flight run's own goroutine is
+// still holding the stream and will reach finishRun (which no-ops the
+// persist for the now-deleted job via recordTerminalResult's jobs[id]
+// re-check). Writing a record here would race that goroutine.
+func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
+	if s.sandbox == nil {
+		return // sandbox placement not configured — nothing could be in flight
+	}
+	dir := s.sandboxPendingDir()
+	if dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("cron sandbox: delete-stop pending scan failed", "job_id", jobID, "err", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue // benign: the run goroutine may have just removed it
+		}
+		var p sandboxPending
+		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" {
+			continue
+		}
+		lg := slog.With("job_id", jobID, "run_id", p.RunID)
+		lg.Info("cron sandbox: deleting job with in-flight run; stopping microVM")
+		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
+		stopErr := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
+		cancel()
+		if stopErr != nil {
+			// Keep the file: §6.2 — fate unknown until a confirmed Stop.
+			// Startup reconcile retries. The deletion itself still proceeds.
+			lg.Error("cron sandbox: delete-stop failed; pending record kept for startup reconcile", "err", stopErr)
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			lg.Warn("cron sandbox: delete-stop pending remove failed", "err", err)
+		}
+	}
+}

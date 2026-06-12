@@ -156,11 +156,11 @@ type sandboxExecArgs struct {
 // terminal state; startup reconcile Stops orphans and closes their run
 // records as failed-transport.
 //
-// Known Phase 1 gap (deliberate): DeleteJobByID during an in-flight
-// sandbox run does not Stop the microVM; the run completes (or hits
-// maxLifetime) and finishRun no-ops via recordTerminalResult's jobs[id]
-// re-check. The pending record now carries the runtime session id, so a
-// future delete→Stop wiring is a small follow-up.
+// Delete immunity (§6.2): DeleteJobByID of a job with an in-flight sandbox
+// run now Stops the microVM via stopSandboxRunsForJob (deleteJobPostCleanup),
+// using the runtime session id in the pending record. The run's own
+// goroutine still reaches finishRun, which no-ops the persist for the
+// now-deleted job via recordTerminalResult's jobs[id] re-check.
 func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	a.lg.Info("cron job executing in sandbox", "prompt_len", len(a.prompt))
 
