@@ -248,6 +248,7 @@ func (f *fakeProcess) ContextUsagePercent() float64       { return 0 }
 func (f *fakeProcess) TurnDurationMs() int64              { return 0 }
 func (f *fakeProcess) MeteringUsage() []cli.MeteringEntry { return nil }
 func (f *fakeProcess) Model() string                      { return "" }
+func (f *fakeProcess) LiveVersion() string                { return "" }
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}
