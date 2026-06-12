@@ -503,11 +503,29 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 // around; panic-recovery callers do not leave orphaned entries in practice
 // because a subsequent Enqueue reuses this same sessionQueue.
 func (q *MessageQueue) Discard(key string) {
+	q.DiscardAndReturn(key)
+}
+
+// DiscardAndReturn is the drain-aware variant of Discard: it performs the
+// same gen-bump / busy-clear / cooldown-cleanup teardown but returns the
+// messages that were queued (FIFO order) instead of silently dropping them.
+//
+// #2013: queued messages each carry a HOURGLASS ("queued") reaction added at
+// Enqueue time. The plain Discard path (ownerLoop ctx.Done on a systemctl
+// restart, ownerLoop panic recovery, and the /new + /clear command paths)
+// reset the ring without surfacing the dropped IDs, so those reactions hang
+// forever — and after a restart the in-memory reaction bookkeeping is gone,
+// so the user sees a permanent ⏳ falsely signalling "still queued". Callers
+// use the returned slice to clear those reactions (best-effort).
+//
+// Returns nil when no messages were queued.
+func (q *MessageQueue) DiscardAndReturn(key string) []QueuedMsg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	var dropped []QueuedMsg
 	if sq := q.queues[key]; sq != nil {
 		sq.gen++
-		sq.ring.reset()
+		dropped = sq.ring.drainAll()
 		sq.busy = false
 		sq.lastNotifyNs = 0
 		sq.interruptRequested = false
@@ -521,6 +539,7 @@ func (q *MessageQueue) Discard(key string) {
 		delete(q.dropNotifyIndex, key)
 		q.releasePooledEntry(e)
 	}
+	return dropped
 }
 
 // Cleanup UNCONDITIONALLY deletes the map entry for key — the only public

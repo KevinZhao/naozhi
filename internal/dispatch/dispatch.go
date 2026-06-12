@@ -868,9 +868,16 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 // In passthrough mode it also fires ErrSessionReset to any in-flight
 // SendPassthrough callers so the IM user sees the turn as cancelled rather
 // than silently hanging.
-func (d *Dispatcher) discardQueue(key string) {
+//
+// #2013: it also clears the HOURGLASS reaction of every dropped message so a
+// /new or /clear issued while follow-ups are queued does not leave dangling
+// ⏳ marks. ctx/msg supply the platform and a cleanup deadline; both are the
+// command handler's live request context (not yet Done) so no detach is
+// needed here.
+func (d *Dispatcher) discardQueue(ctx context.Context, msg platform.IncomingMessage, key string) {
 	if d.queue != nil {
-		d.queue.Discard(key)
+		dropped := d.queue.DiscardAndReturn(key)
+		d.clearQueuedReactions(ctx, msg.Platform, dropped, nil)
 	}
 	if d.router != nil {
 		d.router.DiscardPassthroughPending(key, cli.ErrSessionReset)
@@ -939,7 +946,16 @@ func (d *Dispatcher) ownerLoop(
 	for {
 		select {
 		case <-ctx.Done():
-			d.queue.Discard(key)
+			// #2013: clear the HOURGLASS reactions of any messages still
+			// queued when the turn ctx is cancelled (e.g. a systemctl
+			// restart cancelling the process-level stopCtx). Without this
+			// the ⏳ hangs — and survives the restart in the platform's
+			// reaction cache while our in-memory bookkeeping is gone —
+			// falsely telling the user the message is still queued. The
+			// turn ctx is already Done, so detach via WithoutCancel for the
+			// best-effort cleanup (mirrors the passthrough discard path).
+			dropped := d.queue.DiscardAndReturn(key)
+			d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, dropped, lg)
 			return
 		case <-collectTimer.C:
 		}
@@ -987,7 +1003,14 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}
 	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
-		d.queue.Discard(key)
+		// #2013: the process survives a recovered panic and the platform is
+		// still reachable, so we CAN (and must) clear the HOURGLASS reactions
+		// of the messages this discard drops — otherwise they hang as a
+		// permanent "still queued" signal. Detach the cleanup ctx from any
+		// turn ctx via WithoutCancel; this helper runs from a defer with no
+		// live request ctx in scope.
+		dropped := d.queue.DiscardAndReturn(key)
+		d.clearQueuedReactions(context.WithoutCancel(context.Background()), msg.Platform, dropped, lg)
 	}
 	func() {
 		defer func() {

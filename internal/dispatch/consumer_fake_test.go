@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -209,7 +210,7 @@ func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
 	var _ SessionRouter = fake
 
 	d := &Dispatcher{router: fake}
-	d.discardQueue("im:direct:u1:general")
+	d.discardQueue(context.Background(), platform.IncomingMessage{}, "im:direct:u1:general")
 
 	if called != 1 {
 		t.Fatalf("expected DiscardPassthroughPending called once via seam, got %d", called)
@@ -259,7 +260,7 @@ func TestNewDispatcher_NilRouterStaysUntypedNil(t *testing.T) {
 		t.Fatal("Dispatcher.router should be untyped nil when cfg.Router is nil; typed-nil trap reintroduced")
 	}
 	// discardQueue with a nil router must be a no-op, not a panic.
-	d.discardQueue("irrelevant:key:0:general")
+	d.discardQueue(context.Background(), platform.IncomingMessage{}, "irrelevant:key:0:general")
 }
 
 // TestNewDispatcher_ResolverFabricatedWhenNil pins the contract that
