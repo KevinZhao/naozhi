@@ -404,16 +404,14 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if len(fileIDs) > 0 {
-		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
-		if err != nil {
-			slog.Debug("send: one or more file_ids not found or expired", "count", len(fileIDs))
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired"})
-			return
-		}
-		images = append(images, taken...)
-	}
 
+	// R20260610-085718-LB-9 (#2014): run pure-input validation (key + text cap)
+	// BEFORE uploadStore.TakeAll consumes (and deletes) the pre-uploaded file
+	// entries. TakeAll's R37-CONCUR4 retry contract is only honoured if no
+	// validation can fail after it: a 400 returned post-TakeAll would silently
+	// GC the already-consumed attachments, forcing the user to re-upload the
+	// whole batch. Mirrors the WS path (wshub_send.go), which validates before
+	// taking attachments.
 	if key == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
 		return
@@ -439,6 +437,17 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text too long"})
 		return
 	}
+
+	if len(fileIDs) > 0 {
+		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
+		if err != nil {
+			slog.Debug("send: one or more file_ids not found or expired", "count", len(fileIDs))
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired"})
+			return
+		}
+		images = append(images, taken...)
+	}
+
 	if text == "" && len(images) == 0 {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text or files required"})
 		return
