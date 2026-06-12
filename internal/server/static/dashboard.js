@@ -5978,6 +5978,11 @@ async function fetchCLIBackends() {
 //     a saved Job.Backend choice. Falls through to default when the
 //     value doesn't match any enabled backend (e.g. operator removed
 //     that backend from config.yaml).
+// PICKER_SELECT_STYLE is the shared inline style for the modal backend/agent
+// <select> controls (full-width, design-token surface). Defined once so the
+// backend and agent pickers can't drift apart (R20260610-UI-5).
+const PICKER_SELECT_STYLE = 'width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px';
+
 function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
   const list = backendsData.backends;
@@ -6001,7 +6006,7 @@ function renderBackendPicker(backendsData, opts) {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">CLI backend</label>' +
-    '<select id="' + escAttr(selectId) + '" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+    '<select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
@@ -6075,7 +6080,7 @@ function renderAgentPicker() {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
-    '<select id="new-agent" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+    '<select id="new-agent" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
