@@ -6483,7 +6483,7 @@ function buildCustomRow(query, idx) {
   el.dataset.idx = String(idx);
   const looksLikePath = query && (query.startsWith('/') || query.startsWith('~'));
   const label = looksLikePath
-    ? '打开自定义工作目录：<span style="color:#79c0ff">' + esc(query) + '</span>'
+    ? '打开自定义工作目录：<span style="color:var(--nz-accent)">' + esc(query) + '</span>'
     : '打开自定义工作目录…';
   el.innerHTML =
     '<span class="cp-icon">+</span>' +

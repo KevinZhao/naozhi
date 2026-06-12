@@ -160,6 +160,11 @@
   --nz-memlink-user-fg:#7ad9a3;
   --nz-memlink-project-bg:#1a2a4a;      /* [[project]] memory chip */
   --nz-memlink-project-fg:#7aacf7;
+  /* history-popover project label gold (R20260610-UI-1). Was a bare #d4a017 in
+     the .hp-project rule with no light override; on a white surface the dark
+     gold dropped below AA. Tokenised here (dark default preserves the original)
+     so the light blocks remap it to a deeper gold that clears AA. */
+  --nz-project-label-fg:#d4a017;
 }
 /* THEME-1 (#453) — light theme + system follow modes. The dashboard was
    GitHub-Dark hardcoded; users who prefer light or want to follow OS now
@@ -207,6 +212,7 @@
   --nz-row-active-running-bg:#dbeafe;
   --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
   --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+  --nz-project-label-fg:#7a5800;        /* deeper gold, clears AA on white */
 }
 @media (prefers-color-scheme: light){
   :root[data-theme="auto"]{
@@ -235,6 +241,7 @@
     --nz-row-active-running-bg:#dbeafe;
     --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
     --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+    --nz-project-label-fg:#7a5800;
   }
 }
 /* Global focus-visible: keyboard users get a clear ring, mouse users don't. */
@@ -1122,7 +1129,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .history-popover-item:hover{background:var(--nz-hover-bg)}
 .history-popover-item .hp-prompt{font-size:13px;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
-.history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
+.history-popover-item .hp-meta .hp-project{color:var(--nz-project-label-fg);font-weight:500}
 .history-popover-item .hp-meta .hp-tool{color:var(--nz-accent)}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
 /* Day group header inside the history popover. Dropped text-transform:uppercase
