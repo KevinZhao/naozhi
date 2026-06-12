@@ -497,6 +497,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    edge as the brand selection marker. R20260606. */
 .session-card.active{background:var(--nz-rust-subtle);border-left-color:var(--nz-rust)}
 .session-card.dead-card{opacity:.6}
+/* .btn-close — canonical close/dismiss affordance class (#2027). One marker
+   for every "close this surface" button so the family is greppable and shares
+   a baseline (transparent chrome, pointer, no inherited button box). Per-site
+   classes (.btn-dismiss positioning, .fv-close sizing) layer their specifics
+   on top; their fuller selectors keep equal-or-higher specificity so visuals
+   are unchanged. */
+.btn-close{background:none;border:none;cursor:pointer;line-height:1;color:var(--nz-text-faint)}
+.btn-close:hover{color:var(--nz-text)}
 .session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:var(--nz-text-faint);font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
 .session-card:hover .btn-dismiss{opacity:1}
 .session-card .btn-dismiss:hover{color:var(--nz-red)}
@@ -2713,15 +2721,15 @@ body.kbd-open .sidebar-footer{display:none}
          setActivityView(data-view) in dashboard.js (no inline onclick —
          R236-SEC-02 inline-handler cap is 0). -->
     <div class="ab-top">
-      <button class="ab-nav active" id="abnav-chat" data-view="chat" title="会话" aria-label="会话视图" aria-pressed="true">
+      <button type="button" class="ab-nav active" id="abnav-chat" data-view="chat" title="会话" aria-label="会话视图" aria-pressed="true">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <span class="ab-nav-label">会话</span>
       </button>
-      <button class="ab-nav" id="abnav-assets" data-view="assets" title="已安装资产 (skills/plugins/agents…)" aria-label="资产视图" aria-pressed="false">
+      <button type="button" class="ab-nav" id="abnav-assets" data-view="assets" title="已安装资产 (skills/plugins/agents…)" aria-label="资产视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
         <span class="ab-nav-label">资产</span>
       </button>
-      <button class="ab-nav" id="abnav-cron" data-view="cron" title="定时任务" aria-label="自动化视图" aria-pressed="false">
+      <button type="button" class="ab-nav" id="abnav-cron" data-view="cron" title="定时任务" aria-label="自动化视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg>
         <span class="ab-nav-label">自动化</span>
         <span class="ab-badge" id="abnav-cron-badge" hidden aria-label="需关注的定时任务数"></span>
@@ -2730,7 +2738,7 @@ body.kbd-open .sidebar-footer{display:none}
            AutoTitler. Peer of 自动化 but read-only — naozhi owns these, so the
            panel surfaces run状态/last-run/失败计数 without create/edit/delete.
            Routes through setActivityView('system') → renderSystemView(). -->
-      <button class="ab-nav" id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图" aria-pressed="false">
+      <button type="button" class="ab-nav" id="abnav-system" data-view="system" title="系统任务（内置后台守护）" aria-label="系统任务视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
         <span class="ab-nav-label">系统</span>
         <span class="ab-badge" id="abnav-system-badge" hidden aria-label="需关注的系统任务数"></span>
@@ -2739,7 +2747,7 @@ body.kbd-open .sidebar-footer{display:none}
     <!-- Bottom group: pushed to the rail foot via .ab-bottom{margin-top:auto}.
          Settings view entry. Wired in dashboard.js. -->
     <div class="ab-bottom">
-      <button class="ab-nav" id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图" aria-pressed="false">
+      <button type="button" class="ab-nav" id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span class="ab-nav-label">设置</span>
       </button>
@@ -2750,9 +2758,9 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="header-row">
         <h1>naozhi</h1>
         <div class="hdr-btns">
-          <button class="hdr-btn" id="btn-sidebar-search" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
-          <button class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
-          <button class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button type="button" class="hdr-btn" id="btn-sidebar-search" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+          <button type="button" class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
+          <button type="button" class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <!-- UX-P3 sidebar search: default-hidden, toggled via btn-sidebar-search
@@ -2760,7 +2768,7 @@ body.kbd-open .sidebar-footer{display:none}
            re-renders don't blow away the input value or its focus. -->
       <div class="sidebar-search" id="sidebar-search" style="display:none">
         <input type="text" id="sidebar-search-input" class="sidebar-search-input" placeholder="搜索会话、项目或 CLI 名..." autocomplete="off" spellcheck="false" aria-label="搜索会话" />
-        <button type="button" class="sidebar-search-clear" id="sidebar-search-clear" title="关闭搜索" aria-label="关闭搜索">&times;</button>
+        <button type="button" class="sidebar-search-clear btn-close" id="sidebar-search-clear" title="关闭搜索" aria-label="关闭搜索">&times;</button>
       </div>
     </div>
     <!-- Node selector: shown only when multiple nodes are connected. Replaces
@@ -2822,7 +2830,7 @@ body.kbd-open .sidebar-footer{display:none}
   <nav class="asset-sidebar" id="asset-sidebar" aria-label="资产列表" hidden>
     <div class="asset-sb-head">
       <h1>已安装资产</h1>
-      <button class="hdr-btn" id="asset-refresh" title="刷新（强制重扫）" aria-label="刷新资产"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg></button>
+      <button type="button" class="hdr-btn" id="asset-refresh" title="刷新（强制重扫）" aria-label="刷新资产"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg></button>
     </div>
     <div class="asset-scope" id="asset-scope">本节点 · ~/.claude</div>
     <div class="asset-kindtabs" id="asset-kindtabs" role="tablist"></div>
@@ -2832,7 +2840,7 @@ body.kbd-open .sidebar-footer{display:none}
   </nav>
   <main class="asset-main" id="asset-main" aria-label="资产原文" hidden>
     <div class="asset-main-head" id="asset-main-head" hidden>
-      <button class="btn-mobile-back" id="asset-back" aria-label="返回列表">&#8249;</button>
+      <button type="button" class="btn-mobile-back" id="asset-back" aria-label="返回列表">&#8249;</button>
       <div class="asset-main-title-wrap"><span class="asset-main-title" id="asset-main-title">—</span><span class="asset-main-sub" id="asset-main-sub"></span></div>
     </div>
     <div class="asset-main-body" id="asset-main-body"><div class="asset-empty">从左侧选择一个资产查看原文</div></div>
@@ -2868,7 +2876,7 @@ body.kbd-open .sidebar-footer{display:none}
     <div class="fv-actions">
       <button type="button" class="fv-btn" id="fv-btn-copy" title="复制路径" aria-label="复制路径">复制</button>
       <button type="button" class="fv-btn" id="fv-btn-download" title="下载文件" aria-label="下载文件">下载</button>
-      <button type="button" class="fv-btn fv-close" id="fv-btn-close" title="关闭" aria-label="关闭预览">&times;</button>
+      <button type="button" class="fv-btn fv-close btn-close" id="fv-btn-close" title="关闭" aria-label="关闭预览">&times;</button>
     </div>
   </header>
   <div class="fv-body" id="fv-body"></div>
@@ -2880,7 +2888,7 @@ body.kbd-open .sidebar-footer{display:none}
       <span class="ad-agent" id="ad-agent"></span>
     </div>
     <div class="ad-actions">
-      <button type="button" class="ad-close" id="ad-close" title="关闭" aria-label="关闭追问窗口">&times;</button>
+      <button type="button" class="ad-close btn-close" id="ad-close" title="关闭" aria-label="关闭追问窗口">&times;</button>
     </div>
   </header>
   <div class="ad-quote-chip" id="ad-quote-chip" title="点击展开/回到源消息">
@@ -2911,7 +2919,7 @@ body.kbd-open .sidebar-footer{display:none}
 <!-- §16 inline-expand 回归: cron-run-sheet 浮层 DOM 已删，详情现在直接嵌
      在 timeline 行下方（cronTimelineRowHtml 内 .ctr-detail 容器）。 -->
 <div id="mem-popover" role="dialog" aria-label="记忆预览" aria-hidden="true">
-  <button type="button" class="mem-pop-close" id="mem-pop-close" aria-label="关闭预览">&times;</button>
+  <button type="button" class="mem-pop-close btn-close" id="mem-pop-close" aria-label="关闭预览">&times;</button>
   <div id="mem-pop-content"></div>
 </div>
 <!-- defer: don't block the parser on 759KB+ of JS. defer preserves execution

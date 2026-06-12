@@ -1048,6 +1048,48 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
+// ICONS — single source of truth for the non-SVG glyph set (#2027). Before
+// this map the dashboard carried four parallel icon notations (SVG consts,
+// `&#x..;` / `&#..;` HTML entities, bare Unicode glyphs like `✎ ⎘`, and raw
+// `\u{..}` escapes) with the same semantic icon spelled differently at each
+// call site. Centralising here means one icon → one definition → one notation.
+//
+// Notation rule: literal Unicode glyph characters (one form, no mixing decimal
+// `&#128277;` with hex `&#x2328;`, no mixing `\u{1f464}` lowercase with
+// `\u{1F916}` uppercase). Literal glyphs are the only notation that renders
+// correctly in BOTH consumption contexts used here: dropped raw into innerHTML
+// / template strings, and passed through esc() (which would HTML-escape an
+// entity's `&` into `&amp;` and show it verbatim). SVG-backed icons
+// (star/github/chevron/clawd) keep their dedicated *_SVG consts above.
+const ICONS = {
+  close:    '×', // dismiss / close affordance
+  back:     '←', // mobile back
+  navUp:    '▲', // previous user message
+  navDown:  '▼', // next user message
+  edit:     '✎', // rename / edit
+  copy:     '⎘', // copy key
+  trash:    '🗑', // delete
+  attach:   '📎', // attach file
+  mic:      '🎤', // voice input
+  keyboard: '⌨', // keyboard input
+  send:     '➤', // send message
+  stop:     '■', // interrupt turn
+  download: '⬇', // download
+  downArrow:'↓', // file-row download (thinner, paired with ↗)
+  preview:  '↗', // preview / ask-aside
+  gear:     '⚙', // init / system event
+  user:     '👤', // user event
+  spark:    '✦', // assistant text event (non-claude backends)
+  todo:     '☰', // todo event
+  robot:    '🤖', // subagent badge / agent count
+  galleryPrev:  '‹', // lightbox previous image
+  galleryNext:  '›', // lightbox next image
+  zoomOut:      '−', // lightbox zoom out
+  zoomIn:       '+', // lightbox zoom in
+  rotateLeft:   '↺', // lightbox rotate left
+  rotateRight:  '↻', // lightbox rotate right
+};
+
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
 // workspace basename — it is NOT a registered ProjectManager project — so
@@ -1724,11 +1766,11 @@ function sessionCardHtml(s) {
   // template) so the surrounding .sc-meta layout stays identical.
   const nodeBadge = '';
 
-  const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">&times;</button>';
+  const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
-  const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
+  const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
   // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
   // slack / discord / weixin so operators can eyeball which cards are real
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
@@ -2607,7 +2649,7 @@ function renderMainShell() {
   // with no backend label storage, and we intentionally hide the control there.
   const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
   const renameBtn = canRename
-    ? '<button class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">✎</button>'
+    ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
   // UX P2 Markdown export: any session that has an addressable key can be
   // exported — no dependency on managed status because the /api/sessions/events
@@ -2615,12 +2657,12 @@ function renderMainShell() {
   // shares the .btn-rename hover-reveal treatment so the header stays calm
   // by default.
   const downloadBtn = selectedKey
-    ? '<button class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">⬇</button>'
+    ? '<button type="button" class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
+      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
@@ -2639,9 +2681,9 @@ function renderMainShell() {
     // is reserved for human conversation surfaces.
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
+      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
@@ -2655,12 +2697,12 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">&#x1f4ce;</button>' +
-        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
+        '<button type="button" class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">' + ICONS.attach + '</button>' +
+        '<button type="button" class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? ICONS.keyboard : ICONS.mic) + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
-        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="停止" aria-label="停止当前回合">&#x25A0;</button>' +
+        '<button type="button" class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
+        '<button type="button" class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="停止" aria-label="停止当前回合">' + ICONS.stop + '</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
       '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
@@ -3501,7 +3543,7 @@ function eventHtml(e, opts) {
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
   // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
-  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
+  const icons = {init:ICONS.gear,system:ICONS.gear,user:ICONS.user,text:ICONS.spark,todo:ICONS.todo};
   let icon = icons[e.type] || '';
   // Assistant turns on the claude backend get the clawd mascot instead of
   // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
@@ -3669,10 +3711,10 @@ function eventHtml(e, opts) {
   // the contract — don't let them diverge.
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
-    ? '<button class="event-copy-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
+    ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
     : '';
   const askBtn = isLong && e.type === 'text'
-    ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
+    ? '<button class="event-ask-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">' + ICONS.preview + ' 追问</button>'
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
@@ -4317,7 +4359,7 @@ function updateSidebarAgentBadge() {
   var count = turnState.agents.length;
   var existing = meta.querySelector('.sc-agents');
   if (count > 0) {
-    var html = '\u{1F916}\u00D7' + count;
+    var html = ICONS.robot + '\u00D7' + count;
     if (existing) { existing.innerHTML = html; }
     else { var span = document.createElement('span'); span.className = 'sc-agents'; span.innerHTML = html; meta.appendChild(span); }
   } else if (existing) { existing.remove(); }
@@ -5420,7 +5462,7 @@ function renderFilePreviews() {
       '>' +
       body +
       overlay +
-      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">\u00d7</button>' +
+      '<button class="remove" type="button" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">' + ICONS.close + '</button>' +
       '</div>';
   }).join('');
 }
@@ -5475,7 +5517,7 @@ function toggleInputMode() {
   if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
   const btn = document.getElementById('btn-mic');
   if (btn) {
-    btn.innerHTML = voiceInputMode ? '&#x2328;' : '&#x1f3a4;';
+    btn.innerHTML = voiceInputMode ? ICONS.keyboard : ICONS.mic;
     btn.title = voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
   }
   if (voiceInputMode) {
@@ -8540,7 +8582,7 @@ function applyFileRefResult(wrapEl, entry) {
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
-  preview.textContent = '\u2197'; // paired with download '\u2193' for symmetric arrow look
+  preview.textContent = ICONS.preview; // paired with ICONS.downArrow for symmetric arrow look
   preview.setAttribute('aria-label', 'Preview ' + label);
   preview.title = 'Preview ' + label;
   preview.addEventListener('click', evt => {
@@ -8551,7 +8593,7 @@ function applyFileRefResult(wrapEl, entry) {
   const download = document.createElement('button');
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
-  download.textContent = '\u2193'; // \u2193
+  download.textContent = ICONS.downArrow;
   download.setAttribute('aria-label', 'Download ' + label);
   download.title = 'Download ' + label;
   download.addEventListener('click', evt => {
@@ -9123,14 +9165,14 @@ function renderMdUncached(s) {
         }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
-            '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
+            '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
           '</div>' +
           '</div>';
       }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +
-          '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
+          '<button type="button" class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
         '</div>' +
         '</div>';
     }
@@ -11210,7 +11252,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
+      '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
@@ -11220,15 +11262,15 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">加载中…</div></div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
+      '<button type="button" onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
+        '<button type="button" class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">' + ICONS.send + '</button>' +
       '</div>' +
     '</div>';
   navRebuild(); // clear stale nav state before async preview fetch
@@ -11552,7 +11594,7 @@ function openSessionContextMenu(card, x, y) {
   if (!key) return;
   showSessionContextMenu(x, y, [
     {
-      label: '重命名', icon: '✎',
+      label: '重命名', icon: ICONS.edit,
       action: () => {
         // renameSession() reads selectedKey/selectedNode, so we flip the
         // selection first. Keeps the prompt simple (same input widget the
@@ -11565,14 +11607,14 @@ function openSessionContextMenu(card, x, y) {
       },
     },
     {
-      label: '复制 key', icon: '⎘',
+      label: '复制 key', icon: ICONS.copy,
       action: async () => {
         const ok = await copyStringToClipboard(key);
         showToast(ok ? '已复制 key' : '复制失败', ok ? 'success' : 'warning');
       },
     },
     {
-      label: '删除', icon: '🗑', danger: true,
+      label: '删除', icon: ICONS.trash, danger: true,
       action: () => { dismissSession(key, node); },
     },
   ]);
@@ -12307,13 +12349,13 @@ initSidebarSearch();
   // group model (RFC lightbox-gallery-nav): hidden via .lb-single when the
   // group holds one image.
   ov.innerHTML='<div class="lb-toolbar">'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="Zoom out" title="缩小 (-)">−</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="Zoom in" title="放大 (+)">+</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">↺</button>'
-    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">↻</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-out" aria-label="Zoom out" title="缩小 (-)">' + ICONS.zoomOut + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="zoom-in" aria-label="Zoom in" title="放大 (+)">' + ICONS.zoomIn + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">' + ICONS.rotateLeft + '</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">' + ICONS.rotateRight + '</button>'
     +'</div>'
-    +'<button type="button" class="lb-nav lb-nav-prev" data-lb-action="prev" aria-label="上一张" title="上一张 (←)">‹</button>'
-    +'<button type="button" class="lb-nav lb-nav-next" data-lb-action="next" aria-label="下一张" title="下一张 (→)">›</button>'
+    +'<button type="button" class="lb-nav lb-nav-prev" data-lb-action="prev" aria-label="上一张" title="上一张 (←)">' + ICONS.galleryPrev + '</button>'
+    +'<button type="button" class="lb-nav lb-nav-next" data-lb-action="next" aria-label="下一张" title="下一张 (→)">' + ICONS.galleryNext + '</button>'
     +'<div class="lb-counter" aria-live="polite"></div>'
     +'<img alt=""><div class="lb-zoom-hint"></div>';
   document.body.appendChild(ov);
