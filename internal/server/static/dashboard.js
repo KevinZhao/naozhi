@@ -3718,9 +3718,33 @@ function eventHtml(e, opts) {
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
-  return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + '>' +
+  // data-uuid carries the backend's authoritative entry identity (crypto/rand
+  // hex from internal/cli/uuid.go, round-tripped via the event-log entry). It
+  // is the idempotency key for user-bubble dedup: a process restart re-subscribe
+  // replays history, and without a stable per-event identity the same user
+  // message renders twice (optimistic bubble already consumed, time cursor
+  // didn't advance). See docs/rfc/dashboard-event-uuid-idempotent-render.md.
+  // Attribute is omitted (not empty) when uuid is absent so "no uuid" events
+  // (some CLI-synthesised entries) stay distinguishable and never collide.
+  const uuidAttr = e.uuid ? ' data-uuid="' + escAttr(e.uuid) + '"' : '';
+  return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + uuidAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
+}
+
+// eventAlreadyRendered reports whether a .event with this uuid is already in
+// the given scroll container. DOM is the single source of truth for render
+// dedup — no parallel JS Set — so trimEventsScroll() eviction and full
+// innerHTML rebuilds keep the dedup set automatically consistent (an element
+// trimmed from the DOM stops matching, exactly as intended). Empty/absent
+// uuid never matches (returns false) so uuid-less events are never swallowed.
+// CSS.escape guards the attribute selector even though uuids are hex — keeps
+// the "all selector inputs are escaped" invariant if the uuid source ever
+// changes shape. See docs/rfc/dashboard-event-uuid-idempotent-render.md.
+function eventAlreadyRendered(scrollEl, uuid) {
+  if (!scrollEl || !uuid) return false;
+  const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(uuid) : uuid;
+  return !!scrollEl.querySelector('.event[data-uuid="' + sel + '"]');
 }
 
 // Expose the bubble renderer for agent_view.js (RFC v4 agent-team-ui §3.6).
@@ -10683,6 +10707,15 @@ const wsm = {
       display.forEach(e => {
         if (e.time && e.time <= lastRenderedEventTime) return;
         if (e.type === 'user') {
+          // uuid idempotency for user bubbles: the time-cursor guard above
+          // misses the bug case (onEvent rendered the real user event but a
+          // restart re-subscribe replays it before the cursor advanced), so
+          // dedup on the authoritative uuid as the backstop. User-only by
+          // design — streaming text re-emits the same uuid (RFC §3).
+          if (eventAlreadyRendered(el, e.uuid)) {
+            if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+            return;
+          }
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
           sawUser = true;
@@ -10818,9 +10851,23 @@ const wsm = {
     if (!el) return;
     const empty = el.querySelector('.empty-state');
     if (empty) empty.remove();
-    // When the real "user" event arrives, remove the optimistic version
     const isUser = ev.type === 'user';
     if (isUser) {
+      // uuid idempotency (user bubbles only): a duplicate push or a
+      // post-restart re-subscribe history replay must not paint the same user
+      // message twice. The real bubble appended below carries data-uuid
+      // (eventHtml), so once it is on screen any later replay of the same uuid
+      // is caught here; advance the event-time cursor so the time-gated
+      // onHistory path stays consistent, then bail before re-appending.
+      // Scope is user-only by design: streaming text re-emits the same uuid
+      // many times (RFC §3 — 586 dup uuids measured), so text/tool events must
+      // keep their existing append behaviour and never dedup by uuid here.
+      if (eventAlreadyRendered(el, ev.uuid)) {
+        const t = ev.time || 0;
+        if (t && t > lastRenderedEventTime) lastRenderedEventTime = t;
+        return;
+      }
+      // First arrival of the real user event: drop the optimistic placeholder.
       const opt = el.querySelector('.optimistic-msg');
       if (opt) opt.remove();
     }
