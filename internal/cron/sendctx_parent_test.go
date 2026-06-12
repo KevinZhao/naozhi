@@ -31,7 +31,9 @@ func TestSendCtxParentedOnStopCtx(t *testing.T) {
 	// substring `context.WithTimeout(s.stopCtx, jobTimeout)` only matched
 	// the spawn ctx (line ~1058), letting an inverted sendCtx slip
 	// through silently.
-	const sendCtxLine = "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, sendBudget)"
+	// Phase C (#734/#945) moved the send phase into execSend, where the
+	// budget arrives as execSendArgs.sendBudget — hence the `a.` prefix.
+	const sendCtxLine = "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, a.sendBudget)"
 	if !strings.Contains(src, sendCtxLine) {
 		t.Errorf("scheduler_run.go must parent sendCtx on s.stopCtx;\n"+
 			"want substring %q\n"+
