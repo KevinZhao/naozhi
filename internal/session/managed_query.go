@@ -243,6 +243,23 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		} else {
 			snap.Model = s.Model()
 		}
+		// R20260612-live-version: CLI binary version resolution, same
+		// priority + mirror discipline as model above —
+		//   1. live proc.LiveVersion() (claude system/init claude_code_version)
+		//   2. persisted id.cliVersion (spawn-time Wrapper.CLIVersion, also
+		//      the only source for ACP backends that don't self-report)
+		// The spawn-time value is detected once at naozhi startup, so after
+		// a host claude upgrade it goes stale; the init frame is the
+		// authoritative version of the binary THIS process actually exec'd.
+		// Empty live (init not yet arrived / ACP) → keep the persisted value.
+		if liveVersion := proc.LiveVersion(); liveVersion != "" {
+			if mirrorModel {
+				if id.cliVersion != liveVersion {
+					s.SetCLIVersion(liveVersion)
+				}
+			}
+			snap.CLIVersion = liveVersion
+		}
 		// Prefer whichever is larger: a freshly resumed process reports 0
 		// until the first `result` event arrives, but s.totalCost carries
 		// the historical cumulative value restored from sessions.json.
