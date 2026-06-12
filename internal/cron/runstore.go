@@ -501,6 +501,11 @@ func (s *runStore) Append(run *CronRun) {
 		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
 		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
 		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
+		// R20260610-085718-LB-11 (#2016): ResultBytes is the STORED byte count
+		// (run.go contract) and must match the truncated Result that actually
+		// lands on disk — otherwise the run-detail API reports result_bytes
+		// from the pre-truncation value while result is ~270 bytes.
+		shrunk.ResultBytes = len(shrunk.Result)
 		data2, err2 := marshalRunPooled(&shrunk)
 		if err2 != nil || int64(len(data2)) > s.maxRunBytes {
 			retryBytes := -1
@@ -536,6 +541,9 @@ func (s *runStore) Append(run *CronRun) {
 		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
 		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
 		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
+		// R20260610-085718-LB-11 (#2016): recompute ResultBytes to match the
+		// truncated Result actually written to disk — see contract note above.
+		shrunk.ResultBytes = len(shrunk.Result)
 		if data2, err2 := marshalRunPooled(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 			// #1079: keep the cache push consistent with disk — the

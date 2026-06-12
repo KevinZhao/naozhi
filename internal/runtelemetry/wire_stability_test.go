@@ -43,6 +43,9 @@ func TestErrorClass_WireStable(t *testing.T) {
 		ErrClassCronWorkDirUnreachable: "workdir_unreachable",
 		ErrClassCronWorkDirOutsideRoot: "workdir_outside_root",
 		ErrClassCronOverlapSkipped:     "overlap_skipped",
+		ErrClassCronSandboxFailed:      "sandbox_failed",
+		ErrClassCronSandboxTransport:   "sandbox_transport",
+		ErrClassCronSandboxUnavailable: "sandbox_unavailable",
 
 		ErrClassSysessionUpstream:   "upstream",
 		ErrClassSysessionValidation: "validation",

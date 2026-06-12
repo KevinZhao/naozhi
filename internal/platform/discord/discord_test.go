@@ -139,6 +139,59 @@ func TestOnMessageCreate_GroupMessage(t *testing.T) {
 	}
 }
 
+// TestOnMessageCreate_FailOpenWhenBotIDUnknown pins #2009: when Open() returned
+// without a READY frame botID is empty; a guild message must fail-OPEN
+// (MentionMe=true) instead of being silently dropped by dispatch's group gate.
+func TestOnMessageCreate_FailOpenWhenBotIDUnknown(t *testing.T) {
+	t.Parallel()
+	d := New(Config{BotToken: "test-token"})
+	// botID intentionally NOT set — simulate the non-READY Open() path.
+	var received platform.IncomingMessage
+	done := make(chan struct{})
+	d.handler = func(_ context.Context, msg platform.IncomingMessage) {
+		received = msg
+		close(done)
+	}
+	d.onMessageCreate(nil, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-fo",
+			Author:    &discordgo.User{ID: "user-fo"},
+			Content:   "hello bot",
+			ChannelID: "ch-fo",
+			GuildID:   "guild-fo",
+		},
+	})
+	<-done
+	if received.ChatType != "group" {
+		t.Errorf("ChatType = %q, want group", received.ChatType)
+	}
+	if !received.MentionMe {
+		t.Error("MentionMe should be true (fail-open) when botID is unknown")
+	}
+	if d.getBotID() != "" {
+		t.Errorf("botID should still be empty in test (no live session), got %q", d.getBotID())
+	}
+}
+
+// TestSetBotID_BackfillFromReady pins the Ready-handler backfill path used when
+// a late READY arrives after Open() returned without State.User. #2009.
+func TestSetBotID_BackfillFromReady(t *testing.T) {
+	t.Parallel()
+	d := New(Config{BotToken: "test-token"})
+	if d.getBotID() != "" {
+		t.Fatalf("fresh adapter botID = %q, want empty", d.getBotID())
+	}
+	d.setBotID("late-bot-id")
+	if d.getBotID() != "late-bot-id" {
+		t.Errorf("getBotID() = %q, want late-bot-id after backfill", d.getBotID())
+	}
+	// Empty id must be a no-op (don't clobber a known id with garbage).
+	d.setBotID("")
+	if d.getBotID() != "late-bot-id" {
+		t.Errorf("setBotID(\"\") clobbered id: got %q", d.getBotID())
+	}
+}
+
 func TestOnMessageCreate_DirectMessage(t *testing.T) {
 	t.Parallel()
 	d := New(Config{BotToken: "test-token"})

@@ -53,6 +53,18 @@ func TestCronRunRecordBytesUpperBoundTracksFieldCaps(t *testing.T) {
 		ResultBytes: 1 << 30,
 		ErrorClass:  ErrClassWorkDirUnreachable,
 		ErrorMsg:    sanitiseRunErrMsg(rawErr),
+		// Sandbox execution receipt (RFC §7.3): worst case is a full ARN +
+		// image tag plus max integers/float. Tiny (~250B) relative to the
+		// 32 KiB cap, but include it so a future field addition cannot
+		// silently push the record over without this test catching it.
+		SandboxMeta: &SandboxRunMeta{
+			RuntimeARN:      "arn:aws:bedrock-agentcore:ap-southeast-1:000000000000:runtime/" + strings.Repeat("x", 64),
+			ImageVersion:    strings.Repeat("v", 64),
+			ExitStatus:      255,
+			CostUSD:         99999.999999,
+			DurationMS:      90 * 60 * 1000,
+			MemoryPeakBytes: 8 << 30,
+		},
 	}
 
 	// Sanity-check the helpers actually capped the rune fields, otherwise the
