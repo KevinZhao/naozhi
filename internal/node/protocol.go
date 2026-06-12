@@ -37,6 +37,21 @@ type ServerMsg struct {
 	// seq here if Phase 3 observes duplicates in practice.
 	TaskID    string          `json:"task_id,omitempty"`
 	AgentMeta *AgentMetaPatch `json:"meta,omitempty"`
+
+	// HasMore is set on the initial "history" frame to tell the dashboard
+	// whether any event strictly older than the slice still exists (ring or
+	// disk). It replaces the client-side `len(events) >= INITIAL_HISTORY_LIMIT`
+	// heuristic, which guessed wrong when a session had more visible bubbles
+	// than DefaultVisibleTarget but fewer total events than the page-size hint —
+	// hiding the "load earlier" affordance and stranding the opening messages.
+	//
+	// It is a *bool so the modern "no more history" answer (false) still
+	// serializes — a plain bool with omitempty would drop false and leave the
+	// client unable to distinguish "server says no more" from "legacy server
+	// said nothing". nil (all non-initial-history frames, and older servers) is
+	// omitted; those clients fall back to the length heuristic. Older clients
+	// ignore the unknown field either way.
+	HasMore *bool `json:"has_more,omitempty"`
 }
 
 // AgentMetaPatch carries aggregator-side counters the server_tailer pushes

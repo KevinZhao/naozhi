@@ -33,8 +33,11 @@ const initialHistoryDiskTimeout = 2 * time.Second
 
 // initialVisibleHistory reads the visible-aware initial history slice for a
 // subscribe handshake, bounding the disk-tier fallback with a deadline derived
-// from the Hub context so shutdown still cancels it promptly.
-func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) []cli.EventEntry {
+// from the Hub context so shutdown still cancels it promptly. The returned
+// hasMore reports whether any event strictly older than the slice still exists
+// (ring or disk); the dashboard mounts its "load earlier" affordance off this
+// flag instead of guessing from the returned slice length.
+func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) ([]cli.EventEntry, bool) {
 	target := limit
 	if target <= 0 || target > session.DefaultVisibleTarget {
 		// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, not a
@@ -49,7 +52,19 @@ func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) []c
 	// which is the pre-existing maxEventsPageLimit bound anyway.
 	ctx, cancel := context.WithTimeout(h.ctx, initialHistoryDiskTimeout)
 	defer cancel()
-	return sess.EventLastNVisibleCtx(ctx, target, 0)
+	return sess.EventInitialPageCtx(ctx, target, 0)
+}
+
+// initialHasMorePtr returns a non-nil *bool only for the initial-page history
+// frame (msg.Limit>0, no After cursor) — the one branch that computed hasMore.
+// After-cursor catch-up and legacy full-history frames return nil so the
+// has_more field is omitted and the client keeps its length-heuristic fallback
+// rather than seeing a meaningless false.
+func initialHasMorePtr(msg node.ClientMsg, hasMore bool) *bool {
+	if msg.After > 0 || msg.Limit <= 0 {
+		return nil
+	}
+	return &hasMore
 }
 
 // File: wshub_subscribe.go
@@ -211,6 +226,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
 
 		var entries []cli.EventEntry
+		var hasMore bool
 		switch {
 		case msg.After > 0:
 			entries = sess.EventEntriesSince(msg.After)
@@ -218,14 +234,14 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 			// Visible-aware initial page: a suspended session whose persisted
 			// tail is all internal events (parallel agent team) would otherwise
 			// hand the dashboard a page that renders to the blank placeholder.
-			entries = h.initialVisibleHistory(sess, msg.Limit)
+			entries, hasMore = h.initialVisibleHistory(sess, msg.Limit)
 		default:
 			entries = sess.EventLastN(0)
 		}
 		if len(entries) > 0 {
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: initialHasMorePtr(msg, hasMore)})
 		}
-		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries))
+		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries), "has_more", hasMore)
 		return
 	}
 	// Fast-fail if Shutdown already fired: SubscribeEvents would otherwise
@@ -298,6 +314,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	snap := sess.Snapshot()
 
 	var entries []cli.EventEntry
+	var hasMore bool
 	switch {
 	case msg.After > 0:
 		entries = sess.EventEntriesSince(msg.After)
@@ -310,16 +327,17 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// `limit` events with internal tool_use / task_progress entries, a
 		// plain EventLastN(limit) returns a page that the dashboard filters
 		// down to nothing and renders as the blank "该会话最近仅有 agent
-		// 活动" placeholder. EventLastNVisibleCtx keeps walking (ring, then
-		// disk) until the page carries real chat bubbles.
-		entries = h.initialVisibleHistory(sess, msg.Limit)
+		// 活动" placeholder. EventInitialPageCtx keeps walking (ring, then
+		// disk) until the page carries real chat bubbles, and reports whether
+		// older history still exists for the "load earlier" affordance.
+		entries, hasMore = h.initialVisibleHistory(sess, msg.Limit)
 	default:
 		// Legacy path: send everything the log remembers. Kept so older
 		// clients (and the node-to-node relay) still see full history.
 		entries = sess.EventLastN(0)
 	}
 
-	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State)
+	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State, "has_more", hasMore)
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
 
 	var lastTime int64
@@ -328,11 +346,12 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// (max msg.Limit entries × ~500B-4KB each). SendJSON would otherwise
 		// allocate a fresh buffer per subscribe handshake; eventPushLoop
 		// already uses marshalPooled for the same shape. R218-PERF-14.
-		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries}); err == nil {
+		hm := initialHasMorePtr(msg, hasMore)
+		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm}); err == nil {
 			c.SendRaw(data)
 		} else {
 			slog.Warn("history marshal failed, falling back", "err", err, "key", key)
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm})
 		}
 		lastTime = entries[len(entries)-1].Time
 	} else if snap.State == "running" {
