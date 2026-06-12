@@ -848,6 +848,16 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 			TotalKills:    h.watchdogTotal.Load(),
 		},
 	}
+	// R20260612-global-version: cli_version is seeded into staticStats at
+	// startup from the spawn-time wrapper version, which goes stale after a
+	// host claude upgrade under a long-lived naozhi. Re-resolve it per poll
+	// from router.CLIVersion() — now backed by the live init-frame version —
+	// so the global banner tracks the upgrade without a restart. The lookup
+	// is a lock-free atomic read; only overwrite when non-empty so an
+	// unwired router can't blank the startup value.
+	if live := h.router.CLIVersion(); live != "" {
+		stats.CLIVersion = live
+	}
 	if projectList := h.buildProjectList(now); len(projectList) > 0 {
 		stats.Projects = projectList
 	}
