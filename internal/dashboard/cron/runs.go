@@ -200,6 +200,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ResultBytes: run.ResultBytes,
 		ErrorClass:  string(run.ErrorClass),
 		ErrorMsg:    run.ErrorMsg,
+		ReplayOf:    run.ReplayOf,
 	}
 	if !run.EndedAt.IsZero() {
 		out.EndedAt = run.EndedAt.UnixMilli()

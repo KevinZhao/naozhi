@@ -74,6 +74,8 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		// Placement: nil omits; ""/"local" 本机；"sandbox" 云沙箱
 		// (agentcore-cloud-sandbox RFC §4.2)。
 		Placement *string `json:"placement,omitempty"`
+		// SideEffects: nil omits; pointer 写显式三态（agentcore §6.2）。
+		SideEffects *bool `json:"side_effects,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -82,7 +84,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
 		req.Notify == nil && req.NotifyClear == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
-		req.FreshContext == nil && req.Backend == nil && req.Placement == nil {
+		req.FreshContext == nil && req.Backend == nil && req.Placement == nil && req.SideEffects == nil {
 		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
 	}
@@ -222,6 +224,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
 		Placement:      req.Placement,
+		SideEffects:    req.SideEffects,
 	})
 	if err != nil {
 		switch {

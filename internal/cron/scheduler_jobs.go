@@ -515,6 +515,10 @@ type JobUpdate struct {
 	// 原值；pointer 到 "" 或 "local" 回落本机；"sandbox" 走 AgentCore
 	// run-once。validatePlacement 在 UpdateJob 入口拒绝未知值。
 	Placement *string
+	// SideEffects 切换"任务有外部副作用"声明（agentcore §6.2 双跑围栏）。
+	// nil 保持原值；pointer 到 true/false 写显式三态。无 clear 语义——
+	// 与 Placement 一样属"运行属性"，不像 Notify 需要回 legacy-default。
+	SideEffects *bool
 }
 
 // applyTo writes every non-nil JobUpdate field onto j. R238-ARCH-14
@@ -575,6 +579,10 @@ func (upd JobUpdate) applyTo(j *Job) {
 	}
 	if upd.Placement != nil {
 		j.Placement = *upd.Placement
+	}
+	if upd.SideEffects != nil {
+		v := *upd.SideEffects
+		j.SideEffects = &v
 	}
 }
 

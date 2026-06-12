@@ -252,6 +252,10 @@ type finishArgs struct {
 	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
 	// 路径释放）。R246-GO-3 (#689).
 	finalizer *runFinalizer
+	// replayOf links this run to the original it replayed (agentcore §7.3).
+	// "" for normal runs. finishRun copies it into the CronRun record so the
+	// dashboard can render the replay chain.
+	replayOf string
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -403,6 +407,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
+			ReplayOf:    a.replayOf,
 		})
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next

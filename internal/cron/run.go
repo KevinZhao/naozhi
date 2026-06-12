@@ -58,6 +58,12 @@ type CronRun struct {
 	ResultBytes int        `json:"result_bytes,omitempty"`
 	ErrorClass  ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string     `json:"error_msg,omitempty"`
+
+	// ReplayOf links a replay run to the original run it re-executed
+	// (agentcore-cloud-sandbox §7.3). Empty for original runs. The
+	// dashboard renders a source-chain badge from it, so it lives on both
+	// CronRun and CronRunSummary (the list view shows the chain too).
+	ReplayOf string `json:"replay_of,omitempty"`
 }
 
 // CronRunSummary is the slim shape returned by list endpoints + the
@@ -74,6 +80,9 @@ type CronRunSummary struct {
 	DurationMS int64       `json:"duration_ms,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	ErrorClass ErrorClass  `json:"error_class,omitempty"`
+	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
+	// dashboard draws a "replay of …" badge directly off the summary.
+	ReplayOf string `json:"replay_of,omitempty"`
 }
 
 // summary derives a CronRunSummary from a CronRun. Centralised so any
@@ -90,5 +99,6 @@ func (r *CronRun) summary() CronRunSummary {
 		DurationMS: r.DurationMS,
 		SessionID:  r.SessionID,
 		ErrorClass: r.ErrorClass,
+		ReplayOf:   r.ReplayOf,
 	}
 }

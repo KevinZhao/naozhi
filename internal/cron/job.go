@@ -60,6 +60,7 @@ type JobInit struct {
 	NotifyPlatform string
 	NotifyChatID   string
 	Notify         *bool
+	SideEffects    *bool
 	FreshContext   bool
 	Paused         bool
 }
@@ -103,6 +104,7 @@ func NewJobFull(in JobInit) *Job {
 		NotifyPlatform: in.NotifyPlatform,
 		NotifyChatID:   in.NotifyChatID,
 		Notify:         in.Notify,
+		SideEffects:    in.SideEffects,
 		FreshContext:   in.FreshContext,
 		Paused:         in.Paused,
 	}
@@ -162,6 +164,16 @@ type Job struct {
 	// router. Phase 1 sandbox guardrails (≤60min, no local MCP, no
 	// workspace) are enforced by the sandbox executor, not here.
 	Placement string `json:"placement,omitempty"`
+
+	// SideEffects declares that this job mutates external state (pushes a
+	// branch, opens a PR, sends a message…). Tri-state pointer like Notify:
+	// nil = legacy default (treated as false). It is the §6.2 double-run
+	// fence input: a sandbox run that ends failed-transport (microVM fate
+	// unknown) goes to the human confirmation queue instead of being
+	// silently eligible for auto-replay when SideEffects is true. Only
+	// meaningful for placement=sandbox today, but stored on every job so a
+	// future local-placement use can read it too.
+	SideEffects *bool `json:"side_effects,omitempty"`
 
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
