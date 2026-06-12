@@ -38,6 +38,16 @@ type RetiredStore struct {
 	entries map[string]int64 // sessionID → unix ms
 	dirty   bool
 
+	// gen counts mutations to entries. Save snapshots gen under the lock
+	// alongside the entries copy, then after the unlocked marshal+write only
+	// clears dirty when gen is unchanged. This closes the window where a
+	// concurrent MarkRetired (lifecycle hot path, runs while Save is doing its
+	// unlocked WriteFileAtomic+fsync) sets dirty=true for an entry that the
+	// in-flight write does NOT include — without the gen guard Save would
+	// unconditionally clear dirty and that entry would never be flushed,
+	// losing it across a restart. R20260610-085718-LB-6 (#2011).
+	gen uint64
+
 	// maxEntries caps how many sessionIDs the store will retain after a
 	// Prune call. Without a cap a long-running deployment grows the JSON
 	// file without bound — the history drawer only displays sessions
@@ -142,6 +152,7 @@ func (rs *RetiredStore) MarkRetired(sessionID string, now time.Time) {
 	}
 	rs.entries[sessionID] = ms
 	rs.dirty = true
+	rs.gen++
 }
 
 // Get returns the recorded retirement time for sessionID in unix ms, or 0
@@ -181,11 +192,14 @@ func (rs *RetiredStore) Save() error {
 		return nil
 	}
 	// Snapshot under lock so the JSON encode runs on a stable copy and
-	// concurrent MarkRetired calls don't race the marshaller.
+	// concurrent MarkRetired calls don't race the marshaller. Capture gen
+	// alongside the snapshot so we can detect mutations that land during the
+	// unlocked write window (see the gen field doc / #2011).
 	snap := make(map[string]int64, len(rs.entries))
 	for k, v := range rs.entries {
 		snap[k] = v
 	}
+	savedGen := rs.gen
 	rs.mu.Unlock()
 
 	file := retiredStoreFileV1{
@@ -209,7 +223,14 @@ func (rs *RetiredStore) Save() error {
 	}
 
 	rs.mu.Lock()
-	rs.dirty = false
+	// Only clear dirty when no mutation landed during the unlocked write
+	// window. A concurrent MarkRetired bumps gen for an entry the just-written
+	// snapshot did not contain; clearing dirty unconditionally would strand
+	// that entry until the next mutation (and lose it entirely if it was the
+	// last one before shutdown). R20260610-085718-LB-6 (#2011).
+	if rs.gen == savedGen {
+		rs.dirty = false
+	}
 	rs.mu.Unlock()
 	return nil
 }
@@ -249,6 +270,7 @@ func (rs *RetiredStore) Prune(cutoffMs int64) int {
 	}
 	if removed > 0 {
 		rs.dirty = true
+		rs.gen++
 	}
 	return removed
 }
