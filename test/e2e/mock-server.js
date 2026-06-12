@@ -216,27 +216,20 @@ function startMockServer(overrides = {}) {
       res.end(manifest);
       return;
     }
-    // Serve any /static/*.js the dashboard references. dashboard.html loads,
-    // in order: nz_util.js (defines window.esc/escAttr/escJs — dashboard.js's
-    // bare esc() call sites depend on it), dashboard.js, cron_view.js,
-    // agent_view.js, asset_browser.js. Missing any of these triggers a
-    // global-error toast that perturbs e2e and, worse, leaves window.esc
-    // undefined so eventHtml()/renderMd() throw "esc is not defined" the moment
-    // a test renders an event. A flat-filename allowlist (no path separators)
-    // keeps this from becoming a directory-traversal read.
+    // dashboard.html 引用 5 个 /static/*.js（nz_util / dashboard / cron_view /
+    // agent_view / asset_browser，PR#1954 拆分后）。逐个白名单伺服跟不上拆分
+    // 节奏：漏掉 nz_util.js 时 dashboard.js 因 window.nz 未定义直接崩，所有
+    // e2e 卡在 .session-card 不出现。改为目录伺服（仅 .js、basename 防穿越）。
     if (pathname.startsWith('/static/') && pathname.endsWith('.js')) {
-      const name = pathname.slice('/static/'.length);
-      if (!name.includes('/') && !name.includes('..')) {
-        try {
-          const js = fs.readFileSync(path.join(STATIC_DIR, name));
-          res.writeHead(200, { 'Content-Type': 'application/javascript' });
-          res.end(js);
-        } catch {
-          res.writeHead(404);
-          res.end();
-        }
-        return;
+      try {
+        const js = fs.readFileSync(path.join(STATIC_DIR, path.basename(pathname)));
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end(js);
+      } catch {
+        res.writeHead(404);
+        res.end();
       }
+      return;
     }
     if (pathname === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
@@ -293,6 +286,26 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(eventsData));
+      return;
+    }
+
+    // Full-size attachment fetch used by the lightbox (data-full URL).
+    // Serves a tiny valid PNG so naturalWidth>0; ?path=missing.png returns
+    // 404 to exercise the thumb-fallback path.
+    if (pathname === '/api/sessions/attachment' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const p = url.searchParams.get('path') || '';
+      if (p.includes('missing')) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      );
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(png);
       return;
     }
 

@@ -152,3 +152,51 @@ func TestSendWithWatchdog_SuccessStopsCallback(t *testing.T) {
 		t.Fatalf("goroutine delta = %d after %d successful sends; want ~0 (callback should be stopped, not spawned)", delta, N)
 	}
 }
+
+// TestSendWithWatchdog_DeadlineStopRaceStillFires is the regression test
+// for R20260612-GO-1 (#2021). It pins the invariant that
+// stopWatchdog()==true does NOT mean "deadline never fired": when Send
+// returns because sendCtx hit its deadline but stopWatchdog() races the
+// AfterFunc callback goroutine's start and WINS, the helper must fire
+// InterruptViaControl synchronously rather than synthesizing
+// abortResult{fired:false}.
+//
+// The bug window is the runtime's lag between ctx hitting DeadlineExceeded
+// and AfterFunc actually spawning the callback goroutine; in that window
+// stop() returns true. The short 5ms deadline plus the synchronous return
+// off ctx.Done() makes sendWithWatchdog call stopWatchdog() while the
+// callback is frequently still un-spawned — the exact race window. Run
+// under -race -count=100 to exercise it repeatedly; pre-fix this went red
+// whenever stop() won.
+func TestSendWithWatchdog_DeadlineStopRaceStillFires(t *testing.T) {
+	t.Parallel()
+
+	sess := &fakeSendSession{
+		send: func(ctx context.Context, text string) (SendResult, error) {
+			<-ctx.Done()
+			return SendResult{}, ctx.Err()
+		},
+		interruptOutcome: InterruptSent,
+	}
+
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer sendCancel()
+
+	s := &Scheduler{}
+	_, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+	// The core invariant: deadline exceeded => interrupt fired, regardless
+	// of whether the AfterFunc callback or the synchronous recovery branch
+	// did it. Pre-fix, the stop()==true branch returned fired=false here.
+	if !abort.fired {
+		t.Fatal("abort.fired = false on deadline path; want true (stop()==true must not swallow the interrupt)")
+	}
+	if abort.outcome != InterruptSent {
+		t.Fatalf("abort.outcome = %v, want InterruptSent", abort.outcome)
+	}
+	if got := sess.interruptCalls.Load(); got != 1 {
+		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
+	}
+}

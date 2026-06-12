@@ -222,6 +222,21 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
+		// Placement: tampered/unknown values are normalised to local rather
+		// than dropping the whole job — unlike injection-bearing bytes above,
+		// a bad placement is a routing choice, and losing the job over it
+		// would be worse than running it at the safe default placement.
+		// The sandbox×work_dir Phase 1 combination degrades the same way.
+		if err := validatePlacement(j.Placement); err != nil {
+			slog.Warn("cron store: normalising job with invalid placement to local",
+				"path", path, "cron_id", j.ID, "err", err)
+			j.Placement = ""
+		}
+		if placementIsSandbox(j.Placement) && j.WorkDir != "" {
+			slog.Warn("cron store: sandbox job carries work_dir (Phase 1 unsupported); normalising placement to local",
+				"path", path, "cron_id", j.ID)
+			j.Placement = ""
+		}
 		// R236-QA-16: defensive Schedule / WorkDir validation. AddJob /
 		// dashboard PATCH already validate Schedule via robfig/cron + the
 		// minCronInterval floor, and reject WorkDir paths that escape the

@@ -28,6 +28,16 @@ type Event struct {
 	// is authoritative there. UI Round 5 R5-3.
 	Model string `json:"model,omitempty"`
 
+	// ClaudeCodeVersion is populated for system/init events on stream-json
+	// (claude), where the CLI self-reports the version of the binary it is
+	// actually running (e.g. "2.1.174"). readLoop forwards it to
+	// Process.setLiveVersion so the dashboard can show the LIVE binary
+	// version rather than the spawn-time Wrapper.CLIVersion — the latter is
+	// detected once at naozhi startup and goes stale if the host claude is
+	// upgraded under a long-lived naozhi. ACP path leaves this empty.
+	// R20260612-live-version.
+	ClaudeCodeVersion string `json:"claude_code_version,omitempty"`
+
 	// Agent task fields (system/task_started, task_progress, task_notification).
 	TaskID       string     `json:"task_id,omitempty"`
 	ToolUseID    string     `json:"tool_use_id,omitempty"`

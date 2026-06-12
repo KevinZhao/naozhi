@@ -272,9 +272,18 @@ type Process struct {
 	// "(模型未配置)". Atomic.Pointer[string] keeps Snapshot lock-free,
 	// matching how Wrapper.CLIVersion is exposed via WorkflowState. UI
 	// Round 5 R5-3.
-	model    atomic.Pointer[string]
-	lastSeq  atomic.Int64  // last received shim seq, for reconnect
-	pongRecv chan struct{} // signaled by readLoop on pong receipt
+	model atomic.Pointer[string]
+	// liveVersion is the CLI binary version self-reported by the running
+	// process in its system/init frame (claude_code_version). It is the
+	// version of the binary THIS process actually exec'd — authoritative
+	// even after the host claude was upgraded under a long-lived naozhi,
+	// where the spawn-time Wrapper.CLIVersion (detected once at startup)
+	// goes stale. Empty until the init frame arrives; the session layer
+	// falls back to the spawn-time value during that window. Mirrors the
+	// model LIVE-value pattern above. R20260612-live-version.
+	liveVersion atomic.Pointer[string]
+	lastSeq     atomic.Int64  // last received shim seq, for reconnect
+	pongRecv    chan struct{} // signaled by readLoop on pong receipt
 
 	// readEventBuf is a reusable backing array handed to ReadEventInto so the
 	// single-event Claude hot path (the dominant frame) no longer allocates a
@@ -936,6 +945,29 @@ func (p *Process) setModel(model string) {
 func (p *Process) Model() string {
 	if m := p.model.Load(); m != nil {
 		return *m
+	}
+	return ""
+}
+
+// setLiveVersion records the CLI binary version self-reported in the
+// system/init frame. Called from readLoop when the init frame carries a
+// non-empty claude_code_version; never invoked with "". Lock-free.
+// R20260612-live-version.
+func (p *Process) setLiveVersion(v string) {
+	if v == "" {
+		return
+	}
+	s := v
+	p.liveVersion.Store(&s)
+}
+
+// LiveVersion returns the CLI binary version self-reported by the running
+// process (system/init claude_code_version), or "" if the init frame has
+// not arrived yet. Lock-free; safe from Snapshot's hot read path.
+// R20260612-live-version.
+func (p *Process) LiveVersion() string {
+	if v := p.liveVersion.Load(); v != nil {
+		return *v
 	}
 	return ""
 }

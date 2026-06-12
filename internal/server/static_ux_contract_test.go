@@ -214,11 +214,12 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	// Sanity: code-oriented selectors still use monospace internally so this
 	// rollback doesn't accidentally de-fix code rendering.
 	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
-	// font-size:13px and the SF Mono stack are intentionally left as-is.
+	// font-size migrated to --nz-fs-sm2 (=13px, unchanged render, #2024);
+	// the SF Mono stack — the actual subject of this guard — is unchanged.
 	// R20260608: bg moved var(--nz-border)→var(--nz-bg-2) and color #e6edf3→
 	// var(--nz-code-fg) so inline code stays legible in light theme. The
 	// monospace stack (the actual subject of this guard) is unchanged.
-	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
+	if !strings.Contains(html, ".md-code{background:var(--nz-bg-2);color:var(--nz-code-fg);padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-sm2);font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
@@ -1557,7 +1558,8 @@ func TestDashboardHTML_R110StatusDotPalette(t *testing.T) {
 	// The three dot rules must consume the tokens — if somebody drops a
 	// raw hex back in, this test fails so the review catches it.
 	for _, want := range []string{
-		".dot-running{background:var(--nz-status-running);animation:pulse 1.5s ease-in-out infinite}",
+		// --nz-dur-loop resolves to 1.5s (#2029 cadence unification); render unchanged.
+		".dot-running{background:var(--nz-status-running);animation:pulse var(--nz-dur-loop) ease-in-out infinite}",
 		".dot-ready{background:var(--nz-status-ready)}",
 		// dot-new keeps the dashed accent border so it still reads as
 		// "not yet started" even with the token migration.
@@ -1718,12 +1720,17 @@ func TestDashboardHTML_R110ModalOverlayScrim(t *testing.T) {
 	}
 	css := string(data)
 
-	// Pin the exact scrim value — regex-based so whitespace/property
-	// ordering in future reformats doesn't false-positive.
-	re := regexp.MustCompile(`\.modal-overlay\s*\{[^}]*background\s*:\s*rgba\(0\s*,\s*0\s*,\s*0\s*,\s*(0?\.\d+)\)`)
+	// R20260610-UI-3 unified the blocking-modal scrim onto the --nz-scrim token,
+	// so .modal-overlay now reads `background:var(--nz-scrim)` and the literal
+	// alpha lives on the token in :root. Assert the rule routes through the token,
+	// then resolve the token's rgba value and pin its alpha.
+	if !regexp.MustCompile(`\.modal-overlay\s*\{[^}]*background\s*:\s*var\(--nz-scrim\)`).MatchString(css) {
+		t.Fatal("dashboard.html .modal-overlay must set background:var(--nz-scrim) (R20260610-UI-3 scrim token)")
+	}
+	re := regexp.MustCompile(`--nz-scrim\s*:\s*rgba\(0\s*,\s*0\s*,\s*0\s*,\s*(0?\.\d+)\)`)
 	m := re.FindStringSubmatch(css)
 	if m == nil {
-		t.Fatal("dashboard.html .modal-overlay must set a rgba(0,0,0,X) background")
+		t.Fatal("dashboard.html --nz-scrim token must be defined as rgba(0,0,0,X)")
 	}
 	// Minimum threshold: 0.7 — the UX review specifically flagged
 	// anything below this as insufficient scrim coverage. Parse to
@@ -3628,7 +3635,7 @@ func TestDashboard_R155_AuxLabelsLocalized(t *testing.T) {
 	// anchored on the Chinese label so both the query-echo and no-query
 	// variants localize together.
 	for _, want := range []string{
-		`'打开自定义工作目录：<span style="color:#79c0ff">'`,
+		`'打开自定义工作目录：<span style="color:var(--nz-accent)">'`,
 		`: '打开自定义工作目录…';`,
 	} {
 		if !strings.Contains(js, want) {
@@ -4033,8 +4040,9 @@ func TestDashboard_R151_EventStreamAndBannerLocalized(t *testing.T) {
 		},
 		{
 			"discovered shell loading",
-			`<div class="empty-state">加载中...</div>`,
-			`<div class="empty-state">\u52a0\u8f7d\u4e2d...</div>`,
+			// #2026 standardized the ellipsis to the … glyph (U+2026).
+			`<div class="empty-state">加载中…</div>`,
+			`<div class="empty-state">\u52a0\u8f7d\u4e2d\u2026</div>`,
 		},
 	} {
 		if !strings.Contains(js, want.utf8) && !strings.Contains(js, want.esc) {
@@ -4677,7 +4685,8 @@ func TestDashboardHTML_R110P1_HdrBtnCoarsePointerSize(t *testing.T) {
 
 	// Invariant 3: base + 480px desktop-narrow rules keep compact sizing.
 	// Scope each check to the specific rule string.
-	if !strings.Contains(css, `.hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px`) {
+	// --nz-radius-ms resolves to 6px (#2024 token migration); width/height:32px is the actual subject of this guard.
+	if !strings.Contains(css, `.hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px`) {
 		t.Error("base `.hdr-btn` rule must stay at width:32px;height:32px — mouse users keep the compact density")
 	}
 	if !strings.Contains(css, ".hdr-btn{width:36px;height:36px}") {
@@ -5256,14 +5265,16 @@ func TestDashboardHTML_R110P1_ContextMenuStyles(t *testing.T) {
 		}
 	}
 
-	// z-index contract: menu (211) above overlay (210), both above
-	// .modal-overlay (200). If the menu drops below modal-overlay a
-	// stray confirmDialog would hide it.
-	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:210}") {
-		t.Error(".ctx-menu-overlay must have z-index:210 to sit above modal-overlay (z-index:200)")
+	// z-index contract: menu above its overlay, both above .modal-overlay.
+	// R20260610-UI-2 routed these through the --nz-z-* scale: the overlay sits
+	// at --nz-z-toast (210, above the drawer/modal tier 200) and the menu at
+	// --nz-z-menu (211, above its overlay). If the menu drops below modal-overlay
+	// a stray confirmDialog would hide it.
+	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}") {
+		t.Error(".ctx-menu-overlay must use z-index:var(--nz-z-toast) to sit above the modal/drawer tier")
 	}
-	if !strings.Contains(html, "z-index:211") {
-		t.Error(".ctx-menu must have z-index:211 so it renders above its overlay")
+	if !strings.Contains(html, "z-index:var(--nz-z-menu)") {
+		t.Error(".ctx-menu must use z-index:var(--nz-z-menu) so it renders above its overlay")
 	}
 
 	// 44px min-height on items for WCAG 2.5.5 AAA touch target size —
@@ -7374,5 +7385,36 @@ func TestStaticUXContract_FileHasDoNotAddBanner(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("static_ux_contract_test.go LOST the #388 anti-growth banner witness %q — keep the DO-NOT-ADD warning so the contract-test boundary stays documented", want)
 		}
+	}
+}
+
+// TestDashboardJS_LightboxGalleryNav pins the two invariants of the lightbox
+// gallery navigation (RFC lightbox-gallery-nav) that cannot be expressed
+// behaviourally — interaction behavior itself lives in
+// test/e2e/lightbox_nav.test.js per the #388 banner above.
+func TestDashboardJS_LightboxGalleryNav(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Forbid-list: the legacy inline-onclick single-image call site must not
+	// reappear. Thumbnails are opened by the document-level delegated click
+	// listener; a re-introduced inline handler would create a second,
+	// group-unaware open path (and another CSP 'unsafe-inline' dependency).
+	if strings.Contains(js, `onclick="openLightbox(`) {
+		t.Error("dashboard.js must not render thumbnails with inline onclick=\"openLightbox(...)\" — clicks go through the delegated .event-images listener which opens the whole gallery group (RFC lightbox-gallery-nav §3)")
+	}
+
+	// Compatibility shell: window.openLightbox(src, fallback) is public API
+	// (external callers / bookmarklets) and must keep delegating to the group
+	// model. Two distinct witnesses: the assignment and the delegation call.
+	if !strings.Contains(js, "window.openLightbox=function(src,fallback)") {
+		t.Error("window.openLightbox(src,fallback) compatibility shell missing — the historical single-image entry point must keep working")
+	}
+	if !strings.Contains(js, "window.openLightboxGroup([{full:src,thumb:fallback}],0)") {
+		t.Error("openLightbox must delegate to openLightboxGroup with a single-item group — a parallel non-group implementation would drift from the gallery model")
 	}
 }

@@ -129,18 +129,19 @@ func TestClaudeProtocol_BuildArgs_DebugFile(t *testing.T) {
 	path := "/data/naozhi/cli-debug/abc123.log"
 	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: path})
 
-	// Expect the adjacent pair "--debug api" and "--debug-file <path>".
-	var sawDebugAPI, sawDebugFile bool
+	// Expect "--debug-file <path>" (which implicitly enables debug). No bare
+	// "--debug api" pair: the category filter only scopes the CLI's stderr
+	// stream, never the file, and a dangling "api" token is pure noise. This
+	// asserts the ABSENCE of any "--debug" token so the no-op filter cannot
+	// silently reappear (regression guard for the --debug-api bug).
+	var sawDebugFile bool
 	for i, a := range args {
-		if a == "--debug" && i+1 < len(args) && args[i+1] == "api" {
-			sawDebugAPI = true
-		}
 		if a == "--debug-file" && i+1 < len(args) && args[i+1] == path {
 			sawDebugFile = true
 		}
-	}
-	if !sawDebugAPI {
-		t.Errorf("DebugFile set: missing `--debug api`, got %v", args)
+		if a == "--debug" {
+			t.Errorf("DebugFile set: unexpected `--debug` token in argv: %v", args)
+		}
 	}
 	if !sawDebugFile {
 		t.Errorf("DebugFile set: missing `--debug-file %s`, got %v", path, args)
