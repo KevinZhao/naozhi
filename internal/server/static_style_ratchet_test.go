@@ -21,8 +21,8 @@ import (
 // Baselines captured immediately after the R20260606 migration. LOWER these
 // (never raise) as remaining off-scale literals fold into tokens.
 const (
-	maxFontSizeLiterals     = 141
-	maxBorderRadiusLiterals = 112
+	maxFontSizeLiterals     = 30
+	maxBorderRadiusLiterals = 24
 )
 
 var (
