@@ -216,30 +216,27 @@ function startMockServer(overrides = {}) {
       res.end(manifest);
       return;
     }
-    if (pathname === '/static/dashboard.js') {
-      try {
-        const js = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.js'));
-        res.writeHead(200, { 'Content-Type': 'application/javascript' });
-        res.end(js);
-      } catch {
-        res.writeHead(404);
-        res.end();
+    // Serve any /static/*.js the dashboard references. dashboard.html loads,
+    // in order: nz_util.js (defines window.esc/escAttr/escJs — dashboard.js's
+    // bare esc() call sites depend on it), dashboard.js, cron_view.js,
+    // agent_view.js, asset_browser.js. Missing any of these triggers a
+    // global-error toast that perturbs e2e and, worse, leaves window.esc
+    // undefined so eventHtml()/renderMd() throw "esc is not defined" the moment
+    // a test renders an event. A flat-filename allowlist (no path separators)
+    // keeps this from becoming a directory-traversal read.
+    if (pathname.startsWith('/static/') && pathname.endsWith('.js')) {
+      const name = pathname.slice('/static/'.length);
+      if (!name.includes('/') && !name.includes('..')) {
+        try {
+          const js = fs.readFileSync(path.join(STATIC_DIR, name));
+          res.writeHead(200, { 'Content-Type': 'application/javascript' });
+          res.end(js);
+        } catch {
+          res.writeHead(404);
+          res.end();
+        }
+        return;
       }
-      return;
-    }
-    // dashboard.html 末尾还引用 agent_view.js — 不伺服会触发 global-error
-    // toast 干扰 e2e 视觉截图（CSP script-src sha256 也无法拦下 404 触发的
-    // requestfailed 路径走 window.error handler）。
-    if (pathname === '/static/agent_view.js') {
-      try {
-        const js = fs.readFileSync(path.join(STATIC_DIR, 'agent_view.js'));
-        res.writeHead(200, { 'Content-Type': 'application/javascript' });
-        res.end(js);
-      } catch {
-        res.writeHead(404);
-        res.end();
-      }
-      return;
     }
     if (pathname === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
