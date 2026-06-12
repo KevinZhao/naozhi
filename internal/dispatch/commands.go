@@ -363,7 +363,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		if agentToReset == "" {
 			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
 			d.router.Reset(plannerKey)
-			d.discardQueue(plannerKey)
+			d.discardQueue(ctx, msg, plannerKey)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
 			// R0530-CR-1: resolve via the shared helper so this branch gets
@@ -372,7 +372,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
 				d.router.Reset(key)
-				d.discardQueue(key)
+				d.discardQueue(ctx, msg, key)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
 				// R187-SEC-M1: agentToReset is user IM input, sanitize
@@ -411,7 +411,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	}
 	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 	d.router.Reset(key)
-	d.discardQueue(key)
+	d.discardQueue(ctx, msg, key)
 	label := ""
 	if agentID != "general" {
 		label = " (" + agentID + ")"

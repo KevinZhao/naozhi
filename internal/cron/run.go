@@ -58,6 +58,15 @@ type CronRun struct {
 	ResultBytes int        `json:"result_bytes,omitempty"`
 	ErrorClass  ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string     `json:"error_msg,omitempty"`
+
+	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs
+	// (RFC §5.1/§7.3): runtime arn, image version, exit status, cost,
+	// duration, peak memory. Pointer + omitempty so local runs persist NO
+	// sandbox_meta key (wire-read-safe: old readers skip it, and a local
+	// run's JSON is byte-identical to pre-Phase-2). The detail endpoint
+	// surfaces it; summary() deliberately drops it (list endpoints load
+	// 50 jobs × 5 recent runs — receipts would bloat the payload).
+	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
 }
 
 // CronRunSummary is the slim shape returned by list endpoints + the

@@ -139,3 +139,35 @@ func TestNewAgentcoreSandboxRunner_DisabledConfig(t *testing.T) {
 		t.Fatalf("disabled config: r=%v err=%v, want nil/nil", r, err)
 	}
 }
+
+// TestAdapter_MapsMetaFromRunResult pins PR-1: the adapter must thread the
+// agentcore execution receipt (cost/duration/image/memory/exit) plus the
+// configured runtime ARN into cron.SandboxOutcome.Meta.
+func TestAdapter_MapsMetaFromRunResult(t *testing.T) {
+	api := &fakeAgentcoreAPI{body: sseBody(
+		`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok","total_cost_usd":0.0044,"duration_ms":1888},"ts":"t"}`,
+		`{"kind":"meta","image_version":"phase2","memory_peak_bytes":268435456,"ts":"t"}`,
+		`{"kind":"exit","code":0,"ts":"t"}`,
+	)}
+	r := &agentcoreSandboxRunner{client: agentcore.NewWithAPIForTest(api,
+		agentcore.Config{RuntimeARN: "arn:aws:bedrock-agentcore:us-west-2:1:runtime/x", Region: "us-west-2"})}
+
+	out, err := r.RunJob(context.Background(), adapterJob(), nil)
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if out.State != cron.SandboxStateSuccess {
+		t.Fatalf("state = %q, want success", out.State)
+	}
+	want := cron.SandboxRunMeta{
+		RuntimeARN:      "arn:aws:bedrock-agentcore:us-west-2:1:runtime/x",
+		ImageVersion:    "phase2",
+		ExitStatus:      0,
+		CostUSD:         0.0044,
+		DurationMS:      1888,
+		MemoryPeakBytes: 268435456,
+	}
+	if out.Meta != want {
+		t.Fatalf("Meta = %+v, want %+v", out.Meta, want)
+	}
+}

@@ -252,6 +252,10 @@ type finishArgs struct {
 	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
 	// 路径释放）。R246-GO-3 (#689).
 	finalizer *runFinalizer
+	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
+	// (RFC §7.3). nil for local runs — finishRun attaches it to the CronRun
+	// only when non-nil, so a local run's record carries no sandbox_meta.
+	sandboxMeta *SandboxRunMeta
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -403,6 +407,9 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
+			// Sandbox execution receipt (RFC §7.3) — nil for local runs, so
+			// their record carries no sandbox_meta key (wire-read-safe).
+			SandboxMeta: a.sandboxMeta,
 		})
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next
