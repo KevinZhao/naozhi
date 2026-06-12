@@ -1494,6 +1494,7 @@ function repaintCronLive() {
   } else {
     el.innerHTML = '';
   }
+  if (typeof regroupAvatars === 'function') regroupAvatars(el);
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
   setCronLiveStatus(wsm.cronLive.status);
@@ -1533,6 +1534,9 @@ function appendEventsToContainer(el, events) {
       node = next;
     }
   }
+  // 头像分组：cron live 容器在 #events-scroll 之外，不被主 observer 覆盖，
+  // 追加后显式重算 .nz-grouped（与 appendEvents/抽屉同款）。
+  if (typeof regroupAvatars === 'function') regroupAvatars(el);
   if (wasBottom) el.scrollTop = el.scrollHeight;
 }
 
