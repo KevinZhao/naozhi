@@ -369,6 +369,9 @@ func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc
 	// agentcore-cloud-sandbox §7.3 — persisted sandbox event log for a run.
 	// Same path-param + rate-limit shape as detail/transcript.
 	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/events", auth(s.cronH.HandleRunEvents))
+	// agentcore-cloud-sandbox §7.3 — input snapshot (replay preview). Same
+	// path-param + rate-limit shape as detail/transcript.
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/snapshot", auth(s.cronH.HandleRunSnapshot))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {

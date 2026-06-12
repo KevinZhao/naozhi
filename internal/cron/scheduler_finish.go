@@ -184,6 +184,15 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 		return
 	}
 	s.runStore.DeleteJob(jobID)
+	// agentcore §5.1: also drop this job's input-snapshot manifests so a
+	// deleted job leaves no orphaned snapshot tree alongside its purged
+	// runs/. Blobs are content-addressed and shared across jobs, so they
+	// are NOT removed here — a deduped blob may still back another job's
+	// snapshot. TODO(agentcore §5.2): a blob GC pass (refcount or
+	// mark-sweep against live manifests) for the runsnapshots/blobs/ tree;
+	// Phase 1 accepts blob accumulation (one ≤MaxPromptBytes blob per
+	// distinct prompt, deduped) as bounded-in-practice.
+	s.deleteJobSnapshots(jobID)
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
