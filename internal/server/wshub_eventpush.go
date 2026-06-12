@@ -445,16 +445,24 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	// under h.mu, release the lock, then invoke it.
 	h.mu.Lock()
 	var staleUnsub func()
+	dropCache := false
 	if c.subscriptions != nil {
 		if u, exists := c.subscriptions[key]; exists {
 			staleUnsub = u
 			delete(c.subscriptions, key)
 			h.decSubscriberCountLocked(key)
+			// R20260610-085718-LB-5 (#2010): drop the marshal cache slot when
+			// this stale cleanup removed the last subscriber, matching
+			// handleUnsubscribe/unregister.
+			dropCache = !h.enforceCaps || h.subscriberCount[key] == 0
 		}
 	}
 	h.mu.Unlock()
 	if staleUnsub != nil {
 		staleUnsub()
+	}
+	if dropCache && h.historyMarshalCache != nil {
+		h.historyMarshalCache.drop(key)
 	}
 	c.SendJSON(node.ServerMsg{Type: "session_state", Key: key, State: "ready", Reason: "subscription_timeout"})
 	return false, nil
