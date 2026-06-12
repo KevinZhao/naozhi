@@ -144,6 +144,11 @@ type sandboxExecArgs struct {
 	inflight  *runInflight
 	finalizer *runFinalizer
 	lg        *slog.Logger
+	// replayOf links this run to the original run it re-executes (RFC §7.3).
+	// "" for a normal scheduled/manual run; set by ReplaySandboxRun so the
+	// new run's record carries the replay chain. Threaded through to
+	// finishSandboxRun → finishRun → CronRun.ReplayOf.
+	replayOf string
 }
 
 // executeSandbox runs one cron job at the sandbox placement and routes the
@@ -274,6 +279,28 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 				"pending", pendingPath != "")
 			msg += " (microVM fate UNKNOWN — termination unconfirmed; check for side effects before re-running)"
 		}
+		// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
+		// auto-replay — it enters the human confirmation queue (the operator
+		// checks whether the side effect already landed before deciding to
+		// confirm-done or replay). A side-effect-free job is safe to re-run
+		// freely, so it never enters the queue (its failed-transport record
+		// still warns in history). RuntimeSessionID is carried so the queue's
+		// replay action can satisfy §6.2 rule 1 (Stop before replay). Skip the
+		// queue entry when Stop was already confirmed in-process: the microVM is
+		// dead, but the SIDE EFFECT may still have landed before the stream
+		// broke, so a side-effecting job still needs a human look — keep it
+		// queued regardless of StopConfirmed.
+		if a.snap.sideEffects {
+			s.writeSandboxAttention(sandboxAttention{
+				JobID:            a.snap.jobID,
+				RunID:            a.runID,
+				RuntimeSessionID: runtimeSID,
+				Reason:           attentionReasonTransport,
+				JobLabel:         a.snap.label,
+				StartedAtMS:      a.startedAt.UnixMilli(),
+				CreatedAtMS:      s.attentionNowMS(),
+			}, a.lg)
+		}
 		state := RunStateFailed
 		if ctx.Err() == context.DeadlineExceeded {
 			state = RunStateTimedOut
@@ -311,6 +338,7 @@ func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass
 		prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 		finalizer:   a.finalizer,
 		sandboxMeta: meta,
+		replayOf:    a.replayOf,
 	})
 	notice := "执行失败，请稍后重试。"
 	if state == RunStateSucceeded {

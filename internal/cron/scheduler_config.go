@@ -75,6 +75,41 @@ var ErrPromptAlreadySet = errors.New("cron: job already has a prompt; use Update
 // deletion never reached disk — a restart replayed the deleted job.
 var ErrPersistFailed = errors.New("cron: persist jobs failed")
 
+// errInvalidAttentionID is returned by the §7.4 queue helpers when a runID
+// is not scheduler-generated hex (the IDs flow into filesystem paths and the
+// broadcast, so they are shape-validated before use). Unexported: callers in
+// this package check it directly; the dashboard validates IDs at its own edge.
+var errInvalidAttentionID = errors.New("cron sandbox: invalid attention run id")
+
+// ErrJobNotSandbox is returned by ReplaySandboxRun when the target job is not
+// at placement=sandbox. Replay re-injects a content-addressed payload into a
+// fresh microVM (RFC §7.3); a local job has no snapshot to replay and no
+// microVM to inject into. Sentinel so the dashboard maps it to 409 Conflict.
+var ErrJobNotSandbox = errors.New("cron: job is not at sandbox placement")
+
+// ErrNoSnapshot is returned by ReplaySandboxRun when the original run has no
+// input snapshot on disk (a pre-snapshot run, a snapshots-disabled deploy, or
+// a GC'd blob). Without the snapshot there is no payload to re-inject, so
+// replay cannot proceed (RFC §5.2 "replay = re-inject the same payload").
+var ErrNoSnapshot = errors.New("cron: run has no input snapshot to replay")
+
+// ErrStopUnconfirmed is returned by ReplaySandboxRun when the §6.2 rule-1
+// pre-replay StopSession did not confirm the original microVM is terminated.
+// Replaying before a confirmed Stop risks the double-run the whole §6.2
+// containment exists to prevent, so replay refuses until Stop succeeds (the
+// operator can retry — StopSession is idempotent server-side).
+var ErrStopUnconfirmed = errors.New("cron: original microVM termination unconfirmed; cannot replay safely")
+
+// ErrSandboxUnavailable is returned by ReplaySandboxRun when sandbox placement
+// is not configured (no runner wired). Distinct from ErrJobNotSandbox: the job
+// IS a sandbox job, but this naozhi cannot run sandbox jobs right now.
+var ErrSandboxUnavailable = errors.New("cron: sandbox placement not configured")
+
+// ErrReplayInFlight is returned by ReplaySandboxRun when the job already has a
+// run in flight (the per-job CAS slot is taken). The dashboard maps it to 409
+// Conflict so the operator retries after the in-flight run finishes.
+var ErrReplayInFlight = errors.New("cron: job already has a run in flight; cannot replay now")
+
 // ErrSchedulerStopped is returned by Start() when the scheduler has already
 // been Stop()'d. Stop() documents that the instance is single-shot — its
 // budget-exceed paths intentionally leak wrapper goroutines because no reuse

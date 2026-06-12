@@ -1936,6 +1936,30 @@ body.kbd-open .input-hints{display:none}
 .ctr-detail .ctr-snap-v.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .ctr-detail .ctr-snap-prompt{margin-top:4px}
 .ctr-detail .ctr-snap-pre{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto}
+/* §7.3 replay action bar (PR-6): replay-of chain badge + replay button. */
+.ctr-detail .ctr-replay-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.ctr-detail .ctr-replay-of{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:2px 10px;cursor:pointer;font-family:inherit}
+.ctr-detail .ctr-replay-of:hover{color:var(--nz-text);border-color:var(--nz-accent)}
+.ctr-detail .ctr-replay-btn{font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.ctr-detail .ctr-replay-btn:hover:not(:disabled){border-color:var(--nz-accent);color:var(--nz-text-strong)}
+.ctr-detail .ctr-replay-btn:disabled{opacity:.5;cursor:not-allowed}
+.ctr-detail .ctr-replay-hint{font-size:var(--nz-fs-xs);color:var(--nz-red)}
+/* §7.4 confirmation queue (PR-6): banner + per-incident cards. */
+.cron-timeline-panel .ctr-queue{border:1px solid var(--nz-amber);border-radius:var(--nz-radius-md);background:rgba(210,153,34,.08);padding:10px 12px;margin-bottom:14px}
+.cron-timeline-panel .ctr-queue-head{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.cron-timeline-panel .ctr-queue-title{font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-amber)}
+.cron-timeline-panel .ctr-queue-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
+.cron-timeline-panel .ctr-queue-list{display:flex;flex-direction:column;gap:8px}
+.cron-timeline-panel .ctr-queue-card{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:8px 10px}
+.cron-timeline-panel .ctr-queue-card-main{display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-width:0}
+.cron-timeline-panel .ctr-queue-job{font-size:var(--nz-fs-sm);color:var(--nz-text);font-weight:600;word-break:break-word}
+.cron-timeline-panel .ctr-queue-reason{font-size:var(--nz-fs-xs);color:var(--nz-amber)}
+.cron-timeline-panel .ctr-queue-when{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ctr-queue-actions{display:flex;gap:8px;flex-shrink:0}
+.cron-timeline-panel .ctr-queue-confirm{font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.cron-timeline-panel .ctr-queue-confirm:hover{border-color:var(--nz-accent);color:var(--nz-text-strong)}
+.cron-timeline-panel .ctr-queue-replay{font-size:var(--nz-fs-sm);color:#fff;background:var(--nz-amber);border:1px solid var(--nz-amber);border-radius:var(--nz-radius-sm);padding:3px 12px;cursor:pointer;font-family:inherit}
+.cron-timeline-panel .ctr-queue-replay:hover{filter:brightness(1.08)}
 .ctr-detail .ctr-final{padding:2px 0}
 .ctr-detail .ctr-final-label{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .ctr-detail .ctr-final.err .ctr-final-label{color:var(--nz-red)}
