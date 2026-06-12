@@ -3,6 +3,7 @@ package cron
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -378,3 +379,95 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 	}
 	return sink, closer
 }
+
+// SandboxRunEvents reads the persisted event log for one sandbox run
+// (sandboxevents/<jobID>/<runID>.ndjson, §6.1 streaming-to-disk) and returns
+// up to maxLines raw NDJSON lines (each one decoded-and-re-encoded JSON, no
+// trailing newline). The dashboard run-detail view (RFC §7.3) renders these
+// as the event stream — identical to a local session's message render.
+//
+// Returns (nil, nil) when the file does not exist (a local run, an
+// events-disabled deploy, or a run whose sink degraded on open) so the
+// caller renders an empty stream rather than an error. jobID/runID are
+// shape-validated by the caller (dashboard handler) before reaching here;
+// re-validated defensively to keep the path traversal-safe even on a
+// future internal caller.
+//
+// maxLines caps the response: a 60-minute run can emit tens of thousands of
+// frames, and the dashboard only needs a bounded tail-or-head. We keep the
+// FIRST maxLines (the run's opening — boot + early turns are the most useful
+// for "what happened / where did it break"); a truncated marker is appended
+// so the UI can show "… N more events".
+func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byte, bool, error) {
+	if s == nil || s.storePath == "" {
+		return nil, false, nil
+	}
+	if !IsValidID(jobID) || !IsValidID(runID) {
+		return nil, false, fmt.Errorf("cron sandbox: invalid jobID/runID")
+	}
+	if maxLines <= 0 {
+		maxLines = sandboxEventsDefaultMax
+	}
+	path := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID, runID+".ndjson")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil // no event log — render empty stream
+		}
+		return nil, false, fmt.Errorf("cron sandbox: open event log: %w", err)
+	}
+	defer f.Close()
+
+	out := make([][]byte, 0, maxLines)
+	sc := bufio.NewScanner(f)
+	// Match the writer/agentcore ceiling: a single stream-json line can carry
+	// a large tool result.
+	sc.Buffer(make([]byte, 64*1024), (16<<20)+(64<<10))
+	truncated := false
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !json.Valid(line) {
+			continue // skip any partial/corrupt tail line
+		}
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		out = append(out, cp)
+		// Check the cap AFTER appending: a file with exactly maxLines valid
+		// lines must NOT report truncated. We only set the flag once we have
+		// actually accumulated maxLines AND a further valid line exists, so
+		// peek for the next valid line before declaring truncation.
+		if len(out) >= maxLines {
+			if hasMoreValidJSON(sc) {
+				truncated = true
+			}
+			break
+		}
+	}
+	if err := sc.Err(); err != nil {
+		// Return what we have plus the error; the caller logs + still renders
+		// the partial stream (a corrupt tail must not hide a healthy head).
+		// A read error mid-stream means the tail is missing → truncated, so
+		// the UI signals an incomplete stream rather than rendering it whole.
+		return out, true, fmt.Errorf("cron sandbox: scan event log: %w", err)
+	}
+	return out, truncated, nil
+}
+
+// hasMoreValidJSON advances the scanner looking for one more valid-JSON line
+// after the cap was hit, so truncated reflects "real events were dropped"
+// rather than "the file ended exactly at the cap". Trailing blank/corrupt
+// lines do not count as a dropped event. The scanner is already consumed by
+// the caller's break, so advancing it here is safe.
+func hasMoreValidJSON(sc *bufio.Scanner) bool {
+	for sc.Scan() {
+		if json.Valid(sc.Bytes()) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxEventsDefaultMax bounds SandboxRunEvents when the caller passes a
+// non-positive cap. 2000 frames covers a typical run's opening comfortably
+// while keeping the response well under a megabyte for the dashboard.
+const sandboxEventsDefaultMax = 2000

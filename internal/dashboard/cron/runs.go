@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -204,5 +205,71 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if !run.EndedAt.IsZero() {
 		out.EndedAt = run.EndedAt.UnixMilli()
 	}
+	if m := run.SandboxMeta; m != nil {
+		// RFC §7.3 meta bar. RuntimeARN is operator-facing config (no
+		// secret), but SanitizeForLog it defensively in case a hand-edited
+		// record carries control bytes that would render dangerously.
+		out.Sandbox = &cronRunSandboxView{
+			RuntimeARN:      osutil.SanitizeForLog(m.RuntimeARN, 256),
+			ImageVersion:    osutil.SanitizeForLog(m.ImageVersion, 128),
+			ExitStatus:      m.ExitStatus,
+			CostUSD:         m.CostUSD,
+			DurationMS:      m.DurationMS,
+			MemoryPeakBytes: m.MemoryPeakBytes,
+		}
+	}
 	httputil.WriteJSON(w, out)
+}
+
+// sandboxEventsMaxResponse caps how many envelope frames GET .../events
+// returns. Matches the cron-side default; the dashboard renders the run's
+// opening (boot + early turns — most useful for "what happened / where did
+// it break"), with a truncated flag for the tail.
+const sandboxEventsMaxResponse = 2000
+
+// cronRunEventsResp is the wire shape for GET /api/cron/runs/{run}/events.
+// Events are raw stream envelopes (kind=cli/boot/exit/meta…) re-emitted
+// verbatim as JSON so the dashboard renders them with the same component
+// the local-session event stream uses (RFC §7.3 "identical message render").
+type cronRunEventsResp struct {
+	Events    []json.RawMessage `json:"events"`
+	Truncated bool              `json:"truncated,omitempty"`
+}
+
+// HandleRunEvents serves GET /api/cron/runs/{run_id}/events?job_id= — the
+// persisted sandbox event log (RFC §6.1/§7.3). Shares the runs rate limiter
+// (FS I/O, same bypass concern as detail). Returns an empty events array for
+// a run with no log (local run / events-disabled deploy) rather than 404, so
+// the dashboard renders an empty stream consistently.
+func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	runID := r.PathValue("run_id")
+	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
+		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+
+	lines, truncated, err := h.scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
+	if err != nil {
+		// A scan error still returns the partial head (lines may be non-nil);
+		// log + serve what we have rather than hiding a healthy opening.
+		slog.Warn("cron sandbox: run events read error", "job_id", jobID, "run_id", runID, "err", err)
+	}
+	events := make([]json.RawMessage, len(lines))
+	for i, ln := range lines {
+		events[i] = json.RawMessage(ln)
+	}
+	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
 }

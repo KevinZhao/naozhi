@@ -83,13 +83,19 @@ type CronRunSummary struct {
 	DurationMS int64       `json:"duration_ms,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	ErrorClass ErrorClass  `json:"error_class,omitempty"`
+	// CostUSD is the per-run sandbox cost (from SandboxMeta.CostUSD), carried
+	// in the slim summary so the §7.5 per-run cost小字 + the per-job monthly
+	// aggregate (pure front-end sum over recent_runs) need no detail fetch.
+	// Just a float — the full receipt stays out of the summary. 0/omitted for
+	// local runs and for sandbox runs that produced no cost (transport fail).
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // summary derives a CronRunSummary from a CronRun. Centralised so any
 // future field addition stays in lockstep across list endpoint, recent_runs
 // nested array, and any test fixtures.
 func (r *CronRun) summary() CronRunSummary {
-	return CronRunSummary{
+	s := CronRunSummary{
 		RunID:      r.RunID,
 		JobID:      r.JobID,
 		State:      r.State,
@@ -100,4 +106,8 @@ func (r *CronRun) summary() CronRunSummary {
 		SessionID:  r.SessionID,
 		ErrorClass: r.ErrorClass,
 	}
+	if r.SandboxMeta != nil {
+		s.CostUSD = r.SandboxMeta.CostUSD
+	}
+	return s
 }
