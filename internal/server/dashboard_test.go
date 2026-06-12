@@ -284,6 +284,76 @@ func TestHandleAPISessionEvents_BeforeStaysTimeOrdered(t *testing.T) {
 	}
 }
 
+// TestHandleAPISessionEvents_InitialPageHasMoreHeader is the regression for the
+// stranded-opening-messages bug. The session has more visible bubbles than the
+// initial page carries (server truncates by DefaultVisibleTarget), so older
+// history exists and the X-Events-Has-More header must be "1" — even when the
+// total returned event count is below the client's limit, which is exactly the
+// case the old client-side len>=limit heuristic missed.
+func TestHandleAPISessionEvents_InitialPageHasMoreHeader(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	var evs []typedEvent
+	// 5 * DefaultVisibleTarget visible messages, all text — far more visible
+	// bubbles than DefaultVisibleTarget, so the initial page can't include the
+	// oldest ones.
+	n := 5 * session.DefaultVisibleTarget
+	for ts := int64(1); ts <= int64(n); ts++ {
+		evs = append(evs, typedEvent{ts, "text"})
+	}
+	key := seedTypedEventSession(t, srv, evs...)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&limit=100", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.HandleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("X-Events-Has-More"); got != "1" {
+		t.Errorf("X-Events-Has-More = %q, want \"1\" (older history exists beyond the initial page)", got)
+	}
+}
+
+// TestHandleAPISessionEvents_InitialPageNoHasMoreHeader: a short session whose
+// entire history fits in the initial page → no header (no useless "load
+// earlier" button).
+func TestHandleAPISessionEvents_InitialPageNoHasMoreHeader(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&limit=100", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.HandleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("X-Events-Has-More"); got != "0" {
+		t.Errorf("X-Events-Has-More = %q, want \"0\" (whole history fit in the page, header always set on initial branch)", got)
+	}
+}
+
+// TestHandleAPISessionEvents_BeforePageNoHasMoreHeader: the pagination path
+// (before>0) must not emit the header — it's an initial-page-only signal.
+func TestHandleAPISessionEvents_BeforePageNoHasMoreHeader(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=3500&limit=10", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.HandleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("X-Events-Has-More"); got != "" {
+		t.Errorf("X-Events-Has-More = %q, want \"\" (header is initial-page only)", got)
+	}
+}
+
 func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)

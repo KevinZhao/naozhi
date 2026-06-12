@@ -1919,6 +1919,13 @@ body.kbd-open .input-hints{display:none}
 .ctr-detail .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
 .ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
 /* 最终输出单屏视图：error → result → 兜底 assistant 文本（cronTimelineDetailHtml 决策链）*/
+/* §7.3 run-detail meta bar (sandbox receipt) + §7.5 cost小字. */
+.ctr-detail .ctr-meta-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--nz-border)}
+.ctr-detail .ctr-meta-item{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 7px;white-space:nowrap}
+.ctr-detail .ctr-meta-item.ctr-meta-cost{color:var(--nz-text);font-weight:600}
+.ctr-detail .ctr-meta-item.ctr-meta-exit{color:var(--nz-red);border-color:rgba(248,81,73,.35)}
+.cron-timeline-panel .ctr-sub .ctr-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ct-cost-sum{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
 /* §7.3 input-snapshot collapsible (replay preview). */
 .ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
 .ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}

@@ -412,6 +412,12 @@ func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID
 		s.cron.Remove(removeEntryID)
 	}
 	s.resetRouterStub(jobID)
+	// agentcore §6.2: a sandbox job deleted mid-run must Stop its microVM
+	// (the deliberate Phase 1 gap, now closeable via the pending record's
+	// runtime session id). Best-effort + idempotent; runs before
+	// deleteJobRuns so the pending file is resolved before the runs/ tree
+	// (where Phase 2 will park snapshots) is swept.
+	s.stopSandboxRunsForJob(jobID)
 	s.deleteJobRuns(jobID)
 	s.cleanupRunningJobIfIdle(jobID)
 }

@@ -2745,8 +2745,20 @@ async function fetchEvents(full) {
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
     let events;
+    // The initial (`full`) fetch reads the X-Events-Has-More header so it can
+    // mount "load earlier" off the server's truncation decision rather than the
+    // brittle len>=INITIAL_HISTORY_LIMIT guess. _eventsHeaders captures the raw
+    // Response headers for that one call; incremental polls don't need them.
+    let hasMoreHeader = null;
     try {
-      events = await fetchJSON(url, { headers, timeoutMs: 5000 });
+      const onResp = full ? (resp) => {
+        // null when the header is absent (legacy server / remote-node relay) —
+        // leave hasMoreHeader null so renderEvents falls back to the length
+        // heuristic rather than treating "absent" as an authoritative false.
+        const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
+        if (v != null) hasMoreHeader = (v === '1' || v === 'true');
+      } : null;
+      events = await fetchJSON(url, { headers, timeoutMs: 5000, onResponse: onResp });
     } catch (err) {
       if (err.status) return; // HTTP non-2xx — mirror legacy !r.ok early-return
       throw err;              // timeout / network — surface via outer catch
@@ -2758,7 +2770,9 @@ async function fetchEvents(full) {
     if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
 
     if (full) {
-      renderEvents(events);
+      // Pass the server's authoritative hasMore when the header was present;
+      // null means "fall back to the length heuristic" (legacy / remote node).
+      renderEvents(events, hasMoreHeader);
     } else {
       appendEvents(events);
     }
@@ -2967,7 +2981,11 @@ function updateEarlierButton(state) {
   }
 }
 
-function renderEvents(events) {
+// renderEvents replaces the whole events pane on the initial / full-fetch path.
+// hasMore (when not null) is the server's authoritative "older history exists"
+// signal from the X-Events-Has-More header; null means the header was absent
+// (legacy server or remote node) and we fall back to the length heuristic.
+function renderEvents(events, hasMore) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
   // RNEW-UX-007 — innerHTML replace below wipes any live text selection
@@ -2985,6 +3003,15 @@ function renderEvents(events) {
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
+  // Decide whether "load earlier" will mount BEFORE rendering the all-internal
+  // placeholder, so its copy never promises a button that won't appear. Mount
+  // off the server's hasMore flag when present — it knows the slice was
+  // truncated by visible-bubble count, catching the case the old length
+  // heuristic missed (more visible bubbles than DefaultVisibleTarget but fewer
+  // total events than INITIAL_HISTORY_LIMIT). Fall back to the length heuristic
+  // only when the header was absent (hasMore === null).
+  const showEarlier = (hasMore === true) ||
+    (hasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
   if (html) {
     el.innerHTML = html;
   } else if (events.length === 0) {
@@ -2993,10 +3020,13 @@ function renderEvents(events) {
     // The server returned events but every one was filtered out by
     // INTERNAL_EVENT_TYPES — typically a parallel agent team where the
     // visible tail of the log is all tool_use / task_progress. Render a
-    // neutral placeholder so the panel isn't a blank void, and still
-    // show the "load earlier" affordance below so the operator can
-    // page back to the real messages.
-    el.innerHTML = '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>';
+    // neutral placeholder so the panel isn't a blank void. Only invite the
+    // user to "click below" when the button will actually mount; otherwise the
+    // whole remembered history is internal activity with nothing older to page
+    // to, so promise nothing.
+    el.innerHTML = showEarlier
+      ? '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>'
+      : '<div class="empty-state">该会话仅有 agent 活动，暂无对话消息</div>';
   }
   if (events.length > 0) {
     const last = events[events.length - 1];
@@ -3006,9 +3036,7 @@ function renderEvents(events) {
       oldestFetchedEventTime = first.time;
     }
   }
-  // Mount "load earlier" whenever we got a full page — more history likely
-  // exists, regardless of whether the visible slice survived the filter.
-  if (events.length >= INITIAL_HISTORY_LIMIT) {
+  if (showEarlier) {
     ensureEarlierButton();
   }
   runPendingAsync();
@@ -10490,6 +10518,17 @@ const wsm = {
     if (isInitial) {
       // Full render replaces everything — remove any optimistic messages
       const html = renderEventsWithDividers(display, 0);
+      // Decide "load earlier" mounting BEFORE the all-internal placeholder so
+      // its copy never invites a click on a button that won't appear. Mount off
+      // the server's has_more flag \u2014 it knows the frame was truncated by
+      // visible-bubble count (DefaultVisibleTarget), catching the case the old
+      // length heuristic missed: more visible bubbles than the target but fewer
+      // total events than INITIAL_HISTORY_LIMIT. Fall back to the length
+      // heuristic only for older servers / relayed nodes that don't set
+      // has_more (the field is absent \u2192 undefined).
+      const wsHasMore = (typeof msg.has_more === 'boolean') ? msg.has_more : null;
+      const showEarlier = (wsHasMore === true) ||
+        (wsHasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
       // Only show "no events yet" when the server returned zero events and the session
       // is idle. For running sessions, show "loading events..." since eventPushLoop will
       // deliver events shortly (fixes blank-then-"no events yet" flash on click).
@@ -10503,9 +10542,12 @@ const wsm = {
       } else {
         // Server returned events but every one was internal-filtered
         // (parallel agent team tail). Placeholder keeps the pane from
-        // looking broken; the "load earlier" button mounted below is the
-        // path back to real messages.
-        el.innerHTML = '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>';
+        // looking broken. Invite "click below" only when the button will
+        // mount; otherwise the whole history is internal activity with nothing
+        // older to reach, so promise nothing.
+        el.innerHTML = showEarlier
+          ? '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>'
+          : '<div class="empty-state">\u8be5\u4f1a\u8bdd\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u6682\u65e0\u5bf9\u8bdd\u6d88\u606f</div>';
       }
       // Reset dedup tracker on full render and anchor the pagination
       // cursor to the earliest event we received, independent of DOM
@@ -10519,10 +10561,7 @@ const wsm = {
           oldestFetchedEventTime = first.time;
         }
       }
-      // Mount "load earlier" affordance when the server returned a full page
-      // (more history likely exists). Skipped for short histories so we don't
-      // surface a useless button.
-      if (events.length >= INITIAL_HISTORY_LIMIT) {
+      if (showEarlier) {
         ensureEarlierButton();
       }
       runPendingAsync();

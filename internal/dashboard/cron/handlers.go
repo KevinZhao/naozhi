@@ -235,6 +235,9 @@ type cronRunSummaryView struct {
 	ErrorClass string `json:"error_class,omitempty"`
 	// ReplayOf links a replay run to its origin (agentcore §7.3 chain badge).
 	ReplayOf string `json:"replay_of,omitempty"`
+	// CostUSD: per-run sandbox cost小字 (§7.5); the front end also sums it
+	// across recent_runs for the per-job monthly aggregate.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // cronSummaryToView projects a cronpkg.CronRunSummary into the wire shape used
@@ -251,6 +254,7 @@ func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 		SessionID:  r.SessionID,
 		ErrorClass: string(r.ErrorClass),
 		ReplayOf:   r.ReplayOf,
+		CostUSD:    r.CostUSD,
 	}
 	if !r.EndedAt.IsZero() {
 		row.EndedAt = r.EndedAt.UnixMilli()
@@ -327,6 +331,23 @@ type cronRunDetailView struct {
 	ErrorMsg    string `json:"error_msg,omitempty"`
 	// ReplayOf links a replay run to its origin (agentcore §7.3 chain badge).
 	ReplayOf string `json:"replay_of,omitempty"`
+	// Sandbox is the cloud-execution receipt (RFC §7.3 meta bar), present
+	// only for placement=sandbox runs. nil → the detail view renders no
+	// meta bar (local run). Mirrors cronpkg.SandboxRunMeta's wire shape.
+	Sandbox *cronRunSandboxView `json:"sandbox,omitempty"`
+}
+
+// cronRunSandboxView is the dashboard projection of cronpkg.SandboxRunMeta —
+// the §7.3 run-detail meta bar (run image / duration / memory / cost). It is
+// a separate type (not the cron struct) so the dashboard wire shape is owned
+// here and the cron package stays import-free of server concerns.
+type cronRunSandboxView struct {
+	RuntimeARN      string  `json:"runtime_arn,omitempty"`
+	ImageVersion    string  `json:"image_version,omitempty"`
+	ExitStatus      int     `json:"exit_status"`
+	CostUSD         float64 `json:"cost_usd,omitempty"`
+	DurationMS      int64   `json:"duration_ms,omitempty"`
+	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
 }
 
 // cronJobView is the per-job element inside cronListResp.Jobs. Promoted to

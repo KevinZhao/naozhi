@@ -28,7 +28,7 @@ func TestDashboardJS_CronSnapshotPanel(t *testing.T) {
 		"输入快照（可重放）",
 		// snapshot panel is appended to the detail body.
 		"const snapshotPanel = cronSnapshotPanelHtml(detail.__snapshot);",
-		"return body + snapshotPanel;",
+		"+ snapshotPanel;", // appended after metaBar + body (merged with PR-3)
 	} {
 		if !strings.Contains(js, frag) {
 			t.Errorf("cron_view.js missing snapshot-panel fragment %q", frag)
