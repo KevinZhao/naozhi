@@ -142,11 +142,17 @@ func (r *Router) CLIName() string {
 	return ""
 }
 
-// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
+// CLIVersion exposes the default backend's CLI version for status endpoints.
 // Returns empty when no wrapper is wired.
+//
+// R20260612-global-version: prefers the live version observed from a spawned
+// process (init frame) over the spawn-time CLIVersion detected once at startup,
+// so the global dashboard banner reflects a host claude upgrade under a
+// long-lived naozhi without a restart. Falls back to the spawn-time value
+// before any process has reported (and for backends that never self-report).
 func (r *Router) CLIVersion() string {
 	if r.bkStore.wrapper != nil {
-		return r.bkStore.wrapper.CLIVersion
+		return r.bkStore.wrapper.EffectiveVersion()
 	}
 	return ""
 }

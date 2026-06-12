@@ -282,8 +282,15 @@ type Process struct {
 	// falls back to the spawn-time value during that window. Mirrors the
 	// model LIVE-value pattern above. R20260612-live-version.
 	liveVersion atomic.Pointer[string]
-	lastSeq     atomic.Int64  // last received shim seq, for reconnect
-	pongRecv    chan struct{} // signaled by readLoop on pong receipt
+	// onLiveVersion, when set, is invoked by setLiveVersion the first time a
+	// distinct binary version is observed in the init frame. Wrapper.Spawn
+	// wires it so the process can push its live version up to the owning
+	// wrapper for the global dashboard banner. Assigned once before
+	// startReadLoop, so no lock; nil for legacy &Process{} test fixtures.
+	// R20260612-global-version.
+	onLiveVersion func(string)
+	lastSeq       atomic.Int64  // last received shim seq, for reconnect
+	pongRecv      chan struct{} // signaled by readLoop on pong receipt
 
 	// readEventBuf is a reusable backing array handed to ReadEventInto so the
 	// single-event Claude hot path (the dominant frame) no longer allocates a
@@ -815,6 +822,14 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.mu.Unlock()
 }
 
+// SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
+// CLI binary version is first observed in the init frame. Wrapper.Spawn calls
+// this once before startReadLoop, so it is not synchronised — do not call it
+// after the read loop is running. R20260612-global-version.
+func (p *Process) SetOnLiveVersion(fn func(string)) {
+	p.onLiveVersion = fn
+}
+
 // SessionID returns the session ID in a thread-safe manner.
 func (p *Process) SessionID() string {
 	p.mu.RLock()
@@ -953,12 +968,25 @@ func (p *Process) Model() string {
 // system/init frame. Called from readLoop when the init frame carries a
 // non-empty claude_code_version; never invoked with "". Lock-free.
 // R20260612-live-version.
+//
+// When the value actually changes (first observation, or a process that
+// reconnected onto an upgraded binary), it fires onLiveVersion so the
+// owning Wrapper can refresh its process-wide "latest observed version"
+// used by the global dashboard banner. The change-gate keeps the duplicate
+// captures (readLoop + Send() both hook the init frame) from firing the
+// callback twice. R20260612-global-version.
 func (p *Process) setLiveVersion(v string) {
 	if v == "" {
 		return
 	}
+	if prev := p.liveVersion.Load(); prev != nil && *prev == v {
+		return
+	}
 	s := v
 	p.liveVersion.Store(&s)
+	if p.onLiveVersion != nil {
+		p.onLiveVersion(v)
+	}
 }
 
 // LiveVersion returns the CLI binary version self-reported by the running
