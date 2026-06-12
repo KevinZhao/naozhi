@@ -366,6 +366,9 @@ func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc
 	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
 	// param mirrors handleRunDetail; same per-IP rate limit applies.
 	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
+	// agentcore-cloud-sandbox §7.3 — persisted sandbox event log for a run.
+	// Same path-param + rate-limit shape as detail/transcript.
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/events", auth(s.cronH.HandleRunEvents))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {

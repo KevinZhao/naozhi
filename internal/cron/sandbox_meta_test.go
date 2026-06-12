@@ -63,19 +63,32 @@ func TestSandbox_MetaAbsentForLocalRuns(t *testing.T) {
 }
 
 // TestSandbox_MetaExcludedFromSummary pins the list-endpoint payload guard:
-// recent_runs loads 50 jobs × 5 summaries — receipts would bloat it. The
-// summary() projection must drop SandboxMeta.
+// recent_runs loads 50 jobs × 5 summaries — the full receipt would bloat
+// it. The summary() projection must drop the nested SandboxMeta and every
+// heavy field; it carries ONLY the single cost_usd float (the §7.5 data
+// source — per-run小字 + monthly aggregate), not runtime_arn/image/etc.
 func TestSandbox_MetaExcludedFromSummary(t *testing.T) {
 	r := &CronRun{
 		RunID: "a", JobID: "b", State: RunStateSucceeded,
-		SandboxMeta: &SandboxRunMeta{CostUSD: 1.23, ImageVersion: "phase2"},
+		SandboxMeta: &SandboxRunMeta{
+			CostUSD: 1.23, ImageVersion: "phase2",
+			RuntimeARN: "arn:x", MemoryPeakBytes: 1 << 20,
+		},
 	}
 	data, err := json.Marshal(r.summary())
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
 	}
-	if got := string(data); strings.Contains(got, "sandbox_meta") || strings.Contains(got, "phase2") || strings.Contains(got, "cost") {
-		t.Fatalf("CronRunSummary must not carry sandbox meta: %s", got)
+	got := string(data)
+	// The nested receipt and its heavy fields must NOT be in the summary.
+	for _, forbidden := range []string{"sandbox_meta", "phase2", "image_version", "runtime_arn", "memory_peak"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("CronRunSummary leaked heavy meta field %q: %s", forbidden, got)
+		}
+	}
+	// cost_usd IS expected (the §7.5 lightweight cost source).
+	if !strings.Contains(got, `"cost_usd":1.23`) {
+		t.Fatalf("CronRunSummary must carry cost_usd for §7.5: %s", got)
 	}
 }
 

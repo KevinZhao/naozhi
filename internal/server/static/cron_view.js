@@ -2015,6 +2015,9 @@ function cronTimelineHtml(jobId, job, st) {
   const headTitle = total > 0
     ? '最近运行 · ' + total + ' 次'
     : '最近运行';
+  // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
+  // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
+  const costSummary = cronTimelineCostSummaryHtml(st.runs);
   const rowsHtml = st.runs.length === 0
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
@@ -2048,9 +2051,30 @@ function cronTimelineHtml(jobId, job, st) {
   }
   return '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
+      costSummary +
     '</div>' +
     '<div class="ct-rows" data-collapsed="' + initiallyCollapsed + '" data-job-id="' + escAttr(jobId) + '">' + rowsHtml + '</div>' +
     (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
+}
+
+// cronTimelineCostSummaryHtml sums cost_usd over the loaded runs for the
+// §7.5 cost小字. Returns '' when no loaded run carries cost (all-local job).
+// "已加载 N 条" is explicit so the figure is never misread as a full bill —
+// per RFC §7.5 this is lightweight visibility, not a billing system.
+function cronTimelineCostSummaryHtml(runs) {
+  if (!Array.isArray(runs) || runs.length === 0) return '';
+  let sum = 0;
+  let n = 0;
+  for (const r of runs) {
+    if (r && r.cost_usd) {
+      sum += r.cost_usd;
+      n++;
+    }
+  }
+  if (n === 0) return '';
+  return '<span class="ct-cost-sum" title="已加载 ' + n + ' 条云沙箱 run 的成本之和（非全量账单）">' +
+      '☁️ ' + esc(formatCostUSD(sum)) + ' · ' + n + ' 条' +
+    '</span>';
 }
 
 // cronTimelineToggleShowAll — 把 .ct-rows 从 collapsed 切到 expanded，
@@ -2108,6 +2132,10 @@ function cronTimelineRowHtml(jobId, r, st) {
   if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
   if (errCls) {
     subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
+  }
+  // §7.5 per-run cost小字 — only sandbox runs carry cost_usd in the summary.
+  if (r.cost_usd) {
+    subParts.push('<span class="ctr-cost" title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
   }
   const subRow = subParts.length > 0
     ? '<div class="ctr-sub">' + subParts.join('<span class="ctr-sep">·</span>') + '</div>'
@@ -2171,6 +2199,10 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     return '<div class="ctr-err-load">加载失败：' + esc(detail.__error) + '</div>';
   }
 
+  // §7.3 元信息条：云沙箱 run 顶部展示 镜像 · 时长 · 内存峰值 · 成本。
+  // 本机 run 的 detail.sandbox 为空 → 整条不渲染（零增量）。
+  const metaBar = cronSandboxMetaBarHtml(detail.sandbox);
+
   // 历史 4-tab UI 标记（已收敛为单屏「最终输出」，见下方）：
   //   tabBtn('chat', '对话')
   //   tabBtn('tools', '工具')
@@ -2180,47 +2212,91 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
 
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
-
-  if (detail.error_msg) {
-    const errLabel = detail.error_class
-      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
-      : '';
-    return '<div class="ctr-final err">' +
-        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
-        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
-      '</div>';
-  }
-
-  if (detail.result) {
-    return '<div class="ctr-final">' +
-        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
-      '</div>';
-  }
-
+  let lastAssistant = null;
   if (hasTurns) {
     const turns = transcript.turns;
-    let lastAssistant = null;
     for (let i = turns.length - 1; i >= 0; i--) {
       const t = turns[i];
       if (t && t.kind === 'assistant' && t.text) { lastAssistant = t; break; }
     }
-    if (lastAssistant) {
-      return '<div class="ctr-final">' +
-          '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
-        '</div>';
-    }
   }
 
-  // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
-  // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
-  if (transcript) {
+  // body is the existing single-screen "final output" view; metaBar (if any)
+  // is prepended so the sandbox receipt sits above whatever output renders.
+  let body;
+  if (detail.error_msg) {
+    const errLabel = detail.error_class
+      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
+      : '';
+    body = '<div class="ctr-final err">' +
+        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
+        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
+      '</div>';
+  } else if (detail.result) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
+      '</div>';
+  } else if (lastAssistant) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
+      '</div>';
+  } else if (transcript) {
+    // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
+    // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
     const msg = transcript.fallback === 'raw'
       ? '对话流无法解析，没有可展示的最终输出。'
       : '这次 run 没有保存最终输出。';
-    return '<div class="ctr-empty-detail">' + msg + '</div>';
+    body = '<div class="ctr-empty-detail">' + msg + '</div>';
+  } else {
+    // transcript 字段未定义 = fetch 还在飞，给加载态。
+    body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
-  // transcript 字段未定义 = fetch 还在飞，给加载态。
-  return '<div class="ctr-empty-detail">正在加载最终输出…</div>';
+  return metaBar + body;
+}
+
+// cronSandboxMetaBarHtml renders the §7.3 run-detail meta bar from the
+// detail endpoint's `sandbox` receipt: 镜像 · 时长 · 内存峰值 · 成本.
+// Returns '' for local runs (no receipt) so nothing renders. exit_status is
+// shown only when non-zero (a failed exit is the operator's signal; exit 0
+// is implied by a success render).
+function cronSandboxMetaBarHtml(sb) {
+  if (!sb) return '';
+  const parts = [];
+  parts.push('<span class="ctr-meta-item">☁️ 云沙箱</span>');
+  if (sb.image_version) {
+    parts.push('<span class="ctr-meta-item" title="镜像版本">' + esc(sb.image_version) + '</span>');
+  }
+  if (sb.duration_ms) {
+    parts.push('<span class="ctr-meta-item" title="时长">' + esc(formatRunDuration(sb.duration_ms)) + '</span>');
+  }
+  if (sb.memory_peak_bytes) {
+    parts.push('<span class="ctr-meta-item" title="内存峰值">' + esc(formatBytes(sb.memory_peak_bytes)) + '</span>');
+  }
+  if (sb.cost_usd) {
+    parts.push('<span class="ctr-meta-item ctr-meta-cost" title="成本估算">' + esc(formatCostUSD(sb.cost_usd)) + '</span>');
+  }
+  if (sb.exit_status) {
+    parts.push('<span class="ctr-meta-item ctr-meta-exit" title="退出码">exit ' + esc(String(sb.exit_status)) + '</span>');
+  }
+  return '<div class="ctr-meta-bar">' + parts.join('') + '</div>';
+}
+
+// formatBytes renders a byte count as a compact human size (MiB/GiB) for the
+// meta bar. Integer-ish display — memory peaks are coarse signals.
+function formatBytes(n) {
+  if (!n || n < 0) return '';
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GiB';
+  if (n >= 1 << 20) return Math.round(n / (1 << 20)) + ' MiB';
+  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + ' KiB';
+  return n + ' B';
+}
+
+// formatCostUSD renders a per-run cost. Sub-cent runs show 4 decimals so a
+// $0.0044 run is not rounded to $0.00; larger runs show cents.
+function formatCostUSD(usd) {
+  if (!usd || usd <= 0) return '';
+  if (usd < 0.01) return '$' + usd.toFixed(4);
+  return '$' + usd.toFixed(2);
 }
 
 // cronRunTranscriptHtml renders a list of transcript turns as a vertical
