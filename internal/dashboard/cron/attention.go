@@ -77,8 +77,11 @@ func (h *Handlers) HandleRunConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.scheduler.ConfirmSandboxRun(runID); err != nil {
-		slog.Debug("cron run confirm failed", "err", err)
-		writeCronErr(w, http.StatusBadRequest, "confirm failed")
+		// runID is already shape-validated by attentionRunID, so the only
+		// reachable error here is a server-side disk fault (os.Remove EIO/
+		// EACCES) — a 5xx, not a malformed-request 4xx (review PR-6 L1).
+		slog.Error("cron run confirm failed", "err", err)
+		writeCronErr(w, http.StatusInternalServerError, "confirm failed")
 		return
 	}
 	slog.Info("cron sandbox run confirmed done via dashboard", "run_id", osutil.SanitizeForLog(runID, cronpkg.MaxIDLen))
@@ -147,8 +150,11 @@ func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrSchedulerStopped):
 			writeCronErr(w, http.StatusServiceUnavailable, "scheduler stopped")
 		default:
-			slog.Debug("cron run replay failed", "err", err)
-			writeCronErr(w, http.StatusBadRequest, "replay failed")
+			// Fallthrough is a server-side fault (snapshot manifest read I/O,
+			// crypto/rand generateRunID failure) — a 5xx, not a 4xx; runID +
+			// jobID are already shape-validated above (review PR-6 L1).
+			slog.Error("cron run replay failed", "err", err)
+			writeCronErr(w, http.StatusInternalServerError, "replay failed")
 		}
 		return
 	}

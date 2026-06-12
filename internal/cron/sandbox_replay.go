@@ -102,7 +102,21 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 
 	// §6.2 rule 1: if the original is in the attention queue, the microVM may
 	// still be alive. StopSession FIRST; only a confirmed Stop unlocks replay.
-	if rec, qok, qerr := s.getSandboxAttention(origRunID); qerr == nil && qok && rec.RuntimeSessionID != "" {
+	//
+	// FAIL-CLOSED on a read error: a corrupt/torn attention file (writeSandbox-
+	// Attention is a plain WriteFile, so a crash mid-write leaves a truncated
+	// record) or a transient os.ReadFile fault means we CANNOT confirm the
+	// original microVM's fate. Proceeding would skip the Stop and risk the
+	// double-run the whole containment exists to prevent (review PR-6 H1), so
+	// refuse — same operator-retry semantics as a failed Stop (StopSession is
+	// idempotent; once the record reads cleanly the retry completes).
+	rec, qok, qerr := s.getSandboxAttention(origRunID)
+	if qerr != nil {
+		slog.Error("cron sandbox: replay refused — attention record unreadable, microVM fate unknown",
+			"job_id", jobID, "orig_run_id", origRunID, "err", qerr)
+		return "", ErrStopUnconfirmed
+	}
+	if qok && rec.RuntimeSessionID != "" {
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		stopErr := s.sandbox.StopSession(ctx, rec.RuntimeSessionID)
 		cancel()
@@ -115,8 +129,22 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	}
 
 	// Register the replay goroutine with triggerWG before returning so a
-	// concurrent Stop() drains it (same contract as TriggerNow).
+	// concurrent Stop() drains it (same contract as TriggerNow). The Add MUST
+	// happen under the s.stopped RLock: Stop() sets s.stopped before draining
+	// triggerWG via Wait(), so an Add outside the lock could land a positive
+	// delta from a zero counter concurrently with that Wait — the
+	// R20260610-085718-LB-7 (#2012) Add-before-Wait violation that lets the
+	// replay goroutine escape the drain barrier (review PR-6 H2). The earlier
+	// stopped check (under the snapshot RLock) is now stale — re-check here.
+	// Do NOT hold the lock across dispatchReplay: it calls snapshotJob, which
+	// re-acquires s.mu.RLock (writer-starvation risk).
+	s.mu.RLock()
+	if s.stopped.Load() {
+		s.mu.RUnlock()
+		return "", ErrSchedulerStopped
+	}
 	s.triggerWG.Add(1)
+	s.mu.RUnlock()
 	newRunID, derr := s.dispatchReplay(jobCopy, prompt, man.Model, origRunID)
 	if derr != nil {
 		// CAS lost / generate failed: the goroutine was never spawned, so undo

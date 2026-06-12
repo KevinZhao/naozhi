@@ -3,6 +3,7 @@ package cron
 import (
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -109,6 +110,62 @@ func TestReplay_RefusesWhenStopUnconfirmed(t *testing.T) {
 	// The queue entry must remain (the incident is unresolved).
 	if s.SandboxAttentionCount() != 1 {
 		t.Errorf("queue entry must survive a refused replay; count = %d", s.SandboxAttentionCount())
+	}
+}
+
+// TestReplay_CorruptAttentionFailsClosed pins review PR-6 H1: a corrupt /
+// unreadable attention record must REFUSE the replay (fail-closed), never fall
+// through and skip the §6.2 rule-1 Stop. Without this, a torn write (the queue
+// uses a plain WriteFile) would let a side-effecting run double-run.
+func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
+	runner := &fakeSandboxRunner{
+		lines:   []string{`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok"}}`},
+		outcome: SandboxOutcome{State: SandboxStateSuccess, ResultText: "ok"},
+	}
+	s, _, j, origRunID := replaySetup(t, runner)
+	// Stage a corrupt attention file for the original run (truncated JSON).
+	dir := s.sandboxAttentionDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, origRunID+".json"), []byte("{not valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.ReplaySandboxRun(j.ID, origRunID)
+	if !errors.Is(err, ErrStopUnconfirmed) {
+		t.Fatalf("err = %v, want ErrStopUnconfirmed (corrupt record must fail closed)", err)
+	}
+	runner.mu.Lock()
+	n := len(runner.gotJobs)
+	stops := len(runner.stopped)
+	runner.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("no replay run may dispatch on a corrupt attention read; runner saw %d jobs", n)
+	}
+	_ = stops // Stop may or may not have been attempted; the invariant is "no dispatch".
+}
+
+// TestReplay_AfterStopRejected pins review PR-6 H2: ReplaySandboxRun after the
+// scheduler is stopped returns ErrSchedulerStopped (Add-before-Wait safety) and
+// dispatches nothing.
+func TestReplay_AfterStopRejected(t *testing.T) {
+	runner := &fakeSandboxRunner{
+		lines:   []string{`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok"}}`},
+		outcome: SandboxOutcome{State: SandboxStateSuccess, ResultText: "ok"},
+	}
+	s, _, j, origRunID := replaySetup(t, runner)
+	s.Stop() // sets s.stopped + drains triggerWG
+
+	_, err := s.ReplaySandboxRun(j.ID, origRunID)
+	if !errors.Is(err, ErrSchedulerStopped) {
+		t.Fatalf("err = %v, want ErrSchedulerStopped after Stop()", err)
+	}
+	runner.mu.Lock()
+	n := len(runner.gotJobs)
+	runner.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("no replay may dispatch after Stop; runner saw %d jobs", n)
 	}
 }
 
