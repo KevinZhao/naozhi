@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -200,9 +201,142 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ResultBytes: run.ResultBytes,
 		ErrorClass:  string(run.ErrorClass),
 		ErrorMsg:    run.ErrorMsg,
+		ReplayOf:    run.ReplayOf,
 	}
 	if !run.EndedAt.IsZero() {
 		out.EndedAt = run.EndedAt.UnixMilli()
 	}
+	if m := run.SandboxMeta; m != nil {
+		// RFC §7.3 meta bar. RuntimeARN is operator-facing config (no
+		// secret), but SanitizeForLog it defensively in case a hand-edited
+		// record carries control bytes that would render dangerously.
+		out.Sandbox = &cronRunSandboxView{
+			RuntimeARN:      osutil.SanitizeForLog(m.RuntimeARN, 256),
+			ImageVersion:    osutil.SanitizeForLog(m.ImageVersion, 128),
+			ExitStatus:      m.ExitStatus,
+			CostUSD:         m.CostUSD,
+			DurationMS:      m.DurationMS,
+			MemoryPeakBytes: m.MemoryPeakBytes,
+		}
+	}
 	httputil.WriteJSON(w, out)
+}
+
+// sandboxEventsMaxResponse caps how many envelope frames GET .../events
+// returns. Matches the cron-side default; the dashboard renders the run's
+// opening (boot + early turns — most useful for "what happened / where did
+// it break"), with a truncated flag for the tail.
+const sandboxEventsMaxResponse = 2000
+
+// cronRunEventsResp is the wire shape for GET /api/cron/runs/{run}/events.
+// Events are raw stream envelopes (kind=cli/boot/exit/meta…) re-emitted
+// verbatim as JSON so the dashboard renders them with the same component
+// the local-session event stream uses (RFC §7.3 "identical message render").
+type cronRunEventsResp struct {
+	Events    []json.RawMessage `json:"events"`
+	Truncated bool              `json:"truncated,omitempty"`
+}
+
+// HandleRunEvents serves GET /api/cron/runs/{run_id}/events?job_id= — the
+// persisted sandbox event log (RFC §6.1/§7.3). Shares the runs rate limiter
+// (FS I/O, same bypass concern as detail). Returns an empty events array for
+// a run with no log (local run / events-disabled deploy) rather than 404, so
+// the dashboard renders an empty stream consistently.
+func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	runID := r.PathValue("run_id")
+	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
+		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+
+	lines, truncated, err := h.scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
+	if err != nil {
+		// A scan error still returns the partial head (lines may be non-nil);
+		// log + serve what we have rather than hiding a healthy opening.
+		slog.Warn("cron sandbox: run events read error", "job_id", jobID, "run_id", runID, "err", err)
+	}
+	events := make([]json.RawMessage, len(lines))
+	for i, ln := range lines {
+		events[i] = json.RawMessage(ln)
+	}
+	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
+}
+
+// cronRunSnapshotResp is the wire shape for GET /api/cron/runs/{run}/snapshot
+// — the §7.3 input-snapshot panel (debug / replay preview). Carries the
+// content-addressed manifest fields plus the resolved prompt text. Secrets
+// appear ONLY as reference names (secret_refs), never values (§5.1 red line);
+// the panel renders the names and the UI never has a value to leak.
+type cronRunSnapshotResp struct {
+	Available    bool     `json:"available"`
+	Prompt       string   `json:"prompt,omitempty"`
+	PromptHash   string   `json:"prompt_hash,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	ImageVersion string   `json:"image_version,omitempty"`
+	SecretRefs   []string `json:"secret_refs,omitempty"`
+}
+
+// HandleRunSnapshot serves GET /api/cron/runs/{run_id}/snapshot?job_id= —
+// the §7.3 input-snapshot view. Shares the runs rate limiter (FS I/O).
+// Returns {available:false} (not 404) for a run with no snapshot (local run
+// / snapshots-disabled / pre-snapshot run) so the panel renders a
+// deterministic "unavailable" state.
+func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	runID := r.PathValue("run_id")
+	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
+		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+
+	man, ok, err := h.scheduler.SandboxRunSnapshotManifest(jobID, runID)
+	if err != nil {
+		slog.Warn("cron sandbox: snapshot manifest read error", "job_id", jobID, "run_id", runID, "err", err)
+		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
+		return
+	}
+	if !ok {
+		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
+		return
+	}
+	prompt, perr := h.scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
+	if perr != nil {
+		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
+		// Still return the manifest metadata; prompt blob may have been GC'd.
+	}
+	httputil.WriteJSON(w, cronRunSnapshotResp{
+		Available: true,
+		// Prompt was validated non-control at the cron write edge, but
+		// SanitizeForLog defensively in case a blob predates that policy.
+		Prompt:       osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
+		PromptHash:   man.PromptHash,
+		Model:        osutil.SanitizeForLog(man.Model, 128),
+		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),
+		SecretRefs:   man.SecretRefs,
+	})
 }

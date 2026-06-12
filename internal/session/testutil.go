@@ -54,7 +54,10 @@ type TestProcess struct {
 	// snapshot_setmodel_idempotent_test.go to assert Snapshot's mirror
 	// short-circuits when the cached model already equals proc.Model().
 	ModelVal string
-	SendFunc func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// LiveVersionVal lets snapshot tests drive proc.LiveVersion() — the
+	// CLI binary version self-reported in system/init. R20260612-live-version.
+	LiveVersionVal string
+	SendFunc       func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -140,6 +143,7 @@ func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
 func (p *TestProcess) Model() string                      { return p.ModelVal }
+func (p *TestProcess) LiveVersion() string                { return p.LiveVersionVal }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

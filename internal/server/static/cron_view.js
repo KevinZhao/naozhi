@@ -626,6 +626,7 @@ function openCronCreateModal(backendHtml) {
   const wsBody = buildCronWorkspaceBody();
   const notifyHtml = buildCronNotifyToggleHtml('', false);
   const contextHtml = buildCronContextToggleHtml(false);
+  const placementHtml = buildCronPlacementHtml('', 'cron-placement');
 
   // Title + aria-label are inlined as literals (not passed through esc())
   // so the static UX contract test can grep the exact fragments in source.
@@ -638,7 +639,7 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml,
+        backendHtml, placementHtml,
         promptId: 'cron-prompt',
         promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
       }) +
@@ -648,6 +649,7 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  cronPlacementBindHint('cron-placement');
   trapFocus(overlay);
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
@@ -703,6 +705,8 @@ function renderCronModalBody(opts) {
   // 区与 notify / fresh-context 同列，因为 backend 是 "怎么跑" 的运行时
   // 设定，与 work_dir（"在哪里"）的资源/路径含义不同。
   const backendBlock = opts.backendHtml ? opts.backendHtml : '';
+  // placement 选择器与 backend 同区（都是"怎么跑"的运行时设定，RFC §7.1）。
+  const placementBlock = opts.placementHtml ? opts.placementHtml : '';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
         titleField +
@@ -722,6 +726,7 @@ function renderCronModalBody(opts) {
           '<div class="cf-label">其他设置</div>' +
           '<div class="cron-more-stack">' +
             backendBlock +
+            placementBlock +
             opts.notifyHtml +
             opts.contextHtml +
           '</div>' +
@@ -741,6 +746,44 @@ function buildCronContextToggleHtml(initialFresh) {
         '<span class="ct-hint">勾选后每次运行前重置会话；不勾则复用会话并保留历史。</span>' +
       '</span>' +
     '</label>';
+}
+
+// buildCronPlacementHtml renders the 运行位置 selector (agentcore-cloud-
+// sandbox RFC §7.1): 本机 (default) / 云沙箱 ☁️. The sandbox option carries
+// the Phase 1 fence hint (≤60min / no work_dir / remote-only MCP). The
+// fence is enforced server-side (validateCronPlacement + ErrSandboxWorkDir);
+// the client mirrors the work_dir conflict check at submit time so the
+// user gets a precise toast instead of a 400 round-trip.
+function buildCronPlacementHtml(initialPlacement, selectId) {
+  const sandboxSel = initialPlacement === 'sandbox' ? ' selected' : '';
+  const localSel = sandboxSel ? '' : ' selected';
+  return '<div class="cron-placement-block" style="margin-bottom:12px">' +
+      '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">运行位置</label>' +
+      '<select id="' + escAttr(selectId) + '" aria-label="运行位置" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+        '<option value=""' + localSel + '>本机</option>' +
+        '<option value="sandbox"' + sandboxSel + '>云沙箱 ☁️</option>' +
+      '</select>' +
+      '<span class="ct-hint" id="' + escAttr(selectId) + '-hint" style="display:' + (sandboxSel ? 'block' : 'none') + ';margin-top:4px">云沙箱为一次性隔离运行（跑完即焚）：限 60 分钟内任务，暂不支持工作目录与本地 MCP。</span>' +
+    '</div>';
+}
+
+// collectCronPlacementValue returns the placement value, or null when the
+// selector is absent.
+function collectCronPlacementValue(selectId) {
+  const el = document.getElementById(selectId);
+  if (!el) return null;
+  return el.value || '';
+}
+
+// cronPlacementBindHint toggles the fence hint under the selector when the
+// user flips to 云沙箱. Called once after the modal mounts.
+function cronPlacementBindHint(selectId) {
+  const el = document.getElementById(selectId);
+  const hint = document.getElementById(selectId + '-hint');
+  if (!el || !hint) return;
+  el.addEventListener('change', function() {
+    hint.style.display = el.value === 'sandbox' ? 'block' : 'none';
+  });
 }
 
 // collectCronContextValue returns the fresh_context flag, or null when the
@@ -980,6 +1023,13 @@ async function doCreateCronJob() {
     const backendEl = document.getElementById('cron-backend');
     const backendVal = backendEl && backendEl.value ? backendEl.value : '';
     if (backendVal) body.backend = backendVal;
+    // placement（RFC §7.1）：默认本机省略字段；云沙箱时前端先行围栏校验
+    // （与服务端 validateCronPlacement 同语义），给出精确 toast。
+    const placementVal = collectCronPlacementValue('cron-placement');
+    if (placementVal === 'sandbox') {
+      if (workDir) { showToast('云沙箱暂不支持工作目录：请清空"在哪里"或改用本机运行', 'warning'); return; }
+      body.placement = 'sandbox';
+    }
     let data;
     try {
       data = await fetchJSON('/api/cron', {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
@@ -1695,6 +1745,9 @@ function cronJobCardHtml(j) {
     ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')}"' +
     ' title="点击修改时间">' + esc(human) + '</span>';
   let iconGlyphs = '';
+  // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
+  // last_error_class 提供 terminal 着色（transport 红+⚠）。
+  iconGlyphs += cronPlacementBadgeHtml(j.placement || '', j.last_error_class || '');
   if (j.notify === false) {
     iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
   }
@@ -1847,8 +1900,31 @@ function cronErrorClassLabel(cls) {
     case 'overlap_skipped': return '重叠跳过';
     case 'paused_concurrent': return '暂停时被抢';
     case 'panic': return '内部异常';
+    // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
+    // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
+    case 'sandbox_failed': return '云沙箱任务失败';
+    case 'sandbox_transport': return '云沙箱断流（状态未知）';
+    case 'sandbox_unavailable': return '云沙箱未配置';
     default: return cls || '';
   }
+}
+
+// cronPlacementBadgeHtml —— ☁️ 云沙箱徽标（RFC §7.2）。placement 是与
+// backend pill / origin badge 正交的第三个标识：本机任务返回空串（零增量），
+// 云沙箱任务渲染 ☁️ pill；terminal 三态由 error_class 着色：
+//   success → 绿（默认 pill 色） / sandbox_failed → 黄 / sandbox_transport → 红+⚠
+// （禁止一键重放的引导属于 Phase 3 确认队列，这里只做视觉信号。）
+function cronPlacementBadgeHtml(placement, errorClass) {
+  if (placement !== 'sandbox') return '';
+  let cls = 'cj-placement-sandbox';
+  let label = '☁️ 沙箱';
+  if (errorClass === 'sandbox_transport') {
+    cls += ' pl-transport';
+    label = '☁️ 沙箱 ⚠';
+  } else if (errorClass === 'sandbox_failed' || errorClass === 'sandbox_unavailable') {
+    cls += ' pl-failed';
+  }
+  return '<span class="' + cls + '" title="' + escAttr('云沙箱运行（跑完即焚）' + (errorClass ? ' · ' + cronErrorClassLabel(errorClass) : '')) + '">' + label + '</span>';
 }
 
 // formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
@@ -1939,6 +2015,9 @@ function cronTimelineHtml(jobId, job, st) {
   const headTitle = total > 0
     ? '最近运行 · ' + total + ' 次'
     : '最近运行';
+  // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
+  // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
+  const costSummary = cronTimelineCostSummaryHtml(st.runs);
   const rowsHtml = st.runs.length === 0
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
@@ -1970,11 +2049,196 @@ function cronTimelineHtml(jobId, job, st) {
       '</button>';
     }
   }
-  return '<div class="ct-head">' +
+  // §7.4 confirmation queue banner (PR-6) — prepended above the timeline so a
+  // failed-transport / orphaned side-effecting run is visible the moment the
+  // operator opens any cron panel. Global (cross-job); '' when the queue is
+  // empty. Fetched independently by cronAttentionRefresh().
+  const queueBanner = cronAttentionQueueHtml();
+  return queueBanner +
+    '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
+      costSummary +
     '</div>' +
     '<div class="ct-rows" data-collapsed="' + initiallyCollapsed + '" data-job-id="' + escAttr(jobId) + '">' + rowsHtml + '</div>' +
     (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
+}
+
+// ── §7.4 人工确认队列 (PR-6) ────────────────────────────────────────────────
+// The confirmation queue is the UI face of §6.2 double-run containment: a
+// side-effecting sandbox run that ended failed-transport (or was orphaned by a
+// naozhi restart) waits here for a human to decide. Two actions per card:
+//   确认已完成 → POST /confirm (no replay; operator verified the side effect
+//                landed already)
+//   确认未完成，重放 → POST /replay (server Stops the original microVM first
+//                       — §6.2 rule 1 — then re-injects the input snapshot)
+//
+// cronAttentionState holds the last fetched queue (array of items) so the
+// banner renders synchronously inside cronTimelineHtml; cronAttentionRefresh
+// repopulates it.
+let cronAttentionState = { items: [], loaded: false };
+
+// isAttentionRun is the tri-state predicate the queue + run rows share: a run
+// needs human attention iff its terminal class is the §6.2 unknown-fate state
+// (sandbox_transport) OR it was reconciled as an orphan. error_class is the
+// authoritative signal on the run record; the queue's `reason` is the
+// authoritative signal on a queue item. Both map to the same "needs a human".
+function isAttentionRun(errorClassOrReason) {
+  return errorClassOrReason === 'sandbox_transport' ||
+    errorClassOrReason === 'transport' ||
+    errorClassOrReason === 'orphaned';
+}
+
+// cronAttentionReasonLabel maps a queue item's reason to operator-facing text.
+function cronAttentionReasonLabel(reason) {
+  switch (reason) {
+    case 'transport': return '断流（云端状态未知）';
+    case 'orphaned': return '重启中断（孤儿 run）';
+    default: return reason || '待确认';
+  }
+}
+
+// cronAttentionQueueHtml renders the queue banner from cronAttentionState.
+// Returns '' when the queue is empty so a healthy setup shows nothing.
+function cronAttentionQueueHtml() {
+  const items = (cronAttentionState && Array.isArray(cronAttentionState.items)) ? cronAttentionState.items : [];
+  if (items.length === 0) return '';
+  const cards = items.map(cronAttentionCardHtml).join('');
+  return '<div class="ctr-queue" role="region" aria-label="待确认的云沙箱 run">' +
+      '<div class="ctr-queue-head">' +
+        '<span class="ctr-queue-title">⚠ 待确认 ' + items.length + ' 项</span>' +
+        '<span class="ctr-queue-sub">断流或重启中断的有副作用任务——请先确认副作用是否已发生</span>' +
+      '</div>' +
+      '<div class="ctr-queue-list">' + cards + '</div>' +
+    '</div>';
+}
+
+// cronAttentionCardHtml renders one queue card with both resolve actions.
+function cronAttentionCardHtml(it) {
+  if (!it || !it.run_id || !it.job_id) return '';
+  const label = it.job_label ? esc(it.job_label) : esc(it.job_id.slice(0, 8));
+  const reason = cronAttentionReasonLabel(it.reason);
+  const when = it.started_at_ms ? cronFormatTime(it.started_at_ms) : '';
+  return '<div class="ctr-queue-card" data-run-id="' + escAttr(it.run_id) + '">' +
+      '<div class="ctr-queue-card-main">' +
+        '<span class="ctr-queue-job">' + label + '</span>' +
+        '<span class="ctr-queue-reason">' + esc(reason) + '</span>' +
+        (when ? '<span class="ctr-queue-when">' + esc(when) + '</span>' : '') +
+      '</div>' +
+      '<div class="ctr-queue-actions">' +
+        '<button type="button" class="ctr-queue-confirm"' +
+          ' onclick="cronAttentionConfirm(\'' + escJs(it.run_id) + '\')"' +
+          ' title="' + escAttr('副作用已发生 / 不需重跑——从队列移除') + '">确认已完成</button>' +
+        '<button type="button" class="ctr-queue-replay"' +
+          ' onclick="cronAttentionReplay(\'' + escJs(it.job_id) + '\',\'' + escJs(it.run_id) + '\')"' +
+          ' title="' + escAttr('副作用未发生——先终止原微VM再用快照重放') + '">确认未完成，重放</button>' +
+      '</div>' +
+    '</div>';
+}
+
+// cronFormatTime renders a unix-ms timestamp as a short local time for queue
+// cards. Defensive against bad input.
+function cronFormatTime(ms) {
+  if (!ms || ms <= 0) return '';
+  try {
+    return new Date(ms).toLocaleString();
+  } catch (e) {
+    return '';
+  }
+}
+
+// cronAttentionRefresh fetches GET /api/cron/attention and repaints the queue
+// banner if the open cron panel is showing. Best-effort; auth errors are
+// swallowed (the periodic poll retries).
+async function cronAttentionRefresh() {
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const data = await fetchJSON('/api/cron/attention', { headers, timeoutMs: 8000 });
+    cronAttentionState = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
+  } catch (e) {
+    if (e && e.status) return; // auth / rate-limit — leave the last good state
+    cronAttentionState = { items: [], loaded: true };
+  }
+  if (cronDetailJobId !== null) renderCronTimelinePanel(cronDetailJobId);
+}
+
+// cronAttentionConfirm resolves a queue item as "already done" (no replay).
+async function cronAttentionConfirm(runId) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('确认 run', r.status, raw);
+      return;
+    }
+  } catch (e) {
+    showAPIError('确认 run', 0, String(e));
+    return;
+  }
+  await cronAttentionRefresh();
+}
+
+// cronAttentionReplay triggers a replay from the queue card (§7.4 `确认未完成，
+// 重放`). The server embeds the §6.2 rule-1 Stop-confirm; a 409 means the
+// original microVM could not be confirmed dead — surface it and keep the card.
+async function cronAttentionReplay(jobId, runId) {
+  await cronReplayRunInner(jobId, runId, true);
+}
+
+// cronReplayRun is the §7.3 detail-view replay button handler (success /
+// failed-clean runs). Thin wrapper over the shared inner so both entry points
+// share the POST + error mapping.
+async function cronReplayRun(jobId, runId) {
+  await cronReplayRunInner(jobId, runId, false);
+}
+
+// cronReplayRunInner POSTs /replay and reconciles UI. fromQueue=true also
+// refreshes the queue banner after a successful replay (the card disappears).
+async function cronReplayRunInner(jobId, runId, fromQueue) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/runs/' + encodeURIComponent(runId) + '/replay',
+      { method: 'POST', headers, body: JSON.stringify({ job_id: jobId }) });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('重放 run', r.status, raw);
+      return;
+    }
+  } catch (e) {
+    showAPIError('重放 run', 0, String(e));
+    return;
+  }
+  if (fromQueue) {
+    await cronAttentionRefresh();
+  }
+  // Refresh the timeline so the new replay run shows up at the head.
+  if (cronDetailJobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
+}
+
+// cronTimelineCostSummaryHtml sums cost_usd over the loaded runs for the
+// §7.5 cost小字. Returns '' when no loaded run carries cost (all-local job).
+// "已加载 N 条" is explicit so the figure is never misread as a full bill —
+// per RFC §7.5 this is lightweight visibility, not a billing system.
+function cronTimelineCostSummaryHtml(runs) {
+  if (!Array.isArray(runs) || runs.length === 0) return '';
+  let sum = 0;
+  let n = 0;
+  for (const r of runs) {
+    if (r && r.cost_usd) {
+      sum += r.cost_usd;
+      n++;
+    }
+  }
+  if (n === 0) return '';
+  return '<span class="ct-cost-sum" title="已加载 ' + n + ' 条云沙箱 run 的成本之和（非全量账单）">' +
+      '☁️ ' + esc(formatCostUSD(sum)) + ' · ' + n + ' 条' +
+    '</span>';
 }
 
 // cronTimelineToggleShowAll — 把 .ct-rows 从 collapsed 切到 expanded，
@@ -2032,6 +2296,10 @@ function cronTimelineRowHtml(jobId, r, st) {
   if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
   if (errCls) {
     subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
+  }
+  // §7.5 per-run cost小字 — only sandbox runs carry cost_usd in the summary.
+  if (r.cost_usd) {
+    subParts.push('<span class="ctr-cost" title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
   }
   const subRow = subParts.length > 0
     ? '<div class="ctr-sub">' + subParts.join('<span class="ctr-sep">·</span>') + '</div>'
@@ -2095,6 +2363,10 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     return '<div class="ctr-err-load">加载失败：' + esc(detail.__error) + '</div>';
   }
 
+  // §7.3 元信息条：云沙箱 run 顶部展示 镜像 · 时长 · 内存峰值 · 成本。
+  // 本机 run 的 detail.sandbox 为空 → 整条不渲染（零增量）。
+  const metaBar = cronSandboxMetaBarHtml(detail.sandbox);
+
   // 历史 4-tab UI 标记（已收敛为单屏「最终输出」，见下方）：
   //   tabBtn('chat', '对话')
   //   tabBtn('tools', '工具')
@@ -2104,47 +2376,132 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
 
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
-
-  if (detail.error_msg) {
-    const errLabel = detail.error_class
-      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
-      : '';
-    return '<div class="ctr-final err">' +
-        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
-        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
-      '</div>';
-  }
-
-  if (detail.result) {
-    return '<div class="ctr-final">' +
-        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
-      '</div>';
-  }
-
+  let lastAssistant = null;
   if (hasTurns) {
     const turns = transcript.turns;
-    let lastAssistant = null;
     for (let i = turns.length - 1; i >= 0; i--) {
       const t = turns[i];
       if (t && t.kind === 'assistant' && t.text) { lastAssistant = t; break; }
     }
-    if (lastAssistant) {
-      return '<div class="ctr-final">' +
-          '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
-        '</div>';
-    }
   }
 
-  // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
-  // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
-  if (transcript) {
+  // §7.3 input-snapshot collapsible (PR-4), appended below the output;
+  // metaBar (above) is prepended. Both empty for local / pre-snapshot runs.
+  const snapshotPanel = cronSnapshotPanelHtml(detail.__snapshot);
+
+  // §7.3 replay chain + action row (PR-6). The replay-of badge links this run
+  // to the original it re-executed; the replay button re-injects the input
+  // snapshot. failed-transport runs DISABLE the button (§6.2: fate unknown —
+  // route through the §7.4 queue), success/failed-clean ENABLE it.
+  const replayBar = cronReplayBarHtml(jobId, runId, detail);
+
+  let body;
+  if (detail.error_msg) {
+    const errLabel = detail.error_class
+      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
+      : '';
+    body = '<div class="ctr-final err">' +
+        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
+        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
+      '</div>';
+  } else if (detail.result) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
+      '</div>';
+  } else if (lastAssistant) {
+    body = '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
+      '</div>';
+  } else if (transcript) {
+    // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
+    // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
     const msg = transcript.fallback === 'raw'
       ? '对话流无法解析，没有可展示的最终输出。'
       : '这次 run 没有保存最终输出。';
-    return '<div class="ctr-empty-detail">' + msg + '</div>';
+    body = '<div class="ctr-empty-detail">' + msg + '</div>';
+  } else {
+    // transcript 字段未定义 = fetch 还在飞，给加载态。
+    body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
-  // transcript 字段未定义 = fetch 还在飞，给加载态。
-  return '<div class="ctr-empty-detail">正在加载最终输出…</div>';
+  return metaBar + replayBar + body + snapshotPanel;
+}
+
+// cronReplayBarHtml renders the §7.3 replay action row for a sandbox run.
+// Returns '' for non-sandbox runs (detail.sandbox absent) so local runs carry
+// no replay UI. Three states drive the button (§6.2 safety on the UI face):
+//
+//   - failed-transport (error_class === 'sandbox_transport'): button DISABLED,
+//     tooltip routes the operator to the §7.4 confirmation queue (replaying a
+//     run whose microVM fate is unknown could double-run; the queue does the
+//     Stop-confirm first).
+//   - success / failed-clean: button ENABLED — safe to re-inject the snapshot.
+//
+// The replay-of badge (when detail.replay_of is set) shows this run was itself
+// a replay, linking back to the original (click jumps to it).
+function cronReplayBarHtml(jobId, runId, detail) {
+  if (!detail || !detail.sandbox) return '';
+  const parts = [];
+  if (detail.replay_of) {
+    parts.push('<button type="button" class="ctr-replay-of"' +
+      ' onclick="cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(detail.replay_of) + '\')"' +
+      ' title="' + escAttr('这是一次重放，点击查看原始 run') + '">↩ 重放自 ' + esc(String(detail.replay_of).slice(0, 8)) + '</button>');
+  }
+  const isTransport = detail.error_class === 'sandbox_transport';
+  if (isTransport) {
+    parts.push('<button type="button" class="ctr-replay-btn" disabled' +
+      ' title="' + escAttr('断流，云端状态未知——请到「待确认」队列先确认终止再重放') + '">↻ 重放（已禁用）</button>');
+    parts.push('<span class="ctr-replay-hint">⚠ 状态未知，走待确认队列</span>');
+  } else {
+    parts.push('<button type="button" class="ctr-replay-btn"' +
+      ' onclick="cronReplayRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' title="' + escAttr('用同一份输入快照重新跑一遍（进全新微VM）') + '">↻ 重放</button>');
+  }
+  return '<div class="ctr-replay-bar">' + parts.join('') + '</div>';
+}
+
+// cronSandboxMetaBarHtml renders the §7.3 run-detail meta bar from the
+// detail endpoint's `sandbox` receipt: 镜像 · 时长 · 内存峰值 · 成本.
+// Returns '' for local runs (no receipt) so nothing renders. exit_status is
+// shown only when non-zero (a failed exit is the operator's signal; exit 0
+// is implied by a success render).
+function cronSandboxMetaBarHtml(sb) {
+  if (!sb) return '';
+  const parts = [];
+  parts.push('<span class="ctr-meta-item">☁️ 云沙箱</span>');
+  if (sb.image_version) {
+    parts.push('<span class="ctr-meta-item" title="镜像版本">' + esc(sb.image_version) + '</span>');
+  }
+  if (sb.duration_ms) {
+    parts.push('<span class="ctr-meta-item" title="时长">' + esc(formatRunDuration(sb.duration_ms)) + '</span>');
+  }
+  if (sb.memory_peak_bytes) {
+    parts.push('<span class="ctr-meta-item" title="内存峰值">' + esc(formatBytes(sb.memory_peak_bytes)) + '</span>');
+  }
+  if (sb.cost_usd) {
+    parts.push('<span class="ctr-meta-item ctr-meta-cost" title="成本估算">' + esc(formatCostUSD(sb.cost_usd)) + '</span>');
+  }
+  if (sb.exit_status) {
+    parts.push('<span class="ctr-meta-item ctr-meta-exit" title="退出码">exit ' + esc(String(sb.exit_status)) + '</span>');
+  }
+  return '<div class="ctr-meta-bar">' + parts.join('') + '</div>';
+}
+
+// formatBytes renders a byte count as a compact human size (MiB/GiB) for the
+// meta bar. Integer-ish display — memory peaks are coarse signals.
+function formatBytes(n) {
+  if (!n || n < 0) return '';
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GiB';
+  if (n >= 1 << 20) return Math.round(n / (1 << 20)) + ' MiB';
+  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + ' KiB';
+  return n + ' B';
+}
+
+// formatCostUSD renders a per-run cost. Sub-cent runs show 4 decimals so a
+// $0.0044 run is not rounded to $0.00; larger runs show cents.
+function formatCostUSD(usd) {
+  if (!usd || usd <= 0) return '';
+  if (usd < 0.01) return '$' + usd.toFixed(4);
+  return '$' + usd.toFixed(2);
 }
 
 // cronRunTranscriptHtml renders a list of transcript turns as a vertical
@@ -2377,10 +2734,22 @@ async function cronTimelineFetchDetail(jobId, runId) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    // Preserve sticky annotations (__transcript / __snapshot) across a
+    // collapse→re-expand re-fetch: wholesale replacement would drop them
+    // and make the snapshot panel flicker/disappear if its re-fetch fails
+    // (review PR-4 F5). The annotation fetchers below re-stash fresh data.
+    const prevDetail = st.details[runId];
     st.details[runId] = data || { __error: 'empty response' };
+    if (prevDetail && st.details[runId] && !st.details[runId].__error) {
+      if (prevDetail.__transcript) st.details[runId].__transcript = prevDetail.__transcript;
+      if (prevDetail.__snapshot) st.details[runId].__snapshot = prevDetail.__snapshot;
+    }
     // Fire-and-forget transcript fetch. Silent on failure; the 4-tab
     // renderer falls back to the raw view automatically.
     cronTimelineFetchTranscript(jobId, runId).catch(() => {});
+    // §7.3 input-snapshot fetch (sandbox runs only; local runs get
+    // available:false). Independent fire-and-forget like the transcript.
+    cronTimelineFetchSnapshot(jobId, runId).catch(() => {});
   } catch (err) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
@@ -2426,6 +2795,66 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     }
   }
   if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+}
+
+// cronTimelineFetchSnapshot fetches the §7.3 input snapshot (content-
+// addressed prompt + model + secret ref names) for one run and stashes it
+// on detail.__snapshot. Independent of the detail/transcript fetches so a
+// snapshot miss never cascades. available:false for local / pre-snapshot
+// runs — the renderer then omits the panel.
+async function cronTimelineFetchSnapshot(jobId, runId) {
+  const st = getCronTimelineState(jobId);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
+    const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    if (st.details && st.details[runId]) {
+      st.details[runId].__snapshot = data || { available: false };
+    }
+  } catch (_err) {
+    if (st.details && st.details[runId]) {
+      st.details[runId].__snapshot = { available: false };
+    }
+  }
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+}
+
+// cronSnapshotPanelHtml renders the §7.3 input-snapshot collapsible from a
+// run's __snapshot. Returns '' when the run has no snapshot (local run /
+// pre-snapshot / fetch in flight) so nothing renders for those.
+//
+// SECURITY: secret_refs are NAMES only (server never sends values, §5.1);
+// the panel renders them as plain labels — there is no value to leak.
+function cronSnapshotPanelHtml(snap) {
+  if (!snap || !snap.available) return '';
+  const rows = [];
+  if (snap.model) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">模型</span>' +
+      '<span class="ctr-snap-v">' + esc(snap.model) + '</span></div>');
+  }
+  if (snap.image_version) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">镜像</span>' +
+      '<span class="ctr-snap-v">' + esc(snap.image_version) + '</span></div>');
+  }
+  if (snap.prompt_hash) {
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">提示词哈希</span>' +
+      '<span class="ctr-snap-v mono">' + esc(snap.prompt_hash.slice(0, 16)) + '…</span></div>');
+  }
+  if (Array.isArray(snap.secret_refs) && snap.secret_refs.length > 0) {
+    const names = snap.secret_refs.map(n => '<code>' + esc(n) + '</code>').join(' ');
+    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">密钥引用</span>' +
+      '<span class="ctr-snap-v">' + names + '</span></div>');
+  }
+  const promptBlock = snap.prompt
+    ? '<div class="ctr-snap-prompt"><div class="ctr-snap-k">输入提示词</div>' +
+        '<pre class="ctr-snap-pre">' + esc(snap.prompt) + '</pre></div>'
+    : '';
+  return '<details class="ctr-snapshot">' +
+      '<summary>输入快照（可重放）</summary>' +
+      '<div class="ctr-snap-body">' + rows.join('') + promptBlock + '</div>' +
+    '</details>';
 }
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
@@ -3338,6 +3767,7 @@ function openCronDetail(jobId, originRow) {
     cronExpandedRunId.runId = null;
   }
   cronDetailJobId = jobId;
+  cronAttentionRefresh().catch(() => {}); // §7.4: pull confirmation queue on open
   // openCronPanel handles selectedKey reset / WS unsubscribe / mobile
   // shell push and triggers renderCronPanel — that path repaints both
   // the list (with .is-active on the new row) AND the drawer in one
@@ -3788,6 +4218,7 @@ function openCronEditModal(id, job, backendHtml) {
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
   const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
   const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
+  const placementHtml = buildCronPlacementHtml(job.placement || '', 'edit-cron-placement');
 
   // Round-trip attempt: if the saved expression matches a v2 picker shape
   // we pre-fill the picker; otherwise render the default picker and add a
@@ -3818,7 +4249,7 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml,
+        backendHtml, placementHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
         titleId: 'edit-cron-title',
@@ -3829,6 +4260,7 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  cronPlacementBindHint('edit-cron-placement');
   trapFocus(overlay);
   fillCronPrompt('edit-cron-prompt', job.prompt);
   // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
@@ -3952,6 +4384,21 @@ async function doEditCronJob(id) {
     const newBackend = backendEl.value || '';
     const origBackend = job.backend || '';
     if (newBackend !== origBackend) body.backend = newBackend;
+  }
+
+  // placement（RFC §7.1）：仅在变化时 PATCH；切到云沙箱时按 EFFECTIVE
+  // work_dir（本次编辑后的值，否则 job 现值）做前端围栏，与服务端
+  // UpdateJob 临界区的原子检查同语义。
+  const newPlacement = collectCronPlacementValue('edit-cron-placement');
+  if (newPlacement !== null) {
+    const origPlacement = job.placement || '';
+    if (newPlacement !== origPlacement) {
+      if (newPlacement === 'sandbox') {
+        const effWorkDir = ('work_dir' in body) ? body.work_dir : (job.work_dir || '');
+        if (effWorkDir) { showToast('云沙箱暂不支持工作目录：请先清空"在哪里"', 'warning'); return; }
+      }
+      body.placement = newPlacement;
+    }
   }
 
   if (Object.keys(body).length === 0) { overlay.remove(); return; }

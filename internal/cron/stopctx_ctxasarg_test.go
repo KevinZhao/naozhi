@@ -32,6 +32,9 @@ func TestStopCtx_ReadsConfinedToCallbackPaths(t *testing.T) {
 		"scheduler.go":        true, // cold-start GC trimAllCtx(s.stopCtx, …)
 		"scheduler_run.go":    true, // execute / jitter / spawn / send budget
 		"scheduler_notify.go": true, // notify replyCtx parents on s.stopCtx
+		"sandbox.go":          true, // executeSandbox run budget — same robfig-callback path as scheduler_run.go's executeOpt (no ctx parameter slot)
+		"sandbox_pending.go":  true, // §6.5 startup reconcile — dispatched from Start()'s lifecycle goroutine (mirrors cold-start GC), no ctx parameter slot
+		"sandbox_replay.go":   true, // §7.4 replay dispatch — operator-initiated goroutine registered with triggerWG (mirrors TriggerNow); pre-replay Stop + run budget parent on s.stopCtx so Scheduler.Stop short-circuits, no ctx parameter slot
 	}
 
 	dir := stopCtxTestDir(t)

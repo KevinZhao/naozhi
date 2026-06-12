@@ -40,6 +40,11 @@
     "handler_type": "*dashcron.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/cron/attention",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/cron/pause",
     "handler_type": "*dashcron.Handlers"
@@ -62,6 +67,26 @@
   {
     "method": "GET",
     "path": "/api/cron/runs/{run_id}",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron/runs/{run_id}/confirm",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/runs/{run_id}/events",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron/runs/{run_id}/replay",
+    "handler_type": "*dashcron.Handlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/runs/{run_id}/snapshot",
     "handler_type": "*dashcron.Handlers"
   },
   {
