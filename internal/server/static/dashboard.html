@@ -728,6 +728,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .event.user+.event.text{margin-top:8px}
 .event.system+.event.user,.event.system+.event.text,.event.init+.event.user,.event.init+.event.text{margin-top:8px}
 .event.user+.event.user,.event.text+.event.text{margin-top:2px}
+/* WeChat-style avatar grouping: within one time group, consecutive bubbles
+   from the same sender hide the repeated avatar — only the first bubble of
+   each run shows it. The .event-time-divider inserted at >EVENT_DIVIDER_GAP_MS
+   breaks the sibling adjacency, so the first bubble after a time gap keeps its
+   avatar. visibility:hidden (not display:none) preserves the icon slot so the
+   stacked bubbles stay edge-aligned, matching IM clients. */
+.event.user+.event.user .event-icon,
+.event.text+.event.text .event-icon{visibility:hidden}
 .event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 /* Brand ">_" prompt motif for the quick-ask empty state. The underscore
