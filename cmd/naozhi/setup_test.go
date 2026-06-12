@@ -196,8 +196,12 @@ func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
 	if cfg.CLI.Path != "claude" {
 		t.Errorf("cli.path: got %q, want %q", cfg.CLI.Path, "claude")
 	}
-	if cfg.CLI.Model != "sonnet" {
-		t.Errorf("cli.model: got %q, want %q", cfg.CLI.Model, "sonnet")
+	// cli.model is intentionally empty in the generated template so naozhi
+	// inherits the model from ~/.claude/settings.json (via --setting-sources
+	// user), matching the TUI claude. A non-empty value here would force a
+	// model that overrides the user's settings.json for every naozhi session.
+	if cfg.CLI.Model != "" {
+		t.Errorf("cli.model: got %q, want %q (empty = inherit from settings.json)", cfg.CLI.Model, "")
 	}
 }
 
