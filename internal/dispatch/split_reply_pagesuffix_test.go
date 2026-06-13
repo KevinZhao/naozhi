@@ -122,6 +122,48 @@ func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
 	}
 }
 
+// TestSendSplitReply_TinyMaxLenSuppressesSuffix reproduces #2057: a platform
+// (mis)configured with maxLen smaller than the page suffix width leaves no
+// room to reserve for "[i/N]". The old code fell back to splitLen=maxLen but
+// still appended the suffix, so every chunk exceeded maxLen. The fix
+// suppresses the suffix in that regime; chunks must stay <= maxLen.
+func TestSendSplitReply_TinyMaxLenSuppressesSuffix(t *testing.T) {
+	const limit = 5 // < pageSuffixRuneWidth(1) == 8
+	hp := &hardLimitPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	text := makeRunes('a', 23) // > limit, forces multi-chunk split
+
+	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+
+	if len(hp.rejected) != 0 {
+		t.Fatalf("platform rejected %d oversized chunk(s); want 0 (#2057)", len(hp.rejected))
+	}
+	if len(hp.accepted) < 2 {
+		t.Fatalf("expected multi-chunk split, got %d chunks", len(hp.accepted))
+	}
+	for i, c := range hp.accepted {
+		if n := utf8.RuneCountInString(c); n > limit {
+			t.Errorf("chunk %d has %d runes, exceeds limit %d (#2057)", i+1, n, limit)
+		}
+		// Suffix must be suppressed: no "\n— [" marker present.
+		if lastPageSuffixIndex(c) >= 0 {
+			t.Errorf("chunk %d unexpectedly carries a page suffix at tiny maxLen (#2057): %q", i+1, c)
+		}
+	}
+	// With suffix suppressed, plain concatenation must equal the original.
+	var joined string
+	for _, c := range hp.accepted {
+		joined += c
+	}
+	if joined != text {
+		t.Errorf("reassembled text != original (content lost) (#2057)")
+	}
+}
+
 func makeRunes(r rune, n int) string {
 	buf := make([]rune, n)
 	for i := range buf {

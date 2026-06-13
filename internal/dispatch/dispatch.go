@@ -1493,19 +1493,31 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// only over-reserve, never under-reserve, so every emitted chunk stays
 	// within maxLen.
 	splitLen := maxLen
+	// #2057: when maxLen is smaller than the page suffix itself (a tiny or
+	// mis-configured max_reply_length — constructors only clamp <=0, there
+	// is no positive lower bound in config validation), the reservation
+	// below goes non-positive. The old code silently fell back to
+	// splitLen=maxLen and STILL appended the suffix, so every chunk landed
+	// at maxLen+suffix > maxLen. Detect that case and suppress the page
+	// suffix entirely rather than emit guaranteed-oversized chunks.
+	suppressSuffix := false
 	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
 		// reservation to the worst-case suffix for the resulting chunk count.
 		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
 		if reserved > 0 {
 			splitLen = reserved
+		} else {
+			// No room for any suffix at this maxLen — split at the raw
+			// limit and skip the "[i/N]" marker so chunks stay <= maxLen.
+			suppressSuffix = true
 		}
 	}
 
 	chunks := platform.SplitText(text, splitLen)
 	total := len(chunks)
 	for i, chunk := range chunks {
-		if total > 1 {
+		if total > 1 && !suppressSuffix {
 			// R20260526-PERF-005: per-chunk on every multi-chunk reply,
 			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
 			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
