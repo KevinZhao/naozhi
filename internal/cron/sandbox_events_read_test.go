@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,5 +144,72 @@ func TestSandboxRunEvents_RejectsBadIDs(t *testing.T) {
 	}
 	if _, _, err := s.SandboxRunEvents("0123456789abcdef", "../../x", 10); err == nil {
 		t.Fatal("must reject non-hex runID")
+	}
+}
+
+// TestSandboxRunEvents_BusyWhenSemSaturated verifies the concurrency gate
+// [R20260613-SEC-5 / #2066]: when all sandboxEventsSemCap slots are held, a
+// further read fails fast with ErrSandboxEventsBusy instead of allocating
+// another scanner buffer.
+func TestSandboxRunEvents_BusyWhenSemSaturated(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
+		[]string{`{"kind":"boot"}`})
+
+	// Saturate the package-level semaphore, then restore it on cleanup so the
+	// gate does not leak into sibling tests sharing the process-wide channel.
+	for i := 0; i < sandboxEventsSemCap; i++ {
+		sandboxEventsSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < sandboxEventsSemCap; i++ {
+			<-sandboxEventsSem
+		}
+	})
+
+	if _, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 10); !errors.Is(err, ErrSandboxEventsBusy) {
+		t.Fatalf("saturated sem: err = %v, want ErrSandboxEventsBusy", err)
+	}
+}
+
+// TestSandboxRunEvents_ReleasesSemOnReturn verifies the semaphore slot is
+// freed once a read completes, so back-to-back reads (the common case) all
+// succeed rather than the gate latching after the first.
+func TestSandboxRunEvents_ReleasesSemOnReturn(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
+		[]string{`{"kind":"boot"}`})
+
+	for i := 0; i < sandboxEventsSemCap+2; i++ {
+		if _, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 10); err != nil {
+			t.Fatalf("read %d: unexpected err %v (slot not released?)", i, err)
+		}
+	}
+}
+
+// TestSandboxRunEvents_LineSizeCap verifies a line exceeding
+// sandboxEventsMaxLineSize is handled as a scan error rather than silently
+// growing the buffer to the old 16 MB ceiling [R20260613-SEC-5 / #2066].
+func TestSandboxRunEvents_LineSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	// One valid small line followed by an oversize line (> 1 MB cap).
+	big := `{"kind":"huge","data":"` + strings.Repeat("x", sandboxEventsMaxLineSize+1) + `"}`
+	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
+		[]string{`{"kind":"boot"}`, big})
+
+	got, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 100)
+	if err == nil {
+		t.Fatal("oversize line must surface a scan error (bufio.ErrTooLong)")
+	}
+	// The healthy head line is still returned alongside the error.
+	if len(got) != 1 || string(got[0]) != `{"kind":"boot"}` {
+		t.Fatalf("got %d lines %q, want the single head line", len(got), got)
 	}
 }
