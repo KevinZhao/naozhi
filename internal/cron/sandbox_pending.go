@@ -280,6 +280,12 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 		return
 	}
 	for _, e := range entries {
+		// R20260613-GO-002: bail on shutdown so N×30s StopSession calls don't
+		// exhaust gcWaitBudget. Mirrors reconcileSandboxPending's inter-entry
+		// guard (line 105).
+		if s.stopCtx.Err() != nil {
+			return
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
