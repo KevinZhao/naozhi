@@ -1,11 +1,12 @@
 package cron
 
 import (
+	"cmp"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -193,8 +194,8 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 		})
 	}
 	// Newest first: the queue reads as a stack of recent incidents.
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAtMS > out[j].CreatedAtMS
+	slices.SortFunc(out, func(a, b SandboxAttentionItem) int {
+		return cmp.Compare(b.CreatedAtMS, a.CreatedAtMS)
 	})
 	return out
 }
