@@ -652,11 +652,19 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 			return dst[:0]
 		}
 	}
-	for _, e := range s.persistedHistory {
-		if e.Time > afterMS {
-			dst = append(dst, e)
+	// R20260613-PERF-1: persistedHistory is guaranteed sorted at this point —
+	// the !persistedHistorySorted branch above sorted and re-checked, and the
+	// n==0 / last<=afterMS early-return guards mean we only reach here with a
+	// non-empty sorted slice whose last element is strictly > afterMS.
+	// Binary-search for the first entry with Time > afterMS, then bulk-append
+	// the tail instead of scanning every element individually.
+	i, _ := slices.BinarySearchFunc(s.persistedHistory, afterMS, func(e cli.EventEntry, t int64) int {
+		if e.Time <= t {
+			return -1
 		}
-	}
+		return 1
+	})
+	dst = append(dst, s.persistedHistory[i:]...)
 	s.historyMu.RUnlock()
 	return dst
 }
