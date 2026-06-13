@@ -9,11 +9,30 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
+
+// runtimeSessionIDRe matches the production format produced by
+// sandboxRuntimeSessionID: "run-<lowercase-hex>-<decimal-unixnano>".
+// Used to validate RuntimeSessionID values read from operator-writable
+// disk files before passing them to StopSession. [R20260613-SEC-2 / #2065]
+var runtimeSessionIDRe = regexp.MustCompile(`^run-[0-9a-f]+-[0-9]+$`)
+
+// isValidRuntimeSessionID reports whether s matches the expected production
+// format of a sandbox runtime session id. Called before every StopSession
+// invocation whose session id was read from disk (sandbox_pending.go /
+// sandbox_replay.go). Invalid ids are logged and skipped.
+//
+// The length cap (128 bytes) is generous vs the ~40-char production value
+// ("run-<16-hex>-<19-digit-nano>") and rejects pathologically long strings
+// that could not be legitimate session ids.
+func isValidRuntimeSessionID(s string) bool {
+	return len(s) <= 128 && runtimeSessionIDRe.MatchString(s)
+}
 
 // SandboxJob is the run-once unit handed to the sandbox placement
 // (agentcore-cloud-sandbox RFC §3.1). One job = one microVM = one prompt;

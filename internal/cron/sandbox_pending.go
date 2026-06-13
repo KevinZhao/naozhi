@@ -143,6 +143,15 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		return
 	}
 	if p.RuntimeSessionID != "" {
+		// R20260613-SEC-2: validate before use — this value was read from an
+		// operator-writable disk file; a malformed id is rejected and the
+		// pending file is kept for the next start (same as a Stop failure),
+		// because we cannot confirm the microVM's fate without a valid id.
+		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
+			lg.Warn("cron sandbox: orphan pending record has invalid RuntimeSessionID format; keeping for manual inspection",
+				"runtime_session_id", p.RuntimeSessionID)
+			return
+		}
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		err := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
 		cancel()
@@ -281,6 +290,14 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 		}
 		var p sandboxPending
 		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" {
+			continue
+		}
+		// R20260613-SEC-2: validate RuntimeSessionID read from disk before
+		// passing to StopSession. On invalid format: log-warn and skip
+		// (file is kept — startup reconcile retries on next boot).
+		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
+			slog.Warn("cron sandbox: delete-stop skipped — pending record has invalid RuntimeSessionID format",
+				"job_id", jobID, "run_id", p.RunID, "runtime_session_id", p.RuntimeSessionID)
 			continue
 		}
 		lg := slog.With("job_id", jobID, "run_id", p.RunID)

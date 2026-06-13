@@ -117,6 +117,15 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", ErrStopUnconfirmed
 	}
 	if qok && rec.RuntimeSessionID != "" {
+		// R20260613-SEC-2: validate RuntimeSessionID read from the attention
+		// record (operator-writable disk file) before passing to StopSession.
+		// Invalid format → refuse replay (same semantics as a failed Stop —
+		// ErrStopUnconfirmed — so the microVM fate stays conservatively unknown).
+		if !isValidRuntimeSessionID(rec.RuntimeSessionID) {
+			slog.Error("cron sandbox: replay refused — attention record has invalid RuntimeSessionID format",
+				"job_id", jobID, "orig_run_id", origRunID, "runtime_session_id", rec.RuntimeSessionID)
+			return "", ErrStopUnconfirmed
+		}
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		stopErr := s.sandbox.StopSession(ctx, rec.RuntimeSessionID)
 		cancel()
