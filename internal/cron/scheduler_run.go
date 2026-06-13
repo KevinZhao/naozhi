@@ -1470,7 +1470,7 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		}
 		s.finishRun(finishArgs{
 			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
-			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
+			state: state, errClass: errClass, errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // R20260613-LOGIC-1: mirrors send-error path
 			prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 			finalizer: a.finalizer,
 		})
