@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -302,7 +303,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 			}, a.lg)
 		}
 		state := RunStateFailed
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			state = RunStateTimedOut
 		}
 		s.finishSandboxRun(a, state, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
