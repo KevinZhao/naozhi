@@ -666,7 +666,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// both phases. sendCtx's lifetime is exactly the sendWithWatchdog
 	// window: execSend creates it and cancels it via the sendWithWatchdog
 	// contract plus its own defer, so no ctx escapes to this frame.
-	spawnElapsed := time.Since(spawnStart)
+	spawnElapsed := s.now().Sub(spawnStart)
 	sendBudget := jobTimeout - spawnElapsed
 	if sendBudget < minSendBudget {
 		sendBudget = minSendBudget
