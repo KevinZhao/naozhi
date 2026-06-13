@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.23
 	github.com/aws/aws-sdk-go-v2/service/bedrockagentcore v1.29.0
+	github.com/aws/aws-sdk-go-v2/service/sts v1.43.2
 	github.com/aws/aws-sdk-go-v2/service/transcribestreaming v1.35.1
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/gorilla/websocket v1.5.3
@@ -32,7 +33,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.1.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.31.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.43.2 // indirect
 	github.com/aws/smithy-go v1.27.1 // indirect
 	github.com/gogo/protobuf v1.3.3-0.20221024144010-f67b8970b736 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
