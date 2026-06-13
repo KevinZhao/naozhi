@@ -137,6 +137,48 @@ func TestHandleRunReplay_JobNotFound(t *testing.T) {
 	}
 }
 
+// TestHandleAttentionList_SanitizesReason pins R20260613-SEC-3: the Reason
+// field must be sanitized via osutil.SanitizeForLog for parity with JobLabel.
+// Reason comes from operator-writable sandboxattention/*.json; control
+// characters and HTML must be neutralised before reaching API consumers.
+func TestHandleAttentionList_SanitizesReason(t *testing.T) {
+	t.Parallel()
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	sched := attentionTestScheduler(t, storePath)
+	// Reason contains a newline (log-injection) and an HTML tag (XSS-adjacent).
+	dirtyReason := "transport\n<script>alert(1)</script>"
+	sched.WriteSandboxAttentionForTest(strings.Repeat("a", 16), strings.Repeat("b", 16), dirtyReason, "job")
+
+	h := &Handlers{scheduler: sched}
+	req := httptest.NewRequest(http.MethodGet, "/api/cron/attention", nil)
+	w := httptest.NewRecorder()
+	h.HandleAttentionList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []struct {
+			Reason string `json:"reason"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(resp.Items))
+	}
+	got := resp.Items[0].Reason
+	// The newline must have been replaced (control char sanitised).
+	if strings.Contains(got, "\n") {
+		t.Errorf("Reason still contains newline after sanitize: %q", got)
+	}
+	// The sanitised value must still convey the reason prefix — record is not dropped.
+	if !strings.HasPrefix(got, "transport") {
+		t.Errorf("Reason prefix lost — attention record must not be dropped: %q", got)
+	}
+}
+
 // TestHandleRunReplay_NilScheduler: with no scheduler wired, 501.
 func TestHandleRunReplay_NilScheduler(t *testing.T) {
 	t.Parallel()

@@ -50,7 +50,7 @@ func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, cronAttentionItemView{
 			JobID:       it.JobID,
 			RunID:       it.RunID,
-			Reason:      it.Reason,
+			Reason:      osutil.SanitizeForLog(it.Reason, 64),
 			JobLabel:    osutil.SanitizeForLog(it.JobLabel, 256),
 			StartedAtMS: it.StartedAtMS,
 			CreatedAtMS: it.CreatedAtMS,
