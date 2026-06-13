@@ -6555,6 +6555,25 @@ func TestDashboardJS_PendingSessionBackendBrand(t *testing.T) {
 	if !strings.Contains(js, "s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion") {
 		t.Error("renderMainShell / updateHeaderCLI missing sessionBackends version fallback")
 	}
+
+	// Arm 4 (R20260613-pending-version): for a pending session on the DEFAULT
+	// backend, the version must prefer defaultCLIVersion (the live init-frame
+	// value, refreshed from stats every poll) over backendDisplayVersion()
+	// (the /api/cli/backends manifest cached up to 60s client-side). Without
+	// this ordering, a host claude upgrade under a long-lived naozhi makes a
+	// freshly-created session card flash the pre-upgrade version for up to 60s
+	// until the manifest cache expires. A non-default backend keeps the
+	// manifest value first — it has no live source, and preferring
+	// defaultCLIVersion would mislabel it with the default backend's version.
+	if !strings.Contains(js, "const isDefaultBackend = !pendingBackend || (cliBackends !== null && pendingBackend === cliBackends.default)") {
+		t.Error("pending version fallback missing default-backend gate — non-default backend would inherit defaultCLIVersion")
+	}
+	if !strings.Contains(js, "? (defaultCLIVersion || backendDisplayVersion(pendingBackend))") {
+		t.Error("default-backend pending session must prefer live defaultCLIVersion over the 60s-cached manifest version")
+	}
+	if !strings.Contains(js, ": (backendDisplayVersion(pendingBackend) || defaultCLIVersion)") {
+		t.Error("non-default-backend pending session must prefer its manifest version, not defaultCLIVersion")
+	}
 }
 
 // TestDashboardJS_TableCurrencyDollarNotMathProtected pins the bugfix that
