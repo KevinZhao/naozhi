@@ -733,6 +733,7 @@ func (s *Scheduler) Start() error {
 	// trigger a save unless a CRUD mutation lands). A WARN per skipped job
 	// names the ID + schedule so the operator sees which jobs were dropped.
 	skippedOverCap := 0
+	skippedOverPerChat := 0
 	for _, j := range restored {
 		// Reject persisted jobs whose WorkDir escapes the configured
 		// sandbox. Replaying an on-disk tampered entry must not grant
@@ -751,6 +752,21 @@ func (s *Scheduler) Start() error {
 			slog.Warn("cron job over maxJobs cap; skipping (raise cron.MaxJobs to restore)",
 				"job_id", j.ID, "schedule", j.Schedule, "cap", s.maxJobs)
 			skippedOverCap++
+			continue
+		}
+		// R20260613-CR-10 (#2060): enforce the per-chat cap on the startup
+		// load path too. AddJob (scheduler_jobs.go) rejects beyond
+		// maxJobsPerChat, but loadJobs went straight to addToChatIndexLocked,
+		// so a legacy / hand-edited cron_jobs.json with an over-cap chat would
+		// load all entries and leave the in-memory chatJobCount above the cap —
+		// then AddJob reports "per-chat limit reached" while the operator
+		// believes there is headroom. Clamp here so the loaded count matches
+		// the cap semantics; over-cap entries stay on disk (recoverable by
+		// raising the cap + restart), mirroring the maxJobs skip above.
+		if s.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= s.maxJobsPerChat {
+			slog.Warn("cron job over per-chat cap; skipping (raise cron.MaxJobsPerChat to restore)",
+				"job_id", j.ID, "platform", j.Platform, "chat_id", j.ChatID, "cap", s.maxJobsPerChat)
+			skippedOverPerChat++
 			continue
 		}
 		if j.Paused {
@@ -772,6 +788,10 @@ func (s *Scheduler) Start() error {
 	if skippedOverCap > 0 {
 		slog.Warn("cron Start: jobs skipped due to maxJobs cap; remaining entries are still on disk",
 			"skipped", skippedOverCap, "loaded", jobCount, "cap", s.maxJobs)
+	}
+	if skippedOverPerChat > 0 {
+		slog.Warn("cron Start: jobs skipped due to per-chat cap; remaining entries are still on disk",
+			"skipped", skippedOverPerChat, "loaded", jobCount, "cap", s.maxJobsPerChat)
 	}
 	// Register dashboard stub sessions after releasing the lock; the router's
 	// notifyChange callback must not re-enter scheduler state. Use snapshotted
