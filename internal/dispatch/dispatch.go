@@ -1439,15 +1439,30 @@ func pageSuffixRuneWidth(total int) int {
 }
 
 // upperBoundChunks returns a ceiling estimate of how many chunks SplitText
-// would produce for runeCount runes at the given split width. It never
-// under-estimates (SplitText may produce fewer when it breaks early at a
-// newline, but never more than ceil), so reserving the suffix budget for
-// this count is always safe. #2008.
+// would produce for runeCount runes at the given split width. It must never
+// under-estimate, because the caller reserves the page-suffix budget for
+// this count before the real split happens.
+//
+// #2056: a naive ceil(runeCount/splitWidth) under-estimates. SplitText may
+// break EARLY at a newline whenever the newline's byte offset is past the
+// chunk midpoint (`idx > end/2`), so the shortest possible chunk is roughly
+// half the split width (~floor(splitWidth/2)+1 runes for ASCII). A reply
+// dense with newlines (markdown) can therefore yield up to ~2x the naive
+// estimate. When the true count crosses a decimal digit boundary (e.g.
+// estimate 9 → suffix width 8, but real 10 → suffix width 10) the reserved
+// budget falls short and a chunk+suffix exceeds maxLen — the exact loss
+// mode #2008 set out to prevent, with a gap. Bound by the minimum chunk
+// size ceil(splitWidth/2) so the estimate covers the newline-halving worst
+// case.
 func upperBoundChunks(runeCount, splitWidth int) int {
 	if splitWidth <= 0 {
 		return runeCount + 1
 	}
-	return (runeCount + splitWidth - 1) / splitWidth
+	minChunk := (splitWidth + 1) / 2 // ceil(splitWidth/2), worst-case shortest chunk
+	if minChunk < 1 {
+		minChunk = 1
+	}
+	return (runeCount + minChunk - 1) / minChunk
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.

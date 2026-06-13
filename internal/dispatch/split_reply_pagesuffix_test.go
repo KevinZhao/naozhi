@@ -76,6 +76,52 @@ func TestSendSplitReply_ChunksRespectHardLimit(t *testing.T) {
 	}
 }
 
+// TestSendSplitReply_NewlineDenseRespectsHardLimit reproduces #2056: a reply
+// dense with newlines makes SplitText break early (chunk ~= splitWidth/2),
+// so the true chunk count can be ~2x the naive ceil(runeCount/splitWidth)
+// estimate. When the true count crosses a decimal digit boundary the page
+// suffix widens by 2 runes beyond what was reserved, pushing chunk+suffix
+// over a zero-headroom hard limit. Every emitted chunk must stay <= limit.
+func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
+	const limit = 2000
+	hp := &hardLimitPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	// Lines sized so SplitText packs whole lines but the newline-driven
+	// breaks make the TRUE chunk count cross a decimal digit boundary
+	// (>=10) while the naive ceil(runeCount/splitWidth) estimate stays
+	// single-digit. With the pre-#2056 estimate this reserves an 8-rune
+	// suffix budget but the real suffix is 10 runes, so a full splitLen
+	// chunk + suffix reaches 2002 > 2000. (996 'a' + '\n' = 997 runes per
+	// line, 14 lines → runeCount=13958, naive est 9, real total 10.)
+	line := makeRunes('a', 996) + "\n" // 997 runes per line
+	var b []byte
+	for i := 0; i < 14; i++ {
+		b = append(b, line...)
+	}
+	text := string(b) // 13958 runes, newline-dense
+
+	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+
+	if len(hp.rejected) != 0 {
+		t.Fatalf("platform rejected %d oversized chunk(s); want 0 (#2056)", len(hp.rejected))
+	}
+	if len(hp.accepted) < 10 {
+		t.Fatalf("expected newline-dense reply to split into >=10 chunks, got %d", len(hp.accepted))
+	}
+	for i, c := range hp.accepted {
+		if n := utf8.RuneCountInString(c); n > limit {
+			t.Errorf("chunk %d has %d runes, exceeds hard limit %d (#2056)", i+1, n, limit)
+		}
+	}
+	if joined := stripPageSuffixes(hp.accepted); joined != text {
+		t.Errorf("reassembled text != original (content lost/duplicated) (#2056)")
+	}
+}
+
 func makeRunes(r rune, n int) string {
 	buf := make([]rune, n)
 	for i := range buf {
