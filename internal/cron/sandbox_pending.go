@@ -157,7 +157,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	// been (re-)confirmed above, check whether the run is already terminal on
 	// disk; if so, only the microVM Stop + pending-file removal were owed —
 	// skip the second finishRun entirely.
-	if rec, err := s.runStore.Get(p.JobID, p.RunID); err == nil && rec != nil && !rec.EndedAt.IsZero() {
+	if rec, err := s.Run(p.JobID, p.RunID); err == nil && rec != nil && !rec.EndedAt.IsZero() {
 		lg.Info("cron sandbox: orphan already finished in-process; skipping duplicate finish",
 			"state", rec.State)
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
