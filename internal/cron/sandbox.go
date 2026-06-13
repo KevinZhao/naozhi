@@ -374,9 +374,18 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	} else if state == RunStateCanceled {
 		a.lg.Info("cron sandbox run canceled",
 			"err_class", string(errClass), "err", errMsg)
-	} else {
+	} else if state == RunStateFailed {
+		// R20260613-GOLANG-002: only count genuine failures as
+		// CronSandboxRunFailedTotal. RunStateTimedOut is already counted by
+		// bumpRunStateMetrics → CronRunTimedOutTotal inside finishRun; bumping
+		// this counter too would double-count timed-out runs and pollute alerts.
 		metrics.CronSandboxRunFailedTotal.Add(1)
 		a.lg.Error("cron sandbox run failed",
+			"state", string(state), "err_class", string(errClass), "err", errMsg)
+	} else {
+		// Non-success, non-canceled, non-failed (e.g. RunStateTimedOut):
+		// log at Info so operators can see it without double-counting metrics.
+		a.lg.Info("cron sandbox run ended with non-failure terminal state",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	}
 	s.finishRun(finishArgs{

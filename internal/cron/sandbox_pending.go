@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -183,8 +184,29 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	// Terminal record. The job may have been deleted while we were down —
 	// finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops the
 	// persist; the broadcast pair still closes subscriber timelines.
+	//
+	// R20260613-GOLANG-001: snapshot every field we need while holding
+	// RLock, then release — UpdateJob mutates the *Job fields in place
+	// under s.mu.Lock(), so any read outside the lock is a data race.
+	// finishRun itself re-locks (recordTerminalResult re-checks s.jobs[id])
+	// so passing j is safe; only THIS function's lock-free field reads need
+	// to become snapshots.
 	s.mu.RLock()
 	j := s.jobs[p.JobID]
+	var (
+		jSideEffects  bool
+		jLabel        string
+		jFreshContext bool
+		jPrompt       string
+		jWorkDir      string
+	)
+	if j != nil {
+		jSideEffects = j.SideEffects != nil && *j.SideEffects
+		jLabel = jobTitleOrFallback(j)
+		jFreshContext = j.FreshContext
+		jPrompt = j.Prompt
+		jWorkDir = j.WorkDir
+	}
 	s.mu.RUnlock()
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	msg := "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
@@ -196,13 +218,13 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		// leave as a plain failed-transport record (it re-runs next tick).
 		// RuntimeSessionID is already spent (we Stopped it); kept on the record
 		// for symmetry — the queue's replay action re-Stops idempotently.
-		if j.SideEffects != nil && *j.SideEffects {
+		if jSideEffects {
 			s.writeSandboxAttention(sandboxAttention{
 				JobID:            p.JobID,
 				RunID:            p.RunID,
 				RuntimeSessionID: p.RuntimeSessionID,
 				Reason:           attentionReasonOrphaned,
-				JobLabel:         jobTitleOrFallback(j),
+				JobLabel:         jLabel,
 				StartedAtMS:      p.StartedAtMS,
 				CreatedAtMS:      s.attentionNowMS(),
 			}, lg)
@@ -214,7 +236,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			RunID:     p.RunID,
 			StartedAt: startedAt,
 			Trigger:   runtelemetry.TriggerScheduled,
-			Fresh:     j.FreshContext,
+			Fresh:     jFreshContext,
 		})
 		// finalizer carries a NIL inflight deliberately: the orphan belongs
 		// to the PREVIOUS process — this process's CAS gate was never taken
@@ -228,10 +250,17 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			trigger: runtelemetry.TriggerScheduled,
 			state:   RunStateFailed, errClass: ErrClassSandboxTransport,
 			errMsg: msg,
-			prompt: j.Prompt, workDir: j.WorkDir, fresh: j.FreshContext,
+			prompt: jPrompt, workDir: jWorkDir, fresh: jFreshContext,
 			finalizer: &runFinalizer{},
 		})
 	} else {
+		// R20260613-GOLANG-004: the job was deleted while naozhi was down.
+		// finishRun cannot be called (nil job), but the run did start and end
+		// (failed) — bump the same terminal counters that finishRun /
+		// bumpRunStateMetrics would have incremented so dashboards and alerts
+		// stay accurate.
+		metrics.CronRunEndedTotal.Add(1)
+		metrics.CronRunFailedTotal.Add(1)
 		lg.Info("cron sandbox: orphan's job no longer exists; closing record file only")
 	}
 
@@ -295,7 +324,12 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 			continue // benign: the run goroutine may have just removed it
 		}
 		var p sandboxPending
-		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" {
+		// R20260613-LOGIC-2: validate RunID in addition to JobID/RuntimeSessionID.
+		// p.RunID is read from operator-writable disk and flows into slog fields
+		// at lines 335/338 — without validation a tampered pending file can inject
+		// control characters or oversized strings into structured logs.
+		// Mirrors the same guard in reconcileSandboxPending (line 115).
+		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
 			continue
 		}
 		// R20260613-SEC-2: validate RuntimeSessionID read from disk before
