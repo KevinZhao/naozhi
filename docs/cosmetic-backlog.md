@@ -638,3 +638,12 @@
 - [R20260613-PERF-3] batchRecentRuns 每次 1Hz 请求启 ≤8 goroutine,warm cache 下可退化串行或用 pool — internal/dashboard/cron/handlers.go:958
 - [R20260613-PERF-8] decodeRunsParallel cap-drop 路径不 Put 也不 reset length,可 reset 后归还 — internal/cron/runstore_disklist.go:372
 - [R20260613-SEC-9] sanitizeClientFilename 未剥离 Unicode-dot lookalike(U+2024/U+FF0E) — internal/server/send_attachment_validate.go:295
+- [R20260613-PERF-6b] ListAllJobsWithNextRun 每次 1Hz poll 调 s.cron.Entries() 重取 robfig runningMu;可加 ~50ms TTL 缓存(同函数 #1898 已跟踪锁内拷贝) — internal/cron/scheduler_jobs_list.go:249
+- [R20260613-PERF-11] ListSessionsWithVersion 用 for-range 置 nil 替代 clear() 归还 pool — internal/session/router_core.go:1529
+- [R20260613-PERF-13] writeStoreMeta 每 30s tick 全量 marshal+2 fsync,仅 WrittenAt 变;可缓存比对 — internal/session/store.go:416
+- [R20260613-PERF-15] snapshotKnownIDsSortedLocked 缓存命中仍 slices.Clone 整 []string — internal/session/store.go:722
+- [R20260613-PERF-16] effectiveFlushInterval 每 flush tick 重算,writer 数极少变 — internal/eventlog/persister.go:1483
+- [R20260613-GOLANG-CO1] reconcileSandboxPending 校验失败子路径 slog 传 err=nil(JSON 已 parse 成功但 ID 非法),应传明确文案 — internal/cron/sandbox_pending.go:120
+- [R20260613-GOLANG-CO2] executeOpt 顶部 if s==nil 对方法接收者不可达(nil 解引用在 dispatch 层 panic),误导读者可删 — internal/cron/scheduler_run.go:521
+- [R20260613-ARCH-3] BuildHandler 的 guard-fallback 分支(queue==nil)生产恒不可达,可在确认后删运行时分支(保留 interface 供测试) — internal/dispatch/dispatch.go:801
+- [R20260613-SEC-12] selfupdate.testHTTPTransport 包级可变逃逸口绕过 SSRF 守护,无 build-tag 约束防生产误用 — internal/selfupdate/selfupdate.go:481

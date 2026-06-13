@@ -295,9 +295,10 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 		"AKIAIOSFODNN7EXAMPLE",
 		"xoxb-1234567890",
 		"ya29.AAAA0123456789abcdef",
-		"dapi1234567890abcdef",         // 'd' — Databricks
-		"hvs.AAAA0123456789",           // 'h' — HCP Vault
-		"rk_live_abcdefghij0123456789", // 'r' — Stripe restricted
+		"dapi1234567890abcdef",            // 'd' — Databricks
+		"hvs.AAAA0123456789",              // 'h' — HCP Vault
+		"rk_live_abcdefghij0123456789",    // 'r' — Stripe restricted
+		"-----BEGIN RSA PRIVATE KEY-----", // '-' — PEM header
 	}
 	for _, in := range truthy {
 		if !mayContainSecretPrefix(in) {
@@ -306,12 +307,71 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 	}
 	falsy := []string{
 		"",
-		"402 ok",     // none of s/g/A/x/h/n/y/d/r first bytes
+		"402 ok",     // none of s/g/A/x/h/n/y/d/r/- first bytes
 		"quit + lib", // benign tokens, no trigger byte
 	}
 	for _, in := range falsy {
 		if mayContainSecretPrefix(in) {
 			t.Errorf("mayContainSecretPrefix(%q) = true, want false", in)
 		}
+	}
+}
+
+// TestRedactSecrets_PEMHeader verifies that PEM private-key / certificate
+// block headers (`-----BEGIN …`) are redacted. R20260613-SEC-9.
+//
+// Architecture note: the tail scanner stops at the first space character
+// (space is not an isSecretTokenByte char), so only the `-----BEGIN` token
+// itself is replaced — the remainder of the header line is not redacted.
+// minTail=0 is used because the prefix is unambiguous on its own.
+// `eyJ` (JWT prefix) is deliberately NOT added: eyJ == base64(`{"`) which
+// would false-positive on any base64-encoded JSON object; JWT dots are not
+// isSecretTokenByte chars so tails terminate immediately, making the match
+// unreliable.
+func TestRedactSecrets_PEMHeader(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "RSA private key header",
+			in:   "-----BEGIN RSA PRIVATE KEY-----",
+			want: "[REDACTED] RSA PRIVATE KEY-----",
+		},
+		{
+			name: "EC private key header",
+			in:   "-----BEGIN EC PRIVATE KEY-----",
+			want: "[REDACTED] EC PRIVATE KEY-----",
+		},
+		{
+			name: "PKCS8 private key header",
+			in:   "-----BEGIN PRIVATE KEY-----",
+			want: "[REDACTED] PRIVATE KEY-----",
+		},
+		{
+			name: "certificate header not redacted (not a private key material concern)",
+			// CERTIFICATE is public data; however the same prefix fires.
+			in:   "-----BEGIN CERTIFICATE-----",
+			want: "[REDACTED] CERTIFICATE-----",
+		},
+		{
+			name: "PEM header embedded in env dump",
+			in:   "PRIVATE_KEY=\"-----BEGIN RSA PRIVATE KEY-----\\nMIIEo...",
+			want: "PRIVATE_KEY=\"[REDACTED] RSA PRIVATE KEY-----\\nMIIEo...",
+		},
+		{
+			name: "eyJ prefix NOT redacted (conservative: false-positive risk)",
+			in:   "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.sig",
+			want: "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.sig",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactSecrets(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
