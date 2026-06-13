@@ -256,9 +256,14 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	} else {
 		// R20260613-GOLANG-004: the job was deleted while naozhi was down.
 		// finishRun cannot be called (nil job), but the run did start and end
-		// (failed) — bump the same terminal counters that finishRun /
-		// bumpRunStateMetrics would have incremented so dashboards and alerts
-		// stay accurate.
+		// (failed) — bump the same counters that the j!=nil path would have
+		// incremented via emitRunStarted + finishRun/bumpRunStateMetrics so
+		// dashboards, alerts, and the started/ended balance (used by /health
+		// and runstore.go to gauge in-flight counts) stay accurate.
+		// R20260613-CR-2: Started must be bumped here too — the j!=nil path
+		// bumps it via emitRunStarted (scheduler_callbacks.go:100) but the
+		// nil-job path skipped it, leaving Started/Ended counters imbalanced.
+		metrics.CronRunStartedTotal.Add(1)
 		metrics.CronRunEndedTotal.Add(1)
 		metrics.CronRunFailedTotal.Add(1)
 		lg.Info("cron sandbox: orphan's job no longer exists; closing record file only")
