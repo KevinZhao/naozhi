@@ -476,6 +476,19 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	if !IsValidID(jobID) || !IsValidID(runID) {
 		return nil, false, fmt.Errorf("cron sandbox: invalid jobID/runID")
 	}
+	// Bound concurrent reads: each in-flight call parks a scanner buffer that
+	// can grow toward sandboxEventsMaxToken plus up to maxLines retained
+	// frames, so a single authenticated client issuing a burst of event-log
+	// reads is a memory amplifier. Mirror the dashboard transcriptSem gate
+	// (R20260613-SEC-5, #2066) with a non-blocking acquire: when the gate is
+	// saturated return ErrSandboxEventsBusy so the handler fails fast (503)
+	// instead of letting N requests pile up resident buffers.
+	select {
+	case sandboxEventsSem <- struct{}{}:
+		defer func() { <-sandboxEventsSem }()
+	default:
+		return nil, false, ErrSandboxEventsBusy
+	}
 	if maxLines <= 0 {
 		maxLines = sandboxEventsDefaultMax
 	}
@@ -492,8 +505,12 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	out := make([][]byte, 0, maxLines)
 	sc := bufio.NewScanner(f)
 	// Match the writer/agentcore ceiling: a single stream-json line can carry
-	// a large tool result.
-	sc.Buffer(make([]byte, 64*1024), (16<<20)+(64<<10))
+	// a large tool result. bufio starts at the 64 KB initial buffer and only
+	// grows toward the max when an actual line demands it, so the typical
+	// read stays at 64 KB; the ceiling must stay >= the agentcore producer's
+	// max (internal/agentcore/client.go) or a frame the system wrote could
+	// not be read back.
+	sc.Buffer(make([]byte, 64*1024), sandboxEventsMaxToken)
 	truncated := false
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -542,3 +559,28 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 // non-positive cap. 2000 frames covers a typical run's opening comfortably
 // while keeping the response well under a megabyte for the dashboard.
 const sandboxEventsDefaultMax = 2000
+
+// sandboxEventsMaxToken is the bufio.Scanner max token size for one NDJSON
+// frame. It must stay >= the agentcore producer ceiling
+// (internal/agentcore/client.go: (16<<20)+(64<<10)) so any frame the system
+// wrote to the event log can be read back; a lower cap would silently turn a
+// large-but-valid frame into a skipped/corrupt line.
+const sandboxEventsMaxToken = (16 << 20) + (64 << 10)
+
+// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads process-wide.
+// Mirrors the dashboard transcriptSem cap (8): each in-flight read parks a
+// scanner buffer (growing toward sandboxEventsMaxToken) plus its retained
+// frames, so an unbounded fan-out under multi-operator load is a memory
+// amplifier (R20260613-SEC-5, #2066).
+const sandboxEventsSemCap = 8
+
+// sandboxEventsSem is the process-wide concurrency gate for
+// SandboxRunEvents. A non-blocking acquire keeps the failure mode "busy →
+// ErrSandboxEventsBusy" (handler maps to 503) rather than queueing requests
+// that each hold resident buffers.
+var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
+
+// ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
+// gate (sandboxEventsSem) is saturated. The dashboard handler maps it to a
+// 503 so the client retries instead of amplifying resident memory.
+var ErrSandboxEventsBusy = errors.New("cron sandbox: run events read busy")

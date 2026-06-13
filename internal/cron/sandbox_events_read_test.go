@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,54 @@ func TestSandboxRunEvents_SkipsCorruptLine(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("got %d valid lines, want 2 (corrupt line skipped)", len(got))
+	}
+}
+
+func TestSandboxRunEvents_BusyWhenSemSaturated(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface", []string{
+		`{"kind":"exit","code":0}`,
+	})
+
+	// Saturate the package-level gate, then assert the next read fails fast
+	// with ErrSandboxEventsBusy instead of allocating another scanner buffer.
+	for i := 0; i < sandboxEventsSemCap; i++ {
+		sandboxEventsSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < sandboxEventsSemCap; i++ {
+			<-sandboxEventsSem
+		}
+	})
+
+	_, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 100)
+	if !errors.Is(err, ErrSandboxEventsBusy) {
+		t.Fatalf("saturated gate: err=%v, want ErrSandboxEventsBusy", err)
+	}
+}
+
+func TestSandboxRunEvents_ReleasesSemOnReturn(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface", []string{
+		`{"kind":"exit","code":0}`,
+	})
+
+	// A sequence of reads exceeding the cap must all succeed: the gate is
+	// released on each return, so it never permanently leaks a slot.
+	for i := 0; i < sandboxEventsSemCap+3; i++ {
+		got, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 100)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("read %d: got %d lines, want 1", i, len(got))
+		}
 	}
 }
 
