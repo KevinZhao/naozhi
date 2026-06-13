@@ -828,8 +828,17 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		s.mu.Unlock()
 		if schedRegErr != nil {
 			// Best-effort re-register old schedule outside lock (R112714-LOGIC-1).
-			s.mu.Lock()
-			if j2 := s.jobs[id]; j2 != nil {
+			// R20260613-CR-4: use IIFE + defer so the lock is always released even
+			// if registerJob or persistJobsLocked panics. save2 is returned from
+			// the IIFE and called outside the lock (persistJobsLocked contract).
+			var save2 func()
+			func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				j2 := s.jobs[id]
+				if j2 == nil {
+					return
+				}
 				if reErr := s.registerJob(j2); reErr != nil {
 					slog.Error("cron: failed to restore previous schedule after UpdateJob rollback",
 						"job_id", id, "schedule", schedOldSchedule, "err", reErr)
@@ -842,16 +851,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				}
 				// Re-persist with the rolled-back schedule so disk stays
 				// consistent with in-memory state.
-				if save2, perr2 := s.persistJobsLocked(); perr2 == nil {
-					s.mu.Unlock()
-					save2()
+				if fn, perr2 := s.persistJobsLocked(); perr2 == nil {
+					save2 = fn
 				} else {
-					s.mu.Unlock()
 					slog.Error("cron: re-persist after UpdateJob rollback failed",
 						"job_id", id, "err", perr2)
 				}
-			} else {
-				s.mu.Unlock()
+			}()
+			if save2 != nil {
+				save2()
 			}
 			return nil, fmt.Errorf("re-register cron: %w", schedRegErr)
 		}
