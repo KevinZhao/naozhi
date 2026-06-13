@@ -92,6 +92,17 @@ var secretPrefixes = []secretPrefix{
 	// Stripe API calls, so leaking them is equally sensitive.
 	{prefix: "rk_live_", minTail: 16},
 	{prefix: "rk_test_", minTail: 16},
+	// PEM / PKCS private-key and certificate headers (`-----BEGIN …-----`).
+	// The tail scan stops at the first space (space is not an isSecretTokenByte
+	// char), so minTail=0: the prefix itself is unambiguous enough — any
+	// `-----BEGIN` in output signals PEM data. The redaction covers the
+	// `-----BEGIN` token; the remainder of the header line and base64 body
+	// lines are not redacted by this scanner (architecture limitation: the
+	// tail scanner is token-word based). Deliberately NOT adding `eyJ` (JWT):
+	// eyJ is base64(`{"`) and would false-positive on any base64-encoded JSON;
+	// JWT dots are not isSecretTokenByte chars so the tail scan would terminate
+	// immediately, making the match useless in practice.
+	{prefix: "-----BEGIN", minTail: 0},
 }
 
 // secretPrefixesByFirstByte indexes secretPrefixes by their first byte so the
@@ -192,8 +203,9 @@ func isSecretTokenByte(b byte) bool {
 //
 // First-byte set: 's' (sk-…/sk_live_/sk_test_), 'g' (ghp_/gho_/…/glpat-),
 // 'A' (AKIA/ASIA), 'x' (xoxb-/…), 'h' (hf_/hvs.), 'n' (npm_), 'y' (ya29.),
-// 'd' (dapi), 'r' (rk_live_/rk_test_). Keep in sync with secretPrefixes.
-// strings.IndexAny uses a SIMD-backed byteset scan on amd64/arm64.
+// 'd' (dapi), 'r' (rk_live_/rk_test_), '-' (-----BEGIN). Keep in sync with
+// secretPrefixes. strings.IndexAny uses a SIMD-backed byteset scan on
+// amd64/arm64.
 func mayContainSecretPrefix(s string) bool {
-	return strings.IndexAny(s, "sgAxhnydr") >= 0
+	return strings.IndexAny(s, "sgAxhnydr-") >= 0
 }
