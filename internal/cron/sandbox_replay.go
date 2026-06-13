@@ -117,6 +117,15 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", ErrStopUnconfirmed
 	}
 	if qok && rec.RuntimeSessionID != "" {
+		if !isValidRuntimeSessionID(rec.RuntimeSessionID) {
+			// Tampered/hand-written attention record: never hand an
+			// unvalidated value to the AWS SDK (#2065). Fail closed — we
+			// cannot confirm the original microVM's Stop, so refuse replay
+			// (same semantics as an unconfirmed Stop / unreadable record).
+			slog.Error("cron sandbox: replay refused — attention runtime_session_id malformed, microVM fate unknown",
+				"job_id", jobID, "orig_run_id", origRunID)
+			return "", ErrStopUnconfirmed
+		}
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		stopErr := s.sandbox.StopSession(ctx, rec.RuntimeSessionID)
 		cancel()

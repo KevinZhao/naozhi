@@ -85,6 +85,69 @@ func (p *probeRunner) StopSession(ctx context.Context, id string) error {
 	return p.inner.StopSession(ctx, id)
 }
 
+func TestIsValidRuntimeSessionID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"production form", "run-feedfacefeedface-1234567890123456789", true},
+		{"short hex runID", "run-abc123-1700000000000000000", true},
+		{"no prefix", "feedfacefeedface-1700000000000000000", false},
+		{"wrong prefix", "vm-feedfacefeedface-1700000000000000000", false},
+		{"missing nanos", "run-feedfacefeedface-", false},
+		{"missing nanos and dash", "run-feedfacefeedface", false},
+		{"empty runID", "run--1700000000000000000", false},
+		{"uppercase hex runID", "run-FEEDFACE-1700000000000000000", false},
+		{"non-hex runID", "run-zzzz-1700000000000000000", false},
+		{"non-numeric nanos", "run-feedface-17abc", false},
+		{"control char", "run-feedface-1700\n000", false},
+		{"whitespace injection", "run-feedface-1700 000", false},
+		{"empty", "", false},
+		{"prefix only", "run-", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isValidRuntimeSessionID(c.in); got != c.want {
+				t.Fatalf("isValidRuntimeSessionID(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSandboxReconcile_MalformedRuntimeSIDSkipsStop pins #2065: a tampered
+// pending record whose runtime_session_id is not the generator's shape must
+// NOT be handed to StopSession (AWS SDK), and the file must be kept for a
+// future retry rather than silently removed.
+func TestSandboxReconcile_MalformedRuntimeSIDSkipsStop(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	path := writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "feedfacefeedface",
+		RuntimeSessionID: "run-feedfacefeedface-1700000000000000000\n; rm -rf",
+		StartedAtMS:      time.Now().Add(-5 * time.Minute).UnixMilli(),
+	})
+
+	s.reconcileSandboxPending()
+
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 0 {
+		t.Fatalf("StopSession called %d time(s) on malformed runtime id; want 0", nStopped)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("pending file must be kept after malformed-id skip: %v", err)
+	}
+}
+
 // TestSandboxReconcile_StopsOrphanAndClosesRun pins the startup pass: a
 // leftover pending file → StopSession on the recorded runtime id → a
 // failed-transport terminal record → file removed.

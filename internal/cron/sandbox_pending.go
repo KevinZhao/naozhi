@@ -143,6 +143,14 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		return
 	}
 	if p.RuntimeSessionID != "" {
+		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
+			// Malformed runtime_session_id (a tampered/hand-written pending
+			// record): never hand an unvalidated value to the AWS SDK
+			// (#2065). Treat as fate-unknown like a failed Stop — KEEP the
+			// file so a future boot can retry once the record reads cleanly.
+			lg.Error("cron sandbox: orphan runtime_session_id malformed; skipping Stop and keeping pending record")
+			return
+		}
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		err := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
 		cancel()
@@ -284,6 +292,13 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 			continue
 		}
 		lg := slog.With("job_id", jobID, "run_id", p.RunID)
+		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
+			// Tampered/hand-written record: do not pass an unvalidated value
+			// to the AWS SDK (#2065). KEEP the file (same as a Stop failure)
+			// so startup reconcile can retry once it reads cleanly.
+			lg.Error("cron sandbox: delete-stop runtime_session_id malformed; skipping Stop and keeping pending record")
+			continue
+		}
 		lg.Info("cron sandbox: deleting job with in-flight run; stopping microVM")
 		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
 		stopErr := s.sandbox.StopSession(ctx, p.RuntimeSessionID)

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
@@ -38,6 +39,44 @@ type SandboxJob struct {
 // hypothetical runID collision and pads past the 33-char API minimum.
 func sandboxRuntimeSessionID(runID string, startedAt time.Time) string {
 	return fmt.Sprintf("run-%s-%d", runID, startedAt.UnixNano())
+}
+
+// isValidRuntimeSessionID reports whether s has the exact shape produced by
+// sandboxRuntimeSessionID ("run-<hex-runID>-<unix-nanos>"). The three
+// restart/replay paths (reconcileOneSandboxOrphan, stopSandboxRunsForJob,
+// ReplaySandboxRun) read this field from operator-writable disk files and
+// pass it straight to SandboxRunner.StopSession → AWS Bedrock. Every other
+// disk-read identifier (RunID/JobID) is IsValidID-checked; this restores the
+// same defense-in-depth so a hand-crafted pending/attention record cannot
+// inject an over-long value or control/whitespace characters into the AWS
+// SDK call (R20260613-SEC-2, #2065).
+//
+// Decomposed against the generator's structure rather than a fixed-width
+// regexp so it tracks IsValidID's hex charset / 64-byte ceiling automatically
+// if the runID schema is ever widened.
+func isValidRuntimeSessionID(s string) bool {
+	const prefix = "run-"
+	rest, ok := strings.CutPrefix(s, prefix)
+	if !ok {
+		return false
+	}
+	// Split into the hex runID and the decimal nano suffix at the LAST '-':
+	// the runID charset (lowercase hex) never contains '-', so the final '-'
+	// is unambiguously the runID/nanos boundary.
+	i := strings.LastIndexByte(rest, '-')
+	if i <= 0 || i == len(rest)-1 {
+		return false
+	}
+	runID, nanos := rest[:i], rest[i+1:]
+	if !IsValidID(runID) {
+		return false
+	}
+	for j := 0; j < len(nanos); j++ {
+		if nanos[j] < '0' || nanos[j] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Sandbox terminal states, mirroring agentcore.TerminalState wire values
