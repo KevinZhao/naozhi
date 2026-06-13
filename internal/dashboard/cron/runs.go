@@ -243,8 +243,17 @@ type cronRunEventsResp struct {
 // a run with no log (local run / events-disabled deploy) rather than 404, so
 // the dashboard renders an empty stream consistently.
 func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
-	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+	// R20260613-SEC-1: use the dedicated transcriptLimiter rather than the
+	// shared runsLimiter. The events path uses bufio.Scanner (16.5 MB max
+	// token) and is I/O-heavy like the transcript endpoint — sharing one
+	// bucket lets either endpoint starve the other. Fall back to runsLimiter
+	// for legacy hand-rolled Handlers fixtures without a transcriptLimiter.
+	limiter := h.transcriptLimiter
+	if limiter == nil {
+		limiter = h.runsLimiter
+	}
+	if limiter != nil && !limiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron run events rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
