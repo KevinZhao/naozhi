@@ -1312,7 +1312,8 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if h.validateWS == nil {
-			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
+			slog.Error("cron: work_dir validation not wired", "endpoint", "create")
+			writeCronErr(w, http.StatusServiceUnavailable, "cron work_dir validation unavailable")
 			return
 		}
 		validated, err := h.validateWS(req.WorkDir, h.allowedRoot)
