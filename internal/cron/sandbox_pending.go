@@ -150,12 +150,36 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	// Terminal record. The job may have been deleted while we were down —
 	// finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops the
 	// persist; the broadcast pair still closes subscriber timelines.
+	//
+	// R20260613-GO-002: snapshot all needed data inside the RLock, including a
+	// shallow copy of j, so concurrent UpdateJob (which mutates j fields and
+	// may do *j = preUpdate under s.mu.Lock) does not race with reads outside
+	// the lock. finishRun receives a pointer to our private copy, which is
+	// never touched by UpdateJob.
 	s.mu.RLock()
 	j := s.jobs[p.JobID]
+	var (
+		jobExists    bool
+		sideEffects  bool
+		freshContext bool
+		jobPrompt    string
+		jobWorkDir   string
+		jobTitle     string
+		jobCopy      Job // private copy; safe to pass to finishRun outside lock
+	)
+	if j != nil {
+		jobExists = true
+		jobCopy = *j // shallow copy under RLock
+		sideEffects = j.SideEffects != nil && *j.SideEffects
+		freshContext = j.FreshContext
+		jobPrompt = j.Prompt
+		jobWorkDir = j.WorkDir
+		jobTitle = jobTitleOrFallback(j)
+	}
 	s.mu.RUnlock()
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	msg := "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
-	if j != nil {
+	if jobExists {
 		// §6.2 rule 3 + §7.4: a side-effecting orphan enters the human
 		// confirmation queue. The microVM was Stopped above, but it may have
 		// completed and produced its side effect (PR push, etc.) before naozhi
@@ -163,13 +187,13 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		// leave as a plain failed-transport record (it re-runs next tick).
 		// RuntimeSessionID is already spent (we Stopped it); kept on the record
 		// for symmetry — the queue's replay action re-Stops idempotently.
-		if j.SideEffects != nil && *j.SideEffects {
+		if sideEffects {
 			s.writeSandboxAttention(sandboxAttention{
 				JobID:            p.JobID,
 				RunID:            p.RunID,
 				RuntimeSessionID: p.RuntimeSessionID,
 				Reason:           attentionReasonOrphaned,
-				JobLabel:         jobTitleOrFallback(j),
+				JobLabel:         jobTitle,
 				StartedAtMS:      p.StartedAtMS,
 				CreatedAtMS:      s.attentionNowMS(),
 			}, lg)
@@ -181,7 +205,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			RunID:     p.RunID,
 			StartedAt: startedAt,
 			Trigger:   runtelemetry.TriggerScheduled,
-			Fresh:     j.FreshContext,
+			Fresh:     freshContext,
 		})
 		// finalizer carries a NIL inflight deliberately: the orphan belongs
 		// to the PREVIOUS process — this process's CAS gate was never taken
@@ -191,11 +215,11 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		// and Store(false) its gate, letting a third tick double-run.
 		// finalize() no-ops on nil inflight, which is exactly right here.
 		s.finishRun(finishArgs{
-			job: j, runID: p.RunID, startedAt: startedAt,
+			job: &jobCopy, runID: p.RunID, startedAt: startedAt,
 			trigger: runtelemetry.TriggerScheduled,
 			state:   RunStateFailed, errClass: ErrClassSandboxTransport,
 			errMsg: msg,
-			prompt: j.Prompt, workDir: j.WorkDir, fresh: j.FreshContext,
+			prompt: jobPrompt, workDir: jobWorkDir, fresh: freshContext,
 			finalizer: &runFinalizer{},
 		})
 	} else {
