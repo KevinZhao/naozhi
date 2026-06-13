@@ -631,3 +631,5 @@
 - [R20260610-CR-009] knownSessionsCache 用 time.Now 非注入 clock,future fake-clock 测试会 flaky — internal/cron/scheduler_session_cache.go:89
 - [R20260610-ARCH-001] DaemonErrorClass 类型别名使 timeout 字面量可绕过 mapSysessionErrorClass 不报编译错 — internal/sysession/run.go:51
 - [R20260610-ARCH-002] Reset 同步最坏 ~10s,future 用户直发 cron: 会话场景会叠加 tick 卡顿 — internal/session/router_lifecycle.go:1218
+- [R20260613-PERF-6] marshalBroadcastAuth 取 authMu.RLock 做空检查后 broadcastToAuthenticated 再取一次 — 可折叠为单次 RLock — internal/server/wshub_broadcast.go:183 (area 已被 #1902/#1621/#1925 充分覆盖)
+- [R20260613-GO-004] executeSandbox 用 ctx.Err() == context.DeadlineExceeded 身份比较而非 errors.Is — 当前 stdlib sentinel 不被 wrap 故等价 — internal/cron/sandbox.go:305

@@ -100,6 +100,11 @@ func (s *Scheduler) reconcileSandboxPending() {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		// Bail on shutdown so N×30s Stop timeouts don't exhaust gcWaitBudget.
+		// Mirrors trimAllCtx's inter-entry ctx.Err() check (scheduler.go).
+		if s.stopCtx.Err() != nil {
+			return
+		}
 		path := filepath.Join(dir, e.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {

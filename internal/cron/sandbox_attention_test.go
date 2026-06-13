@@ -158,6 +158,39 @@ func TestDeleteJobAttention_ClearsQueue(t *testing.T) {
 	}
 }
 
+// TestListSandboxAttention_NewestFirst pins that ListSandboxAttention returns
+// records ordered by CreatedAtMS descending (newest first).
+// R20260613-PERF-7: the sort was ported from sort.Slice to slices.SortFunc;
+// this test ensures the descending order is preserved.
+func TestListSandboxAttention_NewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	base := time.Now().UnixMilli()
+	s.writeSandboxAttention(sandboxAttention{
+		JobID: "0123456789abcdef", RunID: "aaaaaaaaaaaaaaaa",
+		Reason: attentionReasonTransport, CreatedAtMS: base,
+	}, slog.Default())
+	s.writeSandboxAttention(sandboxAttention{
+		JobID: "0123456789abcdef", RunID: "bbbbbbbbbbbbbbbb",
+		Reason: attentionReasonOrphaned, CreatedAtMS: base + 1000,
+	}, slog.Default())
+	s.writeSandboxAttention(sandboxAttention{
+		JobID: "0123456789abcdef", RunID: "cccccccccccccccc",
+		Reason: attentionReasonTransport, CreatedAtMS: base + 500,
+	}, slog.Default())
+
+	items := s.ListSandboxAttention()
+	if len(items) != 3 {
+		t.Fatalf("want 3 items, got %d", len(items))
+	}
+	// Expect descending: base+1000, base+500, base
+	if items[0].RunID != "bbbbbbbbbbbbbbbb" || items[1].RunID != "cccccccccccccccc" || items[2].RunID != "aaaaaaaaaaaaaaaa" {
+		t.Fatalf("wrong order: %v %v %v", items[0].RunID, items[1].RunID, items[2].RunID)
+	}
+}
+
 // TestListSandboxAttention_SkipsCorrupt: a corrupt queue file does not hide the
 // rest of the queue.
 func TestListSandboxAttention_SkipsCorrupt(t *testing.T) {

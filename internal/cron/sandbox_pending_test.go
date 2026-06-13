@@ -319,6 +319,43 @@ func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
 	}
 }
 
+// TestSandboxReconcile_BailsWhenStopCtxCancelled pins R20260613-GO-003: if
+// stopCtx is already cancelled when reconcileSandboxPending enters the loop,
+// it must return immediately without calling StopSession on any remaining
+// pending record.
+func TestSandboxReconcile_BailsWhenStopCtxCancelled(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	// Write two pending files so the loop would call StopSession twice if it
+	// did not respect the stopCtx cancellation.
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "aabbccddeeff0011",
+		RuntimeSessionID: "run-aabbccddeeff0011-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "1122334455667788",
+		RuntimeSessionID: "run-1122334455667788-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
+	})
+
+	// Cancel stopCtx before the reconcile pass starts.
+	s.Stop()
+
+	s.reconcileSandboxPending()
+
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 0 {
+		t.Fatalf("StopSession called %d time(s) after stopCtx was cancelled; want 0", nStopped)
+	}
+}
+
 // TestSandboxPending_RemovedOnConfirmedTransport: Stop confirmed in-process
 // spends the retry handle — no stale file for reconcile to chew on.
 func TestSandboxPending_RemovedOnConfirmedTransport(t *testing.T) {

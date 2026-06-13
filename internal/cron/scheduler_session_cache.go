@@ -50,12 +50,13 @@ type knownSessionsCache struct {
 // cache own its own mutex instead of exposing c.mu to every Scheduler caller.
 func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 	c.mu.RLock()
-	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
+	now := time.Now()
+	if c.set != nil && now.Sub(c.generatedAt) < knownSessionsCacheTTL {
 		// A coalesced invalidate (dirty) is honoured only once
 		// minInvalidateInterval has elapsed since the last real drop, so a
 		// burst of Appends does not force a rebuild on every probe.
 		// R20260608133928-PERF-3 (#1965).
-		if !c.dirty || time.Since(c.lastInvalidatedAt) < minInvalidateInterval {
+		if !c.dirty || now.Sub(c.lastInvalidatedAt) < minInvalidateInterval {
 			set := c.set
 			c.mu.RUnlock()
 			return set, true
