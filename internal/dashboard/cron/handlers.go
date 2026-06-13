@@ -251,7 +251,7 @@ func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 		Trigger:    string(r.Trigger),
 		StartedAt:  r.StartedAt.UnixMilli(),
 		DurationMS: r.DurationMS,
-		SessionID:  r.SessionID,
+		SessionID:  osutil.SanitizeForLog(r.SessionID, 64),
 		ErrorClass: string(r.ErrorClass),
 		ReplayOf:   r.ReplayOf,
 		CostUSD:    r.CostUSD,
