@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	clipkg "github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -71,13 +71,22 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		if wr := h.router.BackendWrapper(id); wr != nil {
 			info.DisplayName = wr.CLIName
 			// Path intentionally omitted — see NewCLIBackendsHandler comment.
-			info.Version = wr.CLIVersion
+			// EffectiveVersion (not the spawn-time CLIVersion) so a host
+			// claude upgrade under a long-lived naozhi surfaces here too: the
+			// dashboard's pending-session card falls back to this value via
+			// backendDisplayVersion(), so trusting the stale spawn-time
+			// version made a freshly-created session momentarily show the
+			// pre-upgrade version until its own init frame arrived. Mirrors
+			// Router.CLIVersion(), which already prefers the live value for
+			// the global banner. R20260613-pending-version.
+			ver := wr.EffectiveVersion()
+			info.Version = ver
 			if wr.Protocol != nil {
 				info.Protocol = wr.Protocol.Name()
 			}
 			// Version==""（二进制存在但 --version 解析失败）不应冒充
 			// Available=true —— dashboard 会以 disabled 样式显示。
-			info.Available = wr.CLIVersion != ""
+			info.Available = ver != ""
 		}
 		// Multi-Backend RFC §8.2: dashboard renders chip color + reply tag
 		// + features from the per-backend Profile registry. Unknown ids

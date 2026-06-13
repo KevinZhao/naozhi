@@ -486,7 +486,20 @@ async function fetchSessions() {
           // right icon instead of degrading to the 'cli' default branch.
           const pendingBackend = sessionBackends[key] || '';
           const pendingCLIName = backendDisplayName(pendingBackend) || defaultCLIName;
-          const pendingCLIVersion = backendDisplayVersion(pendingBackend) || defaultCLIVersion;
+          // defaultCLIVersion is the DEFAULT backend's live version, tracked
+          // from each session's system/init frame and refreshed from stats
+          // every poll; backendDisplayVersion() reads the /api/cli/backends
+          // manifest cached up to 60s client-side. For a pending session on the
+          // default backend, prefer the live value so a host claude upgrade
+          // under a long-lived naozhi doesn't make the just-created card flash
+          // the pre-upgrade version during the manifest's stale window. A
+          // non-default backend (e.g. kiro) has no live source here, so keep
+          // its manifest value — preferring defaultCLIVersion would mislabel it
+          // with the default backend's version. R20260613-pending-version.
+          const isDefaultBackend = !pendingBackend || (cliBackends !== null && pendingBackend === cliBackends.default);
+          const pendingCLIVersion = isDefaultBackend
+            ? (defaultCLIVersion || backendDisplayVersion(pendingBackend))
+            : (backendDisplayVersion(pendingBackend) || defaultCLIVersion);
           data.sessions.push({
             key: key,
             state: 'new',
