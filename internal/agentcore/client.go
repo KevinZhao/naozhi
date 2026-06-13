@@ -11,8 +11,10 @@ import (
 	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // runtimeAPI is the slice of the AgentCore data-plane SDK the client uses.
@@ -51,7 +53,37 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agentcore: load aws config: %w", err)
 	}
+	// Confirm RuntimeARN belongs to the operator's own AWS account before any
+	// job prompt can be sent to it. A config-injected ARN pointing at an
+	// attacker-controlled AgentCore runtime would otherwise exfiltrate the
+	// (sensitive) job prompt. Resolve the caller's account via STS and
+	// fail-fast on any STS failure rather than silently allowing the invoke.
+	ident, err := sts.NewFromConfig(awsCfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("agentcore: resolve caller account (sts): %w", err)
+	}
+	if err := verifyARNAccount(cfg.RuntimeARN, aws.ToString(ident.Account)); err != nil {
+		return nil, err
+	}
 	return &Client{api: bedrockagentcore.NewFromConfig(awsCfg), cfg: cfg}, nil
+}
+
+// verifyARNAccount checks that runtimeARN parses and that its account segment
+// matches the operator's own AWS account. Pure function (no AWS calls) so the
+// account-ownership rule is unit-testable in isolation; the STS lookup that
+// feeds accountID stays a thin wrapper in New.
+func verifyARNAccount(runtimeARN, accountID string) error {
+	if accountID == "" {
+		return fmt.Errorf("agentcore: empty caller account id from STS")
+	}
+	parsed, err := arn.Parse(runtimeARN)
+	if err != nil {
+		return fmt.Errorf("agentcore: invalid RuntimeARN %q: %w", runtimeARN, err)
+	}
+	if parsed.AccountID != accountID {
+		return fmt.Errorf("agentcore: RuntimeARN account %q does not match caller account %q (config-injection guard)", parsed.AccountID, accountID)
+	}
+	return nil
 }
 
 // newWithAPI is the test constructor.
