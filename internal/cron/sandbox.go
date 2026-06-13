@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -301,11 +302,21 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 				CreatedAtMS:      s.attentionNowMS(),
 			}, a.lg)
 		}
-		state := RunStateFailed
-		if ctx.Err() == context.DeadlineExceeded {
-			state = RunStateTimedOut
+		// R20260613-CR-6 (#2059): align shutdown-cancel classification with the
+		// local path (scheduler_run.go). sandbox ctx = WithTimeout(s.stopCtx,
+		// budget), so scheduler Stop cancels s.stopCtx → ctx.Err()=Canceled.
+		// Treat that as RunStateCanceled with skipPersist=true (keep history
+		// clean — a graceful shutdown is not a transport failure) rather than
+		// recording a failed-transport run. DeadlineExceeded stays TimedOut.
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			s.finishSandboxRunSkipPersist(a, RunStateCanceled, ErrClassCanceled, outcome.ResultText,
+				"sandbox run canceled by shutdown", metaPtr)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			s.finishSandboxRun(a, RunStateTimedOut, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
+		default:
+			s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 		}
-		s.finishSandboxRun(a, state, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 	}
 }
 
@@ -325,8 +336,25 @@ func sandboxMetaPtr(meta SandboxRunMeta) *SandboxRunMeta {
 // plus the completion notice. meta is the cloud-execution receipt (nil for
 // pre-invoke failures that produced no receipt).
 func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string, meta *SandboxRunMeta) {
+	s.finishSandboxRunWith(a, state, errClass, result, errMsg, meta, false)
+}
+
+// finishSandboxRunSkipPersist is the shutdown-cancel variant (R20260613-CR-6 /
+// #2059): like finishSandboxRun but sets finishArgs.skipPersist so the canceled
+// run does not touch Job state (LastRunAt/LastResult) or grow a persisted
+// failure record — mirroring the local path's shutdown-cancel handling
+// (scheduler_run.go). The WS broadcast still fires so the dashboard sees the
+// terminal frame.
+func (s *Scheduler) finishSandboxRunSkipPersist(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string, meta *SandboxRunMeta) {
+	s.finishSandboxRunWith(a, state, errClass, result, errMsg, meta, true)
+}
+
+func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string, meta *SandboxRunMeta, skipPersist bool) {
 	if state == RunStateSucceeded {
 		s.observeSuccessLatency(s.now().Sub(a.startedAt), SendResult{Text: result}, a.snap, a.lg)
+	} else if state == RunStateCanceled {
+		a.lg.Info("cron sandbox run canceled",
+			"err_class", string(errClass), "err", errMsg)
 	} else {
 		metrics.CronSandboxRunFailedTotal.Add(1)
 		a.lg.Error("cron sandbox run failed",
@@ -335,11 +363,18 @@ func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass
 	s.finishRun(finishArgs{
 		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
-		prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
+		skipPersist: skipPersist,
+		prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 		finalizer:   a.finalizer,
 		sandboxMeta: meta,
 		replayOf:    a.replayOf,
 	})
+	// R20260613-CR-6 (#2059): a shutdown-cancel is not a user-visible failure —
+	// mirror the local path (scheduler_run.go), which delivers no notice when
+	// the run is suppressed during shutdown.
+	if state == RunStateCanceled {
+		return
+	}
 	notice := "执行失败，请稍后重试。"
 	if state == RunStateSucceeded {
 		// Same pipeline as the local success path (R234-SEC-1 +
