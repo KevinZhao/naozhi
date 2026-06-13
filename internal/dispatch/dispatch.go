@@ -1439,15 +1439,30 @@ func pageSuffixRuneWidth(total int) int {
 }
 
 // upperBoundChunks returns a ceiling estimate of how many chunks SplitText
-// would produce for runeCount runes at the given split width. It never
-// under-estimates (SplitText may produce fewer when it breaks early at a
-// newline, but never more than ceil), so reserving the suffix budget for
-// this count is always safe. #2008.
+// would produce for runeCount runes at the given split width. It must never
+// under-estimate, because the caller reserves the page-suffix budget for
+// this count before the real split happens.
+//
+// #2056: a naive ceil(runeCount/splitWidth) under-estimates. SplitText may
+// break EARLY at a newline whenever the newline's byte offset is past the
+// chunk midpoint (`idx > end/2`), so the shortest possible chunk is roughly
+// half the split width (~floor(splitWidth/2)+1 runes for ASCII). A reply
+// dense with newlines (markdown) can therefore yield up to ~2x the naive
+// estimate. When the true count crosses a decimal digit boundary (e.g.
+// estimate 9 → suffix width 8, but real 10 → suffix width 10) the reserved
+// budget falls short and a chunk+suffix exceeds maxLen — the exact loss
+// mode #2008 set out to prevent, with a gap. Bound by the minimum chunk
+// size ceil(splitWidth/2) so the estimate covers the newline-halving worst
+// case.
 func upperBoundChunks(runeCount, splitWidth int) int {
 	if splitWidth <= 0 {
 		return runeCount + 1
 	}
-	return (runeCount + splitWidth - 1) / splitWidth
+	minChunk := (splitWidth + 1) / 2 // ceil(splitWidth/2), worst-case shortest chunk
+	if minChunk < 1 {
+		minChunk = 1
+	}
+	return (runeCount + minChunk - 1) / minChunk
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
@@ -1478,19 +1493,31 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// only over-reserve, never under-reserve, so every emitted chunk stays
 	// within maxLen.
 	splitLen := maxLen
+	// #2057: when maxLen is smaller than the page suffix itself (a tiny or
+	// mis-configured max_reply_length — constructors only clamp <=0, there
+	// is no positive lower bound in config validation), the reservation
+	// below goes non-positive. The old code silently fell back to
+	// splitLen=maxLen and STILL appended the suffix, so every chunk landed
+	// at maxLen+suffix > maxLen. Detect that case and suppress the page
+	// suffix entirely rather than emit guaranteed-oversized chunks.
+	suppressSuffix := false
 	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
 		// reservation to the worst-case suffix for the resulting chunk count.
 		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
 		if reserved > 0 {
 			splitLen = reserved
+		} else {
+			// No room for any suffix at this maxLen — split at the raw
+			// limit and skip the "[i/N]" marker so chunks stay <= maxLen.
+			suppressSuffix = true
 		}
 	}
 
 	chunks := platform.SplitText(text, splitLen)
 	total := len(chunks)
 	for i, chunk := range chunks {
-		if total > 1 {
+		if total > 1 && !suppressSuffix {
 			// R20260526-PERF-005: per-chunk on every multi-chunk reply,
 			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
 			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"

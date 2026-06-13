@@ -140,6 +140,18 @@ func (s *Scheduler) runStoreEnabled() bool {
 	return s != nil && s.runStore.enabled()
 }
 
+// jobStillExists reports whether jobID is still present in s.jobs under a
+// short s.mu read lock. Used by finishRun (#2058) to re-check job existence
+// in the lock-out window between recordTerminalResult (which released s.mu)
+// and the runs/<jobID>/ disk write, so a concurrent DeleteJobByID does not
+// get its runs subtree resurrected by appendRun's ensureJobDir.
+func (s *Scheduler) jobStillExists(jobID string) bool {
+	s.mu.RLock()
+	_, exists := s.jobs[jobID]
+	s.mu.RUnlock()
+	return exists
+}
+
 // appendRun persists one CronRun via the runStore. No-op when persistence is
 // disabled. Forwards verbatim — Append owns its per-job jobLock internally
 // (the disk write is now hoisted out of the lock; see runstore.go), so this
@@ -401,7 +413,21 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
 	// fsync that immediately follow.
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() {
+	// #2058: recordTerminalResult confirmed s.jobs[id] existed, then RELEASED
+	// s.mu before returning jobPersistOK=true. appendRun below writes the
+	// physically-separate runs/<jobID>/ store under only its own per-job
+	// jobLock (never s.mu), across a non-trivial marshal+fsync window. A
+	// concurrent DeleteJobByID in that window drops the job from s.jobs AND
+	// runStore.DeleteJob → RemoveAll(runs/<jobID>); appendRun would then
+	// ensureJobDir → MkdirAll, RESURRECTING an orphaned runs/<jobID>/ subtree
+	// for a job that no longer exists (a bounded disk leak: deterministic
+	// runIDs mean the same-ID job rarely rebuilds to reclaim it, and the empty
+	// dir survives age/count trimming). Re-check existence under s.mu right
+	// before the write so a job deleted in the window does not get a resurrected
+	// record. Best-effort: a delete landing AFTER this check but before the
+	// disk write is the same crash-recovery contract already documented above
+	// (over-report, self-heals) — this just closes the wide, observable window.
+	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(a.job.ID) {
 		s.appendRun(&CronRun{
 			RunID:      a.runID,
 			JobID:      a.job.ID,

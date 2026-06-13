@@ -50,6 +50,13 @@ func (r *recordingBroadcaster) endedCount() int {
 	return len(r.ended)
 }
 
+// startedCount returns the captured RunStarted count.
+func (r *recordingBroadcaster) startedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.started)
+}
+
 // endedAtCron returns the i-th captured RunEnded translated back to the
 // cron-local RunEndedEvent shape. Panics if i is out of range so tests
 // fail loudly on capture-count mismatch instead of silently asserting a

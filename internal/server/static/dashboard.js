@@ -10896,6 +10896,13 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
+    // Advance the event-time cursor on first render too, matching appendEvents
+    // (3159) and onHistory (10745). Without this, a synthetic CLI history entry
+    // with no uuid (pre-uuid events) leaves the cursor un-advanced after the WS
+    // push path renders it, so the later time-gated onHistory replay
+    // (e.time <= lastRenderedEventTime) admits it again and the uuid fallback
+    // never fires → duplicate bubble (#2063).
+    if (evT && evT > lastRenderedEventTime) lastRenderedEventTime = evT;
     // Bound the live DOM before scroll/scan so a long streaming session over
     // the WS push path (the default real-time channel) can't grow
     // #events-scroll without limit and OOM the tab (#398). Without this the

@@ -235,9 +235,32 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 			finalizer.finalize()
 			metrics.CronRunInflight.Add(-1)
 		}()
+		// completed flips true only when executeSandbox returns normally —
+		// at which point it has already driven finishSandboxRun → emitRunEnded.
+		completed := false
 		defer func() {
 			if r := recover(); r != nil {
 				recordTriggerNowPanic(snap.jobID, r)
+				// #2064: emitRunStarted fired synchronously in the caller frame
+				// above, so a panic that aborts executeSandbox BEFORE it reaches
+				// finishSandboxRun → emitRunEnded would leave subscribers with a
+				// started(queued) frame and no matching ended frame — the run
+				// hangs in "queued" forever. Close the lifecycle here so the
+				// dashboard timeline always pairs. Guarded by `completed` so a
+				// (practically impossible) panic AFTER a normal finish can never
+				// double-emit an ended frame.
+				if !completed {
+					s.emitRunEnded(RunEndedEvent{
+						JobID:      snap.jobID,
+						RunID:      runID,
+						State:      RunStateFailed,
+						StartedAt:  startedAt,
+						EndedAt:    s.now(),
+						Trigger:    TriggerManual,
+						ErrorClass: ErrClassSandboxFailed,
+						ErrorMsg:   "sandbox replay panicked before terminal record",
+					})
+				}
 			}
 		}()
 		metrics.CronRunInflight.Add(1)
@@ -248,6 +271,7 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 			lg:       lg,
 			replayOf: origRunID,
 		})
+		completed = true
 	}()
 	return runID, nil
 }

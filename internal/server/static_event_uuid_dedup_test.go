@@ -109,6 +109,43 @@ func TestDashboardJS_OnEventAdvancesCursorOnDedup(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_OnEventAdvancesCursorOnFirstRender pins the #2063 fix: when
+// onEvent renders an event for the FIRST time (the insertAdjacentHTML path,
+// not the dedup-hit early return), it must also advance lastRenderedEventTime.
+// Without this, a synthetic CLI history entry with no uuid (pre-uuid events)
+// leaves the cursor un-advanced after the WS push path renders it; the later
+// time-gated onHistory replay (e.time <= lastRenderedEventTime) then admits it
+// again and — because there is no uuid — the eventAlreadyRendered backstop
+// never fires, producing a duplicate bubble. The first-render advance must sit
+// after the main insertAdjacentHTML('beforeend', html) call.
+func TestDashboardJS_OnEventAdvancesCursorOnFirstRender(t *testing.T) {
+	t.Parallel()
+	js := readDashboardJS(t)
+
+	// Anchor on the onEvent body (the isUser gate is unique to onEvent) so the
+	// optimistic-send append path (which also calls insertAdjacentHTML on html)
+	// does not shadow the match.
+	idxIsUser := strings.Index(js, "const isUser = ev.type === 'user';")
+	if idxIsUser < 0 {
+		t.Fatal("onEvent isUser gate missing")
+	}
+	body := js[idxIsUser:]
+	idxAppend := strings.Index(body, "el.insertAdjacentHTML('beforeend', html);")
+	if idxAppend < 0 {
+		t.Fatal("onEvent first-render insertAdjacentHTML('beforeend', html) call missing")
+	}
+	// The cursor advance must appear after the first-render append (using the
+	// already-computed evT) and before trimEventsScroll bounds the DOM.
+	window := body[idxAppend:]
+	idxTrim := strings.Index(window, "trimEventsScroll(el);")
+	if idxTrim < 0 {
+		t.Fatal("onEvent first-render path must call trimEventsScroll after append")
+	}
+	if !strings.Contains(window[:idxTrim], "if (evT && evT > lastRenderedEventTime) lastRenderedEventTime = evT;") {
+		t.Error("onEvent first-render path must advance lastRenderedEventTime (evT) after insertAdjacentHTML, matching appendEvents/onHistory (#2063)")
+	}
+}
+
 func readDashboardJS(t *testing.T) string {
 	t.Helper()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")

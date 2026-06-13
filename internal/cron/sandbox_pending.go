@@ -147,6 +147,25 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		}
 	}
 
+	// #2054: an in-process transport failure whose Stop did NOT confirm
+	// (sandbox.go default branch) ALREADY drove finishRun → addRun +
+	// metrics + a durable runs/{jobID}/{runID}.json terminal record, yet
+	// deliberately KEEPS the pending file so this reconcile can retry the
+	// Stop. If we re-finish that same runID here we double-count the durable
+	// RunCounters, re-bump CronRunEnded/Failed/StartedTotal, and emit a
+	// phantom started→ended lifecycle to subscribers. So once the Stop has
+	// been (re-)confirmed above, check whether the run is already terminal on
+	// disk; if so, only the microVM Stop + pending-file removal were owed —
+	// skip the second finishRun entirely.
+	if rec, err := s.Run(p.JobID, p.RunID); err == nil && rec != nil && !rec.EndedAt.IsZero() {
+		lg.Info("cron sandbox: orphan already finished in-process; skipping duplicate finish",
+			"state", rec.State)
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			lg.Warn("cron sandbox: reconciled pending remove failed", "err", rmErr)
+		}
+		return
+	}
+
 	// Terminal record. The job may have been deleted while we were down —
 	// finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops the
 	// persist; the broadcast pair still closes subscriber timelines.

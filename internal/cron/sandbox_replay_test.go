@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -144,6 +145,59 @@ func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
 		t.Fatalf("no replay run may dispatch on a corrupt attention read; runner saw %d jobs", n)
 	}
 	_ = stops // Stop may or may not have been attempted; the invariant is "no dispatch".
+}
+
+// panicReplayRunner panics inside RunJob, simulating an executeSandbox panic
+// that strikes AFTER the synchronous emitRunStarted but BEFORE the run reaches
+// finishSandboxRun → emitRunEnded.
+type panicReplayRunner struct{ stopped []string }
+
+func (p *panicReplayRunner) RunJob(context.Context, SandboxJob, func([]byte) error) (SandboxOutcome, error) {
+	panic("boom inside sandbox run")
+}
+
+func (p *panicReplayRunner) StopSession(_ context.Context, id string) error {
+	p.stopped = append(p.stopped, id)
+	return nil
+}
+
+// TestReplay_PanicStillEmitsRunEnded pins #2064: dispatchReplay fires
+// emitRunStarted synchronously in the caller frame, then spawns the run on a
+// goroutine. If the goroutine panics before reaching finishSandboxRun, the
+// recover block must still emit a paired RunEnded — otherwise subscribers see
+// a cron_run_started(queued) frame with no matching ended frame and the run
+// hangs in "queued" forever.
+func TestReplay_PanicStillEmitsRunEnded(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &panicReplayRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+	origRunID := "feedfacefeedface"
+	s.writeSandboxSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+
+	newRunID, err := s.ReplaySandboxRun(j.ID, origRunID)
+	if err != nil {
+		t.Fatalf("ReplaySandboxRun: %v", err)
+	}
+
+	// The started frame fired synchronously; the ended frame must follow even
+	// though the run goroutine panicked.
+	waitEnded(t, rec)
+
+	if got := rec.startedCount(); got != 1 {
+		t.Fatalf("RunStarted count = %d, want 1", got)
+	}
+	ev := rec.endedAtCron(0)
+	if ev.RunID != newRunID {
+		t.Fatalf("ended run id = %q, want the replay run id %q", ev.RunID, newRunID)
+	}
+	if ev.State == RunStateSucceeded {
+		t.Fatalf("panicked run must not report succeeded; state = %q", ev.State)
+	}
+	if ev.StartedAt.IsZero() {
+		t.Fatal("ended frame must carry the original StartedAt so the timeline pairs")
+	}
 }
 
 // TestReplay_AfterStopRejected pins review PR-6 H2: ReplaySandboxRun after the

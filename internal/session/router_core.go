@@ -1212,9 +1212,17 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			// LoadHistoryChainTailCtx walks newest→oldest and stops as
 			// soon as maxPersistedHistory entries are collected, so a
 			// 32-link chain typically opens only 1-2 JSONL files.
-			ids := make([]string, 0, len(s.prevSessionIDs)+1)
-			ids = append(ids, s.prevSessionIDs...)
-			ids = append(ids, s.getSessionID())
+			//
+			// #2055: read the chain via SnapshotChainIDs() (clone under
+			// historyMu) instead of bare-reading s.prevSessionIDs. This
+			// loader goroutine holds neither r.mu nor historyMu, while a
+			// concurrent cron stub refresh (RegisterCronStubWithChain →
+			// registerStub → ReplacePrevSessionIDs) reassigns the slice
+			// header under r.mu — a data race on the 3-word header that
+			// -race flags and that can tear into a bad ptr/len pair. The
+			// accessor returns prev-chain + current in the same order this
+			// site built manually.
+			ids := s.SnapshotChainIDs()
 
 			allEntries := r.historyLoader.LoadHistoryChainTail(
 				r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
