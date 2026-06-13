@@ -631,3 +631,6 @@
 - [R20260610-CR-009] knownSessionsCache 用 time.Now 非注入 clock,future fake-clock 测试会 flaky — internal/cron/scheduler_session_cache.go:89
 - [R20260610-ARCH-001] DaemonErrorClass 类型别名使 timeout 字面量可绕过 mapSysessionErrorClass 不报编译错 — internal/sysession/run.go:51
 - [R20260610-ARCH-002] Reset 同步最坏 ~10s,future 用户直发 cron: 会话场景会叠加 tick 卡顿 — internal/session/router_lifecycle.go:1218
+- [R20260613-SEC-6] feishu WS 模式启动未校验 VerificationToken/EncryptKey（WS 为出站连接，SDK 内部处理认证，低置信假设性） — internal/platform/feishu/feishu.go:619
+- [R20260613-ARCH-3] dispatch 侧缺 CronCodeUnknown 常量对齐 pin（当前走 default 分支，benign） — internal/server/cron_dispatch_adapter_test.go:27
+- [R20260613-ARCH-4] cronCommandScheduler seam 整体暴露 cron.Job 而非投影类型（防御性 value-copy 无 race，仅类型面偏宽） — internal/server/cron_dispatch_adapter.go:23
