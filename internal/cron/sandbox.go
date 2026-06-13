@@ -507,6 +507,15 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	if maxLines <= 0 {
 		maxLines = sandboxEventsDefaultMax
 	}
+	// Bound concurrent reads (mirrors transcriptSem): a non-blocking acquire
+	// fails fast with ErrSandboxEventsBusy rather than letting a burst pin
+	// unbounded scanner buffers [R20260613-SEC-5 / #2066].
+	select {
+	case sandboxEventsSem <- struct{}{}:
+		defer func() { <-sandboxEventsSem }()
+	default:
+		return nil, false, ErrSandboxEventsBusy
+	}
 	path := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID, runID+".ndjson")
 	f, err := os.Open(path)
 	if err != nil {
@@ -519,9 +528,10 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 
 	out := make([][]byte, 0, maxLines)
 	sc := bufio.NewScanner(f)
-	// Match the writer/agentcore ceiling: a single stream-json line can carry
-	// a large tool result.
-	sc.Buffer(make([]byte, 64*1024), (16<<20)+(64<<10))
+	// Cap a single stream-json line at sandboxEventsMaxLineSize (~1 MB):
+	// large enough for a realistic tool-result frame, small enough that a
+	// concurrent burst cannot pin gigabytes of scanner buffers.
+	sc.Buffer(make([]byte, 64*1024), sandboxEventsMaxLineSize)
 	truncated := false
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -570,3 +580,30 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 // non-positive cap. 2000 frames covers a typical run's opening comfortably
 // while keeping the response well under a megabyte for the dashboard.
 const sandboxEventsDefaultMax = 2000
+
+// sandboxEventsMaxLineSize caps a single NDJSON line read from a persisted
+// sandbox event log. The writer (sandboxEventSink) flushes one stream-json
+// envelope per line; a 1 MB ceiling covers the largest realistic tool-result
+// frame while bounding the scanner's per-request heap. The old (16<<20)+(64<<10)
+// ceiling let a single concurrent burst pin gigabytes of scanner buffers with
+// no observed need for 16 MB frames [R20260613-SEC-5 / #2066].
+const sandboxEventsMaxLineSize = (1 << 20) + (64 << 10)
+
+// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads, mirroring the
+// dashboard transcript endpoint's transcriptSem (cap 8). Each in-flight read
+// holds up to maxLines×64KB output plus a scanner buffer; without this gate a
+// single authenticated client could fan out enough concurrent reads to exhaust
+// memory [R20260613-SEC-5 / #2066]. A non-blocking acquire fails fast rather
+// than parking goroutines.
+const sandboxEventsSemCap = 8
+
+// sandboxEventsSem limits concurrent SandboxRunEvents reads process-wide.
+// Package-level (not per-Scheduler) because the bound protects the host's
+// memory, of which there is one regardless of how many schedulers exist in a
+// test binary.
+var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
+
+// ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
+// semaphore is saturated. The dashboard handler maps it to HTTP 503 so a
+// burst fails fast instead of allocating unbounded scanner buffers.
+var ErrSandboxEventsBusy = errors.New("cron sandbox: event reads busy")
