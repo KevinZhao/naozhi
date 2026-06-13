@@ -207,7 +207,6 @@ func TestSandboxReconcile_CorruptRecordDropped(t *testing.T) {
 	}
 }
 
-
 // TestSandboxReconcile_NilSandboxKeepsPending pins review §6.5 F1: with the
 // sandbox config absent at reconcile, the Stop primitive does not exist —
 // the retry handle must survive until a boot where it does.
@@ -233,7 +232,6 @@ func TestSandboxReconcile_NilSandboxKeepsPending(t *testing.T) {
 	}
 }
 
-
 // TestSandboxPending_KeptOnUnconfirmedTransport pins review §6.5 F2: an
 // in-process transport failure whose Stop did NOT confirm must leave the
 // pending file for startup reconcile — removing it would permanently
@@ -253,6 +251,71 @@ func TestSandboxPending_KeptOnUnconfirmedTransport(t *testing.T) {
 	left, _ := os.ReadDir(pendingDirOf(storePath))
 	if len(left) != 1 {
 		t.Fatalf("pending files after unconfirmed transport = %d, want 1 (retry handle)", len(left))
+	}
+}
+
+// TestSandboxReconcile_NoDoubleFinishForInProcessTerminal pins #2054: a
+// transport-failed (StopConfirmed==false) run finishes ONCE in-process
+// (addRun + metrics + durable runs/{jobID}/{runID}.json) while KEEPING its
+// pending file for the §6.2 retry. The next startup's reconcile must NOT
+// re-finish that already-terminal runID — doing so doubled RunCounters and
+// emitted a phantom started→ended lifecycle to subscribers.
+func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{
+		outcome: SandboxOutcome{State: SandboxStateFailedTransport, ErrMsg: "reset", StopConfirmed: false},
+	}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	// In-process transport failure: finishRun runs once, pending file kept.
+	s.executeOpt(j, true)
+	waitEnded(t, rec)
+
+	startedAfterRun := rec.startedCount()
+	endedAfterRun := rec.endedCount()
+	s.mu.RLock()
+	countersAfterRun := s.jobs[j.ID].RunCounters
+	s.mu.RUnlock()
+	if countersAfterRun.Total != 1 {
+		t.Fatalf("RunCounters.Total after run = %d, want 1", countersAfterRun.Total)
+	}
+
+	left, _ := os.ReadDir(pendingDirOf(storePath))
+	if len(left) != 1 {
+		t.Fatalf("pending files after unconfirmed transport = %d, want 1 (retry handle)", len(left))
+	}
+	pendingPath := filepath.Join(pendingDirOf(storePath), left[0].Name())
+
+	// Simulate the next startup reconcile. With the fix, the run is already
+	// terminal on disk → only the microVM Stop + pending removal are owed;
+	// finishRun must NOT fire a second time.
+	s.reconcileSandboxPending()
+
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 1 {
+		t.Fatalf("StopSession calls = %d, want 1 (reconcile must still terminate the microVM)", nStopped)
+	}
+	if got := rec.startedCount(); got != startedAfterRun {
+		t.Fatalf("RunStarted count grew %d→%d across reconcile — phantom lifecycle (#2054)", startedAfterRun, got)
+	}
+	if got := rec.endedCount(); got != endedAfterRun {
+		t.Fatalf("RunEnded count grew %d→%d across reconcile — duplicate finish (#2054)", endedAfterRun, got)
+	}
+	s.mu.RLock()
+	countersAfterReconcile := s.jobs[j.ID].RunCounters
+	s.mu.RUnlock()
+	if countersAfterReconcile.Total != 1 {
+		t.Fatalf("RunCounters.Total after reconcile = %d, want 1 (durable counter must not double-count #2054)", countersAfterReconcile.Total)
+	}
+	if countersAfterReconcile != countersAfterRun {
+		t.Fatalf("RunCounters changed across reconcile: %+v → %+v (#2054)", countersAfterRun, countersAfterReconcile)
+	}
+	if _, err := os.Stat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("pending file must be removed after reconcile confirms the Stop (#2054)")
 	}
 }
 
