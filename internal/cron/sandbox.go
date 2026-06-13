@@ -455,6 +455,23 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		if degraded {
 			return nil
 		}
+		// R20260613-ARCH-2: the reader (SandboxRunEvents) caps a single
+		// NDJSON token at sandboxEventsMaxLineSize via bufio.Scanner. If we
+		// write a line longer than that cap the scanner hits ErrTooLong and
+		// discards every subsequent line in the file — turning a single
+		// oversized frame into a silent loss of ALL later events. Degrade
+		// gracefully instead: drop the oversized line with a WARN (the
+		// information is lost regardless because the reader cannot read it)
+		// and keep writing subsequent lines so the reader can still parse
+		// the rest of the stream.
+		// Note: `line` here is the raw envelope without the trailing '\n'
+		// that this sink appends; compare against the cap minus 1 so the
+		// written form (line + '\n') never exceeds the scanner's token max.
+		if len(line) >= sandboxEventsMaxLineSize {
+			lg.Warn("cron sandbox: oversized event line dropped; will not be readable by scanner",
+				"len", len(line))
+			return nil
+		}
 		_, werr := w.Write(line)
 		if werr == nil {
 			werr = w.WriteByte('\n')
