@@ -595,7 +595,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .nav-pill .nav-counter{font-size:10px;color:var(--nz-text-dim);padding:0 4px;white-space:nowrap;cursor:pointer;transition:color .15s}
 .nav-pill .nav-counter:hover{color:var(--nz-text)}
 .event.nav-highlight .event-content{box-shadow:0 0 0 2px var(--nz-accent)}
-.event{display:flex;gap:10px;padding:6px 24px;max-width:clamp(760px,65vw,1200px);margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
+.event{display:flex;gap:12px;padding:6px 24px;max-width:clamp(760px,65vw,1200px);margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
 .event-icon{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:var(--nz-fs-base)}
 .event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;overflow-wrap:anywhere;min-width:0;white-space:normal;transition:box-shadow .3s ease}
 .md-blank{display:block;height:0.75em}
@@ -605,7 +605,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    gave ~1.3:1 contrast — operators reported the empty circle "looks like
    a stuck spinner". Push background to .35 alpha (~3.2:1) and lighten the
    emoji color so the 👤 reads as an avatar instead of a hollow ring. */
-.event.user .event-icon{background:rgba(88,166,255,.35);color:var(--nz-event-user-fg);font-size:13px}
+.event.user .event-icon{width:36px;height:36px;background:rgba(88,166,255,.35);color:var(--nz-event-user-fg);font-size:18px}
 .event.user .event-content{flex:0 1 auto;max-width:80%;color:var(--nz-event-user-fg);background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
 /* Queued-send indicator: inline chip on the optimistic user bubble when
    send_ack returns status=queued. Replaces the previous top-of-screen
@@ -613,14 +613,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    when the real "user" event replaces the optimistic bubble). */
 .event.user.optimistic-msg .msg-queued-chip{display:inline-block;margin-top:4px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);opacity:.85}
 /* AI text: left-aligned, clean markdown */
-.event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:13px}
+.event.text .event-icon{width:36px;height:36px;background:rgba(163,118,255,.15);color:#a376ff;font-size:18px}
 /* Clawd mascot for claude-backend assistant turns. Drop the .event-icon
    circular background so the pixel robot reads as a free-standing avatar;
    the SVG itself is enlarged past the original 26px icon-slot to give it
    visual presence next to the assistant text.
    Color flows from --nz-clawd-rust via currentColor on the SVG path. */
-.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:32px;height:32px;overflow:visible}
-.event.text .event-icon .cc-clawd{width:32px;height:32px;display:block;color:var(--nz-clawd-rust)}
+.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:36px;height:36px;overflow:visible}
+.event.text .event-icon .cc-clawd{width:36px;height:36px;display:block;color:var(--nz-clawd-rust)}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
 /* Copy button: permanent for long AI messages; hover-revealed via
    .hover-only for short bubbles so every text/user message stays
