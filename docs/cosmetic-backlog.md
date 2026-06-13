@@ -633,3 +633,8 @@
 - [R20260610-ARCH-002] Reset 同步最坏 ~10s,future 用户直发 cron: 会话场景会叠加 tick 卡顿 — internal/session/router_lifecycle.go:1218
 - [R20260613-PERF-6] marshalBroadcastAuth 取 authMu.RLock 做空检查后 broadcastToAuthenticated 再取一次 — 可折叠为单次 RLock — internal/server/wshub_broadcast.go:183 (area 已被 #1902/#1621/#1925 充分覆盖)
 - [R20260613-GO-004] executeSandbox 用 ctx.Err() == context.DeadlineExceeded 身份比较而非 errors.Is — 当前 stdlib sentinel 不被 wrap 故等价 — internal/cron/sandbox.go:305
+- [R20260613-GO-001] lookupFreshFlush/invalidate 写锁下双 time.Since vDSO 调用可合并为单次 now — internal/cron/scheduler_session_cache.go:84,87,142
+- [R20260613-PERF-1] writeSnapshotBlob 先 MkdirAll 再 Stat dedup,可先 Stat 命中即返回 — internal/cron/runsnapshot.go:121
+- [R20260613-PERF-3] batchRecentRuns 每次 1Hz 请求启 ≤8 goroutine,warm cache 下可退化串行或用 pool — internal/dashboard/cron/handlers.go:958
+- [R20260613-PERF-8] decodeRunsParallel cap-drop 路径不 Put 也不 reset length,可 reset 后归还 — internal/cron/runstore_disklist.go:372
+- [R20260613-SEC-9] sanitizeClientFilename 未剥离 Unicode-dot lookalike(U+2024/U+FF0E) — internal/server/send_attachment_validate.go:295

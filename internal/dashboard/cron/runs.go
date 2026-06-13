@@ -11,6 +11,7 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // runIDLenLimit caps the run_id query parameter length. Run IDs and job
@@ -257,17 +258,17 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": "cron not configured"})
 		return
 	}
 	runID := r.PathValue("run_id")
 	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
-		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid run_id"})
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
-		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid job_id"})
 		return
 	}
 
@@ -277,9 +278,16 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 		// log + serve what we have rather than hiding a healthy opening.
 		slog.Warn("cron sandbox: run events read error", "job_id", jobID, "run_id", runID, "err", err)
 	}
+	// R20260613-SEC-1: redact secrets from each NDJSON line before serving to
+	// the dashboard. The sandbox event log can contain tool-call input that
+	// echoes environment variables (e.g. ANTHROPIC_API_KEY, Bearer tokens).
+	// textutil.RedactSecrets replaces known secret-token shapes with [REDACTED]
+	// while preserving JSON validity: secret chars are alphanumeric/-/_ which
+	// are all legal inside a JSON string, and [REDACTED] is equally legal there.
 	events := make([]json.RawMessage, len(lines))
 	for i, ln := range lines {
-		events[i] = json.RawMessage(ln)
+		redacted := textutil.RedactSecrets(string(ln))
+		events[i] = json.RawMessage(redacted)
 	}
 	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
 }
