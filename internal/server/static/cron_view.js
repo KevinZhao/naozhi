@@ -80,16 +80,6 @@ function isCronSessionKey(key) {
 // "what needs my eyeballs" dovetails with the top-level signal.
 let cronFilterQuery = '';
 let cronFilterStatus = 'all';
-// cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
-// 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
-let cronSortOrder = (function() {
-  // RNEW-UX-004 demo: migrated to unified lsGet helper. Keyspace changed
-  // from 'nz_cron_sort' to 'nz:cron_sort' — one-time loss of the saved
-  // preference is acceptable (falls back to 'created_desc').
-  const saved = lsGet('cron_sort', '');
-  if (saved && cronSortComparatorsHasKey(saved)) return saved;
-  return 'created_desc';
-})();
 
 // cronSortComparators 定义四种排序模式的 compare 函数。
 // - created_desc: 默认，最新创建在前（与旧版一致）
@@ -114,6 +104,23 @@ const cronSortComparators = {
 function cronSortComparatorsHasKey(k) {
   return Object.prototype.hasOwnProperty.call(cronSortComparators, k);
 }
+
+// cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
+// 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
+// R202606-CR-1: this initializer must run AFTER cronSortComparators (and the
+// cronSortComparatorsHasKey helper that closes over it) are defined. When the
+// IIFE sat above those definitions, a saved localStorage preference made it
+// call cronSortComparatorsHasKey while cronSortComparators was still in its
+// TDZ, throwing "Cannot access 'cronSortComparators' before initialization"
+// and crashing the whole cron panel on load. Keep it below this line.
+let cronSortOrder = (function() {
+  // RNEW-UX-004 demo: migrated to unified lsGet helper. Keyspace changed
+  // from 'nz_cron_sort' to 'nz:cron_sort' — one-time loss of the saved
+  // preference is acceptable (falls back to 'created_desc').
+  const saved = lsGet('cron_sort', '');
+  if (saved && cronSortComparatorsHasKey(saved)) return saved;
+  return 'created_desc';
+})();
 
 // setCronSortOrder 切换排序模式，持久化到 localStorage 并重绘列表。
 function setCronSortOrder(order) {
