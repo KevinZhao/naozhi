@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/agentcore"
 )
 
 func writeSandboxEventLog(t *testing.T, storePath, jobID, runID string, lines []string) {
@@ -238,13 +240,15 @@ func TestSandboxEventSink_OversizeLineDropped(t *testing.T) {
 
 // TestSandboxRunEvents_LineSizeCap verifies a line exceeding
 // sandboxEventsMaxLineSize is handled as a scan error rather than silently
-// growing the buffer to the old 16 MB ceiling [R20260613-SEC-5 / #2066].
+// growing the scanner buffer without bound. The cap is the shared
+// agentcore.MaxEnvelopeLineBytes ceiling [#2083; concurrency bounded by
+// sandboxEventsSemCap, R20260613-SEC-5 / #2066].
 func TestSandboxRunEvents_LineSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
 
-	// One valid small line followed by an oversize line (> 1 MB cap).
+	// One valid small line followed by a line that exceeds the shared cap.
 	big := `{"kind":"huge","data":"` + strings.Repeat("x", sandboxEventsMaxLineSize+1) + `"}`
 	writeSandboxEventLog(t, storePath, "0123456789abcdef", "feedfacefeedface",
 		[]string{`{"kind":"boot"}`, big})
@@ -256,5 +260,70 @@ func TestSandboxRunEvents_LineSizeCap(t *testing.T) {
 	// The healthy head line is still returned alongside the error.
 	if len(got) != 1 || string(got[0]) != `{"kind":"boot"}` {
 		t.Fatalf("got %d lines %q, want the single head line", len(got), got)
+	}
+}
+
+// TestSandboxEvents_LargeLineWriteReadRoundTrip is the #2083 regression: a
+// single tool-result line in the 1–16MB band that the SSE decoder accepts
+// must also be writable by the sink AND readable back by SandboxRunEvents.
+// Before the cap was unified (16MB writer / 1MB reader) such a line wrote to
+// disk but the reader's scanner hit bufio.ErrTooLong and silently dropped it
+// plus every later event. Now both ends share agentcore.MaxEnvelopeLineBytes,
+// so a 4MB line (well above the old 1MB reader cap, well below the shared
+// 16MB ceiling) survives the full round trip with the following line intact.
+func TestSandboxEvents_LargeLineWriteReadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	jobID := "0123456789abcdef"
+	runID := "feedfacefeedface"
+
+	// 4MB JSON line: above the pre-#2083 1MB reader cap, below the 16MB
+	// shared ceiling. Valid JSON so it is not skipped as a corrupt line.
+	const payloadLen = 4 << 20
+	big := []byte(`{"kind":"cli","line":{"type":"tool_result","data":"` +
+		strings.Repeat("x", payloadLen) + `"}}`)
+	if len(big) >= sandboxEventsMaxLineSize {
+		t.Fatalf("test payload %d must stay below the shared cap %d",
+			len(big), sandboxEventsMaxLineSize)
+	}
+
+	sink, closer := s.sandboxEventSink(jobID, runID, slog.Default())
+	if err := sink(big); err != nil {
+		t.Fatalf("sink rejected an in-band large line: %v", err)
+	}
+	follow := []byte(`{"kind":"exit","code":0}`)
+	if err := sink(follow); err != nil {
+		t.Fatalf("sink rejected the following line: %v", err)
+	}
+	closer()
+
+	got, truncated, err := s.SandboxRunEvents(jobID, runID, 100)
+	if err != nil {
+		t.Fatalf("SandboxRunEvents errored on an in-band large line (the #2083 bug): %v", err)
+	}
+	if truncated {
+		t.Fatal("must not report truncated; both lines fit under maxLines")
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d lines, want 2 (large line + follower both readable)", len(got))
+	}
+	if string(got[0]) != string(big) {
+		t.Fatalf("large line did not round-trip: got %d bytes, want %d", len(got[0]), len(big))
+	}
+	if string(got[1]) != string(follow) {
+		t.Fatalf("follower line lost after large line: got %q", got[1])
+	}
+}
+
+// TestSandboxEventsCap_SharesAgentcoreCeiling pins the single-source-of-truth
+// invariant (#2083): the cron reader's line cap must equal the agentcore SSE
+// decoder's accept ceiling. If a future edit forks one end, this fails before
+// the silent-drop bug can recur.
+func TestSandboxEventsCap_SharesAgentcoreCeiling(t *testing.T) {
+	if sandboxEventsMaxLineSize != agentcore.MaxEnvelopeLineBytes {
+		t.Fatalf("reader cap %d != agentcore wire ceiling %d — the two ends have drifted (#2083)",
+			sandboxEventsMaxLineSize, agentcore.MaxEnvelopeLineBytes)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/agentcore"
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
@@ -477,18 +478,21 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		if degraded {
 			return nil
 		}
-		// R20260613-ARCH-2: the reader (SandboxRunEvents) caps a single
-		// NDJSON token at sandboxEventsMaxLineSize via bufio.Scanner. If we
-		// write a line longer than that cap the scanner hits ErrTooLong and
-		// discards every subsequent line in the file — turning a single
-		// oversized frame into a silent loss of ALL later events. Degrade
-		// gracefully instead: drop the oversized line with a WARN (the
-		// information is lost regardless because the reader cannot read it)
-		// and keep writing subsequent lines so the reader can still parse
-		// the rest of the stream.
-		// Note: `line` here is the raw envelope without the trailing '\n'
-		// that this sink appends; compare against the cap minus 1 so the
-		// written form (line + '\n') never exceeds the scanner's token max.
+		// R20260613-ARCH-2 / #2083: the reader (SandboxRunEvents) caps a
+		// single NDJSON token at sandboxEventsMaxLineSize via bufio.Scanner.
+		// The SSE decoder shares that exact ceiling
+		// (agentcore.MaxEnvelopeLineBytes), so a line the decoder accepted is
+		// normally readable back. This guard is the last line of defence
+		// against any line that still reaches the cap (e.g. JSON re-encoding
+		// of an at-ceiling envelope): writing it would make the reader's
+		// scanner hit ErrTooLong and discard every subsequent line in the
+		// file — turning one oversized frame into a silent loss of ALL later
+		// events. Degrade gracefully instead: drop the oversized line with a
+		// WARN and keep writing subsequent lines.
+		// `line` here is the raw envelope without the trailing '\n' this sink
+		// appends. The `>=` (not `>`) keeps the written form (line + '\n')
+		// from exceeding the scanner's token max: when len(line) == cap we
+		// drop, so every written line is < cap and line+'\n' <= cap.
 		if len(line) >= sandboxEventsMaxLineSize {
 			lg.Warn("cron sandbox: oversized event line dropped; will not be readable by scanner",
 				"len", len(line))
@@ -620,13 +624,18 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 // while keeping the response well under a megabyte for the dashboard.
 const sandboxEventsDefaultMax = 2000
 
-// sandboxEventsMaxLineSize caps a single NDJSON line read from a persisted
-// sandbox event log. The writer (sandboxEventSink) flushes one stream-json
-// envelope per line; a 1 MB ceiling covers the largest realistic tool-result
-// frame while bounding the scanner's per-request heap. The old (16<<20)+(64<<10)
-// ceiling let a single concurrent burst pin gigabytes of scanner buffers with
-// no observed need for 16 MB frames [R20260613-SEC-5 / #2066].
-const sandboxEventsMaxLineSize = (1 << 20) + (64 << 10)
+// sandboxEventsMaxLineSize caps a single NDJSON line on the sandbox event
+// wire. It aliases agentcore.MaxEnvelopeLineBytes — the single source of
+// truth shared with the SSE decoder (holdStream) — so the writer's accept
+// ceiling and this reader's scanner token limit can never drift.
+//
+// R20260613-214326-ARCH-1 (#2083): a previous split (16MB writer / 1MB
+// reader, R20260613-SEC-5 / #2066) let 1–16MB tool-result lines write but
+// never read — the scanner hit bufio.ErrTooLong and silently dropped that
+// line plus every later event. Reader-side memory is bounded by
+// sandboxEventsSemCap (concurrent-read semaphore), not by shrinking this cap
+// below the writer's.
+const sandboxEventsMaxLineSize = agentcore.MaxEnvelopeLineBytes
 
 // sandboxEventsSemCap bounds concurrent SandboxRunEvents reads, mirroring the
 // dashboard transcript endpoint's transcriptSem (cap 8). Each in-flight read
