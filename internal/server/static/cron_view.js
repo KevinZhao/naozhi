@@ -2674,7 +2674,8 @@ function cronTimelineCollapse() {
 // 'next' = ↓ = UI 中更靠下 = 时间上更旧的 run（idx+1）
 function navigateExpandedRun(direction) {
   if (!cronExpandedRunId.jobId || !cronExpandedRunId.runId) return;
-  const st = getCronTimelineState(cronExpandedRunId.jobId);
+  const jobId = cronExpandedRunId.jobId;
+  const st = getCronTimelineState(jobId);
   if (!st.runs || st.runs.length === 0) return;
   const idx = st.runs.findIndex(r => r && r.run_id === cronExpandedRunId.runId);
   if (idx < 0) return;
@@ -2682,10 +2683,28 @@ function navigateExpandedRun(direction) {
   if (direction === 'prev') nextIdx = idx - 1;
   else if (direction === 'next') nextIdx = idx + 1;
   else return;
-  if (nextIdx < 0 || nextIdx >= st.runs.length) return;
+  if (nextIdx < 0) return; // already at the newest run; nothing above it.
+  // R20260614-LOGIC-8 (#2090): ↓ past the last loaded run on a multi-page
+  // timeline used to hit the bounds guard and silently no-op, so the keyboard
+  // could never reach older runs beyond the first page. When more pages exist
+  // (!st.done), load the next page and expand the target once it arrives.
+  if (nextIdx >= st.runs.length) {
+    if (direction !== 'next' || st.done || st.loading) return; // genuinely at the end
+    cronTimelineLoadMore(jobId, () => {
+      // Re-resolve against the freshly grown list; expand the run that now
+      // sits just after the current one (only if the user is still here).
+      if (cronExpandedRunId.jobId !== jobId || cronExpandedRunId.runId == null) return;
+      const st2 = getCronTimelineState(jobId);
+      const i2 = st2.runs.findIndex(r => r && r.run_id === cronExpandedRunId.runId);
+      if (i2 < 0 || i2 + 1 >= st2.runs.length) return; // page returned nothing new
+      const target = st2.runs[i2 + 1];
+      if (target && target.run_id) cronTimelineExpand(jobId, target.run_id);
+    });
+    return;
+  }
   const nextRun = st.runs[nextIdx];
   if (!nextRun || !nextRun.run_id) return;
-  cronTimelineExpand(cronExpandedRunId.jobId, nextRun.run_id);
+  cronTimelineExpand(jobId, nextRun.run_id);
 }
 
 // cronEscClose — 全局 Esc 的 cron 分支委托入口。
@@ -2893,12 +2912,18 @@ function renderCronTimelinePanel(jobId) {
 
 // cronTimelineLoadMore — 分页加载更早的 run 列表。
 // GET /api/cron/runs?job_id=&limit=50&before=<oldest started_at>
-function cronTimelineLoadMore(jobId) {
+//
+// onDone (optional): called once after a SUCCESSFUL page load (st.runs may
+// have grown), used by keyboard navigation (#2090) to expand the next run
+// once it becomes available. Not called when the request errors or when the
+// load was skipped because one is already in flight / the list is done.
+function cronTimelineLoadMore(jobId, onDone) {
   const st = getCronTimelineState(jobId);
   if (st.loading || st.done) return;
   st.loading = true;
   renderCronTimelinePanel(jobId);
   (async () => {
+    let loaded = false;
     try {
       const headers = {};
       const t = getToken();
@@ -2919,6 +2944,7 @@ function cronTimelineLoadMore(jobId) {
       } else {
         st.done = true;
       }
+      loaded = true;
     } catch (err) {
       // R220-FE-5: 401/403 走 authModal；showAPIError 仅做 toast 提示，不会
       // 把用户带回登录态——这里要主动唤起 modal。
@@ -2936,6 +2962,13 @@ function cronTimelineLoadMore(jobId) {
       // could have been closed or switched mid-fetch — st.runs is already
       // populated for next time, so no information is lost.
       if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+      // Fire the post-load hook after st.loading is cleared and the panel is
+      // re-rendered, so a callback that expands a run (#2090) operates on the
+      // settled state. Guarded to a successful load and isolated so a throwing
+      // callback cannot leave st.loading stuck (already reset above).
+      if (loaded && typeof onDone === 'function') {
+        try { onDone(); } catch (e) { /* navigation hook must not break paging */ }
+      }
     }
   })();
 }
