@@ -83,6 +83,46 @@ func TestHandleRunSnapshot_MissingUnavailable(t *testing.T) {
 	}
 }
 
+// TestHandleRunSnapshot_SecretRefs_Sanitized pins [R202606-SEC-1]: each
+// secret_ref name must pass through osutil.SanitizeForLog before serialising,
+// matching the Prompt/Model/ImageVersion edge. A manifest hand-edited on disk
+// can carry a control/bidi rune in a ref name that would render dangerously.
+func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	sched := snapshotTestScheduler(t, filepath.Join(tmp, "cron_jobs.json"))
+
+	jobID, runID := strings.Repeat("a", 16), strings.Repeat("b", 16)
+	// U+202E RIGHT-TO-LEFT OVERRIDE embedded in a ref name.
+	taintedRef := "github‮token"
+	sched.WriteSandboxSnapshotForTest(jobID, runID, "p", "haiku", "phase2", []string{taintedRef})
+
+	h := &Handlers{scheduler: sched}
+	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/snapshot?job_id="+jobID, nil)
+	req.SetPathValue("run_id", runID)
+	w := httptest.NewRecorder()
+	h.HandleRunSnapshot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		SecretRefs []string `json:"secret_refs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.SecretRefs) != 1 {
+		t.Fatalf("secret_refs = %v, want 1 element", resp.SecretRefs)
+	}
+	if strings.ContainsRune(resp.SecretRefs[0], '‮') {
+		t.Errorf("secret_ref contains bidi override (U+202E); SanitizeForLog not applied: %q", resp.SecretRefs[0])
+	}
+	if resp.SecretRefs[0] == "" {
+		t.Errorf("secret_ref empty after sanitise; non-control content should remain")
+	}
+}
+
 // TestHandleRunSnapshot_RejectsBadIDs guards the path-traversal surface.
 func TestHandleRunSnapshot_RejectsBadIDs(t *testing.T) {
 	t.Parallel()
