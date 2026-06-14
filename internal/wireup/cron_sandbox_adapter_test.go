@@ -50,9 +50,16 @@ func sseBody(frames ...string) string {
 }
 
 func adapterJob() cron.SandboxJob {
-	// cron-shaped 16-hex run id: the adapter must derive an API-compliant
-	// runtime session id from it (≥33 chars, validation F3).
-	return cron.SandboxJob{JobID: "j1", RunID: "0123456789abcdef", Prompt: "hi"}
+	// cron-shaped 16-hex run id with a populated RuntimeSessionID, exactly as
+	// production cron derives it (sandboxRuntimeSessionID): "run-<hex>-<nano>"
+	// is ≥33 chars (validation F3). [R202606-ARCH-1] the adapter no longer
+	// synthesises a fallback id, so the job must carry one.
+	return cron.SandboxJob{
+		JobID:            "j1",
+		RunID:            "0123456789abcdef",
+		Prompt:           "hi",
+		RuntimeSessionID: "run-0123456789abcdef-1234567890123456789",
+	}
 }
 
 func TestAdapter_SuccessExtractsResultText(t *testing.T) {
@@ -130,6 +137,57 @@ func TestAdapter_TransportStopFailureLeavesUnconfirmed(t *testing.T) {
 	}
 	if out.StopConfirmed {
 		t.Fatal("Stop failed; StopConfirmed must be false (§6.2: fate unknown)")
+	}
+}
+
+// TestAdapter_EmptyRuntimeSessionIDFailsClosed pins [R202606-ARCH-1]: the
+// adapter must reject a job with an empty RuntimeSessionID with an error and
+// never invoke the platform, rather than synthesising a fallback id that
+// would not match the persisted pending record (orphaning the real microVM
+// on a later reconcile/Stop). A populated id runs normally.
+func TestAdapter_EmptyRuntimeSessionIDFailsClosed(t *testing.T) {
+	cases := []struct {
+		name             string
+		runtimeSessionID string
+		wantErr          bool
+	}{
+		{name: "empty fails closed", runtimeSessionID: "", wantErr: true},
+		{name: "populated runs", runtimeSessionID: "run-0123456789abcdef-1234567890123456789", wantErr: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAgentcoreAPI{body: sseBody(
+				`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok"},"ts":"t"}`,
+				`{"kind":"exit","code":0,"ts":"t"}`,
+			)}
+			r := &agentcoreSandboxRunner{client: agentcore.NewWithAPIForTest(api,
+				agentcore.Config{RuntimeARN: "arn:x", Region: "us-west-2"})}
+
+			job := cron.SandboxJob{JobID: "j1", RunID: "0123456789abcdef", Prompt: "hi", RuntimeSessionID: tc.runtimeSessionID}
+			out, err := r.RunJob(context.Background(), job, nil)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error for empty RuntimeSessionID, got nil (out=%+v)", out)
+				}
+				if !strings.Contains(err.Error(), "empty RuntimeSessionID") {
+					t.Fatalf("error = %q, want it to mention empty RuntimeSessionID", err)
+				}
+				if !strings.Contains(err.Error(), job.RunID) {
+					t.Fatalf("error = %q, want it to embed run id %q for diagnosis", err, job.RunID)
+				}
+				if len(api.stopped) != 0 {
+					t.Fatalf("platform must not be touched on fail-closed; stopped=%v", api.stopped)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RunJob: %v", err)
+			}
+			if out.State != cron.SandboxStateSuccess {
+				t.Fatalf("state = %q, want success", out.State)
+			}
+		})
 	}
 }
 
