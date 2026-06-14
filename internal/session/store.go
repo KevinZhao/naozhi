@@ -434,17 +434,33 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 	return writeErr
 }
 
+// storeDirEnsured memoizes, per store directory, whether datadir.EnsureDir has
+// already succeeded for that directory in this process. R202606-GO-014: the
+// periodic save tick (saveIfDirty, every 30s) previously paid EnsureDir's
+// MkdirAll + Lstat + (possible) Chmod syscalls unconditionally on every save,
+// even though the directory is created once and then never disappears in steady
+// state. Caching by path keeps the hardening correct when multiple Routers use
+// distinct store directories (a package-level sync.Once would wrongly skip the
+// MkdirAll for the second path), and only the first successful save per path
+// touches the filesystem layout. A failed EnsureDir is NOT recorded, so a later
+// save retries until the directory is in place.
+var storeDirEnsured sync.Map // map[string]struct{}
+
 // writeStoreData ensures the store directory exists, atomically writes the
 // pre-marshalled bytes, then writes the advisory version sidecar. Shared by
 // saveStore (map input) and saveStoreSlice (slice input).
 func writeStoreData(path string, data []byte) error {
 	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
-		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
-		// MkdirAll, so the session store inherits the same hardening the
-		// cron run store already had.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create store directory: %w", err)
+		if _, done := storeDirEnsured.Load(dir); !done {
+			// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
+			// symlink/non-dir guard + perm-tightening chmod) instead of a bare
+			// MkdirAll, so the session store inherits the same hardening the
+			// cron run store already had. R202606-GO-014: only run on the first
+			// save per directory; steady-state ticks skip the syscalls.
+			if err := datadir.EnsureDir(dir); err != nil {
+				return fmt.Errorf("create store directory: %w", err)
+			}
+			storeDirEnsured.Store(dir, struct{}{})
 		}
 	}
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
