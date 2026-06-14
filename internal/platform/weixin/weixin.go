@@ -424,14 +424,27 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			//
 			// When the upstream response omits message_id the zero value 0 is
 			// not a real ID, so leave EventID empty and let the dispatch-side
-			// composite fallback key handle dedup.
+			// composite fallback key handle dedup. That fallback key is shaped
+			// fallback:<platform>:<chatID>:<MessageID>:<minute>; if we also
+			// leave IncomingMessage.MessageID empty it degenerates to
+			// from+minute, and a second DISTINCT message from the same user in
+			// the same wall-clock minute collides and is silently dropped.
+			// Populate MessageID with a per-message distinguisher from Seq
+			// (monotonic per relay) or CreateTimeMs so legitimate distinct
+			// messages keep distinct fallback keys. #2117.
 			eventID := ""
+			fallbackMsgID := ""
 			if msg.MessageID != 0 {
 				eventID = "weixin:" + from + ":" + strconv.Itoa(msg.MessageID)
+			} else if msg.Seq != 0 {
+				fallbackMsgID = "seq:" + strconv.Itoa(msg.Seq)
+			} else if msg.CreateTimeMs != 0 {
+				fallbackMsgID = "ts:" + strconv.FormatInt(msg.CreateTimeMs, 10)
 			}
 			incoming := platform.IncomingMessage{
 				Platform:  "weixin",
 				EventID:   eventID,
+				MessageID: fallbackMsgID,
 				UserID:    from,
 				ChatID:    from, // direct chat, reply to the sender
 				ChatType:  "direct",
