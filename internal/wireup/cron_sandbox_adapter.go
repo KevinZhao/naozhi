@@ -78,11 +78,15 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 	}
 
 	// runtimeSessionId is derived by cron (sandboxRuntimeSessionID) so the
-	// §6.5 pending record can hold it before the invoke; the adapter only
-	// guards against an unset value from a hand-built caller.
+	// §6.5 pending record can hold it before the invoke. [R202606-ARCH-1]
+	// Fail closed on an empty value rather than synthesising a fallback id:
+	// a generated id would never match the id persisted in the pending
+	// record, so a later reconcile/Stop would target the wrong (or no)
+	// session and permanently orphan the real microVM. Production cron
+	// always populates RuntimeSessionID; an empty value is a caller bug.
 	runtimeID := job.RuntimeSessionID
 	if runtimeID == "" {
-		runtimeID = fmt.Sprintf("run-%s-%d", job.RunID, time.Now().UnixNano())
+		return cron.SandboxOutcome{}, fmt.Errorf("wireup: sandbox job %s has empty RuntimeSessionID", job.RunID)
 	}
 
 	var resultText string

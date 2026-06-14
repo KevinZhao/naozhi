@@ -263,13 +263,15 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
 	jobIDs := (*jobIDsPtr)[:0]
 
+	// R202606-PERF-003: allocate the map BEFORE taking the RLock so the
+	// make() does not run inside the lock window and block writers. We can no
+	// longer size from len(s.jobs) (that read needs the lock), so use a
+	// fixed initial capacity; the map still grows as needed, only trading a
+	// few possible rehashes for a shorter lock hold. R20260603-PERF-3 had
+	// sized it under the lock to avoid those rehashes, but shrinking the lock
+	// window is the higher-value tradeoff here.
+	out := make(map[string]struct{}, 32)
 	s.mu.RLock()
-	// R20260603-PERF-3: size the map from len(s.jobs) under the lock already
-	// held here, replacing the fixed cap of 32 that caused repeated rehashes
-	// for schedulers with many jobs. Each job contributes at most one
-	// LastSessionID entry in this loop, so len(s.jobs)+8 is a tight upper
-	// bound with a small slack for in-flight and recent-history entries.
-	out := make(map[string]struct{}, len(s.jobs)+8)
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {

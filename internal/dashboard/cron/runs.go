@@ -176,6 +176,15 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
+	// [R202606-SEC-2] Cross-ownership check, mirroring HandleRunTranscript:
+	// defensive even though runStore.Get keys the lookup on the disk path. A
+	// future refactor that loosens the key must not silently expose another
+	// job's run through this URL.
+	if run.JobID != jobID {
+		slog.Warn("cron run detail: job_id mismatch", "url_job_id", jobID, "run_job_id", run.JobID, "run_id", runID)
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
 	// SanitizeForLog the Prompt + WorkDir fields read off disk: dashboard
 	// validate* gates already strip control / bidi characters at the write
 	// edge, but a CronRun persisted before the policy was tightened (or
@@ -352,6 +361,18 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
 		// Still return the manifest metadata; prompt blob may have been GC'd.
 	}
+	// [R202606-SEC-1] SanitizeForLog each secret ref name before projecting to
+	// wire, matching the Model/ImageVersion/Prompt edge: a manifest hand-edited
+	// on disk (or written before the validator was tightened) can carry
+	// control/bidi runes in a ref name that would render dangerously in the
+	// dashboard panel. Ref names are short identifiers; clamp to 256.
+	var secretRefs []string
+	if len(man.SecretRefs) > 0 {
+		secretRefs = make([]string, len(man.SecretRefs))
+		for i, ref := range man.SecretRefs {
+			secretRefs[i] = osutil.SanitizeForLog(ref, 256)
+		}
+	}
 	httputil.WriteJSON(w, cronRunSnapshotResp{
 		Available: true,
 		// Prompt was validated non-control at the cron write edge, but
@@ -360,6 +381,6 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		PromptHash:   man.PromptHash,
 		Model:        osutil.SanitizeForLog(man.Model, 128),
 		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),
-		SecretRefs:   man.SecretRefs,
+		SecretRefs:   secretRefs,
 	})
 }
