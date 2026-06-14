@@ -656,3 +656,9 @@
 - [R20260614-SEC-6] feishu 不安全 webhook 启动 warn 应升 error 与首次投递严重度一致 — internal/platform/feishu/feishu.go:641
 - [R20260614-SEC-7] weixin context_token 明文存 sync.Map，heap dump 暴露会话凭证（已知威胁模型可接受） — internal/platform/weixin/weixin.go:406
 - [R20260614-ARCH-4] 三个 sandbox 写路径 MkdirAll 后从不 SyncDir，新建目录项首跑窗口不持久 — internal/cron/sandbox_pending.go:47
+- [R202606-GO-003] scheduler.Stop() 传 nil 给 stopWithCtx(ctx) 触发 staticcheck SA1012，宜用 context.Background() — internal/cron/scheduler.go:992
+- [R202606-GO-016] ensure_stub_lockorder_test 用已弃用 session.CronKey (SA1019)，应迁 sessionkey.CronKey — internal/cron/ensure_stub_lockorder_test.go:44
+- [R202606-ARCH-3] KindCLI result 行在 agentcore observe/holdStream + wireup 三处独立解码，schema 变更需三点协调 — internal/agentcore/terminal.go:46
+- [R202606-ARCH-5] cronConfigMaps 的 atomic.Pointer COW seam 为尚不存在的 hot-reload writer 预付（speculative generality） — internal/cron/scheduler_config.go:463
+- [R202606-PERF-024] cli deliverEvent 每事件两次 select（killCh + eventCh），高频 streaming 可合并为三路 select — internal/cli/process_readloop.go:909
+- [R202606-PERF-025] session storeMetaPath 每次 30s save 重算 Base/Ext/Dir 拼接，可在 Router 构建时缓存 — internal/session/store.go:135
