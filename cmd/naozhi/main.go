@@ -361,6 +361,13 @@ func main() {
 	scheduler := schedulers.Cron
 	sysMgr := schedulers.Sysession
 	sysWorkDir := schedulers.SysessionWorkDir
+	// When the sysession daemon framework is disabled, SysessionWorkDir is
+	// empty — but the image-orient vision runner below still spawns CLIs and
+	// must land their JSONLs in a directory the history panel filters out.
+	// Resolve the same sys-sessions path so SkipWorkspace has a real target.
+	if sysWorkDir == "" {
+		sysWorkDir = sysSessionsWorkDir(cfg, storePath)
+	}
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
 	// Configure remote nodes for multi-node aggregation (buildRemoteNodes in
@@ -382,8 +389,15 @@ func main() {
 	// (separate from the sysession daemon Runner, which is text-only and may
 	// be disabled). Feature defaults on; a runner build failure degrades to
 	// the feature being off rather than failing startup — auto-orient is
-	// best-effort. WorkDir is the workspace root: the vision call writes no
-	// files, it only needs a valid existing cwd.
+	// best-effort.
+	//
+	// WorkDir MUST be the sys-sessions dir, NOT the user workspace root: the
+	// claude CLI writes a transcript JSONL under ~/.claude/projects/<cwd>/ on
+	// every invocation, and a vision call pointed at the workspace root leaks
+	// those (plus the orientation-prompt fragment) into the history panel.
+	// sysWorkDir is the SkipWorkspace filter target, so landing JSONLs there
+	// hides them. EnsureWorkDir is required because the sysession framework
+	// (which normally creates it) may be disabled.
 	orientEnabled := cfg.ImageOrientEnabled()
 	var orientRunner server.VisionOrienter
 	if orientEnabled {
@@ -391,9 +405,13 @@ func main() {
 		if wrapper != nil {
 			binPath = wrapper.CLIPath
 		}
-		vr, err := sysession.NewVisionRunner(sysession.RunnerConfig{
+		orientWorkDir, wdErr := sysession.EnsureWorkDir(sysWorkDir)
+		if wdErr != nil {
+			slog.Warn("image auto-orient disabled: sys-sessions workdir unusable", "err", wdErr, "dir", sysWorkDir)
+			orientEnabled = false
+		} else if vr, err := sysession.NewVisionRunner(sysession.RunnerConfig{
 			BinPath: binPath,
-			WorkDir: workspace,
+			WorkDir: orientWorkDir,
 			Model:   cfg.ImageOrient.Model,
 			EnvAllowlist: []string{
 				"ANTHROPIC_",
@@ -402,8 +420,7 @@ func main() {
 				"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 				"http_proxy", "https_proxy", "no_proxy",
 			},
-		})
-		if err != nil {
+		}); err != nil {
 			slog.Warn("image auto-orient disabled: vision runner build failed", "err", err)
 			orientEnabled = false
 		} else {
