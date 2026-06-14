@@ -261,6 +261,29 @@ func (l workspaceRootLister) KnownWorkspaceRoots() []string {
 // Manager.SetTelemetry (server routes), routed through the shared
 // runtelemetry.Broadcaster seam (#1723); the dashboard reads also fall
 // back to polling /api/system/daemons.
+// sysSessionsWorkDir resolves the cwd for all naozhi-internal one-off CLI
+// invocations (sysession daemons + the image-orient vision runner): explicit
+// config override first, then a sibling of sessions.json
+// (= dataDir/sys-sessions/). Empty storePath means the operator opted out of
+// state persistence; fall back to ~/.naozhi to keep the directory under user
+// control.
+//
+// Both consumers MUST share this directory: it is the SkipWorkspace filter
+// target in the history panel, so any session whose JSONL lands here is
+// hidden. A vision runner pointed at the user workspace root would leak its
+// transcripts (and orientation-prompt fragments) into the history list.
+func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
+	if wd := osutil.ExpandHome(cfg.Sysession.Runner.WorkDir); wd != "" {
+		return wd
+	}
+	base := filepath.Dir(storePath)
+	if base == "" || base == "." {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".naozhi")
+	}
+	return filepath.Join(base, "sys-sessions")
+}
+
 func buildSysessionManager(cfg *config.Config, router *session.Router,
 	projectMgr *project.Manager, defaultWrapper *cli.Wrapper, storePath string,
 ) (*sysession.Manager, string, error) {
@@ -272,20 +295,11 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		return nil, "", nil
 	}
 
-	// Resolve work dir: explicit override first, then a sibling of
-	// sessions.json (= dataDir/sys-sessions/).  Empty storePath means
-	// the operator opted out of state persistence; fall back to ~/.naozhi
-	// to keep the directory under user control.
-	workDir := osutil.ExpandHome(cfg.Sysession.Runner.WorkDir)
-	if workDir == "" {
-		base := filepath.Dir(storePath)
-		if base == "" || base == "." {
-			home, _ := os.UserHomeDir()
-			base = filepath.Join(home, ".naozhi")
-		}
-		workDir = filepath.Join(base, "sys-sessions")
-	}
-	resolvedWorkDir, err := sysession.EnsureWorkDir(workDir)
+	// Resolve work dir via the shared helper so the image-orient vision
+	// runner (cmd/naozhi/main.go) lands its JSONLs in the SAME directory.
+	// That directory is also the SkipWorkspace filter target, so both
+	// daemon and vision sessions are hidden from the history panel.
+	resolvedWorkDir, err := sysession.EnsureWorkDir(sysSessionsWorkDir(cfg, storePath))
 	if err != nil {
 		return nil, "", fmt.Errorf("ensure sys-sessions dir: %w", err)
 	}

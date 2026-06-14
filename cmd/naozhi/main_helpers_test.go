@@ -2,9 +2,58 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/config"
 )
+
+// TestSysSessionsWorkDir pins the resolution order the image-orient vision
+// runner and the sysession daemon both depend on. Landing their JSONLs in
+// this directory (the history panel's SkipWorkspace target) is what keeps
+// background/vision sessions out of the history list — a regression that
+// pointed either consumer at the user workspace root would leak transcripts
+// (and orientation-prompt fragments) into the history panel.
+func TestSysSessionsWorkDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	tests := []struct {
+		name      string
+		override  string
+		storePath string
+		want      string
+	}{
+		{
+			name:      "explicit_override_wins",
+			override:  "/custom/sys",
+			storePath: "/data/sessions.json",
+			want:      "/custom/sys",
+		},
+		{
+			name:      "sibling_of_store",
+			override:  "",
+			storePath: "/data/state/sessions.json",
+			want:      filepath.Join("/data/state", "sys-sessions"),
+		},
+		{
+			name:      "empty_store_falls_back_to_home",
+			override:  "",
+			storePath: "",
+			want:      filepath.Join(home, ".naozhi", "sys-sessions"),
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Sysession.Runner.WorkDir = tc.override
+			if got := sysSessionsWorkDir(cfg, tc.storePath); got != tc.want {
+				t.Fatalf("sysSessionsWorkDir(override=%q, store=%q) = %q, want %q",
+					tc.override, tc.storePath, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestChatIDSuffix(t *testing.T) {
 	tests := []struct {
