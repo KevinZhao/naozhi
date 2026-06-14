@@ -666,3 +666,7 @@
 - [R20260614-GO-002] writeStoreData 的 Load→EnsureDir→Store 非原子,并发 save 可双进(EnsureDir 幂等,无害) — internal/session/store.go:454
 - [R20260614-COSM-2] reconcileOneSandboxOrphan 合成 emitRunStarted 恒用 TriggerScheduled,manual replay orphan 显示 scheduled 图标 — internal/cron/sandbox_pending.go:228
 - [R20260614-ARCH-4] Server 结构体 48 字段 god-object(已有 server-split phased plan 在进行,需 RFC) — internal/server/server.go:81
+- [R20260614-GO-002] CronRunInflight.Add(1) 在 defer 注册之后 — 经核实为误报(直线代码先于任何 panic),记录避免重复审查 — internal/cron/sandbox_replay.go:284
+- [R20260614-SEC-10] containsYAMLBreakingByte 未拒绝 Unicode U+2028/U+2029(YAML1.2 不视为换行,当前无 trigger) — internal/config/config.go:1477
+- [R20260614-SEC-3] 建议审计所有 cron 渲染函数的 server 字符串是否经 esc()(假设性,未发现具体未转义点) — internal/server/static/cron_view.js:3588
+- [R20260614-LOGIC-003] EffectivePlannerModel godoc 称 fallback 'sonnet' 但返回 ''(godoc 与实现不符,纯文档) — internal/project/manager.go:385
