@@ -351,6 +351,26 @@ func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeS
 	if !a.snap.sideEffects {
 		return
 	}
+	// R20260614-ARCH-1: a DeleteJobByID concurrent with this in-flight run can
+	// reach deleteJobPostCleanup (stopSandboxRunsForJob → deleteJobRuns →
+	// deleteJobAttention) while this goroutine is still blocked on the stream
+	// that delete just severed; we then walk the sandbox.go default/timeout
+	// branch into here AFTER deleteJobAttention already cleared the queue,
+	// writing a ghost record for a job that no longer exists. ListSandboxAttention
+	// only shape-validates the id (never job existence), so that record would
+	// surface a phantom queue card whose replay ErrJobNotFound's. Re-check
+	// s.jobs[id] under RLock (mirrors finishRun→recordTerminalResult's jobs[id]
+	// re-check) and skip if the job is gone. The reconcile/test attention writers
+	// stay on the unchecked writeSandboxAttention primitive: reconcile already
+	// gates on j!=nil, and the test seam stages records for synthetic ids.
+	s.mu.RLock()
+	_, jobExists := s.jobs[a.snap.jobID]
+	s.mu.RUnlock()
+	if !jobExists {
+		a.lg.Info("cron sandbox: transport-attention skipped — job deleted mid-flight (R20260614-ARCH-1)",
+			"job_id", a.snap.jobID, "run_id", a.runID)
+		return
+	}
 	s.writeSandboxAttention(sandboxAttention{
 		JobID:            a.snap.jobID,
 		RunID:            a.runID,

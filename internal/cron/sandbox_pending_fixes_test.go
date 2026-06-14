@@ -280,3 +280,167 @@ func TestStopSandboxRunsForJob_ValidRunIDProcessed(t *testing.T) {
 		t.Fatal("pending file must be removed after confirmed stop with valid RunID")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R20260614-GO-001: reconcileOneSandboxOrphan must bump
+// CronSandboxRunFailedTotal on BOTH the live-job and deleted-job branches —
+// it closes the run via finishRun directly (not finishSandboxRunWith, the
+// only other sandbox-failure path that bumps the counter), so without an
+// explicit bump an orphaned sandbox run is invisible to
+// naozhi_cron_sandbox_run_failed_total.
+// ---------------------------------------------------------------------------
+
+func TestReconcileOrphan_LiveJobBumpsSandboxFailedMetric(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s) // job still exists at reconcile time
+
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "abcabcabc0000001",
+		RuntimeSessionID: "run-abcabcabc0000001-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	sandboxFailedBefore := metrics.CronSandboxRunFailedTotal.Value()
+
+	s.reconcileSandboxPending()
+	waitEnded(t, rec)
+
+	if delta := metrics.CronSandboxRunFailedTotal.Value() - sandboxFailedBefore; delta != 1 {
+		t.Fatalf("CronSandboxRunFailedTotal delta = %d for live-job orphan, want 1 [R20260614-GO-001]", delta)
+	}
+}
+
+func TestReconcileOrphan_DeletedJobBumpsSandboxFailedMetric(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	// No job added → nil-job branch.
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: "0123456789abcdef", RunID: "abcabcabc0000002",
+		RuntimeSessionID: "run-abcabcabc0000002-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	sandboxFailedBefore := metrics.CronSandboxRunFailedTotal.Value()
+
+	s.reconcileSandboxPending()
+
+	if delta := metrics.CronSandboxRunFailedTotal.Value() - sandboxFailedBefore; delta != 1 {
+		t.Fatalf("CronSandboxRunFailedTotal delta = %d for deleted-job orphan, want 1 [R20260614-GO-001]", delta)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R20260614-GO-003: a pending record with StartedAtMS<=0 is corrupt and must
+// be dropped (re-warned once then removed), not flowed into a 1970 StartedAt
+// and an astronomical DurationMS.
+// ---------------------------------------------------------------------------
+
+func TestReconcileSandboxPending_ZeroStartedAtDroppedAsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	path := writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "abcabcabc0000003",
+		RuntimeSessionID: "run-abcabcabc0000003-1234567890123456789",
+		StartedAtMS:      0, // corrupt: would yield a 1970 StartedAt
+	})
+
+	s.reconcileSandboxPending()
+
+	// Dropped as corrupt: no terminal broadcast, file removed.
+	if rec.endedCount() != 0 {
+		t.Fatal("StartedAtMS<=0 record must be dropped as corrupt, not reconciled into a terminal run")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt (StartedAtMS<=0) pending file must be removed so it does not re-warn every boot")
+	}
+}
+
+func TestReconcileSandboxPending_NegativeStartedAtDroppedAsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	path := writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "abcabcabc0000004",
+		RuntimeSessionID: "run-abcabcabc0000004-1234567890123456789",
+		StartedAtMS:      -5000,
+	})
+
+	s.reconcileSandboxPending()
+
+	if rec.endedCount() != 0 {
+		t.Fatal("negative StartedAtMS record must be dropped as corrupt")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt (negative StartedAtMS) pending file must be removed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R20260614-ARCH-1: enqueueSandboxTransportAttention must skip the write when
+// the job has been deleted out from under the in-flight run, so a delete /
+// in-flight-transport-failure race cannot leave a ghost §7.4 queue card whose
+// replay would ErrJobNotFound.
+// ---------------------------------------------------------------------------
+
+func TestEnqueueSandboxTransportAttention_SkipsDeletedJob(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	// snap.jobID points at a job that does NOT exist in s.jobs (simulating a
+	// DeleteJobByID that completed while this run's goroutine was blocked on
+	// the now-severed stream).
+	a := sandboxExecArgs{
+		snap: jobSnapshot{
+			jobID:       "0123456789abcdef",
+			label:       "ghost",
+			sideEffects: true,
+		},
+		runID:     "deadbeefdeadbe01",
+		startedAt: time.Now(),
+		lg:        slog.Default(),
+	}
+
+	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe01-1234567890123456789")
+
+	if n := s.SandboxAttentionCount(); n != 0 {
+		t.Fatalf("attention count = %d, want 0 — deleted-job transport failure must not write a ghost card [R20260614-ARCH-1]", n)
+	}
+}
+
+func TestEnqueueSandboxTransportAttention_WritesForLiveJob(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+	j := sideEffectsJob(t, s) // job exists
+
+	a := sandboxExecArgs{
+		snap: jobSnapshot{
+			jobID:       j.ID,
+			label:       jobTitleOrFallback(j),
+			sideEffects: true,
+		},
+		runID:     "deadbeefdeadbe02",
+		startedAt: time.Now(),
+		lg:        slog.Default(),
+	}
+
+	s.enqueueSandboxTransportAttention(a, "run-deadbeefdeadbe02-1234567890123456789")
+
+	if n := s.SandboxAttentionCount(); n != 1 {
+		t.Fatalf("attention count = %d, want 1 — live-job side-effecting transport failure must enqueue [R20260614-ARCH-1]", n)
+	}
+}

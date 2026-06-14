@@ -119,11 +119,15 @@ func (s *Scheduler) reconcileSandboxPending() {
 			continue
 		}
 		var p sandboxPending
-		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) {
+		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 {
 			// Corrupt or tampered record (RunID/JobID must be scheduler-
 			// generated hex — they flow into run-record paths and the
-			// broadcast, so shape-validate before use). Remove so it does
-			// not re-warn on every boot.
+			// broadcast, so shape-validate before use). StartedAtMS<=0
+			// (R20260614-GO-003) is equally corrupt: time.UnixMilli on a
+			// zero/negative value yields a 1970 (or pre-epoch) StartedAt that
+			// flows into CronRun.StartedAt and an astronomical DurationMS,
+			// wrecking the dashboard timeline — drop the record. Remove so it
+			// does not re-warn on every boot.
 			slog.Warn("cron sandbox: corrupt pending record dropped", "file", e.Name(), "err", err)
 			_ = os.Remove(path)
 			continue
@@ -251,6 +255,14 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		// finalizer bound to s.jobInflight(jobID) would reset run-B's view
 		// and Store(false) its gate, letting a third tick double-run.
 		// finalize() no-ops on nil inflight, which is exactly right here.
+		//
+		// R20260614-GO-001: this branch calls finishRun directly (not via
+		// finishSandboxRunWith, the only other RunStateFailed→sandbox path),
+		// so it must bump CronSandboxRunFailedTotal itself — otherwise an
+		// orphaned sandbox run closed here is invisible to the
+		// naozhi_cron_sandbox_run_failed_total alert. State is RunStateFailed
+		// by construction here, matching finishSandboxRunWith's gate.
+		metrics.CronSandboxRunFailedTotal.Add(1)
 		s.finishRun(finishArgs{
 			job: j, runID: p.RunID, startedAt: startedAt,
 			trigger: runtelemetry.TriggerScheduled,
@@ -272,6 +284,11 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		metrics.CronRunStartedTotal.Add(1)
 		metrics.CronRunEndedTotal.Add(1)
 		metrics.CronRunFailedTotal.Add(1)
+		// R20260614-GO-001: this orphan is a sandbox-placement run that failed
+		// (transport) just like the j!=nil branch — bump the sandbox-specific
+		// counter too so naozhi_cron_sandbox_run_failed_total stays consistent
+		// whether or not the job survived the restart.
+		metrics.CronSandboxRunFailedTotal.Add(1)
 		lg.Info("cron sandbox: orphan's job no longer exists; closing record file only")
 	}
 
