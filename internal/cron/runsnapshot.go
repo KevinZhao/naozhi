@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // SandboxRunSnapshot is the content-addressed record of a sandbox run's
@@ -102,8 +104,11 @@ func (s *Scheduler) writeSandboxSnapshot(jobID, runID, prompt, model, imageVersi
 		lg.Warn("cron sandbox: snapshot dir create failed; replay unavailable", "err", err)
 		return
 	}
-	// runID is scheduler-generated hex — path-safe by construction.
-	if err := os.WriteFile(filepath.Join(dir, runID+".json"), b, 0o600); err != nil {
+	// runID is scheduler-generated hex — path-safe by construction. Atomic
+	// write to match writeSnapshotBlob's tmp+rename discipline (the blob it
+	// references is committed atomically; a truncated manifest would dangle a
+	// hash to a blob it can no longer parse) — R20260614-ARCH-2.
+	if err := osutil.WriteFileAtomic(filepath.Join(dir, runID+".json"), b, 0o600); err != nil {
 		lg.Warn("cron sandbox: snapshot manifest write failed; replay unavailable", "err", err)
 	}
 }
