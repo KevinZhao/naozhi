@@ -67,6 +67,21 @@ func TestRunShutdown_EmitsPhaseTimings(t *testing.T) {
 			"(got positions sysmgr=%d scheduler=%d router=%d) — see RFC v2.1 §5.2",
 			idxSys, idxSched, idxRouter)
 	}
+
+	// #1897: the scheduler phase must honour an external shutdown deadline via
+	// StopContext, not the bare scheduler.Stop (which ignores the host window
+	// and waits out its full ~35s internal budget, starving the later phases).
+	// Pinning the source here is the real revert-guard: a behavioral test in
+	// package main cannot build a short-budget *cron.Scheduler (the budget
+	// override helpers are cron-package _test.go-only), and the ctx
+	// short-circuit itself is already covered by
+	// internal/cron/stop_context_test.go.
+	if !strings.Contains(mainBody, "scheduler.StopContext(") {
+		t.Error("main.go: scheduler shutdown step must call scheduler.StopContext(ctx) so the host shutdown deadline is honoured (#1897)")
+	}
+	if strings.Contains(mainBody, "run: scheduler.Stop}") {
+		t.Error("main.go: scheduler step still uses bare `run: scheduler.Stop` — it ignores the shutdown deadline and can wait out its full ~35s budget (#1897)")
+	}
 }
 
 func readSrc(t *testing.T, path string) string {
