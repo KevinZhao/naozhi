@@ -713,6 +713,150 @@ func TestEventEntriesForKeyAppend(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_BinarySearch_R20260613PERF1 exercises the
+// binary-search optimisation in the dead-session (persistedHistory) branch.
+// Each sub-case asserts that EventEntriesSinceAppend returns exactly the same
+// entries as a reference linear scan (the semantics must be identical to the
+// old O(n) loop).  R20260613-PERF-1.
+
+// helper: linearSince returns entries with Time > afterMS by brute-force scan.
+func linearSince(history []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	var out []cli.EventEntry
+	for _, e := range history {
+		if e.Time > afterMS {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func assertEntriesEqual(t *testing.T, label string, got, want []cli.EventEntry) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s: len got=%d want=%d", label, len(got), len(want))
+		return
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("%s: entry[%d] got {%d,%q} want {%d,%q}",
+				label, i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_Empty(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistorySorted = true
+	got := s.EventEntriesSinceAppend(nil, 0)
+	if got != nil {
+		t.Errorf("empty history: got %v want nil", got)
+	}
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_AllBelowOrEqual(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+	// afterMS == last.Time: strict > means nothing qualifies.
+	got := s.EventEntriesSinceAppend(nil, 300)
+	if got != nil {
+		t.Errorf("all <= afterMS: got %v want nil", got)
+	}
+	// afterMS > last.Time: also nothing.
+	got = s.EventEntriesSinceAppend(nil, 400)
+	if got != nil {
+		t.Errorf("afterMS > last: got %v want nil", got)
+	}
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_AllAbove(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+	// afterMS is below all entries: all three should be returned.
+	got := s.EventEntriesSinceAppend(nil, 0)
+	want := linearSince(s.persistedHistory, 0)
+	assertEntriesEqual(t, "all > afterMS=0", got, want)
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_BoundaryExact(t *testing.T) {
+	t.Parallel()
+	// Strict > semantics: afterMS exactly equal to an entry's Time must NOT
+	// include that entry.
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+		{Time: 400, Summary: "d"},
+	}
+	s.persistedHistorySorted = true
+
+	// afterMS == 200: only entries with Time 300 and 400 qualify.
+	got := s.EventEntriesSinceAppend(nil, 200)
+	want := linearSince(s.persistedHistory, 200)
+	assertEntriesEqual(t, "boundary exact afterMS=200", got, want)
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_DuplicateTimes(t *testing.T) {
+	t.Parallel()
+	// When multiple entries share the same Time value, the boundary is still
+	// correct: all entries with Time == afterMS are excluded; all with Time
+	// strictly greater are included.
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a1"},
+		{Time: 100, Summary: "a2"},
+		{Time: 200, Summary: "b1"},
+		{Time: 200, Summary: "b2"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+
+	// afterMS == 100: both b1, b2, c qualify; a1 and a2 do not.
+	got := s.EventEntriesSinceAppend(nil, 100)
+	want := linearSince(s.persistedHistory, 100)
+	assertEntriesEqual(t, "duplicate times afterMS=100", got, want)
+
+	// afterMS == 200: only c qualifies.
+	got = s.EventEntriesSinceAppend(nil, 200)
+	want = linearSince(s.persistedHistory, 200)
+	assertEntriesEqual(t, "duplicate times afterMS=200", got, want)
+}
+
+func TestEventEntriesSinceAppend_BinarySearch_MatchesLinear(t *testing.T) {
+	t.Parallel()
+	// Comprehensive cross-check: binary search result equals the old linear
+	// scan for every possible afterMS boundary in the history.
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 10, Summary: "a"},
+		{Time: 20, Summary: "b"},
+		{Time: 30, Summary: "c"},
+		{Time: 40, Summary: "d"},
+		{Time: 50, Summary: "e"},
+	}
+	s.persistedHistorySorted = true
+
+	boundaries := []int64{0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}
+	for _, afterMS := range boundaries {
+		want := linearSince(s.persistedHistory, afterMS)
+		got := s.EventEntriesSinceAppend(nil, afterMS)
+		assertEntriesEqual(t, "linear vs binary afterMS", got, want)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

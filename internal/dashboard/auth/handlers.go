@@ -95,6 +95,21 @@ type Handlers struct {
 
 const maxLoginLimiters = 10000
 
+// authCookieMaxAgeSeconds is the lifetime of the nz_auth cookie set on a
+// successful login.
+//
+// R20260613-SEC-3 (#2074): the cookie MAC carries no per-session identity
+// (it is HMAC(secret, token||gen||seq), shared by every browser), so logout
+// cannot revoke a single cookie server-side without RotateCookieGen — which
+// would evict every concurrent operator (see HandleLogout's comment, #1913).
+// Until per-session cookie identity lands, the only server-side bound on a
+// stolen-but-unrevoked cookie is this MaxAge. Shortening it from 24h to 1h
+// shrinks the post-compromise replay window 24× at the cost of a more
+// frequent re-login on long-idle sessions. Active tabs are unaffected: the
+// dashboard re-issues the cookie on every successful login and the WS layer
+// holds an open session, so a working operator rarely sees the prompt.
+const authCookieMaxAgeSeconds = 3600 // 1 hour
+
 // New constructs a Handlers from the auth-relevant ServerOptions inputs.
 // Phase 3a (server-split-phase4-design.md §6.5 Plan B): exported ctor so
 // internal/server's buildAuthHandlers can construct without needing access
@@ -572,7 +587,7 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 		Secure:   a.IsSecure(r),
-		MaxAge:   86400, // 1 day
+		MaxAge:   authCookieMaxAgeSeconds,
 	})
 	httputil.WriteOK(w)
 }

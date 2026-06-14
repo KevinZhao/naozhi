@@ -273,6 +273,12 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lines, truncated, err := h.scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
+	if errors.Is(err, cronpkg.ErrSandboxEventsBusy) {
+		// Concurrency semaphore saturated: fail fast (mirrors the transcript
+		// endpoint's "busy" 503) rather than serving a partial stream.
+		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "cron run events busy"})
+		return
+	}
 	if err != nil {
 		// A scan error still returns the partial head (lines may be non-nil);
 		// log + serve what we have rather than hiding a healthy opening.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -316,11 +317,64 @@ func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
 	})
 }
 
+// storeMarshalBufPool recycles the assembly buffer that marshalStoreEntriesFunc
+// concatenates each session's cached object encoding into. R20260613-PERF-3
+// (#2073): the previous code did `make([]byte, 0, 256*N)` on every save tick —
+// at 200 sessions that is a ~51 KB allocation used once and discarded each 30s
+// saveIfDirty cycle. The per-session marshal cache (R20260531A-PERF-2) already
+// avoids re-encoding unchanged sessions, but the full N×256 assembly buffer was
+// still freshly allocated every tick. Pooling it keeps the backing array alive
+// across saves so the steady-state save path is allocation-free. Mirrors the
+// bridgeEncPool / batchScratchPool idiom in eventlog_bridge.go.
+//
+// The buffer is fully consumed before it is returned to the pool: the save
+// paths hand the returned slice straight to writeStoreData (a synchronous
+// WriteFileAtomic that copies the bytes to disk and does not retain the slice),
+// then call putStoreMarshalBuf. Nothing aliases the slice past that point.
+var storeMarshalBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
+// storeMarshalBufMaxCap caps buffer reuse so a one-off oversized store (e.g. a
+// transient burst of thousands of sessions) does not permanently pin a large
+// backing array in the pool. A buffer that grew past this is dropped on return
+// instead of being recycled. Same rationale as bridgeEncMaxCap.
+const storeMarshalBufMaxCap = 256 * 1024
+
+// storeMarshalBufRecyclable reports whether a buffer of the given capacity is
+// small enough to return to the pool. Split out as a pure predicate so the
+// cap-gating decision is unit-testable without going through sync.Pool (whose
+// Get/Put give no reuse guarantee under GC, making pool-roundtrip assertions
+// inherently flaky). See putStoreMarshalBuf.
+func storeMarshalBufRecyclable(capacity int) bool {
+	return capacity <= storeMarshalBufMaxCap
+}
+
+// putStoreMarshalBuf returns an assembly buffer to the pool after the caller is
+// done with it (i.e. after writeStoreData has copied the bytes to disk). Buffers
+// that grew past the cap are dropped so the pool never pins an oversized array.
+func putStoreMarshalBuf(buf []byte) {
+	if !storeMarshalBufRecyclable(cap(buf)) {
+		return
+	}
+	b := buf[:0]
+	storeMarshalBufPool.Put(&b)
+}
+
 // marshalStoreEntriesFunc assembles the JSON array from each session's cached
 // object encoding, driven by an iteration closure so both the map- and
 // slice-shaped snapshots share one code path.
+//
+// The returned slice is borrowed from storeMarshalBufPool; the caller MUST
+// return it via putStoreMarshalBuf once the bytes have been written (see
+// writeStoreData call sites). Callers that do not return it simply forfeit the
+// reuse — correctness is unaffected.
 func marshalStoreEntriesFunc(n int, iter func(yield func(*ManagedSession))) ([]byte, error) {
-	buf := make([]byte, 0, 256*n)
+	bufp := storeMarshalBufPool.Get().(*[]byte)
+	buf := (*bufp)[:0]
 	buf = append(buf, '[')
 	first := true
 	iter(func(s *ManagedSession) {
@@ -353,7 +407,12 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
 	}
-	return writeStoreData(path, data)
+	// data is borrowed from storeMarshalBufPool; writeStoreData copies it to
+	// disk synchronously and does not retain it, so it is safe to recycle once
+	// the write returns (success or failure — the bytes are not reused either way).
+	writeErr := writeStoreData(path, data)
+	putStoreMarshalBuf(data)
+	return writeErr
 }
 
 // saveStoreSlice persists a slice snapshot of sessions. The periodic Cleanup /
@@ -369,7 +428,10 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
 	}
-	return writeStoreData(path, data)
+	// See saveStore: data is a pooled buffer that writeStoreData does not retain.
+	writeErr := writeStoreData(path, data)
+	putStoreMarshalBuf(data)
+	return writeErr
 }
 
 // writeStoreData ensures the store directory exists, atomically writes the

@@ -162,6 +162,41 @@ func TestReconcileOrphan_DeletedJobBumpsMetrics(t *testing.T) {
 	}
 }
 
+// TestReconcileOrphan_DeletedJobBumpsStartedTotal pins R20260613-CR-2:
+// the nil-job (deleted-while-down) reconcile path must bump
+// CronRunStartedTotal in addition to CronRunEndedTotal/CronRunFailedTotal
+// so the Started/Ended counters stay balanced. The j!=nil path bumps
+// Started via emitRunStarted (scheduler_callbacks.go:100); the nil-job
+// path must do the same manually.
+func TestReconcileOrphan_DeletedJobBumpsStartedTotal(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	// No job registered → s.jobs[jobID] == nil.
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: "0123456789abcdef", RunID: "cafebabe00000002",
+		RuntimeSessionID: "run-cafebabe00000002-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-4 * time.Minute).UnixMilli(),
+	})
+
+	startedBefore := metrics.CronRunStartedTotal.Value()
+	endedBefore := metrics.CronRunEndedTotal.Value()
+
+	s.reconcileSandboxPending()
+
+	if rec.endedCount() != 0 {
+		t.Fatal("no broadcast expected when job is gone")
+	}
+	if delta := metrics.CronRunStartedTotal.Value() - startedBefore; delta != 1 {
+		t.Fatalf("CronRunStartedTotal delta = %d for deleted-job orphan, want 1 [R20260613-CR-2]", delta)
+	}
+	if delta := metrics.CronRunEndedTotal.Value() - endedBefore; delta != 1 {
+		t.Fatalf("CronRunEndedTotal delta = %d for deleted-job orphan, want 1 [R20260613-CR-2]", delta)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fix 4 (R20260613-LOGIC-2): stopSandboxRunsForJob must skip records whose
 // RunID fails IsValidID (log-injection guard).

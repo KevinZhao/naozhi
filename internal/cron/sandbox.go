@@ -299,44 +299,66 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 				"pending", pendingPath != "")
 			msg += " (microVM fate UNKNOWN — termination unconfirmed; check for side effects before re-running)"
 		}
-		// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
-		// auto-replay — it enters the human confirmation queue (the operator
-		// checks whether the side effect already landed before deciding to
-		// confirm-done or replay). A side-effect-free job is safe to re-run
-		// freely, so it never enters the queue (its failed-transport record
-		// still warns in history). RuntimeSessionID is carried so the queue's
-		// replay action can satisfy §6.2 rule 1 (Stop before replay). Skip the
-		// queue entry when Stop was already confirmed in-process: the microVM is
-		// dead, but the SIDE EFFECT may still have landed before the stream
-		// broke, so a side-effecting job still needs a human look — keep it
-		// queued regardless of StopConfirmed.
-		if a.snap.sideEffects {
-			s.writeSandboxAttention(sandboxAttention{
-				JobID:            a.snap.jobID,
-				RunID:            a.runID,
-				RuntimeSessionID: runtimeSID,
-				Reason:           attentionReasonTransport,
-				JobLabel:         a.snap.label,
-				StartedAtMS:      a.startedAt.UnixMilli(),
-				CreatedAtMS:      s.attentionNowMS(),
-			}, a.lg)
-		}
 		// R20260613-CR-6 (#2059): align shutdown-cancel classification with the
 		// local path (scheduler_run.go). sandbox ctx = WithTimeout(s.stopCtx,
 		// budget), so scheduler Stop cancels s.stopCtx → ctx.Err()=Canceled.
 		// Treat that as RunStateCanceled with skipPersist=true (keep history
 		// clean — a graceful shutdown is not a transport failure) rather than
 		// recording a failed-transport run. DeadlineExceeded stays TimedOut.
+		//
+		// R20260613-LB-1 (#2081): the side-effecting human-confirmation-queue
+		// write below MUST stay inside the non-cancel branches. A run cancelled
+		// only by graceful shutdown is not a transport failure (it is recorded
+		// as RunStateCanceled with skipPersist above's sibling branch); enqueuing
+		// it for attention would leave the operator a phantom "needs confirm"
+		// entry that a later reconcileSandboxPending overwrites with orphaned —
+		// for a run whose history correctly reads Canceled. So only genuine
+		// transport failures (DeadlineExceeded / default) feed the queue.
 		switch {
 		case errors.Is(ctx.Err(), context.Canceled):
 			s.finishSandboxRunSkipPersist(a, RunStateCanceled, ErrClassCanceled, outcome.ResultText,
 				"sandbox run canceled by shutdown", metaPtr)
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			s.enqueueSandboxTransportAttention(a, runtimeSID)
 			s.finishSandboxRun(a, RunStateTimedOut, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 		default:
+			s.enqueueSandboxTransportAttention(a, runtimeSID)
 			s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 		}
 	}
+}
+
+// enqueueSandboxTransportAttention adds a side-effecting job's genuine
+// transport failure to the human confirmation queue.
+//
+// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
+// auto-replay — it enters the human confirmation queue (the operator checks
+// whether the side effect already landed before deciding to confirm-done or
+// replay). A side-effect-free job is safe to re-run freely, so it never enters
+// the queue (its failed-transport record still warns in history).
+// RuntimeSessionID is carried so the queue's replay action can satisfy §6.2
+// rule 1 (Stop before replay). The entry is written regardless of
+// StopConfirmed: the microVM may be dead, but the SIDE EFFECT may still have
+// landed before the stream broke, so a side-effecting job still needs a human
+// look.
+//
+// R20260613-LB-1 (#2081): callers MUST NOT invoke this for shutdown-cancel
+// (ctx.Err()==Canceled) runs — those are classified RunStateCanceled and kept
+// out of the queue, so this is only reached from the DeadlineExceeded/default
+// transport branches.
+func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeSID string) {
+	if !a.snap.sideEffects {
+		return
+	}
+	s.writeSandboxAttention(sandboxAttention{
+		JobID:            a.snap.jobID,
+		RunID:            a.runID,
+		RuntimeSessionID: runtimeSID,
+		Reason:           attentionReasonTransport,
+		JobLabel:         a.snap.label,
+		StartedAtMS:      a.startedAt.UnixMilli(),
+		CreatedAtMS:      s.attentionNowMS(),
+	}, a.lg)
 }
 
 // sandboxMetaPtr returns &meta when the receipt carries any information,
@@ -455,6 +477,23 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		if degraded {
 			return nil
 		}
+		// R20260613-ARCH-2: the reader (SandboxRunEvents) caps a single
+		// NDJSON token at sandboxEventsMaxLineSize via bufio.Scanner. If we
+		// write a line longer than that cap the scanner hits ErrTooLong and
+		// discards every subsequent line in the file — turning a single
+		// oversized frame into a silent loss of ALL later events. Degrade
+		// gracefully instead: drop the oversized line with a WARN (the
+		// information is lost regardless because the reader cannot read it)
+		// and keep writing subsequent lines so the reader can still parse
+		// the rest of the stream.
+		// Note: `line` here is the raw envelope without the trailing '\n'
+		// that this sink appends; compare against the cap minus 1 so the
+		// written form (line + '\n') never exceeds the scanner's token max.
+		if len(line) >= sandboxEventsMaxLineSize {
+			lg.Warn("cron sandbox: oversized event line dropped; will not be readable by scanner",
+				"len", len(line))
+			return nil
+		}
 		_, werr := w.Write(line)
 		if werr == nil {
 			werr = w.WriteByte('\n')
@@ -507,6 +546,15 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	if maxLines <= 0 {
 		maxLines = sandboxEventsDefaultMax
 	}
+	// Bound concurrent reads (mirrors transcriptSem): a non-blocking acquire
+	// fails fast with ErrSandboxEventsBusy rather than letting a burst pin
+	// unbounded scanner buffers [R20260613-SEC-5 / #2066].
+	select {
+	case sandboxEventsSem <- struct{}{}:
+		defer func() { <-sandboxEventsSem }()
+	default:
+		return nil, false, ErrSandboxEventsBusy
+	}
 	path := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID, runID+".ndjson")
 	f, err := os.Open(path)
 	if err != nil {
@@ -519,9 +567,10 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 
 	out := make([][]byte, 0, maxLines)
 	sc := bufio.NewScanner(f)
-	// Match the writer/agentcore ceiling: a single stream-json line can carry
-	// a large tool result.
-	sc.Buffer(make([]byte, 64*1024), (16<<20)+(64<<10))
+	// Cap a single stream-json line at sandboxEventsMaxLineSize (~1 MB):
+	// large enough for a realistic tool-result frame, small enough that a
+	// concurrent burst cannot pin gigabytes of scanner buffers.
+	sc.Buffer(make([]byte, 64*1024), sandboxEventsMaxLineSize)
 	truncated := false
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -570,3 +619,30 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 // non-positive cap. 2000 frames covers a typical run's opening comfortably
 // while keeping the response well under a megabyte for the dashboard.
 const sandboxEventsDefaultMax = 2000
+
+// sandboxEventsMaxLineSize caps a single NDJSON line read from a persisted
+// sandbox event log. The writer (sandboxEventSink) flushes one stream-json
+// envelope per line; a 1 MB ceiling covers the largest realistic tool-result
+// frame while bounding the scanner's per-request heap. The old (16<<20)+(64<<10)
+// ceiling let a single concurrent burst pin gigabytes of scanner buffers with
+// no observed need for 16 MB frames [R20260613-SEC-5 / #2066].
+const sandboxEventsMaxLineSize = (1 << 20) + (64 << 10)
+
+// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads, mirroring the
+// dashboard transcript endpoint's transcriptSem (cap 8). Each in-flight read
+// holds up to maxLines×64KB output plus a scanner buffer; without this gate a
+// single authenticated client could fan out enough concurrent reads to exhaust
+// memory [R20260613-SEC-5 / #2066]. A non-blocking acquire fails fast rather
+// than parking goroutines.
+const sandboxEventsSemCap = 8
+
+// sandboxEventsSem limits concurrent SandboxRunEvents reads process-wide.
+// Package-level (not per-Scheduler) because the bound protects the host's
+// memory, of which there is one regardless of how many schedulers exist in a
+// test binary.
+var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
+
+// ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
+// semaphore is saturated. The dashboard handler maps it to HTTP 503 so a
+// burst fails fast instead of allocating unbounded scanner buffers.
+var ErrSandboxEventsBusy = errors.New("cron sandbox: event reads busy")

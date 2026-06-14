@@ -647,3 +647,12 @@
 - [R20260613-GOLANG-CO2] executeOpt 顶部 if s==nil 对方法接收者不可达(nil 解引用在 dispatch 层 panic),误导读者可删 — internal/cron/scheduler_run.go:521
 - [R20260613-ARCH-3] BuildHandler 的 guard-fallback 分支(queue==nil)生产恒不可达,可在确认后删运行时分支(保留 interface 供测试) — internal/dispatch/dispatch.go:801
 - [R20260613-SEC-12] selfupdate.testHTTPTransport 包级可变逃逸口绕过 SSRF 守护,无 build-tag 约束防生产误用 — internal/selfupdate/selfupdate.go:481
+- [R20260614-GO-001] send_attachment_validate.go inline 注释仍描述旧 4KB 窗口，与全缓冲扫描 docstring 矛盾 — internal/server/send_attachment_validate.go:192
+- [R20260614-SEC-5] pdfNestedInImage 全缓冲扫描已实施但函数注释未同步说明 R20260613-SEC-4 修复 — internal/server/send_attachment_validate.go:227
+- [R20260614-GO-002] ReconcileOrphan 测试测全局 expvar delta 无隔离，未来加 t.Parallel/-count 会 flaky — internal/cron/sandbox_pending_fixes_test.go:171
+- [R20260614-GO-003] EventEntriesSince 非 Append 变体仍 O(n) 线性扫描，与 SinceAppend 的 O(log n) 二分不对称 — internal/session/managed_query.go:578
+- [R20260614-GO-004] pdfMagicSignature 是可变 var []byte，可改 const-like 数组强化不可变 — internal/server/send_attachment_validate.go:234
+- [R20260614-SEC-4] upstream InsecureSkipVerify=true 未在 /health 暴露，误配生产难被监控发现 — internal/upstream/connector.go:318
+- [R20260614-SEC-6] feishu 不安全 webhook 启动 warn 应升 error 与首次投递严重度一致 — internal/platform/feishu/feishu.go:641
+- [R20260614-SEC-7] weixin context_token 明文存 sync.Map，heap dump 暴露会话凭证（已知威胁模型可接受） — internal/platform/weixin/weixin.go:406
+- [R20260614-ARCH-4] 三个 sandbox 写路径 MkdirAll 后从不 SyncDir，新建目录项首跑窗口不持久 — internal/cron/sandbox_pending.go:47
