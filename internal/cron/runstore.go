@@ -764,10 +764,17 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 				limit = entry.count
 			}
 			out := make([]string, 0, limit)
+			seen := make(map[string]struct{}, limit)
 			for i := 0; i < limit; i++ {
-				if sid := entry.ringRead(i).SessionID; sid != "" {
-					out = append(out, sid)
+				sid := entry.ringRead(i).SessionID
+				if sid == "" {
+					continue
 				}
+				if _, dup := seen[sid]; dup {
+					continue
+				}
+				seen[sid] = struct{}{}
+				out = append(out, sid)
 			}
 			entry.mu.RUnlock()
 			return out
@@ -780,10 +787,17 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 	// fast path above.
 	rows := s.List(jobID, n, time.Time{})
 	out := make([]string, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
 	for i := range rows {
-		if sid := rows[i].SessionID; sid != "" {
-			out = append(out, sid)
+		sid := rows[i].SessionID
+		if sid == "" {
+			continue
 		}
+		if _, dup := seen[sid]; dup {
+			continue
+		}
+		seen[sid] = struct{}{}
+		out = append(out, sid)
 	}
 	return out
 }
