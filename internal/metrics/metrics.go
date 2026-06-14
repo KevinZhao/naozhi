@@ -347,6 +347,14 @@ var (
 	// specifically (agentcore-cloud-sandbox RFC §6.2).
 	CronSandboxRunFailedTotal = expvar.NewInt("naozhi_cron_sandbox_run_failed_total")
 
+	// CronSandboxRunTimedOutTotal counts sandbox-placement cron runs that
+	// ended in RunStateTimedOut. Kept separate from CronSandboxRunFailedTotal
+	// (which counts only genuine RunStateFailed — see #2091/R20260614-LOGIC-9)
+	// so failure alerts don't drown out sandbox deadlines, and from the
+	// path-mixed CronRunTimedOutTotal so operators can isolate sandbox
+	// timeouts from local-run timeouts.
+	CronSandboxRunTimedOutTotal = expvar.NewInt("naozhi_cron_sandbox_run_timed_out_total")
+
 	// SysessionRunStartedTotal counts sysession daemon run starts (after the
 	// per-daemon CAS gate, before tick IO). Mirrors CronRunStartedTotal for
 	// the sysession subsystem (#1723 RFC §6 Phase 1.5). Bumped unconditionally
