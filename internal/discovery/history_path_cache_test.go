@@ -210,30 +210,38 @@ func TestFindSessionJSONL_MissingProjectsDir(t *testing.T) {
 	}
 }
 
-// TestFindSessionJSONL_CacheKeyNUL: pathCacheKey uses a NUL separator
-// so two similarly-named claudeDirs cannot produce a false hit via
-// string concatenation. This is cheap defense-in-depth — without NUL,
-// "/home/alice/.claude" + "abc" and "/home/alice/.claudeabc" + ""
-// would both collide on "/home/alice/.claudeabc".
-func TestFindSessionJSONL_CacheKeyNUL(t *testing.T) {
+// TestFindSessionJSONL_CacheKeyDistinct: pathCacheKey is a (dir, id)
+// struct key, so two similarly-named claudeDirs cannot produce a false
+// hit the way a naive "dir+id" string concat could — without the field
+// boundary, "/home/alice/.claude" + "abc" and "/home/alice/.claudeabc"
+// + "" would both collapse to "/home/alice/.claudeabc". The struct key
+// keeps the fields distinct (and avoids the per-lookup concat alloc).
+func TestFindSessionJSONL_CacheKeyDistinct(t *testing.T) {
 	t.Parallel()
 	k1 := pathCacheKey("/home/alice/.claude", "abc")
 	k2 := pathCacheKey("/home/alice/.claudeabc", "")
 	if k1 == k2 {
-		t.Errorf("keys collided: %q == %q (NUL separator missing)", k1, k2)
+		t.Errorf("keys collided: %+v == %+v (struct fields must stay distinct)", k1, k2)
 	}
-	// NUL must actually be present (0x00 byte), not just any separator.
-	for _, k := range []string{k1, k2} {
-		hasNUL := false
-		for i := 0; i < len(k); i++ {
-			if k[i] == 0 {
-				hasNUL = true
-				break
-			}
+	if k1.dir != "/home/alice/.claude" || k1.id != "abc" {
+		t.Errorf("k1 fields not preserved: %+v", k1)
+	}
+}
+
+// TestPathCacheKey_NoAlloc pins PERF-005 (#2125): building the cache key
+// must not allocate. The previous "dir+\x00+id" string concat heap-
+// allocated a new key on every findSessionJSONL call, including cache
+// hits; the struct key is allocation-free.
+func TestPathCacheKey_NoAlloc(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		k := pathCacheKey("/home/alice/.claude", "00000000-0000-0000-0000-000000000abc")
+		// Touch a field so the call isn't optimized away entirely.
+		if k.id == "" {
+			t.Fatal("unexpected empty id")
 		}
-		if !hasNUL {
-			t.Errorf("key %q missing NUL separator", k)
-		}
+	})
+	if allocs != 0 {
+		t.Errorf("pathCacheKey allocated %.0f times per call, want 0", allocs)
 	}
 }
 
@@ -292,23 +300,27 @@ func TestEvictPathCache_DropsOnlyExpiredNegatives(t *testing.T) {
 	now := time.Now()
 
 	// Hand-craft a mix of entries to check eviction policy.
-	s.pathCache.entries["pos"] = pathCacheEntry{path: "/some/path"}
-	s.pathCache.entries["neg-fresh"] = pathCacheEntry{negativeUntil: now.Add(30 * time.Second)}
-	s.pathCache.entries["neg-stale-a"] = pathCacheEntry{negativeUntil: now.Add(-1 * time.Second)}
-	s.pathCache.entries["neg-stale-b"] = pathCacheEntry{negativeUntil: now.Add(-5 * time.Second)}
+	kPos := pathKey{id: "pos"}
+	kNegFresh := pathKey{id: "neg-fresh"}
+	kNegStaleA := pathKey{id: "neg-stale-a"}
+	kNegStaleB := pathKey{id: "neg-stale-b"}
+	s.pathCache.entries[kPos] = pathCacheEntry{path: "/some/path"}
+	s.pathCache.entries[kNegFresh] = pathCacheEntry{negativeUntil: now.Add(30 * time.Second)}
+	s.pathCache.entries[kNegStaleA] = pathCacheEntry{negativeUntil: now.Add(-1 * time.Second)}
+	s.pathCache.entries[kNegStaleB] = pathCacheEntry{negativeUntil: now.Add(-5 * time.Second)}
 
 	s.evictPathCacheLocked()
 
-	if _, ok := s.pathCache.entries["pos"]; !ok {
+	if _, ok := s.pathCache.entries[kPos]; !ok {
 		t.Error("positive entry evicted — must survive")
 	}
-	if _, ok := s.pathCache.entries["neg-fresh"]; !ok {
+	if _, ok := s.pathCache.entries[kNegFresh]; !ok {
 		t.Error("fresh negative evicted — only expired should drop")
 	}
-	if _, ok := s.pathCache.entries["neg-stale-a"]; ok {
+	if _, ok := s.pathCache.entries[kNegStaleA]; ok {
 		t.Error("stale negative 'neg-stale-a' should have been evicted")
 	}
-	if _, ok := s.pathCache.entries["neg-stale-b"]; ok {
+	if _, ok := s.pathCache.entries[kNegStaleB]; ok {
 		t.Error("stale negative 'neg-stale-b' should have been evicted")
 	}
 }
