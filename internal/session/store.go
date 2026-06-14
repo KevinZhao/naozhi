@@ -644,9 +644,17 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy — see saveStore.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create known IDs directory: %w", err)
+		// R20260614-GO-003: reuse storeDirEnsured (same map as writeStoreData)
+		// so the 5-minute knownIDsSaveInterval tick skips MkdirAll+Lstat+Chmod
+		// after the first successful write. Both functions target the same
+		// directory (filepath.Dir of the store path), so one successful
+		// writeStoreData call already guards saveKnownIDs. A failed EnsureDir
+		// is NOT recorded, allowing retry on the next tick.
+		if _, done := storeDirEnsured.Load(dir); !done {
+			if err := datadir.EnsureDir(dir); err != nil {
+				return fmt.Errorf("create known IDs directory: %w", err)
+			}
+			storeDirEnsured.Store(dir, struct{}{})
 		}
 	}
 	data, err := json.Marshal(sortedIDs)
