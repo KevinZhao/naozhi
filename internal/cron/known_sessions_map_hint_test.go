@@ -1,5 +1,9 @@
 // known_sessions_map_hint_test.go: structural and behavioural pins for
-// R20260603-PERF-3 — buildKnownSessionsSet map initial capacity.
+// buildKnownSessionsSet map allocation. Originally R20260603-PERF-3 sized the
+// map from len(s.jobs) under the RLock; R202606-PERF-003 reverses that
+// placement — the map is now allocated BEFORE the RLock to shorten the lock
+// window, at the cost of a fixed initial capacity hint. The lock-hold
+// reduction is the higher-value tradeoff for write-contended schedulers.
 
 package cron
 
@@ -10,11 +14,12 @@ import (
 	"testing"
 )
 
-// TestBuildKnownSessionsSet_MapHint_R20260603PERF3 is a structural pin that
-// verifies buildKnownSessionsSet allocates the output map with len(s.jobs)
-// as the capacity hint instead of the fixed 32 that caused repeated rehashes
-// for schedulers with many jobs.
-func TestBuildKnownSessionsSet_MapHint_R20260603PERF3(t *testing.T) {
+// TestBuildKnownSessionsSet_MapAllocBeforeLock_R202606PERF003 is a structural
+// pin that verifies buildKnownSessionsSet allocates the output map BEFORE
+// taking s.mu.RLock(), so the make() does not run inside the lock window and
+// block writers. This supersedes the earlier R20260603-PERF-3 pin that
+// required the make to read len(s.jobs) under the lock.
+func TestBuildKnownSessionsSet_MapAllocBeforeLock_R202606PERF003(t *testing.T) {
 	src, err := os.ReadFile("scheduler_session.go")
 	if err != nil {
 		t.Fatalf("read scheduler_session.go: %v", err)
@@ -31,20 +36,8 @@ func TestBuildKnownSessionsSet_MapHint_R20260603PERF3(t *testing.T) {
 		rest = rest[:len(fnMarker)+next]
 	}
 
-	// Must NOT use the fixed 32 hint.
-	if strings.Contains(rest, "make(map[string]struct{}, 32)") {
-		t.Error("buildKnownSessionsSet must not use make(..., 32); " +
-			"use len(s.jobs) as the capacity hint (R20260603-PERF-3)")
-	}
-
-	// Must use len(s.jobs) as the hint.
-	if !strings.Contains(rest, "len(s.jobs)") {
-		t.Error("buildKnownSessionsSet must use len(s.jobs) as the map " +
-			"capacity hint to avoid rehashes on large job sets (R20260603-PERF-3)")
-	}
-
-	// The make must appear after s.mu.RLock() so len(s.jobs) is read under
-	// the read lock.
+	// The map make must appear BEFORE s.mu.RLock() so the allocation is not
+	// performed while holding the read lock. R202606-PERF-003.
 	idxRLock := strings.Index(rest, "s.mu.RLock()")
 	idxMake := strings.Index(rest, "make(map[string]struct{}")
 	if idxRLock < 0 {
@@ -53,9 +46,20 @@ func TestBuildKnownSessionsSet_MapHint_R20260603PERF3(t *testing.T) {
 	if idxMake < 0 {
 		t.Fatal("buildKnownSessionsSet: make(map[string]struct{}) not found")
 	}
-	if idxMake <= idxRLock {
-		t.Error("buildKnownSessionsSet: map make must appear after s.mu.RLock() " +
-			"so len(s.jobs) is read under the read lock (R20260603-PERF-3)")
+	if idxMake >= idxRLock {
+		t.Error("buildKnownSessionsSet: map make must appear before s.mu.RLock() " +
+			"so the allocation does not extend the lock window (R202606-PERF-003)")
+	}
+
+	// The map alloc must not depend on len(s.jobs): that read needs the lock,
+	// which is exactly what we moved the alloc out of.
+	makeStmt := rest[idxMake:]
+	if end := strings.Index(makeStmt, ")"); end >= 0 {
+		makeStmt = makeStmt[:end+1]
+	}
+	if strings.Contains(makeStmt, "len(s.jobs)") {
+		t.Error("buildKnownSessionsSet: map make must not size from len(s.jobs) " +
+			"now that it runs before the RLock (R202606-PERF-003)")
 	}
 }
 

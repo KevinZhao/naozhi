@@ -88,6 +88,36 @@ func TestCacheGetBefore_LimitEqualsAvailable(t *testing.T) {
 	}
 }
 
+// TestCacheGetBefore_EmptyEntryStillHit pins R202606-PERF-002: the lazy-alloc
+// rewrite must keep the cache-hit contract for a warm entry with no rows.
+// cacheGetBefore should return (nil/empty, true) — a hit, not a miss — and
+// must not allocate when there is nothing to collect.
+func TestCacheGetBefore_EmptyEntryStillHit(t *testing.T) {
+	t.Parallel()
+
+	const keepCount = 20
+	s := newTestStore(t, keepCount, 30*24*time.Hour)
+	jobID := mustGenerateID()
+
+	// Append one run then warm the cache, so the entry exists and is warm.
+	now := time.Now()
+	s.Append(makeRun(jobID, now.Add(-time.Hour)))
+	if got := s.List(jobID, keepCount, time.Time{}); len(got) != 1 {
+		t.Fatalf("warm List len=%d want 1", len(got))
+	}
+
+	// All-filtered case: cutoff older than the single run so nothing passes.
+	// Must be a cache hit (ok==true) with an empty result, not a miss.
+	cutoff := now.Add(-2 * time.Hour)
+	got, ok := s.cacheGetBefore(jobID, 10, cutoff)
+	if !ok {
+		t.Fatalf("cacheGetBefore: ok=false want true (warm, under cap is still a hit)")
+	}
+	if len(got) != 0 {
+		t.Fatalf("cacheGetBefore all-filtered len=%d want 0; got %+v", len(got), got)
+	}
+}
+
 // TestCacheGetBefore_SomeBeyondCutoff tests the mixed case: some entries are
 // newer than cutoff (will be skipped via continue) and some are older (will be
 // collected).  limit must still bound the result.

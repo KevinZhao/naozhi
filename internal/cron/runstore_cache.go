@@ -382,7 +382,10 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 	if entry.count >= s.keepCount {
 		return nil, false
 	}
-	out := make([]CronRunSummary, 0, limit)
+	// R202606-PERF-002: lazily allocate out so the empty-job cache-hit path
+	// (entry.count == 0) and all-filtered paths return a nil slice without
+	// paying the make([]CronRunSummary, 0, limit). Still a cache hit.
+	var out []CronRunSummary
 	for i := 0; i < entry.count; i++ {
 		r := entry.ringRead(i)
 		// diskListNewestFirst applies StartedAt strict-less-than the
@@ -390,6 +393,9 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 		// lockstep on the equality boundary.
 		if !before.IsZero() && !r.StartedAt.Before(before) {
 			continue
+		}
+		if out == nil {
+			out = make([]CronRunSummary, 0, limit)
 		}
 		out = append(out, r)
 		// R20260606-PERF-11: break as soon as limit is reached rather than
