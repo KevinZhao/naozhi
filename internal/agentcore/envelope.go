@@ -31,6 +31,27 @@ const (
 	KindMeta EnvelopeKind = "meta"
 )
 
+// MaxEnvelopeLineBytes is the single-source-of-truth ceiling for one
+// serialized SSE envelope line on the sandbox event wire. It bounds BOTH
+// ends of the same NDJSON contract so they cannot drift:
+//
+//   - the SSE decoder (holdStream) sizes its bufio.Scanner token limit to
+//     this value — the bootstrap caps each CLI stdout line at 16MB and wraps
+//     it in the envelope, so a max-size CLI line still fits with margin;
+//   - the cron reader (SandboxRunEvents) and its write-side guard
+//     (sandboxEventSink) use the same value, so any line the decoder accepts
+//     is also readable back.
+//
+// R20260613-214326-ARCH-1 (#2083): a previous split (16MB writer / 1MB
+// reader) let 1–16MB tool-result lines write but never read — the reader's
+// scanner hit bufio.ErrTooLong and silently dropped that line plus every
+// later event. Reader-side memory is bounded by the SandboxRunEvents
+// concurrency semaphore, not by shrinking this cap below the writer's.
+//
+// 16MiB + 64KiB: the 16MiB CLI stdout ceiling plus envelope/JSON-escaping
+// overhead headroom.
+const MaxEnvelopeLineBytes = (16 << 20) + (64 << 10)
+
 // Envelope is one decoded SSE frame from the bootstrap handler.
 type Envelope struct {
 	Kind EnvelopeKind    `json:"kind"`
