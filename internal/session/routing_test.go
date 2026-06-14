@@ -445,6 +445,69 @@ func TestResolveForKey(t *testing.T) {
 	}
 }
 
+// TestResolveForKey_ReservedNamespacesAlwaysRejected pins the runtime
+// enforcement that cron issue #2061's invariant (2) rests on: ResolveForKey
+// MUST reject every reserved key namespace so no external resume/route path
+// can derive an AgentOpts (and thus a GetOrCreate) against a cron: / scratch:
+// / sys: / bare-project: key. freshContextPreflightP0
+// (internal/cron/scheduler_run.go) owns the cron: namespace and its
+// Reset(key)+GetOrCreate(key) two-step relies on no external caller ever
+// resolving a cron: key. That dependency is documented in prose there; this
+// test converts it into an executed assertion.
+//
+// Key shape matters: the cases use FOUR-segment reserved keys whose 4th
+// segment is a real default agent ("general"). That is deliberate — a
+// two-segment key like "cron:x" is rejected by the len(parts)!=4 fallback
+// REGARDLESS of the IsReservedNamespace short-circuit, so it cannot detect a
+// regression that removes that short-circuit. With "cron:a:b:general", if the
+// reserved-namespace branch were ever reordered/removed, the key would fall
+// through to defaults["general"] and resolve ok=true with a non-zero opts —
+// which this test would catch. Both the bound (data!=nil) and unbound
+// (data==nil) resolvers are covered, and the cases are derived from
+// reservedKeyPrefixes so a future namespace auto-extends the guard.
+//
+// Companion to the {"cron_key_rejected"} / {"scratch_key_rejected"} rows in
+// TestResolveForKey (bound resolver); do not delete either believing the
+// other is redundant — this adds the unbound resolver + every reserved prefix.
+func TestResolveForKey_ReservedNamespacesAlwaysRejected(t *testing.T) {
+	t.Parallel()
+	defaults := map[string]AgentOpts{"general": {Model: "sonnet"}}
+	bound := NewKeyResolver(defaults, &fakeDataSource{byName: map[string]ProjectBinding{
+		"p": {Bound: true, Name: "p", WorkspaceDir: "/w", PlannerModel: "opus"},
+	}})
+	unbound := NewKeyResolver(defaults, nil)
+
+	// One four-segment key per reserved namespace, 4th segment = a real
+	// default agent so a regression removing the IsReservedNamespace branch
+	// would flip ok=true / opts={Model:"sonnet"} (and fail this test).
+	// e.g. "cron:a:b:general", "project:a:b:general", "scratch:a:b:general",
+	// "sys:a:b:general". project:a:b:general is NOT a planner key (no :planner
+	// suffix), so it routes to the reserved-namespace branch; the planner
+	// positive path stays covered by TestResolveForKey's "planner_exists" row.
+	var keys []string
+	for _, p := range reservedKeyPrefixes {
+		keys = append(keys, p+"a:b:general")
+	}
+
+	for _, r := range []struct {
+		name string
+		kr   *KeyResolver
+	}{{"bound", bound}, {"unbound", unbound}} {
+		for _, k := range keys {
+			t.Run(r.name+"/"+k, func(t *testing.T) {
+				opts, ok := r.kr.ResolveForKey(k)
+				if ok {
+					t.Errorf("ResolveForKey(%q) ok=true, want false (reserved namespace must reject; "+
+						"a regression removing the IsReservedNamespace short-circuit would surface here)", k)
+				}
+				if !reflect.DeepEqual(opts, AgentOpts{}) {
+					t.Errorf("ResolveForKey(%q) opts=%#v, want zero AgentOpts", k, opts)
+				}
+			})
+		}
+	}
+}
+
 // TestResolveForKey_IM4SegmentDoesNotOverlayWorkspace is the SS2
 // regression guard. The RFC §3.1 branch (c) comment states "does NOT
 // overlay workspace" for the IM 4-segment branch (resume path:
