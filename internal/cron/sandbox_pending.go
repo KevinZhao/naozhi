@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -55,7 +56,12 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 	}
 	// runID is scheduler-generated hex — path-safe by construction.
 	path := filepath.Join(dir, p.RunID+".json")
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	// Atomic write (tmp→fsync→rename→SyncDir): this file is the ONLY restart
+	// reconcile handle to Stop an orphaned microVM (godoc lines 16-21). A
+	// crash mid-write under bare os.WriteFile could leave a truncated/empty
+	// record that reconcile drops as corrupt → permanent microVM orphan
+	// (R20260614-ARCH-1).
+	if err := osutil.WriteFileAtomic(path, b, 0o600); err != nil {
 		lg.Warn("cron sandbox: pending write failed; restart reconcile unavailable for this run", "err", err)
 		return ""
 	}

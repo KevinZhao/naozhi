@@ -1085,6 +1085,14 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
+	// sysession.runner.model feeds the same --model argv (sysession/runner.go
+	// appends `--model <value>` to the exec args). Without the shared
+	// allowlist, a leading-`-` / flag-shaped identifier (e.g.
+	// "--system-prompt evil") slips straight into argv as a flag injection.
+	if err := validateModelString("sysession.runner.model", cfg.Sysession.Runner.Model); err != nil {
+		return err
+	}
+
 	// projects.planner_defaults.prompt 走 --append-system-prompt argv，
 	// 与 project.PlannerPrompt 完全同源。validateConfig 之前漏检此字段：
 	// 配置文件里写入 NUL / C0 / C1 / bidi / LS-PS 会绕过所有验证直接进 argv。
