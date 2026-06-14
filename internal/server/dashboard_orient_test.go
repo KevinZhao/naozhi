@@ -287,8 +287,70 @@ func TestHandleOrient_MissingIDRejected(t *testing.T) {
 func TestHandleOrient_UnknownIDNotFound(t *testing.T) {
 	h := newOrientTestHandler(&orientConfig{enabled: true, runner: &stubVision{answer: "right"}, timeout: time.Second})
 	w := httptest.NewRecorder()
-	h.handleOrient(w, orientReq("deadbeefdeadbeef"))
+	// Upload IDs are 32 lowercase hex chars (hex.EncodeToString of 16 rand bytes).
+	h.handleOrient(w, orientReq("deadbeefdeadbeefdeadbeefdeadbeef"))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("unknown id must 404, got %d", w.Code)
+	}
+}
+
+// TestHandleOrient_InvalidIDRejected pins [R20260614-SEC-7]: IDs that do not
+// match the 32-char lowercase hex shape of uploadStore.Put must be rejected
+// with 400 before reaching the store.
+func TestHandleOrient_InvalidIDRejected(t *testing.T) {
+	h := newOrientTestHandler(&orientConfig{enabled: true, runner: &stubVision{answer: "right"}, timeout: time.Second})
+
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"too short", "deadbeef"},
+		{"too long", strings.Repeat("a", 33)},
+		{"uppercase hex", strings.Repeat("A", 32)},
+		{"non-hex chars", strings.Repeat("g", 32)},
+		{"path traversal", "../../../etc/passwd" + strings.Repeat("a", 13)},
+		{"empty after strip", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.id == "" {
+				// empty id is caught by the earlier req.ID == "" check (400 "missing id")
+				return
+			}
+			w := httptest.NewRecorder()
+			h.handleOrient(w, orientReq(tc.id))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("id %q: want 400, got %d", tc.id, w.Code)
+			}
+		})
+	}
+}
+
+// TestIsUploadID pins the helper's acceptance and rejection rules.
+func TestIsUploadID(t *testing.T) {
+	valid := []string{
+		strings.Repeat("0", 32),
+		strings.Repeat("f", 32),
+		"deadbeefdeadbeefdeadbeefdeadbeef",
+		"0123456789abcdef0123456789abcdef",
+	}
+	for _, s := range valid {
+		if !isUploadID(s) {
+			t.Errorf("isUploadID(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{
+		strings.Repeat("0", 31),        // too short
+		strings.Repeat("0", 33),        // too long
+		strings.Repeat("F", 32),        // uppercase
+		strings.Repeat("g", 32),        // non-hex
+		"deadbeef deadbeef deadbeef12", // space
+		"",
+	}
+	for _, s := range invalid {
+		if isUploadID(s) {
+			t.Errorf("isUploadID(%q) = true, want false", s)
+		}
 	}
 }

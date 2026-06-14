@@ -446,6 +446,14 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 // save retries until the directory is in place.
 var storeDirEnsured sync.Map // map[string]struct{}
 
+// storeMetaWritten tracks which store paths have had their advisory version
+// sidecar written at least once in this process. The sidecar content (Version
+// field = storeFormatVersion) is a compile-time constant and never changes
+// while the process is running, so writing it once per path is sufficient.
+// R20260614-PERF-005: avoids ~4 syscalls + 2 fsyncs on every 30s saveIfDirty
+// tick. A failed write is NOT recorded, allowing retry on the next tick.
+var storeMetaWritten sync.Map // map[string]struct{}
+
 // writeStoreData ensures the store directory exists, atomically writes the
 // pre-marshalled bytes, then writes the advisory version sidecar. Shared by
 // saveStore (map input) and saveStoreSlice (slice input).
@@ -470,7 +478,14 @@ func writeStoreData(path string, data []byte) error {
 	// fail the save: the main store is already durable, and the meta is
 	// advisory (used to detect cross-version downgrades). Log so operators
 	// catch partial-filesystem issues during normal ops.
-	writeStoreMeta(path)
+	// R20260614-PERF-005: skip on subsequent ticks — Version is a compile-time
+	// constant so the sidecar content never changes within a process lifetime.
+	// writeStoreMeta is best-effort (no error return), so we store after the
+	// call unconditionally; a failed write is logged by writeStoreMeta itself.
+	if _, done := storeMetaWritten.Load(path); !done {
+		writeStoreMeta(path)
+		storeMetaWritten.Store(path, struct{}{})
+	}
 	return nil
 }
 
@@ -629,9 +644,17 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy — see saveStore.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create known IDs directory: %w", err)
+		// R20260614-GO-003: reuse storeDirEnsured (same map as writeStoreData)
+		// so the 5-minute knownIDsSaveInterval tick skips MkdirAll+Lstat+Chmod
+		// after the first successful write. Both functions target the same
+		// directory (filepath.Dir of the store path), so one successful
+		// writeStoreData call already guards saveKnownIDs. A failed EnsureDir
+		// is NOT recorded, allowing retry on the next tick.
+		if _, done := storeDirEnsured.Load(dir); !done {
+			if err := datadir.EnsureDir(dir); err != nil {
+				return fmt.Errorf("create known IDs directory: %w", err)
+			}
+			storeDirEnsured.Store(dir, struct{}{})
 		}
 	}
 	data, err := json.Marshal(sortedIDs)

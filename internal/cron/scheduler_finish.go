@@ -205,6 +205,10 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 	// Phase 1 accepts blob accumulation (one ≤MaxPromptBytes blob per
 	// distinct prompt, deduped) as bounded-in-practice.
 	s.deleteJobSnapshots(jobID)
+	// Drop sandbox event logs written by sandboxEventSink (§6.1). A 60-minute
+	// sandbox run can accumulate several MB; leaving this tree orphaned on job
+	// deletion is a bounded but observable disk leak. R20260614-LOGIC-2.
+	s.deleteJobSandboxEvents(jobID)
 	// §7.4: drop any unresolved confirmation-queue records for this job — a
 	// deleted job has nothing left to confirm or replay, and a stale queue
 	// entry would let the operator "replay" a run whose job no longer exists
