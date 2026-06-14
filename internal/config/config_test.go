@@ -44,6 +44,8 @@ func TestExpandEnvVars_DenyUpstreamCredentials(t *testing.T) {
 		envVal  string
 	}{
 		{"ANTHROPIC_API_KEY", "sk-ant-secret-do-not-leak"},
+		{"CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-secret-do-not-leak"},
+		{"CLAUDE_API_KEY", "claude-api-secret-do-not-leak"},
 		{"AWS_ACCESS_KEY_ID", "AKIA-secret"},
 		{"AWS_SECRET_ACCESS_KEY", "secret-do-not-leak"},
 		{"AZURE_CLIENT_SECRET", "azure-secret"},
