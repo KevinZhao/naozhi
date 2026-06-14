@@ -28,6 +28,27 @@ package limits
 // to prevent accidental run-time mutation by tests or config-loading code.
 const MaxCoalescedText = 4 * 1024 * 1024
 
+// MaxStreamJSONLine is the upstream invariant cap on a single claude
+// stream-json / tool-result line: the CLI never emits a stdout line larger
+// than this, so every transport that carries those lines bounds a single
+// frame/read/file at the same ceiling. Centralized here so the value cannot
+// drift across the (unrelated) packages that each enforce it
+// [R20260613-214326-ARCH-3 / #2084]:
+//
+//   - internal/node (ReverseConn read limit on authenticated RPC payloads)
+//   - internal/upstream (connector inbound frame limit, mirrors node)
+//   - internal/dashboard/ext/agentevents (persisted tool-result file cap)
+//   - internal/agentcore (SSE envelope = this line + framing overhead; see
+//     agentcore.MaxEnvelopeLineBytes, which is this value plus headroom)
+//
+// 16 MiB matches the claude CLI's own stdout line ceiling. Transports that
+// wrap a line in an envelope (agentcore SSE) add their own overhead margin
+// on top rather than baking a second literal here.
+//
+// Keep as a const for the same compile-time-stability reason as the caps
+// above.
+const MaxStreamJSONLine = 16 << 20
+
 // PlatformReplyMaxAttempts is the retry count passed to
 // platform.ReplyWithRetry on every outbound IM-platform reply path
 // (dispatch's error-reply fallback and SendSplitReply chunk loop, plus

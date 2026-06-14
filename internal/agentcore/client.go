@@ -205,7 +205,9 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 	// Single stream-json lines can carry large tool results. The bootstrap
 	// caps its stdout lines at 16MB and wraps them in the SSE envelope —
 	// allow envelope overhead on top so a max-size CLI line still fits.
-	sc.Buffer(make([]byte, 64*1024), (16<<20)+(64<<10))
+	// MaxEnvelopeLineBytes is the shared wire ceiling the cron reader also
+	// uses, so any line accepted here is readable back (#2083).
+	sc.Buffer(make([]byte, 64*1024), MaxEnvelopeLineBytes)
 
 	for sc.Scan() {
 		raw := sc.Bytes()
