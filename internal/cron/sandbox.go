@@ -661,6 +661,21 @@ const sandboxEventsSemCap = 8
 // test binary.
 var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
 
+// deleteJobSandboxEvents removes a deleted job's sandboxevents subtree
+// (sandboxevents/<jobID>/). Best-effort: a missing tree is fine. A 60-minute
+// sandbox run can emit several MB; leaving this tree orphaned on job deletion is
+// a bounded but observable disk leak. Called from deleteJobRuns after the runs/
+// and runsnapshots/ subtrees are removed. R20260614-LOGIC-2.
+func (s *Scheduler) deleteJobSandboxEvents(jobID string) {
+	if s.storePath == "" || !IsValidID(jobID) {
+		return
+	}
+	dir := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID)
+	if err := os.RemoveAll(dir); err != nil {
+		slog.Warn("cron sandbox: event subtree delete failed", "job_id", jobID, "err", err)
+	}
+}
+
 // ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
 // semaphore is saturated. The dashboard handler maps it to HTTP 503 so a
 // burst fails fast instead of allocating unbounded scanner buffers.

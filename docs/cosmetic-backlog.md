@@ -662,3 +662,7 @@
 - [R202606-ARCH-5] cronConfigMaps 的 atomic.Pointer COW seam 为尚不存在的 hot-reload writer 预付（speculative generality） — internal/cron/scheduler_config.go:463
 - [R202606-PERF-024] cli deliverEvent 每事件两次 select（killCh + eventCh），高频 streaming 可合并为三路 select — internal/cli/process_readloop.go:909
 - [R202606-PERF-025] session storeMetaPath 每次 30s save 重算 Base/Ext/Dir 拼接，可在 Router 构建时缓存 — internal/session/store.go:135
+- [R20260614-SEC-8] redactEntrySecrets 仅处理 Summary/Detail,Type/ImagePaths 等字段不脱敏(Type 为内部 enum,实际不携带自由文本) — internal/server/wshub_eventpush_redact.go:22
+- [R20260614-GO-002] writeStoreData 的 Load→EnsureDir→Store 非原子,并发 save 可双进(EnsureDir 幂等,无害) — internal/session/store.go:454
+- [R20260614-COSM-2] reconcileOneSandboxOrphan 合成 emitRunStarted 恒用 TriggerScheduled,manual replay orphan 显示 scheduled 图标 — internal/cron/sandbox_pending.go:228
+- [R20260614-ARCH-4] Server 结构体 48 字段 god-object(已有 server-split phased plan 在进行,需 RFC) — internal/server/server.go:81
