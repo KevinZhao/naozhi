@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1632,10 +1633,20 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
 	var written int
+	// R20260614-PERF-1 (#2088): stack-allocate the Record per entry instead
+	// of calling schema.NewEntry (which returns a heap-allocated *Record) on
+	// the persist hot path. MarshalRecordInto only reads rec's fields
+	// synchronously (Validate + Encode) and never retains the pointer, so a
+	// single reusable stack value is safe across the batch. Mirrors the field
+	// assignment NewEntry performs; ownership of e.JSON is unchanged.
+	var rec schema.Record
 	for _, e := range job.Entries {
-		rec := schema.NewEntry(w.nextSeq, e.JSON)
+		rec.V = schema.WireVersion
+		rec.Seq = w.nextSeq
+		rec.Type = schema.TypeEntry
+		rec.Entry = json.RawMessage(e.JSON)
 		encBuf.Reset()
-		body, err := schema.MarshalRecordInto(encBuf, rec)
+		body, err := schema.MarshalRecordInto(encBuf, &rec)
 		if err != nil {
 			// Over-size / malformed — count and drop just this entry.
 			p.malformedCnt.Add(1)
