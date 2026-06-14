@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // sandboxAttention is the §7.4 confirmation-queue record. A sandbox run that
@@ -93,7 +95,11 @@ func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger)
 		lg.Warn("cron sandbox: attention marshal failed", "err", err)
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, rec.RunID+".json"), b, 0o600); err != nil {
+	// Atomic write so a crash mid-write cannot leave a truncated queue record
+	// that ListSandboxAttention silently skips as corrupt — the §7.4 record is
+	// the only durable signal that a side-effecting orphan needs human
+	// confirmation (R20260614-ARCH-3).
+	if err := osutil.WriteFileAtomic(filepath.Join(dir, rec.RunID+".json"), b, 0o600); err != nil {
 		lg.Warn("cron sandbox: attention write failed; run not enqueued for confirmation", "err", err)
 	}
 }
