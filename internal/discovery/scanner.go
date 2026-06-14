@@ -107,7 +107,17 @@ type summaryCacheEntry struct {
 // sessionIDs without contention because the map lookup is O(1).
 type pathCacheState struct {
 	sync.RWMutex
-	entries map[string]pathCacheEntry
+	entries map[pathKey]pathCacheEntry
+}
+
+// pathKey is the composite (claudeDir, sessionID) map key. Using a struct
+// key instead of a packed "dir\x00id" string eliminates the per-lookup
+// string concatenation+allocation on the hot findSessionJSONL path — the
+// startup resume-chain replay calls findSessionJSONL O(N×chain) times and
+// every cache hit was paying for a fresh key string (PERF-005 #2125).
+type pathKey struct {
+	dir string
+	id  string
 }
 
 // pathCacheEntry holds either a positive result (path != "") or a
@@ -204,7 +214,7 @@ func NewScanner() *Scanner {
 	return &Scanner{
 		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
 		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
-		pathCache:    pathCacheState{entries: make(map[string]pathCacheEntry)},
+		pathCache:    pathCacheState{entries: make(map[pathKey]pathCacheEntry)},
 	}
 }
 
