@@ -526,6 +526,18 @@ func main() {
 			// would kill legitimately-long jobs. This asymmetry is the security
 			// property: do NOT harmonise the two without reopening Sec-LOW-2. A
 			// future subsystem added below MUST pick one StopPolicy* explicitly.
+			//
+			// #1897: per-step deadline for the scheduler teardown phase,
+			// mirroring the sysmgr step's 5s. This does NOT itself fit the
+			// whole systemd TimeoutStopSec (sysmgr alone can consume its own
+			// 5s, and SendSIGKILL=no means systemd never kills us); its job
+			// is to cap a wedged cron drain at ~5s instead of scheduler's
+			// full ~35s internal budget so the http-drain/router phases
+			// still get to run. StopContext is advisory — an early-finishing
+			// drain returns immediately; a job ignoring ctx returns at the
+			// deadline and its goroutine is left for OS reap per Stop()'s
+			// StopPolicyBudgetThenLeak contract above.
+			const schedStopBudget = 5 * time.Second
 			runShutdownSteps([]shutdownStep{
 				// Sysession Manager must stop FIRST: daemon Tick paths call
 				// into router (VisitSessions / SetUserLabelWithOrigin);
@@ -547,7 +559,23 @@ func main() {
 				// Scheduler must stop fully before router.Shutdown: in-flight
 				// cron jobs still call into router (GetOrCreate/Send), so
 				// tearing the router down in parallel would race.
-				{name: "scheduler", run: scheduler.Stop},
+				//
+				// #1897: honour an external shutdown deadline like the sysmgr
+				// step above, instead of the bare scheduler.Stop. Stop() ==
+				// stopWithCtx(nil) ignores the host shutdown window and waits
+				// out its full internal budget (gcWaitBudget 5s + stopBudget
+				// 30s = 35s worst case). With a wedged cron job that bounds the
+				// scheduler phase to ~5s instead of ~35s, so the later
+				// http-drain/router phases are not starved of the systemd stop
+				// window. StopContext is advisory + additive (R250-ARCH-5 /
+				// #1168): each drain phase short-circuits on ctx cancel and the
+				// final persistOnShutdown ALWAYS runs, so no cron snapshot is
+				// lost — the happy path is identical to Stop().
+				{name: "scheduler", run: func() {
+					schedStopCtx, schedStopCancel := context.WithTimeout(context.Background(), schedStopBudget)
+					scheduler.StopContext(schedStopCtx)
+					schedStopCancel()
+				}},
 				// S11 (R194-COR): block on the real HTTP-drain barrier before
 				// tearing down the router. cancel() above triggers
 				// Server.Start's shutdown goroutine (srv.Shutdown 30s drain);
