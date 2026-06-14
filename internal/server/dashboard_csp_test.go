@@ -469,14 +469,32 @@ func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
 	}
 }
 
-// generatedOnclickCap is the downward-only ratchet on the number of inline
-// `onclick=` attributes that dashboard.js emits into innerHTML template strings
-// for dynamically-rendered controls (session cards, project rows, cron cards,
-// history items, etc.). Unlike the STATIC dashboard.html surface (capped at 0
-// by TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), these JS-generated
-// handlers are the remaining reason script-src still needs `'unsafe-inline'`
-// (the NEEDS-DESIGN bundle on #441 / #479 / #922; phased landing tracked on
-// #1734).
+// generatedOnclickBundle lists every dashboard-bundle JS file whose template
+// strings can emit inline `onclick=` attributes into innerHTML. dashboard.html
+// loads all of these with <script defer>, so an `onclick=` emitted from any of
+// them is exactly as much a reason for script-src to keep `'unsafe-inline'` as
+// one emitted from dashboard.js. R202606-CR-2: the cron-view extraction (PR-1)
+// moved ~41 generated handlers out of dashboard.js into cron_view.js; before
+// this, the ratchet only watched dashboard.js, so those handlers fell out of
+// coverage and could grow unbounded. Any future view extraction MUST add its
+// file here so the surface stays pinned. Keep in sync with the <script src>
+// list in static/dashboard.html.
+var generatedOnclickBundle = []string{
+	"dashboard.js",
+	"cron_view.js",
+	"agent_view.js",
+	"asset_browser.js",
+	"nz_util.js",
+}
+
+// generatedOnclickCap is the downward-only ratchet on the TOTAL number of inline
+// `onclick=` attributes that the dashboard JS bundle (generatedOnclickBundle)
+// emits into innerHTML template strings for dynamically-rendered controls
+// (session cards, project rows, cron cards, history items, etc.). Unlike the
+// STATIC dashboard.html surface (capped at 0 by
+// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), these JS-generated handlers
+// are the remaining reason script-src still needs `'unsafe-inline'` (the
+// NEEDS-DESIGN bundle on #441 / #479 / #922; phased landing tracked on #1734).
 //
 // This cap is a RATCHET: it must only ever be LOWERED. Each migration PR that
 // converts a batch of `onclick="fn(args)"` emissions to the existing
@@ -484,17 +502,18 @@ func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
 // in dashboard.js) must drop this number to the new post-migration count in the
 // SAME change, so the test stays green and pins the reduction. Raising it is a
 // regression that pushes the script-src 'unsafe-inline' removal backwards and
-// must be rejected — add a data-action dispatch entry instead.
-const generatedOnclickCap = 84
+// must be rejected — add a data-action dispatch entry instead. (Pure file
+// splits that move handlers between bundle files leave the total unchanged.)
+const generatedOnclickCap = 86
 
 // TestDashboardCSP_GeneratedHandlerSurfaceRatchet pins the JS-generated inline
-// `onclick=` surface in static/dashboard.js as a downward-only ratchet
-// (#922 / #1734). The static-HTML inline-handler surface is already at 0
+// `onclick=` surface across the whole dashboard JS bundle as a downward-only
+// ratchet (#922 / #1734). The static-HTML inline-handler surface is already at 0
 // (TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow); this test covers the
-// harder, larger surface that dashboard.js still emits inside template strings.
+// harder, larger surface that the bundle still emits inside template strings.
 //
 // Mirrors the inlineOnclickCap=0 idiom in
-// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow but against dashboard.js and
+// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow but against the JS bundle and
 // with a non-zero cap that shrinks per migration PR. Driving the count to 0 is
 // the precondition for dropping script-src 'unsafe-inline' (gated atomically by
 // TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate).
@@ -510,21 +529,27 @@ func TestDashboardCSP_GeneratedHandlerSurfaceRatchet(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	jsPath := filepath.Join(filepath.Dir(self), "static", "dashboard.js")
-	body, err := os.ReadFile(jsPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", jsPath, err)
-	}
-	js := string(body)
+	staticDir := filepath.Join(filepath.Dir(self), "static")
 
 	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
-	got := len(onclickRe.FindAllStringIndex(js, -1))
-	if got > generatedOnclickCap {
-		t.Errorf("static/dashboard.js has %d inline `onclick=` attributes, ratchet cap is %d "+
+	total := 0
+	perFile := make(map[string]int, len(generatedOnclickBundle))
+	for _, name := range generatedOnclickBundle {
+		body, err := os.ReadFile(filepath.Join(staticDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		n := len(onclickRe.FindAllStringIndex(string(body), -1))
+		perFile[name] = n
+		total += n
+	}
+
+	if total > generatedOnclickCap {
+		t.Errorf("dashboard JS bundle has %d inline `onclick=` attributes (per-file %v), ratchet cap is %d "+
 			"(#922 / #1734). This cap is downward-only: convert a batch of generated "+
 			"`onclick=\"fn(args)\"` emissions to the existing data-action dispatch "+
 			"(SIDEBAR_PROJECT_ACTIONS / CRON_MENU_ACTIONS) and LOWER the cap in the same "+
 			"change. Goal: drive the count to 0 so script-src 'unsafe-inline' can be dropped.",
-			got, generatedOnclickCap)
+			total, perFile, generatedOnclickCap)
 	}
 }
