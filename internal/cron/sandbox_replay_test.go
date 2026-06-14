@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
 // replaySetup builds a sandbox scheduler with a side-effecting job and a
@@ -197,6 +200,72 @@ func TestReplay_PanicStillEmitsRunEnded(t *testing.T) {
 	}
 	if ev.StartedAt.IsZero() {
 		t.Fatal("ended frame must carry the original StartedAt so the timeline pairs")
+	}
+}
+
+// finalizeOrderBroadcaster records, at the instant BroadcastRunEnded fires,
+// whether CurrentRun(jobID) has already been finalized (ok=false). It pins the
+// finalize-before-broadcast contract (R246-GO-3 / #689) for the replay panic
+// path (#2094): if emitRunEnded fired before finalize, the probe would observe
+// the run still inflight (ok=true).
+type finalizeOrderBroadcaster struct {
+	recordingBroadcaster
+	probe func(jobID string) (RunInflightView, bool)
+	mu    sync.Mutex
+	// inflightAtBroadcast is true if any ended-broadcast observed the run
+	// still inflight (contract violation).
+	inflightAtBroadcast bool
+}
+
+func (b *finalizeOrderBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
+	if b.probe != nil {
+		if _, ok := b.probe(ev.OwnerID); ok {
+			b.mu.Lock()
+			b.inflightAtBroadcast = true
+			b.mu.Unlock()
+		}
+	}
+	b.recordingBroadcaster.BroadcastRunEnded(ev)
+}
+
+func (b *finalizeOrderBroadcaster) observedInflight() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inflightAtBroadcast
+}
+
+// TestReplay_PanicFinalizesBeforeBroadcast pins #2094: on the panic-recover
+// path of dispatchReplay, finalizer.finalize() must run before emitRunEnded so
+// a concurrent dashboard list observing the cron_run_ended frame sees
+// CurrentRun(jobID) == ok:false (run already released), not a stale inflight
+// view. Before the fix, defer LIFO ran emitRunEnded (recover defer) before the
+// outer finalize defer, leaving the run momentarily inflight when the ended
+// frame broadcast.
+func TestReplay_PanicFinalizesBeforeBroadcast(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &panicReplayRunner{}
+	rec := &finalizeOrderBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath},
+		SchedulerDeps{Router: panicRouter{t: t}, Telemetry: rec, Sandbox: runner})
+	t.Cleanup(func() { s.Stop() })
+	rec.probe = s.CurrentRun
+
+	j := sideEffectsJob(t, s)
+	origRunID := "feedfacefeedface"
+	s.writeSandboxSnapshot(j.ID, origRunID, "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+
+	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
+		t.Fatalf("ReplaySandboxRun: %v", err)
+	}
+	waitEnded(t, &rec.recordingBroadcaster)
+
+	if rec.observedInflight() {
+		t.Fatal("emitRunEnded broadcast before finalize: CurrentRun still reported the run inflight when the ended frame fired (finalize-before-broadcast contract violated, #2094)")
+	}
+	// And the run must genuinely be released afterwards (no leak).
+	if _, ok := s.CurrentRun(j.ID); ok {
+		t.Fatal("run still inflight after panic-recover finalize; gate leaked")
 	}
 }
 
