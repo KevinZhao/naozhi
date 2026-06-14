@@ -64,6 +64,27 @@ func TestVerifyARNAccount(t *testing.T) {
 			accountID: self,
 			wantErr:   false,
 		},
+		{
+			name:      "wrong service lambda same account",
+			arn:       "arn:aws:lambda:us-east-1:123456789012:function:evil",
+			accountID: self,
+			wantErr:   true,
+			errSubstr: "is not bedrock-agentcore",
+		},
+		{
+			name:      "wrong service s3 same account",
+			arn:       "arn:aws:s3:::my-bucket/key",
+			accountID: self,
+			wantErr:   true,
+			errSubstr: "is not bedrock-agentcore",
+		},
+		{
+			name:      "empty region",
+			arn:       "arn:aws:bedrock-agentcore::123456789012:runtime/no-region",
+			accountID: self,
+			wantErr:   true,
+			errSubstr: "empty region",
+		},
 	}
 
 	for _, tt := range tests {

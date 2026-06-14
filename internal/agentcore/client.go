@@ -80,6 +80,15 @@ func verifyARNAccount(runtimeARN, accountID string) error {
 	if err != nil {
 		return fmt.Errorf("agentcore: invalid RuntimeARN %q: %w", runtimeARN, err)
 	}
+	// Defense-in-depth: a misconfigured ARN pointing at another service in the
+	// same account (e.g. a Lambda or S3 ARN) would otherwise pass the account
+	// check. Assert the ARN actually names a regional AgentCore runtime.
+	if parsed.Service != "bedrock-agentcore" {
+		return fmt.Errorf("agentcore: RuntimeARN service %q is not bedrock-agentcore (config-injection guard)", parsed.Service)
+	}
+	if parsed.Region == "" {
+		return fmt.Errorf("agentcore: RuntimeARN %q has empty region (runtime is regional; region is required)", runtimeARN)
+	}
 	if parsed.AccountID != accountID {
 		return fmt.Errorf("agentcore: RuntimeARN account %q does not match caller account %q (config-injection guard)", parsed.AccountID, accountID)
 	}
