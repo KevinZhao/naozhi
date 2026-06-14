@@ -2390,27 +2390,39 @@ func TestClassifyShimState(t *testing.T) {
 // respawn-different-id (old ID appended to prevIDs).
 func TestCollectPreviousHistory(t *testing.T) {
 	t.Run("fresh: nil old session returns empty", func(t *testing.T) {
-		entries, prev := collectPreviousHistory(nil, nil, "")
+		entries, prev, userTurns := collectPreviousHistory(nil, nil, "")
 		if entries != nil || prev != nil {
 			t.Errorf("collectPreviousHistory(nil) = (%v, %v), want (nil, nil)", entries, prev)
+		}
+		if userTurns != 0 {
+			t.Errorf("userTurns = %d, want 0 for nil old session", userTurns)
 		}
 	})
 
 	t.Run("resume same id: chain unchanged, persistedHistory cloned", func(t *testing.T) {
 		persisted := []cli.EventEntry{
 			{Time: 1000, Type: "user", Summary: "hi"},
+			{Time: 1001, Type: "assistant", Summary: "yo"},
+			{Time: 1002, Type: "user", Summary: "again"},
 		}
 		oldPrev := []string{"id-a"}
 		s := &ManagedSession{persistedHistory: persisted}
+		// Cached count maintained by injectHistory in production; seed it so
+		// the persisted-snapshot branch returns it (#2089).
+		s.persistedUserTurns.Store(2)
 		s.setSessionID("id-b")
 
-		entries, prev := collectPreviousHistory(s, oldPrev, "id-b")
+		entries, prev, userTurns := collectPreviousHistory(s, oldPrev, "id-b")
 
-		if len(entries) != 1 || entries[0].Summary != "hi" {
-			t.Errorf("entries = %v, want one 'hi' entry", entries)
+		if len(entries) != 3 || entries[0].Summary != "hi" {
+			t.Errorf("entries = %v, want three entries starting with 'hi'", entries)
 		}
 		if len(prev) != 1 || prev[0] != "id-a" {
 			t.Errorf("prev = %v, want [id-a] (same id, no growth)", prev)
+		}
+		// #2089: persisted-snapshot branch returns the cached count, not a rescan.
+		if userTurns != 2 {
+			t.Errorf("userTurns = %d, want 2 (cached value)", userTurns)
 		}
 	})
 
@@ -2418,7 +2430,7 @@ func TestCollectPreviousHistory(t *testing.T) {
 		s := &ManagedSession{}
 		s.setSessionID("id-old")
 
-		_, prev := collectPreviousHistory(s, []string{"id-a"}, "id-new")
+		_, prev, _ := collectPreviousHistory(s, []string{"id-a"}, "id-new")
 
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-old" {
 			t.Errorf("prev = %v, want [id-a id-old]", prev)
@@ -2434,7 +2446,7 @@ func TestCollectPreviousHistory(t *testing.T) {
 		for i := range oldPrev {
 			oldPrev[i] = fmt.Sprintf("id-%d", i)
 		}
-		_, prev := collectPreviousHistory(s, oldPrev, "id-new")
+		_, prev, _ := collectPreviousHistory(s, oldPrev, "id-new")
 
 		if len(prev) != maxPrevSessionIDs {
 			t.Fatalf("prev len = %d, want %d (capped)", len(prev), maxPrevSessionIDs)
@@ -2534,6 +2546,8 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		oldTotalCost float64,
 		oldCreatedAt int64,
 		exempt bool,
+		oldSID string,
+		oldUserTurns int64,
 	) *ManagedSession {
 		return r.installFreshSessionLocked
 	}

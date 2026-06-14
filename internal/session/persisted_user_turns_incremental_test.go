@@ -6,19 +6,10 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// countUserTurns is the O(n) oracle: the exact value the removed
-// recountPersistedUserTurnsLocked full scan would produce over the current
-// persistedHistory slice. The incremental count maintained by InjectHistory
-// (R20260603140013-PERF-2) must always agree with this.
-func countUserTurns(hist []cli.EventEntry) int64 {
-	var n int64
-	for i := range hist {
-		if hist[i].Type == "user" {
-			n++
-		}
-	}
-	return n
-}
+// The O(n) oracle is the production countUserTurns helper (router_lifecycle.go):
+// the exact value a full scan of persistedHistory produces. The incremental
+// count maintained by InjectHistory (R20260603140013-PERF-2) must always agree
+// with it.
 
 // assertCountMatchesOracle checks that the cached persistedUserTurns equals a
 // fresh full scan of persistedHistory (the recount oracle). Holds historyMu to
