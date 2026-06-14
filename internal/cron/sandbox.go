@@ -405,9 +405,18 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		metrics.CronSandboxRunFailedTotal.Add(1)
 		a.lg.Error("cron sandbox run failed",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
+	} else if state == RunStateTimedOut {
+		// #2091: sandbox timeouts are deliberately kept OUT of
+		// CronSandboxRunFailedTotal (that counter would double-count against
+		// the per-state CronRunTimedOutTotal bumped by finishRun). They still
+		// need a sandbox-scoped counter so alerts catch them and can tell them
+		// apart from local-path timeouts mixed into CronRunTimedOutTotal.
+		metrics.CronSandboxRunTimedOutTotal.Add(1)
+		a.lg.Error("cron sandbox run timed out",
+			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	} else {
-		// Non-success, non-canceled, non-failed (e.g. RunStateTimedOut):
-		// log at Info so operators can see it without double-counting metrics.
+		// Other non-success, non-canceled, non-failed, non-timeout terminal
+		// states: log at Info so operators can see it without double-counting.
 		a.lg.Info("cron sandbox run ended with non-failure terminal state",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	}

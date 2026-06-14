@@ -259,6 +259,16 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 				// (practically impossible) panic AFTER a normal finish can never
 				// double-emit an ended frame.
 				if !completed {
+					// #2094: finalize BEFORE broadcasting the ended frame, per the
+					// finishRun finalize-before-emitRunEnded contract
+					// (scheduler_finish.go, R246-GO-3/#689). Without this, the
+					// LIFO defer order ran emitRunEnded (this defer, registered
+					// last) before finalizer.finalize() (the defer above,
+					// registered earlier), so a concurrent dashboard list could
+					// observe a cron_run_ended frame while CurrentRun(jobID) was
+					// still running. finalize() is idempotent (f.done guard), so
+					// the later defer's call is a harmless no-op.
+					finalizer.finalize()
 					s.emitRunEnded(RunEndedEvent{
 						JobID:      snap.jobID,
 						RunID:      runID,
