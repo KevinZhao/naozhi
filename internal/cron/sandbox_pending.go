@@ -229,15 +229,30 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 		// RuntimeSessionID is already spent (we Stopped it); kept on the record
 		// for symmetry — the queue's replay action re-Stops idempotently.
 		if jSideEffects {
-			s.writeSandboxAttention(sandboxAttention{
-				JobID:            p.JobID,
-				RunID:            p.RunID,
-				RuntimeSessionID: p.RuntimeSessionID,
-				Reason:           attentionReasonOrphaned,
-				JobLabel:         jLabel,
-				StartedAtMS:      p.StartedAtMS,
-				CreatedAtMS:      s.attentionNowMS(),
-			}, lg)
+			// #2119: an in-process transport failure may have ALREADY enqueued
+			// an attention record for this runID (reason=transport) before the
+			// process died (sandbox.go enqueueSandboxTransportAttention keeps the
+			// pending file so this reconcile can retry the Stop). writeSandboxAttention
+			// uses WriteFileAtomic to the same <runID>.json path, so an
+			// unconditional write here would CLOBBER the existing record and
+			// downgrade its reason from "transport" (stream lost) to "orphaned"
+			// (restart) — misleading the operator about what actually happened.
+			// Probe first; only write the orphaned record when none exists yet.
+			// A read error (qerr) is treated as "may exist" → skip, preserving
+			// any prior reason (the run's failed-transport CronRun still warns).
+			if rec, qok, qerr := s.getSandboxAttention(p.RunID); qerr == nil && !qok && rec == nil {
+				s.writeSandboxAttention(sandboxAttention{
+					JobID:            p.JobID,
+					RunID:            p.RunID,
+					RuntimeSessionID: p.RuntimeSessionID,
+					Reason:           attentionReasonOrphaned,
+					JobLabel:         jLabel,
+					StartedAtMS:      p.StartedAtMS,
+					CreatedAtMS:      s.attentionNowMS(),
+				}, lg)
+			} else if qerr != nil {
+				lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
+			}
 		}
 		// Synthetic started so subscribers get a paired lifecycle (the real
 		// started frame belonged to the previous process's broadcaster).
