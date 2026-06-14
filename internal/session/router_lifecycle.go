@@ -552,9 +552,13 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, int64) {
 }
 
 // collectPreviousHistory gathers JSONL-backed history entries and the
-// session ID chain for a respawn. Returns (entries, chain). Pure
-// computation — no mutation of r.ss.sessions; caller must hold r.mu
-// if it needs serialisation w.r.t. sibling spawn attempts.
+// session ID chain for a respawn. Returns (entries, chain, userTurns) where
+// userTurns is the number of Type=="user" entries in entries — computed here
+// (cached value for the persisted-snapshot branch, single pass for the
+// dead-process EventEntries branch) so the spawn path seeds persistedUserTurns
+// without an independent O(n) rescan (#2089). Pure computation — no mutation
+// of r.ss.sessions; caller must hold r.mu if it needs serialisation w.r.t.
+// sibling spawn attempts.
 //
 // Extracted from spawnSession (R70-ARCH-H2 paired with
 // resolveSpawnParamsLocked). The dead-process branch prefers
@@ -562,9 +566,9 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, int64) {
 // live events accumulated since the JSONL snapshot was last loaded;
 // the live-but-suspended branch (no process, or alive waiting) falls
 // back to the persisted snapshot.
-func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]cli.EventEntry, []string) {
+func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]cli.EventEntry, []string, int64) {
 	if oldSess == nil {
-		return nil, nil
+		return nil, nil, 0
 	}
 
 	// R215-GO-P1-1: split the historyMu critical section so that p.EventEntries()
@@ -584,12 +588,20 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	//     under sendMu, which we don't acquire — but the old Process keeps its
 	//     own eventLog alive until GC, so reading entries from it is sound).
 	var entries []cli.EventEntry
+	// #2089: capture the user-turn count alongside the snapshot so the spawn
+	// path can seed persistedUserTurns without a second independent O(n)
+	// rescan. For the persisted-snapshot branch the count is the already
+	// maintained cached value (read under the same RLock so it matches the
+	// cloned slice). userTurns == -1 signals "unknown" — the dead-process
+	// branch below counts EventEntries() once instead.
+	userTurns := int64(-1)
 	oldSess.historyMu.RLock()
 	p := oldSess.loadProcess()
 	var persistedSnapshot []cli.EventEntry
 	if (p == nil || p.Alive()) && len(oldSess.persistedHistory) > 0 {
 		persistedSnapshot = make([]cli.EventEntry, len(oldSess.persistedHistory))
 		copy(persistedSnapshot, oldSess.persistedHistory)
+		userTurns = oldSess.persistedUserTurns.Load()
 	}
 	oldSess.historyMu.RUnlock()
 
@@ -619,7 +631,26 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	if len(prevIDs) > maxPrevSessionIDs {
 		prevIDs = prevIDs[len(prevIDs)-maxPrevSessionIDs:]
 	}
-	return entries, prevIDs
+	// #2089: if the count is still unknown (dead-process EventEntries branch,
+	// which has no cached count), do the single necessary pass here so the
+	// caller never rescans. Empty/nil entries trivially have zero user turns.
+	if userTurns < 0 {
+		userTurns = countUserTurns(entries)
+	}
+	return entries, prevIDs, userTurns
+}
+
+// countUserTurns returns the number of Type=="user" entries in entries.
+// Shared by collectPreviousHistory (#2089) and the recount contract so the
+// "what counts as a user turn" rule lives in one place.
+func countUserTurns(entries []cli.EventEntry) int64 {
+	var n int64
+	for i := range entries {
+		if entries[i].Type == "user" {
+			n++
+		}
+	}
+	return n
 }
 
 // markSpawnDoneLocked closes the per-spawn done channel and removes the
@@ -823,10 +854,20 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// acquired independently by event injection). The old reference is safe to
 	// read because sessions are never mutated after creation, only replaced.
 	old := r.ss.sessions[key]
+	// #2093: capture the SID of the session we are about to replace. If the
+	// respawn lands on a different effectiveSID (e.g. resolveResumeID
+	// downgraded a missing JSONL to fresh, rotating SID A→B), the old SID's
+	// idToKey[A]=key entry would otherwise dangle forever and later mis-route
+	// a resume of A into the unrelated session that reuses this deterministic
+	// key. installFreshSessionLocked clears it when oldSID != effectiveSID.
+	var oldSID string
+	if old != nil {
+		oldSID = old.getSessionID()
+	}
 	oldPrevIDs, oldTotalCost, oldCreatedAt := snapshotOldSessionLocked(old)
 	r.mu.Unlock()
 
-	oldHistory, prevIDs := collectPreviousHistory(old, oldPrevIDs, resumeID)
+	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
 
 	// Auto-workspace-chain spawn-attach was REMOVED here (RFC
 	// docs/rfc/project-stable-session-key.md §9.1). It used to machine-guess
@@ -850,7 +891,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	s := r.installFreshSessionLocked(
 		key, proc, workspace, backendID, wrapper, resumeID,
-		oldHistory, prevIDs, oldTotalCost, oldCreatedAt, opts.Exempt,
+		oldHistory, prevIDs, oldTotalCost, oldCreatedAt, opts.Exempt, oldSID,
+		oldUserTurns,
 	)
 	r.mu.Unlock()
 
@@ -912,6 +954,8 @@ func (r *Router) installFreshSessionLocked(
 	oldTotalCost float64,
 	oldCreatedAt int64,
 	exempt bool,
+	oldSID string,
+	oldUserTurns int64,
 ) *ManagedSession {
 	s := &ManagedSession{
 		key:              key,
@@ -930,11 +974,13 @@ func (r *Router) installFreshSessionLocked(
 	// Seed persistedUserTurns from the restored history so the proc==nil
 	// snapshot branch (managed_query.go:206) and AutoTitler min-turn gate see
 	// the correct count immediately. R20260603040203-CODE-002: s is unpublished
-	// so no concurrent readers; historyMu is still required by recount contract.
+	// so no concurrent readers.
+	// #2089: oldUserTurns was already computed by collectPreviousHistory
+	// (cached value for the persisted-snapshot branch, single pass for the
+	// dead-process EventEntries branch), so we store it directly instead of an
+	// independent O(n) rescan of oldHistory on every spawn.
 	if len(oldHistory) > 0 {
-		s.historyMu.Lock()
-		s.recountPersistedUserTurnsLocked()
-		s.historyMu.Unlock()
+		s.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
 	// Sidebar order anchor: inherit oldCreatedAt when this spawn replaces a
@@ -981,6 +1027,18 @@ func (r *Router) installFreshSessionLocked(
 		effectiveSID = proc.SessionID()
 	}
 	s.setSessionID(effectiveSID)
+	// #2093: when a respawn rotates the SID (oldSID != effectiveSID), the old
+	// SID's idToKey entry would otherwise dangle. Drop it iff it still points
+	// at this key so a later RegisterForResume dedup cannot mis-route a resume
+	// of the retired SID into whatever session next reuses this deterministic
+	// key. Guard on "still maps to key" to avoid clobbering an entry another
+	// live session legitimately re-claimed (oldSID == effectiveSID is skipped
+	// so we never delete the entry we are about to write).
+	if oldSID != "" && oldSID != effectiveSID {
+		if mapped, ok := r.ss.idToKey[oldSID]; ok && mapped == key {
+			delete(r.ss.idToKey, oldSID)
+		}
+	}
 	if effectiveSID != "" {
 		r.trackSessionID(effectiveSID)
 		r.ss.idToKey[effectiveSID] = key
@@ -1471,7 +1529,15 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// completes after Rename swapped keys, s.InjectHistory appends to
 	// old.persistedHistory. When len<cap in that backing array, the append
 	// writes into bytes that fresh.persistedHistory also points to.
+	// #2089: snapshot the persisted history and its already-maintained
+	// user-turn count together under historyMu so the cloned slice and the
+	// count cannot diverge (injectHistory updates both under this lock). This
+	// lets the seed below copy the cached count (O(1)) instead of rescanning
+	// the whole slice for "user" entries (O(n)).
+	old.historyMu.RLock()
 	freshHistory := slices.Clone(old.persistedHistory)
+	oldUserTurns := old.persistedUserTurns.Load()
+	old.historyMu.RUnlock()
 	fresh := &ManagedSession{
 		key:              newKey,
 		persistedHistory: freshHistory,
@@ -1488,10 +1554,11 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	}
 	// Seed persistedUserTurns so snapshot().MessageCount is correct on the
 	// renamed session before any new turns arrive. R20260603040203-CODE-002.
+	// #2089: freshHistory is an exact clone of old.persistedHistory captured
+	// atomically with oldUserTurns under historyMu, so the user-turn count is
+	// identical — copy the cached value (O(1)) instead of an O(n) rescan.
 	if len(freshHistory) > 0 {
-		fresh.historyMu.Lock()
-		fresh.recountPersistedUserTurnsLocked()
-		fresh.historyMu.Unlock()
+		fresh.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
 	fresh.setWorkspace(old.Workspace())

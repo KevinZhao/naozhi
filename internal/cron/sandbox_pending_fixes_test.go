@@ -86,6 +86,7 @@ func TestFinishSandboxRunWith_TimedOutDoesNotIncrementFailedMetric(t *testing.T)
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()
+	timedOutBefore := metrics.CronSandboxRunTimedOutTotal.Value()
 
 	// TimedOut: must NOT bump CronSandboxRunFailedTotal.
 	s.finishSandboxRun(a, RunStateTimedOut, ErrClassSandboxTransport, "", "deadline exceeded", nil)
@@ -93,6 +94,12 @@ func TestFinishSandboxRunWith_TimedOutDoesNotIncrementFailedMetric(t *testing.T)
 
 	if delta := metrics.CronSandboxRunFailedTotal.Value() - before; delta != 0 {
 		t.Fatalf("CronSandboxRunFailedTotal delta = %d for TimedOut, want 0 (double-count bug)", delta)
+	}
+	// R20260614-LOGIC-9 (#2091): TimedOut MUST bump the dedicated
+	// CronSandboxRunTimedOutTotal so failure-only alerts don't miss sandbox
+	// deadlines.
+	if delta := metrics.CronSandboxRunTimedOutTotal.Value() - timedOutBefore; delta != 1 {
+		t.Fatalf("CronSandboxRunTimedOutTotal delta = %d for TimedOut, want 1 (#2091)", delta)
 	}
 }
 
@@ -119,12 +126,17 @@ func TestFinishSandboxRunWith_FailedIncrementsFailedMetric(t *testing.T) {
 	}
 
 	before := metrics.CronSandboxRunFailedTotal.Value()
+	timedOutBefore := metrics.CronSandboxRunTimedOutTotal.Value()
 
 	s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "", "clean failure", nil)
 	waitEnded(t, rec)
 
 	if delta := metrics.CronSandboxRunFailedTotal.Value() - before; delta != 1 {
 		t.Fatalf("CronSandboxRunFailedTotal delta = %d for Failed, want 1", delta)
+	}
+	// Failed must NOT bleed into the timeout counter (#2091).
+	if delta := metrics.CronSandboxRunTimedOutTotal.Value() - timedOutBefore; delta != 0 {
+		t.Fatalf("CronSandboxRunTimedOutTotal delta = %d for Failed, want 0 (#2091)", delta)
 	}
 }
 

@@ -361,13 +361,7 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 // Invoked after every persistedHistory mutation in InjectHistory so the
 // proc==nil snapshot branch (#1644) can read the count lock-free.
 func (s *ManagedSession) recountPersistedUserTurnsLocked() {
-	var n int64
-	for i := range s.persistedHistory {
-		if s.persistedHistory[i].Type == "user" {
-			n++
-		}
-	}
-	s.persistedUserTurns.Store(n)
+	s.persistedUserTurns.Store(countUserTurns(s.persistedHistory))
 }
 
 // EventEntries returns the event log entries for this session.

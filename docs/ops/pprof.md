@@ -154,7 +154,8 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_sysession_run_ended_total` | sysession daemon run 终态计数（聚合所有终态） | 与 `naozhi_sysession_run_started_total` 配合判断"开了但没收尾"的 run 数 |
 | `naozhi_cron_run_succeeded_total` | succeeded 终态计数 | 比例骤降 = backend / prompt 退化；对比 failed/timed_out 看根因 |
 | `naozhi_cron_run_failed_total` | failed 终态计数（session_error / send_error / workdir_* 等非超时错误） | 持续涨 = job 配置或目标不可达；按 LastErrorClass 分组排查 |
-| `naozhi_cron_sandbox_run_failed_total` | sandbox placement 的 cron run 非成功终态计数（sandbox_failed / sandbox_transport / sandbox_unavailable） | 任何 sandbox_transport 涨都值得看：断流意味着 microVM 状态未知（双跑风险，RFC §6.2）；unavailable 涨 = cron.sandbox 配置缺失或失效 |
+| `naozhi_cron_sandbox_run_failed_total` | sandbox placement 的 cron run 非成功终态计数（sandbox_failed / sandbox_transport / sandbox_unavailable）；**不含 timed_out**（见下行，#2091） | 任何 sandbox_transport 涨都值得看：断流意味着 microVM 状态未知（双跑风险，RFC §6.2）；unavailable 涨 = cron.sandbox 配置缺失或失效 |
+| `naozhi_cron_sandbox_run_timed_out_total` | sandbox placement 的 cron run 进入 timed_out 终态的专用计数（与 failed 分离，避免双计；与 path-mixed `naozhi_cron_run_timed_out_total` 分离，便于隔离 sandbox 超时，#2091） | 非零且持续涨 = sandbox 侧接近 jobTimeout / microVM 启动慢；和 `naozhi_cron_sandbox_run_failed_total` 一起纳入 sandbox 告警，否则只盯 failed 会漏掉超时 |
 | `naozhi_cron_run_skipped_total` | skipped 终态计数（overlap_skipped / paused_concurrent） | 持续涨 = 上一轮没跑完下一轮就来了；调长 schedule 或缩 prompt |
 | `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
 | `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
