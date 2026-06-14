@@ -782,6 +782,49 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 	}
 }
 
+// TestNewScanner_PromptSemReused pins PERF-003 (#2124): the prompt-
+// extraction semaphore is allocated once in NewScanner and reused across
+// every Scan / RefreshDynamic call instead of `make(chan struct{}, 4)`
+// per cycle. Asserts (1) capacity, (2) the channel survives a refresh
+// with the same identity (not reallocated), and (3) it is fully drained
+// after the fan-out completes so reuse is safe.
+func TestNewScanner_PromptSemReused(t *testing.T) {
+	t.Parallel()
+	sc := NewScanner()
+	if sc.promptSem == nil {
+		t.Fatal("promptSem must be allocated by NewScanner")
+	}
+	if got := cap(sc.promptSem); got != promptSemCap {
+		t.Fatalf("promptSem cap = %d, want %d", got, promptSemCap)
+	}
+	semBefore := sc.promptSem
+
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/promptsem-reuse"
+	sessionID := "eeeeffff-0000-0000-0000-0000000000fe"
+	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
+	makeJSONLWithUserPrompts(t, jsonlPath, []string{"semaphore reuse"})
+
+	sessions := []DiscoveredSession{{SessionID: sessionID, CWD: cwd, State: "ready"}}
+	sc.RefreshDynamic(claudeDir, sessions)
+	sc.RefreshDynamic(claudeDir, sessions)
+
+	if sc.promptSem != semBefore {
+		t.Error("promptSem identity changed — must be reused, not reallocated")
+	}
+	if n := len(sc.promptSem); n != 0 {
+		t.Errorf("promptSem not drained after fan-out: len=%d, want 0", n)
+	}
+	if sessions[0].LastPrompt != "semaphore reuse" {
+		t.Errorf("LastPrompt = %q, want %q (correctness must hold with reused sem)",
+			sessions[0].LastPrompt, "semaphore reuse")
+	}
+}
+
 // R20260603-PERF-2: RefreshDynamic reuses the mtime captured during prompt
 // extraction. When the JSONL is missing, LastActive must fall back to
 // StartedAt (matching the old jsonlMtime behaviour).
