@@ -207,7 +207,7 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 
 // pdfNestedInImage reports whether the payload — already classified as an
 // image by http.DetectContentType — contains a "%PDF-" magic sequence in
-// the first 16 KB. R232-SEC-7 (#1002): blocks JFIF+PDF nested-container
+// the full upload buffer. R232-SEC-7 (#1002): blocks JFIF+PDF nested-container
 // bypass where the JFIF header passes the leading-byte sniff but the body
 // is actually a PDF.
 //
@@ -215,16 +215,17 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 // step past by padding its JFIF header (e.g. an embedded ICC profile, or APPn
 // segments) beyond 4 KB so the "%PDF-" payload lands outside the scan while
 // http.DetectContentType still reports image/jpeg from the leading ~512 B.
-// A legitimate JFIF header is only tens of bytes and even a fat ICC profile
-// rarely exceeds a few KB, so widening to 16 KB closes the bypass with no
-// false positives — the cost stays constant-bounded on legitimate uploads.
+// Widened to 16 KB at that time, but the same bypass is possible with any
+// fixed window: a crafted JFIF APP13/ICC profile segment can legally exceed
+// 16 KB and push "%PDF-" past the boundary.
+//
+// R20260613-SEC-4: scan the entire buffer instead of a fixed window. The
+// upload is already bounded to maxImageBytes (10 MB) by the caller, so a
+// single bytes.Contains over the full buffer is O(n) on a bounded n — cost
+// is acceptable and the bypass is completely closed. Legitimate images never
+// contain "%PDF-", so there are no false positives.
 func pdfNestedInImage(data []byte) bool {
-	const scanWindow = 16 * 1024
-	end := len(data)
-	if end > scanWindow {
-		end = scanWindow
-	}
-	return bytes.Contains(data[:end], pdfMagicSignature)
+	return bytes.Contains(data, pdfMagicSignature)
 }
 
 // pdfMagicSignature is the 5-byte signature every conforming PDF starts

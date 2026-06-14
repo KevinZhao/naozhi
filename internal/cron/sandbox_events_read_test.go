@@ -2,6 +2,7 @@ package cron
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,6 +189,50 @@ func TestSandboxRunEvents_ReleasesSemOnReturn(t *testing.T) {
 		if _, _, err := s.SandboxRunEvents("0123456789abcdef", "feedfacefeedface", 10); err != nil {
 			t.Fatalf("read %d: unexpected err %v (slot not released?)", i, err)
 		}
+	}
+}
+
+// TestSandboxEventSink_OversizeLineDropped verifies R20260613-ARCH-2: when
+// the sink receives a line >= sandboxEventsMaxLineSize it is silently
+// discarded (not written to the NDJSON log) and subsequent normal-size
+// lines are still written and readable by SandboxRunEvents. Without this
+// guard an oversized line written to disk causes bufio.Scanner to return
+// ErrTooLong, which terminates the scan and silently drops all lines that
+// follow — turning one big line into a full tail loss.
+func TestSandboxEventSink_OversizeLineDropped(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	jobID := "0123456789abcdef"
+	runID := "feedfacefeedface"
+
+	sink, closer := s.sandboxEventSink(jobID, runID, slog.Default())
+
+	// Send an oversized line (>= sandboxEventsMaxLineSize bytes).
+	oversized := make([]byte, sandboxEventsMaxLineSize)
+	for i := range oversized {
+		oversized[i] = 'x'
+	}
+	if err := sink(oversized); err != nil {
+		t.Fatalf("sink returned error for oversized line, want nil (degrade gracefully): %v", err)
+	}
+
+	// Send a normal-size line after the oversized one.
+	normal := []byte(`{"kind":"boot","msg":"ok"}`)
+	if err := sink(normal); err != nil {
+		t.Fatalf("sink returned error for normal line: %v", err)
+	}
+	closer()
+
+	// SandboxRunEvents must return only the normal line; the oversized line
+	// was never written so there is no ErrTooLong to interrupt the scan.
+	got, _, err := s.SandboxRunEvents(jobID, runID, 100)
+	if err != nil {
+		t.Fatalf("SandboxRunEvents returned error (oversized line must not break reader): %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != string(normal) {
+		t.Fatalf("got lines %q, want exactly the normal line %q", got, normal)
 	}
 }
 
