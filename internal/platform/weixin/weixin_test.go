@@ -236,6 +236,12 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	if msg.ChatType != "direct" {
 		t.Errorf("ChatType = %q, want %q", msg.ChatType, "direct")
 	}
+	// #2116: EventID must be namespaced (platform:user:message_id), never a
+	// bare integer, so it cannot collide with another platform/user's event in
+	// the shared cross-platform Dedup.
+	if want := "weixin:alice:42"; msg.EventID != want {
+		t.Errorf("EventID = %q, want %q", msg.EventID, want)
+	}
 
 	// Verify context_token was cached
 	ct, ok := w.contextTokens.Load("alice")

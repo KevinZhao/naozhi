@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -413,13 +414,20 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				})
 			}
 
-			// When the upstream response omits message_id the zero value "0"
-			// is not a real ID — every zero-id message would collide on the
-			// first dedup call and then pass through, so leave EventID empty
-			// and let Dedup.Seen's empty-string guard treat it as unknown.
+			// EventID is the global dedup key — dispatch.go shares ONE
+			// platform.Dedup across every platform, so a bare integer
+			// message_id (e.g. "42") with no namespace can collide with another
+			// platform's (or another user's) identically-numbered event and
+			// silently drop the second message as a "replay". Prefix with the
+			// platform and the sender so the key is unique per (platform, user,
+			// message). Mirrors slack's channel:ts composite fix (#2015). #2116.
+			//
+			// When the upstream response omits message_id the zero value 0 is
+			// not a real ID, so leave EventID empty and let the dispatch-side
+			// composite fallback key handle dedup.
 			eventID := ""
 			if msg.MessageID != 0 {
-				eventID = fmt.Sprintf("%d", msg.MessageID)
+				eventID = "weixin:" + from + ":" + strconv.Itoa(msg.MessageID)
 			}
 			incoming := platform.IncomingMessage{
 				Platform:  "weixin",
