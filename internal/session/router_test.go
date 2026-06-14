@@ -2390,9 +2390,9 @@ func TestClassifyShimState(t *testing.T) {
 // respawn-different-id (old ID appended to prevIDs).
 func TestCollectPreviousHistory(t *testing.T) {
 	t.Run("fresh: nil old session returns empty", func(t *testing.T) {
-		entries, prev := collectPreviousHistory(nil, nil, "")
-		if entries != nil || prev != nil {
-			t.Errorf("collectPreviousHistory(nil) = (%v, %v), want (nil, nil)", entries, prev)
+		entries, prev, turns := collectPreviousHistory(nil, nil, "")
+		if entries != nil || prev != nil || turns != 0 {
+			t.Errorf("collectPreviousHistory(nil) = (%v, %v, %d), want (nil, nil, 0)", entries, prev, turns)
 		}
 	})
 
@@ -2403,8 +2403,12 @@ func TestCollectPreviousHistory(t *testing.T) {
 		oldPrev := []string{"id-a"}
 		s := &ManagedSession{persistedHistory: persisted}
 		s.setSessionID("id-b")
+		// Mirror production: persistedUserTurns is maintained incrementally,
+		// so seed it to match persisted (one "user" entry). collectPreviousHistory
+		// must return that count on the persistedSnapshot branch (#2089).
+		s.persistedUserTurns.Store(1)
 
-		entries, prev := collectPreviousHistory(s, oldPrev, "id-b")
+		entries, prev, turns := collectPreviousHistory(s, oldPrev, "id-b")
 
 		if len(entries) != 1 || entries[0].Summary != "hi" {
 			t.Errorf("entries = %v, want one 'hi' entry", entries)
@@ -2412,13 +2416,16 @@ func TestCollectPreviousHistory(t *testing.T) {
 		if len(prev) != 1 || prev[0] != "id-a" {
 			t.Errorf("prev = %v, want [id-a] (same id, no growth)", prev)
 		}
+		if turns != 1 {
+			t.Errorf("userTurns = %d, want 1 (reused from old's incremental count)", turns)
+		}
 	})
 
 	t.Run("respawn new id: old id appended to chain", func(t *testing.T) {
 		s := &ManagedSession{}
 		s.setSessionID("id-old")
 
-		_, prev := collectPreviousHistory(s, []string{"id-a"}, "id-new")
+		_, prev, _ := collectPreviousHistory(s, []string{"id-a"}, "id-new")
 
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-old" {
 			t.Errorf("prev = %v, want [id-a id-old]", prev)
@@ -2434,13 +2441,42 @@ func TestCollectPreviousHistory(t *testing.T) {
 		for i := range oldPrev {
 			oldPrev[i] = fmt.Sprintf("id-%d", i)
 		}
-		_, prev := collectPreviousHistory(s, oldPrev, "id-new")
+		_, prev, _ := collectPreviousHistory(s, oldPrev, "id-new")
 
 		if len(prev) != maxPrevSessionIDs {
 			t.Fatalf("prev len = %d, want %d (capped)", len(prev), maxPrevSessionIDs)
 		}
 		if prev[len(prev)-1] != "id-old" {
 			t.Errorf("last entry = %q, want id-old (newest retained)", prev[len(prev)-1])
+		}
+	})
+
+	// #2089 dead-process branch: when the old process is dead,
+	// collectPreviousHistory returns p.EventEntries() (which can hold live
+	// events accumulated since the JSONL load) — a DIFFERENT slice from
+	// persistedHistory. The returned userTurns MUST count THAT slice, not reuse
+	// the stale persistedUserTurns atomic (which only tracks persistedHistory).
+	t.Run("dead process: userTurns counts EventEntries, not the stale atomic", func(t *testing.T) {
+		evEntries := []cli.EventEntry{
+			{Time: 1, Type: "user", Summary: "q1"},
+			{Time: 2, Type: "text", Summary: "a1"},
+			{Time: 3, Type: "user", Summary: "q2"},
+			{Time: 4, Type: "user", Summary: "q3"},
+		}
+		s := &ManagedSession{}
+		s.setSessionID("id-dead")
+		s.storeProcess(newDeadProcWithEntries(evEntries))
+		// Deliberately seed a WRONG atomic to prove the dead-proc branch does
+		// NOT reuse it: persistedUserTurns=1 but EventEntries has 3 user turns.
+		s.persistedUserTurns.Store(1)
+
+		entries, _, turns := collectPreviousHistory(s, nil, "id-new")
+
+		if len(entries) != 4 {
+			t.Fatalf("entries len = %d, want 4 (from EventEntries)", len(entries))
+		}
+		if turns != 3 {
+			t.Errorf("userTurns = %d, want 3 (counted from EventEntries, not the stale atomic=1)", turns)
 		}
 	})
 }
@@ -2531,6 +2567,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		resumeID string,
 		oldHistory []cli.EventEntry,
 		prevIDs []string,
+		oldUserTurns int64,
 		oldTotalCost float64,
 		oldCreatedAt int64,
 		exempt bool,

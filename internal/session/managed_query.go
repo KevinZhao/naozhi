@@ -361,13 +361,22 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 // Invoked after every persistedHistory mutation in InjectHistory so the
 // proc==nil snapshot branch (#1644) can read the count lock-free.
 func (s *ManagedSession) recountPersistedUserTurnsLocked() {
+	s.persistedUserTurns.Store(countUserTurns(s.persistedHistory))
+}
+
+// countUserTurns returns the number of Type=="user" entries in hist. Shared
+// by recountPersistedUserTurnsLocked and the seed paths (spawnSession /
+// Rename) so a restored slice's count can be derived without a second
+// independent full scan (#2089). Pure read; caller owns any locking required
+// for consistent access to the slice it passes.
+func countUserTurns(hist []cli.EventEntry) int64 {
 	var n int64
-	for i := range s.persistedHistory {
-		if s.persistedHistory[i].Type == "user" {
+	for i := range hist {
+		if hist[i].Type == "user" {
 			n++
 		}
 	}
-	s.persistedUserTurns.Store(n)
+	return n
 }
 
 // EventEntries returns the event log entries for this session.
