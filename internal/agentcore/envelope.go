@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/limits"
 )
 
 // EnvelopeKind discriminates the bootstrap SSE envelope (one `data:` frame
@@ -48,9 +50,11 @@ const (
 // later event. Reader-side memory is bounded by the SandboxRunEvents
 // concurrency semaphore, not by shrinking this cap below the writer's.
 //
-// 16MiB + 64KiB: the 16MiB CLI stdout ceiling plus envelope/JSON-escaping
-// overhead headroom.
-const MaxEnvelopeLineBytes = (16 << 20) + (64 << 10)
+// The base CLI stdout ceiling (limits.MaxStreamJSONLine, 16MiB) plus 64KiB
+// of envelope/JSON-escaping overhead headroom. Derived from the shared
+// constant rather than re-baking the 16MiB literal, so a future CLI cap
+// change is made in one place (#2084).
+const MaxEnvelopeLineBytes = limits.MaxStreamJSONLine + (64 << 10)
 
 // Envelope is one decoded SSE frame from the bootstrap handler.
 type Envelope struct {

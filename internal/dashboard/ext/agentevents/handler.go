@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
@@ -51,7 +52,10 @@ var toolResultPathRe = regexp.MustCompile(`^tool-results/[A-Za-z0-9]{1,32}\.(txt
 
 const (
 	maxAgentEventsLimit = 500
-	toolResultMaxBytes  = 16 << 20 // 16 MB
+	// toolResultMaxBytes caps a persisted tool-result file served back to the
+	// dashboard. A tool-result is one stream-json line, so it shares the
+	// upstream line cap rather than baking a second 16MB literal (#2084).
+	toolResultMaxBytes = limits.MaxStreamJSONLine
 )
 
 // Handler hosts the agent-team endpoints. Kept separate from
