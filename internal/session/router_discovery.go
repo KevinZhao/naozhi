@@ -378,11 +378,27 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	}
 	// Deduplicate: if another session already targets this sessionID, reuse it.
 	if existingKey, ok := r.ss.idToKey[sessionID]; ok {
-		if _, exists := r.ss.sessions[existingKey]; exists {
-			r.mu.Unlock()
-			return existingKey
+		if existing, exists := r.ss.sessions[existingKey]; exists {
+			// R20260614-LB-idtokey (#2093): the key string is deterministic
+			// (ProjectStableKey / cron:<jobID> always reproduce the same
+			// string) and idToKey is NOT cleaned for rotated/prev session IDs
+			// when installFreshSessionLocked replaces a session under the same
+			// key, nor when unregisterSessionLocked deletes only the current
+			// SID. So idToKey[sessionID]=K can dangle while sessions[K] now
+			// holds an UNRELATED session (the key was deleted, then reused for
+			// a fresh conversation). Reusing existingKey blindly would route a
+			// resume of the old sessionID into that unrelated live session —
+			// cross-session bleed. Only dedup when the found session genuinely
+			// owns this sessionID (current SID or anywhere in its rotation
+			// chain). Otherwise the index entry is a leaked residue: drop it
+			// and fall through to build a fresh resume entry under `key`.
+			if slices.Contains(existing.SnapshotChainIDs(), sessionID) {
+				r.mu.Unlock()
+				return existingKey
+			}
 		}
-		// Stale index entry; clean up and continue.
+		// Stale or leaked index entry (key gone, or it points at a session
+		// that no longer owns this sessionID); clean up and continue.
 		delete(r.ss.idToKey, sessionID)
 	}
 	s := &ManagedSession{
