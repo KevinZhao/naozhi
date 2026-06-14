@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -384,8 +385,10 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth succeeded — raise limit for RPC payloads (session responses, event batches).
-	conn.SetReadLimit(16 << 20) // 16 MB
+	// Auth succeeded — raise limit for RPC payloads (session responses, event
+	// batches). One RPC frame carries at most one stream-json line, so this
+	// matches the shared upstream line cap (#2084).
+	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
 	// Use configured display name; fall back to what remote sent.
 	// msg.DisplayName / msg.Hostname were already truncated at read time

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -350,9 +351,9 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		slog.Warn("upstream connector: TLS certificate verification disabled (upstream.insecure=true) — set upstream.insecure=false for production")
 	}
 	// Bound inbound frame size so a malicious or buggy primary cannot
-	// exhaust memory with a single huge message. 16 MB matches the primary
-	// side's ReverseConn limit (reverseserver.go).
-	conn.SetReadLimit(16 << 20)
+	// exhaust memory with a single huge message. Matches the primary side's
+	// ReverseConn limit (reverseserver.go) via the shared cap (#2084).
+	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
 	// gorilla/websocket's Conn.Close is documented for one concurrent
 	// reader and one concurrent writer but not for concurrent Close calls.
