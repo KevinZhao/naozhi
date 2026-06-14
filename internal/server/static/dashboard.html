@@ -1498,10 +1498,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
   .btn-hold-talk{font-size:var(--nz-fs-md);min-height:42px}
   .vo-card{padding:24px 32px}
   .vo-timer{font-size:var(--nz-fs-display)}
-  .session-list{overflow-x:hidden;overflow-y:auto}
-  /* Clear the fixed bottom tab bar so the bottom status strip (and the last
-     session card) is not covered by the activity-bar tab bar. */
-  .sidebar-status{padding-bottom:calc(var(--nz-tabbar-h,54px) + 4px);padding-left:max(16px,env(safe-area-inset-left))}
+  /* Reserve the fixed bottom tab bar's height so the last session card is not
+     covered by the activity-bar tab bar. The old #sidebar-status bar used to
+     carry this reserve, but that element was deleted in the "底部让位给 session
+     列表" iteration, leaving the list flush against (and under) the tab bar.
+     The padding now lives on .session-list itself so the bottom card clears. */
+  .session-list{overflow-x:hidden;overflow-y:auto;padding-bottom:calc(var(--nz-tabbar-h,54px) + 4px)}
   /* Compact session cards on mobile */
   .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px;gap:10px}
   .session-card .sc-meta{font-size:var(--nz-fs-xs);gap:3px}
