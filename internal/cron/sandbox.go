@@ -299,44 +299,66 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 				"pending", pendingPath != "")
 			msg += " (microVM fate UNKNOWN — termination unconfirmed; check for side effects before re-running)"
 		}
-		// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
-		// auto-replay — it enters the human confirmation queue (the operator
-		// checks whether the side effect already landed before deciding to
-		// confirm-done or replay). A side-effect-free job is safe to re-run
-		// freely, so it never enters the queue (its failed-transport record
-		// still warns in history). RuntimeSessionID is carried so the queue's
-		// replay action can satisfy §6.2 rule 1 (Stop before replay). Skip the
-		// queue entry when Stop was already confirmed in-process: the microVM is
-		// dead, but the SIDE EFFECT may still have landed before the stream
-		// broke, so a side-effecting job still needs a human look — keep it
-		// queued regardless of StopConfirmed.
-		if a.snap.sideEffects {
-			s.writeSandboxAttention(sandboxAttention{
-				JobID:            a.snap.jobID,
-				RunID:            a.runID,
-				RuntimeSessionID: runtimeSID,
-				Reason:           attentionReasonTransport,
-				JobLabel:         a.snap.label,
-				StartedAtMS:      a.startedAt.UnixMilli(),
-				CreatedAtMS:      s.attentionNowMS(),
-			}, a.lg)
-		}
 		// R20260613-CR-6 (#2059): align shutdown-cancel classification with the
 		// local path (scheduler_run.go). sandbox ctx = WithTimeout(s.stopCtx,
 		// budget), so scheduler Stop cancels s.stopCtx → ctx.Err()=Canceled.
 		// Treat that as RunStateCanceled with skipPersist=true (keep history
 		// clean — a graceful shutdown is not a transport failure) rather than
 		// recording a failed-transport run. DeadlineExceeded stays TimedOut.
+		//
+		// R20260613-LB-1 (#2081): the side-effecting human-confirmation-queue
+		// write below MUST stay inside the non-cancel branches. A run cancelled
+		// only by graceful shutdown is not a transport failure (it is recorded
+		// as RunStateCanceled with skipPersist above's sibling branch); enqueuing
+		// it for attention would leave the operator a phantom "needs confirm"
+		// entry that a later reconcileSandboxPending overwrites with orphaned —
+		// for a run whose history correctly reads Canceled. So only genuine
+		// transport failures (DeadlineExceeded / default) feed the queue.
 		switch {
 		case errors.Is(ctx.Err(), context.Canceled):
 			s.finishSandboxRunSkipPersist(a, RunStateCanceled, ErrClassCanceled, outcome.ResultText,
 				"sandbox run canceled by shutdown", metaPtr)
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			s.enqueueSandboxTransportAttention(a, runtimeSID)
 			s.finishSandboxRun(a, RunStateTimedOut, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 		default:
+			s.enqueueSandboxTransportAttention(a, runtimeSID)
 			s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxTransport, outcome.ResultText, msg, metaPtr)
 		}
 	}
+}
+
+// enqueueSandboxTransportAttention adds a side-effecting job's genuine
+// transport failure to the human confirmation queue.
+//
+// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
+// auto-replay — it enters the human confirmation queue (the operator checks
+// whether the side effect already landed before deciding to confirm-done or
+// replay). A side-effect-free job is safe to re-run freely, so it never enters
+// the queue (its failed-transport record still warns in history).
+// RuntimeSessionID is carried so the queue's replay action can satisfy §6.2
+// rule 1 (Stop before replay). The entry is written regardless of
+// StopConfirmed: the microVM may be dead, but the SIDE EFFECT may still have
+// landed before the stream broke, so a side-effecting job still needs a human
+// look.
+//
+// R20260613-LB-1 (#2081): callers MUST NOT invoke this for shutdown-cancel
+// (ctx.Err()==Canceled) runs — those are classified RunStateCanceled and kept
+// out of the queue, so this is only reached from the DeadlineExceeded/default
+// transport branches.
+func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeSID string) {
+	if !a.snap.sideEffects {
+		return
+	}
+	s.writeSandboxAttention(sandboxAttention{
+		JobID:            a.snap.jobID,
+		RunID:            a.runID,
+		RuntimeSessionID: runtimeSID,
+		Reason:           attentionReasonTransport,
+		JobLabel:         a.snap.label,
+		StartedAtMS:      a.startedAt.UnixMilli(),
+		CreatedAtMS:      s.attentionNowMS(),
+	}, a.lg)
 }
 
 // sandboxMetaPtr returns &meta when the receipt carries any information,

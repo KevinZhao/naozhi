@@ -713,6 +713,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
+			// evictOldest() releases and re-acquires r.mu around proc.Close()
+			// (router_capacity.go), so a concurrent spawnSession can ++/-- the
+			// pendingSpawns counter inside that window. Re-read it here instead
+			// of reusing the line-707 snapshot: a stale (smaller) value would
+			// under-count and let us over-spawn past maxProcs, while a stale
+			// (larger) value would falsely refuse with ErrMaxProcs. Both
+			// activeCount and pendingSpawns must reflect the post-evict state for
+			// the invariant "all three checks run under r.mu" to hold (#2082).
+			pending64 = int64(r.pp.pendingSpawns)
 			if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
