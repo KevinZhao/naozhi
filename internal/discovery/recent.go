@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,8 +84,25 @@ func (noopRecentFilter) SkipSessionID(string) bool { return false }
 // kept for source-compat with discovery callers; new callers should
 // prefer filter.SkipSessionID for richer semantics).
 func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
+	return RecentSessionsCtx(context.Background(), claudeDir, limit, maxAge, excludeSessionIDs, filter)
+}
+
+// RecentSessionsCtx is RecentSessions with cancellation support. The
+// per-directory FS walk (which can stall indefinitely on a slow/hung
+// home — NFS, FUSE) checks ctx.Done() before each project directory and
+// returns whatever it has scanned so far once the context is cancelled or
+// its deadline expires. PERF-009 (#2134): the dashboard history scan runs
+// as the singleflight leader, so an unbounded walk blocks every concurrent
+// poll goroutine waiting on the flight; a bounded context caps that stall.
+//
+// On early return the partial result is still sorted/trimmed normally, so
+// callers get a best-effort recent slice rather than nil.
+func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
 	if claudeDir == "" {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if filter == nil {
 		filter = noopRecentFilter{}
@@ -108,6 +127,16 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 	jsonlPaths := make(map[string]string, len(entries))
 
 	for _, e := range entries {
+		// PERF-009 (#2134): bail out of the walk as soon as the context
+		// is cancelled / its deadline lapses so a slow FS cannot pin the
+		// singleflight leader for the full traversal. Each project dir
+		// triggers stat/ReadDir/file reads below, so the gate sits at the
+		// top of the per-directory body.
+		if err := ctx.Err(); err != nil {
+			slog.Warn("recent sessions scan cancelled mid-walk; returning partial result",
+				"scanned", len(all), "err", err)
+			break
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -180,6 +209,14 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 	result := make([]RecentSession, 0, resCap)
 	for i := range all {
 		if limit > 0 && len(result) >= limit {
+			break
+		}
+		// PERF-009 (#2134): extractFirstPrompt opens+reads a JSONL file
+		// per result; honour cancellation here too so a slow FS in the
+		// prompt-extraction phase cannot pin the leader either.
+		if err := ctx.Err(); err != nil {
+			slog.Warn("recent sessions prompt extraction cancelled; returning partial result",
+				"extracted", len(result), "err", err)
 			break
 		}
 		path := jsonlPaths[all[i].SessionID]
