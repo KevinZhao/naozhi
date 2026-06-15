@@ -533,3 +533,149 @@ func TestReconcileOrphan_WritesOrphanedAttentionWhenNonePreexists(t *testing.T) 
 			got.Reason, attentionReasonOrphaned)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R20260615-030459-COR-002: reconcileSandboxPending must treat
+// RuntimeSessionID=="" as corrupt and drop+warn the record without calling
+// StopSession or finishRun. Mirrors the disqualifier already present in
+// stopSandboxRunsForJob (line 375).
+// ---------------------------------------------------------------------------
+
+func TestReconcileSandboxPending_EmptyRuntimeSessionIDDroppedAsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	path := writePendingFixture(t, storePath, sandboxPending{
+		JobID:            j.ID,
+		RunID:            "abcabcabc0000005",
+		RuntimeSessionID: "", // empty: no microVM handle, §6.2 containment broken
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	s.reconcileSandboxPending()
+
+	// Must be treated as corrupt: no terminal broadcast, no StopSession.
+	if rec.endedCount() != 0 {
+		t.Fatal("empty RuntimeSessionID record must be dropped as corrupt, not reconciled into a terminal run [COR-002]")
+	}
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 0 {
+		t.Fatalf("StopSession called %d time(s) for empty-RSID record; want 0 [COR-002]", nStopped)
+	}
+	// File must be removed so it does not re-warn on every boot.
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt (empty RuntimeSessionID) pending file must be removed [COR-002]")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R20260615-030459-COR-001: reconcileOneSandboxOrphan must re-check job
+// existence under RLock immediately before writeSandboxAttention so a
+// concurrent DeleteJobByID that runs between the initial snapshot RUnlock and
+// the attention write cannot leave a ghost queue card (TOCTOU, analogous to
+// the fix for enqueueSandboxTransportAttention in OPEN #2129).
+// ---------------------------------------------------------------------------
+
+// TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck verifies
+// the re-check: if the job is gone from s.jobs at the time of the attention
+// write guard, no attention card is written.
+// We simulate the TOCTOU window by directly removing the job from s.jobs
+// (package-internal test — avoids the panicRouter.Reset path that DeleteJobByID
+// would trigger) so the initial RLock snapshot sees nil (deleted-job branch)
+// and the re-check also sees nil. The key invariant: no ghost attention card.
+func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+
+	runID := "aabbccddeeff0201"
+	p := sandboxPending{
+		JobID:            j.ID,
+		RunID:            runID,
+		RuntimeSessionID: "run-aabbccddeeff0201-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
+	}
+	path := writePendingFixture(t, storePath, p)
+
+	// Simulate the TOCTOU race: remove the job from s.jobs directly so neither
+	// the initial snapshot NOR the re-check can find it. The deleted-job branch
+	// must not write an attention card regardless.
+	s.mu.Lock()
+	delete(s.jobs, j.ID)
+	s.mu.Unlock()
+
+	s.reconcileOneSandboxOrphan(p, path)
+	// deleted-job branch does not broadcast; wait a tick to be sure.
+	time.Sleep(5 * time.Millisecond)
+
+	// No broadcast expected from the deleted-job branch.
+	if rec.endedCount() != 0 {
+		t.Fatal("deleted-job orphan branch must not broadcast an ended event [COR-001]")
+	}
+	// Critical: no ghost attention card must have been written.
+	if n := s.SandboxAttentionCount(); n != 0 {
+		t.Fatalf("attention count = %d after job-deleted reconcile; want 0 — re-check must prevent ghost card [COR-001]", n)
+	}
+	// Pending file removed.
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("pending file must be removed after orphan reconcile [COR-001]")
+	}
+}
+
+// TestReconcileOrphan_AttentionRecheck_RaceWithDelete is a -race canary:
+// run a side-effects-job reconcile while a concurrent goroutine repeatedly
+// deletes+re-adds the job, verifying the attention count never exceeds 1.
+// The re-check (COR-001) prevents the ghost-card race.
+func TestReconcileOrphan_AttentionRecheck_RaceWithDelete(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+
+	runID := "aabbccddeeff0202"
+	p := sandboxPending{
+		JobID:            j.ID,
+		RunID:            runID,
+		RuntimeSessionID: "run-aabbccddeeff0202-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
+	}
+	path := writePendingFixture(t, storePath, p)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			// Toggle: delete the job so some reconcile iterations hit
+			// the re-check with nil, others with non-nil.
+			s.mu.Lock()
+			if _, ok := s.jobs[j.ID]; ok {
+				delete(s.jobs, j.ID)
+			} else {
+				s.jobs[j.ID] = j
+			}
+			s.mu.Unlock()
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	// Rewrite pending file on each iteration so reconcile can fire > once.
+	for i := 0; i < 5; i++ {
+		writePendingFixture(t, storePath, p)
+		s.reconcileOneSandboxOrphan(p, path)
+	}
+	<-done
+
+	// Under -race this will surface any unguarded concurrent access.
+	// Attention count may be 0 or 1 — the invariant is: never > 1 (no ghost dup).
+	if n := s.SandboxAttentionCount(); n > 1 {
+		t.Fatalf("attention count = %d; re-check must prevent ghost duplicate cards [COR-001]", n)
+	}
+}

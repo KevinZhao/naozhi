@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/agentcore"
-	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -461,7 +460,7 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		// Same pipeline as the local success path (R234-SEC-1 +
 		// R20260531070014-ARCH-1): sanitise (truncate/redact) then localize
 		// API-error envelopes before anything reaches an IM channel.
-		notice = apierr.Localize(sanitiseRunResult(result))
+		notice = localizeNotice(result)
 	} else if errClass == ErrClassSandboxTransport {
 		notice = "云沙箱连接中断，任务状态未知，请检查执行历史。"
 	}
