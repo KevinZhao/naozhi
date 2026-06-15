@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -332,6 +333,40 @@ func TestReplay_NonSandboxJob(t *testing.T) {
 	_, err := s.ReplaySandboxRun(j.ID, "feedfacefeedface")
 	if !errors.Is(err, ErrJobNotSandbox) {
 		t.Fatalf("err = %v, want ErrJobNotSandbox", err)
+	}
+}
+
+// TestReplay_PanicKeepsStartedEndedBalanced pins R202606-ARCH-2: when the
+// replay goroutine panics before reaching finishSandboxRun/recordTerminalResult,
+// the panic-recover path must bump CronRunEndedTotal to match the
+// CronRunStartedTotal that emitRunStarted already bumped synchronously.
+// Without the fix (metrics.CronRunEndedTotal.Add(1) in the recover block),
+// Started and Ended diverge by 1 permanently, breaking the in-flight gauge
+// invariant.
+func TestReplay_PanicKeepsStartedEndedBalanced(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &panicReplayRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+	origRunID := "feedfacefeedface"
+	s.writeSandboxSnapshot(j.ID, origRunID, "panic metrics test", "haiku", "img-v1", nil, slog.Default())
+
+	startedBefore := metrics.CronRunStartedTotal.Value()
+	endedBefore := metrics.CronRunEndedTotal.Value()
+
+	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
+		t.Fatalf("ReplaySandboxRun: %v", err)
+	}
+	waitEnded(t, rec)
+
+	startedDelta := metrics.CronRunStartedTotal.Value() - startedBefore
+	endedDelta := metrics.CronRunEndedTotal.Value() - endedBefore
+	if startedDelta != 1 {
+		t.Fatalf("CronRunStartedTotal delta = %d, want 1 [R202606-ARCH-2]", startedDelta)
+	}
+	if endedDelta != 1 {
+		t.Fatalf("CronRunEndedTotal delta = %d, want 1 — panic path must bump CronRunEndedTotal to keep started/ended balanced [R202606-ARCH-2]", endedDelta)
 	}
 }
 
