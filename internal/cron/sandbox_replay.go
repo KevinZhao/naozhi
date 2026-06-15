@@ -278,6 +278,7 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 						ErrorClass: ErrClassSandboxFailed,
 						ErrorMsg:   "sandbox replay panicked before terminal record",
 					})
+					metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
 				}
 			}
 		}()
