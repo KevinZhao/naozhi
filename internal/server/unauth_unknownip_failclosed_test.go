@@ -119,3 +119,53 @@ func TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed(t *testing.T) {
 		t.Fatalf("WS upgrade with trustedProxy=true and missing XFF returned %d, want 429 (fail-closed); the unknownIPKey shared-bucket regression is back", w.Code)
 	}
 }
+
+// TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter pins
+// R202606-CORR-002: the fail-closed 429 branch for unresolvable IPs in
+// wshub_upgrade.go must carry Retry-After: 60, consistent with the sibling
+// 429 paths in routes.go and health.go.
+func TestHandleUpgrade_TrustedProxy_MissingXFF_SetsRetryAfter(t *testing.T) {
+	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.RemoteAddr = "10.0.0.1:1234" // no XFF — triggers fail-closed branch
+	w := httptest.NewRecorder()
+	srv.hub.HandleUpgrade(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After = %q, want \"60\" (R202606-CORR-002: missing header regression)", got)
+	}
+}
+
+// TestHandleUpgrade_LimiterDeny_SetsRetryAfter pins R202606-CORR-002: the
+// per-IP limiterFn denial branch in wshub_upgrade.go must also carry
+// Retry-After: 60, consistent with the sibling 429 paths.
+func TestHandleUpgrade_LimiterDeny_SetsRetryAfter(t *testing.T) {
+	// Use a non-trustedProxy server so RemoteAddr always resolves, then inject
+	// an always-deny wsUpgradeLimiter to exercise the second 429 branch.
+	router := session.NewRouter(session.RouterConfig{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:           ":0",
+		Router:         router,
+		Backend:        "claude",
+		DashboardToken: "secret",
+		TrustedProxy:   false,
+	})
+	srv.registerDashboard()
+	srv.hub.wsUpgradeLimiter = func(ip string) bool { return false }
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.RemoteAddr = "203.0.113.5:9000"
+	w := httptest.NewRecorder()
+	srv.hub.HandleUpgrade(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 from limiter deny, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After = %q, want \"60\" (R202606-CORR-002: missing header regression on limiterFn deny branch)", got)
+	}
+}
