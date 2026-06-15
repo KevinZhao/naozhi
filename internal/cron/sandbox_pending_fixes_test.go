@@ -533,3 +533,42 @@ func TestReconcileOrphan_WritesOrphanedAttentionWhenNonePreexists(t *testing.T) 
 			got.Reason, attentionReasonOrphaned)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R20260615-030459-COR-002: reconcileSandboxPending must treat
+// RuntimeSessionID=="" as corrupt and drop+warn the record without calling
+// StopSession or finishRun. Mirrors the disqualifier already present in
+// stopSandboxRunsForJob (line 375).
+// ---------------------------------------------------------------------------
+
+func TestReconcileSandboxPending_EmptyRuntimeSessionIDDroppedAsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	path := writePendingFixture(t, storePath, sandboxPending{
+		JobID:            j.ID,
+		RunID:            "abcabcabc0000005",
+		RuntimeSessionID: "", // empty: no microVM handle, §6.2 containment broken
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	s.reconcileSandboxPending()
+
+	// Must be treated as corrupt: no terminal broadcast, no StopSession.
+	if rec.endedCount() != 0 {
+		t.Fatal("empty RuntimeSessionID record must be dropped as corrupt, not reconciled into a terminal run [COR-002]")
+	}
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 0 {
+		t.Fatalf("StopSession called %d time(s) for empty-RSID record; want 0 [COR-002]", nStopped)
+	}
+	// File must be removed so it does not re-warn on every boot.
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt (empty RuntimeSessionID) pending file must be removed [COR-002]")
+	}
+}

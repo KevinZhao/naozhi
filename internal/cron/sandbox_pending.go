@@ -119,7 +119,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 			continue
 		}
 		var p sandboxPending
-		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 {
+		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 || p.RuntimeSessionID == "" {
 			// Corrupt or tampered record (RunID/JobID must be scheduler-
 			// generated hex — they flow into run-record paths and the
 			// broadcast, so shape-validate before use). StartedAtMS<=0
@@ -128,6 +128,11 @@ func (s *Scheduler) reconcileSandboxPending() {
 			// flows into CronRun.StartedAt and an astronomical DurationMS,
 			// wrecking the dashboard timeline — drop the record. Remove so it
 			// does not re-warn on every boot.
+			// RuntimeSessionID=="" (R20260615-030459-COR-002): a pending record
+			// without a runtime session id cannot be reconciled — reconcile would
+			// skip the StopSession block (line 156) yet still call finishRun and
+			// remove the file, breaking §6.2 containment. Treat as corrupt:
+			// drop+warn, aligned with stopSandboxRunsForJob's guard (line 375).
 			slog.Warn("cron sandbox: corrupt pending record dropped", "file", e.Name(), "err", err)
 			_ = os.Remove(path)
 			continue
