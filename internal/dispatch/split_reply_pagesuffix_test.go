@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"unicode/utf8"
@@ -161,6 +162,88 @@ func TestSendSplitReply_TinyMaxLenSuppressesSuffix(t *testing.T) {
 	}
 	if joined != text {
 		t.Errorf("reassembled text != original (content lost) (#2057)")
+	}
+}
+
+// singleTokenPlatform mimics a platform (e.g. WeChat iLink) whose reply is
+// authorised by a single-use context token: the FIRST send succeeds, every
+// subsequent send in the same turn is rejected (token already consumed).
+// #2136.
+type singleTokenPlatform struct {
+	mu       sync.Mutex
+	limit    int
+	accepted []string
+	sends    int
+}
+
+func (s *singleTokenPlatform) Name() string                                               { return "singletoken" }
+func (s *singleTokenPlatform) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
+func (s *singleTokenPlatform) Reply(_ context.Context, msg platform.OutgoingMessage) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sends++
+	if s.sends > 1 {
+		// Token already consumed by the first send — upstream rejects reuse.
+		return "", errors.New("singletoken: context_token already used")
+	}
+	s.accepted = append(s.accepted, msg.Text)
+	return "ok", nil
+}
+func (s *singleTokenPlatform) EditMessage(_ context.Context, _, _ string) error { return nil }
+func (s *singleTokenPlatform) MaxReplyLength() int                              { return s.limit }
+func (s *singleTokenPlatform) SupportsInterimMessages() bool                    { return false }
+func (s *singleTokenPlatform) UsesSingleUseReplyToken() bool                    { return true }
+
+// TestSendSplitReply_SingleUseTokenCollapsesToOneMessage reproduces #2136: a
+// reply longer than the platform limit must be delivered as a SINGLE
+// (truncated) message for a single-use-token platform, not fanned into N
+// chunks where chunks 2..N hit the consumed token and are silently lost.
+func TestSendSplitReply_SingleUseTokenCollapsesToOneMessage(t *testing.T) {
+	const limit = 100
+	sp := &singleTokenPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	text := makeRunes('a', 350) // > limit, would normally split into 4 chunks
+
+	d.SendSplitReply(context.Background(), sp, "user-1", text)
+
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.sends != 1 {
+		t.Fatalf("expected exactly 1 send (single-use token), got %d", sp.sends)
+	}
+	if len(sp.accepted) != 1 {
+		t.Fatalf("expected 1 accepted message, got %d", len(sp.accepted))
+	}
+	if n := utf8.RuneCountInString(sp.accepted[0]); n > limit {
+		t.Errorf("collapsed message has %d runes, exceeds limit %d", n, limit)
+	}
+	if !strings.HasSuffix(sp.accepted[0], singleReplyTruncMarker) {
+		t.Errorf("collapsed message missing truncation marker: %q", sp.accepted[0])
+	}
+}
+
+// TestSendSplitReply_SingleUseTokenShortReplyUnchanged verifies a reply that
+// already fits the limit is delivered verbatim (no truncation marker) on a
+// single-use-token platform. #2136.
+func TestSendSplitReply_SingleUseTokenShortReplyUnchanged(t *testing.T) {
+	const limit = 100
+	sp := &singleTokenPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	text := makeRunes('b', 40) // <= limit
+
+	d.SendSplitReply(context.Background(), sp, "user-1", text)
+
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.sends != 1 || len(sp.accepted) != 1 {
+		t.Fatalf("expected 1 send/1 accepted, got sends=%d accepted=%d", sp.sends, len(sp.accepted))
+	}
+	if sp.accepted[0] != text {
+		t.Errorf("short reply altered: got %q want %q", sp.accepted[0], text)
 	}
 }
 
