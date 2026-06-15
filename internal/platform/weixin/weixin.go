@@ -174,6 +174,13 @@ func (w *Weixin) MaxReplyLength() int { return w.cfg.MaxReplyLen }
 // SupportsInterimMessages returns false — iLink Bot context_token is single-use.
 func (w *Weixin) SupportsInterimMessages() bool { return false }
 
+// UsesSingleUseReplyToken returns true — the iLink Bot context_token cached
+// from the inbound poll is consumed by the first Reply and rejected upstream
+// on reuse. #2136: this tells the dispatcher to collapse a long reply into a
+// single (truncated) message rather than fan it into N chunks, of which only
+// the first would arrive and chunks 2..N would be silently lost.
+func (w *Weixin) UsesSingleUseReplyToken() bool { return true }
+
 // RegisterRoutes is a no-op (long-poll, no inbound HTTP).
 func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 

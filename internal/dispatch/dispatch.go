@@ -1492,6 +1492,24 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 	return (runeCount + minChunk - 1) / minChunk
 }
 
+// singleReplyTruncMarker is appended (within the rune budget) when a reply to
+// a single-use-token platform must be truncated to fit one message. #2136.
+const singleReplyTruncMarker = "\n…(truncated)"
+
+// truncateForSingleReply trims text to at most maxRunes runes, reserving room
+// for a visible truncation marker so the user knows the reply was cut. When
+// maxRunes is too small to fit the marker, it falls back to a bare rune-safe
+// truncation (content kept maximal, marker dropped).
+func truncateForSingleReply(text string, maxRunes int) string {
+	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
+	keep := maxRunes - markerRunes
+	if keep <= 0 {
+		// No room for the marker — keep as much content as fits.
+		return string([]rune(text)[:maxRunes])
+	}
+	return string([]rune(text)[:keep]) + singleReplyTruncMarker
+}
+
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
@@ -1500,6 +1518,26 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		// floating literal so a bump in platform.DefaultMaxReplyLen is
 		// picked up here automatically.
 		maxLen = platform.DefaultMaxReplyLen
+	}
+
+	// #2136: platforms whose reply is authorised by a single-use token (e.g.
+	// WeChat iLink) can deliver only ONE message per inbound turn — the token
+	// is consumed by the first send and reuse is rejected upstream. Fanning a
+	// long reply into N chunks would deliver only chunk [1/N] and silently
+	// lose [2/N]..[N/N]. Collapse to a single rune-safe-truncated message with
+	// a visible "…(truncated)" marker so the user knows the reply was cut.
+	if platform.UsesSingleUseReplyToken(p) {
+		if utf8.RuneCountInString(text) > maxLen {
+			text = truncateForSingleReply(text, maxLen)
+		}
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Error("single-reply send failed after retries", "chat", chatID, "err", err)
+		} else {
+			d.markReplySuccess()
+		}
+		return
 	}
 
 	// #2008: when the reply needs splitting we append a "\n— [i/N]" page
