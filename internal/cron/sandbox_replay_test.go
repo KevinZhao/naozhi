@@ -154,14 +154,24 @@ func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
 // panicReplayRunner panics inside RunJob, simulating an executeSandbox panic
 // that strikes AFTER the synchronous emitRunStarted but BEFORE the run reaches
 // finishSandboxRun → emitRunEnded.
-type panicReplayRunner struct{ stopped []string }
+//
+// R20260615-030459-GO-001: stopped is guarded by mu. StopSession is called
+// from a goroutine (executeSandbox → reconcileOneSandboxOrphan / replay path)
+// concurrently with the test's reads; without a mutex the -race detector fires.
+// Mirrors fakeSandboxRunner's identical mu pattern in sandbox_test.go.
+type panicReplayRunner struct {
+	mu      sync.Mutex
+	stopped []string
+}
 
 func (p *panicReplayRunner) RunJob(context.Context, SandboxJob, func([]byte) error) (SandboxOutcome, error) {
 	panic("boom inside sandbox run")
 }
 
 func (p *panicReplayRunner) StopSession(_ context.Context, id string) error {
+	p.mu.Lock()
 	p.stopped = append(p.stopped, id)
+	p.mu.Unlock()
 	return nil
 }
 

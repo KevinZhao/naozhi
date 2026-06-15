@@ -16,6 +16,7 @@ import (
 // the reserved-IP guard — the dial proceeds and fails only at the TCP layer
 // (timeout / connection refused), never with the "reserved IP" message.
 func TestBlockPrivateDialContext_DialsValidatedIP(t *testing.T) {
+	// NOTE: must not use t.Parallel() — mutates testHTTPTransport package-global.
 	prev := testHTTPTransport
 	testHTTPTransport = nil
 	t.Cleanup(func() { testHTTPTransport = prev })
@@ -51,6 +52,7 @@ func TestBlockPrivateDialContext_DialsValidatedIP(t *testing.T) {
 // httptest servers on loopback work — that branch is tested by the Download
 // integration tests; here we pin the production-mode branch.
 func TestLatestRelease_TransportHasSSRFGuard(t *testing.T) {
+	// NOTE: must not use t.Parallel() — mutates testHTTPTransport package-global.
 	prev := testHTTPTransport
 	testHTTPTransport = nil
 	t.Cleanup(func() { testHTTPTransport = prev })

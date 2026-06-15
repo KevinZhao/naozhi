@@ -675,3 +675,9 @@
 - [R202606-ARCH-3] sandboxEventSink godoc 写 sandbox_events/(下划线)但代码用 sandboxevents/(纯文档不符) — internal/cron/sandbox.go:472
 - [R202606-PERF-001] saveKnownIDs 用裸 json.Marshal 未复用 storeMarshalBufPool(5min/tick 冷路径微优化) — internal/session/store.go:660
 - [R202606-PERF-003] writeSandboxPending 每次 run 启动无条件 os.MkdirAll 未缓存(可加 sync.Once,微优化) — internal/cron/sandbox_pending.go:48
+- [R20260615-030459-GO-002] selfupdate latestTransport dead-else 注释易误读为"故意跳过 SSRF guard" — internal/selfupdate/selfupdate.go:87
+- [R20260615-030459-SEC-9] NAOZHI_CLI_DEBUG 启动应 WARN "captures API credentials" — internal/cli/cli_debug.go:69
+- [R20260615-030459-SEC-12] /health 暴露 node IDs 给已认证用户(凭证泄漏时辅助横移) — internal/server/health.go:279
+- [R20260615-030459-SEC-13] font-src cdn.jsdelivr.net 无 SRI(KaTeX 字体)待 vendoring — internal/server/routes.go:524
+- [R20260615-030459-ARC-3] cron notice-localize guard test 注释引用 stale 行号 scheduler_run.go:1595 — internal/cron/cron_notice_apierr_localize_test.go:19
+- [R20260615-030459-COR-005] reconcile corrupt-record log 在 err==nil 时仍打 err=nil 字段(IsValidID 失败路径) — internal/cron/sandbox_pending.go:131

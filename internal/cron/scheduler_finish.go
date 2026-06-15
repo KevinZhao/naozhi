@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -521,6 +522,15 @@ func sanitiseRunResult(s string) string {
 	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
+
+// localizeNotice is the canonical notice-pipeline helper: sanitise (truncate/
+// redact secrets) then localize API-error envelopes before text reaches any
+// IM channel or notification path. Factored from the two hand-written call
+// sites in scheduler_run.go and sandbox.go (R20260615-030459-ARC-1) so the
+// privacy-critical pipeline (R234-SEC-1 / R20260531070014-ARCH-1) has a
+// single authoritative definition and divergence between call sites is
+// prevented.
+func localizeNotice(s string) string { return apierr.Localize(sanitiseRunResult(s)) }
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection
 // scrub used by recordResultP0WithSanitised, for skipPersist branches
