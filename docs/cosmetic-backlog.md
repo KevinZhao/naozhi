@@ -670,3 +670,8 @@
 - [R20260614-SEC-10] containsYAMLBreakingByte 未拒绝 Unicode U+2028/U+2029(YAML1.2 不视为换行,当前无 trigger) — internal/config/config.go:1477
 - [R20260614-SEC-3] 建议审计所有 cron 渲染函数的 server 字符串是否经 esc()(假设性,未发现具体未转义点) — internal/server/static/cron_view.js:3588
 - [R20260614-LOGIC-003] EffectivePlannerModel godoc 称 fallback 'sonnet' 但返回 ''(godoc 与实现不符,纯文档) — internal/project/manager.go:385
+- [R202606-SEC-002] resolveClaudeProjectsDir 接受 CLAUDE_PROJECTS_DIR 未校验绝对路径(运营配置硬化,非攻击面) — internal/server/claude_paths.go:33
+- [R202606-ARCH-1] sandboxevents/sandboxpending/sandboxattention 子目录名为 magic string 跨 8 处重复无共享 const(无 trigger,typo 才会 desync) — internal/cron/sandbox.go:486
+- [R202606-ARCH-3] sandboxEventSink godoc 写 sandbox_events/(下划线)但代码用 sandboxevents/(纯文档不符) — internal/cron/sandbox.go:472
+- [R202606-PERF-001] saveKnownIDs 用裸 json.Marshal 未复用 storeMarshalBufPool(5min/tick 冷路径微优化) — internal/session/store.go:660
+- [R202606-PERF-003] writeSandboxPending 每次 run 启动无条件 os.MkdirAll 未缓存(可加 sync.Once,微优化) — internal/cron/sandbox_pending.go:48
