@@ -246,15 +246,29 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			// A read error (qerr) is treated as "may exist" → skip, preserving
 			// any prior reason (the run's failed-transport CronRun still warns).
 			if rec, qok, qerr := s.getSandboxAttention(p.RunID); qerr == nil && !qok && rec == nil {
-				s.writeSandboxAttention(sandboxAttention{
-					JobID:            p.JobID,
-					RunID:            p.RunID,
-					RuntimeSessionID: p.RuntimeSessionID,
-					Reason:           attentionReasonOrphaned,
-					JobLabel:         jLabel,
-					StartedAtMS:      p.StartedAtMS,
-					CreatedAtMS:      s.attentionNowMS(),
-				}, lg)
+				// R20260615-030459-COR-001: re-check job existence under RLock
+				// before writing the attention card. The snapshot (j above) was
+				// taken before RUnlock; a concurrent DeleteJobByID that ran in
+				// the gap can delete the job + sweep the attention queue, leaving
+				// a ghost card whose replay would hit ErrJobNotFound. This is the
+				// same TOCTOU pattern fixed for enqueueSandboxTransportAttention
+				// in OPEN #2129 — mirror that fix here.
+				s.mu.RLock()
+				jobStillExists := s.jobs[p.JobID] != nil
+				s.mu.RUnlock()
+				if jobStillExists {
+					s.writeSandboxAttention(sandboxAttention{
+						JobID:            p.JobID,
+						RunID:            p.RunID,
+						RuntimeSessionID: p.RuntimeSessionID,
+						Reason:           attentionReasonOrphaned,
+						JobLabel:         jLabel,
+						StartedAtMS:      p.StartedAtMS,
+						CreatedAtMS:      s.attentionNowMS(),
+					}, lg)
+				} else {
+					lg.Info("cron sandbox: job deleted after snapshot; skipping orphaned attention write [COR-001]")
+				}
 			} else if qerr != nil {
 				lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
 			}
