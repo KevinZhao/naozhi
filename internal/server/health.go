@@ -241,7 +241,14 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// cadence. unauthDashAllow returns true when the limiter is not
 		// wired (test harness without server.New) so this stays a no-op
 		// for fixtures that bypass the bucket.
-		if h.auth != nil && !h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy)) {
+		// R20260614-SEC-10 (#2120): fail closed when the client IP can't be
+		// resolved in trusted-proxy mode (XFF stripped) rather than sharing
+		// the unknownIPKey bucket, so one direct-to-origin attacker can't
+		// starve the /health unauth budget for every other XFF-less caller.
+		// Mirrors HandleLogin (R247-SEC-25). No-op in !trustedProxy mode.
+		if h.auth != nil &&
+			(!requestHasResolvableClientIP(r, h.auth.TrustedProxy) ||
+				!h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy))) {
 			// JSON envelope (errRespRetry, R247-ARCH-3 / #612 / #451) keeps the
 			// /health error path consistent with its writeJSON success path and
 			// carries retry_after in the body for fetch wrappers that drop the

@@ -444,3 +444,92 @@ func TestEnqueueSandboxTransportAttention_WritesForLiveJob(t *testing.T) {
 		t.Fatalf("attention count = %d, want 1 — live-job side-effecting transport failure must enqueue [R20260614-ARCH-1]", n)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fix (#2119) [R20260614-LOGIC-4]: reconcileOneSandboxOrphan must NOT clobber
+// an attention record an in-process transport failure already wrote for the
+// same runID, and must still write an orphaned record when none pre-exists.
+// ---------------------------------------------------------------------------
+
+func TestReconcileOrphan_PreservesExistingTransportAttentionReason(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+
+	runID := "aabbccddeeff0119"
+	lg := slog.Default()
+
+	// (a) In-process transport failure already enqueued a transport record for
+	// this runID before the process died.
+	s.writeSandboxAttention(sandboxAttention{
+		JobID:            j.ID,
+		RunID:            runID,
+		RuntimeSessionID: "run-aabbccddeeff0119-1234567890123456789",
+		Reason:           attentionReasonTransport,
+		JobLabel:         "push a PR",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+		CreatedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	}, lg)
+
+	// (b)+(c) Process crashed before removing the pending file; restart
+	// reconcile sees the orphan and would re-write attention for the same runID.
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: runID,
+		RuntimeSessionID: "run-aabbccddeeff0119-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	s.reconcileSandboxPending()
+	waitEnded(t, rec)
+
+	got, ok, err := s.getSandboxAttention(runID)
+	if err != nil {
+		t.Fatalf("getSandboxAttention: %v", err)
+	}
+	if !ok || got == nil {
+		t.Fatal("attention record disappeared after reconcile; want preserved")
+	}
+	if got.Reason != attentionReasonTransport {
+		t.Fatalf("reason = %q, want %q (orphan reconcile must not clobber the in-process transport record) [#2119]",
+			got.Reason, attentionReasonTransport)
+	}
+	// Exactly one queue entry — no duplicate written.
+	if items := s.ListSandboxAttention(); len(items) != 1 {
+		t.Fatalf("queue len = %d, want 1", len(items))
+	}
+}
+
+func TestReconcileOrphan_WritesOrphanedAttentionWhenNonePreexists(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+
+	runID := "aabbccddeeff0120"
+
+	// No prior attention record: a clean restart orphan (process died before
+	// any in-process transport attention was written).
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: runID,
+		RuntimeSessionID: "run-aabbccddeeff0120-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	s.reconcileSandboxPending()
+	waitEnded(t, rec)
+
+	got, ok, err := s.getSandboxAttention(runID)
+	if err != nil {
+		t.Fatalf("getSandboxAttention: %v", err)
+	}
+	if !ok || got == nil {
+		t.Fatal("orphaned attention record not written when none pre-existed")
+	}
+	if got.Reason != attentionReasonOrphaned {
+		t.Fatalf("reason = %q, want %q (clean orphan must enqueue with orphaned reason) [#2119]",
+			got.Reason, attentionReasonOrphaned)
+	}
+}
