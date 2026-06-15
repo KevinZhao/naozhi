@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -1888,6 +1889,12 @@ func (h *Handlers) FlushRetiredStore() {
 	}
 }
 
+// historyScanTimeout bounds the loadHistorySessions FS walk. PERF-009
+// (#2134): the scan runs inside the 120s-TTL singleflight leader, so an
+// unbounded walk over a slow home blocks all concurrent pollers; 5s is
+// generously above a healthy walk yet caps a hung-FS stall.
+const historyScanTimeout = 5 * time.Second
+
 func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
 
@@ -1904,7 +1911,12 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	if h.cronSessions != nil {
 		filter.skipSessions = h.cronSessions.KnownSessionIDs()
 	}
-	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
+	// PERF-009 (#2134): cap the FS walk so a slow/hung home (NFS, FUSE)
+	// can't pin this singleflight leader — and with it every concurrent
+	// poll goroutine waiting on the flight — for the full traversal.
+	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
+	defer cancel()
+	all := discovery.RecentSessionsCtx(ctx, h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
 	// Resolve project names in batch.  R217-PERF-10 (#616): borrow the
 	// pooled []string scratch (same pool fillProjectAndSummary uses) so
