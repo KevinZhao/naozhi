@@ -3,6 +3,8 @@ package cron
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -187,12 +189,29 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	// been (re-)confirmed above, check whether the run is already terminal on
 	// disk; if so, only the microVM Stop + pending-file removal were owed —
 	// skip the second finishRun entirely.
-	if rec, err := s.Run(p.JobID, p.RunID); err == nil && rec != nil && !rec.EndedAt.IsZero() {
+	rec, err := s.Run(p.JobID, p.RunID)
+	if err == nil && rec != nil && !rec.EndedAt.IsZero() {
 		lg.Info("cron sandbox: orphan already finished in-process; skipping duplicate finish",
 			"state", rec.State)
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
 			lg.Warn("cron sandbox: reconciled pending remove failed", "err", rmErr)
 		}
+		return
+	}
+	// #2149: the dedup guard above only fires on err==nil. A *transient* read
+	// error (EIO / ESTALE / EACCES from a FUSE/NFS backend, or the brief
+	// post-upgrade `-rw-------` window) makes s.Run return a non-nil error that
+	// is NEITHER fs.ErrNotExist (record truly absent) NOR ErrCorruptRun (file
+	// present but unparseable). Falling through to the second finishRun below
+	// would double-count an already-terminal record + emit a phantom
+	// started→ended lifecycle. Treat such "fate unknown" reads conservatively:
+	// keep the pending file and retry on the next reconcile (same posture as
+	// the Stop-unconfirmed branch and the #2119 attention probe). fs.ErrNotExist
+	// (genuinely no terminal record) and ErrCorruptRun (record exists but
+	// cannot be confirmed terminal, and would never become parseable) both fall
+	// through to finish the orphan as before.
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, ErrCorruptRun) {
+		lg.Warn("cron sandbox: orphan terminal-state probe failed transiently; keeping pending record for next start", "err", err)
 		return
 	}
 
