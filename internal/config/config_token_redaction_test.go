@@ -61,6 +61,40 @@ func TestUpstreamConfig_LogValue_RedactsToken(t *testing.T) {
 	}
 }
 
+// R20260616-SEC-1: FeishuConfig implements slog.LogValuer so a direct slog
+// serialization redacts AppSecret / VerificationToken / EncryptKey instead of
+// leaking them, while non-secret fields (app_id, connection_mode) survive.
+func TestFeishuConfig_LogValue_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+	cfg := FeishuConfig{
+		AppID:             "cli_app_1234",
+		AppSecret:         "feishu-app-secret-PLAINTEXT-1",
+		ConnectionMode:    "websocket",
+		VerificationToken: "verify-token-PLAINTEXT-2",
+		EncryptKey:        "encrypt-key-PLAINTEXT-3",
+		MaxReplyLength:    4000,
+	}
+	out := logLine(t, "feishu", cfg)
+	for _, secret := range []string{
+		"feishu-app-secret-PLAINTEXT-1",
+		"verify-token-PLAINTEXT-2",
+		"encrypt-key-PLAINTEXT-3",
+	} {
+		if strings.Contains(out, secret) {
+			t.Errorf("plaintext secret %q leaked into log output: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in log output: %s", out)
+	}
+	if !strings.Contains(out, "cli_app_1234") {
+		t.Errorf("non-secret app_id should still be logged: %s", out)
+	}
+	if !strings.Contains(out, "websocket") {
+		t.Errorf("non-secret connection_mode should still be logged: %s", out)
+	}
+}
+
 // An empty token must render empty (not "[REDACTED]") so logs distinguish
 // "configured but hidden" from "absent".
 func TestConfig_LogValue_EmptyTokenNotRedacted(t *testing.T) {
