@@ -272,6 +272,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
+	s.mux.HandleFunc("GET /static/files_view.js", auth(handleFilesViewJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -332,6 +333,12 @@ func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
+	// Workspace file browser (docs/rfc/workspace-file-browser.md): read-only
+	// directory listing + write-once upload. Listing reuses HandleFileGet's
+	// path-safety; upload is the only WRITE in the file API (CSRF auto-gated
+	// by RequireAuth on POST).
+	s.mux.HandleFunc("GET /api/projects/files/list", auth(s.projectH.HandleFilesList))
+	s.mux.HandleFunc("POST /api/projects/files/upload", auth(s.projectH.HandleFilesUpload))
 }
 
 // registerDiscoveredRoutes wires the discovered-session route group
@@ -675,6 +682,22 @@ func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "asset_browser.js")
+}
+
+// handleFilesViewJS serves static/files_view.js — the workspace file browser
+// view module (docs/rfc/workspace-file-browser.md). Mirrors handleAssetBrowserJS.
+func handleFilesViewJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("files_view.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "files_view.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "files_view.js")
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a

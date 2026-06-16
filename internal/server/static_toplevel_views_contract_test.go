@@ -88,7 +88,8 @@ func TestDashboardHTML_TopLevelViewContainers(t *testing.T) {
 	// View-switch CSS: each non-chat view hides the chat panels and shows its
 	// own. The default-hidden rule must cover the new containers too.
 	wantCSS := []string{
-		".asset-sidebar,.asset-main,.cron-main,.settings-main,.system-main{display:none}",
+		".asset-sidebar,.asset-main,.files-sidebar,.files-main,.cron-main,.settings-main,.system-main{display:none}",
+		"body.nz-view-files .files-sidebar{display:flex}",
 		"body.nz-view-cron .sidebar,body.nz-view-cron .resizer,body.nz-view-cron .main{display:none!important}",
 		"body.nz-view-cron .cron-main{display:flex",
 		"body.nz-view-settings .sidebar,body.nz-view-settings .resizer,body.nz-view-settings .main{display:none!important}",
@@ -128,8 +129,9 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 		"function renderSettingsView(", // settings view renderer
 		"function renderSystemView(",   // system (sysession) view renderer
 		// 系统 must be a registered view and route to its panel opener.
-		`const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];`,
+		`const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];`,
 		"else if (view === 'system') { openSystemPanel(); }",
+		"else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }",
 	}
 	for _, w := range wants {
 		if !strings.Contains(js, w) {
