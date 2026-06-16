@@ -128,3 +128,77 @@ func TestDiskListNewestFirst_ParallelLimitTrimsToNewest(t *testing.T) {
 		}
 	}
 }
+
+// TestDiskListNewestFirst_ParallelBackfillsOverCorruptInOverCapWindow pins the
+// #2150 fix: in the over-cap window (len(items) > limit, e.g. a concurrent warm
+// observing count > keepCount before trim) a corrupt/unreadable file among the
+// newest `limit` candidates must NOT shrink the result — decodeRunsParallel
+// must backfill from older valid candidates until `limit` valid rows are
+// gathered, mirroring the serial path's accumulate-until-`limit` walk. Before
+// the fix the parallel branch hard-capped at n=min(len,limit) and dropped the
+// corrupt slot with no backfill, returning fewer than `limit` rows.
+func TestDiskListNewestFirst_ParallelBackfillsOverCorruptInOverCapWindow(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
+	jobID := mustGenerateID()
+
+	// Build a candidate window larger than the requested limit so backfill has
+	// older valid candidates to pull from (the over-cap window).
+	const limit = diskDecodeParallelThreshold + 2 // > threshold → parallel branch
+	const extra = 5                               // older valid candidates to backfill from
+	const corruptInWindow = 3                     // corrupt files inside the newest `limit`
+
+	base := time.Now().Add(-time.Hour)
+	dir := filepath.Join(s.root, jobID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	total := limit + extra
+	items := make([]runDirItem, total)
+	wantValidIDs := make([]string, 0, limit)
+	for i := 0; i < total; i++ {
+		// newest-first index i: highest mtime first.
+		mt := base.Add(time.Duration(total-i) * time.Minute)
+		// Make the first `corruptInWindow` (newest) entries corrupt; the rest valid.
+		if i < corruptInWindow {
+			cid := mustGenerateRunID()
+			p := filepath.Join(dir, cid+".json")
+			if err := os.WriteFile(p, []byte("{not valid json"), 0o600); err != nil {
+				t.Fatalf("WriteFile corrupt: %v", err)
+			}
+			_ = os.Chtimes(p, mt, mt)
+			items[i] = runDirItem{path: p, runID: cid, mtime: mt}
+			continue
+		}
+		run := makeRun(jobID, base.Add(time.Duration(i)*time.Second))
+		s.Append(run)
+		p := filepath.Join(dir, run.RunID+".json")
+		_ = os.Chtimes(p, mt, mt)
+		items[i] = runDirItem{path: p, runID: run.RunID, mtime: mt}
+		if len(wantValidIDs) < limit {
+			wantValidIDs = append(wantValidIDs, run.RunID)
+		}
+	}
+
+	rows, corrupt, unreadable := s.decodeRunsParallel(items, limit)
+	if unreadable != 0 {
+		t.Fatalf("unreadableCount = %d want 0", unreadable)
+	}
+	// The 3 corrupt files sit in the scanned prefix needed to gather `limit`
+	// valid rows, so they must all be counted.
+	if corrupt != corruptInWindow {
+		t.Fatalf("corruptCount = %d want %d", corrupt, corruptInWindow)
+	}
+	// The fix: backfill yields a FULL `limit` rows despite the corrupt files in
+	// the newest window (pre-fix this returned limit-corruptInWindow rows).
+	if len(rows) != limit {
+		t.Fatalf("rows = %d want %d (backfill over corrupt failed)", len(rows), limit)
+	}
+	for i := range wantValidIDs {
+		if rows[i].RunID != wantValidIDs[i] {
+			t.Fatalf("rows[%d].RunID = %q want %q (newest-first order/backfill wrong)", i, rows[i].RunID, wantValidIDs[i])
+		}
+	}
+}

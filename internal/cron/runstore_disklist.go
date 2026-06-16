@@ -356,13 +356,19 @@ const decodeSlotPoolMaxCap = 2 * DefaultRunsKeepCount
 // order is irrelevant. Only called from the before.IsZero path where every
 // candidate up to limit is wanted, so there is no early-break to honour.
 func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int, int) {
+	// #2150: the serial path (diskListNewestFirst) scans candidates in
+	// newest-first order, skips corrupt/unreadable files WITHOUT consuming a
+	// result slot, and keeps reading older candidates until it has `limit`
+	// valid rows (or runs out). In the over-cap window (WriteFileAtomic landed
+	// the new run BEFORE Append took jobLock to trimJobLocked, so a concurrent
+	// warm can observe count > keepCount==limit) len(items) > limit, and any
+	// corrupt file among the newest `limit` would otherwise be hard-trimmed
+	// away by `n = min(len(items), limit)` with NO backfill — the parallel
+	// path returned fewer than `limit` valid rows where the serial path would
+	// have backfilled from older candidates. Decode the full candidate window
+	// (bounded by the over-cap window, ≤ 2*keepCount) so the backfill source is
+	// available, then mirror the serial accumulate-until-`limit` walk below.
 	n := len(items)
-	if n > limit {
-		// before.IsZero means no StartedAt filter drops rows, so the first
-		// `limit` (newest) candidates are exactly the answer — decode only
-		// those rather than the whole directory.
-		n = limit
-	}
 	// R20260607-PERF-012 (#1924): recycle the position-indexed scratch slice
 	// via decodeSlotPool rather than make([]decodeSlot, n) per warm. Grow to n
 	// (reusing the pooled backing array when its cap suffices) and clear so no
@@ -418,20 +424,30 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 	}
 	wg.Wait()
 
-	out := make([]CronRunSummary, 0, n)
+	// Mirror the serial accumulate-until-`limit` walk: collect valid rows in
+	// newest-first order, backfilling past index `limit` over corrupt/unreadable
+	// slots, and STOP once `limit` valid rows are gathered. corrupt/unreadable
+	// counts cover exactly the prefix scanned to reach `limit` (or the whole
+	// window when fewer than `limit` valid rows exist) — identical to the serial
+	// loop's early-break accounting.
+	out := make([]CronRunSummary, 0, limit)
 	corruptCount := 0
 	unreadableCount := 0
 	for i := range slots {
+		if len(out) >= limit {
+			break
+		}
+		if slots[i].ok {
+			out = append(out, slots[i].summary)
+			continue
+		}
 		if slots[i].corrupt {
 			corruptCount++
-		} else if !slots[i].ok {
+		} else {
 			// Non-corrupt read failure (e.g. EACCES, EIO, ESTALE): track
 			// separately from corrupt so warmCache can log a distinct message.
 			// R20260603-CR-1 (#1693).
 			unreadableCount++
-		}
-		if slots[i].ok {
-			out = append(out, slots[i].summary)
 		}
 	}
 	return out, corruptCount, unreadableCount
