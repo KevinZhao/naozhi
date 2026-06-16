@@ -175,6 +175,16 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/projects/files/list",
+    "handler_type": "*dashproject.Handlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/files/upload",
+    "handler_type": "*dashproject.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/projects/planner/restart",
     "handler_type": "*dashproject.Handlers"
@@ -322,6 +332,11 @@
   {
     "method": "GET",
     "path": "/static/dashboard.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/files_view.js",
     "handler_type": "http.HandlerFunc"
   },
   {
