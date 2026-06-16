@@ -283,15 +283,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		CLIAvailable: cliAvailable(h.router.CLIPath()),
 	}
-	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
-		nodeStatus := make(map[string]string, len(kn))
-		for id := range kn {
-			if nc, ok := h.nodeAccess.NodeByID(id); ok {
-				nodeStatus[id] = nc.Status()
-			} else {
-				nodeStatus[id] = "disconnected"
-			}
-		}
+	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
 	auth.Platforms = h.platformsStatus
