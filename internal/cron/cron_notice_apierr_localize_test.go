@@ -93,3 +93,23 @@ func TestCronNotice_LocalizeBeforeSanitise_OrderMatters(t *testing.T) {
 		t.Errorf("localized output should be rate-limit message, got: %q", localized)
 	}
 }
+
+// TestLocalizeNotice_EquivalentToPipeline pins R20260615-030459-ARC-1:
+// localizeNotice must produce identical output to the hand-written
+// apierr.Localize(sanitiseRunResult(s)) pipeline it replaces.
+func TestLocalizeNotice_EquivalentToPipeline(t *testing.T) {
+	t.Parallel()
+	inputs := []string{
+		"normal result text with no API error",
+		"API Error: overloaded_error: The API is temporarily overloaded (request_id: req_abc123xyz)",
+		"API Error: rate_limit_exceeded: Too many tokens (request_id: req_zzz999)",
+		"",
+	}
+	for _, in := range inputs {
+		want := apierr.Localize(sanitiseRunResult(in))
+		got := localizeNotice(in)
+		if got != want {
+			t.Errorf("localizeNotice(%q) = %q; want %q [ARC-1]", in, got, want)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -153,7 +154,17 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// a misconfigured / hostile value can never be reinterpreted as another flag
 	// (argv-injection guard, mirrors the --resume validator above). Empty = off,
 	// flag omitted.
-	if opts.DebugFile != "" && !strings.HasPrefix(opts.DebugFile, "-") {
+	//
+	// R20260615-030459-SEC-8 (#2133): require an ABSOLUTE path. The CLI
+	// subprocess runs with cmd.Dir = session workspace (shim startCLI), so a
+	// relative --debug-file resolves against that workspace and leaks the raw
+	// debug log — which can contain API keys — into the session's working
+	// directory. This can happen when an operator configures a relative
+	// RouterConfig.EventLogDir, since the router derives the debug dir from
+	// filepath.Dir(eventLogDir). Dropping a non-absolute path here (debug off
+	// for that spawn) is a defence-in-depth backstop independent of the router's
+	// own dir resolution.
+	if opts.DebugFile != "" && !strings.HasPrefix(opts.DebugFile, "-") && filepath.IsAbs(opts.DebugFile) {
 		args = append(args, "--debug-file", opts.DebugFile)
 	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)

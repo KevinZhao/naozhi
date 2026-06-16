@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,6 +173,13 @@ func (w *Weixin) MaxReplyLength() int { return w.cfg.MaxReplyLen }
 
 // SupportsInterimMessages returns false — iLink Bot context_token is single-use.
 func (w *Weixin) SupportsInterimMessages() bool { return false }
+
+// UsesSingleUseReplyToken returns true — the iLink Bot context_token cached
+// from the inbound poll is consumed by the first Reply and rejected upstream
+// on reuse. #2136: this tells the dispatcher to collapse a long reply into a
+// single (truncated) message rather than fan it into N chunks, of which only
+// the first would arrive and chunks 2..N would be silently lost.
+func (w *Weixin) UsesSingleUseReplyToken() bool { return true }
 
 // RegisterRoutes is a no-op (long-poll, no inbound HTTP).
 func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
@@ -413,17 +421,37 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				})
 			}
 
-			// When the upstream response omits message_id the zero value "0"
-			// is not a real ID — every zero-id message would collide on the
-			// first dedup call and then pass through, so leave EventID empty
-			// and let Dedup.Seen's empty-string guard treat it as unknown.
+			// EventID is the global dedup key — dispatch.go shares ONE
+			// platform.Dedup across every platform, so a bare integer
+			// message_id (e.g. "42") with no namespace can collide with another
+			// platform's (or another user's) identically-numbered event and
+			// silently drop the second message as a "replay". Prefix with the
+			// platform and the sender so the key is unique per (platform, user,
+			// message). Mirrors slack's channel:ts composite fix (#2015). #2116.
+			//
+			// When the upstream response omits message_id the zero value 0 is
+			// not a real ID, so leave EventID empty and let the dispatch-side
+			// composite fallback key handle dedup. That fallback key is shaped
+			// fallback:<platform>:<chatID>:<MessageID>:<minute>; if we also
+			// leave IncomingMessage.MessageID empty it degenerates to
+			// from+minute, and a second DISTINCT message from the same user in
+			// the same wall-clock minute collides and is silently dropped.
+			// Populate MessageID with a per-message distinguisher from Seq
+			// (monotonic per relay) or CreateTimeMs so legitimate distinct
+			// messages keep distinct fallback keys. #2117.
 			eventID := ""
+			fallbackMsgID := ""
 			if msg.MessageID != 0 {
-				eventID = fmt.Sprintf("%d", msg.MessageID)
+				eventID = "weixin:" + from + ":" + strconv.Itoa(msg.MessageID)
+			} else if msg.Seq != 0 {
+				fallbackMsgID = "seq:" + strconv.Itoa(msg.Seq)
+			} else if msg.CreateTimeMs != 0 {
+				fallbackMsgID = "ts:" + strconv.FormatInt(msg.CreateTimeMs, 10)
 			}
 			incoming := platform.IncomingMessage{
 				Platform:  "weixin",
 				EventID:   eventID,
+				MessageID: fallbackMsgID,
 				UserID:    from,
 				ChatID:    from, // direct chat, reply to the sender
 				ChatType:  "direct",

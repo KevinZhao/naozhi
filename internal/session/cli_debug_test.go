@@ -68,6 +68,29 @@ func TestResolveCLIDebugDir_TruthyValues(t *testing.T) {
 	}
 }
 
+// TestResolveCLIDebugDir_RelativeEventLogAnchoredAbsolute guards SEC-8
+// (#2133): a relatively-configured EventLogDir must not yield a relative
+// debug dir, because the path is passed to the CLI subprocess as
+// --debug-file and a relative value resolves against the subprocess CWD
+// (the session workspace), leaking the API-key-bearing debug log there.
+func TestResolveCLIDebugDir_RelativeEventLogAnchoredAbsolute(t *testing.T) {
+	got := resolveCLIDebugDirWith("relconfig/events", stubGetenv("1"))
+	if got == "" {
+		t.Fatalf("relative event log: want enabled absolute dir, got disabled")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("debug dir = %q, want absolute (must not resolve against CLI subprocess CWD)", got)
+	}
+	// The absolute root is anchored to the process CWD + relative parent,
+	// and ends in the cli-debug leaf so capture still works.
+	wantSuffix := filepath.Join("relconfig", "cli-debug")
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Errorf("debug dir = %q, want suffix %q", got, wantSuffix)
+	}
+	// Cleanup: EnsureDir created the tree under CWD.
+	_ = os.RemoveAll(filepath.Join("relconfig"))
+}
+
 func TestCLIDebugFileFor(t *testing.T) {
 	key := "dashboard:direct:2026-06-09-naozhi:general"
 
