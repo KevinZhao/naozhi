@@ -24,6 +24,12 @@ type Manager struct {
 	root     string
 	defaults PlannerDefaults
 
+	// includeRoot registers the root directory itself as a project (named
+	// after its basename) in addition to its subdirectories. See
+	// ProjectsConfig.IncludeRoot. Files directly under root then resolve to an
+	// owning project so the dashboard renders preview/download buttons.
+	includeRoot bool
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
@@ -31,8 +37,17 @@ type Manager struct {
 	bindingIndex map[string]string
 }
 
+// Option customises a Manager at construction time.
+type Option func(*Manager)
+
+// WithIncludeRoot registers the projects root directory itself as a project
+// (in addition to its subdirectories) when enabled.
+func WithIncludeRoot(enabled bool) Option {
+	return func(m *Manager) { m.includeRoot = enabled }
+}
+
 // NewManager creates a project manager for the given root directory.
-func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
+func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve projects root: %w", err)
@@ -44,12 +59,16 @@ func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("projects root is not a directory: %s", absRoot)
 	}
-	return &Manager{
+	m := &Manager{
 		root:         absRoot,
 		defaults:     defaults,
 		projects:     make(map[string]*Project),
 		bindingIndex: make(map[string]string),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m, nil
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
@@ -100,6 +119,43 @@ func (m *Manager) Scan() error {
 		}
 	}
 
+	// IncludeRoot: register the root directory itself as a project so files
+	// living directly under root (not inside any subdirectory project) resolve
+	// to an owning project and the dashboard renders preview/download buttons.
+	// The root project uses basename(root) as its name; a real subdirectory of
+	// the same name wins (it was inserted above) so we never shadow it. Path
+	// resolution is longest-prefix everywhere (ResolveWorkspaces here,
+	// resolveProjectForAbsPath in the dashboard), so a file under a deeper
+	// subdirectory project still resolves there — root only catches the leftovers.
+	if m.includeRoot {
+		rootName := filepath.Base(m.root)
+		if err := ValidateProjectName(rootName); err != nil {
+			slog.Warn("include_root: root basename is not a valid project name; skipping root project",
+				"root", m.root, "name", rootName, "err", err)
+		} else if _, clash := projects[rootName]; clash {
+			slog.Warn("include_root: a subdirectory already uses the root basename; skipping root project",
+				"root", m.root, "name", rootName)
+		} else {
+			cfg, err := loadConfig(m.root)
+			if err != nil {
+				slog.Warn("include_root: skip root project with bad config", "root", m.root, "err", err)
+			} else if err := ValidateConfig(cfg); err != nil {
+				slog.Warn("include_root: skip root project with invalid config", "root", m.root, "err", err)
+			} else {
+				remote, isGH := DetectGitHubRemote(m.root)
+				projects[rootName] = &Project{
+					Name:         rootName,
+					Path:         m.root,
+					PathPrefix:   m.root + string(filepath.Separator),
+					Config:       cfg,
+					GitRemoteURL: remote,
+					IsGitHub:     isGH,
+					IsRoot:       true,
+				}
+			}
+		}
+	}
+
 	// Sidebar order migration: stamp CreatedAt on any project missing one.
 	// Sort the names so the synthesised timestamps preserve the upgraded
 	// binary's first-render order (which used to be byte-name ascending via
@@ -117,6 +173,13 @@ func (m *Manager) Scan() error {
 	// No current caller invokes Scan concurrently.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
+		// The root project (include_root) is synthetic: it has no
+		// .naozhi/project.yaml and we must NOT auto-create one inside the user's
+		// top-level workspace. Skip it here and stamp an in-memory-only
+		// CreatedAt below so the migration never persists to root.
+		if p.IsRoot {
+			continue
+		}
 		if p.Config.CreatedAt == 0 {
 			missing = append(missing, name)
 		}
@@ -135,6 +198,32 @@ func (m *Manager) Scan() error {
 				slog.Warn("persist project CreatedAt failed",
 					"name", name, "err", err)
 			}
+		}
+	}
+
+	// Root project sidebar order: assign an in-memory-only CreatedAt that sorts
+	// the root entry strictly LAST among all projects so it lands at the bottom
+	// of the sidebar. Never persisted (that is the point of skipping it above),
+	// so it is recomputed every boot; because it is always the max, its relative
+	// position is stable across reboots regardless of the synthetic value.
+	//
+	// Override unconditionally (not just when CreatedAt==0): if the operator
+	// dropped a real .naozhi/project.yaml at the workspace root, loadConfig
+	// would have read its created_at and that would otherwise place root in the
+	// middle of the list, breaking the "root sorts last" invariant. The root
+	// project is synthetic, so its sidebar position is always derived here.
+	for _, p := range projects {
+		if p.IsRoot {
+			var maxCreated int64
+			for _, q := range projects {
+				if q.IsRoot {
+					continue
+				}
+				if q.Config.CreatedAt > maxCreated {
+					maxCreated = q.Config.CreatedAt
+				}
+			}
+			p.Config.CreatedAt = maxCreated + 1
 		}
 	}
 

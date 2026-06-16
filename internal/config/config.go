@@ -99,6 +99,24 @@ type WorkspaceConfig struct {
 type ProjectsConfig struct {
 	Root            string          `yaml:"root"`                       // projects root directory
 	PlannerDefaults PlannerDefaults `yaml:"planner_defaults,omitempty"` // global planner defaults
+	// IncludeRoot registers the projects root directory itself as a project
+	// (named after its basename) in addition to its subdirectories. This lets
+	// files that live directly under root — not inside any subdirectory
+	// project — resolve to an owning project so the dashboard renders
+	// preview/download buttons for them. Default false.
+	//
+	// SECURITY / threat model: the root project's Path is the whole workspace
+	// tree, so its file endpoints can read files belonging to sibling
+	// subdirectory projects. The dashboard token is the only barrier, so this
+	// is a SINGLE-OPERATOR feature. To bound the blast radius the root project
+	// is treated like the __public_tmp__ pseudo-project on the file endpoints:
+	// the foreign-private-UID, denied-name (sockets/pid/core/ssh) and
+	// irregular-type gates apply, the credential-name filter
+	// (isSensitiveDownloadPath: .env / id_rsa / *.pem / .ssh/** / secrets/**)
+	// applies to BOTH the GET and the batch-exists paths, and every served
+	// file is audit-logged. Scan never writes a .naozhi/project.yaml into the
+	// root (the root project's CreatedAt is in-memory-only).
+	IncludeRoot bool `yaml:"include_root,omitempty"`
 }
 
 type PlannerDefaults struct {

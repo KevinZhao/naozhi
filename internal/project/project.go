@@ -22,6 +22,14 @@ type Project struct {
 	// Runtime-derived fields (not persisted, refreshed on Scan).
 	GitRemoteURL string `json:"git_remote_url,omitempty"`
 	IsGitHub     bool   `json:"is_github,omitempty"`
+
+	// IsRoot marks the synthetic project that represents the projects root
+	// directory itself (registered only when ProjectsConfig.IncludeRoot is on).
+	// Its Path is the whole workspace tree, so it is treated like the
+	// __public_tmp__ pseudo-project on the file endpoints: the foreign-private
+	// UID / denied-name / irregular-type gates apply, and Scan never persists a
+	// CreatedAt for it (no .naozhi/project.yaml is auto-written into the root).
+	IsRoot bool `json:"is_root,omitempty"`
 }
 
 // ProjectConfig is persisted to .naozhi/project.yaml inside each project directory.
