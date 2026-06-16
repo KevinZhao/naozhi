@@ -484,6 +484,7 @@ var generatedOnclickBundle = []string{
 	"cron_view.js",
 	"agent_view.js",
 	"asset_browser.js",
+	"files_view.js",
 	"nz_util.js",
 }
 
