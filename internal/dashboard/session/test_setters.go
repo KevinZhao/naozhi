@@ -51,7 +51,7 @@ func (h *Handlers) HistorySessionsForTest() []discovery.RecentSession {
 // HistoryCacheLockForTest is the test-visible accessor for the cache mutex.
 // Tests that need to manipulate cache state under the lock can hold this
 // while assigning through SetCachedHistoryForTest.
-func (h *Handlers) HistoryCacheLockForTest() *sync.Mutex { return &h.historyCacheMu }
+func (h *Handlers) HistoryCacheLockForTest() *sync.RWMutex { return &h.historyCacheMu }
 
 // SetCachedHistoryForTest atomically replaces the cached slice + timestamp.
 // Caller MUST hold HistoryCacheLockForTest().

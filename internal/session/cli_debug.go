@@ -49,6 +49,21 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 		return ""
 	}
 	dataDir := filepath.Dir(eventLogDir)
+	// SEC-8 (#2133): the debug-file path is handed to the CLI subprocess as
+	// --debug-file. A relative path resolves against the subprocess CWD —
+	// the session workspace — so a relatively-configured EventLogDir would
+	// land the debug log (which may contain API keys) inside the session
+	// workspace. Anchor the debug root to an absolute path so the file is
+	// pinned to a stable location regardless of where the CLI is spawned.
+	if !filepath.IsAbs(dataDir) {
+		if abs, err := filepath.Abs(dataDir); err == nil {
+			dataDir = abs
+		} else {
+			slog.Warn("cli debug dir could not be made absolute; debug capture disabled for this run",
+				"dataDir", dataDir, "err", err)
+			return ""
+		}
+	}
 	dir := datadir.CLIDebugRoot(dataDir)
 	if err := datadir.EnsureDir(dir); err != nil {
 		slog.Warn("cli debug dir unusable; debug capture disabled for this run",

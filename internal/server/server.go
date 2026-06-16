@@ -550,6 +550,7 @@ func buildServer(opts ServerOptions) *Server {
 		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodeAccess,
 		platforms:          platNames,
+		platformsStatus:    platformStatusMap(platNames),
 		hubDropped: func() int64 {
 			if s.hub == nil {
 				return 0

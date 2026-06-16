@@ -171,6 +171,48 @@ func TestClaudeProtocol_BuildArgs_DebugFileArgvInjectionGuard(t *testing.T) {
 	}
 }
 
+func TestClaudeProtocol_BuildArgs_DebugFileRelativePathDropped(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	// R20260615-030459-SEC-8 (#2133): a relative --debug-file resolves against
+	// the CLI subprocess CWD (session workspace), leaking the raw debug log —
+	// which can contain API keys — into the session's working directory. A
+	// non-absolute path must be dropped (debug off for this spawn) rather than
+	// passed through.
+	for _, rel := range []string{
+		"cli-debug/abc123.log", // relative dir (from a relative EventLogDir)
+		"abc123.log",           // bare filename
+		"./abc123.log",         // explicit cwd-relative
+		"../cli-debug/x.log",   // parent-relative
+	} {
+		args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: rel})
+		for i, a := range args {
+			if a == "--debug-file" {
+				t.Errorf("relative DebugFile %q must be dropped, but --debug-file emitted: %v", rel, args)
+			}
+			if a == rel && i > 0 && args[i-1] == "--debug-file" {
+				t.Errorf("relative DebugFile %q leaked into argv: %v", rel, args)
+			}
+		}
+	}
+}
+
+func TestClaudeProtocol_BuildArgs_DebugFileAbsolutePathKept(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	path := "/data/naozhi/cli-debug/abc123.log"
+	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: path})
+	var saw bool
+	for i, a := range args {
+		if a == "--debug-file" && i+1 < len(args) && args[i+1] == path {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("absolute DebugFile %q must be kept, got %v", path, args)
+	}
+}
+
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}

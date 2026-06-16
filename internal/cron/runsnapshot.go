@@ -146,6 +146,11 @@ func (s *Scheduler) writeSnapshotBlob(root, content string) (string, error) {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write blob tmp: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("sync blob tmp: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("close blob tmp: %w", err)
