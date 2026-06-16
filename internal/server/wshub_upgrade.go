@@ -67,8 +67,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// (R247-SEC-25) and AllowRequest (R244-SEC-P3-3). In !trustedProxy
 		// mode every request resolves, so this is a no-op there.
 		if !requestHasResolvableClientIP(r, h.trustedProxy) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", wsAuthRetryAfterSeconds)
 			return
 		}
 		// The underlying *Allow implementations map "" to a shared
@@ -76,8 +75,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// that would let malformed RemoteAddr bypass the per-IP budget
 		// entirely.
 		if !limiterFn(clientIP(r, h.trustedProxy)) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", wsAuthRetryAfterSeconds)
 			return
 		}
 	}

@@ -397,8 +397,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		// (R247-SEC-25). No-op in !trustedProxy mode (always resolvable).
 		if !requestHasResolvableClientIP(r, s.auth.TrustedProxy) ||
 			!s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}
 		s.auth.ServeLoginPage(w, r)
