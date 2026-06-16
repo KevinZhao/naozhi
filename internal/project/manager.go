@@ -150,6 +150,7 @@ func (m *Manager) Scan() error {
 					Config:       cfg,
 					GitRemoteURL: remote,
 					IsGitHub:     isGH,
+					IsRoot:       true,
 				}
 			}
 		}
@@ -172,6 +173,13 @@ func (m *Manager) Scan() error {
 	// No current caller invokes Scan concurrently.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
+		// The root project (include_root) is synthetic: it has no
+		// .naozhi/project.yaml and we must NOT auto-create one inside the user's
+		// top-level workspace. Skip it here and stamp an in-memory-only
+		// CreatedAt below so the migration never persists to root.
+		if p.IsRoot {
+			continue
+		}
 		if p.Config.CreatedAt == 0 {
 			missing = append(missing, name)
 		}
@@ -190,6 +198,26 @@ func (m *Manager) Scan() error {
 				slog.Warn("persist project CreatedAt failed",
 					"name", name, "err", err)
 			}
+		}
+	}
+
+	// Root project sidebar order: assign an in-memory-only CreatedAt that sorts
+	// the root entry strictly LAST among all projects so it lands at the bottom
+	// of the sidebar. Never persisted (that is the point of skipping it above),
+	// so it is recomputed every boot; because it is always the max, its relative
+	// position is stable across reboots regardless of the synthetic value.
+	for _, p := range projects {
+		if p.IsRoot && p.Config.CreatedAt == 0 {
+			var maxCreated int64
+			for _, q := range projects {
+				if q.IsRoot {
+					continue
+				}
+				if q.Config.CreatedAt > maxCreated {
+					maxCreated = q.Config.CreatedAt
+				}
+			}
+			p.Config.CreatedAt = maxCreated + 1
 		}
 	}
 

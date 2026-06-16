@@ -655,8 +655,15 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	// through the same resolveProjectFileWithRoot guard so symlink escape /
 	// path-traversal / credential-name rejection still apply.
 	rootPath := ""
+	// restrictedRoot mirrors HandleFileGet: the __public_tmp__ pseudo-project
+	// and the include_root whole-workspace project get the foreign-private-UID
+	// / denied-name / irregular-type gates AND the credential-name filter in
+	// the existence-probe path so the batch-exists API cannot enumerate what
+	// the GET path refuses to serve. A normal subdirectory project does not.
+	restrictedRoot := false
 	if req.Project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
+		restrictedRoot = true
 	} else {
 		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
 		// before touching projectMgr; HandleFilesExists previously passed raw
@@ -684,6 +691,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rootPath = p.Path
+		restrictedRoot = p.IsRoot
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
@@ -731,14 +739,25 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 		// owner/mode on the same inode the existence reply describes.
 		// Cost: at most one extra Lstat per /tmp probe; the production
 		// path is the project-root case where this branch is skipped.
-		if entry.Exists && req.Project == publicTmpProject {
+		if entry.Exists && restrictedRoot {
 			if abs, rerr := resolveProjectFileWithRoot(rootResolved, rel); rerr == nil {
-				// R20260527122801-SEC-6 (#1330): also deny sensitive
-				// names (sockets / pid / core dumps / ssh-agent
-				// artefacts) so the existence-probe API cannot be
-				// used to enumerate IPC endpoints under /tmp even
-				// when their mode bits are world-readable.
-				if isPublicTmpDeniedName(abs) {
+				// Credential-name parity: the GET path blocks credential-named
+				// files (.env / id_rsa / *.pem / .ssh/** / secrets/**) via
+				// isSensitiveDownloadPath in servePreview/serveDownload, but the
+				// batch-exists path historically applied NO such filter. For a
+				// restricted root spanning sibling projects' trees that would
+				// leak {exists,size,mime} for every credential file under root,
+				// so enforce the same full-path sensitive-name scan here. (For
+				// the /tmp pseudo-project this is a no-op-tightening: it never
+				// served credential names anyway.)
+				if isSensitiveDownloadPath(rel) {
+					entry = existsEntry{Exists: false}
+				} else if isPublicTmpDeniedName(abs) {
+					// R20260527122801-SEC-6 (#1330): also deny sensitive
+					// names (sockets / pid / core dumps / ssh-agent
+					// artefacts) so the existence-probe API cannot be
+					// used to enumerate IPC endpoints even when their mode
+					// bits are world-readable.
 					entry = existsEntry{Exists: false}
 				} else if info, lerr := os.Lstat(abs); lerr == nil &&
 					(isPublicTmpForeignPrivate(info) || isPublicTmpIrregularType(info)) {
@@ -877,8 +896,18 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// against /tmp instead of looking up a real project, but keep the same
 	// path-traversal / symlink-escape / credential-name guards downstream.
 	rootPath := ""
+	// restrictedRoot marks a project whose root spans content the dashboard is
+	// NOT unconditionally cleared to read: the __public_tmp__ pseudo-project
+	// (/tmp) and the include_root project (the whole workspace tree, possibly
+	// containing sibling projects' or other UIDs' files). For both, the
+	// publicTmp foreign-private-UID / denied-name / irregular-type gates and
+	// the per-access audit log below apply. A normal subdirectory project is an
+	// operator-registered leaf whose contents are by definition readable, so it
+	// stays restrictedRoot=false.
+	restrictedRoot := false
 	if project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
+		restrictedRoot = true
 	} else {
 		// R183-SEC-M2: same trust-boundary gate as HandleFilesExists above.
 		if err := validateProjectName(project); err != nil {
@@ -892,6 +921,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rootPath = p.Path
+		restrictedRoot = p.IsRoot
 	}
 
 	resolved, err := resolveProjectFile(rootPath, path)
@@ -939,10 +969,11 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// naozhi *process* — which has read access — not the dashboard caller.
 	// Refuse owner-private files owned by a different UID; the same-UID
 	// case (operator's own /tmp output) and world/group-readable files
-	// stay accessible. Only applies to the publicTmpProject path; real
-	// projects are operator-registered roots whose contents the dashboard
-	// is by definition cleared to read.
-	if project == publicTmpProject && isPublicTmpForeignPrivate(info) {
+	// stay accessible. Applies to the restrictedRoot paths (publicTmpProject
+	// and the include_root whole-workspace project); a normal subdirectory
+	// project is an operator-registered root whose contents the dashboard is
+	// by definition cleared to read.
+	if restrictedRoot && isPublicTmpForeignPrivate(info) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
@@ -953,7 +984,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// ssh-agent's 0o777 socket), some names must never be served — Unix
 	// sockets reflect IPC payload, core dumps contain process memory,
 	// PID files leak process structure. See publicTmpDeniedSuffixes.
-	if project == publicTmpProject && isPublicTmpDeniedName(resolved) {
+	if restrictedRoot && isPublicTmpDeniedName(resolved) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
@@ -962,7 +993,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// Unix socket whose name matches neither the deny-list nor the
 	// foreign-private mode gate (e.g. a custom-named agent IPC socket)
 	// would otherwise be served. Refuse any non-regular file type.
-	if project == publicTmpProject && isPublicTmpIrregularType(info) {
+	if restrictedRoot && isPublicTmpIrregularType(info) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
@@ -976,8 +1007,9 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// /tmp file so an operator who later switches to a shared deployment can
 	// reconstruct who read what. RemoteAddr is logged (not request headers)
 	// to avoid echoing attacker-controlled values into the log stream.
-	if project == publicTmpProject {
-		slog.Info("public_tmp file access",
+	if restrictedRoot {
+		slog.Info("restricted_root file access",
+			"project", project,
 			"path", osutil.SanitizeForLog(resolved, 512),
 			"mode", mode,
 			"remote_addr", r.RemoteAddr)
