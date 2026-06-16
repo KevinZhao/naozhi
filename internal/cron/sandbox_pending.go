@@ -79,6 +79,47 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 		lg.Warn("cron sandbox: pending write failed; restart reconcile unavailable for this run", "err", err)
 		return ""
 	}
+	// R20260616-PERF-001 (#2140): record the live jobID→path mapping so a
+	// later DeleteJobByID resolves this run's pending file with one map lookup
+	// instead of scanning + unmarshalling every concurrent run's record. The
+	// per-job CAS keeps at most one in-flight run per job, so a single entry
+	// per key is correct; a re-write for the same job overwrites the (now
+	// stale) prior path.
+	s.setSandboxPendingIndex(p.JobID, path)
+	return path
+}
+
+// setSandboxPendingIndex records jobID→path for the §6.5 in-flight record.
+func (s *Scheduler) setSandboxPendingIndex(jobID, path string) {
+	s.sandboxPendingMu.Lock()
+	if s.sandboxPendingIndex == nil {
+		s.sandboxPendingIndex = make(map[string]string)
+	}
+	s.sandboxPendingIndex[jobID] = path
+	s.sandboxPendingMu.Unlock()
+}
+
+// clearSandboxPendingIndex drops the index entry for jobID iff it still maps
+// to path (an unconditional delete could clobber a newer run's entry that
+// reused the same jobID after a fast finish→re-run; the path guard makes the
+// clear idempotent and race-safe against that re-write).
+func (s *Scheduler) clearSandboxPendingIndex(jobID, path string) {
+	if jobID == "" || path == "" {
+		return
+	}
+	s.sandboxPendingMu.Lock()
+	if s.sandboxPendingIndex[jobID] == path {
+		delete(s.sandboxPendingIndex, jobID)
+	}
+	s.sandboxPendingMu.Unlock()
+}
+
+// lookupSandboxPendingIndex returns the recorded pending-file path for jobID
+// (write-authoritative; "" when no in-flight record exists this process).
+func (s *Scheduler) lookupSandboxPendingIndex(jobID string) string {
+	s.sandboxPendingMu.Lock()
+	path := s.sandboxPendingIndex[jobID]
+	s.sandboxPendingMu.Unlock()
 	return path
 }
 
@@ -354,12 +395,17 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 //
 // Runs lock-free from deleteJobPostCleanup. Best-effort and idempotent:
 //
-//   - Scans the pending dir for records whose JobID matches (a job has at
-//     most one in-flight run under the per-job CAS, but scan-by-jobID is
-//     robust to any future fan-out and needs no jobID→runID index).
+//   - R20260616-PERF-001 (#2140): the common case resolves the job's in-flight
+//     pending file with a single map lookup (sandboxPendingIndex, kept write-
+//     authoritative by writeSandboxPending / the terminal remove) instead of an
+//     os.ReadDir + per-file ReadFile/unmarshal over EVERY concurrent run's
+//     record. Only falls back to the full dir scan on an index miss — i.e. for
+//     a pending file written by a PREVIOUS process that this boot's index never
+//     saw (those are normally drained by reconcileSandboxPending at startup, but
+//     a delete that races reconcile must still find them).
 //   - StopSession is idempotent server-side and maps ResourceNotFound→nil
 //     (adapter), so a run that finished + removed its pending file between
-//     our scan and the Stop is harmless.
+//     our lookup and the Stop is harmless.
 //   - Removes the pending file after a confirmed Stop so startup reconcile
 //     does not later re-Stop a session for a job that no longer exists. On
 //     Stop failure the file is KEPT (mirrors reconcile / §6.2): the microVM
@@ -377,6 +423,17 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 	if dir == "" {
 		return
 	}
+	// Fast path: this process wrote the pending record, so its path is in the
+	// index — one lookup + one ReadFile, no full-dir scan.
+	if path := s.lookupSandboxPendingIndex(jobID); path != "" {
+		if s.stopOneSandboxPendingFile(jobID, path) {
+			s.clearSandboxPendingIndex(jobID, path)
+		}
+		return
+	}
+	// Slow path (index miss): a pending file may have been left by a previous
+	// process. Scan the dir for a JobID match. Bounded by the live orphan
+	// count, and only taken when the in-memory index has nothing for jobID.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -400,35 +457,59 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 			continue // benign: the run goroutine may have just removed it
 		}
 		var p sandboxPending
-		// R20260613-LOGIC-2: validate RunID in addition to JobID/RuntimeSessionID.
-		// p.RunID is read from operator-writable disk and flows into slog fields
-		// at lines 335/338 — without validation a tampered pending file can inject
-		// control characters or oversized strings into structured logs.
-		// Mirrors the same guard in reconcileSandboxPending (line 115).
-		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
+		if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID {
 			continue
 		}
-		// R20260613-SEC-2: validate RuntimeSessionID read from disk before
-		// passing to StopSession. On invalid format: log-warn and skip
-		// (file is kept — startup reconcile retries on next boot).
-		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
-			slog.Warn("cron sandbox: delete-stop skipped — pending record has invalid RuntimeSessionID format",
-				"job_id", jobID, "run_id", p.RunID, "runtime_session_id", p.RuntimeSessionID)
-			continue
-		}
-		lg := slog.With("job_id", jobID, "run_id", p.RunID)
-		lg.Info("cron sandbox: deleting job with in-flight run; stopping microVM")
-		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
-		stopErr := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
-		cancel()
-		if stopErr != nil {
-			// Keep the file: §6.2 — fate unknown until a confirmed Stop.
-			// Startup reconcile retries. The deletion itself still proceeds.
-			lg.Error("cron sandbox: delete-stop failed; pending record kept for startup reconcile", "err", stopErr)
-			continue
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			lg.Warn("cron sandbox: delete-stop pending remove failed", "err", err)
+		if s.stopOneSandboxPendingFile(jobID, path) {
+			s.clearSandboxPendingIndex(jobID, path)
 		}
 	}
+}
+
+// stopOneSandboxPendingFile reads, validates, and (on a valid record) Stops the
+// microVM for a single §6.5 pending file, removing the file on a confirmed
+// Stop. Returns true when the file was removed (so the caller can drop the
+// index entry); false when the record was skipped (corrupt/invalid/unreadable)
+// or the Stop was not confirmed — in which case the file is KEPT (§6.2) for the
+// next startup reconcile.
+func (s *Scheduler) stopOneSandboxPendingFile(jobID, path string) bool {
+	if s.stopCtx.Err() != nil {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false // benign: the run goroutine may have just removed it
+	}
+	var p sandboxPending
+	// R20260613-LOGIC-2: validate RunID in addition to JobID/RuntimeSessionID.
+	// p.RunID is read from operator-writable disk and flows into slog fields
+	// below — without validation a tampered pending file can inject control
+	// characters or oversized strings into structured logs. Mirrors the same
+	// guard in reconcileSandboxPending.
+	if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
+		return false
+	}
+	// R20260613-SEC-2: validate RuntimeSessionID read from disk before passing
+	// to StopSession. On invalid format: log-warn and skip (file is kept —
+	// startup reconcile retries on next boot).
+	if !isValidRuntimeSessionID(p.RuntimeSessionID) {
+		slog.Warn("cron sandbox: delete-stop skipped — pending record has invalid RuntimeSessionID format",
+			"job_id", jobID, "run_id", p.RunID, "runtime_session_id", p.RuntimeSessionID)
+		return false
+	}
+	lg := slog.With("job_id", jobID, "run_id", p.RunID)
+	lg.Info("cron sandbox: deleting job with in-flight run; stopping microVM")
+	ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
+	stopErr := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
+	cancel()
+	if stopErr != nil {
+		// Keep the file: §6.2 — fate unknown until a confirmed Stop.
+		// Startup reconcile retries. The deletion itself still proceeds.
+		lg.Error("cron sandbox: delete-stop failed; pending record kept for startup reconcile", "err", stopErr)
+		return false
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		lg.Warn("cron sandbox: delete-stop pending remove failed", "err", err)
+	}
+	return true
 }
