@@ -99,6 +99,14 @@ type WorkspaceConfig struct {
 type ProjectsConfig struct {
 	Root            string          `yaml:"root"`                       // projects root directory
 	PlannerDefaults PlannerDefaults `yaml:"planner_defaults,omitempty"` // global planner defaults
+	// IncludeRoot registers the projects root directory itself as a project
+	// (named after its basename) in addition to its subdirectories. This lets
+	// files that live directly under root — not inside any subdirectory
+	// project — resolve to an owning project so the dashboard renders
+	// preview/download buttons for them. Default false. Sensitive-name guards
+	// (isSensitiveDownloadPath) still apply, so .env / id_rsa / *.pem under
+	// root remain blocked regardless of this flag.
+	IncludeRoot bool `yaml:"include_root,omitempty"`
 }
 
 type PlannerDefaults struct {

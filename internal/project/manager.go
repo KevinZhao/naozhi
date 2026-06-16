@@ -24,6 +24,12 @@ type Manager struct {
 	root     string
 	defaults PlannerDefaults
 
+	// includeRoot registers the root directory itself as a project (named
+	// after its basename) in addition to its subdirectories. See
+	// ProjectsConfig.IncludeRoot. Files directly under root then resolve to an
+	// owning project so the dashboard renders preview/download buttons.
+	includeRoot bool
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
@@ -31,8 +37,17 @@ type Manager struct {
 	bindingIndex map[string]string
 }
 
+// Option customises a Manager at construction time.
+type Option func(*Manager)
+
+// WithIncludeRoot registers the projects root directory itself as a project
+// (in addition to its subdirectories) when enabled.
+func WithIncludeRoot(enabled bool) Option {
+	return func(m *Manager) { m.includeRoot = enabled }
+}
+
 // NewManager creates a project manager for the given root directory.
-func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
+func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve projects root: %w", err)
@@ -44,12 +59,16 @@ func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("projects root is not a directory: %s", absRoot)
 	}
-	return &Manager{
+	m := &Manager{
 		root:         absRoot,
 		defaults:     defaults,
 		projects:     make(map[string]*Project),
 		bindingIndex: make(map[string]string),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m, nil
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
@@ -97,6 +116,42 @@ func (m *Manager) Scan() error {
 			Config:       cfg,
 			GitRemoteURL: remote,
 			IsGitHub:     isGH,
+		}
+	}
+
+	// IncludeRoot: register the root directory itself as a project so files
+	// living directly under root (not inside any subdirectory project) resolve
+	// to an owning project and the dashboard renders preview/download buttons.
+	// The root project uses basename(root) as its name; a real subdirectory of
+	// the same name wins (it was inserted above) so we never shadow it. Path
+	// resolution is longest-prefix everywhere (ResolveWorkspaces here,
+	// resolveProjectForAbsPath in the dashboard), so a file under a deeper
+	// subdirectory project still resolves there — root only catches the leftovers.
+	if m.includeRoot {
+		rootName := filepath.Base(m.root)
+		if err := ValidateProjectName(rootName); err != nil {
+			slog.Warn("include_root: root basename is not a valid project name; skipping root project",
+				"root", m.root, "name", rootName, "err", err)
+		} else if _, clash := projects[rootName]; clash {
+			slog.Warn("include_root: a subdirectory already uses the root basename; skipping root project",
+				"root", m.root, "name", rootName)
+		} else {
+			cfg, err := loadConfig(m.root)
+			if err != nil {
+				slog.Warn("include_root: skip root project with bad config", "root", m.root, "err", err)
+			} else if err := ValidateConfig(cfg); err != nil {
+				slog.Warn("include_root: skip root project with invalid config", "root", m.root, "err", err)
+			} else {
+				remote, isGH := DetectGitHubRemote(m.root)
+				projects[rootName] = &Project{
+					Name:         rootName,
+					Path:         m.root,
+					PathPrefix:   m.root + string(filepath.Separator),
+					Config:       cfg,
+					GitRemoteURL: remote,
+					IsGitHub:     isGH,
+				}
+			}
 		}
 	}
 
