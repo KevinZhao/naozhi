@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -146,6 +147,15 @@ func removeSandboxPending(path string, lg *slog.Logger) {
 // synthetic started event first, so subscribers see a consistent
 // started→ended pair (the original started frame died with the previous
 // process — same rationale as emitSyntheticSkipped).
+//
+// R20260616-PERF-006 (#2142): the cheap validate/drop-corrupt pass stays
+// serial (local I/O), then the surviving orphans' Stops are fanned out across
+// a bounded worker pool (sandboxReconcileWorkers). Each orphan's StopSession
+// is an independent ~30s network call, so serial N×30s on a slow upstream
+// could stall the reconcile pass for minutes; the pool caps that to
+// ⌈N/workers⌉×30s while bounding peak in-flight Stops. reconcileOneSandboxOrphan
+// is concurrency-safe: every shared-state touch goes through s.mu (RLock
+// snapshot + finishRun's own re-lock) or atomic metrics counters.
 func (s *Scheduler) reconcileSandboxPending() {
 	dir := s.sandboxPendingDir()
 	if dir == "" {
@@ -158,6 +168,12 @@ func (s *Scheduler) reconcileSandboxPending() {
 		}
 		return
 	}
+
+	type orphan struct {
+		p    sandboxPending
+		path string
+	}
+	orphans := make([]orphan, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -185,15 +201,53 @@ func (s *Scheduler) reconcileSandboxPending() {
 			// does not re-warn on every boot.
 			// RuntimeSessionID=="" (R20260615-030459-COR-002): a pending record
 			// without a runtime session id cannot be reconciled — reconcile would
-			// skip the StopSession block (line 156) yet still call finishRun and
+			// skip the StopSession block yet still call finishRun and
 			// remove the file, breaking §6.2 containment. Treat as corrupt:
-			// drop+warn, aligned with stopSandboxRunsForJob's guard (line 375).
+			// drop+warn, aligned with stopSandboxRunsForJob's guard.
 			slog.Warn("cron sandbox: corrupt pending record dropped", "file", e.Name(), "err", err)
 			_ = os.Remove(path)
 			continue
 		}
-		s.reconcileOneSandboxOrphan(p, path)
+		orphans = append(orphans, orphan{p: p, path: path})
 	}
+
+	if len(orphans) == 0 {
+		return
+	}
+	// Serial when there is nothing to parallelise — avoid the goroutine +
+	// channel plumbing for the common single-orphan case.
+	if len(orphans) == 1 {
+		s.reconcileOneSandboxOrphan(orphans[0].p, orphans[0].path)
+		return
+	}
+
+	workers := sandboxReconcileWorkers
+	if workers > len(orphans) {
+		workers = len(orphans)
+	}
+	jobs := make(chan orphan)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for o := range jobs {
+				// Per-orphan shutdown bail: a Stop() racing reconcile cancels
+				// stopCtx; stop dispatching new Stops so we don't exhaust the
+				// gcWaitBudget. reconcileOneSandboxOrphan also re-checks via its
+				// WithTimeout(stopCtx, …) so an in-flight Stop unblocks too.
+				if s.stopCtx.Err() != nil {
+					continue
+				}
+				s.reconcileOneSandboxOrphan(o.p, o.path)
+			}
+		}()
+	}
+	for _, o := range orphans {
+		jobs <- o
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 // reconcileOneSandboxOrphan handles a single §6.5 orphan: Stop, terminal
