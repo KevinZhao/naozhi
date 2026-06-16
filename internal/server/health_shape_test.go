@@ -158,7 +158,11 @@ func TestHandleHealth_WSDropped_ZeroEmitted(t *testing.T) {
 func TestHandleHealth_PlatformsShape(t *testing.T) {
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 	// inject a second platform so we exercise the multi-entry path.
+	// R20260616-PERF-002: the served `platforms` map is now pre-built once at
+	// construction (platformsStatus) rather than rebuilt from `platforms` per
+	// request, so override the pre-built map directly here.
 	srv.healthH.platforms = map[string]struct{}{"feishu": {}, "slack": {}}
+	srv.healthH.platformsStatus = map[string]string{"feishu": "registered", "slack": "registered"}
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")

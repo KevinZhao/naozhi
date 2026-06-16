@@ -271,3 +271,15 @@ func platformNameSet(platforms map[string]platform.Platform) map[string]struct{}
 	}
 	return out
 }
+
+// platformStatusMap pre-builds the {name: "registered"} map HealthHandler
+// serves as the /health `platforms` sub-object. Platform registration is
+// fixed at construction, so building this once (R20260616-PERF-002) avoids a
+// per-request make(map)+range on the 1 Hz dashboard poll path.
+func platformStatusMap(names map[string]struct{}) map[string]string {
+	out := make(map[string]string, len(names))
+	for name := range names {
+		out[name] = "registered"
+	}
+	return out
+}

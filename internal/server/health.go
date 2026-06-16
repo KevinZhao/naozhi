@@ -35,7 +35,14 @@ type HealthHandler struct {
 	watchdogTotal      *atomic.Int64
 	nodeAccess         NodeAccessor
 	platforms          map[string]struct{} // platform names (read-only after init)
-	hubDropped         func() int64        // hub.DroppedMessages
+	// platformsStatus is the pre-built {name: "registered"} map served as the
+	// /health `platforms` sub-object. Platform names are fixed at construction
+	// (read-only after init, mirroring `platforms`), so building this once
+	// avoids a per-request make(map)+range on the 1 Hz dashboard poll path.
+	// R20260616-PERF-002. Only ever assigned to auth.Platforms for JSON
+	// serialization (read-only), never mutated by callers.
+	platformsStatus map[string]string
+	hubDropped      func() int64 // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
@@ -287,11 +294,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		auth.Nodes = nodeStatus
 	}
-	platStatus := make(map[string]string, len(h.platforms))
-	for name := range h.platforms {
-		platStatus[name] = "registered"
-	}
-	auth.Platforms = platStatus
+	auth.Platforms = h.platformsStatus
 
 	// R247-ARCH-12 (#1052): the per-subsystem auth-section fields
 	// (ws_dropped, dispatch, eventlog, attachment_tracker) route through
