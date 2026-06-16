@@ -74,6 +74,12 @@ func TestResolveCLIDebugDir_TruthyValues(t *testing.T) {
 // --debug-file and a relative value resolves against the subprocess CWD
 // (the session workspace), leaking the API-key-bearing debug log there.
 func TestResolveCLIDebugDir_RelativeEventLogAnchoredAbsolute(t *testing.T) {
+	// Anchor the process CWD to a temp dir so EnsureDir (which resolves the
+	// relative config against the CWD via filepath.Abs) creates its tree
+	// there instead of polluting the source tree. t.Chdir restores the CWD
+	// and removes the temp dir at test end, keeping the test hermetic.
+	t.Chdir(t.TempDir())
+
 	got := resolveCLIDebugDirWith("relconfig/events", stubGetenv("1"))
 	if got == "" {
 		t.Fatalf("relative event log: want enabled absolute dir, got disabled")
@@ -87,8 +93,6 @@ func TestResolveCLIDebugDir_RelativeEventLogAnchoredAbsolute(t *testing.T) {
 	if !strings.HasSuffix(got, wantSuffix) {
 		t.Errorf("debug dir = %q, want suffix %q", got, wantSuffix)
 	}
-	// Cleanup: EnsureDir created the tree under CWD.
-	_ = os.RemoveAll(filepath.Join("relconfig"))
 }
 
 func TestCLIDebugFileFor(t *testing.T) {

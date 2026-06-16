@@ -681,3 +681,15 @@
 - [R20260615-030459-SEC-13] font-src cdn.jsdelivr.net 无 SRI(KaTeX 字体)待 vendoring — internal/server/routes.go:524
 - [R20260615-030459-ARC-3] cron notice-localize guard test 注释引用 stale 行号 scheduler_run.go:1595 — internal/cron/cron_notice_apierr_localize_test.go:19
 - [R20260615-030459-COR-005] reconcile corrupt-record log 在 err==nil 时仍打 err=nil 字段(IsValidID 失败路径) — internal/cron/sandbox_pending.go:131
+- [R20260616-GO-002] RecentSessionsCtx 接受 nil context 静默替换 Background 掩盖 caller bug — internal/discovery/recent.go:104
+- [R20260616-GO-003] recent sessions 扫描超时 slog.Warn 无 DeadlineExceeded/Canceled 区分 — internal/discovery/recent.go:136
+- [R20260616-SEC-4] SameOriginOK 在 Origin+Referer 均缺失时放行未检查 bearer token 存在 — internal/dashboard/auth/csrf.go:88
+- [R20260616-SEC-5] Feishu AES-CBC decrypt 用攻击者可控 IV 无 IV 真实性校验（受上游签名校验保护） — internal/platform/feishu/crypto.go:45
+- [R20260616-SEC-9] /livez /readyz 探针完全无鉴权无限流 可被扫描器持续轮询追踪 uptime — internal/server/health.go:180
+- [R20260616-SEC-10] feishu pkcs7Unpad 非常量时间循环 理论 padding-oracle 时序侧信道（受上游 HMAC 保护） — internal/platform/feishu/crypto.go:66
+- [R20260616-PERF-005] HandleUpgrade 每个 WS 连接 new 两个 rate.Limiter — internal/server/wshub_upgrade.go:141
+- [R20260616-PERF-008] writeStoreData 每 30s tick 一次 storeDirEnsured sync.Map.Load 装箱 — internal/session/store.go:653
+- [R20260616-PERF-012] cliAvailableAt 每 60s TTL 刷新 sync.Map.Store 装箱 cliAvailEntry — internal/server/health_systeminfo.go:59
+- [R20260616-PERF-014] Cleanup pruneCandidates/candidates slice 每 5min tick 重新分配未池化 — internal/session/router_cleanup.go:316
+- [R20260616-ARCH-3] RuntimeSessionID validate-then-skip 块 3 处重复 log-level 不一致 — internal/cron/sandbox_pending.go:166
+- [R20260616-ARCH-4] .json dir-entry 扫描循环在 cron sandbox 文件重复 4 次 — internal/cron/sandbox_pending.go:106

@@ -168,7 +168,7 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 				"runtime_session_id", p.RuntimeSessionID)
 			return
 		}
-		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
 		err := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
 		cancel()
 		if err != nil {
@@ -404,7 +404,7 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 		}
 		lg := slog.With("job_id", jobID, "run_id", p.RunID)
 		lg.Info("cron sandbox: deleting job with in-flight run; stopping microVM")
-		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
 		stopErr := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
 		cancel()
 		if stopErr != nil {
