@@ -135,6 +135,11 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	// behind which do not affect correctness (GC still collects on
 	// uploadTTL expiry).
 	r.clearAttachmentTrackerRefs(key, snap.workspace)
+	// Reclaim the run-history ring cache slots for this key. On-disk records
+	// are left intact (subject to keepWindow GC on next warm) — only the
+	// resident ring is freed, preventing the per-session ring map from
+	// growing without bound as sessions come and go.
+	r.sessionRuns.Invalidate(key)
 	// R191-CONC-H1-c: Broadcast under r.mu (see evictOldest comment).
 	// Async-remove review H1: this Broadcast is NOT load-bearing for
 	// Shutdown — the session left r.ss.sessions in unregisterAndSnapshot, so
@@ -1011,4 +1016,10 @@ func (r *Router) shutdown() {
 	// OnPersistedEntry bumps arrive during the tracker's drain.
 	// Ordering matters: a bump after Stop would silently drop.
 	r.stopAttachmentTracker()
+
+	// Flush the session-run-history write worker so records enqueued during
+	// the final turns reach disk. Close blocks on the worker draining its
+	// bounded queue (best-effort: any record dropped earlier on a full queue
+	// stays dropped). nil/disabled store is a no-op.
+	r.sessionRuns.Close()
 }

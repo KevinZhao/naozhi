@@ -287,6 +287,7 @@ func (s *Server) registerDashboard() {
 func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
+	s.mux.HandleFunc("GET /api/sessions/runs", auth(s.sessionH.HandleRuns))
 	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
