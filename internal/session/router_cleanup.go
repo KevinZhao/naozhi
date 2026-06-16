@@ -505,7 +505,7 @@ func (r *Router) Cleanup() {
 	// tick. The ws-overrides copy stays a map because its save path keys by
 	// string; knownIDs uses the gen-memoised sorted slice (R220123-PERF-19).
 	var sessionsCopy []*ManagedSession
-	var knownIDsCopy []string
+	var knownIDsCopy []byte
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
@@ -531,10 +531,13 @@ func (r *Router) Cleanup() {
 	// os.CreateTemp, so this throttle is an I/O budget gate, not a
 	// file-level race guard.)
 	var snapshotKnownIDsGen uint64
+	var knownIDsMarshalErr error
 	if r.kid.dirty && now.Sub(r.kid.savedAt) >= knownIDsSaveInterval {
 		// R220123-PERF-19 (#1638): sorted snapshot is memoised by gen, so
 		// the O(N log N) sort is skipped when the set is unchanged.
-		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
+		// R20260616-PERF-009 (#2143): the marshal is memoised the same way,
+		// so the ~50KB json.Marshal is skipped on unchanged ticks too.
+		knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
 		snapshotKnownIDsGen = r.kid.gen
 		r.kid.savedAt = now
 	}
@@ -566,12 +569,20 @@ func (r *Router) Cleanup() {
 			r.mu.Unlock()
 		}
 	}
-	if knownIDsCopy != nil {
+	if knownIDsMarshalErr != nil {
+		// R20260616-PERF-009: marshal is now done under r.mu (memoised). A
+		// failure is practically impossible for a []string, but if it occurs
+		// reset savedAt so the next tick retries and leave dirty set.
+		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
+		r.mu.Lock()
+		r.kid.savedAt = time.Time{}
+		r.mu.Unlock()
+	} else if knownIDsCopy != nil {
 		// knownIDsSavedAt was committed under r.mu above (pre-save) to
 		// gate concurrent saveIfDirty. On success we only clear the dirty
 		// flag; on failure reset savedAt to zero so the throttle gate
 		// re-opens on the next tick (R20260603-CODE-4).
-		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+		if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 			r.mu.Lock()
 			r.kid.savedAt = time.Time{}
@@ -727,11 +738,14 @@ func (r *Router) saveIfDirty() {
 			wsOverridesCopy[k] = v
 		}
 	}
-	var knownIDsCopy []string
+	var knownIDsCopy []byte
 	var snapshotKnownIDsGen uint64
+	var knownIDsMarshalErr error
 	if knownIDsDue {
 		// R220123-PERF-19 (#1638): memoised sorted snapshot.
-		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
+		// R20260616-PERF-009 (#2143): marshal is memoised by gen too, so an
+		// unchanged set re-uses the cached bytes instead of re-serializing.
+		knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
 		snapshotKnownIDsGen = r.kid.gen
 	}
 	storePath := r.storePath
@@ -778,11 +792,18 @@ func (r *Router) saveIfDirty() {
 			r.mu.Unlock()
 		}
 	}
-	if knownIDsCopy != nil {
+	if knownIDsMarshalErr != nil {
+		// R20260616-PERF-009: marshal now happens under the lock (memoised);
+		// reset savedAt so the next tick retries and leave dirty set.
+		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
+		r.mu.Lock()
+		r.kid.savedAt = time.Time{}
+		r.mu.Unlock()
+	} else if knownIDsCopy != nil {
 		// savedAt committed pre-save; only toggle dirty on success.
 		// R20260603-CODE-4: reset savedAt on failure so the throttle gate
 		// re-opens on the next tick rather than blocking for a full interval.
-		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+		if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 			r.mu.Lock()
 			r.kid.savedAt = time.Time{}
@@ -929,8 +950,10 @@ func (r *Router) shutdown() {
 	}
 	storePath := r.storePath
 	// R220123-PERF-19 (#1638): sorted snapshot for the final flush too, so
-	// saveKnownIDs receives the deterministic ordering it now requires.
-	knownIDsCopy := r.snapshotKnownIDsSortedLocked()
+	// the persisted bytes keep the deterministic ordering.
+	// R20260616-PERF-009 (#2143): reuse the gen-memoised marshal so an
+	// unchanged set since the last periodic save re-uses the cached bytes.
+	knownIDsCopy, knownIDsMarshalErr := r.snapshotKnownIDsMarshaledLocked()
 	wsOverrides := make(map[string]string, len(r.wsStore.overrides))
 	for k, v := range r.wsStore.overrides {
 		wsOverrides[k] = v
@@ -955,7 +978,9 @@ func (r *Router) shutdown() {
 	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
-	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+	if knownIDsMarshalErr != nil {
+		slog.Error("marshal known session IDs on shutdown", "err", knownIDsMarshalErr)
+	} else if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 		slog.Error("save known session IDs on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveWorkspaceOverrides(storePath, wsOverrides); err != nil {
