@@ -133,6 +133,42 @@ func TestIncludeRoot_ExistsCredentialFile_NotEnumerable(t *testing.T) {
 	}
 }
 
+// A symlink under the root that points into a sensitive-named directory must
+// NOT let the batch-exists API enumerate the target: the credential filter must
+// scan the symlink-RESOLVED path (abs), not the raw client-supplied rel. (PR
+// review finding: `secrets/` evaded the segment scan when rel was used.)
+func TestIncludeRoot_ExistsSymlinkIntoSecrets_NotEnumerable(t *testing.T) {
+	h, rootName, root := newIncludeRootHandlersForTest(t, map[string]string{
+		"secrets/db.yaml": "password: hunter2\n",
+	})
+	// pub -> secrets, so "pub/db.yaml" resolves to "<root>/secrets/db.yaml".
+	if err := os.Symlink(filepath.Join(root, "secrets"), filepath.Join(root, "pub")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	body, _ := json.Marshal(existsReq{
+		Project: rootName,
+		Paths:   []string{"pub/db.yaml"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.HandleFilesExists(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results map[string]struct {
+			Exists bool `json:"exists"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Results["pub/db.yaml"].Exists {
+		t.Error("symlink into secrets/ enumerable via exists API; credential filter scanned rel not abs")
+	}
+}
+
 // Sanity: with include_root OFF, the root basename is not a project, so the
 // same request 404s — confirms the gates are only reachable behind the flag.
 func TestIncludeRoot_DisabledRootName404(t *testing.T) {

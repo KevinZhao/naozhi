@@ -750,7 +750,13 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 				// so enforce the same full-path sensitive-name scan here. (For
 				// the /tmp pseudo-project this is a no-op-tightening: it never
 				// served credential names anyway.)
-				if isSensitiveDownloadPath(rel) {
+				//
+				// Scan `abs` (the symlink-resolved path), NOT the raw client
+				// `rel`: the GET-path call sites all pass the resolved path, and
+				// a symlink like `pub -> secrets` would otherwise let `rel`
+				// ("pub/db.yaml") evade the `secrets` segment match that `abs`
+				// ("…/secrets/db.yaml") catches.
+				if isSensitiveDownloadPath(abs) {
 					entry = existsEntry{Exists: false}
 				} else if isPublicTmpDeniedName(abs) {
 					// R20260527122801-SEC-6 (#1330): also deny sensitive

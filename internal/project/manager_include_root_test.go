@@ -200,3 +200,40 @@ func TestScan_IncludeRoot_RootSortsLast(t *testing.T) {
 		t.Errorf("last project = %q (IsRoot=%v), want the root project sorted last", last.Name, last.IsRoot)
 	}
 }
+
+// Even if the operator dropped a real .naozhi/project.yaml at the workspace
+// root with a small created_at, the synthetic root project must still sort
+// LAST (its sidebar position is always derived, never taken from disk).
+func TestScan_IncludeRoot_RootSortsLast_EvenWithRealConfig(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	root := filepath.Join(parent, "workspace")
+	makeProjectDir(t, root, "alpha", &ProjectConfig{CreatedAt: 1_000_000})
+	// Write a real project.yaml AT the root with a tiny created_at that would,
+	// if honored, sort root first.
+	rootCfgDir := filepath.Join(root, ".naozhi")
+	if err := os.MkdirAll(rootCfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfigToPath(filepath.Join(rootCfgDir, "project.yaml"), ProjectConfig{CreatedAt: 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewManager(root, PlannerDefaults{}, WithIncludeRoot(true))
+	if err != nil {
+		t.Fatalf("NewManager = %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan = %v", err)
+	}
+
+	all := m.All()
+	if len(all) == 0 {
+		t.Fatal("no projects")
+	}
+	last := all[len(all)-1]
+	if !last.IsRoot {
+		t.Errorf("last project = %q (CreatedAt=%d), want root sorted last despite real created_at=5",
+			last.Name, last.Config.CreatedAt)
+	}
+}

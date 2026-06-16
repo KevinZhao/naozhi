@@ -206,8 +206,14 @@ func (m *Manager) Scan() error {
 	// of the sidebar. Never persisted (that is the point of skipping it above),
 	// so it is recomputed every boot; because it is always the max, its relative
 	// position is stable across reboots regardless of the synthetic value.
+	//
+	// Override unconditionally (not just when CreatedAt==0): if the operator
+	// dropped a real .naozhi/project.yaml at the workspace root, loadConfig
+	// would have read its created_at and that would otherwise place root in the
+	// middle of the list, breaking the "root sorts last" invariant. The root
+	// project is synthetic, so its sidebar position is always derived here.
 	for _, p := range projects {
-		if p.IsRoot && p.Config.CreatedAt == 0 {
+		if p.IsRoot {
 			var maxCreated int64
 			for _, q := range projects {
 				if q.IsRoot {
