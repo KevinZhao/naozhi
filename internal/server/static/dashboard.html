@@ -34,6 +34,10 @@
   --nz-text-dim:#6e7681;--nz-text-faint:#484f58;
   --nz-accent:#58a6ff;--nz-blue:#1f6feb;--nz-green:#3fb950;
   --nz-red:#da3633;--nz-amber:#d29922;
+  /* Purple — canceled-run dot (cron timeline + session run history). Was a
+     bare #a371f7 repeated across .cj-stats-dot.cancel / .ctr-dot.cancel;
+     tokenised so the canceled signal has one source of truth. */
+  --nz-purple:#a371f7;
   /* Anthropic rust — used for the Clawd mascot rendered next to assistant
      turns on the claude backend. Defined as a token so the icon's pixel
      fill stays consistent with any future Anthropic-tinted accents. */
@@ -206,6 +210,7 @@
   --nz-text-dim:#6e7781;--nz-text-faint:#afb8c1;
   --nz-accent:#0969da;--nz-blue:#0969da;--nz-green:#1a7f37;
   --nz-red:#cf222e;--nz-amber:#9a6700;
+  --nz-purple:#8250df;
   --nz-focus:#0969da;
   --nz-status-running:var(--nz-amber);
   --nz-status-ready:var(--nz-green);
@@ -1862,7 +1867,7 @@ body.kbd-open .input-hints{display:none}
 .cj-stats-dot.err{background:var(--nz-red)}
 .cj-stats-dot.skip{background:var(--nz-text-faint)}
 .cj-stats-dot.warn{background:var(--nz-amber)}
-.cj-stats-dot.cancel{background:#a371f7}
+.cj-stats-dot.cancel{background:var(--nz-purple)}
 .cj-stats-dot.run{background:var(--nz-accent)}
 .cj-stats-dot.unk,.cj-stats-dot.empty{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
 .cj-stats-pop-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);line-height:1.45}
@@ -1887,7 +1892,7 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ctr-dot.err{background:var(--nz-red)}
 .cron-timeline-panel .ctr-dot.skip{background:var(--nz-text-faint)}
 .cron-timeline-panel .ctr-dot.warn{background:var(--nz-amber)}
-.cron-timeline-panel .ctr-dot.cancel{background:#a371f7}
+.cron-timeline-panel .ctr-dot.cancel{background:var(--nz-purple)}
 .cron-timeline-panel .ctr-dot.run{background:var(--nz-accent);animation:cjDotPulse var(--nz-dur-loop) ease-in-out infinite}
 .cron-timeline-panel .ctr-dot.unk{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
 .cron-timeline-panel .ctr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
@@ -1933,6 +1938,43 @@ body.kbd-open .input-hints{display:none}
   .cron-timeline-panel{max-height:50vh;padding:10px 12px 6px}
   .cron-timeline-panel .ctr-main{font-size:var(--nz-fs-sm);gap:8px}
   .cron-timeline-panel .ctr-dur{font-size:var(--nz-fs-xs)}
+}
+/* Session run-history panel (docs/rfc/session-run-metrics.md §8). Visual
+   language mirrors .cron-timeline-panel: status dot + state + time + right-
+   aligned duration. Implemented as a native <details> disclosure so the
+   collapse-to-summary behaviour needs zero JS and stays accessible. */
+.session-runs-panel{border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);flex-shrink:0}
+.session-runs-panel[hidden]{display:none}
+.session-runs-panel .srp-summary{display:flex;align-items:center;gap:var(--nz-space-2);padding:var(--nz-space-2) var(--nz-space-4);cursor:pointer;list-style:none;min-height:36px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);user-select:none}
+.session-runs-panel .srp-summary::-webkit-details-marker{display:none}
+.session-runs-panel .srp-summary::before{content:'\25B6';font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);transition:transform var(--nz-dur) var(--nz-ease);flex-shrink:0}
+.session-runs-panel[open] .srp-summary::before{transform:rotate(90deg)}
+.session-runs-panel .srp-summary:hover{background:var(--nz-hover-bg)}
+.session-runs-panel .srp-title{color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.session-runs-panel .srp-stats{display:flex;align-items:center;gap:var(--nz-space-2);margin-left:auto;font-variant-numeric:tabular-nums;flex-wrap:nowrap;overflow-x:auto}
+.session-runs-panel .srp-stat{white-space:nowrap}
+.session-runs-panel .srp-stat.bad{color:var(--nz-red)}
+.session-runs-panel .srp-stat-sep{opacity:.4}
+.session-runs-panel .srp-body{padding:0 var(--nz-space-4) var(--nz-space-2);max-height:42vh;overflow-y:auto}
+.session-runs-panel .srp-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
+.session-runs-panel .srr{padding:var(--nz-space-2) var(--nz-space-3);border-bottom:1px solid var(--nz-border)}
+.session-runs-panel .srr:last-child{border-bottom:none}
+.session-runs-panel .srr-main{display:flex;align-items:center;gap:var(--nz-space-2);font-size:var(--nz-fs-sm2);color:var(--nz-text)}
+.session-runs-panel .srr-dot{width:8px;height:8px;border-radius:var(--nz-radius-full);flex-shrink:0;background:var(--nz-text-faint)}
+.session-runs-panel .srr-dot.ok{background:var(--nz-green)}
+.session-runs-panel .srr-dot.err{background:var(--nz-red)}
+.session-runs-panel .srr-dot.timeout{background:var(--nz-red)}
+.session-runs-panel .srr-dot.cancel{background:var(--nz-purple)}
+.session-runs-panel .srr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
+.session-runs-panel .srr-time{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.session-runs-panel .srr-dur{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;margin-left:auto}
+.session-runs-panel .srr-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:var(--nz-space-1);align-items:center;flex-wrap:wrap}
+.session-runs-panel .srr-sub .srr-sep{opacity:.5}
+.session-runs-panel .srp-empty{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);padding:var(--nz-space-3) var(--nz-space-1);line-height:1.6}
+@media(max-width:768px){
+  .session-runs-panel .srp-body{max-height:32vh}
+  .session-runs-panel .srp-summary{min-height:44px}
+  .session-runs-panel .srr-main{font-size:var(--nz-fs-sm);gap:var(--nz-space-2)}
 }
 /* cron-dashboard-redesign P2b §4.4.2 — run-detail sheet 4 tab + transcript timeline.
  * Tab bar sits above the legacy "原始日志" body content; transcript turn
