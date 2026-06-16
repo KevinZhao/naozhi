@@ -3,7 +3,6 @@ package cron
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 )
@@ -126,7 +125,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 				"job_id", jobID, "orig_run_id", origRunID, "runtime_session_id", rec.RuntimeSessionID)
 			return "", ErrStopUnconfirmed
 		}
-		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
 		stopErr := s.sandbox.StopSession(ctx, rec.RuntimeSessionID)
 		cancel()
 		if stopErr != nil {
