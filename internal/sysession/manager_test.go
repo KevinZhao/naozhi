@@ -56,6 +56,14 @@ func (f *fakeRouter) ClearUserLabelOrigin(key string) bool {
 
 func (f *fakeRouter) RegisterSystemStub(_, _, _ string) {}
 
+// label returns the last label written for key (empty if none). Test-only
+// accessor so assertions can verify what renameOne actually persisted.
+func (f *fakeRouter) label(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.labels[key].label
+}
+
 // EventEntriesForKey: default base fake has no per-key event log; tests
 // that need it use snapshotFakeRouter, which overrides this method.
 func (f *fakeRouter) EventEntriesForKey(_ string) []cli.EventEntry { return nil }

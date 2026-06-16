@@ -236,6 +236,12 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	if msg.ChatType != "direct" {
 		t.Errorf("ChatType = %q, want %q", msg.ChatType, "direct")
 	}
+	// #2116: EventID must be namespaced (platform:user:message_id), never a
+	// bare integer, so it cannot collide with another platform/user's event in
+	// the shared cross-platform Dedup.
+	if want := "weixin:alice:42"; msg.EventID != want {
+		t.Errorf("EventID = %q, want %q", msg.EventID, want)
+	}
 
 	// Verify context_token was cached
 	ct, ok := w.contextTokens.Load("alice")
@@ -245,6 +251,102 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	entry, isEntry := ct.(*tokenEntry)
 	if !isEntry || entry.token != "ctx-1" {
 		t.Errorf("context_token not cached, got %v", ct)
+	}
+}
+
+// TestPollLoop_FallbackMessageID covers #2117: when the iLink upstream omits
+// message_id (decodes to 0), the adapter must still populate
+// IncomingMessage.MessageID from a per-message distinguisher (Seq, else
+// CreateTimeMs). Otherwise the dispatch-side fallback dedup key degenerates to
+// from+minute and two distinct messages in the same wall-clock minute collide.
+func TestPollLoop_FallbackMessageID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		msg       weixinMessage
+		wantEvent string
+		wantMsgID string
+	}{
+		{
+			name: "seq when no message_id",
+			msg: weixinMessage{
+				MessageID:   0,
+				Seq:         7,
+				FromUserID:  "bob",
+				MessageType: msgTypeUser,
+				ItemList:    []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}},
+			},
+			wantEvent: "",
+			wantMsgID: "seq:7",
+		},
+		{
+			name: "create_time_ms when no message_id or seq",
+			msg: weixinMessage{
+				MessageID:    0,
+				Seq:          0,
+				CreateTimeMs: 1700000000123,
+				FromUserID:   "carol",
+				MessageType:  msgTypeUser,
+				ItemList:     []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}},
+			},
+			wantEvent: "",
+			wantMsgID: "ts:1700000000123",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pollCount := atomic.Int32{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if pollCount.Add(1) == 1 {
+					json.NewEncoder(w).Encode(getUpdatesResp{
+						Ret:           0,
+						Msgs:          []weixinMessage{tc.msg},
+						GetUpdatesBuf: "cursor-1",
+					})
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+				json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "cursor-1"})
+			}))
+			defer srv.Close()
+
+			w := New(Config{Token: "tok", BaseURL: srv.URL})
+			var received atomic.Int32
+			var receivedMsg platform.IncomingMessage
+			var mu sync.Mutex
+			handler := func(_ context.Context, msg platform.IncomingMessage) {
+				mu.Lock()
+				receivedMsg = msg
+				mu.Unlock()
+				received.Add(1)
+			}
+			if err := w.Start(handler); err != nil {
+				t.Fatalf("Start() error: %v", err)
+			}
+			defer w.Stop()
+
+			deadline := time.After(3 * time.Second)
+			for received.Load() == 0 {
+				select {
+				case <-deadline:
+					t.Fatal("timeout waiting for message")
+				default:
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+			mu.Lock()
+			msg := receivedMsg
+			mu.Unlock()
+
+			if msg.EventID != tc.wantEvent {
+				t.Errorf("EventID = %q, want %q", msg.EventID, tc.wantEvent)
+			}
+			if msg.MessageID != tc.wantMsgID {
+				t.Errorf("MessageID = %q, want %q", msg.MessageID, tc.wantMsgID)
+			}
+		})
 	}
 }
 

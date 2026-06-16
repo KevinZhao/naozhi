@@ -130,15 +130,27 @@ func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 // h.authClients nil; the nil-guard falls back to the legacy filter loop so
 // pre-existing fixtures observe no behaviour change.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
+	snapPtr, snap := h.snapshotAuthenticated()
+	for _, c := range snap {
+		c.SendRaw(data)
+	}
+	releaseBroadcastSnap(snapPtr, snap)
+}
+
+// snapshotAuthenticated returns a pooled snapshot of the clients that should
+// receive an "all authenticated clients" broadcast. The caller MUST return the
+// snapshot to the pool via releaseBroadcastSnap once the fan-out completes.
+//
+// R200109-PERF-4 (#1621): the authClients mirror has its own authMu so this
+// fan-out (N sessions × multiple events/s) no longer serialises behind the
+// Hub-wide h.mu that register / unregister / markAuthenticated hold. Snapshot
+// under the cheap authMu.RLock, release before the per-client SendRaw loop. The
+// legacy fallback still walks h.clients (h.mu-owned). authClients-nil is fixed
+// at NewHub, so the nil check is lock-free.
+func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
 
-	// R200109-PERF-4 (#1621): the authClients mirror has its own authMu so
-	// this fan-out (N sessions × multiple events/s) no longer serialises
-	// behind the Hub-wide h.mu that register / unregister / markAuthenticated
-	// hold. Snapshot under the cheap authMu.RLock, release before the per-
-	// client SendRaw loop. The legacy fallback still walks h.clients (h.mu-
-	// owned). authClients-nil is fixed at NewHub, so the nil check is lock-free.
 	if h.authClients != nil {
 		h.authMu.RLock()
 		for c := range h.authClients {
@@ -156,11 +168,7 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 		}
 		h.mu.RUnlock()
 	}
-
-	for _, c := range snap {
-		c.SendRaw(data)
-	}
-	releaseBroadcastSnap(snapPtr, snap)
+	return snapPtr, snap
 }
 
 // marshalBroadcastAuth consolidates the marshal→err-guard→fan-out tail shared
@@ -177,20 +185,29 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // non-nil (all production hubs via NewHub) and empty, there is nobody to
 // deliver to — skip marshalPooled entirely. Hand-rolled hubs that leave
 // authClients nil fall through to the legacy path (h.clients scan) as before.
+//
+// R20260616-PERF-004 (#2141): the recipient snapshot and the empty check share
+// a single authMu acquisition. Previously the empty check took authMu.RLock,
+// released it, and then broadcastToAuthenticated re-acquired it — two serial
+// authMu round-trips per broadcast (every cron tick fires two of these). Now we
+// snapshot once: an empty snapshot means there is nobody to deliver to, so we
+// skip marshalPooled entirely; otherwise we marshal and reuse the same snapshot
+// for the fan-out.
 func (h *Hub) marshalBroadcastAuth(v any) {
-	// Fast-path: if the authClients mirror exists and is empty there are no
-	// authenticated dashboard tabs — skip the marshal entirely.
-	h.authMu.RLock()
-	empty := h.authClients != nil && len(h.authClients) == 0
-	h.authMu.RUnlock()
-	if empty {
+	snapPtr, snap := h.snapshotAuthenticated()
+	if len(snap) == 0 {
+		releaseBroadcastSnap(snapPtr, snap)
 		return
 	}
 	data, err := marshalPooled(v)
 	if err != nil {
+		releaseBroadcastSnap(snapPtr, snap)
 		return
 	}
-	h.broadcastToAuthenticated(data)
+	for _, c := range snap {
+		c.SendRaw(data)
+	}
+	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // broadcastState sends a session_state message to ALL authenticated clients.

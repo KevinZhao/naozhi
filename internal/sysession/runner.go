@@ -238,7 +238,7 @@ type runnerImpl struct {
 const runnerStderrCapBytes = 4096
 
 // runnerStdoutCapBytes caps "claude -p" stdout. AutoTitler validates
-// ≤16 Chinese characters; even with reasoning prefixes legitimate
+// titles at ≤24 runes; even with reasoning prefixes legitimate
 // upstream output is well below this 64 KiB cap. The cap exists so a
 // runaway CLI (infinite-loop reasoning, base64-blob hallucination)
 // cannot OOM the parent naozhi process. limitedWriter lies about

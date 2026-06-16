@@ -79,6 +79,28 @@ func SupportsInterimMessages(p Platform) bool {
 	return false // default: not supported (opt-in)
 }
 
+// SingleUseReplyTokenCapable is an optional capability: platforms whose
+// outbound reply is authorised by a single-use context token (e.g. WeChat
+// iLink) can deliver only ONE reply per inbound message — the token is
+// consumed by the first send and the second send onward is rejected
+// upstream. #2136: SendSplitReply must NOT fan a long reply into N chunks
+// for these platforms; only chunk 1 would arrive and chunks 2..N would be
+// silently lost. Such platforms opt in here so the dispatcher collapses the
+// reply into a single (truncated) message instead.
+type SingleUseReplyTokenCapable interface {
+	UsesSingleUseReplyToken() bool
+}
+
+// UsesSingleUseReplyToken reports whether a platform can deliver only one
+// reply per inbound message because its reply token is single-use. Defaults
+// to false (opt-in) for platforms that do not implement the capability.
+func UsesSingleUseReplyToken(p Platform) bool {
+	if s, ok := AsCapability[SingleUseReplyTokenCapable](p); ok {
+		return s.UsesSingleUseReplyToken()
+	}
+	return false // default: multi-send allowed (opt-in)
+}
+
 // ReactionType is a platform-agnostic reaction key. Adapters map each type
 // to a platform-specific emoji / reaction string.
 type ReactionType string

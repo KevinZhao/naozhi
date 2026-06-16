@@ -1408,6 +1408,10 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // the existing test fixture TEST_NAOZHI_VAR is unaffected).
 var envExpansionDenyPrefixes = []string{
 	"ANTHROPIC_",
+	// CLAUDE_* covers claude CLI credentials such as
+	// CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_API_KEY; an operator may mistake
+	// these for a generic credential alias. R20260614-SEC-5.
+	"CLAUDE_",
 	"AWS_",
 	"AZURE_",
 	"GCP_",
