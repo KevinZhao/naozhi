@@ -256,6 +256,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		// payload — e.g. empty prompt). Permanent, not transport. The
 		// microVM was never created, so the pending handle is moot.
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
 			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()), nil)
 		return
@@ -271,9 +272,11 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	switch outcome.State {
 	case SandboxStateSuccess:
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "", metaPtr)
 	case SandboxStateFailedClean:
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
 			sanitiseRunErrMsg(outcome.ErrMsg), metaPtr)
 	default: // SandboxStateFailedTransport and any future unknown state: conservative.
@@ -289,6 +292,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		if outcome.StopConfirmed {
 			// §6.2 rule 1 satisfied in-process — the retry handle is spent.
 			removeSandboxPending(pendingPath, a.lg)
+			s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 			msg += " (microVM termination confirmed)"
 		} else {
 			// Stop unconfirmed: KEEP the pending file. The next startup's

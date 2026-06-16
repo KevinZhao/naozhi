@@ -277,7 +277,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
-  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
+  ['abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
@@ -314,20 +314,21 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 // setActivityView('cron') when not already in cron view. We set activeView
 // BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
 // already false on the re-entry and the loop terminates after one hop.
-const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];
+const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === activeView) return;
   const prev = activeView;
   activeView = view;
   // Rail button active / aria-pressed state.
-  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
     });
   // Mutually-exclusive view classes. 'chat' clears all of them.
   document.body.classList.toggle('nz-view-assets', view === 'assets');
+  document.body.classList.toggle('nz-view-files', view === 'files');
   document.body.classList.toggle('nz-view-cron', view === 'cron');
   document.body.classList.toggle('nz-view-system', view === 'system');
   document.body.classList.toggle('nz-view-settings', view === 'settings');
@@ -341,6 +342,7 @@ function setActivityView(view) {
   if (sysm) sysm.hidden = view !== 'system';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  if (prev === 'files' && view !== 'files' && window.nzFilesView) window.nzFilesView.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
@@ -352,6 +354,7 @@ function setActivityView(view) {
   }
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
+  else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
   else if (view === 'cron') { openCronPanel(); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
@@ -2234,6 +2237,7 @@ function selectSession(key, node) {
   const activeCard = setActiveSessionCard(key, node);
   if (activeCard) updateCardUnreadChip(activeCard, 0);
   renderMainShell();
+  fetchSessionRuns(key, node); // populate the run-history timeline (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
   if (draftInput && sessionDrafts[key]) {
@@ -2250,6 +2254,130 @@ function selectSession(key, node) {
     fetchEvents(true);
     if (eventTimer) clearInterval(eventTimer);
     eventTimer = setInterval(() => fetchEvents(false), 1000);
+  }
+}
+
+// ---- Session run-history timeline (docs/rfc/session-run-metrics.md §8) ----
+//
+// Best-effort: a fetch failure or empty history just leaves the panel hidden;
+// the conversation surface is never blocked on it.
+
+// sessionRunOutcomeMeta maps an outcome to its dot class + Chinese label,
+// reusing the green/red/purple status vocabulary the cron timeline established.
+function sessionRunOutcomeMeta(outcome) {
+  switch (outcome) {
+    case 'completed': return { dot: 'ok', label: '完成' };
+    case 'timeout': return { dot: 'timeout', label: '超时' };
+    case 'canceled': return { dot: 'cancel', label: '已取消' };
+    case 'error': return { dot: 'err', label: '出错' };
+    default: return { dot: '', label: outcome || '—' };
+  }
+}
+
+function sessionRunStatLabel(ms) {
+  // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
+  // a top-level function in the shared script scope.
+  if (typeof formatRunDuration === 'function') return formatRunDuration(ms) || '0ms';
+  return Math.round(ms) + 'ms';
+}
+
+function sessionRunsStatsHtml(stats) {
+  if (!stats || !stats.count) return '';
+  const parts = [];
+  parts.push('<span class="srp-stat">' + esc(stats.count + ' 次') + '</span>');
+  parts.push('<span class="srp-stat">均 ' + esc(sessionRunStatLabel(stats.avg_ms || 0)) + '</span>');
+  if (stats.p95_ms) parts.push('<span class="srp-stat">P95 ' + esc(sessionRunStatLabel(stats.p95_ms)) + '</span>');
+  parts.push('<span class="srp-stat">最长 ' + esc(sessionRunStatLabel(stats.max_ms || 0)) + '</span>');
+  if (stats.timeout_count > 0) {
+    parts.push('<span class="srp-stat bad" title="超时次数">⚠ ' + esc(String(stats.timeout_count)) + '</span>');
+  }
+  return parts.join('<span class="srp-stat-sep">·</span>');
+}
+
+function sessionRunRowHtml(r) {
+  const meta = sessionRunOutcomeMeta(r.outcome);
+  // formatAbsTime is the dashboard's single timestamp formatter; use it for
+  // both the visible label and the hover title (ux-contract: timestamps carry
+  // a formatAbsTime title). A relative/colloquial label could be layered later.
+  const started = r.started_at ? formatAbsTime(r.started_at) : '';
+  const startedShort = started || '—';
+  const dur = sessionRunStatLabel(r.duration_ms || 0);
+  const sub = [];
+  if (typeof r.first_byte_ms === 'number' && r.first_byte_ms > 0) {
+    sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
+  }
+  if (r.cost_usd && typeof formatCostUSD === 'function') {
+    sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
+  }
+  const subRow = sub.length
+    ? '<div class="srr-sub">' + sub.join('<span class="srr-sep">·</span>') + '</div>'
+    : '';
+  return '<div class="srr">' +
+      '<div class="srr-main">' +
+        '<span class="srr-dot ' + meta.dot + '" aria-hidden="true"></span>' +
+        '<span class="srr-state">' + esc(meta.label) + '</span>' +
+        '<span class="srr-time"' + (started ? ' title="' + escAttr(started) + '"' : '') + '>' + esc(startedShort) + '</span>' +
+        '<span class="srr-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      subRow +
+    '</div>';
+}
+
+function renderSessionRunsPanel(data) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
+  const stats = data && data.stats;
+  if (!runs.length) {
+    // Hidden entirely when there's no history (mirrors cron :empty behaviour).
+    panel.hidden = true;
+    panel.innerHTML = '';
+    return;
+  }
+  panel.hidden = false;
+  const rowsHtml = runs.map(sessionRunRowHtml).join('');
+  // Collapsed by default on mobile so the timeline doesn't crowd the composer
+  // + image-upload preview; expanded by default on desktop where there's room.
+  if (!panel.hasAttribute('data-user-toggled')) {
+    panel.open = !isMobile();
+  }
+  panel.innerHTML =
+    '<summary class="srp-summary">' +
+      '<span class="srp-title">运行记录</span>' +
+      '<span class="srp-stats">' + sessionRunsStatsHtml(stats) + '</span>' +
+    '</summary>' +
+    '<div class="srp-body">' +
+      (rowsHtml ? '<div class="srp-rows">' + rowsHtml + '</div>'
+                : '<div class="srp-empty">本会话暂无运行记录</div>') +
+    '</div>';
+}
+
+// Remember the user's manual expand/collapse so a later refresh doesn't fight
+// their choice (one listener, delegated on the panel).
+document.addEventListener('toggle', function (e) {
+  const panel = e.target;
+  if (panel && panel.id === 'session-runs-panel') {
+    panel.setAttribute('data-user-toggled', '1');
+  }
+}, true);
+
+async function fetchSessionRuns(key, node) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  // Run history is a local-node concern; remote-node sessions skip it for now.
+  if (node && node !== 'local') { panel.hidden = true; return; }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
+    if (!resp.ok) { panel.hidden = true; return; }
+    const data = await resp.json();
+    // Guard against a stale response landing after the user switched sessions.
+    if (selectedKey !== key) return;
+    renderSessionRunsPanel(data);
+  } catch (_) {
+    panel.hidden = true;
   }
 }
 
@@ -2692,6 +2820,11 @@ function renderMainShell() {
     // (#cron-timeline-panel placeholder above the events scroll). It now
     // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
     // is reserved for human conversation surfaces.
+    // session-run-metrics RFC §8.2: the run-history timeline is a NEW sibling
+    // node here (not the relocated cron one). Hidden until renderSessionRunsPanel
+    // populates it; :empty/[hidden] keeps it out of layout when a session has
+    // no recorded runs.
+    '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
