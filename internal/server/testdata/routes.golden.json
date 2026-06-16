@@ -255,6 +255,11 @@
     "handler_type": "*dashsession.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/sessions/runs",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/sessions/send",
     "handler_type": "*SendHandler"
