@@ -308,7 +308,7 @@ func (r *Router) Cleanup() {
 		// below.
 		state cli.ProcessState
 	}
-	candidates := make([]cand, 0, len(r.ss.sessions)/2+1)
+	var candidates []cand
 	// R20260602190132-PERF-5 (#1607): collect prune candidates in this same
 	// RLock pass so the later write-locked prune section only has to re-verify
 	// and delete a small known set (O(expired)) instead of re-ranging the whole

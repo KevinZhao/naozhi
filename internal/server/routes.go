@@ -396,9 +396,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		// budget as wsUpgradeLimiter accommodates real users (tab-reload,
 		// mobile-wake, multiple browser windows) while limiting sustained
 		// abuse. Authenticated users are unaffected.
-		if !s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+		// R20260614-SEC-10 (#2120): fail closed when the client IP can't be
+		// resolved in trusted-proxy mode (XFF stripped by a misconfigured /
+		// failed-over proxy) instead of sharing the unknownIPKey bucket —
+		// otherwise one direct-to-origin attacker starves the unauth-dash
+		// budget for every other XFF-less caller. Mirrors HandleLogin
+		// (R247-SEC-25). No-op in !trustedProxy mode (always resolvable).
+		if !requestHasResolvableClientIP(r, s.auth.TrustedProxy) ||
+			!s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}
 		s.auth.ServeLoginPage(w, r)

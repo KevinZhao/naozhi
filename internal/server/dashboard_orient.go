@@ -81,6 +81,14 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "missing id"})
 		return
 	}
+	// [R20260614-SEC-7] Validate upload ID format before passing to store.
+	// uploadStore.Put generates IDs as hex.EncodeToString(16 random bytes) →
+	// exactly 32 lowercase hex chars. Reject anything that doesn't match so
+	// a crafted ID cannot probe the store or cause unexpected behaviour.
+	if !isUploadID(req.ID) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
 
 	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
 	if !ok {
@@ -169,4 +177,20 @@ func (h *SendHandler) orientImage(parent context.Context, id, owner string, img 
 		return 0, nil
 	}
 	return v.DegreesCW, out
+}
+
+// isUploadID reports whether s matches the upload ID shape produced by
+// uploadStore.Put: exactly 32 lowercase hex characters
+// (hex.EncodeToString of 16 crypto/rand bytes).
+func isUploadID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

@@ -163,24 +163,72 @@ func (dc *discoveryCache) refresh() {
 	}
 
 	// Filter out recently-evicted PIDs and store the final result.
+	//
+	// R20260614-PERF-009 (#2123): the O(N) sessions filter and the
+	// evictedPIDs expiry sweep used to run entirely under dc.mu.Lock(),
+	// blocking every snapshot() reader (dashboard GET /api/discovered) for
+	// the full scan-size duration. Both are now computed against a small
+	// snapshot of evictedPIDs taken under a brief RLock, with the write lock
+	// held only for the final publish. Because evictPID can add a PID in the
+	// window between our RUnlock and the publish Lock (the race the
+	// RefreshDynamic path documents at R20260605B-CORR-5), the publish does a
+	// cheap re-check against any PIDs evicted *after* our snapshot instant so
+	// a just-evicted session cannot be resurrected.
 	now := time.Now()
 	const evictGrace = 60 * time.Second
-	dc.mu.Lock()
+
+	// Snapshot the (typically tiny) evictedPIDs set under a brief RLock.
+	dc.mu.RLock()
+	var evictedSnap map[int]time.Time
 	if len(dc.evictedPIDs) > 0 {
-		for pid, evictedAt := range dc.evictedPIDs {
+		evictedSnap = make(map[int]time.Time, len(dc.evictedPIDs))
+		for pid, at := range dc.evictedPIDs {
+			evictedSnap[pid] = at
+		}
+	}
+	dc.mu.RUnlock()
+
+	// Expiry sweep + O(N) filter run lock-free against the snapshot.
+	if len(evictedSnap) > 0 {
+		for pid, evictedAt := range evictedSnap {
 			if now.Sub(evictedAt) > evictGrace {
-				delete(dc.evictedPIDs, pid)
+				delete(evictedSnap, pid)
 			}
 		}
 	}
-	if len(dc.evictedPIDs) > 0 {
+	if len(evictedSnap) > 0 {
 		filtered := sessions[:0:0]
 		for _, s := range sessions {
-			if _, evicted := dc.evictedPIDs[s.PID]; !evicted {
+			if _, evicted := evictedSnap[s.PID]; !evicted {
 				filtered = append(filtered, s)
 			}
 		}
 		sessions = filtered
+	}
+
+	dc.mu.Lock()
+	// Apply the expiry deletions decided above to the live map, and re-filter
+	// against any PID evicted after our snapshot instant (concurrent
+	// evictPID). The re-check loop only iterates when a race actually
+	// happened; the steady-state path skips it entirely.
+	if len(dc.evictedPIDs) > 0 {
+		for pid, evictedAt := range dc.evictedPIDs {
+			if now.Sub(evictedAt) > evictGrace {
+				delete(dc.evictedPIDs, pid)
+				continue
+			}
+			if _, seen := evictedSnap[pid]; !seen {
+				// Evicted during our lock-free window — drop any matching
+				// session so the just-evicted card cannot reappear.
+				out := sessions[:0:0]
+				for _, s := range sessions {
+					if s.PID != pid {
+						out = append(out, s)
+					}
+				}
+				sessions = out
+			}
+		}
 	}
 	dc.sessions = sessions
 	dc.lastDirMtime = newDirMtime

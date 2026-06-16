@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -1264,7 +1263,7 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 	// dispatch IM 路径已通过 localizeAPIError（封装 apierr.Localize）防护；
 	// cron 成功路径之前完全绕过此保护。先 sanitise（截断/脱敏）再 localize
 	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
-	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
+	replyText := formatCronNotice(snap.labelOrID(), localizeNotice(result.Text))
 	s.deliverNotice(notifyTo, replyText)
 }
 

@@ -64,7 +64,21 @@ type Scanner struct {
 	// summary write lock on a cache miss and serialise behind the slowest
 	// stat+parse for the same workspace (PERF-10 #1967). Keyed by indexPath.
 	summaryLoad singleflight.Group
+
+	// promptSem bounds the concurrent prompt-extraction I/O fan-out in Scan
+	// and RefreshDynamic to promptSemCap goroutines. Allocated once in
+	// NewScanner and reused across every scan cycle: each worker does a
+	// symmetric send-then-receive, so the channel is always fully drained
+	// before the *Wait() returns, making it safe to reuse. This eliminates
+	// the per-cycle `make(chan struct{}, 4)` garbage the ~10s discovery loop
+	// produced on every tick (PERF-003 #2124).
+	promptSem chan struct{}
 }
+
+// promptSemCap caps the concurrent prompt-extraction I/O fan-out (per
+// Scan / RefreshDynamic) so a workspace with hundreds of sessions does
+// not open hundreds of JSONL files at once.
+const promptSemCap = 4
 
 type promptCacheState struct {
 	sync.RWMutex
@@ -107,7 +121,17 @@ type summaryCacheEntry struct {
 // sessionIDs without contention because the map lookup is O(1).
 type pathCacheState struct {
 	sync.RWMutex
-	entries map[string]pathCacheEntry
+	entries map[pathKey]pathCacheEntry
+}
+
+// pathKey is the composite (claudeDir, sessionID) map key. Using a struct
+// key instead of a packed "dir\x00id" string eliminates the per-lookup
+// string concatenation+allocation on the hot findSessionJSONL path — the
+// startup resume-chain replay calls findSessionJSONL O(N×chain) times and
+// every cache hit was paying for a fresh key string (PERF-005 #2125).
+type pathKey struct {
+	dir string
+	id  string
 }
 
 // pathCacheEntry holds either a positive result (path != "") or a
@@ -204,7 +228,8 @@ func NewScanner() *Scanner {
 	return &Scanner{
 		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
 		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
-		pathCache:    pathCacheState{entries: make(map[string]pathCacheEntry)},
+		pathCache:    pathCacheState{entries: make(map[pathKey]pathCacheEntry)},
+		promptSem:    make(chan struct{}, promptSemCap),
 	}
 }
 
@@ -482,7 +507,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	// to avoid serial 512KB reads per discovered session.
 	prompts := make([]string, len(candidates))
 	var promptWg sync.WaitGroup
-	promptSem := make(chan struct{}, 4)
+	promptSem := s.promptSem
 	for i := range candidates {
 		promptWg.Add(1)
 		go func(idx int) {
@@ -1082,7 +1107,7 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 	mtimes := make([]int64, len(sessions))
 	mtimeOK := make([]bool, len(sessions))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
+	sem := s.promptSem
 	for i := range sessions {
 		wg.Add(1)
 		go func(idx int) {

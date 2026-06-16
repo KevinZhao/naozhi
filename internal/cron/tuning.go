@@ -95,3 +95,10 @@ const minSendBudget = 30 * time.Second
 // stopCancel) wall-clock. Keep at 30s for symmetry with stopBudget; if
 // a future review tightens stopBudget, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
+
+// sandboxStopTimeout bounds a single sandbox StopSession (microVM teardown)
+// network call during pending reconcile / delete-stop / replay. 30s mirrors
+// cronNotifyTimeout / stopBudget so a hung Stop cannot outlive Stop()'s
+// systemd TimeoutStopSec window. Centralised here (R20260616-ARCH-2) so the
+// per-Stop budget is tuned in one place rather than three call-site literals.
+const sandboxStopTimeout = 30 * time.Second

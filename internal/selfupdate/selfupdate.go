@@ -72,8 +72,23 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	// CheckRedirect pins every hop to github.com / *.github.com so a hostile
 	// CDN/DNS cannot send us to evil.com/tag/v9 (extractTag would then accept
 	// an attacker-controlled tag string and we'd build the asset URL off it).
+	//
+	// R202606-SEC-004: inject a DialContext that rejects reserved IPs after DNS
+	// resolution to close the DNS rebinding / SSRF path (169.254.169.254,
+	// RFC-1918, loopback). Without this guard a DNS rebind of github.com to an
+	// internal address (e.g. IMDS 169.254.169.254) would be followed by the
+	// initial request before CheckRedirect can intervene. In test mode
+	// blockPrivateDialContext() returns nil and testHTTPTransport is used as-is
+	// so httptest servers on loopback work.
+	var latestTransport http.RoundTripper
+	if dialCtx := blockPrivateDialContext(); dialCtx != nil {
+		latestTransport = &http.Transport{DialContext: dialCtx}
+	} else {
+		latestTransport = testHTTPTransport // nil in production falls back to http.DefaultTransport
+	}
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout:   defaultTimeout,
+		Transport: latestTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")

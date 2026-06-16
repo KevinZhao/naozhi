@@ -391,7 +391,7 @@ async function fetchSessions() {
       data = await fetchJSON('/api/sessions', { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status === 401 || err.status === 403) {
-        if (!document.querySelector('.modal-overlay')) showAuthModal();
+        showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
         return false;
       }
       if (err.status) return false;
@@ -5862,7 +5862,23 @@ function describeTranscribeError(err) {
 
 // --- Auth modal ---
 
-function showAuthModal() {
+// Auth-prompt de-dupe + debounce. Two guards keep the token modal from
+// machine-gunning back open: (1) only ever one overlay at a time, and
+// (2) after the operator explicitly dismisses the prompt, suppress
+// *background* re-prompts (the 5s /api/sessions poll, WS reconnect) for a
+// cooldown window. User-initiated actions (send / upload) pass {auto:false}
+// and bypass the cooldown so a click still gets immediate feedback. A
+// successful login clears the cooldown.
+let _authModalCooldownUntil = 0;
+const AUTH_MODAL_COOLDOWN_MS = 60000;
+
+function showAuthModal(opts) {
+  opts = opts || {};
+  // De-dupe: never stack a second auth prompt over an existing modal.
+  if (document.querySelector('.modal-overlay')) return;
+  // Debounce: a freshly-dismissed prompt should not be reopened by the
+  // next background poll. User actions (auto !== true) always prompt.
+  if (opts.auto && Date.now() < _authModalCooldownUntil) return;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
@@ -5886,13 +5902,23 @@ function showAuthModal() {
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" onclick="dismissAuthModal()">取消</button>' +
         '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
   trapFocus(overlay);
   setTimeout(() => document.getElementById('token-input').focus(), 100);
+}
+
+// dismissAuthModal closes the auth prompt and starts the background-reprompt
+// cooldown so the next /api/sessions poll (or WS reconnect) doesn't pop it
+// straight back open. The operator can still trigger it immediately via an
+// explicit send/upload.
+function dismissAuthModal() {
+  _authModalCooldownUntil = Date.now() + AUTH_MODAL_COOLDOWN_MS;
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
 }
 
 async function saveToken() {
@@ -5906,6 +5932,7 @@ async function saveToken() {
       body: JSON.stringify({token: t})
     });
     if (r.ok) {
+      _authModalCooldownUntil = 0; // fresh session — drop any dismiss cooldown
       const overlay = document.querySelector('.modal-overlay');
       if (overlay) overlay.remove();
       wsm.disconnect();
