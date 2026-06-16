@@ -28,6 +28,11 @@ type replyTracker struct {
 	// from the card-action callback (Feishu WS) route the answer back to the
 	// same session key the question was asked in. See QuestionCard.ChatType.
 	chatType string
+	// agentID is the originating session's agent id, embedded into
+	// AskUserQuestion cards so the card-click answer routes back to the same
+	// agent session that asked the question rather than "general" (#2148).
+	// See QuestionCard.AgentID.
+	agentID string
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
 	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
 	// When ctx cancels, waitReady can return before msgIDReady is closed,
@@ -124,7 +129,7 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType, agentID string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	singleUseToken := platform.UsesSingleUseReplyToken(p)
 	t := &replyTracker{
@@ -132,6 +137,7 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatTyp
 		p:               p,
 		chatID:          chatID,
 		chatType:        chatType,
+		agentID:         agentID,
 		msgIDReady:      make(chan struct{}),
 		editCh:          make(chan struct{}, 1),
 		todoWake:        make(chan struct{}, 1),
@@ -242,6 +248,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 			card := platform.QuestionCard{
 				ToolUseID: aq.ToolUseID,
 				ChatType:  t.chatType,
+				AgentID:   t.agentID,
 				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
 			}
 			for _, q := range aq.Items {
