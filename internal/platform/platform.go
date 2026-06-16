@@ -37,6 +37,14 @@ type IncomingMessage struct {
 	Text      string
 	MentionMe bool
 	Images    []Image
+	// AgentID, when non-empty, pins the target agent for this message,
+	// bypassing slash-command resolution (session.ResolveAgent). It is set
+	// by synthetic messages that already know their originating agent — e.g.
+	// a Feishu AskUserQuestion card click, whose answer must route back to
+	// the SAME agent session that asked the question rather than defaulting
+	// to "general" (#2148). The dispatcher whitelist-validates the value
+	// against the known agent set before honouring it.
+	AgentID string
 }
 
 // OutgoingMessage is the platform-agnostic outbound message.
@@ -205,6 +213,13 @@ type QuestionCard struct {
 	// originating chat type is unknown; adapters then fall back to their own
 	// heuristic.
 	ChatType string
+	// AgentID is the originating session's agent id ("general", "code-reviewer",
+	// …). Adapters whose card-action callback can't recover the agent from the
+	// transport envelope (Feishu) embed it in the button value so the answer
+	// routes back to the SAME agent session that asked the question rather than
+	// defaulting to "general" (#2148). Empty when unknown; adapters then omit it
+	// and the receiver falls back to slash-command resolution.
+	AgentID string
 	// Items is one or more questions. Adapters render each as its own
 	// labelled block.
 	Items []QuestionItem

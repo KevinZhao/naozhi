@@ -210,6 +210,24 @@ func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) stri
 	return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
 }
 
+// isKnownAgent reports whether agentID is a recognised agent target —
+// "general", "planner" (always probed; see interruptChat), or any agentID
+// reachable through a configured slash command. Used to whitelist-validate an
+// explicit IncomingMessage.AgentID (e.g. from a Feishu AskUserQuestion card
+// click) before it can override slash-command resolution, so a hostile or
+// replayed card value can't route an answer into an arbitrary agent (#2148).
+func (d *Dispatcher) isKnownAgent(agentID string) bool {
+	if agentID == "general" || agentID == "planner" {
+		return true
+	}
+	for _, id := range d.agentCommands {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
+}
+
 // Metrics returns a snapshot of operational counters for /health.
 // Counter values are monotonic since process start. lastReplySuccess is the
 // wall-clock time of the most recent successful user-visible reply; the zero
@@ -651,6 +669,20 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 
 	// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
 	agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
+
+	// #2148: a synthetic message (e.g. a Feishu AskUserQuestion card click) can
+	// pin its target agent explicitly via msg.AgentID, bypassing slash-command
+	// resolution — the answer must route back to the SAME agent session that
+	// asked the question, not default to "general". The card answer text has no
+	// /agent prefix, so ResolveAgent above already returned ("general", text);
+	// we only swap the agentID, leaving cleanText (the full answer) intact.
+	// Whitelist-validate against the known agent set so a hostile/replayed
+	// value can't route into an arbitrary agent — unknown ids are ignored and
+	// the original resolution stands.
+	if msg.AgentID != "" && d.isKnownAgent(msg.AgentID) {
+		agentID = msg.AgentID
+	}
+
 	if cleanText == "" && len(msg.Images) == 0 {
 		if agentID != "general" {
 			d.replyText(ctx, msg, "请在指令后输入内容。", lg)
@@ -1295,7 +1327,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType)
+	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType, agentID)
 	defer tracker.stop()
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)

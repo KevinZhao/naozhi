@@ -28,6 +28,11 @@ type replyTracker struct {
 	// from the card-action callback (Feishu WS) route the answer back to the
 	// same session key the question was asked in. See QuestionCard.ChatType.
 	chatType string
+	// agentID is the originating session's agent id, embedded into
+	// AskUserQuestion cards so the card-click answer routes back to the same
+	// agent session that asked the question rather than "general" (#2148).
+	// See QuestionCard.AgentID.
+	agentID string
 	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
 	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
 	// When ctx cancels, waitReady can return before msgIDReady is closed,
@@ -85,6 +90,17 @@ type replyTracker struct {
 	// R216-PERF-13.
 	supportsInterim bool
 
+	// singleUseToken caches platform.UsesSingleUseReplyToken(p) at
+	// construction time. When true the platform (e.g. Weixin iLink) can
+	// deliver only ONE reply per inbound message — its context_token is
+	// consumed by the first Reply and rejected on reuse. #2147: a standalone
+	// TodoWrite (or any non-final) Reply would burn that token before the
+	// final answer is sent via sendAndReply, so the real answer is rejected
+	// upstream and silently lost. We therefore suppress the standalone
+	// TodoWrite delivery entirely on these platforms (and skip starting
+	// todoLoop), reserving the single reply for the final answer.
+	singleUseToken bool
+
 	// askQuestionFired signals that this turn emitted at least one
 	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
 	// text that `claude -p` always produces after auto-rejecting the
@@ -113,18 +129,21 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType, agentID string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
+	singleUseToken := platform.UsesSingleUseReplyToken(p)
 	t := &replyTracker{
 		ctx:             ctx,
 		p:               p,
 		chatID:          chatID,
 		chatType:        chatType,
+		agentID:         agentID,
 		msgIDReady:      make(chan struct{}),
 		editCh:          make(chan struct{}, 1),
 		todoWake:        make(chan struct{}, 1),
 		done:            make(chan struct{}),
 		supportsInterim: supportsInterim,
+		singleUseToken:  singleUseToken,
 	}
 	// statusLines is only ever written when supportsInterim is true (see
 	// onEvent's gate). Skip the per-turn make on platforms (Weixin,
@@ -148,8 +167,14 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatTyp
 		t.loopWG.Add(1)
 		t.initialReplyReservationOn = true
 	}
-	t.loopWG.Add(1)
-	go t.todoLoop()
+	// #2147: skip todoLoop on single-use-token platforms. A standalone
+	// TodoWrite Reply would consume the one-shot context_token before the
+	// final answer is sent, so the real answer is rejected upstream and
+	// lost. The onEvent TodoWrite branch is gated on the same flag below.
+	if !t.singleUseToken {
+		t.loopWG.Add(1)
+		go t.todoLoop()
+	}
 	return t
 }
 
@@ -223,6 +248,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 			card := platform.QuestionCard{
 				ToolUseID: aq.ToolUseID,
 				ChatType:  t.chatType,
+				AgentID:   t.agentID,
 				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
 			}
 			for _, q := range aq.Items {
@@ -356,6 +382,14 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 	// each wake so it always sees the freshest value — no race window where
 	// a consumer drains and the producer's replace finds an empty queue.
 	if text, ok := extractTodoMessage(ev); ok {
+		// #2147: on single-use-token platforms (Weixin iLink) a standalone
+		// TodoWrite Reply would burn the one-shot context_token before the
+		// final answer, so suppress it — the checklist is interim output and
+		// the single reply must be reserved for the real answer. todoLoop is
+		// not started for these platforms, so just drop the snapshot.
+		if t.singleUseToken {
+			return
+		}
 		t.pendingTodo.Store(&text)
 		select {
 		case t.todoWake <- struct{}{}:
