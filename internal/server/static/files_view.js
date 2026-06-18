@@ -122,12 +122,9 @@
         '<span class="files-ic">' + icon + '</span>' +
         '<span class="files-name">' + esc(e.name) + '</span>' +
         '<span class="files-meta">' + esc(meta) + '</span>';
-      if (!e.is_dir && !e.symlink) {
-        html += '<span class="files-acts">' +
-          '<button type="button" class="files-act" data-act="preview" data-name="' + esc(e.name) + '" title="预览">预览</button>' +
-          '<button type="button" class="files-act" data-act="download" data-name="' + esc(e.name) + '" title="下载">下载</button>' +
-          '</span>';
-      }
+      // No per-row action buttons: clicking the row previews (and the preview
+      // pane header carries the 下载 button). Keeps the narrow sidebar to
+      // icon + name + size. A folder row navigates; a file row previews.
       html += '</div>';
     });
     if (res && res.truncated) {
@@ -145,15 +142,21 @@
   }
 
   // ---- preview / download (reuse the existing /api/projects/file modes) ----
-  function download(name) {
-    var url = fileApiUrl(state.project, 'local', relOf(name), 'download');
+  // download(rel, name): rel is workspace-relative (so the header button works
+  // regardless of the current dir). When called with one arg it downloads the
+  // currently-previewed file.
+  function download(rel, name) {
+    if (rel == null) { rel = state.previewRel; name = state.previewName; }
+    if (!rel) return;
+    var url = fileApiUrl(state.project, 'local', rel, 'download');
     var a = document.createElement('a');
-    a.href = url; a.download = name; a.rel = 'noopener';
+    a.href = url; a.download = name || (rel.split('/').pop() || 'file'); a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
   }
 
   function preview(name) {
     var rel = relOf(name);
+    state.previewRel = rel; state.previewName = name;
     document.body.classList.add('files-reading');
     $('files-main-head').hidden = false;
     $('files-main-title').textContent = name;
@@ -293,13 +296,6 @@
 
     var list = $('files-list');
     if (list) list.addEventListener('click', function (e) {
-      var act = e.target.closest('.files-act');
-      if (act) {
-        e.stopPropagation();
-        if (act.dataset.act === 'download') download(act.dataset.name);
-        else preview(act.dataset.name);
-        return;
-      }
       var row = e.target.closest('.files-row'); if (!row) return;
       var kind = row.dataset.kind;
       if (kind === 'up') { loadDir(parentDir()); return; }
@@ -308,6 +304,7 @@
       // symlink rows are inert.
     });
 
+    var dl = $('files-download'); if (dl) dl.addEventListener('click', function () { download(); });
     var bk = $('files-back'); if (bk) bk.addEventListener('click', backToList);
     var rf = $('files-refresh'); if (rf) rf.addEventListener('click', function () { loadDir(state.dir); });
 

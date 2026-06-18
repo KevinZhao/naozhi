@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -34,6 +35,24 @@ const uploadBodyOverhead = 2 << 20
 // from inflating the in-memory Value map. Mirrors the server-side
 // rejectIfTooManyFields policy (maxMultipartFields=32).
 const maxUploadMultipartFields = 32
+
+// uploadMemThreshold is the in-memory spill threshold for ParseMultipartForm:
+// parts larger than this stream to a temp file (which the handler RemoveAll's
+// on return). 8 MiB keeps the common small-file path fully in memory while
+// bounding peak RAM for the large-file path.
+const uploadMemThreshold = 8 << 20
+
+// uploadReadDeadline is the per-request body-read window for an upload,
+// overriding the short global http.Server.ReadTimeout (15s) which would
+// otherwise truncate a large upload over a normal uplink. 10 minutes lets a
+// 256 MiB file land at ~3.4 Mbps sustained while still bounding a slow-loris
+// body to a finite window. The deadline is absolute (not per-read), so it is
+// a hard ceiling on how long one upload can pin a connection.
+const uploadReadDeadline = 10 * time.Minute
+
+// timeNow is the clock used for the per-request read deadline; a package var so
+// tests can pin it. Defaults to time.Now.
+var timeNow = time.Now
 
 // writeOnlySensitiveNames are basenames that isSensitiveDownloadPath (a
 // read/preview deny-list) does not cover but that must never be CREATED or
@@ -166,10 +185,22 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	overwrite := r.URL.Query().Get("overwrite") == "1"
 
+	// The global http.Server.ReadTimeout (15s, server.go) is a single absolute
+	// budget for reading the whole body — far too short for a multi-hundred-MB
+	// upload over a typical uplink, so without a per-handler override a large
+	// (legitimate) upload would fail with a truncated-body parse error well
+	// below the advertised cap. Extend the read deadline for THIS request only
+	// to a generous-but-bounded window so big uploads succeed while slow-loris
+	// body attacks stay bounded (the deadline is absolute, not a per-read
+	// reset). SetReadDeadline returns ErrNotSupported if the ResponseWriter
+	// doesn't implement it (e.g. some test recorders); ignore that — the
+	// global timeout still applies as a safe floor.
+	_ = http.NewResponseController(w).SetReadDeadline(timeNow().Add(uploadReadDeadline))
+
 	// Body cap BEFORE parse so an oversize body yields a clean 413 instead of
 	// ParseMultipartForm's opaque "bad multipart form".
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadFileBytes+uploadBodyOverhead)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
+	if err := r.ParseMultipartForm(uploadMemThreshold); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			httputil.WriteJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large"})
@@ -179,6 +210,16 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 		return
 	}
+	// ParseMultipartForm spills any part larger than uploadMemThreshold to a
+	// temp file in os.TempDir(); with a 256 MiB cap the primary workload always
+	// spills. Register cleanup before any further return so the temp file is
+	// removed once the handler returns — io.Copy below has fully read it into
+	// the destination by then. Mirrors the transcribe handler convention.
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 	if r.MultipartForm != nil {
 		nFields := 0
 		for range r.MultipartForm.Value {
@@ -277,6 +318,18 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalPath := filepath.Join(parentResolved, leaf)
+
+	// Re-run the write deny-list on the RESOLVED target, not just the logical
+	// one. cleanDir may EvalSymlinks to a control subtree the logical check
+	// missed: a workspace symlink `docs -> .git` passes the `docs/hook` check
+	// at relTarget above, but parentResolved is then `<root>/.git`, so writing
+	// `<root>/.git/hook` would slip a git hook (code execution) past the
+	// `.git`-segment guard. Deriving the workspace-relative path from the
+	// resolved parent closes that symlinked-parent bypass.
+	if rel, rerr := filepath.Rel(rootResolved, finalPath); rerr == nil && isWriteBlockedPath(filepath.ToSlash(rel)) {
+		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "this file name is not allowed"})
+		return
+	}
 
 	// Create the leaf with O_NOFOLLOW (refuse symlinked leaf) + O_EXCL (refuse
 	// silent overwrite) or O_TRUNC (explicit overwrite=1). This openat IS the
