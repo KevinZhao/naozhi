@@ -693,3 +693,18 @@
 - [R20260616-PERF-014] Cleanup pruneCandidates/candidates slice 每 5min tick 重新分配未池化 — internal/session/router_cleanup.go:316
 - [R20260616-ARCH-3] RuntimeSessionID validate-then-skip 块 3 处重复 log-level 不一致 — internal/cron/sandbox_pending.go:166
 - [R20260616-ARCH-4] .json dir-entry 扫描循环在 cron sandbox 文件重复 4 次 — internal/cron/sandbox_pending.go:106
+- [R20260616-GO-002] isKnownAgent 线性扫描 agentCommands map values，可建反查 map[string]struct{} — internal/dispatch/dispatch.go:222
+- [R20260616-SEC-4] WS owner-slot 耗尽路径无 metrics counter，静默 200-then-RST 无告警信号 — internal/server/wshub_upgrade.go:168
+- [R20260616-SEC-5] weixin contextToken 来自 iLink relay 未做控制字符 sanitize 即存储/日志 — internal/platform/weixin/weixin.go:416
+- [R20260616-SEC-6] feishu webhook semaphore 满时静默返回 200 丢消息，无丢弃 metric — internal/platform/feishu/transport_hook.go:412
+- [R20260616-SEC-8] sandboxPendingDir Lstat-symlink guard 在多租户主机有 Lstat→MkdirAll TOCTOU（单租户低危）— internal/cron/sandbox_pending.go:61
+- [R20260616-PERF-001] subsystemProbes 每次 /health 调用新建 []HealthProbe{4} 可构造期缓存 — internal/server/health_probe.go:88
+- [R20260616-PERF-003] lookupSandboxPendingIndex 用 Mutex 全锁做只读 map 查，可升 RWMutex — internal/cron/sandbox_pending.go:123
+- [R20260616-PERF-005] ringSnapshot 单条读也 make 整 limit 长 slice，可加 append 变体复用 buffer — internal/cron/runstore_ring.go:95
+- [R20260616-PERF-009] handleHealth 每 1Hz poll 调 runtime.NumGoroutine() STW，可粗粒度采样缓存 — internal/server/health.go:277
+- [R20260616-PERF-010] broadcastSessionSystemEvent 零认证客户端时仍取 pool+进 for-chunk，可加零客户端短路 — internal/server/wshub_broadcast.go:437
+- [R20260616-ARCH-1] agentcore.ResultMetaOf/ResultMeta 跨包无调用者，可 unexport 或统一经 RunResult 读取 — internal/agentcore/envelope.go:126
+- [R20260616-ARCH-2] holdStream 对 result 行最多 3 次部分 decode，可在 observe 一次解码集中 — internal/agentcore/client.go:243
+- [R20260616-ARCH-3] SandboxRunMeta.isZero() 用全零相等，CostUSD==0&&ExitStatus==0 真成功会误判无 receipt（无 live trigger）— internal/cron/sandbox.go:119
+- [R20260616-LOGIC-3] decodeRunsParallel worker 解码超出 backfill window 的项（受 2*keepCount 界）— internal/cron/runstore_disklist.go:371
+- [R20260616-LOGIC-4] TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed 隐式依赖 limiter wiring，无显式断言 — internal/server/unauth_unknownip_failclosed_test.go:110

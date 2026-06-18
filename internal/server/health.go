@@ -187,6 +187,7 @@ type healthResp struct {
 func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
 	_, _ = w.Write([]byte("ok\n"))
 }
 
@@ -209,6 +210,7 @@ func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
 	// Router presence is the minimal "wired" check — Start() bolts every
 	// handler onto a non-nil router before the listener accepts traffic,
 	// so router==nil here means the constructor partially-initialised
@@ -238,6 +240,11 @@ func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 //     dashboard's 1 Hz poll cadence; lateral moves from a stolen token
 //     would face the same poll budget as a legitimate dashboard tab.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// R20260616-SEC-3: set defensively at the top so every exit path (incl.
+	// the errRespRetry rate-limit branch) carries the headers, not only the
+	// writeJSON success paths which set them via httputil.WriteJSON.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
 	resp := healthResp{
 		Status: "ok",
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
