@@ -2336,10 +2336,12 @@ function renderSessionRunsPanel(data) {
   }
   panel.hidden = false;
   const rowsHtml = runs.map(sessionRunRowHtml).join('');
-  // Collapsed by default on mobile so the timeline doesn't crowd the composer
-  // + image-upload preview; expanded by default on desktop where there's room.
+  // Collapsed by default everywhere: the run-history timeline grows without
+  // bound as more runs accumulate, so leaving it open would steadily push the
+  // conversation + composer down. The user's manual expand/collapse is honoured
+  // afterwards via data-user-toggled.
   if (!panel.hasAttribute('data-user-toggled')) {
-    panel.open = !isMobile();
+    panel.open = false;
   }
   panel.innerHTML =
     '<summary class="srp-summary">' +
