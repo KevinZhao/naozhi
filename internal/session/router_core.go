@@ -313,6 +313,7 @@ type Router struct {
 	// and injected into every ManagedSession at construction. nil when StorePath
 	// is empty (tests / no-persist). Closed in Shutdown to flush the async
 	// write worker.
+	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
 	sessionRuns *runhistory.Store
 
 	// kid is the known-session-IDs facet (Router P2, #600): the IDs set, its
