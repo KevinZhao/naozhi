@@ -261,10 +261,49 @@ function getCurrentTheme() {
   } catch (_) {}
   return 'auto';
 }
-function applyTheme(theme) {
+// applyTheme sets data-theme + writes the localStorage early-paint cache, and
+// when persist is true also pushes the choice to the server (PUT /api/settings)
+// so it survives a browser/device change or cache clear. localStorage stays
+// the first-paint source of truth (the inline applier in dashboard.html reads
+// it before any JS) — the server copy is reconciled in on load by syncThemeFromServer.
+// persist defaults false so the load-time reconcile and the initial
+// applyTheme(getCurrentTheme()) don't echo back to the server.
+function applyTheme(theme, persist) {
   if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+  if (persist) persistTheme(theme);
+}
+// persistTheme writes the theme to the server, best-effort: a failure leaves
+// the localStorage copy intact (still applied locally) and just surfaces a
+// toast, since the change isn't lost — only un-synced to other devices.
+function persistTheme(theme) {
+  const headers = { 'Content-Type': 'application/json' };
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
+    .catch(function (err) {
+      if (typeof showToast === 'function') showToast('主题已应用，但未能保存到服务器', 'error');
+      else console.warn('persist theme failed', err);
+    });
+}
+// syncThemeFromServer pulls the server-persisted theme on load and reconciles
+// it with the localStorage cache. The server is the cross-device source of
+// truth, so a differing server value wins and is re-applied (without
+// re-persisting). On error/no-store we keep whatever localStorage gave us.
+function syncThemeFromServer() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { headers, timeoutMs: 8000 })
+    .then(function (s) {
+      const srv = s && s.theme;
+      if (THEME_ORDER.indexOf(srv) < 0) return;       // unknown/empty → keep local
+      if (srv === getCurrentTheme()) return;            // already in sync
+      applyTheme(srv);                                  // server wins; persist=false
+      if (activeView === 'settings') renderSettingsView(); // refresh active pill if open
+    })
+    .catch(function () { /* offline / pre-persist server: keep localStorage */ });
 }
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
@@ -272,6 +311,10 @@ document.addEventListener('DOMContentLoaded', function () {
   // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
   restorePending();
   applyTheme(getCurrentTheme());
+  // Reconcile with the server-persisted theme (cross-device source of truth).
+  // Runs after the localStorage-based applyTheme above so first paint is
+  // instant and a differing server value re-applies once it resolves.
+  syncThemeFromServer();
   // Activity-bar view switch (codex-style rail). Wired here (not inline
   // onclick) to keep the script-src inline-handler surface from growing
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
@@ -10009,7 +10052,7 @@ function renderSettingsView() {
   if (grp) grp.addEventListener('click', function (e) {
     const b = e.target.closest('.settings-theme-opt');
     if (!b) return;
-    applyTheme(b.dataset.theme);
+    applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
   });
 }

@@ -276,6 +276,16 @@
   },
   {
     "method": "GET",
+    "path": "/api/settings",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/settings",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
     "path": "/api/system/daemons",
     "handler_type": "*Server"
   },
