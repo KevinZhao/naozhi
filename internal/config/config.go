@@ -362,6 +362,22 @@ type FeishuConfig struct {
 	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
+// LogValue implements slog.LogValuer so the Feishu credentials never land in
+// logs. Any slog.* call that serializes a FeishuConfig renders the redacted
+// form instead of the plaintext AppSecret / VerificationToken / EncryptKey.
+// See NodeConfig.LogValue. R20260616-SEC-1.
+func (c FeishuConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("app_id", c.AppID),
+		slog.String("app_secret", redactSecret(c.AppSecret)),
+		slog.String("connection_mode", c.ConnectionMode),
+		slog.String("verification_token", redactSecret(c.VerificationToken)),
+		slog.String("encrypt_key", redactSecret(c.EncryptKey)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+		slog.Bool("allow_insecure_webhook", c.AllowInsecureWebhook),
+	)
+}
+
 type CronConfig struct {
 	StorePath        string `yaml:"store_path"`
 	MaxJobs          int    `yaml:"max_jobs"`
