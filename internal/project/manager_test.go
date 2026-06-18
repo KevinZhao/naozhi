@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makeProjectDir creates a minimal project directory under root:
@@ -400,6 +401,47 @@ func TestAll_OrderedByCreatedAt(t *testing.T) {
 			t.Errorf("All()[%d].Name = %q, want %q (creation-order driven)",
 				i, all[i].Name, want)
 		}
+	}
+}
+
+// TestScan_CapturesDirModTime locks the "new session" picker contract: Scan
+// stamps each project's DirModTime from the directory's filesystem mtime so
+// the dashboard folder picker can order its fallback tier by most-recently-
+// touched. The value is runtime-derived (not persisted) and must be non-zero
+// for a normally-stat'able directory.
+func TestScan_CapturesDirModTime(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeProjectDir(t, root, "alpha", nil)
+	makeProjectDir(t, root, "beta", nil)
+
+	// Force a distinct, older mtime on "alpha" so the comparison is not at the
+	// mercy of sub-millisecond create timing. "beta" keeps its fresh mtime.
+	oldTime := time.Unix(1_600_000_000, 0) // 2020-09-13, safely in the past
+	if err := os.Chtimes(filepath.Join(root, "alpha"), oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes alpha: %v", err)
+	}
+
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	byName := map[string]*Project{}
+	for _, p := range m.All() {
+		byName[p.Name] = p
+	}
+	if byName["alpha"].DirModTime == 0 || byName["beta"].DirModTime == 0 {
+		t.Fatalf("DirModTime not stamped: alpha=%d beta=%d",
+			byName["alpha"].DirModTime, byName["beta"].DirModTime)
+	}
+	if got := byName["alpha"].DirModTime; got != oldTime.UnixMilli() {
+		t.Errorf("alpha DirModTime = %d, want %d (chtimes mtime in ms)",
+			got, oldTime.UnixMilli())
+	}
+	if byName["beta"].DirModTime <= byName["alpha"].DirModTime {
+		t.Errorf("beta (fresh) DirModTime %d should exceed alpha (backdated) %d",
+			byName["beta"].DirModTime, byName["alpha"].DirModTime)
 	}
 }
 

@@ -2,6 +2,7 @@ package project
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -152,9 +153,10 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// million-entry directory is never fully materialised. The +1 lets us
 	// detect (and flag) truncation without reading the whole dir.
 	dirents, rderr := f.ReadDir(maxListEntries + 1)
-	if rderr != nil && !errors.Is(rderr, fs.ErrNotExist) {
-		// io.EOF is returned as nil by ReadDir(n>0) when fewer than n entries
-		// remain; a non-EOF error here is a genuine IO failure.
+	if rderr != nil && !errors.Is(rderr, io.EOF) && !errors.Is(rderr, fs.ErrNotExist) {
+		// ReadDir(n>0) returns io.EOF once fewer than n entries remain — and on
+		// the FIRST call for an empty directory — so io.EOF is the normal
+		// terminal signal, not a failure. Only a non-EOF error is genuine IO.
 		slog.Warn("project files/list: readdir IO failure", "err", rderr, "project", project)
 	}
 

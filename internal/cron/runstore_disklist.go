@@ -353,8 +353,10 @@ const decodeSlotPoolMaxCap = 2 * DefaultRunsKeepCount
 //
 // Order is preserved by writing each decode into a position-indexed scratch
 // slice (items is already mtime-sorted by scanSortedRunDir), so completion
-// order is irrelevant. Only called from the before.IsZero path where every
-// candidate up to limit is wanted, so there is no early-break to honour.
+// order is irrelevant. Only called from the before.IsZero path. The
+// accumulation loop collects valid rows newest-first and breaks once `limit`
+// are gathered (#2150), so corrupt/unreadable counts cover exactly the scanned
+// prefix — identical to the serial loop's early-break accounting.
 func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int, int) {
 	// #2150: the serial path (diskListNewestFirst) scans candidates in
 	// newest-first order, skips corrupt/unreadable files WITHOUT consuming a

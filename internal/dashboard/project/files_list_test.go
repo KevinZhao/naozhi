@@ -164,15 +164,20 @@ func TestHandleFilesList_SymlinkEscapeRejected(t *testing.T) {
 	}
 
 	// Root listing: the symlink is surfaced but flagged, never followed.
+	// Assert it is PRESENT first — an `if ok` guard would silently pass if a
+	// regression dropped symlink children, turning the security assertion into
+	// a no-op.
 	_, resp := doList(t, h, "project="+proj)
 	names := entryNames(resp.Entries)
-	if e, ok := names["escape"]; ok {
-		if !e.Symlink {
-			t.Errorf("symlink child must carry symlink:true")
-		}
-		if e.IsDir {
-			t.Errorf("symlink child must not be reported as is_dir")
-		}
+	e, ok := names["escape"]
+	if !ok {
+		t.Fatalf("escape symlink missing from listing (got %v)", names)
+	}
+	if !e.Symlink {
+		t.Errorf("symlink child must carry symlink:true")
+	}
+	if e.IsDir {
+		t.Errorf("symlink child must not be reported as is_dir")
 	}
 
 	// Listing THROUGH the symlink must be refused (O_NOFOLLOW / prefix check).

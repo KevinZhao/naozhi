@@ -204,6 +204,13 @@ type projectsListEntry struct {
 	Favorite     bool                  `json:"favorite"`
 	GitRemoteURL string                `json:"git_remote_url"`
 	GitHub       bool                  `json:"github"`
+	// DirModTime is the project directory's filesystem mtime (unix ms),
+	// captured at Manager.Scan. The dashboard "new session" picker orders its
+	// fallback tier by this descending so the most-recently-touched workspace
+	// surfaces first. omitempty: zero (un-stat'able) drops the key and the
+	// picker falls back to backend order for that entry — the JS reads it as
+	// `p.dir_mtime || 0`, so absence is handled without an undef branch.
+	DirModTime int64 `json:"dir_mtime,omitempty"`
 	// StableKey is the project-level stable dashboard session key for the
 	// default (general) agent: dashboard:pj:<workspace-hash>:general
 	// (RFC docs/rfc/project-stable-session-key.md §4.2). The backend is the
@@ -246,6 +253,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Favorite:     p.Config.Favorite,
 			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
+			DirModTime:   p.DirModTime,
 			StableKey:    stableKey,
 		})
 	}
