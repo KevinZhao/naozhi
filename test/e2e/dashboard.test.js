@@ -1396,7 +1396,9 @@ test.describe('PWA & manifest', () => {
   });
 
   test('HTML has PWA meta tags', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
+    // Pin a dark OS scheme so the auto-theme theme-color sync resolves to the
+    // dark surface, matching the manifest fallback assertion below.
+    const ctx = await browser.newContext({ ...desktop, colorScheme: 'dark' });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
 
@@ -1412,13 +1414,42 @@ test.describe('PWA & manifest', () => {
     );
     expect(appleCapable).toBe('yes');
 
+    // theme-color is synced to the live --nz-bg-0 by dashboard.js once the
+    // page is interactive (so the PWA chrome follows the active theme). With
+    // the default 'auto' theme under a dark OS scheme this resolves to the
+    // dark surface #0d1117 — matching the manifest fallback.
     const themeColor = await page.$eval(
       'meta[name="theme-color"]',
       el => el.content
     );
-    expect(themeColor).toBe('#0d1117');
+    expect(themeColor.toLowerCase()).toBe('#0d1117');
 
     await ctx.close();
+  });
+
+  test('theme-color meta follows the active theme', async ({ browser }) => {
+    // Light OS scheme + auto theme → white surface.
+    const lightCtx = await browser.newContext({ ...desktop, colorScheme: 'light' });
+    const lightPage = await lightCtx.newPage();
+    await lightPage.goto(mock.url + '/dashboard');
+    await lightPage.waitForFunction(() => {
+      const m = document.querySelector('meta[name="theme-color"]');
+      return m && m.content.toLowerCase() === '#ffffff';
+    });
+    await lightCtx.close();
+
+    // Explicit dark theme overrides the OS preference → dark surface.
+    const darkCtx = await browser.newContext({ ...desktop, colorScheme: 'light' });
+    const darkPage = await darkCtx.newPage();
+    await darkPage.addInitScript(() => {
+      try { localStorage.setItem('nz_theme', 'dark'); } catch (_) {}
+    });
+    await darkPage.goto(mock.url + '/dashboard');
+    await darkPage.waitForFunction(() => {
+      const m = document.querySelector('meta[name="theme-color"]');
+      return m && m.content.toLowerCase() === '#0d1117';
+    });
+    await darkCtx.close();
   });
 
   test('manifest link in head', async ({ browser }) => {

@@ -265,7 +265,40 @@ function applyTheme(theme) {
   if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+  syncThemeColorMeta();
 }
+// Keep the PWA/browser chrome (the standalone title bar, mobile status bar)
+// in sync with the active theme. The manifest's static theme_color only
+// covers first paint; once the page is live the resolved --nz-bg-0 is the
+// source of truth, so a dark bar no longer bleeds through in light mode.
+// Reads computed style after the data-theme attribute is set so 'auto' picks
+// up the OS preference too.
+function syncThemeColorMeta() {
+  try {
+    const bg = getComputedStyle(document.documentElement)
+      .getPropertyValue('--nz-bg-0').trim();
+    if (!bg) return;
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'theme-color');
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute('content', bg);
+  } catch (_) {}
+}
+// In 'auto' mode the resolved bg follows the OS scheme, so re-sync when the
+// system preference flips while the page is open.
+try {
+  if (window.matchMedia) {
+    const _themeMql = window.matchMedia('(prefers-color-scheme: light)');
+    const _onSchemeChange = function () {
+      if (getCurrentTheme() === 'auto') syncThemeColorMeta();
+    };
+    if (_themeMql.addEventListener) _themeMql.addEventListener('change', _onSchemeChange);
+    else if (_themeMql.addListener) _themeMql.addListener(_onSchemeChange);
+  }
+} catch (_) {}
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
   // fetchSessions/send so a reload-before-first-send still carries the chosen
@@ -2336,10 +2369,12 @@ function renderSessionRunsPanel(data) {
   }
   panel.hidden = false;
   const rowsHtml = runs.map(sessionRunRowHtml).join('');
-  // Collapsed by default on mobile so the timeline doesn't crowd the composer
-  // + image-upload preview; expanded by default on desktop where there's room.
+  // Collapsed by default everywhere: the run-history timeline grows without
+  // bound as more runs accumulate, so leaving it open would steadily push the
+  // conversation + composer down. The user's manual expand/collapse is honoured
+  // afterwards via data-user-toggled.
   if (!panel.hasAttribute('data-user-toggled')) {
-    panel.open = !isMobile();
+    panel.open = false;
   }
   panel.innerHTML =
     '<summary class="srp-summary">' +
