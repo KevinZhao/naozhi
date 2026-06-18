@@ -28,7 +28,9 @@ import (
 //     renamed; restore it or update dashboard.js + this test together.
 //   - Intentional addition (update this test): a NEW field was added
 //     (e.g. display_name once Round 208 lands). Add the field name here
-//     and note it in RNEW-ARCH-401.
+//     and note it in RNEW-ARCH-401. Note `dir_mtime` (the new-session
+//     picker's folder-order key) is omitempty, so it is NOT in `required`
+//     — its presence/shape is pinned by TestProjectsListEntry_JSONShape.
 //
 // Scope: top-level is an array (not an object), so only per-project keys
 // are enforced. dashproject.RedactGitRemoteURL is separately tested — we only pin

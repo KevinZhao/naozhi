@@ -71,6 +71,23 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 	return m, nil
 }
 
+// dirModTimeMillis returns the directory's filesystem mtime in unix ms.
+// It prefers the cheap os.DirEntry.Info() (already cached from ReadDir on most
+// platforms) and falls back to os.Stat(path) when entry is nil (the synthetic
+// root project) or Info() fails. Returns 0 on any error so the caller treats
+// the mtime as unknown and the picker falls back to backend order.
+func dirModTimeMillis(entry os.DirEntry, path string) int64 {
+	if entry != nil {
+		if info, err := entry.Info(); err == nil {
+			return info.ModTime().UnixMilli()
+		}
+	}
+	if info, err := os.Stat(path); err == nil {
+		return info.ModTime().UnixMilli()
+	}
+	return 0
+}
+
 // Scan discovers all subdirectories under root and loads their project configs.
 func (m *Manager) Scan() error {
 	entries, err := os.ReadDir(m.root)
@@ -116,6 +133,7 @@ func (m *Manager) Scan() error {
 			Config:       cfg,
 			GitRemoteURL: remote,
 			IsGitHub:     isGH,
+			DirModTime:   dirModTimeMillis(entry, absPath),
 		}
 	}
 
@@ -151,6 +169,7 @@ func (m *Manager) Scan() error {
 					GitRemoteURL: remote,
 					IsGitHub:     isGH,
 					IsRoot:       true,
+					DirModTime:   dirModTimeMillis(nil, m.root),
 				}
 			}
 		}

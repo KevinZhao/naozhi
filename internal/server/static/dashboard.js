@@ -222,8 +222,8 @@ function restorePending() {
 // SetWorkspace), so even a session opened in another browser/device — or one
 // reloaded before its first send — spawns into the right directory. Local
 // nodes only: remote sessions resolve their workspace on their own node.
-// Fire-and-forget — never blocks or fails the creation flow (matches the
-// pushRecentProject swallow convention).
+// Fire-and-forget — never blocks or fails the creation flow: localStorage /
+// network errors are swallowed rather than aborting session creation.
 function eagerBindWorkspace(key, workspace, node) {
   if (!key || !workspace) return;
   const nd = node || 'local';
@@ -6608,24 +6608,18 @@ function renderPaletteList(state, query) {
   if (q) {
     scored.sort((a, b) => b.score - a.score);
   } else {
-    // R110-P3 palette idle-state ordering: three-tier sort on empty query.
+    // R110-P3 palette idle-state ordering: two-tier sort on empty query.
     //   Tier 0: favorites — surface "pinned" projects first. Users already
     //           star projects via the sidebar section-header ⭐ button,
     //           which persists to the backend projects config. Reusing
     //           that signal avoids a second "palette-pin" concept (which
     //           would split the mental model and duplicate state).
-    //   Tier 1: recents (localStorage) top-N — most-recently-used.
-    //   Tier 2: everything else in original projectsData order (alpha +
-    //           backend favorite-first order is preserved, so the rest
-    //           bucket doesn't reshuffle unrelated projects).
-    // A project that is BOTH favorite and recent lands in tier 0 only;
-    // the recents lookup skips it so it doesn't appear twice or trigger
-    // a stale rank clash.
-    const recents = loadRecentProjects();
-    const recentRank = new Map();
-    recents.slice(0, RECENT_PROJECTS_SHOW).forEach((e, i) => {
-      recentRank.set(e.name + '|' + (e.node || 'local'), i);
-    });
+    //   Tier 1: everything else by directory filesystem mtime, most-recently-
+    //           modified first (dir_mtime, unix ms, stamped by the backend at
+    //           scan time). The folder you last touched on disk surfaces at
+    //           the top of the non-favorite bucket; un-stat'able / older-remote
+    //           entries (dir_mtime 0) sort last, then original projectsData
+    //           order is the final stable tiebreak.
     const withIndex = scored.map((s, i) => ({s, i}));
     withIndex.sort((a, b) => {
       const pa = a.s.project;
@@ -6634,13 +6628,13 @@ function renderPaletteList(state, query) {
       const fa = pa.favorite ? 0 : 1;
       const fb = pb.favorite ? 0 : 1;
       if (fa !== fb) return fa - fb;
-      // Tier gate 1: within the same tier, recents come before non-recents.
-      const ka = pa.name + '|' + (pa.node || 'local');
-      const kb = pb.name + '|' + (pb.node || 'local');
-      const ra = recentRank.has(ka) ? recentRank.get(ka) : Infinity;
-      const rb = recentRank.has(kb) ? recentRank.get(kb) : Infinity;
-      if (ra !== rb) return ra - rb;
-      // Tier gate 2: stable on original projectsData order (input index).
+      // Tier gate 1: directory mtime descending (most-recently-modified
+      // folder first). Missing/zero dir_mtime sorts last so un-stat'able or
+      // older-protocol remote entries don't jump to the top.
+      const ma = pa.dir_mtime || 0;
+      const mb = pb.dir_mtime || 0;
+      if (ma !== mb) return mb - ma;
+      // Final stable tiebreak: original projectsData order (input index).
       return a.i - b.i;
     });
     scored.length = 0;
@@ -6902,16 +6896,6 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   persistPending();
   eagerBindWorkspace(key, projectPath, nodeId);
 
-  // R110-P3 recent-projects: every successful project-scoped session
-  // creation bumps the (name,node) pair to the top of the palette's
-  // recent list so next-time access is one click. Custom-workspace paths
-  // are intentionally NOT recorded — they have no stable project.name
-  // and the palette has no row to highlight them against. Errors from
-  // localStorage are swallowed: Safari private-browsing / out-of-quota /
-  // disabled storage all throw on setItem, and a silently-un-recorded
-  // bump is preferable to breaking the creation flow over a UX tweak.
-  pushRecentProject(projectName, nodeId || 'local');
-
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
@@ -6926,48 +6910,6 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   lastVersion = 0;
   debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
-}
-
-// --- Recent projects (palette ordering) ---
-
-// RECENT_PROJECTS_KEY holds a compact JSON array of {name,node,ts} tuples,
-// ordered by `ts` DESC. Capped at RECENT_PROJECTS_MAX so the stored blob
-// stays small (worst case ~10 * 100 bytes). The palette only surfaces
-// the top 5 (see renderPaletteList) but we retain a deeper tail so a
-// long-absent project can climb back into view after one use.
-const RECENT_PROJECTS_KEY = 'naozhi_recent_projects';
-const RECENT_PROJECTS_MAX = 10;
-const RECENT_PROJECTS_SHOW = 5;
-
-function loadRecentProjects() {
-  try {
-    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Defensive filter: discard entries without a string `name` so a
-    // manually-edited localStorage can't break render.
-    return parsed
-      .filter(e => e && typeof e.name === 'string')
-      .slice(0, RECENT_PROJECTS_MAX);
-  } catch (_) {
-    return [];
-  }
-}
-
-function pushRecentProject(name, node) {
-  if (!name) return;
-  node = node || 'local';
-  try {
-    const list = loadRecentProjects();
-    const filtered = list.filter(e => !(e.name === name && (e.node || 'local') === node));
-    filtered.unshift({name: name, node: node, ts: Date.now()});
-    const trimmed = filtered.slice(0, RECENT_PROJECTS_MAX);
-    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
-  } catch (_) {
-    // Private browsing / quota / disabled storage — swallow, next
-    // successful write reseeds the list.
-  }
 }
 
 function doCreateSession() {
