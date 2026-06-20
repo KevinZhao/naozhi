@@ -129,12 +129,22 @@ func (s *Store) Get() Settings {
 // (empty path), so the running process stays consistent with what the
 // operator just chose; the returned error reports only the persistence
 // outcome.
+//
+// [R202606-GO-1] The lock is held through the marshal + WriteFileAtomic disk
+// write, not released right after the in-memory update. Two concurrent
+// Set("dark")/Set("light") calls otherwise race: the in-memory value is
+// last-wins, but the two disk writes can complete in either order, so a
+// restart could read a file that contradicts the in-memory Get(). Holding
+// the lock across the persist path serialises the file writes so the last
+// in-memory winner is also the last on-disk write. Writes are operator-rare
+// (a theme click), so the held-lock cost is negligible; nothing inside the
+// critical section re-enters s.mu.
 func (s *Store) Set(next Settings) error {
 	next = next.normalize()
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.cur = next
-	s.mu.Unlock()
 
 	if s.path == "" {
 		return nil

@@ -3,6 +3,7 @@ package uiprefs
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -51,6 +52,42 @@ func TestSet_NormalizesUnknownTheme(t *testing.T) {
 	}
 	if got := New(dir).Get().Theme; got != defaultTheme {
 		t.Fatalf("reloaded Theme = %q, want normalized %q", got, defaultTheme)
+	}
+}
+
+// concurrentSet: [R202606-GO-1] under N concurrent Set calls, the persisted
+// file must agree with the final in-memory Get(). Before the fix the lock was
+// released before the disk write, so the two writes could land in any order
+// and a reload could read a theme that contradicts memory. With the lock held
+// across marshal+WriteFileAtomic the last in-memory winner is also the last
+// on-disk write, so a fresh store reading the file sees the same value.
+func TestSet_ConcurrentSetMemoryAndFileConsistent(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	themes := []string{"auto", "light", "dark"}
+	const goroutines = 64
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		theme := themes[i%len(themes)]
+		go func() {
+			defer wg.Done()
+			if err := s.Set(Settings{Theme: theme}); err != nil {
+				t.Errorf("Set(%q): %v", theme, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// The race detector (go test -race) flags the unsynchronised window if the
+	// lock no longer covers the disk write. Beyond that, the on-disk document
+	// must match what the running process believes is current.
+	mem := s.Get().Theme
+	disk := New(dir).Get().Theme
+	if mem != disk {
+		t.Fatalf("memory Theme = %q but on-disk Theme = %q; persist not serialised", mem, disk)
 	}
 }
 
