@@ -58,10 +58,6 @@ let selectedNode = (function() {
   catch(_) { return 'local'; }
 })();
 let nodesData = {};
-// Toggle state for the #node-selector dropdown. Kept in module scope (vs. a
-// DOM attr lookup) so the outside-click listener can bail fast without reading
-// layout. True = dropdown is visible.
-let nodeSelectorOpen = false;
 let lastVersion = 0;
 let lastNodesJSON = '';
 let lastHistoryJSON = '';
@@ -371,7 +367,6 @@ document.addEventListener('DOMContentLoaded', function () {
   bindClick('btn-history', function () { toggleHistory(); });
   bindClick('btn-new-session', function () { createNewSession(); });
   bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
-  bindClick('ns-trigger', function (e) { toggleNodeSelector(e); });
   bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
   // NOTE: the quick-ask form submit is NOT bound here. That form lives in
   // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
@@ -699,25 +694,16 @@ function renderSidebar(data) {
   });
 
   // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
-  // The node selector dropdown needs unfiltered counts, so allSessionsCache
-  // must hold every node's items. The selector itself is refreshed via the
-  // updateStatusBar() call above (which tail-calls updateNodeSelector — that
-  // path is also fired from setState on every WS transition); session counts
-  // in the dropdown therefore lag by at most one poll cycle, which only
-  // matters while the dropdown is open — an acceptable trade for not paying
-  // two full dropdown repaints per poll.
-
   allSessionsCache = allItemsUnfiltered;
 
-  // Filter the list by selectedNode when multiple nodes are connected. In
-  // single-node setups (selector is hidden) there's nothing to filter and we
-  // pass everything through so the legacy UX is preserved. Transient states
-  // where selectedNode is null (e.g. previewDiscovered) fall through the
-  // falsy branch and show the full list rather than an empty sidebar.
-  const activeFilter = isMultiNode() && selectedNode;
-  const allItems = activeFilter
-    ? allItemsUnfiltered.filter(s => (s.node || 'local') === selectedNode)
-    : allItemsUnfiltered;
+  // The sidebar lists every connected node's sessions together — the old
+  // per-node filter (driven by the sidebar node selector) was removed when
+  // that selector moved into the New Session modal. Each card carries a
+  // .sc-node badge (sessionCardHtml) so operators can still tell which
+  // connection a session lives on. selectedNode now only tracks which node
+  // the *currently-open* session lives on (for dispatch / header), not a
+  // sidebar visibility filter, so nothing here is hidden.
+  const allItems = allItemsUnfiltered;
 
   // Stable sidebar order: oldest at top, newest at bottom, position never
   // shifts on activity or state change. Each session ships a server-stamped
@@ -1852,11 +1838,15 @@ function sessionCardHtml(s) {
   const unreadBadge = (unreadCount > 0 && !isActive)
     ? '<span class="sc-unread" aria-label="' + unreadCount + ' 条未读">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>'
     : '';
-  // Per-card node badge is no longer needed: the sidebar is filtered to a
-  // single node via the #node-selector, so every visible card is on the
-  // currently-selected node. The badge is kept empty (vs. removed from the
-  // template) so the surrounding .sc-meta layout stays identical.
-  const nodeBadge = '';
+  // Per-card node badge: the sidebar now lists every connected node's
+  // sessions together (the node picker moved into the New Session modal), so
+  // each non-local card is tagged with its connection to disambiguate. Local
+  // sessions stay unmarked — they're the default and the common case. The
+  // hue is derived from the node id (nodeColor) so it matches the palette's
+  // .cp-node badge and the modal node picker.
+  const nodeBadge = (isMultiNode() && sNode !== 'local')
+    ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
+    : '';
 
   const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
@@ -2049,17 +2039,16 @@ function formatOutageDuration(elapsedMs) {
 // state transitions. That DOM was deleted when the sidebar gave its bottom
 // real estate to the session list, after which updateStatusBar early-
 // returns when the container is missing — its only remaining side-effect
-// is updateNodeSelector(), which setState already invokes on every WS
+// is reconcileSelectedNode(), which setState already invokes on every WS
 // state change via updateStatusBar(). The 1s tick therefore had no
-// user-visible effect (the trigger dot updates on real state changes,
-// not by polling) and was a periodic no-op repaint. Issue #434.
+// user-visible effect and was a periodic no-op repaint. Issue #434.
 
 function updateStatusBar() {
   const container = document.getElementById('sidebar-status');
   // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
-  // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
-  // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
-  if (!container) { updateNodeSelector(); return; }
+  // 早退，但仍要 reconcileSelectedNode()——选中的远程节点若已下线，需把
+  // selectedNode 拨回 local，否则 dispatch / 头部会指向一个消失的连接。
+  if (!container) { reconcileSelectedNode(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
   // surfaces per-node status; the sidebar-status bar collapses to "current
@@ -2132,10 +2121,9 @@ function updateStatusBar() {
   }
 
   container.innerHTML = html;
-  // Keep the node selector's trigger dot in sync with live status \u2014 a remote
-  // flipping offline should update both the bar below and the selector above
-  // without waiting for the next /api/sessions poll.
-  updateNodeSelector();
+  // A remote flipping offline must also pull selectedNode back to local if it
+  // was pointing at that now-gone node, without waiting for the next poll.
+  reconcileSelectedNode();
 }
 
 // CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal.
@@ -2297,12 +2285,11 @@ function selectSession(key, node) {
   if (sessionUnread[selSid]) {
     delete sessionUnread[selSid];
   }
-  // Picking a session on a different node shifts the sidebar filter there
-  // too — users expect the selector to follow their click, not strand them
-  // looking at another node's list. Persist + refresh the widget.
+  // Opening a session on another node retargets dispatch (selectedNode drives
+  // the dispatch node + main header). The sidebar no longer filters by node,
+  // so there is no list to re-render — just persist the new target.
   if (prevNode !== selectedNode) {
     try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-    if (typeof updateNodeSelector === 'function') updateNodeSelector();
   }
   lastEventTime = 0;
   lastRenderedEventTime = 0;
@@ -6374,43 +6361,72 @@ function backendDisplayVersion(backendID) {
   return (e && e.version) ? e.version : '';
 }
 
-// R110-P3 agent picker (Round 167) — returns an HTML fragment for an agent
-// <select>, or an empty string when only the default 'general' agent is
-// configured (no meaningful choice to offer). Mirrors renderBackendPicker's
-// shape: single <select> with id="new-agent", consumed by getSelectedAgent()
-// at submit time, defaulting to the last-picked agent (localStorage) so
-// power users who always want e.g. 'sonnet' don't re-pick every session.
-function renderAgentPicker() {
-  if (!Array.isArray(availableAgents) || availableAgents.length <= 1) return '';
-  // Remember the last picked agent across reloads. Falls back to 'general'
-  // on first use or when the previously-selected agent has been removed
-  // from the backend config (e.g. config.yaml edit). Swallow errors from
-  // private browsing / disabled storage so the picker always renders.
-  let remembered = 'general';
-  try {
-    const v = localStorage.getItem('naozhi_last_agent');
-    if (v && availableAgents.indexOf(v) >= 0) remembered = v;
-  } catch (_) { /* noop */ }
-  const options = availableAgents.map(a => {
-    const selected = a === remembered ? ' selected' : '';
-    return '<option value="' + escAttr(a) + '"' + selected + '>' + esc(a) + '</option>';
+// renderNodePicker returns an HTML fragment for a connection (node) <select>,
+// or an empty string when only the local node is connected (no meaningful
+// choice to offer). It took over the modal slot the agent picker used to
+// occupy: the sidebar node selector was removed, so choosing which connection
+// a new session lives on now happens here, at creation time. Mirrors
+// renderBackendPicker's shape — single <select id="new-node"> consumed by
+// getSelectedNode() at submit time — and pre-selects the current selectedNode
+// so the picker matches whatever the operator was last working on.
+//
+// 'local' is always pinned first (defensive: even if the server's nodes
+// payload omits it). Remotes follow, ordered by display name.
+function renderNodePicker() {
+  if (!isMultiNode()) return '';
+  const ids = Object.keys(nodesData);
+  if (ids.indexOf('local') === -1) ids.unshift('local');
+  const sorted = ids.slice().sort((a, b) => {
+    if (a === 'local' && b !== 'local') return -1;
+    if (b === 'local' && a !== 'local') return 1;
+    return getNodeDisplayName(a).localeCompare(getNodeDisplayName(b));
+  });
+  const current = selectedNode || 'local';
+  const options = sorted.map(id => {
+    const selected = id === current ? ' selected' : '';
+    const status = getNodeStatus(id);
+    const label = getNodeDisplayName(id) + ' · ' + statusLabelForNode(status);
+    return '<option value="' + escAttr(id) + '"' + selected + '>' + esc(label) + '</option>';
   }).join('');
   return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
-    '<select id="new-agent" style="' + PICKER_SELECT_STYLE + '">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-node">连接</label>' +
+    '<select id="new-node" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
 }
 
-function getSelectedAgent() {
-  const el = document.getElementById('new-agent');
+// getSelectedNode reads the modal's connection <select>. Falls back to the
+// current selectedNode (then 'local') when the picker isn't rendered — i.e.
+// single-connection setups where there is nothing to choose.
+function getSelectedNode() {
+  const el = document.getElementById('new-node');
   const v = el && el.value ? el.value : '';
-  if (v) {
-    // Persist so the next modal defaults to this agent without asking again.
-    try { localStorage.setItem('naozhi_last_agent', v); } catch (_) { /* noop */ }
-  }
-  return v || 'general';
+  return v || selectedNode || 'local';
+}
+
+// wireNodePicker attaches a change listener to the modal's #new-node <select>
+// (added imperatively to stay clear of CSP's inline-handler ban). Picking a
+// connection updates the global selectedNode + persists it, then runs the
+// caller's onChange so a palette can re-filter its project list to the newly
+// chosen node. No-op when the picker isn't present (single-node setups).
+function wireNodePicker(onChange) {
+  const el = document.getElementById('new-node');
+  if (!el) return;
+  el.addEventListener('change', function () {
+    selectedNode = el.value || 'local';
+    try { localStorage.setItem('nz_selectedNode', selectedNode); } catch (_) { /* noop */ }
+    if (typeof onChange === 'function') onChange();
+  });
+}
+
+// getSelectedAgent resolves the agent segment for the session key. The agent
+// picker was retired (its modal slot now hosts the connection picker), so
+// every dashboard-created session uses the default 'general' agent. Kept as a
+// single resolution point so buildDashboardSessionKey's call sites don't
+// hardcode the literal and a future picker can re-route through here.
+function getSelectedAgent() {
+  return 'general';
 }
 
 // R110-P3 key schema (Round 167) — dashboard sessions historically used
@@ -6559,7 +6575,7 @@ function createNewSession() {
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
           backendPicker +
-          renderAgentPicker() +
+          renderNodePicker() +
           '<div style="margin-bottom:12px">' +
             '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -6571,6 +6587,17 @@ function createNewSession() {
         '</div>';
       document.body.appendChild(overlay);
       trapFocus(overlay);
+      // Switching connection retargets where this custom-workspace session
+      // lands; the workspace placeholder follows (local prefills the default
+      // workspace, remotes clear it since we have no per-node default).
+      wireNodePicker(function () {
+        const wsEl = document.getElementById('new-workspace');
+        if (!wsEl) return;
+        const nowLocal = (selectedNode || 'local') === 'local';
+        const ph = nowLocal ? (defaultWorkspace || '') : '';
+        wsEl.placeholder = ph;
+        if (!wsEl.value) wsEl.value = ph;
+      });
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -6581,16 +6608,15 @@ function createNewSession() {
 
 function openProjectPalette(backendsData) {
   const backendPicker = renderBackendPicker(backendsData);
-  const agentPicker = renderAgentPicker();
-  // Stash the picker HTML on the overlay dataset so the custom-workspace
-  // modal (spawned from a palette row) can surface the same choice. When
-  // only one backend exists, picker is empty and we skip the header slot.
-  // The agent picker is shown inline next to the backend slot so multi-agent
-  // setups can pick both at once without leaving the palette.
-  const pickerSlot = (backendPicker || agentPicker)
+  const nodePicker = renderNodePicker();
+  // The backend + connection pickers sit inline above the search box so the
+  // operator can pick both before choosing a project. The connection picker
+  // replaced the agent picker that used to live here; switching it re-filters
+  // the project list to that node's projects (see nodeFilteredProjects).
+  const pickerSlot = (backendPicker || nodePicker)
     ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px">' +
         (backendPicker ? '<div style="flex:1;min-width:0">' + backendPicker + '</div>' : '') +
-        (agentPicker ? '<div style="flex:1;min-width:0">' + agentPicker + '</div>' : '') +
+        (nodePicker ? '<div style="flex:1;min-width:0">' + nodePicker + '</div>' : '') +
       '</div>'
     : '';
   const overlay = document.createElement('div');
@@ -6618,6 +6644,10 @@ function openProjectPalette(backendsData) {
   const input = document.getElementById('cp-input');
   input.addEventListener('input', () => renderPaletteList(state, input.value));
   input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
+  // Re-filter the project list when the connection changes — the list is
+  // scoped to selectedNode (nodeFilteredProjects), so a node switch must
+  // repaint it against the current query.
+  wireNodePicker(function () { renderPaletteList(state, input.value); });
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -6892,29 +6922,30 @@ function pickPaletteProject(p) {
 }
 
 function pickPaletteCustom(initialValue) {
-  // Capture the palette's backend + agent choice before we remove the overlay.
-  // The Custom Workspace modal re-renders its own copies of both pickers,
-  // so we need to pass the pre-selection forward rather than relying on the
-  // palette's DOM (which is about to be nuked).
+  // Capture the palette's backend choice before we remove the overlay. The
+  // Custom Workspace modal re-renders its own copies of the pickers, so we
+  // carry the pre-selection forward rather than relying on the palette's DOM
+  // (which is about to be nuked). The connection choice rides on the global
+  // selectedNode (wireNodePicker keeps it current), so renderNodePicker below
+  // pre-selects it without an explicit hand-off.
   const preselectedBackend = getSelectedBackend();
-  const preselectedAgent = getSelectedAgent();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
   // 选中 remote 节点时不用 local 的 defaultWorkspace 占位符，避免误导用户。
   const isLocal = (selectedNode || 'local') === 'local';
   const ws = isLocal ? (defaultWorkspace || '') : '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
-  // Re-render the backend + agent pickers inside the modal and pre-select the
-  // palette's choice, so switching to Custom Workspace doesn't drop either.
+  // Re-render the backend + connection pickers inside the modal and pre-select
+  // the palette's choice, so switching to Custom Workspace doesn't drop either.
   const picker = renderBackendPicker(cliBackends);
-  const agentPicker = renderAgentPicker();
+  const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
       '<h3>自定义工作目录</h3>' +
       picker +
-      agentPicker +
+      nodePicker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -6930,12 +6961,15 @@ function pickPaletteCustom(initialValue) {
     const sel = document.getElementById('new-backend');
     if (sel) sel.value = preselectedBackend;
   }
-  if (preselectedAgent) {
-    const sel = document.getElementById('new-agent');
-    if (sel && Array.from(sel.options).some(o => o.value === preselectedAgent)) {
-      sel.value = preselectedAgent;
-    }
-  }
+  // Switching connection here clears/prefills the workspace placeholder the
+  // same way the no-projects modal does, so a remote pick doesn't dangle the
+  // local default path.
+  wireNodePicker(function () {
+    const wsEl = document.getElementById('new-workspace');
+    if (!wsEl) return;
+    const nowLocal = (selectedNode || 'local') === 'local';
+    wsEl.placeholder = nowLocal ? (defaultWorkspace || '') : '';
+  });
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
     if (el) { el.focus(); el.select(); }
@@ -6979,7 +7013,6 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   selectedKey = key;
   selectedNode = nodeId || 'local';
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, selectedNode);
@@ -6994,6 +7027,10 @@ function doCreateSession() {
   const workspace = document.getElementById('new-workspace').value.trim();
   const backend = getSelectedBackend();
   const agent = getSelectedAgent();
+  // Read the connection picker directly so the choice lands even if the
+  // change listener never fired (e.g. the operator never re-opened the
+  // select). getSelectedNode falls back to selectedNode / 'local'.
+  const targetNode = getSelectedNode();
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
@@ -7005,11 +7042,6 @@ function doCreateSession() {
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
   const key = buildDashboardSessionKey(ts, folderName, agent);
-
-  // 自定义工作目录的会话目标节点 = 当前选中节点。否则用户从 remote 节点视图
-  // 触发「自定义工作目录」时会被强制拉回 local，与「在远程项目里新建」的
-  // 操作直觉相违。
-  const targetNode = selectedNode || 'local';
 
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
@@ -7023,7 +7055,6 @@ function doCreateSession() {
   selectedKey = key;
   selectedNode = targetNode;
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, targetNode);
@@ -7084,7 +7115,6 @@ function createQuickSession(initialText, onTextStranded) {
   selectedKey = key;
   selectedNode = 'local';
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, 'local');
@@ -10211,180 +10241,20 @@ function renderSystemView() {
     '</div>';
 }
 
-// updateNodeSelector is the single render entry point for the node-selector
-// trigger + dropdown visibility. Called after every /api/sessions poll (so
-// new/removed remotes appear immediately) and after every open/close toggle.
-// Fast path when multi-node isn't active: hide the whole widget.
-function updateNodeSelector() {
-  const root = document.getElementById('node-selector');
-  if (!root) return;
-
-  const multi = isMultiNode();
-  if (!multi) {
-    root.hidden = true;
-    nodeSelectorOpen = false;
-    return;
-  }
-
-  // If the persisted selection points at a node that no longer exists,
-  // snap it back to 'local' so the sidebar doesn't render an empty list.
-  // Happens when a remote is removed server-side while the dashboard is open.
-  if (selectedNode !== 'local' && !nodesData[selectedNode]) {
+// reconcileSelectedNode keeps `selectedNode` honest now that the sidebar node
+// selector is gone (the node picker moved into the New Session modal). It no
+// longer touches any DOM — the sidebar lists every node's sessions together —
+// but `selectedNode` still drives dispatch targeting and the main header, so
+// if the persisted selection points at a node that has since disappeared
+// (remote removed server-side while the dashboard is open) we snap it back to
+// 'local'. Kept as a single entry point so the many call sites (poll, session
+// switch, session create) don't each need to re-derive the same guard.
+function reconcileSelectedNode() {
+  if (selectedNode && selectedNode !== 'local' && !nodesData[selectedNode]) {
     selectedNode = 'local';
     try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
   }
-
-  root.hidden = false;
-  const trigger = document.getElementById('ns-trigger');
-  const dotEl = document.getElementById('ns-trigger-dot');
-  const labelEl = document.getElementById('ns-trigger-label');
-  const alertEl = document.getElementById('ns-trigger-alert');
-
-  const status = getNodeStatus(selectedNode);
-  const displayName = getNodeDisplayName(selectedNode);
-  const statusLabel = statusLabelForNode(status);
-
-  if (dotEl) {
-    dotEl.className = 'ns-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
-  }
-  if (labelEl) {
-    labelEl.textContent = displayName + ' · ' + statusLabel;
-    labelEl.title = displayName + ' (' + selectedNode + ') · ' + statusLabel;
-  }
-
-  // Aggregated alert dot: any non-current node in a non-ok/connecting state
-  // surfaces a red dot on the trigger so the user knows to open the dropdown.
-  if (alertEl) {
-    let hasAlert = false;
-    for (const id of Object.keys(nodesData)) {
-      if (id === selectedNode) continue;
-      const s = getNodeStatus(id);
-      if (s !== 'ok' && s !== 'connected' && s !== 'connecting' && s !== 'authenticating') {
-        hasAlert = true; break;
-      }
-    }
-    alertEl.hidden = !hasAlert;
-  }
-
-  if (trigger) {
-    trigger.setAttribute('aria-expanded', nodeSelectorOpen ? 'true' : 'false');
-  }
-
-  const dropdown = document.getElementById('ns-dropdown');
-  if (!dropdown) return;
-  if (!nodeSelectorOpen) {
-    dropdown.hidden = true;
-    return;
-  }
-  dropdown.hidden = false;
-  dropdown.innerHTML = renderNodeDropdownHtml();
 }
-
-// renderNodeDropdownHtml builds the list of node options. Local is pinned
-// first; remotes are grouped by status (connected → connecting → offline)
-// then sorted by display name. Each row shows status dot, name, session count,
-// and a check when selected.
-function renderNodeDropdownHtml() {
-  const ids = Object.keys(nodesData);
-  // Ensure 'local' is always present even if the server didn't include it
-  // (defensive — the local node should always be in nodesData, but we don't
-  // want to drop it off the UI if the backend ever forgets to ship it).
-  if (ids.indexOf('local') === -1) ids.unshift('local');
-
-  const rank = { ok: 0, connected: 0, connecting: 1, authenticating: 1, offline: 2, unreachable: 2, error: 2, disconnected: 2, off: 2 };
-  const sortable = ids.map(id => ({
-    id,
-    name: getNodeDisplayName(id),
-    status: getNodeStatus(id),
-    count: getNodeSessionCount(id),
-  }));
-  sortable.sort((a, b) => {
-    // Local always first.
-    if (a.id === 'local' && b.id !== 'local') return -1;
-    if (b.id === 'local' && a.id !== 'local') return 1;
-    const ra = rank[a.status] === undefined ? 9 : rank[a.status];
-    const rb = rank[b.status] === undefined ? 9 : rank[b.status];
-    if (ra !== rb) return ra - rb;
-    return a.name.localeCompare(b.name);
-  });
-
-  let html = '';
-  for (const n of sortable) {
-    const active = n.id === selectedNode;
-    const cls = 'ns-option' + (active ? ' active' : '');
-    const dotCls = VALID_DOT_CLASSES[n.status] || 'offline';
-    const statusLabel = statusLabelForNode(n.status);
-    const addr = (n.id !== 'local' && nodesData[n.id] && nodesData[n.id].remote_addr) ? nodesData[n.id].remote_addr : '';
-    const countBadge = n.count > 0 ? '<span class="ns-count">' + n.count + '</span>' : '';
-    const check = active ? '<span class="ns-check" aria-hidden="true">✓</span>' : '';
-    html += '<button type="button" class="' + cls + '" role="option" aria-selected="' + (active ? 'true' : 'false') + '" data-node="' + escAttr(n.id) + '" onclick="selectNodeFromDropdown(this.dataset.node)">' +
-      '<span class="ns-dot ' + dotCls + '" aria-hidden="true"></span>' +
-      '<span class="ns-body">' +
-        '<span class="ns-name" title="' + escAttr(n.name) + '">' + esc(n.name) + '</span>' +
-        (addr ? '<span class="ns-addr">' + esc(addr) + '</span>' : '') +
-      '</span>' +
-      '<span class="ns-status">' + esc(statusLabel) + '</span>' +
-      countBadge +
-      check +
-      '</button>';
-  }
-  return html;
-}
-
-// toggleNodeSelector is the click handler on the trigger. Flips the dropdown,
-// repaints, and installs a one-shot outside-click listener to close on stray
-// clicks. `event` is stopped so the same click doesn't immediately fire the
-// outside-click listener we're about to install.
-function toggleNodeSelector(event) {
-  if (event) { event.stopPropagation(); event.preventDefault(); }
-  nodeSelectorOpen = !nodeSelectorOpen;
-  updateNodeSelector();
-}
-
-// selectNodeFromDropdown is the click handler on each option. Switches the
-// filter, persists, closes the dropdown, and re-renders the sidebar against
-// the last cached payload so the change is instant (no network round-trip).
-function selectNodeFromDropdown(nodeId) {
-  if (!nodeId) return;
-  nodeSelectorOpen = false;
-  if (nodeId === selectedNode) {
-    updateNodeSelector();
-    return;
-  }
-  selectedNode = nodeId;
-  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  updateNodeSelector();
-  // Re-render the sidebar so the filter takes effect. The selected session
-  // key may be on a different node now — we intentionally do NOT clear
-  // selectedKey here: if the user switches back, the card is still active,
-  // and if they pick a session on the new node, selectSession() will swap.
-  if (_lastSidebarData) {
-    renderSidebar(_lastSidebarData);
-  } else {
-    debouncedFetchSessions();
-  }
-  updateStatusBar();
-}
-
-// Outside-click + Esc to close the dropdown. Installed once at startup and
-// cheap to run (early-returns when the dropdown isn't open).
-document.addEventListener('click', function(e) {
-  if (!nodeSelectorOpen) return;
-  const root = document.getElementById('node-selector');
-  if (root && root.contains(e.target)) return;
-  nodeSelectorOpen = false;
-  updateNodeSelector();
-});
-document.addEventListener('keydown', function(e) {
-  if (!nodeSelectorOpen) return;
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    nodeSelectorOpen = false;
-    updateNodeSelector();
-    const trigger = document.getElementById('ns-trigger');
-    if (trigger) trigger.focus();
-  }
-});
 
 /* ===== WebSocket Connection Manager ===== */
 
@@ -11352,8 +11222,8 @@ const wsm = {
     }
     updateStatusBar();
     // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
-    // no-op since #sidebar-status DOM was deleted; updateNodeSelector is
-    // already driven by this updateStatusBar() call.)
+    // no-op since #sidebar-status DOM was deleted; selectedNode reconciliation
+    // is already driven by this updateStatusBar() call.)
     if (s === WS_STATES.CONNECTED) {
       // No reconnect toast: the sidebar status row already conveys the
       // transition (amber "connecting..." dot → green "connected" dot,
