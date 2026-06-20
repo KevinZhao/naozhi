@@ -35,6 +35,22 @@ type Manager struct {
 
 	// bindingIndex: "platform:chatType:chatID" -> project name (built from all ChatBindings)
 	bindingIndex map[string]string
+
+	// resolveCache memoises ResolveWorkspaces' inode-walk fallback (ws path →
+	// project name, or "" for a confirmed no-match). It is consulted ONLY after
+	// the byte-wise strings.HasPrefix fast path misses, so the common (case-
+	// matching) workspace pays nothing. The fallback Stats every ancestor of a
+	// ws on a case-insensitive FS (macOS APFS/HFS+, Windows NTFS) where the
+	// configured projects_root and the on-disk path differ only in case — at
+	// 1 Hz × N dashboard polls that syscall fan-out would repeat every tick
+	// without this cache. Keyed by the raw ws string the caller passes.
+	//
+	// Lifetime: entries are valid only against the current m.projects snapshot,
+	// so Scan() clears the cache under m.mu.Lock when it swaps projects. The
+	// other writers (BindChat / SetFavorite / UpdateConfig) mutate a project's
+	// Config but never its Path, so a cached ws→name mapping stays correct
+	// across them and they deliberately do NOT clear it.
+	resolveCache sync.Map // ws string → string (project name; "" = no match)
 }
 
 // Option customises a Manager at construction time.
@@ -249,6 +265,13 @@ func (m *Manager) Scan() error {
 	m.mu.Lock()
 	m.projects = projects
 	m.rebuildBindingIndex()
+	// Drop the inode-walk fallback memo: it is keyed to the project set we just
+	// replaced, so a stale ws→name (e.g. a renamed/removed project, or a path
+	// that now resolves to a different deepest project) must not survive a
+	// rescan. Clear under the same write lock that swaps m.projects so a
+	// concurrent ResolveWorkspaces reader never sees fresh projects with a stale
+	// cache. Go 1.21+ sync.Map.Clear.
+	m.resolveCache.Clear()
 	m.mu.Unlock()
 
 	slog.Info("scanned projects", "root", m.root, "count", len(projects))
@@ -455,6 +478,16 @@ func (m *Manager) ProjectNames() map[string]struct{} {
 
 // ResolveWorkspaces maps workspace paths to project names in a single lock acquisition.
 // Returns a map from workspace path to project name. Paths that don't match any project are omitted.
+//
+// Matching is longest-prefix over the registered projects. The primary check is
+// a byte-wise strings.HasPrefix, which is exact and allocation-free. When that
+// misses for a ws, ResolveWorkspaces falls back to an inode-aware containment
+// walk (resolveWorkspaceByInode) so a case-insensitive filesystem (macOS
+// APFS/HFS+, Windows NTFS) still resolves the project even when the configured
+// projects_root and the on-disk workspace path differ only in case — e.g. root
+// "/Users/me/Workspace" vs a Claude-recorded cwd "/Users/me/workspace/foo".
+// Without the fallback those sessions render with no project/folder label in
+// the dashboard history panel even though they live under root.
 func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -483,11 +516,53 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 				}
 			}
 		}
+		if bestName == "" {
+			// Byte prefix missed for every project. On a case-insensitive FS the
+			// ws may still live under a project whose Path differs only in case,
+			// so probe inode containment (cached, since it Stats the FS).
+			bestName = m.resolveWorkspaceByInode(ws)
+		}
 		if bestName != "" {
 			result[ws] = bestName
 		}
 	}
 	return result
+}
+
+// resolveWorkspaceByInode is the inode-aware longest-prefix fallback for
+// ResolveWorkspaces. It is reached only when the byte-wise strings.HasPrefix
+// scan found no project for ws, so on a case-sensitive FS with matching case
+// (the common deployment) it is never called.
+//
+// It walks every registered project and asks osutil.PathContainedInRoot
+// whether ws is the same path as, or beneath, that project's Path — a check
+// that falls back to an os.SameFile ancestor walk and so honours the kernel's
+// case folding without hard-coding any OS-specific rules. Among the projects
+// that contain ws it keeps the longest Path (deepest project wins), preserving
+// the same longest-prefix semantics as the fast path.
+//
+// Results (including a confirmed no-match, cached as "") are memoised in
+// resolveCache because the SameFile walk Stats each ancestor and the dashboard
+// re-resolves the same workspaces at 1 Hz. Callers already hold m.mu.RLock; the
+// cache is a sync.Map so the concurrent reads are safe, and Scan clears it under
+// the write lock when m.projects is replaced.
+func (m *Manager) resolveWorkspaceByInode(ws string) string {
+	if v, ok := m.resolveCache.Load(ws); ok {
+		return v.(string)
+	}
+	var bestName string
+	var bestLen int
+	for _, p := range m.projects {
+		if len(p.Path) <= bestLen {
+			continue // a longer match already won; SameFile walk is the cost we skip
+		}
+		if osutil.PathContainedInRoot(ws, p.Path) {
+			bestName = p.Name
+			bestLen = len(p.Path)
+		}
+	}
+	m.resolveCache.Store(ws, bestName)
+	return bestName
 }
 
 // EffectivePlannerModel returns the model for the planner (project override > global default > "sonnet").
