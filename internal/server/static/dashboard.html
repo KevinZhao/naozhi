@@ -462,13 +462,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .files-ic{flex-shrink:0;width:18px;text-align:center}
 .files-name{flex:1;min-width:0;font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .files-meta{flex-shrink:0;font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
-.files-acts{flex-shrink:0;display:flex;gap:4px;opacity:0;transition:opacity .12s}
-.files-row:hover .files-acts{opacity:1}
-.files-act{padding:2px 8px;border-radius:var(--nz-radius-sm);border:1px solid var(--nz-border);background:var(--nz-bg-0);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-2xs);cursor:pointer}
-.files-act:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
 .files-main{flex:1;flex-direction:column;min-width:0;background:var(--nz-bg-0)}
 .files-main-head{flex-shrink:0;padding:12px 20px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
-.files-main-title-wrap{min-width:0;display:flex;flex-direction:column;gap:2px}
+.files-main-title-wrap{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.files-dl-btn{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+.files-dl-btn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
+.files-dl-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .files-main-title{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .files-main-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);font-family:var(--nz-font-mono)}
 .files-main-body{flex:1;overflow-y:auto;padding:20px;max-width:900px;width:100%;margin:0 auto}
@@ -2984,8 +2983,9 @@ body.kbd-open .sidebar-footer{display:none}
     <div class="files-main-head" id="files-main-head" hidden>
       <button type="button" class="btn-mobile-back" id="files-back" aria-label="返回列表">&#8249;</button>
       <div class="files-main-title-wrap"><span class="files-main-title" id="files-main-title">—</span><span class="files-main-sub" id="files-main-sub"></span></div>
+      <button type="button" class="files-dl-btn" id="files-download" title="下载此文件" aria-label="下载此文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>下载</span></button>
     </div>
-    <div class="files-main-body" id="files-main-body"><div class="files-empty">从左侧选择一个文件预览，或点「下载」保存到本地</div></div>
+    <div class="files-main-body" id="files-main-body"><div class="files-empty">点左侧文件即可预览，预览区右上角可下载</div></div>
   </main>
   <!-- Cron view: independent top-level view (peer of chat/assets), shown under
        body.nz-view-cron. renderCronPanel() in dashboard.js paints the existing

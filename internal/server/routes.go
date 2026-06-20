@@ -217,6 +217,10 @@ func (s *Server) registerDashboard() {
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
+	// instance-wide UI preferences (theme); persisted server-side so the
+	// choice survives a browser/device change or cache clear (dashboard_uiprefs.go)
+	s.mux.HandleFunc("GET /api/settings", auth(s.handleUISettingsGet))
+	s.mux.HandleFunc("PUT /api/settings", auth(s.handleUISettingsPut))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
 	// pprof / expvar debug endpoints: auth-gated + loopback-only AND
 	// gated behind server.debug_mode (default false) so a leaked dashboard

@@ -51,6 +51,19 @@ func EventsRoot(dataDir string) string {
 	return filepath.Join(dataDir, "events")
 }
 
+// UISettingsPath returns the dashboard UI-preferences file
+// (<dataDir>/ui-settings.json). Holds operator-chosen presentation state
+// (today: theme) that the dashboard used to keep only in browser
+// localStorage; persisting it server-side lets the choice survive a
+// browser/device change or a cache clear. Single-user model: one file for
+// the whole instance (docs note in internal/uiprefs).
+func UISettingsPath(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "ui-settings.json")
+}
+
 // CronJobsPath returns the cron job definitions file
 // (<dataDir>/cron_jobs.json).
 func CronJobsPath(dataDir string) string {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,56 @@ func TestHandleFilesUpload_Success(t *testing.T) {
 	if fi != nil && fi.Mode().Perm() != 0o600 {
 		t.Errorf("perm = %o, want 600", fi.Mode().Perm())
 	}
+}
+
+func TestHandleFilesUpload_EmptyFile(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	w := doUpload(t, h, "", proj, "", "empty.txt", []byte(""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty upload: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	fi, err := os.Stat(filepath.Join(projDir, "empty.txt"))
+	if err != nil || fi.Size() != 0 {
+		t.Errorf("empty file not written as 0 bytes: size=%v err=%v", fi, err)
+	}
+}
+
+func TestHandleFilesUpload_UnicodeRoundTrip(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	name := "中文笔记.md"
+	w := doUpload(t, h, "", proj, "", name, []byte("# 标题"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unicode upload: want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	got, err := os.ReadFile(filepath.Join(projDir, name))
+	if err != nil || string(got) != "# 标题" {
+		t.Errorf("unicode file round-trip failed: %q err=%v", got, err)
+	}
+}
+
+func TestCreateWorkspaceFile_ExclAndPerm(t *testing.T) {
+	// Direct unit test so both build variants (unix/windows) get a non-skipped
+	// assertion on the O_EXCL + perm contract.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	f, err := CreateWorkspaceFile(p, false)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = f.Close()
+	if fi, _ := os.Stat(p); fi != nil && runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Errorf("perm = %o, want 600", fi.Mode().Perm())
+	}
+	// Second create without overwrite must fail O_EXCL → ErrExist.
+	if _, err := CreateWorkspaceFile(p, false); !os.IsExist(err) {
+		t.Errorf("create existing without overwrite: want ErrExist, got %v", err)
+	}
+	// Overwrite truncates in place.
+	f2, err := CreateWorkspaceFile(p, true)
+	if err != nil {
+		t.Fatalf("overwrite create: %v", err)
+	}
+	_ = f2.Close()
 }
 
 func TestHandleFilesUpload_RootDir(t *testing.T) {
@@ -177,6 +228,26 @@ func TestHandleFilesUpload_GitSubtreeBlocked(t *testing.T) {
 	w := doUpload(t, h, "", proj, ".git/hooks", "post-checkout", []byte("#!/bin/sh"))
 	if w.Code != http.StatusForbidden {
 		t.Errorf(".git subtree write: want 403, got %d", w.Code)
+	}
+}
+
+func TestHandleFilesUpload_SymlinkedParentIntoControlDirRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	// A workspace symlink `docs -> .git` must not let an upload to dir=docs
+	// write into the .git control subtree (which the logical-path deny-list
+	// would miss). The resolved-path re-check must catch it.
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{".git/keep": "x"})
+	if err := os.Symlink(filepath.Join(projDir, ".git"), filepath.Join(projDir, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	w := doUpload(t, h, "", proj, "docs", "post-checkout", []byte("#!/bin/sh\nevil"))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("symlinked-parent into .git: want 403, got %d", w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".git", "post-checkout")); err == nil {
+		t.Errorf("write slipped into .git via symlinked parent")
 	}
 }
 
@@ -280,6 +351,8 @@ func TestValidUploadLeaf(t *testing.T) {
 		{".", "", false},
 		{"..", "", false},
 		{"", "", false},
+		{strings.Repeat("a", 255), strings.Repeat("a", 255), true},
+		{strings.Repeat("a", 256), "", false},
 	}
 	for _, tc := range cases {
 		got, ok := validUploadLeaf(tc.in)
