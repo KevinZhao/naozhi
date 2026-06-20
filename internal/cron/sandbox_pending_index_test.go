@@ -11,9 +11,49 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+// TestSandboxPendingIndex_ConcurrentReadWrite is a -race canary for
+// [R202606-PERF-001]: lookupSandboxPendingIndex takes the read lock while
+// set/clear take the write lock on the same sync.RWMutex. Many concurrent
+// readers racing a writer must surface any lock-discipline regression (e.g. a
+// reader downgraded to a plain map read without holding RLock) under -race.
+func TestSandboxPendingIndex_ConcurrentReadWrite(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	const jobID = "0123456789abcdef"
+	const path = "/tmp/sandboxpending/feedfacefeedface.json"
+
+	var wg sync.WaitGroup
+	// Writers: flip the entry in and out.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			s.setSandboxPendingIndex(jobID, path)
+			s.clearSandboxPendingIndex(jobID, path)
+		}
+	}()
+	// Readers: many concurrent RLock lookups.
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if got := s.lookupSandboxPendingIndex(jobID); got != "" && got != path {
+					t.Errorf("unexpected index value %q", got)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
 
 // TestSandboxPendingIndex_WriteThenLookup pins that writeSandboxPending
 // populates the index and the terminal clear removes it.

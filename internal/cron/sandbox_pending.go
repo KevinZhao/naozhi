@@ -120,9 +120,9 @@ func (s *Scheduler) clearSandboxPendingIndex(jobID, path string) {
 // lookupSandboxPendingIndex returns the recorded pending-file path for jobID
 // (write-authoritative; "" when no in-flight record exists this process).
 func (s *Scheduler) lookupSandboxPendingIndex(jobID string) string {
-	s.sandboxPendingMu.Lock()
+	s.sandboxPendingMu.RLock()
 	path := s.sandboxPendingIndex[jobID]
-	s.sandboxPendingMu.Unlock()
+	s.sandboxPendingMu.RUnlock()
 	return path
 }
 
