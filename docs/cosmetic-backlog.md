@@ -708,3 +708,5 @@
 - [R20260616-ARCH-3] SandboxRunMeta.isZero() 用全零相等，CostUSD==0&&ExitStatus==0 真成功会误判无 receipt（无 live trigger）— internal/cron/sandbox.go:119
 - [R20260616-LOGIC-3] decodeRunsParallel worker 解码超出 backfill window 的项（受 2*keepCount 界）— internal/cron/runstore_disklist.go:371
 - [R20260616-LOGIC-4] TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed 隐式依赖 limiter wiring，无显式断言 — internal/server/unauth_unknownip_failclosed_test.go:110
+- [R20260620-DEAD-1] #2180 移除节点选择器后 getNodeSessionCount(id) 零调用者（原唯一消费者 renderNodeDropdownHtml 已删）— internal/server/static/dashboard.js:9988
+- [R20260620-DEAD-2] #2180 退役 agent picker 后 availableAgents 只写（481/668）不读，可清理 — internal/server/static/dashboard.js:92

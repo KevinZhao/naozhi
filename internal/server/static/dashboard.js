@@ -784,16 +784,13 @@ function renderSidebar(data) {
       }
     });
     // Favorite projects get an empty group so their header is always rendered.
-    // Under the node filter, only inject favorites that belong to the
-    // currently-viewed node — otherwise switching to a remote would surface
-    // an empty header for every local favorite, which defeats the filter.
+    // The sidebar lists every connected node's sessions together (the per-node
+    // filter was removed in #2180 when the node selector moved into the New
+    // Session modal), so every favorite's header renders regardless of which
+    // node it lives on — matching the unfiltered session list above.
     projectsData.forEach(p => {
       if (!p.favorite) return;
       const pNode = p.node || 'local';
-      // Only suppress cross-node favorites when the filter is actually live
-      // (multi-node AND selectedNode non-null). Otherwise fall through to
-      // preserve the legacy "every favorite header always renders" behavior.
-      if (activeFilter && pNode !== selectedNode) return;
       const k = pNode + ':' + p.name;
       if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
     });
