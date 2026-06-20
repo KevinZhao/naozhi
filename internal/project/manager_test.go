@@ -892,3 +892,163 @@ func TestRebuildBindingIndex_OverwriteOnBind(t *testing.T) {
 		t.Error("ProjectForChat after double-bind = nil")
 	}
 }
+
+// ---- ResolveWorkspaces inode-walk fallback (case-insensitive FS) ----
+
+// TestResolveWorkspaces_InodeFallback is the CI-safe proxy for the macOS/Windows
+// case-fold bug where projects_root is configured as "/Users/me/Workspace" but
+// Claude records cwds as "/Users/me/workspace/foo" (the on-disk case). The byte
+// prefix then misses and the session renders with no folder label.
+//
+// On case-sensitive Linux CI we reproduce the exact "byte-different path, same
+// inode" condition with a symlink: <root>/proj is the real project, and we ask
+// ResolveWorkspaces to resolve a ws routed through an <alias> symlink that names
+// the same inode as root. HasPrefix fails (alias != root byte-wise), so the
+// inode walk must rescue the match — the same code path the real case-fold bug
+// exercises.
+func TestResolveWorkspaces_InodeFallback(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// alias -> real, so aliasWS is byte-different from the registered project
+	// Path (<root>/proj) yet names the same inode as <root>/proj/sub.
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "proj", "sub")
+
+	// Sanity: the byte fast path must genuinely miss, otherwise the test would
+	// pass without exercising the fallback.
+	if strings.HasPrefix(aliasWS+"/", filepath.Join(root, "proj")+"/") {
+		t.Fatalf("precondition failed: %q byte-prefixes the project path; "+
+			"fallback would not be exercised", aliasWS)
+	}
+
+	result := m.ResolveWorkspaces([]string{aliasWS})
+	if got := result[aliasWS]; got != "proj" {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want \"proj\" (inode fallback should match)", aliasWS, got)
+	}
+}
+
+// TestResolveWorkspaces_InodeFallback_LongestWins pins that the fallback keeps
+// the longest-prefix (deepest project) semantics of the byte fast path: when a
+// ws (reached via an inode-equal alias) lives under both an outer and an inner
+// registered project, the inner one must win.
+func TestResolveWorkspaces_InodeFallback_LongestWins(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	// outer = <root>/outer ; inner = <root>/outer/inner — both registered as
+	// projects (any non-hidden subdir under root is a project, and Scan also
+	// walks nested dirs that contain their own marker only via top-level
+	// ReadDir, so register inner as a sibling top-level whose Path nests under
+	// outer by constructing the tree explicitly).
+	makeProjectDir(t, root, "outer", nil)
+	innerName := "inner"
+	if err := os.MkdirAll(filepath.Join(root, "outer", innerName), 0o755); err != nil {
+		t.Fatalf("mkdir inner: %v", err)
+	}
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// Only top-level dirs under root become projects, so "outer" is the only
+	// registered project here; a ws under outer/inner must still resolve to
+	// "outer" via the fallback (deepest *registered* project).
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "outer", innerName, "deep")
+	result := m.ResolveWorkspaces([]string{aliasWS})
+	if got := result[aliasWS]; got != "outer" {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want \"outer\"", aliasWS, got)
+	}
+}
+
+// TestResolveWorkspaces_InodeFallback_SiblingNotMatched guards that the fallback
+// does not over-match a sibling directory. A ws under <tmp>/realOther (a
+// sibling of root, not beneath it) must resolve to nothing even though the
+// inode walk is in play.
+func TestResolveWorkspaces_InodeFallback_SiblingNotMatched(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	other := filepath.Join(tmp, "realOther")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatalf("mkdir other: %v", err)
+	}
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	otherWS := filepath.Join(other, "whatever")
+	result := m.ResolveWorkspaces([]string{otherWS})
+	if got, ok := result[otherWS]; ok {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want no match (sibling of root)", otherWS, got)
+	}
+}
+
+// TestResolveWorkspaces_FallbackCacheInvalidatedOnScan verifies the inode-walk
+// memo does not outlive a project rescan: a ws that resolved to a project must
+// stop resolving once that project's directory is removed and Scan re-runs.
+func TestResolveWorkspaces_FallbackCacheInvalidatedOnScan(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "proj", "sub")
+
+	// First resolve populates the fallback cache with proj→"proj".
+	if got := m.ResolveWorkspaces([]string{aliasWS})[aliasWS]; got != "proj" {
+		t.Fatalf("pre-rescan ResolveWorkspaces(%q) = %q, want \"proj\"", aliasWS, got)
+	}
+
+	// Remove the project directory and rescan; the cached mapping must be
+	// dropped so the ws no longer resolves.
+	if err := os.RemoveAll(filepath.Join(root, "proj")); err != nil {
+		t.Fatalf("remove proj: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if got, ok := m.ResolveWorkspaces([]string{aliasWS})[aliasWS]; ok {
+		t.Errorf("post-rescan ResolveWorkspaces(%q) = %q, want no match (cache should be invalidated)", aliasWS, got)
+	}
+}
