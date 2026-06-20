@@ -219,6 +219,13 @@ func (s *Scheduler) reconcileSandboxPending() {
 	// Serial when there is nothing to parallelise — avoid the goroutine +
 	// channel plumbing for the common single-orphan case.
 	if len(orphans) == 1 {
+		// R202606-CR-002: honor shutdown before the (up to sandboxStopTimeout)
+		// Stop, mirroring the per-orphan ctx.Err() gate the parallel path applies
+		// at line 241. Without this a SIGTERM during a single-orphan reconcile
+		// still blocks ~30s on the Stop, slowing shutdown.
+		if s.stopCtx.Err() != nil {
+			return
+		}
 		s.reconcileOneSandboxOrphan(orphans[0].p, orphans[0].path)
 		return
 	}

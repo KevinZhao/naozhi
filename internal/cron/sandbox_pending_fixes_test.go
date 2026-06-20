@@ -635,6 +635,42 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	}
 }
 
+// TestReconcileSandboxPending_ShutdownBeforeReconcileSkipsStop pins
+// R202606-CR-002 at the end-to-end level: with stopCtx already cancelled, a
+// single-orphan reconcile must NOT invoke StopSession. (The cancel is observed
+// at the inter-entry guard for an already-cancelled ctx; the new single-orphan
+// fast-path guard covers the narrower window where stopCtx is cancelled AFTER
+// the orphan list is built but BEFORE the serial reconcileOneSandboxOrphan
+// call — that window is not deterministically reachable from a black-box test,
+// so this test pins the observable contract and the fast-path guard mirrors the
+// parallel path's per-orphan ctx.Err() check for the racy window.)
+func TestReconcileSandboxPending_ShutdownBeforeReconcileSkipsStop(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	// Exactly one orphan → the single-orphan serial fast path.
+	writePendingFixture(t, storePath, sandboxPending{
+		JobID: j.ID, RunID: "abcabcabc0000006",
+		RuntimeSessionID: "run-abcabcabc0000006-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+	})
+
+	// Cancel stopCtx via Stop() (CAS-guarded; the scheduler was never Started).
+	s.Stop()
+
+	s.reconcileSandboxPending()
+
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 0 {
+		t.Fatalf("StopSession called %d time(s) after shutdown; want 0 [R202606-CR-002]", nStopped)
+	}
+}
+
 // TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics pins
 // R202606-CR-001 (#2156): when DeleteJobByID removes the job in the gap between
 // the RLock snapshot and the emitRunStarted/finishRun block, the orphan must be
