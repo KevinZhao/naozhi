@@ -190,9 +190,7 @@ func (l *EventLog) LastNVisibleAppend(dst []EventEntry, visibleTarget, maxTotal 
 // Useful for sync.Pool-backed callers that want to right-size their
 // scratch buffer before a LastNAppend call.
 func (l *EventLog) Count() int {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.count
+	return int(l.countAtomic.Load())
 }
 
 // EntriesSince returns entries after the given unix ms timestamp, in chronological order.
