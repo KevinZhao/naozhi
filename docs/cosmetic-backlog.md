@@ -710,3 +710,8 @@
 - [R20260616-LOGIC-4] TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed 隐式依赖 limiter wiring，无显式断言 — internal/server/unauth_unknownip_failclosed_test.go:110
 - [R20260620-DEAD-1] #2180 移除节点选择器后 getNodeSessionCount(id) 零调用者（原唯一消费者 renderNodeDropdownHtml 已删）— internal/server/static/dashboard.js:9988
 - [R20260620-DEAD-2] #2180 退役 agent picker 后 availableAgents 只写（481/668）不读，可清理 — internal/server/static/dashboard.js:92
+- [R202606b-GO-008] shim write handler `[]byte(msg.Line + "\n")` 双分配热路径 — internal/shim/server.go:1201
+- [R202606b-GO-009] scanUserPrompt 池切片在 bufio.Scanner 内部扩容后不回写,>16KiB 行失去池收益 — internal/discovery/scanner.go:754
+- [R202606b-ARCH-8] Scheduler 字段索引块与 per-field godoc 双份维护,必漂移 — internal/cron/scheduler.go:28-44
+- [R202606b-PERF-016] prepareInbound 每条入站消息 slog.With 分配新 logger(owner 路径丢弃) — internal/dispatch/dispatch.go:658-661
+- [R202606b-ARCH-7] internal/session/api 包仅 1 消费者(sysession),抽象成本>收益,可并入消费者 — internal/session/api/capabilities.go:1-42

@@ -572,15 +572,45 @@ type SlackConfig struct {
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
+// LogValue implements slog.LogValuer so the Slack credentials never land in
+// logs. Any slog.* call that serializes a SlackConfig redacts BotToken /
+// AppToken while non-secret fields survive. R202606b-SEC-2.
+func (c SlackConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("bot_token", redactSecret(c.BotToken)),
+		slog.String("app_token", redactSecret(c.AppToken)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
+}
+
 type DiscordConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+// LogValue implements slog.LogValuer so the Discord bot token never lands in
+// logs. R202606b-SEC-2.
+func (c DiscordConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("bot_token", redactSecret(c.BotToken)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
 }
 
 type WeixinConfig struct {
 	Token          string `yaml:"token"`
 	BaseURL        string `yaml:"base_url"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+// LogValue implements slog.LogValuer so the WeCom token never lands in logs.
+// The non-secret BaseURL / MaxReplyLength survive. R202606b-SEC-2.
+func (c WeixinConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("token", redactSecret(c.Token)),
+		slog.String("base_url", c.BaseURL),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
 }
 
 type TranscribeConfig struct {

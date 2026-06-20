@@ -161,6 +161,55 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 // to seen on emit). Empty UUIDs bypass dedup entirely and are kept
 // as-is; see the package-level comment on "Missing UUID".
 func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
+	// Fast paths: when only one tier carries data (the common upgrade
+	// case — events/ empty so fallback fills the gap, or Claude JSONL
+	// absent so only local has rows) the dedup `seen` map is pure waste:
+	// it's only ever READ for fallback entries against local-seeded keys,
+	// so with one side empty the map is built and never consulted (or only
+	// consulted for the surviving tier's self-dedup, which we inline).
+	//
+	// fallback empty: `seen` would be seeded from local but the only reads
+	// of `seen` happen in the two fallback loops, both of which are no-ops
+	// when len(fallback)==0. The remaining work is exactly emit(local[i])
+	// for every i in order — i.e. local filtered by emit's cutoff. No map,
+	// no dedup. Element-for-element identical to the general path.
+	if len(fallback) == 0 {
+		out := make([]cli.EventEntry, 0, len(local))
+		for _, e := range local {
+			if beforeMS > 0 && e.Time >= beforeMS {
+				continue
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+	// local empty: step-1 seeding produces an empty `seen`, the two-way
+	// merge loop never runs (no local), and only the fallback tail-flush
+	// executes. That flush is: keep empty-UUID entries unconditionally;
+	// for non-empty UUIDs, keep the FIRST occurrence and drop later dups;
+	// all subject to emit's cutoff. We replicate that self-dedup exactly so
+	// the output matches the general path element-for-element. The map is
+	// only allocated when fallback actually contains a non-empty UUID dup
+	// candidate — here we still build it (fallback may carry dups) but skip
+	// seeding from a (non-existent) local tier.
+	if len(local) == 0 {
+		seen := make(map[string]struct{}, len(fallback))
+		out := make([]cli.EventEntry, 0, len(fallback))
+		for _, e := range fallback {
+			if beforeMS > 0 && e.Time >= beforeMS {
+				continue
+			}
+			if e.UUID != "" {
+				if _, dup := seen[e.UUID]; dup {
+					continue
+				}
+				seen[e.UUID] = struct{}{}
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+
 	// Step 1: seed `seen` with the UUID of every local entry that the
 	// merge will actually emit so fallback entries are checked against
 	// the full *visible* local set, not just those already emitted. The

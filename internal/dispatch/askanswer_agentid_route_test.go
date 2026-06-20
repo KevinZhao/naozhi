@@ -61,6 +61,51 @@ func TestIsKnownAgent(t *testing.T) {
 	}
 }
 
+// TestIsKnownAgent_MultipleCommands pins the O(1) prebuilt-set lookup
+// (R202606b-PERF-001): every agentCommands value is reachable, distinct
+// commands may share an agent id, and the always-probed general/planner
+// remain known regardless of the configured commands.
+func TestIsKnownAgent_MultipleCommands(t *testing.T) {
+	t.Parallel()
+	fp := &fakePlatform{}
+	d, err := NewDispatcher(DispatcherConfig{
+		Router:    session.NewRouter(session.RouterConfig{MaxProcs: 10}),
+		Platforms: map[string]platform.Platform{"fake": fp},
+		Agents:    map[string]session.AgentOpts{},
+		AgentCommands: map[string]string{
+			"review": "code-reviewer",
+			"cr":     "code-reviewer", // alias → same agent id
+			"ops":    "ops-agent",
+		},
+		Guard: newFakeGuard(),
+		Dedup: platform.NewDedup(100),
+		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+			return &cli.SendResult{Text: "ok"}, nil
+		},
+		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
+		WatchdogNoOutputKills: new(atomic.Int64),
+		WatchdogTotalKills:    new(atomic.Int64),
+		NoOutputTimeout:       5 * time.Second,
+		TotalTimeout:          30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	cases := map[string]bool{
+		"general":       true,
+		"planner":       true,
+		"code-reviewer": true,
+		"ops-agent":     true,
+		"review":        false, // command name, not an agent id
+		"unknown":       false,
+	}
+	for id, want := range cases {
+		if got := d.isKnownAgent(id); got != want {
+			t.Errorf("isKnownAgent(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
 // TestPrepareInbound_ExplicitAgentIDRoutesToAsker pins the #2148 fix: a card
 // answer (no /agent prefix) with AgentID="code-reviewer" must resolve to the
 // code-reviewer agent and a session key embedding it.

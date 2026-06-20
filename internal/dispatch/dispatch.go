@@ -101,6 +101,13 @@ type Dispatcher struct {
 	// session.AgentOpts maps.
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
+	// knownAgentIDs is a read-only reverse-lookup set of every agentID that
+	// isKnownAgent accepts: the agentCommands values plus the always-probed
+	// "general"/"planner". Built once in NewDispatcher from agentCommands
+	// (which is immutable thereafter, see above), so isKnownAgent is O(1)
+	// instead of an O(k) scan over agentCommands on every inbound message
+	// that carries an explicit AgentID (#2148 card answers). [R202606b-PERF-001]
+	knownAgentIDs map[string]struct{}
 	// scheduler is the cron-side consumer surface dispatch slash-commands
 	// need (CronCommands, cron_consumer.go). Production wiring passes the
 	// server-side cronDispatchAdapter; tests inject a fake without
@@ -217,15 +224,8 @@ func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) stri
 // click) before it can override slash-command resolution, so a hostile or
 // replayed card value can't route an answer into an arbitrary agent (#2148).
 func (d *Dispatcher) isKnownAgent(agentID string) bool {
-	if agentID == "general" || agentID == "planner" {
-		return true
-	}
-	for _, id := range d.agentCommands {
-		if id == agentID {
-			return true
-		}
-	}
-	return false
+	_, ok := d.knownAgentIDs[agentID]
+	return ok
 }
 
 // Metrics returns a snapshot of operational counters for /health.
@@ -528,6 +528,17 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogNoOutputKills: cfg.WatchdogNoOutputKills,
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
+	}
+	// Prebuild the known-agent reverse-lookup set so isKnownAgent is O(1)
+	// on the inbound hot path (#2148 card answers). agentCommands is
+	// immutable after construction (see Dispatcher.agentCommands doc), so
+	// this snapshot stays correct for the dispatcher's lifetime.
+	// [R202606b-PERF-001]
+	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)
+	d.knownAgentIDs["general"] = struct{}{}
+	d.knownAgentIDs["planner"] = struct{}{}
+	for _, id := range d.agentCommands {
+		d.knownAgentIDs[id] = struct{}{}
 	}
 	// Headless / test wirings may also leave the watchdog kill counters
 	// unset. Production wiring sets them, but tests routinely build a
