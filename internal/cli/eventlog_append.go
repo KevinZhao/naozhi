@@ -140,6 +140,7 @@ func (l *EventLog) Append(e EventEntry) {
 	l.head = (l.head + 1) % l.maxSize
 	if l.count < l.maxSize {
 		l.count++
+		l.countAtomic.Add(1)
 	}
 	// R260528-PERF-22 (#1360): pin the ring slot for agent/task_start so
 	// the linker's OnResolve callback can hop straight here without the
@@ -441,6 +442,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
 			l.count++
+			l.countAtomic.Add(1)
 		}
 		// R260528-PERF-22 (#1360): pin agent/task_start ring slots so
 		// the SubagentLinker's OnResolve can backfill in O(1). Recorded

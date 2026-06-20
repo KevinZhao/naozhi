@@ -191,6 +191,72 @@ func TestHandleRunEvents_RedactsSecrets(t *testing.T) {
 	}
 }
 
+// TestHandleRunEvents_RedactsAbsolutePaths verifies R202606-SEC-008: absolute
+// filesystem paths in the sandbox event NDJSON are redacted to "<path>" before
+// reaching the wire so the host's filesystem layout is not leaked to an
+// authenticated operator. The redacted response must still be valid JSON.
+func TestHandleRunEvents_RedactsAbsolutePaths(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{
+		StorePath:      filepath.Join(tmp, "cron_jobs.json"),
+		AllowNilRouter: true,
+	}, cronpkg.SchedulerDeps{})
+
+	jobID := strings.Repeat("e", 16)
+	runID := strings.Repeat("f", 16)
+	evDir := filepath.Join(tmp, "sandboxevents", jobID)
+	if err := os.MkdirAll(evDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	secretPath := "/home/ec2-user/.aws/credentials"
+	lines := `{"kind":"cli","line":{"type":"tool_use","name":"Read","input":{"file_path":"` + secretPath + `"}}}` + "\n" +
+		`{"kind":"cli","line":{"type":"tool_result","content":"cat: /etc/shadow: Permission denied"}}` + "\n" +
+		`{"kind":"exit","code":0}` + "\n"
+	if err := os.WriteFile(filepath.Join(evDir, runID+".ndjson"), []byte(lines), 0o600); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := &Handlers{scheduler: sched}
+	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
+	req.SetPathValue("run_id", runID)
+	w := httptest.NewRecorder()
+	h.HandleRunEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	if strings.Contains(body, secretPath) {
+		t.Errorf("R202606-SEC-008: absolute path leaked in events response: %q", secretPath)
+	}
+	if strings.Contains(body, "/etc/shadow") {
+		t.Errorf("R202606-SEC-008: absolute path /etc/shadow leaked in events response")
+	}
+	if !strings.Contains(body, "<path>") {
+		t.Errorf("R202606-SEC-008: expected <path> redaction marker in response, got: %s", body)
+	}
+
+	// Response must still be valid JSON with 3 events, each still valid JSON.
+	var resp struct {
+		Events []json.RawMessage `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("R202606-SEC-008: redacted response is not valid JSON: %v", err)
+	}
+	if len(resp.Events) != 3 {
+		t.Fatalf("R202606-SEC-008: events = %d, want 3", len(resp.Events))
+	}
+	for i, ev := range resp.Events {
+		var v map[string]any
+		if err := json.Unmarshal(ev, &v); err != nil {
+			t.Errorf("R202606-SEC-008: event[%d] is not valid JSON after redaction: %v (%s)", i, err, ev)
+		}
+	}
+}
+
 // TestHandleRunEvents_ErrorPathsUseJSONStatus verifies R20260613-SEC-10: the
 // error paths in HandleRunEvents use WriteJSONStatus (JSON + nosniff) rather
 // than bare http.Error (text/plain).

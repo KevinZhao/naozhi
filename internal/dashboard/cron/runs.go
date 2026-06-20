@@ -299,9 +299,17 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	// textutil.RedactSecrets replaces known secret-token shapes with [REDACTED]
 	// while preserving JSON validity: secret chars are alphanumeric/-/_ which
 	// are all legal inside a JSON string, and [REDACTED] is equally legal there.
+	//
+	// [R202606-SEC-008] also redact absolute filesystem paths, matching the
+	// transcript endpoint's order (RedactSecrets → RedactAbsolutePaths in
+	// sanitizeWireText). A sandbox tool-call input can echo host paths (e.g.
+	// /home/<user>/.aws/credentials, ~/.ssh/id_rsa) which leak the host's
+	// filesystem layout to an authenticated operator. osutil.RedactAbsolutePaths
+	// swaps each path token for the literal "<path>", which is legal inside a
+	// JSON string, so the NDJSON line stays valid JSON.
 	events := make([]json.RawMessage, len(lines))
 	for i, ln := range lines {
-		redacted := textutil.RedactSecrets(string(ln))
+		redacted := osutil.RedactAbsolutePaths(textutil.RedactSecrets(string(ln)))
 		events[i] = json.RawMessage(redacted)
 	}
 	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})

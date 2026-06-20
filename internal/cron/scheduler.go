@@ -331,8 +331,10 @@ type Scheduler struct {
 
 	// sandboxPendingMu guards sandboxPendingIndex. It is independent of s.mu
 	// (the §6.5 write/remove seams run lock-free w.r.t. the jobs trio) so the
-	// hot delete path never contends with job CRUD.
-	sandboxPendingMu sync.Mutex
+	// hot delete path never contends with job CRUD. RWMutex so the pure-read
+	// lookup path (lookupSandboxPendingIndex, the hot delete fast path) does not
+	// serialize against concurrent reads [R202606-PERF-001].
+	sandboxPendingMu sync.RWMutex
 	// sandboxPendingIndex maps jobID → its in-flight §6.5 pending file path,
 	// maintained write-authoritatively at the two write paths
 	// (writeSandboxPending sets, the terminal remove clears). It lets
