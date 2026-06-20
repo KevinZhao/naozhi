@@ -2,7 +2,14 @@ package dispatch
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/session"
 
 	"github.com/naozhi/naozhi/internal/platform"
 )
@@ -100,6 +107,82 @@ func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
 	got := removedIDs(rp)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 reactions cleared on panic (m1, m2), got %v", got)
+	}
+}
+
+// TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions covers
+// R20260614-LOGIC-001: when a drain batch has already been pulled OUT of the
+// ring by DoneOrDrain and the subsequent sendAndReply panics, the drained
+// batch's HOURGLASS reactions must still be cleared. handleOwnerLoopPanic's
+// DiscardAndReturn only sees the ring (now empty for the drained batch), so
+// without the recover-defer's pendingClear cleanup those reactions would hang
+// until the platform reaction-cache TTL (feishu: 12h), falsely telling the
+// user the message is still queued.
+//
+// Setup: the FIRST turn's GetOrCreate returns an error (clean turn, no panic,
+// no queued reaction on the owner's own message). A follow-up is enqueued so
+// the drain loop pulls it out; the SECOND GetOrCreate panics, exercising the
+// drained-batch path.
+func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
+	rp := &fakeReactorPlatform{}
+	var calls atomic.Int64
+	router := &fakeSessionRouter{
+		notifyIdle: func() {},
+		getOrCreate: func(_ context.Context, _ string, _ session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+			n := calls.Add(1)
+			if n == 1 {
+				// First (owner) turn: fail cleanly so sendAndReply returns
+				// via handleGetOrCreateError without panicking.
+				return nil, session.SessionStatus(0), errors.New("first turn fails cleanly")
+			}
+			// Drain turn: panic INSIDE sendAndReply, after the batch has
+			// already been removed from the ring by DoneOrDrain.
+			panic("boom during drained turn")
+		},
+	}
+	d := &Dispatcher{
+		platforms: map[string]platform.Platform{"fake": rp},
+		// collectDelay 0 → drain timer fires immediately.
+		queue:  NewMessageQueue(8, 0),
+		router: router,
+		caps:   NoopCapabilities{},
+	}
+
+	const key = "im:direct:u1:general"
+	msg := platform.IncomingMessage{Platform: "fake", ChatID: "u1", MessageID: "m0"}
+
+	// Owner acquires ownership (no queued reaction on its own message).
+	owner := QueuedMsg{Text: "owner", MessageID: "m0"}
+	isOwner, _, _, gen, _ := d.queue.Enqueue(key, owner)
+	if !isOwner {
+		t.Fatalf("expected owner on first Enqueue")
+	}
+	// Follow-up sits in the ring carrying a HOURGLASS reaction; it will be
+	// drained out by DoneOrDrain then lost to a panic in sendAndReply.
+	d.queue.Enqueue(key, QueuedMsg{Text: "f1", MessageID: "m1"})
+
+	// ownerLoop recovers the panic internally; it must not propagate.
+	// Pass a non-nil logger: ownerLoop enriches it via lg.With at entry,
+	// matching production wiring (BuildHandler always supplies one).
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d.ownerLoop(context.Background(), key, gen, owner, "general", session.AgentOpts{}, msg, lg)
+
+	// Wait briefly for any cleanup; the clear happens synchronously inside
+	// the recover defer before ownerLoop returns, but poll to be robust.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(removedIDs(rp)) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	got := removedIDs(rp)
+	if len(got) != 1 || got[0] != "m1" {
+		t.Fatalf("expected drained batch reaction m1 cleared on panic, got %v", got)
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("expected at least 2 GetOrCreate calls (first + drain), got %d", calls.Load())
 	}
 }
 

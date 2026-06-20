@@ -662,3 +662,49 @@
 - [R202606-ARCH-5] cronConfigMaps 的 atomic.Pointer COW seam 为尚不存在的 hot-reload writer 预付（speculative generality） — internal/cron/scheduler_config.go:463
 - [R202606-PERF-024] cli deliverEvent 每事件两次 select（killCh + eventCh），高频 streaming 可合并为三路 select — internal/cli/process_readloop.go:909
 - [R202606-PERF-025] session storeMetaPath 每次 30s save 重算 Base/Ext/Dir 拼接，可在 Router 构建时缓存 — internal/session/store.go:135
+- [R20260614-SEC-8] redactEntrySecrets 仅处理 Summary/Detail,Type/ImagePaths 等字段不脱敏(Type 为内部 enum,实际不携带自由文本) — internal/server/wshub_eventpush_redact.go:22
+- [R20260614-GO-002] writeStoreData 的 Load→EnsureDir→Store 非原子,并发 save 可双进(EnsureDir 幂等,无害) — internal/session/store.go:454
+- [R20260614-COSM-2] reconcileOneSandboxOrphan 合成 emitRunStarted 恒用 TriggerScheduled,manual replay orphan 显示 scheduled 图标 — internal/cron/sandbox_pending.go:228
+- [R20260614-ARCH-4] Server 结构体 48 字段 god-object(已有 server-split phased plan 在进行,需 RFC) — internal/server/server.go:81
+- [R20260614-GO-002] CronRunInflight.Add(1) 在 defer 注册之后 — 经核实为误报(直线代码先于任何 panic),记录避免重复审查 — internal/cron/sandbox_replay.go:284
+- [R20260614-SEC-10] containsYAMLBreakingByte 未拒绝 Unicode U+2028/U+2029(YAML1.2 不视为换行,当前无 trigger) — internal/config/config.go:1477
+- [R20260614-SEC-3] 建议审计所有 cron 渲染函数的 server 字符串是否经 esc()(假设性,未发现具体未转义点) — internal/server/static/cron_view.js:3588
+- [R20260614-LOGIC-003] EffectivePlannerModel godoc 称 fallback 'sonnet' 但返回 ''(godoc 与实现不符,纯文档) — internal/project/manager.go:385
+- [R202606-SEC-002] resolveClaudeProjectsDir 接受 CLAUDE_PROJECTS_DIR 未校验绝对路径(运营配置硬化,非攻击面) — internal/server/claude_paths.go:33
+- [R202606-ARCH-1] sandboxevents/sandboxpending/sandboxattention 子目录名为 magic string 跨 8 处重复无共享 const(无 trigger,typo 才会 desync) — internal/cron/sandbox.go:486
+- [R202606-ARCH-3] sandboxEventSink godoc 写 sandbox_events/(下划线)但代码用 sandboxevents/(纯文档不符) — internal/cron/sandbox.go:472
+- [R202606-PERF-001] saveKnownIDs 用裸 json.Marshal 未复用 storeMarshalBufPool(5min/tick 冷路径微优化) — internal/session/store.go:660
+- [R202606-PERF-003] writeSandboxPending 每次 run 启动无条件 os.MkdirAll 未缓存(可加 sync.Once,微优化) — internal/cron/sandbox_pending.go:48
+- [R20260615-030459-GO-002] selfupdate latestTransport dead-else 注释易误读为"故意跳过 SSRF guard" — internal/selfupdate/selfupdate.go:87
+- [R20260615-030459-SEC-9] NAOZHI_CLI_DEBUG 启动应 WARN "captures API credentials" — internal/cli/cli_debug.go:69
+- [R20260615-030459-SEC-12] /health 暴露 node IDs 给已认证用户(凭证泄漏时辅助横移) — internal/server/health.go:279
+- [R20260615-030459-SEC-13] font-src cdn.jsdelivr.net 无 SRI(KaTeX 字体)待 vendoring — internal/server/routes.go:524
+- [R20260615-030459-ARC-3] cron notice-localize guard test 注释引用 stale 行号 scheduler_run.go:1595 — internal/cron/cron_notice_apierr_localize_test.go:19
+- [R20260615-030459-COR-005] reconcile corrupt-record log 在 err==nil 时仍打 err=nil 字段(IsValidID 失败路径) — internal/cron/sandbox_pending.go:131
+- [R20260616-GO-002] RecentSessionsCtx 接受 nil context 静默替换 Background 掩盖 caller bug — internal/discovery/recent.go:104
+- [R20260616-GO-003] recent sessions 扫描超时 slog.Warn 无 DeadlineExceeded/Canceled 区分 — internal/discovery/recent.go:136
+- [R20260616-SEC-4] SameOriginOK 在 Origin+Referer 均缺失时放行未检查 bearer token 存在 — internal/dashboard/auth/csrf.go:88
+- [R20260616-SEC-5] Feishu AES-CBC decrypt 用攻击者可控 IV 无 IV 真实性校验（受上游签名校验保护） — internal/platform/feishu/crypto.go:45
+- [R20260616-SEC-9] /livez /readyz 探针完全无鉴权无限流 可被扫描器持续轮询追踪 uptime — internal/server/health.go:180
+- [R20260616-SEC-10] feishu pkcs7Unpad 非常量时间循环 理论 padding-oracle 时序侧信道（受上游 HMAC 保护） — internal/platform/feishu/crypto.go:66
+- [R20260616-PERF-005] HandleUpgrade 每个 WS 连接 new 两个 rate.Limiter — internal/server/wshub_upgrade.go:141
+- [R20260616-PERF-008] writeStoreData 每 30s tick 一次 storeDirEnsured sync.Map.Load 装箱 — internal/session/store.go:653
+- [R20260616-PERF-012] cliAvailableAt 每 60s TTL 刷新 sync.Map.Store 装箱 cliAvailEntry — internal/server/health_systeminfo.go:59
+- [R20260616-PERF-014] Cleanup pruneCandidates/candidates slice 每 5min tick 重新分配未池化 — internal/session/router_cleanup.go:316
+- [R20260616-ARCH-3] RuntimeSessionID validate-then-skip 块 3 处重复 log-level 不一致 — internal/cron/sandbox_pending.go:166
+- [R20260616-ARCH-4] .json dir-entry 扫描循环在 cron sandbox 文件重复 4 次 — internal/cron/sandbox_pending.go:106
+- [R20260616-GO-002] isKnownAgent 线性扫描 agentCommands map values，可建反查 map[string]struct{} — internal/dispatch/dispatch.go:222
+- [R20260616-SEC-4] WS owner-slot 耗尽路径无 metrics counter，静默 200-then-RST 无告警信号 — internal/server/wshub_upgrade.go:168
+- [R20260616-SEC-5] weixin contextToken 来自 iLink relay 未做控制字符 sanitize 即存储/日志 — internal/platform/weixin/weixin.go:416
+- [R20260616-SEC-6] feishu webhook semaphore 满时静默返回 200 丢消息，无丢弃 metric — internal/platform/feishu/transport_hook.go:412
+- [R20260616-SEC-8] sandboxPendingDir Lstat-symlink guard 在多租户主机有 Lstat→MkdirAll TOCTOU（单租户低危）— internal/cron/sandbox_pending.go:61
+- [R20260616-PERF-001] subsystemProbes 每次 /health 调用新建 []HealthProbe{4} 可构造期缓存 — internal/server/health_probe.go:88
+- [R20260616-PERF-003] lookupSandboxPendingIndex 用 Mutex 全锁做只读 map 查，可升 RWMutex — internal/cron/sandbox_pending.go:123
+- [R20260616-PERF-005] ringSnapshot 单条读也 make 整 limit 长 slice，可加 append 变体复用 buffer — internal/cron/runstore_ring.go:95
+- [R20260616-PERF-009] handleHealth 每 1Hz poll 调 runtime.NumGoroutine() STW，可粗粒度采样缓存 — internal/server/health.go:277
+- [R20260616-PERF-010] broadcastSessionSystemEvent 零认证客户端时仍取 pool+进 for-chunk，可加零客户端短路 — internal/server/wshub_broadcast.go:437
+- [R20260616-ARCH-1] agentcore.ResultMetaOf/ResultMeta 跨包无调用者，可 unexport 或统一经 RunResult 读取 — internal/agentcore/envelope.go:126
+- [R20260616-ARCH-2] holdStream 对 result 行最多 3 次部分 decode，可在 observe 一次解码集中 — internal/agentcore/client.go:243
+- [R20260616-ARCH-3] SandboxRunMeta.isZero() 用全零相等，CostUSD==0&&ExitStatus==0 真成功会误判无 receipt（无 live trigger）— internal/cron/sandbox.go:119
+- [R20260616-LOGIC-3] decodeRunsParallel worker 解码超出 backfill window 的项（受 2*keepCount 界）— internal/cron/runstore_disklist.go:371
+- [R20260616-LOGIC-4] TestHandleUpgrade_TrustedProxy_MissingXFF_FailsClosed 隐式依赖 limiter wiring，无显式断言 — internal/server/unauth_unknownip_failclosed_test.go:110

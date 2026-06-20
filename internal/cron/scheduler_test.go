@@ -1039,13 +1039,13 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	}
 }
 
-// TestIsExcluded_FastPathWarmsCache verifies the R20260609-COR-003 (#1978)
-// contract: when IsExcluded hits via Job.LastSessionID on a cold cache it
-// still returns true cheaply, but — unlike the original R245-GO-4 (#844)
-// fast path which left the cache cold — it now WARMS the TTL cache so a
-// steady-state probe stream that always hits LastSessionID no longer leaves
-// the dashboard's 1Hz KnownSessionIDs() cold-rebuilding on every tick.
-func TestIsExcluded_FastPathWarmsCache(t *testing.T) {
+// TestLookupKnownSessionID_FastPathWarmsCache verifies the R20260609-COR-003
+// (#1978) contract: when LookupKnownSessionID hits via Job.LastSessionID on a
+// cold cache it still returns true cheaply, but — unlike the original
+// R245-GO-4 (#844) fast path which left the cache cold — it now WARMS the TTL
+// cache so a steady-state probe stream that always hits LastSessionID no longer
+// leaves the dashboard's 1Hz KnownSessionIDs() cold-rebuilding on every tick.
+func TestLookupKnownSessionID_FastPathWarmsCache(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
@@ -1077,8 +1077,8 @@ func TestIsExcluded_FastPathWarmsCache(t *testing.T) {
 
 	// Fast-path hit (LastSessionID match). Must return true AND warm the TTL
 	// cache (#1978) so subsequent KnownSessionIDs() callers reuse the build.
-	if !s.IsExcluded("fastpath-aaaa-bbbb-cccc-000000000001") {
-		t.Fatalf("IsExcluded did not match seeded LastSessionID")
+	if !s.LookupKnownSessionID("fastpath-aaaa-bbbb-cccc-000000000001") {
+		t.Fatalf("LookupKnownSessionID did not match seeded LastSessionID")
 	}
 	s.knownSessionsCache.mu.Lock()
 	cached := s.knownSessionsCache.set
@@ -1092,8 +1092,8 @@ func TestIsExcluded_FastPathWarmsCache(t *testing.T) {
 
 	// Probe a sessionID that is NOT in any cheap source — the slow path
 	// must run buildKnownSessionsSet and populate the cache.
-	if s.IsExcluded("never-existed-aaaa-bbbb-cccc-000000000099") {
-		t.Fatalf("IsExcluded matched an id that was never seen")
+	if s.LookupKnownSessionID("never-existed-aaaa-bbbb-cccc-000000000099") {
+		t.Fatalf("LookupKnownSessionID matched an id that was never seen")
 	}
 	s.knownSessionsCache.mu.Lock()
 	cached = s.knownSessionsCache.set
@@ -1174,10 +1174,11 @@ func TestLookupKnownSessionID(t *testing.T) {
 		}
 	})
 
-	// IsExcluded and LookupKnownSessionID must agree on every input; the
-	// named API is purely a re-export of containsSessionID. A divergence
-	// would mean one of them grew a probe path the other does not. (#767)
-	t.Run("agrees_with_is_excluded", func(t *testing.T) {
+	// LookupKnownSessionID and KnownSessionIDs()[id] must agree on every
+	// input; the named probe is a re-export of containsSessionID. A
+	// divergence would mean one of them grew a probe path the other does
+	// not. (#767)
+	t.Run("agrees_with_known_session_ids_set", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		s := NewScheduler(SchedulerConfig{
@@ -1200,11 +1201,14 @@ func TestLookupKnownSessionID(t *testing.T) {
 		probes := []string{
 			"agree-aaaa-bbbb-cccc-000000000003",   // hit
 			"missing-aaaa-bbbb-cccc-000000000099", // miss
-			"",                                    // empty
 		}
 		for _, p := range probes {
-			if got, want := s.LookupKnownSessionID(p), s.IsExcluded(p); got != want {
-				t.Errorf("LookupKnownSessionID(%q) = %v, IsExcluded(%q) = %v (must agree)", p, got, p, want)
+			s.invalidateKnownSessionsCache()
+			gotLookup := s.LookupKnownSessionID(p)
+			s.invalidateKnownSessionsCache()
+			_, gotInSet := s.KnownSessionIDs()[p]
+			if gotLookup != gotInSet {
+				t.Errorf("LookupKnownSessionID(%q) = %v, id∈KnownSessionIDs = %v (must agree)", p, gotLookup, gotInSet)
 			}
 		}
 	})

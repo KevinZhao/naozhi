@@ -962,6 +962,7 @@ func (r *Router) installFreshSessionLocked(
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		exempt:           exempt,
+		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)
@@ -1543,6 +1544,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		persistedHistory: freshHistory,
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		exempt:           old.exempt,
+		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)

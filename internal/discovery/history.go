@@ -171,16 +171,17 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 	return "", nil
 }
 
-// pathCacheKey packs claudeDir + sessionID into a single map key. NUL
-// byte separates the two fields so "prefix" collisions between
-// similarly-named claude dirs cannot produce false hits.
-func pathCacheKey(claudeDir, sessionID string) string {
-	return claudeDir + "\x00" + sessionID
+// pathCacheKey packs claudeDir + sessionID into a struct map key. A
+// struct key (vs a packed "dir\x00id" string) avoids the per-call string
+// concatenation+allocation on the hot lookup path while still keeping the
+// two fields distinct so similarly-named claude dirs cannot collide.
+func pathCacheKey(claudeDir, sessionID string) pathKey {
+	return pathKey{dir: claudeDir, id: sessionID}
 }
 
 // pathCacheLookup returns (path, true) on a hit, ("", false) on a miss
 // or an expired negative entry. Hot path: takes only RLock.
-func (s *Scanner) pathCacheLookup(key string) (string, bool) {
+func (s *Scanner) pathCacheLookup(key pathKey) (string, bool) {
 	s.pathCache.RLock()
 	entry, ok := s.pathCache.entries[key]
 	s.pathCache.RUnlock()
@@ -200,7 +201,7 @@ func (s *Scanner) pathCacheLookup(key string) (string, bool) {
 // is skipped when the map size is within bounds; above cap we drop
 // expired negative entries first (positive entries are strictly more
 // valuable because each represents a full ReadDir already amortized).
-func (s *Scanner) pathCacheStorePositive(key, path string) {
+func (s *Scanner) pathCacheStorePositive(key pathKey, path string) {
 	s.pathCache.Lock()
 	defer s.pathCache.Unlock()
 	if len(s.pathCache.entries) >= pathCacheMaxEntries {
@@ -212,7 +213,7 @@ func (s *Scanner) pathCacheStorePositive(key, path string) {
 // pathCacheStoreNegative commits a "scanned and didn't find it" verdict
 // with a bounded TTL so a later-created JSONL is still picked up on
 // the next lookup.
-func (s *Scanner) pathCacheStoreNegative(key string) {
+func (s *Scanner) pathCacheStoreNegative(key pathKey) {
 	s.pathCache.Lock()
 	defer s.pathCache.Unlock()
 	if len(s.pathCache.entries) >= pathCacheMaxEntries {
@@ -225,7 +226,7 @@ func (s *Scanner) pathCacheStoreNegative(key string) {
 
 // pathCacheInvalidate drops a cached entry, used by callers that just
 // observed the cached path no longer exists on disk.
-func (s *Scanner) pathCacheInvalidate(key string) {
+func (s *Scanner) pathCacheInvalidate(key pathKey) {
 	s.pathCache.Lock()
 	delete(s.pathCache.entries, key)
 	s.pathCache.Unlock()

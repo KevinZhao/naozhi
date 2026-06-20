@@ -35,7 +35,14 @@ type HealthHandler struct {
 	watchdogTotal      *atomic.Int64
 	nodeAccess         NodeAccessor
 	platforms          map[string]struct{} // platform names (read-only after init)
-	hubDropped         func() int64        // hub.DroppedMessages
+	// platformsStatus is the pre-built {name: "registered"} map served as the
+	// /health `platforms` sub-object. Platform names are fixed at construction
+	// (read-only after init, mirroring `platforms`), so building this once
+	// avoids a per-request make(map)+range on the 1 Hz dashboard poll path.
+	// R20260616-PERF-002. Only ever assigned to auth.Platforms for JSON
+	// serialization (read-only), never mutated by callers.
+	platformsStatus map[string]string
+	hubDropped      func() int64 // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
@@ -180,6 +187,7 @@ type healthResp struct {
 func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
 	_, _ = w.Write([]byte("ok\n"))
 }
 
@@ -202,6 +210,7 @@ func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
 	// Router presence is the minimal "wired" check — Start() bolts every
 	// handler onto a non-nil router before the listener accepts traffic,
 	// so router==nil here means the constructor partially-initialised
@@ -231,6 +240,11 @@ func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 //     dashboard's 1 Hz poll cadence; lateral moves from a stolen token
 //     would face the same poll budget as a legitimate dashboard tab.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// R20260616-SEC-3: set defensively at the top so every exit path (incl.
+	// the errRespRetry rate-limit branch) carries the headers, not only the
+	// writeJSON success paths which set them via httputil.WriteJSON.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
 	resp := healthResp{
 		Status: "ok",
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
@@ -241,7 +255,14 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// cadence. unauthDashAllow returns true when the limiter is not
 		// wired (test harness without server.New) so this stays a no-op
 		// for fixtures that bypass the bucket.
-		if h.auth != nil && !h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy)) {
+		// R20260614-SEC-10 (#2120): fail closed when the client IP can't be
+		// resolved in trusted-proxy mode (XFF stripped) rather than sharing
+		// the unknownIPKey bucket, so one direct-to-origin attacker can't
+		// starve the /health unauth budget for every other XFF-less caller.
+		// Mirrors HandleLogin (R247-SEC-25). No-op in !trustedProxy mode.
+		if h.auth != nil &&
+			(!requestHasResolvableClientIP(r, h.auth.TrustedProxy) ||
+				!h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy))) {
 			// JSON envelope (errRespRetry, R247-ARCH-3 / #612 / #451) keeps the
 			// /health error path consistent with its writeJSON success path and
 			// carries retry_after in the body for fetch wrappers that drop the
@@ -269,22 +290,10 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		CLIAvailable: cliAvailable(h.router.CLIPath()),
 	}
-	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
-		nodeStatus := make(map[string]string, len(kn))
-		for id := range kn {
-			if nc, ok := h.nodeAccess.NodeByID(id); ok {
-				nodeStatus[id] = nc.Status()
-			} else {
-				nodeStatus[id] = "disconnected"
-			}
-		}
+	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
-	platStatus := make(map[string]string, len(h.platforms))
-	for name := range h.platforms {
-		platStatus[name] = "registered"
-	}
-	auth.Platforms = platStatus
+	auth.Platforms = h.platformsStatus
 
 	// R247-ARCH-12 (#1052): the per-subsystem auth-section fields
 	// (ws_dropped, dispatch, eventlog, attachment_tracker) route through

@@ -763,6 +763,12 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 			if limit > entry.count {
 				limit = entry.count
 			}
+			// Empty ring: skip the slice/map allocs entirely (count==0 clamps
+			// limit to 0). Release the read lock before returning.
+			if limit == 0 {
+				entry.mu.RUnlock()
+				return nil
+			}
 			out := make([]string, 0, limit)
 			seen := make(map[string]struct{}, limit)
 			for i := 0; i < limit; i++ {

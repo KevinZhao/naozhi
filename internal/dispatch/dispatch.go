@@ -210,6 +210,24 @@ func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) stri
 	return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
 }
 
+// isKnownAgent reports whether agentID is a recognised agent target —
+// "general", "planner" (always probed; see interruptChat), or any agentID
+// reachable through a configured slash command. Used to whitelist-validate an
+// explicit IncomingMessage.AgentID (e.g. from a Feishu AskUserQuestion card
+// click) before it can override slash-command resolution, so a hostile or
+// replayed card value can't route an answer into an arbitrary agent (#2148).
+func (d *Dispatcher) isKnownAgent(agentID string) bool {
+	if agentID == "general" || agentID == "planner" {
+		return true
+	}
+	for _, id := range d.agentCommands {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
+}
+
 // Metrics returns a snapshot of operational counters for /health.
 // Counter values are monotonic since process start. lastReplySuccess is the
 // wall-clock time of the most recent successful user-visible reply; the zero
@@ -651,6 +669,20 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 
 	// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
 	agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
+
+	// #2148: a synthetic message (e.g. a Feishu AskUserQuestion card click) can
+	// pin its target agent explicitly via msg.AgentID, bypassing slash-command
+	// resolution — the answer must route back to the SAME agent session that
+	// asked the question, not default to "general". The card answer text has no
+	// /agent prefix, so ResolveAgent above already returned ("general", text);
+	// we only swap the agentID, leaving cleanText (the full answer) intact.
+	// Whitelist-validate against the known agent set so a hostile/replayed
+	// value can't route into an arbitrary agent — unknown ids are ignored and
+	// the original resolution stands.
+	if msg.AgentID != "" && d.isKnownAgent(msg.AgentID) {
+		agentID = msg.AgentID
+	}
+
 	if cleanText == "" && len(msg.Images) == 0 {
 		if agentID != "general" {
 			d.replyText(ctx, msg, "请在指令后输入内容。", lg)
@@ -925,8 +957,27 @@ func (d *Dispatcher) ownerLoop(
 	// NotifyIdle run while the panic is still propagating, which races
 	// with anyone observing the idle signal as "turn complete".
 	defer d.router.NotifyIdle()
+	// R20260614-LOGIC-001: a drain batch is pulled OUT of the ring by
+	// DoneOrDrain before sendAndReply processes it. If sendAndReply then
+	// panics, handleOwnerLoopPanic's DiscardAndReturn only surfaces the
+	// messages STILL in the ring (those that arrived after the drain) — it
+	// can no longer see this already-drained batch, so their HOURGLASS
+	// reactions would hang until the platform reaction cache TTL (feishu:
+	// 12h), falsely telling the user the message is still queued. We track
+	// the most recent drained-but-not-yet-cleared batch here and clear it in
+	// the recover defer before delegating to handleOwnerLoopPanic for the
+	// ring remainder. `first` is intentionally NOT tracked: the owner's own
+	// message never receives a queued reaction (the isOwner path at
+	// BuildHandler enters ownerLoop directly, skipping ackQueuedWithReaction).
+	var pendingClear []QueuedMsg
 	defer func() {
 		if r := recover(); r != nil {
+			// Clear the drained batch's reactions first; the turn ctx may
+			// already be Done (e.g. shutdown racing the panic), so detach
+			// via WithoutCancel — mirrors handleOwnerLoopPanic's own cleanup.
+			if len(pendingClear) > 0 {
+				d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, pendingClear, lg)
+			}
 			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
 			// path inherits the same key/agent/platform attrs as the rest
 			// of this turn's log lines. The recover trigger means the
@@ -965,6 +1016,10 @@ func (d *Dispatcher) ownerLoop(
 			return // Queue empty or generation mismatch — stop.
 		}
 
+		// R20260614-LOGIC-001: from here until the clearQueuedReactions below
+		// these messages are out of the ring; a sendAndReply panic must clear
+		// their reactions via the recover defer (handleOwnerLoopPanic can't).
+		pendingClear = queued
 		text, images := CoalesceMessages(queued)
 		lg.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, false)
@@ -972,6 +1027,10 @@ func (d *Dispatcher) ownerLoop(
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
 		d.clearQueuedReactions(ctx, msg.Platform, queued, lg)
+		// Reactions cleared on the normal path — drop the recover-defer's
+		// fallback handle so a panic in the NEXT loop iteration (before the
+		// next DoneOrDrain) doesn't redundantly re-clear this batch.
+		pendingClear = nil
 		// Go 1.23+: Reset on a Timer whose channel was just consumed by the case arm above is race-free; no Stop+drain needed.
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
@@ -1268,7 +1327,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType)
+	tracker := newIMEventTracker(ctx, p, msg.ChatID, msg.ChatType, agentID)
 	defer tracker.stop()
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
@@ -1465,6 +1524,24 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 	return (runeCount + minChunk - 1) / minChunk
 }
 
+// singleReplyTruncMarker is appended (within the rune budget) when a reply to
+// a single-use-token platform must be truncated to fit one message. #2136.
+const singleReplyTruncMarker = "\n…(truncated)"
+
+// truncateForSingleReply trims text to at most maxRunes runes, reserving room
+// for a visible truncation marker so the user knows the reply was cut. When
+// maxRunes is too small to fit the marker, it falls back to a bare rune-safe
+// truncation (content kept maximal, marker dropped).
+func truncateForSingleReply(text string, maxRunes int) string {
+	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
+	keep := maxRunes - markerRunes
+	if keep <= 0 {
+		// No room for the marker — keep as much content as fits.
+		return string([]rune(text)[:maxRunes])
+	}
+	return string([]rune(text)[:keep]) + singleReplyTruncMarker
+}
+
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
@@ -1473,6 +1550,26 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		// floating literal so a bump in platform.DefaultMaxReplyLen is
 		// picked up here automatically.
 		maxLen = platform.DefaultMaxReplyLen
+	}
+
+	// #2136: platforms whose reply is authorised by a single-use token (e.g.
+	// WeChat iLink) can deliver only ONE message per inbound turn — the token
+	// is consumed by the first send and reuse is rejected upstream. Fanning a
+	// long reply into N chunks would deliver only chunk [1/N] and silently
+	// lose [2/N]..[N/N]. Collapse to a single rune-safe-truncated message with
+	// a visible "…(truncated)" marker so the user knows the reply was cut.
+	if platform.UsesSingleUseReplyToken(p) {
+		if utf8.RuneCountInString(text) > maxLen {
+			text = truncateForSingleReply(text, maxLen)
+		}
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Error("single-reply send failed after retries", "chat", chatID, "err", err)
+		} else {
+			d.markReplySuccess()
+		}
+		return
 	}
 
 	// #2008: when the reply needs splitting we append a "\n— [i/N]" page

@@ -60,7 +60,7 @@ func TestHandleFileGet_PublicTmpAuditLogSanitised(t *testing.T) {
 	}
 
 	logged := buf.String()
-	if !strings.Contains(logged, "public_tmp file access") {
+	if !strings.Contains(logged, "restricted_root file access") {
 		t.Fatalf("audit log line not emitted; got: %q", logged)
 	}
 	// With SanitizeForLog the control bytes are rewritten to '_' BEFORE

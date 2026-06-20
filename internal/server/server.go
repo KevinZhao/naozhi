@@ -30,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
+	"github.com/naozhi/naozhi/internal/uiprefs"
 )
 
 const (
@@ -132,6 +133,7 @@ type Server struct {
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
 	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
+	uiPrefs        *uiprefs.Store       // 读: dashboard_uiprefs.go (instance-wide dashboard theme/prefs; in-memory when StateDir unset)
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -399,6 +401,11 @@ func buildServer(opts ServerOptions) *Server {
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
 		orient:          buildOrientConfig(opts),
+		// Instance-wide dashboard prefs (theme). Reuses opts.StateDir — the
+		// same data root the session/cron stores live under — so no new
+		// ServerOptions field or main.go wiring is needed. Empty StateDir
+		// yields an in-memory store (no persistence), matching retiredStore.
+		uiPrefs: uiprefs.New(opts.StateDir),
 
 		// Extracted handler groups (literals factored to build_handlers.go;
 		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale
@@ -550,6 +557,7 @@ func buildServer(opts ServerOptions) *Server {
 		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodeAccess,
 		platforms:          platNames,
+		platformsStatus:    platformStatusMap(platNames),
 		hubDropped: func() int64 {
 			if s.hub == nil {
 				return 0

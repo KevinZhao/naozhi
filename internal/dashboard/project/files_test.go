@@ -702,7 +702,7 @@ func TestHandleFileGet_PublicTmpAuditLog(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
 	logged := buf.String()
-	if !strings.Contains(logged, "public_tmp file access") {
+	if !strings.Contains(logged, "restricted_root file access") {
 		t.Errorf("audit log line missing; got: %q", logged)
 	}
 	if !strings.Contains(logged, "mode=preview") {
@@ -730,7 +730,7 @@ func TestHandleFileGet_NonPublicTmpNoAudit(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
-	if strings.Contains(buf.String(), "public_tmp file access") {
+	if strings.Contains(buf.String(), "restricted_root file access") {
 		t.Errorf("audit log must not fire for normal projects; got: %q", buf.String())
 	}
 }

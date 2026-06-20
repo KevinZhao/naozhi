@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/agentcore"
-	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -257,6 +256,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		// payload — e.g. empty prompt). Permanent, not transport. The
 		// microVM was never created, so the pending handle is moot.
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
 			"sandbox preflight: "+sanitiseRunErrMsg(err.Error()), nil)
 		return
@@ -272,9 +272,11 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	switch outcome.State {
 	case SandboxStateSuccess:
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateSucceeded, ErrClassNone, outcome.ResultText, "", metaPtr)
 	case SandboxStateFailedClean:
 		removeSandboxPending(pendingPath, a.lg)
+		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
 			sanitiseRunErrMsg(outcome.ErrMsg), metaPtr)
 	default: // SandboxStateFailedTransport and any future unknown state: conservative.
@@ -290,6 +292,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		if outcome.StopConfirmed {
 			// §6.2 rule 1 satisfied in-process — the retry handle is spent.
 			removeSandboxPending(pendingPath, a.lg)
+			s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 			msg += " (microVM termination confirmed)"
 		} else {
 			// Stop unconfirmed: KEEP the pending file. The next startup's
@@ -349,6 +352,26 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 // transport branches.
 func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeSID string) {
 	if !a.snap.sideEffects {
+		return
+	}
+	// R20260614-ARCH-1: a DeleteJobByID concurrent with this in-flight run can
+	// reach deleteJobPostCleanup (stopSandboxRunsForJob → deleteJobRuns →
+	// deleteJobAttention) while this goroutine is still blocked on the stream
+	// that delete just severed; we then walk the sandbox.go default/timeout
+	// branch into here AFTER deleteJobAttention already cleared the queue,
+	// writing a ghost record for a job that no longer exists. ListSandboxAttention
+	// only shape-validates the id (never job existence), so that record would
+	// surface a phantom queue card whose replay ErrJobNotFound's. Re-check
+	// s.jobs[id] under RLock (mirrors finishRun→recordTerminalResult's jobs[id]
+	// re-check) and skip if the job is gone. The reconcile/test attention writers
+	// stay on the unchecked writeSandboxAttention primitive: reconcile already
+	// gates on j!=nil, and the test seam stages records for synthetic ids.
+	s.mu.RLock()
+	_, jobExists := s.jobs[a.snap.jobID]
+	s.mu.RUnlock()
+	if !jobExists {
+		a.lg.Info("cron sandbox: transport-attention skipped — job deleted mid-flight (R20260614-ARCH-1)",
+			"job_id", a.snap.jobID, "run_id", a.runID)
 		return
 	}
 	s.writeSandboxAttention(sandboxAttention{
@@ -441,7 +464,7 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		// Same pipeline as the local success path (R234-SEC-1 +
 		// R20260531070014-ARCH-1): sanitise (truncate/redact) then localize
 		// API-error envelopes before anything reaches an IM channel.
-		notice = apierr.Localize(sanitiseRunResult(result))
+		notice = localizeNotice(result)
 	} else if errClass == ErrClassSandboxTransport {
 		notice = "云沙箱连接中断，任务状态未知，请检查执行历史。"
 	}
@@ -660,6 +683,21 @@ const sandboxEventsSemCap = 8
 // memory, of which there is one regardless of how many schedulers exist in a
 // test binary.
 var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
+
+// deleteJobSandboxEvents removes a deleted job's sandboxevents subtree
+// (sandboxevents/<jobID>/). Best-effort: a missing tree is fine. A 60-minute
+// sandbox run can emit several MB; leaving this tree orphaned on job deletion is
+// a bounded but observable disk leak. Called from deleteJobRuns after the runs/
+// and runsnapshots/ subtrees are removed. R20260614-LOGIC-2.
+func (s *Scheduler) deleteJobSandboxEvents(jobID string) {
+	if s.storePath == "" || !IsValidID(jobID) {
+		return
+	}
+	dir := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID)
+	if err := os.RemoveAll(dir); err != nil {
+		slog.Warn("cron sandbox: event subtree delete failed", "job_id", jobID, "err", err)
+	}
+}
 
 // ErrSandboxEventsBusy is returned by SandboxRunEvents when the concurrency
 // semaphore is saturated. The dashboard handler maps it to HTTP 503 so a

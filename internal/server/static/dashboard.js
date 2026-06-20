@@ -218,8 +218,8 @@ function restorePending() {
 // SetWorkspace), so even a session opened in another browser/device — or one
 // reloaded before its first send — spawns into the right directory. Local
 // nodes only: remote sessions resolve their workspace on their own node.
-// Fire-and-forget — never blocks or fails the creation flow (matches the
-// pushRecentProject swallow convention).
+// Fire-and-forget — never blocks or fails the creation flow: localStorage /
+// network errors are swallowed rather than aborting session creation.
 function eagerBindWorkspace(key, workspace, node) {
   if (!key || !workspace) return;
   const nd = node || 'local';
@@ -257,23 +257,99 @@ function getCurrentTheme() {
   } catch (_) {}
   return 'auto';
 }
-function applyTheme(theme) {
+// applyTheme sets data-theme + writes the localStorage early-paint cache, and
+// when persist is true also pushes the choice to the server (PUT /api/settings)
+// so it survives a browser/device change or cache clear. localStorage stays
+// the first-paint source of truth (the inline applier in dashboard.html reads
+// it before any JS) — the server copy is reconciled in on load by syncThemeFromServer.
+// persist defaults false so the load-time reconcile and the initial
+// applyTheme(getCurrentTheme()) don't echo back to the server.
+function applyTheme(theme, persist) {
   if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+  syncThemeColorMeta();
+  if (persist) persistTheme(theme);
 }
+// persistTheme writes the theme to the server, best-effort: a failure leaves
+// the localStorage copy intact (still applied locally) and just surfaces a
+// toast, since the change isn't lost — only un-synced to other devices.
+function persistTheme(theme) {
+  const headers = { 'Content-Type': 'application/json' };
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
+    .catch(function (err) {
+      if (typeof showToast === 'function') showToast('主题已应用，但未能保存到服务器', 'error');
+      else console.warn('persist theme failed', err);
+    });
+}
+// syncThemeFromServer pulls the server-persisted theme on load and reconciles
+// it with the localStorage cache. The server is the cross-device source of
+// truth, so a differing server value wins and is re-applied (without
+// re-persisting). On error/no-store we keep whatever localStorage gave us.
+function syncThemeFromServer() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { headers, timeoutMs: 8000 })
+    .then(function (s) {
+      const srv = s && s.theme;
+      if (THEME_ORDER.indexOf(srv) < 0) return;       // unknown/empty → keep local
+      if (srv === getCurrentTheme()) return;            // already in sync
+      applyTheme(srv);                                  // server wins; persist=false
+      if (activeView === 'settings') renderSettingsView(); // refresh active pill if open
+    })
+    .catch(function () { /* offline / pre-persist server: keep localStorage */ });
+}
+// Keep the PWA/browser chrome (the standalone title bar, mobile status bar)
+// in sync with the active theme. The manifest's static theme_color only
+// covers first paint; once the page is live the resolved --nz-bg-0 is the
+// source of truth, so a dark bar no longer bleeds through in light mode.
+// Reads computed style after the data-theme attribute is set so 'auto' picks
+// up the OS preference too.
+function syncThemeColorMeta() {
+  try {
+    const bg = getComputedStyle(document.documentElement)
+      .getPropertyValue('--nz-bg-0').trim();
+    if (!bg) return;
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'theme-color');
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute('content', bg);
+  } catch (_) {}
+}
+// In 'auto' mode the resolved bg follows the OS scheme, so re-sync when the
+// system preference flips while the page is open.
+try {
+  if (window.matchMedia) {
+    const _themeMql = window.matchMedia('(prefers-color-scheme: light)');
+    const _onSchemeChange = function () {
+      if (getCurrentTheme() === 'auto') syncThemeColorMeta();
+    };
+    if (_themeMql.addEventListener) _themeMql.addEventListener('change', _onSchemeChange);
+    else if (_themeMql.addListener) _themeMql.addListener(_onSchemeChange);
+  }
+} catch (_) {}
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
   // fetchSessions/send so a reload-before-first-send still carries the chosen
   // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
   restorePending();
   applyTheme(getCurrentTheme());
+  // Reconcile with the server-persisted theme (cross-device source of truth).
+  // Runs after the localStorage-based applyTheme above so first paint is
+  // instant and a differing server value re-applies once it resolves.
+  syncThemeFromServer();
   // Activity-bar view switch (codex-style rail). Wired here (not inline
   // onclick) to keep the script-src inline-handler surface from growing
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
-  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
+  ['abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
@@ -309,20 +385,21 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 // setActivityView('cron') when not already in cron view. We set activeView
 // BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
 // already false on the re-entry and the loop terminates after one hop.
-const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];
+const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === activeView) return;
   const prev = activeView;
   activeView = view;
   // Rail button active / aria-pressed state.
-  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
     });
   // Mutually-exclusive view classes. 'chat' clears all of them.
   document.body.classList.toggle('nz-view-assets', view === 'assets');
+  document.body.classList.toggle('nz-view-files', view === 'files');
   document.body.classList.toggle('nz-view-cron', view === 'cron');
   document.body.classList.toggle('nz-view-system', view === 'system');
   document.body.classList.toggle('nz-view-settings', view === 'settings');
@@ -336,6 +413,7 @@ function setActivityView(view) {
   if (sysm) sysm.hidden = view !== 'system';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  if (prev === 'files' && view !== 'files' && window.nzFilesView) window.nzFilesView.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
@@ -347,6 +425,7 @@ function setActivityView(view) {
   }
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
+  else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
   else if (view === 'cron') { openCronPanel(); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
@@ -383,7 +462,7 @@ async function fetchSessions() {
       data = await fetchJSON('/api/sessions', { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status === 401 || err.status === 403) {
-        if (!document.querySelector('.modal-overlay')) showAuthModal();
+        showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
         return false;
       }
       if (err.status) return false;
@@ -2221,6 +2300,7 @@ function selectSession(key, node) {
   const activeCard = setActiveSessionCard(key, node);
   if (activeCard) updateCardUnreadChip(activeCard, 0);
   renderMainShell();
+  fetchSessionRuns(key, node); // populate the run-history timeline (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
   if (draftInput && sessionDrafts[key]) {
@@ -2237,6 +2317,132 @@ function selectSession(key, node) {
     fetchEvents(true);
     if (eventTimer) clearInterval(eventTimer);
     eventTimer = setInterval(() => fetchEvents(false), 1000);
+  }
+}
+
+// ---- Session run-history timeline (docs/rfc/session-run-metrics.md §8) ----
+//
+// Best-effort: a fetch failure or empty history just leaves the panel hidden;
+// the conversation surface is never blocked on it.
+
+// sessionRunOutcomeMeta maps an outcome to its dot class + Chinese label,
+// reusing the green/red/purple status vocabulary the cron timeline established.
+function sessionRunOutcomeMeta(outcome) {
+  switch (outcome) {
+    case 'completed': return { dot: 'ok', label: '完成' };
+    case 'timeout': return { dot: 'timeout', label: '超时' };
+    case 'canceled': return { dot: 'cancel', label: '已取消' };
+    case 'error': return { dot: 'err', label: '出错' };
+    default: return { dot: '', label: outcome || '—' };
+  }
+}
+
+function sessionRunStatLabel(ms) {
+  // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
+  // a top-level function in the shared script scope.
+  if (typeof formatRunDuration === 'function') return formatRunDuration(ms) || '0ms';
+  return Math.round(ms) + 'ms';
+}
+
+function sessionRunsStatsHtml(stats) {
+  if (!stats || !stats.count) return '';
+  const parts = [];
+  parts.push('<span class="srp-stat">' + esc(stats.count + ' 次') + '</span>');
+  parts.push('<span class="srp-stat">均 ' + esc(sessionRunStatLabel(stats.avg_ms || 0)) + '</span>');
+  if (stats.p95_ms) parts.push('<span class="srp-stat">P95 ' + esc(sessionRunStatLabel(stats.p95_ms)) + '</span>');
+  parts.push('<span class="srp-stat">最长 ' + esc(sessionRunStatLabel(stats.max_ms || 0)) + '</span>');
+  if (stats.timeout_count > 0) {
+    parts.push('<span class="srp-stat bad" title="超时次数">⚠ ' + esc(String(stats.timeout_count)) + '</span>');
+  }
+  return parts.join('<span class="srp-stat-sep">·</span>');
+}
+
+function sessionRunRowHtml(r) {
+  const meta = sessionRunOutcomeMeta(r.outcome);
+  // formatAbsTime is the dashboard's single timestamp formatter; use it for
+  // both the visible label and the hover title (ux-contract: timestamps carry
+  // a formatAbsTime title). A relative/colloquial label could be layered later.
+  const started = r.started_at ? formatAbsTime(r.started_at) : '';
+  const startedShort = started || '—';
+  const dur = sessionRunStatLabel(r.duration_ms || 0);
+  const sub = [];
+  if (typeof r.first_byte_ms === 'number' && r.first_byte_ms > 0) {
+    sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
+  }
+  if (r.cost_usd && typeof formatCostUSD === 'function') {
+    sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
+  }
+  const subRow = sub.length
+    ? '<div class="srr-sub">' + sub.join('<span class="srr-sep">·</span>') + '</div>'
+    : '';
+  return '<div class="srr">' +
+      '<div class="srr-main">' +
+        '<span class="srr-dot ' + meta.dot + '" aria-hidden="true"></span>' +
+        '<span class="srr-state">' + esc(meta.label) + '</span>' +
+        '<span class="srr-time"' + (started ? ' title="' + escAttr(started) + '"' : '') + '>' + esc(startedShort) + '</span>' +
+        '<span class="srr-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      subRow +
+    '</div>';
+}
+
+function renderSessionRunsPanel(data) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
+  const stats = data && data.stats;
+  if (!runs.length) {
+    // Hidden entirely when there's no history (mirrors cron :empty behaviour).
+    panel.hidden = true;
+    panel.innerHTML = '';
+    return;
+  }
+  panel.hidden = false;
+  const rowsHtml = runs.map(sessionRunRowHtml).join('');
+  // Collapsed by default everywhere: the run-history timeline grows without
+  // bound as more runs accumulate, so leaving it open would steadily push the
+  // conversation + composer down. The user's manual expand/collapse is honoured
+  // afterwards via data-user-toggled.
+  if (!panel.hasAttribute('data-user-toggled')) {
+    panel.open = false;
+  }
+  panel.innerHTML =
+    '<summary class="srp-summary">' +
+      '<span class="srp-title">运行记录</span>' +
+      '<span class="srp-stats">' + sessionRunsStatsHtml(stats) + '</span>' +
+    '</summary>' +
+    '<div class="srp-body">' +
+      (rowsHtml ? '<div class="srp-rows">' + rowsHtml + '</div>'
+                : '<div class="srp-empty">本会话暂无运行记录</div>') +
+    '</div>';
+}
+
+// Remember the user's manual expand/collapse so a later refresh doesn't fight
+// their choice (one listener, delegated on the panel).
+document.addEventListener('toggle', function (e) {
+  const panel = e.target;
+  if (panel && panel.id === 'session-runs-panel') {
+    panel.setAttribute('data-user-toggled', '1');
+  }
+}, true);
+
+async function fetchSessionRuns(key, node) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  // Run history is a local-node concern; remote-node sessions skip it for now.
+  if (node && node !== 'local') { panel.hidden = true; return; }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
+    if (!resp.ok) { panel.hidden = true; return; }
+    const data = await resp.json();
+    // Guard against a stale response landing after the user switched sessions.
+    if (selectedKey !== key) return;
+    renderSessionRunsPanel(data);
+  } catch (_) {
+    panel.hidden = true;
   }
 }
 
@@ -2679,6 +2885,11 @@ function renderMainShell() {
     // (#cron-timeline-panel placeholder above the events scroll). It now
     // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
     // is reserved for human conversation surfaces.
+    // session-run-metrics RFC §8.2: the run-history timeline is a NEW sibling
+    // node here (not the relocated cron one). Hidden until renderSessionRunsPanel
+    // populates it; :empty/[hidden] keeps it out of layout when a session has
+    // no recorded runs.
+    '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
@@ -5846,7 +6057,23 @@ function describeTranscribeError(err) {
 
 // --- Auth modal ---
 
-function showAuthModal() {
+// Auth-prompt de-dupe + debounce. Two guards keep the token modal from
+// machine-gunning back open: (1) only ever one overlay at a time, and
+// (2) after the operator explicitly dismisses the prompt, suppress
+// *background* re-prompts (the 5s /api/sessions poll, WS reconnect) for a
+// cooldown window. User-initiated actions (send / upload) pass {auto:false}
+// and bypass the cooldown so a click still gets immediate feedback. A
+// successful login clears the cooldown.
+let _authModalCooldownUntil = 0;
+const AUTH_MODAL_COOLDOWN_MS = 60000;
+
+function showAuthModal(opts) {
+  opts = opts || {};
+  // De-dupe: never stack a second auth prompt over an existing modal.
+  if (document.querySelector('.modal-overlay')) return;
+  // Debounce: a freshly-dismissed prompt should not be reopened by the
+  // next background poll. User actions (auto !== true) always prompt.
+  if (opts.auto && Date.now() < _authModalCooldownUntil) return;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
@@ -5870,13 +6097,23 @@ function showAuthModal() {
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" onclick="dismissAuthModal()">取消</button>' +
         '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
   trapFocus(overlay);
   setTimeout(() => document.getElementById('token-input').focus(), 100);
+}
+
+// dismissAuthModal closes the auth prompt and starts the background-reprompt
+// cooldown so the next /api/sessions poll (or WS reconnect) doesn't pop it
+// straight back open. The operator can still trigger it immediately via an
+// explicit send/upload.
+function dismissAuthModal() {
+  _authModalCooldownUntil = Date.now() + AUTH_MODAL_COOLDOWN_MS;
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
 }
 
 async function saveToken() {
@@ -5890,6 +6127,7 @@ async function saveToken() {
       body: JSON.stringify({token: t})
     });
     if (r.ok) {
+      _authModalCooldownUntil = 0; // fresh session — drop any dismiss cooldown
       const overlay = document.querySelector('.modal-overlay');
       if (overlay) overlay.remove();
       wsm.disconnect();
@@ -6478,24 +6716,18 @@ function renderPaletteList(state, query) {
   if (q) {
     scored.sort((a, b) => b.score - a.score);
   } else {
-    // R110-P3 palette idle-state ordering: three-tier sort on empty query.
+    // R110-P3 palette idle-state ordering: two-tier sort on empty query.
     //   Tier 0: favorites — surface "pinned" projects first. Users already
     //           star projects via the sidebar section-header ⭐ button,
     //           which persists to the backend projects config. Reusing
     //           that signal avoids a second "palette-pin" concept (which
     //           would split the mental model and duplicate state).
-    //   Tier 1: recents (localStorage) top-N — most-recently-used.
-    //   Tier 2: everything else in original projectsData order (alpha +
-    //           backend favorite-first order is preserved, so the rest
-    //           bucket doesn't reshuffle unrelated projects).
-    // A project that is BOTH favorite and recent lands in tier 0 only;
-    // the recents lookup skips it so it doesn't appear twice or trigger
-    // a stale rank clash.
-    const recents = loadRecentProjects();
-    const recentRank = new Map();
-    recents.slice(0, RECENT_PROJECTS_SHOW).forEach((e, i) => {
-      recentRank.set(e.name + '|' + (e.node || 'local'), i);
-    });
+    //   Tier 1: everything else by directory filesystem mtime, most-recently-
+    //           modified first (dir_mtime, unix ms, stamped by the backend at
+    //           scan time). The folder you last touched on disk surfaces at
+    //           the top of the non-favorite bucket; un-stat'able / older-remote
+    //           entries (dir_mtime 0) sort last, then original projectsData
+    //           order is the final stable tiebreak.
     const withIndex = scored.map((s, i) => ({s, i}));
     withIndex.sort((a, b) => {
       const pa = a.s.project;
@@ -6504,13 +6736,13 @@ function renderPaletteList(state, query) {
       const fa = pa.favorite ? 0 : 1;
       const fb = pb.favorite ? 0 : 1;
       if (fa !== fb) return fa - fb;
-      // Tier gate 1: within the same tier, recents come before non-recents.
-      const ka = pa.name + '|' + (pa.node || 'local');
-      const kb = pb.name + '|' + (pb.node || 'local');
-      const ra = recentRank.has(ka) ? recentRank.get(ka) : Infinity;
-      const rb = recentRank.has(kb) ? recentRank.get(kb) : Infinity;
-      if (ra !== rb) return ra - rb;
-      // Tier gate 2: stable on original projectsData order (input index).
+      // Tier gate 1: directory mtime descending (most-recently-modified
+      // folder first). Missing/zero dir_mtime sorts last so un-stat'able or
+      // older-protocol remote entries don't jump to the top.
+      const ma = pa.dir_mtime || 0;
+      const mb = pb.dir_mtime || 0;
+      if (ma !== mb) return mb - ma;
+      // Final stable tiebreak: original projectsData order (input index).
       return a.i - b.i;
     });
     scored.length = 0;
@@ -6776,16 +7008,6 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   persistPending();
   eagerBindWorkspace(key, projectPath, nodeId);
 
-  // R110-P3 recent-projects: every successful project-scoped session
-  // creation bumps the (name,node) pair to the top of the palette's
-  // recent list so next-time access is one click. Custom-workspace paths
-  // are intentionally NOT recorded — they have no stable project.name
-  // and the palette has no row to highlight them against. Errors from
-  // localStorage are swallowed: Safari private-browsing / out-of-quota /
-  // disabled storage all throw on setItem, and a silently-un-recorded
-  // bump is preferable to breaking the creation flow over a UX tweak.
-  pushRecentProject(projectName, nodeId || 'local');
-
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
@@ -6799,48 +7021,6 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   lastVersion = 0;
   debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
-}
-
-// --- Recent projects (palette ordering) ---
-
-// RECENT_PROJECTS_KEY holds a compact JSON array of {name,node,ts} tuples,
-// ordered by `ts` DESC. Capped at RECENT_PROJECTS_MAX so the stored blob
-// stays small (worst case ~10 * 100 bytes). The palette only surfaces
-// the top 5 (see renderPaletteList) but we retain a deeper tail so a
-// long-absent project can climb back into view after one use.
-const RECENT_PROJECTS_KEY = 'naozhi_recent_projects';
-const RECENT_PROJECTS_MAX = 10;
-const RECENT_PROJECTS_SHOW = 5;
-
-function loadRecentProjects() {
-  try {
-    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Defensive filter: discard entries without a string `name` so a
-    // manually-edited localStorage can't break render.
-    return parsed
-      .filter(e => e && typeof e.name === 'string')
-      .slice(0, RECENT_PROJECTS_MAX);
-  } catch (_) {
-    return [];
-  }
-}
-
-function pushRecentProject(name, node) {
-  if (!name) return;
-  node = node || 'local';
-  try {
-    const list = loadRecentProjects();
-    const filtered = list.filter(e => !(e.name === name && (e.node || 'local') === node));
-    filtered.unshift({name: name, node: node, ts: Date.now()});
-    const trimmed = filtered.slice(0, RECENT_PROJECTS_MAX);
-    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
-  } catch (_) {
-    // Private browsing / quota / disabled storage — swallow, next
-    // successful write reseeds the list.
-  }
 }
 
 function doCreateSession() {
@@ -9877,7 +10057,7 @@ function renderSettingsView() {
   if (grp) grp.addEventListener('click', function (e) {
     const b = e.target.closest('.settings-theme-opt');
     if (!b) return;
-    applyTheme(b.dataset.theme);
+    applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
   });
 }

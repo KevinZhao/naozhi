@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	// eventlog_bridge.go's newEventLogLocalSource / mergeWithEventLog
 	// (#403, #567) so this file no longer needs the naozhilog import.
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
@@ -305,6 +307,14 @@ type Router struct {
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
+
+	// sessionRuns persists per-run wall-clock timing (run history / stats).
+	// Owned by the Router: constructed in NewRouter from filepath.Dir(storePath)
+	// and injected into every ManagedSession at construction. nil when StorePath
+	// is empty (tests / no-persist). Closed in Shutdown to flush the async
+	// write worker.
+	// 读写: core (init/spawn-config injection), lifecycle (spawn-config injection), discovery (takeover/register injection), cleanup (Invalidate/Close), runhistory (List/Stats read)
+	sessionRuns *runhistory.Store
 
 	// kid is the known-session-IDs facet (Router P2, #600): the IDs set, its
 	// insertion-order slice, the dirty flag, the mutation gen, and the
@@ -846,6 +856,14 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
 	r.bkStore.backendOverrides = make(map[string]string)
+	// Session run-history store. Rooted next to the session store file (its
+	// own config, NOT cron's), so operators who split the two dirs keep them
+	// independent. Empty StorePath disables persistence (NewStore returns a
+	// no-op store), matching the event-log persister's behaviour.
+	if cfg.StorePath != "" {
+		r.sessionRuns = runhistory.NewStore(filepath.Dir(cfg.StorePath), 0, 0)
+	}
+
 	// nil HistoryLoader → production discovery-backed implementation so the
 	// rest of the router can call r.historyLoader unconditionally (#458).
 	if r.historyLoader == nil {
@@ -1000,6 +1018,7 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 		prevSessionIDs:     entry.PrevSessionIDs,
 		prevSessionOrigins: entry.PrevSessionOrigins,
 		exempt:             isExemptKey(key),
+		runStore:           r.sessionRuns,
 	}
 	storeTotalCost(&s.totalCost, entry.TotalCost)
 	s.setWorkspace(entry.Workspace)
