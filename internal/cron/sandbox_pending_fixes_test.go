@@ -611,6 +611,7 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	delete(s.jobs, j.ID)
 	s.mu.Unlock()
 
+	startedBefore := rec.startedCount()
 	s.reconcileOneSandboxOrphan(p, path)
 	// deleted-job branch does not broadcast; wait a tick to be sure.
 	time.Sleep(5 * time.Millisecond)
@@ -619,6 +620,11 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	if rec.endedCount() != 0 {
 		t.Fatal("deleted-job orphan branch must not broadcast an ended event [COR-001]")
 	}
+	// R202606-CR-001 (#2156): no started broadcast either — the metrics-only
+	// path must NOT call emitRunStarted for a job that no longer exists.
+	if got := rec.startedCount(); got != startedBefore {
+		t.Fatalf("RunStarted count grew %d→%d for job-gone reconcile — phantom lifecycle [#2156]", startedBefore, got)
+	}
 	// Critical: no ghost attention card must have been written.
 	if n := s.SandboxAttentionCount(); n != 0 {
 		t.Fatalf("attention count = %d after job-deleted reconcile; want 0 — re-check must prevent ghost card [COR-001]", n)
@@ -626,6 +632,80 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 	// Pending file removed.
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("pending file must be removed after orphan reconcile [COR-001]")
+	}
+}
+
+// TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics pins
+// R202606-CR-001 (#2156): when DeleteJobByID removes the job in the gap between
+// the RLock snapshot and the emitRunStarted/finishRun block, the orphan must be
+// closed via the metrics-only path — no started/ended broadcast — yet the
+// Started/Ended/Failed/SandboxFailed counters must each advance by exactly one
+// so the in-flight gauge (started−ended) stays balanced.
+//
+// We make the snapshot see j!=nil but the re-check see nil by deleting the job
+// from s.jobs from a concurrent goroutine. To make the assertion deterministic
+// regardless of which side of the race we land on, we assert the invariant that
+// holds in BOTH outcomes: started broadcasts == ended broadcasts (no phantom
+// half-lifecycle), and the four counters advance together.
+func TestReconcileOrphan_JobDeletedInGap_NoBroadcastBalancedMetrics(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+
+	runID := "aabbccddeeff0203"
+	p := sandboxPending{
+		JobID:            j.ID,
+		RunID:            runID,
+		RuntimeSessionID: "run-aabbccddeeff0203-1234567890123456789",
+		StartedAtMS:      time.Now().Add(-3 * time.Minute).UnixMilli(),
+	}
+	path := writePendingFixture(t, storePath, p)
+
+	// Delete the job out from under the snapshot. Done before the call so the
+	// re-check deterministically sees nil even if the snapshot raced and saw
+	// the job — the routing into the metrics-only path is the contract.
+	s.mu.Lock()
+	delete(s.jobs, j.ID)
+	s.mu.Unlock()
+
+	startedBefore := rec.startedCount()
+	endedBefore := rec.endedCount()
+	startedMetricBefore := metrics.CronRunStartedTotal.Value()
+	endedMetricBefore := metrics.CronRunEndedTotal.Value()
+	failedBefore := metrics.CronRunFailedTotal.Value()
+	sandboxFailedBefore := metrics.CronSandboxRunFailedTotal.Value()
+
+	s.reconcileOneSandboxOrphan(p, path)
+	time.Sleep(5 * time.Millisecond)
+
+	// No subscriber broadcast at all — neither started nor ended.
+	if got := rec.startedCount(); got != startedBefore {
+		t.Fatalf("RunStarted broadcast grew %d→%d for job gone in gap; want none [#2156]", startedBefore, got)
+	}
+	if got := rec.endedCount(); got != endedBefore {
+		t.Fatalf("RunEnded broadcast grew %d→%d for job gone in gap; want none [#2156]", endedBefore, got)
+	}
+	// Counters advance by exactly one each (gauge stays balanced).
+	if d := metrics.CronRunStartedTotal.Value() - startedMetricBefore; d != 1 {
+		t.Fatalf("CronRunStartedTotal delta = %d, want 1 [#2156]", d)
+	}
+	if d := metrics.CronRunEndedTotal.Value() - endedMetricBefore; d != 1 {
+		t.Fatalf("CronRunEndedTotal delta = %d, want 1 [#2156]", d)
+	}
+	if d := metrics.CronRunFailedTotal.Value() - failedBefore; d != 1 {
+		t.Fatalf("CronRunFailedTotal delta = %d, want 1 [#2156]", d)
+	}
+	if d := metrics.CronSandboxRunFailedTotal.Value() - sandboxFailedBefore; d != 1 {
+		t.Fatalf("CronSandboxRunFailedTotal delta = %d, want 1 [#2156]", d)
+	}
+	// No ghost attention card.
+	if n := s.SandboxAttentionCount(); n != 0 {
+		t.Fatalf("attention count = %d, want 0 [#2156]", n)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("pending file must be removed after orphan reconcile [#2156]")
 	}
 }
 

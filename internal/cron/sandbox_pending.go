@@ -353,7 +353,23 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	s.mu.RUnlock()
 	startedAt := time.UnixMilli(p.StartedAtMS)
 	msg := "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
+	// R20260615-030459-COR-001 / R202606-CR-001 (#2156): re-check job existence
+	// under RLock ONCE before any subscriber-visible write. The snapshot (j
+	// above) was taken before RUnlock; a concurrent DeleteJobByID that ran in
+	// the gap can delete the job + sweep the attention queue. Without this
+	// re-check we'd (a) leave a ghost attention card whose replay ErrJobNotFound,
+	// and (b) broadcast a phantom cron_run_started/ended pair for a job the
+	// dashboard no longer shows. Consume the same boolean at BOTH sites so the
+	// attention write and the started/finish lifecycle agree on whether the job
+	// still exists. j!=nil but jobStillExists==false ⇒ deleted in the gap: fall
+	// through to the metrics-only path (counters stay balanced, nothing broadcast).
+	jobStillExists := j != nil
 	if j != nil {
+		s.mu.RLock()
+		jobStillExists = s.jobs[p.JobID] != nil
+		s.mu.RUnlock()
+	}
+	if j != nil && jobStillExists {
 		// §6.2 rule 3 + §7.4: a side-effecting orphan enters the human
 		// confirmation queue. The microVM was Stopped above, but it may have
 		// completed and produced its side effect (PR push, etc.) before naozhi
@@ -374,29 +390,15 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			// A read error (qerr) is treated as "may exist" → skip, preserving
 			// any prior reason (the run's failed-transport CronRun still warns).
 			if rec, qok, qerr := s.getSandboxAttention(p.RunID); qerr == nil && !qok && rec == nil {
-				// R20260615-030459-COR-001: re-check job existence under RLock
-				// before writing the attention card. The snapshot (j above) was
-				// taken before RUnlock; a concurrent DeleteJobByID that ran in
-				// the gap can delete the job + sweep the attention queue, leaving
-				// a ghost card whose replay would hit ErrJobNotFound. This is the
-				// same TOCTOU pattern fixed for enqueueSandboxTransportAttention
-				// in OPEN #2129 — mirror that fix here.
-				s.mu.RLock()
-				jobStillExists := s.jobs[p.JobID] != nil
-				s.mu.RUnlock()
-				if jobStillExists {
-					s.writeSandboxAttention(sandboxAttention{
-						JobID:            p.JobID,
-						RunID:            p.RunID,
-						RuntimeSessionID: p.RuntimeSessionID,
-						Reason:           attentionReasonOrphaned,
-						JobLabel:         jLabel,
-						StartedAtMS:      p.StartedAtMS,
-						CreatedAtMS:      s.attentionNowMS(),
-					}, lg)
-				} else {
-					lg.Info("cron sandbox: job deleted after snapshot; skipping orphaned attention write [COR-001]")
-				}
+				s.writeSandboxAttention(sandboxAttention{
+					JobID:            p.JobID,
+					RunID:            p.RunID,
+					RuntimeSessionID: p.RuntimeSessionID,
+					Reason:           attentionReasonOrphaned,
+					JobLabel:         jLabel,
+					StartedAtMS:      p.StartedAtMS,
+					CreatedAtMS:      s.attentionNowMS(),
+				}, lg)
 			} else if qerr != nil {
 				lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
 			}
@@ -434,9 +436,14 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 			finalizer: &runFinalizer{},
 		})
 	} else {
-		// R20260613-GOLANG-004: the job was deleted while naozhi was down.
-		// finishRun cannot be called (nil job), but the run did start and end
-		// (failed) — bump the same counters that the j!=nil path would have
+		// Reached when the job is gone: either it was deleted while naozhi was
+		// down (j==nil, R20260613-GOLANG-004) OR a concurrent DeleteJobByID
+		// deleted it in the gap between the RUnlock snapshot and here
+		// (j!=nil && !jobStillExists, R202606-CR-001 / #2156). In both cases
+		// finishRun must NOT run — there is no live job to attach the record to,
+		// and broadcasting a started/ended pair for a job the dashboard already
+		// dropped would be a phantom lifecycle. The run did start and end
+		// (failed), so bump the same counters that the live-job path would have
 		// incremented via emitRunStarted + finishRun/bumpRunStateMetrics so
 		// dashboards, alerts, and the started/ended balance (used by /health
 		// and runstore.go to gauge in-flight counts) stay accurate.
