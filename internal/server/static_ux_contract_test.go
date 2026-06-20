@@ -4940,20 +4940,24 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R167_AgentPicker locks the Round 167 R110-P3 agent-picker
-// contract. The feature lets operators pick an agent (e.g. sonnet / haiku /
-// a custom config.yaml entry) when creating a new dashboard session, and
-// rewrites the key schema so the server-side buildSessionOpts correctly
-// resolves AgentOpts from parts[3].
+// TestDashboardJS_NodePicker locks the connection (node) picker contract. The
+// sidebar node selector was removed and the per-session connection choice now
+// lives in the New Session modal, in the slot the agent picker used to occupy.
+// The Round 167 key schema (agentID as parts[3]) is unchanged — every
+// dashboard session uses the default 'general' agent, resolved via
+// getSelectedAgent so buildSessionOpts still reads a well-formed key.
 //
 // Invariants:
-//  1. renderAgentPicker helper exists, emits a <select id="new-agent"> when
-//     availableAgents.length > 1, and collapses to an empty string otherwise.
-//  2. getSelectedAgent reads the <select>, defaults to "general", and
-//     persists the pick to localStorage under `naozhi_last_agent`.
-//  3. Three session-creation entry points call renderAgentPicker: the
-//     no-projects modal in createNewSession, the palette in
-//     openProjectPalette, and the Custom Workspace modal in pickPaletteCustom.
+//  1. renderNodePicker helper exists, emits a <select id="new-node"> only when
+//     isMultiNode() (more than the local connection), labels it 连接, and
+//     collapses to an empty string for single-connection setups.
+//  2. getSelectedNode reads the <select> and falls back to selectedNode then
+//     'local'; wireNodePicker persists the pick + re-filters; getSelectedAgent
+//     resolves to 'general' (the agent picker was retired).
+//  3. Three session-creation entry points call renderNodePicker: the
+//     no-projects modal in createNewSession, the palette in openProjectPalette,
+//     and the Custom Workspace modal in pickPaletteCustom. The retired agent
+//     picker (renderAgentPicker / #new-agent) must not resurface.
 //  4. buildDashboardSessionKey emits 4-segment keys with agentID as parts[3]
 //     (not projectName), and sanitizeKeySlug normalizes project/folder names.
 //  5. doCreateInProject and doCreateSession construct keys via the new
@@ -4962,7 +4966,7 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 //  6. keyTailDisplay provides a safe fallback for the sidebar/main-header
 //     displayName so the schema change doesn't regress the empty-fallback
 //     UI to showing raw agentIDs ("general") as session labels.
-func TestDashboardJS_R167_AgentPicker(t *testing.T) {
+func TestDashboardJS_NodePicker(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -4970,35 +4974,46 @@ func TestDashboardJS_R167_AgentPicker(t *testing.T) {
 	}
 	js := string(data)
 
-	// Invariant 1: renderAgentPicker helper.
+	// Invariant 1: renderNodePicker helper.
 	for _, need := range []string{
-		"function renderAgentPicker()",
-		"availableAgents.length <= 1",
-		`id="new-agent"`,
-		`localStorage.getItem('naozhi_last_agent')`,
+		"function renderNodePicker()",
+		"if (!isMultiNode()) return '';",
+		`id="new-node"`,
+		`for="new-node">连接`,
 	} {
 		if !strings.Contains(js, need) {
-			t.Errorf("renderAgentPicker invariant missing: %q", need)
+			t.Errorf("renderNodePicker invariant missing: %q", need)
 		}
 	}
 
-	// Invariant 2: getSelectedAgent helper.
+	// Invariant 2: getSelectedNode / wireNodePicker / getSelectedAgent.
 	for _, need := range []string{
+		"function getSelectedNode()",
+		`document.getElementById('new-node')`,
+		"return v || selectedNode || 'local';",
+		"function wireNodePicker(onChange)",
 		"function getSelectedAgent()",
-		`document.getElementById('new-agent')`,
-		`localStorage.setItem('naozhi_last_agent', v)`,
-		"return v || 'general';",
+		"return 'general';",
 	} {
 		if !strings.Contains(js, need) {
-			t.Errorf("getSelectedAgent invariant missing: %q", need)
+			t.Errorf("node-picker helper invariant missing: %q", need)
 		}
 	}
 
-	// Invariant 3: three call sites. Tolerate whitespace shuffles by
-	// counting occurrences rather than matching exact formatting.
-	if c := strings.Count(js, "renderAgentPicker()"); c < 4 {
+	// Invariant 3: three call sites for renderNodePicker, and the retired
+	// agent picker must be gone. Count occurrences to tolerate formatting.
+	if c := strings.Count(js, "renderNodePicker()"); c < 4 {
 		// 1 definition + 3 call sites = 4 minimum occurrences.
-		t.Errorf("renderAgentPicker() must have at least 3 call sites (found %d total incl. definition)", c)
+		t.Errorf("renderNodePicker() must have at least 3 call sites (found %d total incl. definition)", c)
+	}
+	for _, gone := range []string{
+		"function renderAgentPicker()",
+		`id="new-agent"`,
+		`getElementById('new-agent')`,
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("retired agent picker resurfaced: %q — the modal slot now hosts renderNodePicker", gone)
+		}
 	}
 
 	// Invariant 4: key builder.
