@@ -494,7 +494,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		validatedWS, err := resolveAttachmentWorkspace(h.hub, key, workspace)
 		if err != nil {
 			slog.Warn("attachment workspace validation failed",
-				"key", key, "err", err)
+				"key", session.SanitizeLogAttr(key), "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
 			return
 		}
@@ -599,7 +599,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
 				slog.Error("remote send",
 					"node", osutil.SanitizeForLog(node, 128),
-					"key", capturedKey, "err", err)
+					"key", session.SanitizeLogAttr(capturedKey), "err", err)
 			} else {
 				nc.RefreshSubscription(capturedKey)
 			}
@@ -622,7 +622,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// dashboard user (or a stolen cookie) should not learn from a 403.
 		// Operators retain full diagnostics via the slog at sessionSend's
 		// own callsite. R218-SEC-P1.
-		slog.Warn("dashboard sessionSend rejected", "key", key, "err", err)
+		slog.Warn("dashboard sessionSend rejected", "key", session.SanitizeLogAttr(key), "err", err)
 		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": asyncErrorMessage(err)})
 		return
 	}
