@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/agentcore"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -658,9 +658,14 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 const sandboxEventsDefaultMax = 2000
 
 // sandboxEventsMaxLineSize caps a single NDJSON line on the sandbox event
-// wire. It aliases agentcore.MaxEnvelopeLineBytes — the single source of
+// wire. It must equal agentcore.MaxEnvelopeLineBytes — the single source of
 // truth shared with the SSE decoder (holdStream) — so the writer's accept
-// ceiling and this reader's scanner token limit can never drift.
+// ceiling and this reader's scanner token limit can never drift. cron does
+// NOT import internal/agentcore (that would pull the AWS SDK into the cron
+// build graph, violating the isolation contract above [R202606-ARCH-1]);
+// instead both derive from the same leaf-package expression
+// limits.MaxStreamJSONLine + 64KiB. no_agentcore_import_test.go pins the
+// no-import edge.
 //
 // R20260613-214326-ARCH-1 (#2083): a previous split (16MB writer / 1MB
 // reader, R20260613-SEC-5 / #2066) let 1–16MB tool-result lines write but
@@ -668,7 +673,7 @@ const sandboxEventsDefaultMax = 2000
 // line plus every later event. Reader-side memory is bounded by
 // sandboxEventsSemCap (concurrent-read semaphore), not by shrinking this cap
 // below the writer's.
-const sandboxEventsMaxLineSize = agentcore.MaxEnvelopeLineBytes
+const sandboxEventsMaxLineSize = limits.MaxStreamJSONLine + (64 << 10)
 
 // sandboxEventsSemCap bounds concurrent SandboxRunEvents reads, mirroring the
 // dashboard transcript endpoint's transcriptSem (cap 8). Each in-flight read
