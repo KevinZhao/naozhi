@@ -388,6 +388,117 @@ func TestMerged_AboveCutoffLocalDoesNotEvictFallback(t *testing.T) {
 	}
 }
 
+// generalMergeSorted is the pre-fast-path reference implementation of
+// mergeSorted: it always seeds `seen` from local and runs the full
+// two-way merge regardless of whether a tier is empty. The fast-path
+// branches in mergeSorted must produce element-for-element identical
+// output to this on the one-tier-empty inputs below.
+func generalMergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
+	seen := make(map[string]struct{}, len(local))
+	for _, e := range local {
+		if e.UUID != "" && (beforeMS <= 0 || e.Time < beforeMS) {
+			seen[e.UUID] = struct{}{}
+		}
+	}
+	out := make([]cli.EventEntry, 0, len(local)+len(fallback))
+	emit := func(e cli.EventEntry) {
+		if beforeMS > 0 && e.Time >= beforeMS {
+			return
+		}
+		out = append(out, e)
+	}
+	i, j := 0, 0
+	for i < len(local) && j < len(fallback) {
+		if entryCmp(local[i], fallback[j]) <= 0 {
+			emit(local[i])
+			i++
+			continue
+		}
+		f := fallback[j]
+		if f.UUID == "" {
+			emit(f)
+		} else if _, dup := seen[f.UUID]; !dup {
+			seen[f.UUID] = struct{}{}
+			emit(f)
+		}
+		j++
+	}
+	for ; i < len(local); i++ {
+		emit(local[i])
+	}
+	for ; j < len(fallback); j++ {
+		f := fallback[j]
+		if f.UUID == "" {
+			emit(f)
+			continue
+		}
+		if _, dup := seen[f.UUID]; dup {
+			continue
+		}
+		seen[f.UUID] = struct{}{}
+		emit(f)
+	}
+	return out
+}
+
+func eventsEqual(a, b []cli.EventEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].UUID != b[i].UUID || a[i].Time != b[i].Time || a[i].Summary != b[i].Summary {
+			return false
+		}
+	}
+	return true
+}
+
+// TestMergeSorted_FastPathFallbackEmpty_EquivalentToGeneral pins the
+// [R202606b-PERF-003] fast path (len(fallback)==0): output must equal the
+// reference two-way-merge implementation element-for-element across
+// cutoff boundaries and empty-UUID entries.
+func TestMergeSorted_FastPathFallbackEmpty_EquivalentToGeneral(t *testing.T) {
+	local := []cli.EventEntry{
+		{UUID: "a", Time: 100, Summary: "a"},
+		{UUID: "", Time: 150, Summary: "legacy"}, // empty UUID kept
+		{UUID: "b", Time: 200, Summary: "b"},
+		{UUID: "c", Time: 300, Summary: "c"},
+	}
+	for _, beforeMS := range []int64{0, -1, 150, 200, 250, 1000} {
+		fast := mergeSorted(local, nil, beforeMS)
+		ref := generalMergeSorted(local, nil, beforeMS)
+		if !eventsEqual(fast, ref) {
+			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
+		}
+	}
+	// empty local + empty fallback degenerate case
+	if got := mergeSorted(nil, nil, 0); len(got) != 0 {
+		t.Errorf("empty/empty: got %+v, want nil", got)
+	}
+}
+
+// TestMergeSorted_FastPathLocalEmpty_EquivalentToGeneral pins the
+// [R202606b-PERF-003] fast path (len(local)==0): fallback self-dedup
+// (first UUID wins), empty-UUID pass-through, and cutoff filtering must
+// match the reference implementation.
+func TestMergeSorted_FastPathLocalEmpty_EquivalentToGeneral(t *testing.T) {
+	fallback := []cli.EventEntry{
+		{UUID: "a", Time: 100, Summary: "a"},
+		{UUID: "", Time: 120, Summary: "legacy1"}, // empty UUID kept
+		{UUID: "b", Time: 200, Summary: "b1"},
+		{UUID: "b", Time: 200, Summary: "b2-dup"}, // self-dup, first wins
+		{UUID: "", Time: 220, Summary: "legacy2"}, // empty UUID kept
+		{UUID: "c", Time: 300, Summary: "c"},
+	}
+	for _, beforeMS := range []int64{0, -1, 120, 200, 201, 300, 1000} {
+		fast := mergeSorted(nil, fallback, beforeMS)
+		ref := generalMergeSorted(nil, fallback, beforeMS)
+		if !eventsEqual(fast, ref) {
+			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
+		}
+	}
+}
+
 // TestMerged_NilReceiver: methods on nil receiver don't panic. The
 // router's attachHistorySource may install MergedSource as nil on
 // older sessions that opt out.
