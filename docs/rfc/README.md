@@ -55,6 +55,7 @@
 | [dashboard-csp-strict.md](dashboard-csp-strict.md) | Draft v1（待评审） | 2026-06-04 | #1734/#922：dashboard CSP 去 unsafe-inline（nonce/strict-dynamic）；前端+CSP+鉴权联动 high risk，须先评审 |
 | [router-god-object-split.md](router-god-object-split.md) | Implemented v2（2026-06-10 订正） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）。P0-P5 已分 PR 落地（#1762/#1796/#1802/#1837/#1804/#1841/#1852），P6 由 managed-session-split 交付，P7 经核实关闭 won't-do（#577） |
 | [lifecycle-policy-and-naming.md](lifecycle-policy-and-naming.md) | Draft v1（待评审） | 2026-06-04 | #870/#463/#729：lifecycle policy 接口（须等 restart RFC）/ Get*Fetch*Load* 165处 rename ADR / AutoTitler 持久进程（撞 SharedCLI 决策）；均须先评审 |
+| [node-pairing.md](node-pairing.md) | Draft v1（待评审） | 2026-06-19 | 节点配对机制：新增 `naozhi node add\|ls\|rm`（primary 生成 token+配对码）与 `naozhi join <code>`（worker 解码→写 upstream→注册服务→验连），把 reverse-connect 拓扑从"两端手写对齐 YAML+手搬 token"降到"复制一行配对码"。借鉴 tailscale `--authkey`。复用 yaml.Node 写入 / `runInstall` / `shim.GenerateToken`，不动 wire 协议。关键约束：reverse_nodes 启动时加载，新增 node 需重启 primary（§7.1，热重载列 follow-up）；MVP 配对码含明文 token（§5.1 警告），短时效短码端点列 §5.2 follow-up |
 
 ## 已废弃 / 已被取代
 
