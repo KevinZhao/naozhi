@@ -33,10 +33,7 @@ type sandboxPending struct {
 // sandboxPendingDir resolves the pending directory ("" when persistence is
 // disabled — store-less test fixtures skip the §6.5 machinery entirely).
 func (s *Scheduler) sandboxPendingDir() string {
-	if s.storePath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(s.storePath), "sandboxpending")
+	return s.stateSubtree("sandboxpending")
 }
 
 // writeSandboxPending persists the in-flight record. Returns the file path
@@ -48,21 +45,12 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 	if dir == "" {
 		return ""
 	}
-	// R20260616-SEC-8 (#2144): refuse to MkdirAll through a symlink at the
-	// pending dir path. MkdirAll follows an existing symlink, so a planted
-	// `<stateDir>/sandboxpending → /elsewhere` would silently redirect every
-	// pending write (the §6.5 restart-reconcile handles for live microVMs)
-	// into an attacker-chosen directory. WriteFileAtomic's tmp→rename is
-	// TOCTOU-safe relative to the final path, but the directory itself is not.
-	// Lstat does NOT follow the final component, so a symlink surfaces here as
-	// ModeSymlink; bail (degrades to no reconcile handle, like a MkdirAll
-	// failure) rather than write through it. Single-operator hosts are low
-	// risk; multi-tenant deployments are not.
-	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		lg.Warn("cron sandbox: pending dir is a symlink; refusing to write through it (restart reconcile unavailable for this run)", "dir", dir)
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// #2166: route the dir create through the symlink-guarded helper so a
+	// planted `<stateDir>/sandboxpending → /elsewhere` cannot silently redirect
+	// the §6.5 restart-reconcile handle into an attacker-chosen directory.
+	// Degrades to no reconcile handle (like a MkdirAll failure) rather than
+	// writing through the symlink.
+	if err := s.mkdirStateSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: pending dir create failed; restart reconcile unavailable for this run", "err", err)
 		return ""
 	}
