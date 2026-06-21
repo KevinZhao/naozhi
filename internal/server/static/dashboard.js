@@ -61,10 +61,9 @@ let nodesData = {};
 let lastVersion = 0;
 let lastNodesJSON = '';
 let lastHistoryJSON = '';
-// _lastSidebarData caches the most recent /api/sessions payload so UX-P3
-// sidebar search can re-render locally on each keystroke without
-// re-hitting the server. Set by fetchSessions after a successful render;
-// consumed by the sidebar-search input oninput handler.
+// _lastSidebarData caches the most recent /api/sessions payload so the
+// sidebar can re-render locally without re-hitting the server. Set by
+// fetchSessions after a successful render.
 let _lastSidebarData = null;
 // _lastSidebarHtml caches the last fully-built sidebar HTML string so
 // renderSidebar can skip the (expensive) `list.innerHTML = html` write
@@ -363,10 +362,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', fn);
   };
-  bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });
   bindClick('btn-history', function () { toggleHistory(); });
   bindClick('btn-new-session', function () { createNewSession(); });
-  bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
   bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
   // NOTE: the quick-ask form submit is NOT bound here. That form lives in
   // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
@@ -720,28 +717,11 @@ function renderSidebar(data) {
   // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
   // (internal/server/dashboard_session.go) so allItems never contains cron
   // keys here. The previous `cronVisibleKeys` whitelist + per-render filter
-  // are gone — both branches below (search-filter / project-grouping) walk
-  // allItems directly.
+  // are gone — the project-grouping branch below walks allItems directly.
   const visibleItems = allItems;
 
-  // UX-P3 sidebar search: if the filter input is visible and non-empty,
-  // skip the project grouping entirely and render the filtered set as a
-  // flat list. Grouping under a filter scatters matches across day headers
-  // and loses the "search" affordance. Reading the input here (not in a
-  // separate oninput handler) means every sessions_update re-evaluates the
-  // filter — same query, fresh data — without flickering the input.
-  const filterQuery = readSidebarSearchQuery();
-  const filterActive = !!filterQuery;
-  let listHtml = '';
-  if (filterActive) {
-    const matched = filterSessionsByQuery(visibleItems, filterQuery);
-    listHtml = matched.length === 0
-      ? '<div class="session-list-filter-empty">没有匹配的会话<span class="slfe-hint">试试项目名、CLI 名或 prompt 片段</span></div>'
-      : matched.map(sessionCardHtml).join('');
-  }
-
-  let html = listHtml;
-  if (!filterActive) {
+  let html = '';
+  {
     // Project lookup by (node,name) so we can reach favorite/github flags.
     const projIndex = {};
     projectsData.forEach(p => {
@@ -875,9 +855,8 @@ function renderSidebar(data) {
   // R110-P2 empty-state CTA: keep the legacy "no sessions" text (E2E asserts
   // it via toContain) but add a visible call-to-action so first-time users
   // aren't left staring at a dead sidebar. createNewSession is the same handler
-  // the header `+` button invokes. NOT emitted in filter mode — the
-  // filter-specific empty state ('没有匹配的会话') already covers that path.
-  if (!html && !filterActive) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
+  // the header `+` button invokes.
+  if (!html) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
   // R33-UX1: skip the innerHTML write (and its full sidebar reflow) when
   // the produced markup is byte-identical to what is already mounted.
   // 20 sessions × 1 Hz polling cycle rebuilds the same string every tick
@@ -919,144 +898,6 @@ function renderSidebar(data) {
   // "最近会话" list mirrors the authoritative snapshot. Gated by selectedKey
   // inside the helper so the main shell's active session view isn't touched.
   renderRecentSessionsPanel();
-}
-
-// --- UX-P3 sidebar search helpers ---
-//
-// readSidebarSearchQuery is called at the top of renderSidebar so every
-// sessions_update repaint re-applies the current filter without a separate
-// oninput handler firing a second render. Returns '' when the search pane
-// is hidden or the input is empty, both of which are "no filter" states.
-function readSidebarSearchQuery() {
-  const pane = document.getElementById('sidebar-search');
-  if (!pane || pane.style.display === 'none') return '';
-  const input = document.getElementById('sidebar-search-input');
-  if (!input) return '';
-  return input.value.trim();
-}
-
-// filterSessionsByQuery is the pure match step — extracted so unit tests
-// can exercise it without driving the DOM. Match surface: user_label,
-// summary, last_prompt, project, cli_name, key (all substring,
-// case-insensitive). session_id is NOT in the surface because it's a
-// long opaque hash no operator types; matching on key is enough when
-// someone wants to paste a slice of it.
-function filterSessionsByQuery(items, query) {
-  const q = (query || '').trim().toLowerCase();
-  if (!q) return items;
-  return items.filter(s => {
-    if (!s) return false;
-    const fields = [
-      s.user_label, s.summary, s.last_prompt,
-      s.project, s.cli_name, s.key,
-    ];
-    for (const f of fields) {
-      if (typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1) return true;
-    }
-    return false;
-  });
-}
-
-// toggleSidebarSearch flips the search pane's visibility. Entering toggle
-// auto-focuses the input; exiting clears it (so re-opening starts clean
-// and a stale filter doesn't silently hide sessions). Mirrors the header
-// button's aria-expanded so screen readers track state.
-function toggleSidebarSearch() {
-  const pane = document.getElementById('sidebar-search');
-  const btn = document.getElementById('btn-sidebar-search');
-  if (!pane || !btn) return;
-  const opening = pane.style.display === 'none';
-  pane.style.display = opening ? 'flex' : 'none';
-  btn.classList.toggle('active', opening);
-  btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
-  if (opening) {
-    const input = document.getElementById('sidebar-search-input');
-    if (input) {
-      // defer focus so the display:flex paint lands first (Safari refuses
-      // focus() on a still-hidden element, then silently drops it).
-      setTimeout(() => { input.focus(); input.select(); }, 30);
-    }
-  } else {
-    // Closing clears the query so the next open starts fresh and the
-    // sidebar immediately re-renders without a lingering filter. Render
-    // locally against the cached payload (if any) to avoid an extra
-    // /api/sessions round-trip — the data is already authoritative.
-    // #1772: cancel any pending debounced keystroke render first, so a timer
-    // queued just before close can't fire after we've already cleared and
-    // re-rendered (which, when _lastSidebarData is null, would also trigger a
-    // spurious debouncedFetchSessions()).
-    if (_sidebarSearchDebounce) { clearTimeout(_sidebarSearchDebounce); _sidebarSearchDebounce = null; }
-    const input = document.getElementById('sidebar-search-input');
-    if (input) input.value = '';
-    if (_lastSidebarData) {
-      renderSidebar(_lastSidebarData);
-    } else {
-      debouncedFetchSessions();
-    }
-  }
-}
-
-// closeSidebarSearch is the explicit "close" path used by the × button
-// and the Esc key — same semantics as toggleSidebarSearch's close arm.
-function closeSidebarSearch() {
-  const pane = document.getElementById('sidebar-search');
-  if (pane && pane.style.display !== 'none') toggleSidebarSearch();
-}
-
-// initSidebarSearch wires the input handler + the `/` and Esc keyboard
-// shortcuts. Call once at startup. The input's oninput handler triggers
-// a debounced sidebar re-fetch so each keystroke re-applies the filter
-// against the canonical sessions data — no client-side cache desync.
-let _sidebarSearchDebounce = null;
-function initSidebarSearch() {
-  const input = document.getElementById('sidebar-search-input');
-  if (input) {
-    input.addEventListener('input', () => {
-      // Re-render locally against the cached /api/sessions payload so
-      // rapid typing doesn't DoS the server with per-keystroke requests.
-      // When no data has landed yet (first load), fall through to a
-      // debounced fetch as a degraded bootstrap.
-      //
-      // #1772: debounce the local re-render too. renderSidebar does a full
-      // sort + filter + sessionCardHtml map+join over every session on each
-      // keystroke; the _lastSidebarHtml guard skips the DOM write only when
-      // the output is byte-identical, which is rare while a filter narrows.
-      // 120ms collapses a typing burst into one render. The periodic
-      // sessions_update repaint reuses the current query via
-      // readSidebarSearchQuery, so debouncing the keystroke render loses no
-      // filter state.
-      if (_sidebarSearchDebounce) clearTimeout(_sidebarSearchDebounce);
-      _sidebarSearchDebounce = setTimeout(() => {
-        _sidebarSearchDebounce = null;
-        if (_lastSidebarData) {
-          renderSidebar(_lastSidebarData);
-        } else {
-          debouncedFetchSessions();
-        }
-      }, 120);
-    });
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); closeSidebarSearch(); }
-    });
-  }
-  // Global `/` shortcut: open sidebar search unless the user is already
-  // typing into some other input/textarea/contenteditable. Mirrors the
-  // `?` help shortcut's skip rule so developer muscle memory works.
-  document.addEventListener('keydown', e => {
-    if (e.key !== '/') return;
-    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-    const tgt = e.target;
-    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
-    if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
-    e.preventDefault();
-    const pane = document.getElementById('sidebar-search');
-    if (pane && pane.style.display === 'none') {
-      toggleSidebarSearch();
-    } else {
-      const inp = document.getElementById('sidebar-search-input');
-      if (inp) inp.focus();
-    }
-  });
 }
 
 // projectDisplayLabel returns the operator-facing name for a project,
@@ -12461,8 +12302,7 @@ document.addEventListener('keydown', function(e) {
   // `[` toggles collapse on PC. Skip when typing into an input/textarea/
   // contenteditable, when any modifier is held, while an IME composition is
   // active (CJK input fires `[` for fullwidth bracket), or while a modal/
-  // palette is open. Mirrors the skip logic the `/` shortcut uses for
-  // sidebar search.
+  // palette is open.
   if (e.key !== '[') return;
   if (e.isComposing) return;
   if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
@@ -12659,7 +12499,6 @@ initViewportTracking();
 initSwipeDelete();
 initSidebarProjectActions();
 initSwipeBack();
-initSidebarSearch();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
   ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
