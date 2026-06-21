@@ -9799,24 +9799,11 @@ function statusLabelForNode(status) {
   return m[status] || status;
 }
 
-// RAIL_CONN_LABELS maps a normalized node status to a short Chinese label for
-// the settings view's connection section. Distinct from the English
-// statusLabelForNode (used in the multi-node dropdown for parity with existing
-// tests) — the settings view wants compact CJK.
-const RAIL_CONN_LABELS = {
-  ok: '已连接', connected: '已连接',
-  connecting: '连接中', authenticating: '鉴权中',
-  offline: '离线', unreachable: '不可达',
-  error: '错误', disconnected: '已断开', off: '离线',
-};
-function railConnLabel(status) { return RAIL_CONN_LABELS[status] || status; }
-
 // renderSettingsView paints the standalone settings top-level view into
-// #settings-main. Two sections: theme (tri-state, reusing applyTheme/
-// THEME_ORDER/THEME_LABELS) and connection (read-only, reusing getNodeStatus/
-// getNodeDisplayName). Theme buttons are wired via event delegation — no inline
-// onclick (the HTML inline-handler cap is 0). Re-rendered on each theme click
-// to refresh the active state.
+// #settings-main. Currently a single section: theme (tri-state, reusing
+// applyTheme/THEME_ORDER/THEME_LABELS). Theme buttons are wired via event
+// delegation — no inline onclick (the HTML inline-handler cap is 0).
+// Re-rendered on each theme click to refresh the active state.
 function renderSettingsView() {
   const root = document.getElementById('settings-main');
   if (!root) return;
@@ -9826,21 +9813,11 @@ function renderSettingsView() {
       '" data-theme="' + esc(t) + '" aria-pressed="' + (t === cur ? 'true' : 'false') + '">' +
       esc(THEME_LABELS[t]) + '</button>';
   }).join('');
-  const status = getNodeStatus('local');
-  const connMeta = isMultiNode()
-    ? '<div class="settings-conn-meta">多节点：点击侧栏顶部的节点选择器切换。</div>'
-    : '';
   root.innerHTML =
     '<div class="settings-head"><h1>设置</h1></div>' +
     '<div class="settings-body">' +
       '<section class="settings-sec"><h2>主题</h2>' +
         '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
-      '</section>' +
-      '<section class="settings-sec"><h2>连接</h2>' +
-        '<div class="settings-conn">' +
-          '<span class="ab-conn-dot ' + (VALID_DOT_CLASSES[status] || 'offline') + '"></span>' +
-          '<span>' + esc(getNodeDisplayName('local')) + ' · ' + esc(railConnLabel(status)) + '</span>' +
-        '</div>' + connMeta +
       '</section>' +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
