@@ -661,8 +661,10 @@ func UpdateMetaFile(metaPath string, mutate func(*Meta) bool) (bool, error) {
 	if m == nil {
 		// Legacy attachment with no meta; we cannot append references
 		// without inventing upload metadata, so we refuse rather than
-		// write a partial sidecar.
-		return false, fmt.Errorf("meta sidecar missing: %s", metaPath)
+		// write a partial sidecar. Keep the path out of the error
+		// string (package policy: workspace paths are operator-only).
+		// The caller already has metaPath for its OnMetaWriteError log.
+		return false, errors.New("meta sidecar missing")
 	}
 	if !mutate(m) {
 		return false, nil
