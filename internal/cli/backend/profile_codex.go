@@ -42,10 +42,24 @@ func codexProfile() Profile {
 		// thread/tokenUsage/updated; there is no USD figure on the wire.
 		// Dashboard cost cells render unitless with a "tokens" suffix.
 		CostUnit: "tokens",
-		// RFC §5 phase1 conservative values (validated 2026-06-21):
+		// Feature values (validated 2026-06-21; embedded_context 2026-06-21 phase2):
 		//   - askuser: requestUserInput reverse request not yet card-ified (phase2)
 		//   - passthrough: turn/steer not yet wired to /urgent (phase2)
-		//   - embedded_context: @file mention not yet plumbed (phase1)
+		//   - embedded_context: @file mention works, but via a DIFFERENT
+		//     mechanism than claude. claude statically inlines the file
+		//     content into the prompt; codex does NOT — the `@path` rides
+		//     through verbatim in the turn/start text UserInput and codex
+		//     reads the file agentically with its shell tool. Verified
+		//     2026-06-21: codex parses `@path` from plain prompt text and
+		//     issues a commandExecution to read it. The dashboard gate
+		//     (dashboard.js featureForCurrent('embedded_context')) only needs
+		//     the backend to "read file paths from inside the prompt", which
+		//     codex satisfies. Caveat: resolution depends on the runtime
+		//     sandbox permitting the read (codex default is workspace-write,
+		//     which does); a read-only sandbox would leave the file unread.
+		//     This is honestly a weaker guarantee than claude's static inline,
+		//     but matches the dashboard contract and needs zero file-reading
+		//     code in naozhi (no new path-traversal / size-cap surface).
 		//   - image_input: codex responses accepts data: URL images (gpt-5.x path)
 		//   - audio_input: no direct audio
 		//   - mcp_http: codex supports HTTP MCP servers
@@ -53,7 +67,7 @@ func codexProfile() Profile {
 		Features: map[string]bool{
 			"askuser":          false,
 			"passthrough":      false,
-			"embedded_context": false,
+			"embedded_context": true,
 			"image_input":      true,
 			"audio_input":      false,
 			"mcp_http":         true,
