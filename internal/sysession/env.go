@@ -113,12 +113,6 @@ var envAlwaysPassthrough = map[string]struct{}{
 // inherits the runner env.
 type backendMode = envpolicy.BackendMode
 
-const (
-	backendAnthropic = envpolicy.BackendAnthropic
-	backendBedrock   = envpolicy.BackendBedrock
-	backendVertex    = envpolicy.BackendVertex
-)
-
 // detectBackendFromEnv delegates to envpolicy.DetectBackendFromEnv (#891).
 func detectBackendFromEnv(parent []string) backendMode {
 	return envpolicy.DetectBackendFromEnv(parent)
