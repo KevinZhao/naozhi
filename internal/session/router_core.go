@@ -274,6 +274,7 @@ type Router struct {
 	// Plumbed into cli.HistoryWiring at attachHistorySource time so the
 	// codexjsonl factory can glob per-thread rollout files. Wired from
 	// RouterConfig.CodexSessionsDir in cmd/naozhi/main.go.
+	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	codexSessionsDir string
 
 	// wsStore is the per-chat workspace-override facet (Router P1, #383):
