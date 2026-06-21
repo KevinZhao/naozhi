@@ -52,10 +52,7 @@ const sandboxSnapshotSchemaV = 1
 // sandboxSnapshotDir resolves the snapshot tree root ("" when persistence
 // is disabled — store-less test fixtures skip snapshots entirely).
 func (s *Scheduler) sandboxSnapshotDir() string {
-	if s.storePath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(s.storePath), "runsnapshots")
+	return s.stateSubtree("runsnapshots")
 }
 
 // writeSandboxSnapshot persists one run's input manifest + its prompt blob
@@ -100,7 +97,7 @@ func (s *Scheduler) writeSandboxSnapshot(jobID, runID, prompt, model, imageVersi
 		return
 	}
 	dir := filepath.Join(root, jobID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := s.mkdirStateSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: snapshot dir create failed; replay unavailable", "err", err)
 		return
 	}
@@ -123,7 +120,7 @@ func (s *Scheduler) writeSnapshotBlob(root, content string) (string, error) {
 	sum := sha256.Sum256([]byte(content))
 	hash := hex.EncodeToString(sum[:])
 	blobDir := filepath.Join(root, "blobs")
-	if err := os.MkdirAll(blobDir, 0o700); err != nil {
+	if err := s.mkdirStateSubtree(blobDir); err != nil {
 		return "", fmt.Errorf("mkdir blob dir: %w", err)
 	}
 	path := filepath.Join(blobDir, hash)
