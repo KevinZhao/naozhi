@@ -1,4 +1,4 @@
-package cryptoutil
+package auth
 
 import (
 	"strings"
