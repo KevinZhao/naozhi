@@ -577,9 +577,16 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .main-header h2 .btn-rename:hover{color:var(--nz-text-strong);background:rgba(255,255,255,0.06)}
 .main-header .detail{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.main-header .detail-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
-.main-header .detail-cost.has-cost{color:var(--nz-text-strong)}
-.main-header .detail-cost.high-cost{color:var(--nz-amber)}
+/* session-run-metrics header overview: the run-history stats ("N 轮 · 均 X ·
+   最长 X") promoted from the panel summary into the header's right edge. Pushed
+   to the right with margin-left:auto; truncates rather than wrapping so it
+   never shoves the cli/model label off-screen on narrow viewports. Empty (no
+   recorded runs) → zero-width, collapses cleanly. */
+.main-header .detail-runstats{display:flex;align-items:center;gap:6px;margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.main-header .detail-runstats:empty{display:none}
+.main-header .detail-runstats .srp-stat{white-space:nowrap}
+.main-header .detail-runstats .srp-stat.bad{color:var(--nz-red)}
+.main-header .detail-runstats .srp-stat-sep{opacity:.4}
 
 /* Multi-Backend RFC §8.4 — backend chip (D1 header / D2 sidebar). Color
    comes inline from BackendInfo.chip_color; the rules below provide layout,
@@ -1923,10 +1930,6 @@ body.kbd-open .input-hints{display:none}
 .session-runs-panel[open] .srp-summary::before{transform:rotate(90deg)}
 .session-runs-panel .srp-summary:hover{background:var(--nz-hover-bg)}
 .session-runs-panel .srp-title{color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
-.session-runs-panel .srp-stats{display:flex;align-items:center;gap:var(--nz-space-2);margin-left:auto;font-variant-numeric:tabular-nums;flex-wrap:nowrap;overflow-x:auto}
-.session-runs-panel .srp-stat{white-space:nowrap}
-.session-runs-panel .srp-stat.bad{color:var(--nz-red)}
-.session-runs-panel .srp-stat-sep{opacity:.4}
 .session-runs-panel .srp-body{padding:0 var(--nz-space-4) var(--nz-space-2);max-height:42vh;overflow-y:auto}
 .session-runs-panel .srp-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);overflow:hidden;background:var(--nz-bg-0)}
 .session-runs-panel .srr{padding:var(--nz-space-2) var(--nz-space-3);border-bottom:1px solid var(--nz-border)}

@@ -2141,92 +2141,6 @@ func TestDashboardJS_R110P1_CronStepValueHumanize(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R110P3_CostTooltipHelper pins the R110-P3 cost-detail
-// hover MVP. The session header's `$N.NN` chip previously had no
-// tooltip — operators couldn't see when the spend accumulated, which
-// session ID it belonged to, or for how long the session had been open.
-// The full TODO ask (input/output/cache token breakdown) requires
-// backend schema extension and is tracked as residual scope; this MVP
-// surfaces the four data points the front-end already has (precise
-// cost, firstSeen, lastActive, session_id tail).
-//
-// The helper is pure so a future unit-test harness can exercise it
-// without DOM setup, and — importantly — it MUST return plain text
-// (never HTML). Native `title` attributes render as text, so an XSS
-// payload in s.user_label that somehow reached this helper would be
-// harmless. Pinning the "return lines.join('\\n')" shape locks that
-// invariant.
-func TestDashboardJS_R110P3_CostTooltipHelper(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-
-	// 1) Pure helper at module scope. Not a closure inside updateHeaderCost
-	//    so a contract test can reach it via Node/JSDOM harness later.
-	if !strings.Contains(js, "function formatHeaderCostTooltip(s, selKey, selNode)") {
-		t.Error("dashboard.js missing formatHeaderCostTooltip helper — R110-P3 cost hover needs a pure text builder")
-	}
-
-	// 2) Guard: zero cost + no session_id returns ''. Prevents an empty
-	//    chip from having a phantom "$0 · …" tooltip that distracts
-	//    operators on a freshly-created pending session.
-	if !strings.Contains(js, "if (cost <= 0 && !s.session_id) return '';") {
-		t.Error("formatHeaderCostTooltip must short-circuit when there's nothing meaningful to show — zero cost + empty session_id should return ''")
-	}
-
-	// 3) Four data-point labels in Chinese. Pinning the literal copy so
-	//    an i18n refactor touches this line with intent. "创建时间" replaced
-	//    "首次打开" when sidebar order migrated from per-client localStorage
-	//    firstSeen to the server-stamped session created_at: the tooltip
-	//    now mirrors the same value the comparator uses, instead of a
-	//    separate per-dashboard timestamp.
-	for _, label := range []string{
-		"'累计花费: $'",
-		"'创建时间: '",
-		"'最后活动: '",
-		"'会话 ID: …'",
-	} {
-		if !strings.Contains(js, label) {
-			t.Errorf("formatHeaderCostTooltip missing label %q — cost hover MVP requires all four data-point labels", label)
-		}
-	}
-
-	// 4) session_id must use the last 8 chars (common shim for CLI
-	//    --resume handoffs). If somebody changes to first 8, operators
-	//    would paste a prefix that doesn't match anything.
-	if !strings.Contains(js, "s.session_id.slice(-8)") {
-		t.Error("formatHeaderCostTooltip must show the LAST 8 chars of session_id (last is what operators paste for --resume)")
-	}
-
-	// 5) Plain-text return contract: must use \n joiner (native `title`
-	//    renders line breaks), NOT <br> or similar HTML. If somebody
-	//    later switches to a custom tooltip component they must update
-	//    this test together with the HTML escaping story.
-	if !strings.Contains(js, "return lines.join('\\n');") {
-		t.Error("formatHeaderCostTooltip must return plain text joined with '\\n' — using HTML markers would require an explicit escape story, not yet in place")
-	}
-
-	// 6) Live-update integration: updateHeaderCost must refresh the
-	//    title on every cost tick so hover content doesn't go stale
-	//    when result events arrive mid-session.
-	if !strings.Contains(js, "el.title = formatHeaderCostTooltip(s, selectedKey, selectedNode);") {
-		t.Error("updateHeaderCost must refresh el.title via formatHeaderCostTooltip on each tick — otherwise the tooltip drifts behind live cost updates")
-	}
-
-	// 7) First-render integration: renderMainShell must seed the title
-	//    via costTitleAttr so the very first hover after selection has
-	//    the detail, not an empty popup that waits for updateHeaderCost.
-	if !strings.Contains(js, "const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);") {
-		t.Error("renderMainShell must compute costTooltip at render time so initial hover isn't empty")
-	}
-	if !strings.Contains(js, "' title=\"' + escAttr(costTooltip) + '\"'") {
-		t.Error("renderMainShell must emit the title attribute with escAttr so any user-controlled characters in s fields can't break out of the attribute")
-	}
-}
-
 // TestDashboardJS_R110P3_PaletteFavoriteSort pins the palette idle-state
 // (empty-query) ordering. Originally a three-tier sort (favorites → recents →
 // rest); the recents tier was retired when the picker switched to ordering the
@@ -4353,8 +4267,9 @@ func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 //     filter — cron-heavy workspaces accumulate cost overnight).
 //     Input shape tolerant: missing fields contribute zero / are skipped.
 //  2. formatHomeCost keeps sub-cent precision (4 decimals) for tiny
-//     values, 2 decimals once cost is measurable — mirrors the session
-//     card header-cost chip behavior.
+//     values, 2 decimals once cost is measurable. (The per-session header
+//     cost chip was later removed — Bedrock pricing made it misleading —
+//     but the Home-panel aggregate retains this formatter.)
 //  3. renderRecentSessionsPanel emits the stats strip above the session
 //     list AND passes Date.now() into computeHomeStats (not a hardcoded
 //     constant — obvious bug bait if a future refactor captures a stale
