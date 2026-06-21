@@ -1240,27 +1240,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hdr-btns{display:flex;gap:4px;align-items:center}
 .hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px;display:flex;align-items:center;justify-content:center}
 .hdr-btn:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
-/* Active state indicates the toggleable pane (currently sidebar search) is
-   open. Matches the accent color used on focus rings across the dashboard
-   so a keyboard user can tell which toggle the button drives. */
 .hdr-btn.active{background:var(--nz-bg-2);color:var(--nz-accent);border-color:var(--nz-accent)}
 .hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-/* UX-P3 sidebar search: toggle-revealed input row under the header-row.
-   Lives inside .sidebar-header (outside #session-list) so sessions_update
-   repaints don't clobber the input value/focus — the renderer reads the
-   input's current value on each repaint and filters accordingly. */
-.sidebar-search{display:flex;gap:6px;align-items:center;margin-top:8px;padding:0 4px}
-.sidebar-search-input{flex:1;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm2);font-family:inherit;outline:none;transition:border-color .1s}
-.sidebar-search-input:focus{border-color:var(--nz-accent)}
-.sidebar-search-input::placeholder{color:var(--nz-text-faint)}
-.sidebar-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:var(--nz-fs-md);line-height:1;padding:4px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;transition:all .1s}
-.sidebar-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
-/* When the filter is active AND empty (no matches), paint a friendly hint
-   instead of the legacy "no sessions" CTA which would mislead operators
-   into thinking they have zero sessions. .session-list-filter-empty is
-   emitted by the renderer's filter branch. */
-.session-list-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
-.session-list-filter-empty .slfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
 /* Header badges (history count, cron attention count) are neutral by
    default — red is opt-in via .is-alert (see Track D variants below).
    Before Round 127 this rule hard-coded --nz-red, then a later Track D
@@ -2770,17 +2751,9 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="header-row">
         <h1>naozhi</h1>
         <div class="hdr-btns">
-          <button type="button" class="hdr-btn" id="btn-sidebar-search" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
           <button type="button" class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
           <button type="button" class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
-      </div>
-      <!-- UX-P3 sidebar search: default-hidden, toggled via btn-sidebar-search
-           or the `/` shortcut. Kept outside #session-list so sessions_update
-           re-renders don't blow away the input value or its focus. -->
-      <div class="sidebar-search" id="sidebar-search" style="display:none">
-        <input type="text" id="sidebar-search-input" class="sidebar-search-input" placeholder="搜索会话、项目或 CLI 名..." autocomplete="off" spellcheck="false" aria-label="搜索会话" />
-        <button type="button" class="sidebar-search-clear btn-close" id="sidebar-search-clear" title="关闭搜索" aria-label="关闭搜索">&times;</button>
       </div>
     </div>
     <!-- Node selector: shown only when multiple nodes are connected. Replaces

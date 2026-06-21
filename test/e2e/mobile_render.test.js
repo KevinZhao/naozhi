@@ -8,50 +8,10 @@ const { startMockServer } = require('./mock-server');
 const fs = require('fs');
 const path = require('path');
 
-const desktop = { viewport: { width: 1280, height: 800 } };
-
 test.describe('#1772 mobile render hotspots', () => {
   let mock;
   test.beforeAll(async () => { mock = await startMockServer(); });
   test.afterAll(() => mock.server.close());
-
-  test('sidebar search re-render is debounced (not per-keystroke)', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Open the sidebar search box.
-    await page.click('#btn-sidebar-search');
-    await page.waitForSelector('#sidebar-search-input', { state: 'visible' });
-
-    // Instrument renderSidebar to count invocations.
-    await page.evaluate(() => {
-      // eslint-disable-next-line no-eval
-      window.__renderCount = 0;
-      // renderSidebar is a top-level function; wrap it via eval in page scope.
-      // eslint-disable-next-line no-eval
-      eval('var __origRenderSidebar = renderSidebar; renderSidebar = function(){ window.__renderCount++; return __origRenderSidebar.apply(this, arguments); };');
-    });
-
-    const input = page.locator('#sidebar-search-input');
-    // Type a 5-char burst quickly.
-    await input.type('hello', { delay: 10 });
-
-    // Immediately after the burst, the debounced render must NOT have fired
-    // once per keystroke. Allow at most 1 (in case the last timer just fired).
-    const immediate = await page.evaluate(() => window.__renderCount);
-    expect(immediate).toBeLessThanOrEqual(1);
-
-    // After the debounce window, exactly one render should have landed.
-    await page.waitForTimeout(250);
-    const settled = await page.evaluate(() => window.__renderCount);
-    expect(settled).toBeGreaterThanOrEqual(1);
-    // A 5-char burst must collapse to far fewer than 5 renders.
-    expect(settled).toBeLessThan(5);
-
-    await ctx.close();
-  });
 
   test('source: swipe-delete caches offsetWidth and popover dismiss is gated', async () => {
     // These are hot-loop layout-read removals with no cheap DOM contract to
