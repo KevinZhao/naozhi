@@ -33,7 +33,6 @@ func ComputeStats(runs []SessionRun) SessionRunStats {
 
 	sort.Slice(durs, func(i, j int) bool { return durs[i] < durs[j] })
 	st.P50MS = percentile(durs, 50)
-	st.P95MS = percentile(durs, 95)
 	return st
 }
 

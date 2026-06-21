@@ -55,7 +55,6 @@ type SessionRunStats struct {
 	TotalMS      int64 `json:"total_ms"`
 	AvgMS        int64 `json:"avg_ms"`
 	P50MS        int64 `json:"p50_ms"`
-	P95MS        int64 `json:"p95_ms"`
 	MaxMS        int64 `json:"max_ms"`
 	CompletedCnt int   `json:"completed_count"`
 	ErrorCnt     int   `json:"error_count"`

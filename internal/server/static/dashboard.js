@@ -1781,19 +1781,6 @@ function applyFeatureGates() {
   }
 }
 
-// formatCostByUnit returns the cost cell text for the dashboard header.
-// USD: "$0.0024" / "$1.23". credits: "0.024 credits" / "1.23 credits".
-// Empty unit (unknown backend) hides the cell. Multi-Backend RFC §8.3 D5.
-function formatCostByUnit(cost, unit) {
-  if (cost == null || !isFinite(cost)) cost = 0;
-  if (unit === 'credits') {
-    if (cost === 0) return '0 credits';
-    return (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(3)) + ' credits';
-  }
-  // Default: USD
-  return '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
-}
-
 function cliIcon(name) {
   // Kiro official ghost-style mark (sourced from https://kiro.dev/icon.svg).
   // Inlined here so the asset works offline + survives CSP. Compressed to
@@ -2344,9 +2331,9 @@ function sessionRunStatLabel(ms) {
 function sessionRunsStatsHtml(stats) {
   if (!stats || !stats.count) return '';
   const parts = [];
-  parts.push('<span class="srp-stat">' + esc(stats.count + ' 次') + '</span>');
+  // 对话的单位是「轮」(round)：一次 run = 一轮对话往返。
+  parts.push('<span class="srp-stat">' + esc(stats.count + ' 轮') + '</span>');
   parts.push('<span class="srp-stat">均 ' + esc(sessionRunStatLabel(stats.avg_ms || 0)) + '</span>');
-  if (stats.p95_ms) parts.push('<span class="srp-stat">P95 ' + esc(sessionRunStatLabel(stats.p95_ms)) + '</span>');
   parts.push('<span class="srp-stat">最长 ' + esc(sessionRunStatLabel(stats.max_ms || 0)) + '</span>');
   if (stats.timeout_count > 0) {
     parts.push('<span class="srp-stat bad" title="超时次数">⚠ ' + esc(String(stats.timeout_count)) + '</span>');
@@ -2383,6 +2370,17 @@ function sessionRunRowHtml(r) {
     '</div>';
 }
 
+// setHeaderRunStats writes (or clears) the aggregate run-stats node that lives
+// in the session-detail header's .detail line. The run-history stats used to
+// sit inside the panel <summary>; they were promoted to the header so the
+// per-session "N 轮 · 均 X · 最长 X" overview is always visible without
+// expanding the (collapsed-by-default) timeline. The header node is built
+// empty by renderMainShell, so absence = no-op rather than throw.
+function setHeaderRunStats(html) {
+  const el = document.getElementById('header-runstats');
+  if (el) el.innerHTML = html || '';
+}
+
 function renderSessionRunsPanel(data) {
   const panel = document.getElementById('session-runs-panel');
   if (!panel) return;
@@ -2392,9 +2390,13 @@ function renderSessionRunsPanel(data) {
     // Hidden entirely when there's no history (mirrors cron :empty behaviour).
     panel.hidden = true;
     panel.innerHTML = '';
+    setHeaderRunStats('');
     return;
   }
   panel.hidden = false;
+  // Stats are surfaced in the header; the panel keeps only the per-run detail
+  // rows behind a collapsed disclosure.
+  setHeaderRunStats(sessionRunsStatsHtml(stats));
   const rowsHtml = runs.map(sessionRunRowHtml).join('');
   // Collapsed by default everywhere: the run-history timeline grows without
   // bound as more runs accumulate, so leaving it open would steadily push the
@@ -2406,7 +2408,6 @@ function renderSessionRunsPanel(data) {
   panel.innerHTML =
     '<summary class="srp-summary">' +
       '<span class="srp-title">运行记录</span>' +
-      '<span class="srp-stats">' + sessionRunsStatsHtml(stats) + '</span>' +
     '</summary>' +
     '<div class="srp-body">' +
       (rowsHtml ? '<div class="srp-rows">' + rowsHtml + '</div>'
@@ -2427,19 +2428,22 @@ async function fetchSessionRuns(key, node) {
   const panel = document.getElementById('session-runs-panel');
   if (!panel) return;
   // Run history is a local-node concern; remote-node sessions skip it for now.
-  if (node && node !== 'local') { panel.hidden = true; return; }
+  // Clear the header stats too so a remote session doesn't inherit the
+  // previously-selected local session's "N 轮" overview.
+  if (node && node !== 'local') { panel.hidden = true; setHeaderRunStats(''); return; }
   try {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
-    if (!resp.ok) { panel.hidden = true; return; }
+    if (!resp.ok) { panel.hidden = true; setHeaderRunStats(''); return; }
     const data = await resp.json();
     // Guard against a stale response landing after the user switched sessions.
     if (selectedKey !== key) return;
     renderSessionRunsPanel(data);
   } catch (_) {
     panel.hidden = true;
+    setHeaderRunStats('');
   }
 }
 
@@ -2818,19 +2822,13 @@ function renderMainShell() {
   // surrounding chip was a duplicate signal that competed for attention
   // with cost / turn-timer.
   const headerBackendChip = '';
-  // Multi-Backend RFC §8.3 D5: cost unit comes from the SessionView so
-  // claude shows "$" and kiro shows "credits". Empty unit (unknown backend)
-  // hides the cell — keeps the layout clean rather than rendering "$NaN".
-  const costUnit = s.cost_unit || '';
-  const cost = s.total_cost || 0;
-  const showCost = costUnit !== '';
-  const costText = formatCostByUnit(cost, costUnit);
-  const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
-  // R110-P3 cost tooltip: compute the same detail the live updater
-  // (updateHeaderCost) writes, so the very first render isn't missing
-  // hover content until a subsequent event refresh lands.
-  const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);
-  const costTitleAttr = costTooltip ? ' title="' + escAttr(costTooltip) + '"' : '';
+  // session-run-metrics header cleanup: the per-session cost chip was removed.
+  // The figure came from the CLI's self-reported total_cost_usd, which is
+  // computed against Anthropic list pricing — under Bedrock that diverges
+  // systematically from the actual AWS bill (often reading $0), so it misled
+  // more than it informed. The header now surfaces the run-history overview
+  // (N 轮 · 均 X · 最长 X) instead, injected asynchronously into
+  // #header-runstats by renderSessionRunsPanel.
   // Multi-Backend RFC §8.3 D6: context usage progress bar driven by the
   // UI Round 5 R5-7: header no longer renders ctx-bar — the 48×6 px
   // strip carried low signal (operator can't act on "ctx 12%"), competed
@@ -2874,7 +2872,10 @@ function renderMainShell() {
         headerOriginBadge +
         ctxBarHtml +
         turnTimerHtml +
-        (showCost ? '<span class="' + costClass + '" id="header-cost"' + costTitleAttr + '>' + costText + '</span>' : '') +
+        // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
+        // filled asynchronously by renderSessionRunsPanel once /api/sessions/runs
+        // resolves; stays empty (collapses) for sessions with no recorded runs.
+        '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
     '</div>' +
@@ -10861,7 +10862,6 @@ const wsm = {
       }
     }
     refreshBanner();
-    updateHeaderCost();
   },
 
   onEvent(msg) {
@@ -10884,8 +10884,9 @@ const wsm = {
     } else if (ev.type === 'result') {
       if (ev.cost) {
         const sKey = sid(selectedKey, selectedNode);
+        // total_cost still feeds the Home/recent-sessions aggregate; the header
+        // cost chip itself was removed (see renderMainShell).
         if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
-        updateHeaderCost();
       }
       // Optimistic: result means the turn is done.
       const reKey = sid(selectedKey, selectedNode);
@@ -11266,75 +11267,6 @@ function updateMainState(state, reason) {
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
   updateSendButton(state);
-}
-
-function updateHeaderCost() {
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const el = document.getElementById('header-cost');
-  if (!el) return;
-  const cost = s.total_cost || 0;
-  // Multi-Backend RFC §8.3 D5: format per session's cost_unit so live
-  // updates honor the same "credits" / "$" choice the initial render made.
-  el.textContent = formatCostByUnit(cost, s.cost_unit || '');
-  el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
-  // R110-P3 cost-detail hover: keep the title attribute in sync so live
-  // updates (ws session_state / result events) don't leave stale metadata
-  // behind the tooltip. formatHeaderCostTooltip silently returns '' for
-  // a zero-cost session so the chip isn't distracted by a "session_id: …"
-  // hint when there's nothing to explain.
-  el.title = formatHeaderCostTooltip(s, selectedKey, selectedNode);
-}
-
-// formatHeaderCostTooltip builds a multi-line plain-text tooltip for the
-// header cost chip. Pure function so a contract test can exercise it
-// without driving the DOM. Return value is a newline-joined string, not
-// HTML — the browser renders native tooltips for `title` attributes, and
-// wrapping the helper so it ALWAYS returns plain text (never HTML) pins
-// the XSS-safe boundary: even when sess fields carry user-controlled
-// characters, the browser treats them as text and won't parse tags.
-//
-// R110-P3 scope: MVP surfaces data the front-end already has — cost
-// (precise), session creation + last-active timestamps, and the last
-// 8 chars of session_id (operators commonly paste that for CLI
-// `--resume`). Full token/input/output/cache breakdown requires backend
-// schema work and is tracked as residual scope.
-function formatHeaderCostTooltip(s, selKey, selNode) {
-  if (!s || typeof s !== 'object') return '';
-  const cost = s.total_cost || 0;
-  if (cost <= 0 && !s.session_id) return '';
-  const lines = [];
-  if (cost > 0) {
-    // Multi-Backend RFC §8.3 D5/D26: tooltip honors cost_unit so kiro
-    // sessions show "0.024 credits" rather than a confusing "$0.024".
-    const unit = s.cost_unit || '';
-    if (unit === 'credits') {
-      lines.push('累计花费: ' + cost.toFixed(4) + ' credits');
-    } else {
-      lines.push('累计花费: $' + cost.toFixed(4));
-    }
-  }
-  // D26: per-turn metering breakdown when kiro reports it. Each row is one
-  // billing dimension (kiro currently emits {value, unit:"credit"}); future
-  // backends may add multiple rows.
-  if (Array.isArray(s.metering_usage) && s.metering_usage.length > 0) {
-    s.metering_usage.forEach(m => {
-      if (!m || typeof m.value !== 'number') return;
-      const unit = m.unit_plural || m.unit || '';
-      lines.push('上一轮: ' + m.value.toFixed(4) + (unit ? ' ' + unit : ''));
-    });
-  }
-  // Server-stamped session creation time; same value drives the sidebar
-  // sort anchor so tooltip and visual position stay consistent.
-  if (s.created_at && s.created_at > 0) {
-    lines.push('创建时间: ' + formatAbsTime(s.created_at));
-  }
-  if (s.last_active && s.last_active > 0) {
-    lines.push('最后活动: ' + formatAbsTime(s.last_active));
-  }
-  if (typeof s.session_id === 'string' && s.session_id.length >= 8) {
-    lines.push('会话 ID: …' + s.session_id.slice(-8));
-  }
-  return lines.join('\n');
 }
 
 function updateHeaderCLI() {

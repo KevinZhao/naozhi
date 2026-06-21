@@ -232,10 +232,6 @@ func TestComputeStats(t *testing.T) {
 	if st.P50MS != 200 {
 		t.Errorf("P50 want 200, got %d", st.P50MS)
 	}
-	// P95 rank=ceil(.95*4)=4 -> 400
-	if st.P95MS != 400 {
-		t.Errorf("P95 want 400, got %d", st.P95MS)
-	}
 }
 
 func TestComputeStats_Empty(t *testing.T) {
@@ -246,7 +242,7 @@ func TestComputeStats_Empty(t *testing.T) {
 
 func TestComputeStats_Single(t *testing.T) {
 	st := ComputeStats([]SessionRun{{DurationMS: 42, Outcome: OutcomeCompleted}})
-	if st.P50MS != 42 || st.P95MS != 42 || st.AvgMS != 42 || st.MaxMS != 42 {
+	if st.P50MS != 42 || st.AvgMS != 42 || st.MaxMS != 42 {
 		t.Errorf("single-element stats wrong: %+v", st)
 	}
 }
