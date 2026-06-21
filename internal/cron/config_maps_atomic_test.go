@@ -26,6 +26,7 @@ func (stubPlatformReplier) Split(text string, _ int) []string { return []string{
 func (stubPlatformReplier) Reply(context.Context, string, string) (string, error) {
 	return "", nil
 }
+func (stubPlatformReplier) UsesSingleUseReplyToken() bool { return false }
 
 // TestConfigMaps_AtomicSnapshotNeverNil pins R249-ARCH-27 (#991): the config
 // maps + the NotifySender are published as one immutable *cronConfigMaps

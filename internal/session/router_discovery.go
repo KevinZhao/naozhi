@@ -345,20 +345,29 @@ func (r *Router) trackSessionID(id string) {
 		return
 	}
 	if len(r.kid.ids) >= maxKnownIDs {
-		// Drop the oldest entry; r.kid.order invariant is that it holds
-		// exactly the keys of r.kid.ids in insertion order. Shift in-place
-		// rather than reslicing: `order[1:]` keeps the backing array
-		// pinned from the original data pointer, so after many evictions the
-		// slice header drifts rightward and the leading, now-unused portion
-		// of the array can't be reused — eventually forcing re-allocation.
-		// The copy + clear tail approach keeps the header stable and lets the
-		// allocator reuse the same buffer indefinitely.
-		oldest := r.kid.order[0]
+		// Drop the oldest entry. The live window is order[orderHead:] and
+		// mirrors the keys of r.kid.ids in insertion order. Evict in
+		// amortized O(1) by clearing the front slot and advancing orderHead
+		// rather than shifting the whole slice (the prior copy(order, order[1:])
+		// paid an O(N) ~80KB move under the hot r.mu write lock on every new ID
+		// past the cap).
+		oldest := r.kid.order[r.kid.orderHead]
 		delete(r.kid.ids, oldest)
-		n := len(r.kid.order)
-		copy(r.kid.order, r.kid.order[1:])
-		r.kid.order[n-1] = ""
-		r.kid.order = r.kid.order[:n-1]
+		r.kid.order[r.kid.orderHead] = ""
+		r.kid.orderHead++
+		// Compact only when the dead prefix grows to half the slice, so the
+		// reclaim cost is amortized O(1) per eviction. Copy the live window
+		// into a FRESH buffer: reslicing (`order = order[orderHead:]`) would
+		// pin the original backing array and let the header drift rightward,
+		// so the leading dead portion could never be reused — eventually
+		// forcing re-allocation anyway and leaking the dead-prefix strings.
+		if r.kid.orderHead >= len(r.kid.order)/2 {
+			live := r.kid.order[r.kid.orderHead:]
+			compacted := make([]string, len(live), maxKnownIDs+1)
+			copy(compacted, live)
+			r.kid.order = compacted
+			r.kid.orderHead = 0
+		}
 	}
 	r.kid.ids[id] = true
 	r.kid.order = append(r.kid.order, id)

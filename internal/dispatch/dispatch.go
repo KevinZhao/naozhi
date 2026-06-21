@@ -1373,23 +1373,7 @@ func (d *Dispatcher) sendAndReply(
 	// passes. Pure function on (result, sess) — easy to unit-test without
 	// spinning up a Dispatcher / Router / platform.
 	replyText := d.decorateReplyText(result, sess)
-	var outImages []platform.Image
-	imagePaths := cli.ExtractImagePaths(replyText)
-	if len(imagePaths) > 0 {
-		// R112714-PERF-8: use strings.ReplaceAll loop instead of
-		// strings.NewReplacer. ExtractImagePaths returns at most a handful of
-		// paths per reply (typically 1-2), so the per-call trie allocation in
-		// strings.NewReplacer costs more than N simple verbatim scans. Each
-		// path is always replaced (even when ReadFile fails) so user-visible
-		// behaviour is unchanged: every extracted path becomes "[图片]".
-		for _, path := range imagePaths {
-			data, err := d.imageReader.ReadFile(path)
-			if err == nil {
-				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
-			}
-			replyText = strings.ReplaceAll(replyText, path, "[图片]")
-		}
-	}
+	outImages, replyText := d.readTurnImages(replyText)
 
 	tracker.waitReady(ctx)
 
@@ -1457,6 +1441,49 @@ func (d *Dispatcher) sendAndReply(
 // footer applies — callers typically gate on `replyText != ""` before
 // dispatching to the platform, so an empty return is the existing
 // "nothing to send" sentinel.
+// maxTurnImageBytes caps the total bytes of outbound images attached to a
+// single reply turn (#2196). ExtractImagePaths caps at 10 paths and each
+// image is capped at 10 MiB (cli/image.go maxImageFileSize), so without a
+// running total a single turn could hold ~100 MiB in memory. 20 MiB covers
+// a realistic multi-image reply while bounding worst-case heap pressure.
+const maxTurnImageBytes = 20 * 1024 * 1024
+
+// readTurnImages resolves the local image paths embedded in replyText into
+// platform.Image attachments and returns the text with every path rewritten
+// to "[图片]". It enforces maxTurnImageBytes across the whole turn: once the
+// running total would exceed the budget, further images are skipped (their
+// paths are STILL rewritten so the user-visible text is identical regardless
+// of attachment outcome). Extracted as a pure-ish helper mirroring
+// decorateReplyText so the byte budget is unit-testable without a Dispatcher
+// roundtrip.
+func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string) {
+	imagePaths := cli.ExtractImagePaths(replyText)
+	if len(imagePaths) == 0 {
+		return nil, replyText
+	}
+	var outImages []platform.Image
+	var turnImageBytes int
+	// R112714-PERF-8: use strings.ReplaceAll loop instead of
+	// strings.NewReplacer. ExtractImagePaths returns at most a handful of
+	// paths per reply (typically 1-2), so the per-call trie allocation in
+	// strings.NewReplacer costs more than N simple verbatim scans. Each
+	// path is always replaced (even when ReadFile fails or the byte budget
+	// is exhausted) so user-visible behaviour is unchanged: every extracted
+	// path becomes "[图片]".
+	for _, path := range imagePaths {
+		data, err := d.imageReader.ReadFile(path)
+		if err == nil {
+			if turnImageBytes+len(data) <= maxTurnImageBytes {
+				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
+				turnImageBytes += len(data)
+			}
+			// Over budget: skip the attachment but still rewrite the path.
+		}
+		replyText = strings.ReplaceAll(replyText, path, "[图片]")
+	}
+	return outImages, replyText
+}
+
 func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
 	// R103901-CODE-1: scrub well-known credential token shapes (sk-ant-, ghp_,
 	// AKIA, …) BEFORE localising the API error, mirroring the cron notify

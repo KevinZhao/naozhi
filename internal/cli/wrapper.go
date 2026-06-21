@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -869,9 +871,29 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 	// connection (Init failure goes through proc.Kill / handle.Close).
 	skipped := 0
 	for {
-		rawLine, err := r.proc.shimR.ReadBytes('\n')
-		if err != nil {
-			return nil, true, err
+		// R55-OOM (#2183): bound the per-line read. bufio.Reader.ReadBytes
+		// grows its buffer without limit, so a hostile/buggy shim that sends a
+		// giant line with no newline could drive OOM during the Init handshake
+		// (the steady-state path readShimLine and ShimHandle.ReadMsg already
+		// cap via a ReadSlice-accumulate loop). Mirror that here: accumulate
+		// chunks under maxScannerBufBytes, treating bufio.ErrBufferFull as a
+		// keep-reading signal and any other error as terminal.
+		var rawLine []byte
+		for {
+			chunk, err := r.proc.shimR.ReadSlice('\n')
+			if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+				// Any partial chunk on a terminal error is abandoned: a half
+				// line cannot be parsed and the connection is going away.
+				return nil, true, err
+			}
+			if len(rawLine)+len(chunk) > maxScannerBufBytes {
+				return nil, true, fmt.Errorf("shim init line exceeds %d bytes", maxScannerBufBytes)
+			}
+			rawLine = append(rawLine, chunk...)
+			if err == nil {
+				break // terminator found
+			}
+			// ErrBufferFull: keep reading until newline or cap.
 		}
 		var msg shimMsg
 		if json.Unmarshal(rawLine, &msg) != nil {

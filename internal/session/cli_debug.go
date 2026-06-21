@@ -85,5 +85,25 @@ func (r *Router) cliDebugFileFor(key string) string {
 	if r.cliDebugDir == "" {
 		return ""
 	}
-	return filepath.Join(r.cliDebugDir, persist.KeyHash(key)+".log")
+	path := filepath.Join(r.cliDebugDir, persist.KeyHash(key)+".log")
+	// SEC (#2171): the spawned claude child creates --debug-file under its own
+	// umask, so the log (which may contain API keys) can land 0644 / world-
+	// readable even though the parent dir is 0700. Pre-create and harden to
+	// 0600 here. No O_EXCL — the file legitimately pre-exists from a prior
+	// spawn (capture overwrites on each run). The follow-up Chmod repairs a
+	// pre-existing world-readable file that O_CREATE leaves untouched. All
+	// errors are fail-open (warn + still return path): debug hardening must
+	// never block a session spawn, matching resolveCLIDebugDirWith's posture.
+	// 0600 open mirrors internal/cron/sandbox.go (without O_EXCL).
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
+		slog.Warn("cli debug file pre-create failed; continuing without hardening",
+			"path", path, "err", err)
+	} else {
+		_ = f.Close()
+		if err := os.Chmod(path, 0o600); err != nil {
+			slog.Warn("cli debug file chmod 0600 failed; log may be world-readable",
+				"path", path, "err", err)
+		}
+	}
+	return path
 }

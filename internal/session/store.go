@@ -783,8 +783,17 @@ type knownIDsStore struct {
 	// oldest (FIFO) rather than picking randomly via map iteration — random
 	// eviction could drop a still-active session ID, causing discovery to
 	// misclassify its CLI process as an external (non-naozhi) session.
+	// The live window is order[orderHead:]: orderHead marks the front of
+	// still-present IDs, advancing on each eviction so the common path is
+	// amortized O(1) (no per-eviction shift). The dead prefix is compacted
+	// into a fresh buffer only when it grows large (see trackSessionID).
 	// 读写: core (init), discovery (trackSessionID)
 	order []string
+	// orderHead is the index of the oldest live entry in order; entries
+	// before it have been evicted and cleared. order[orderHead:] are the
+	// live IDs (mirroring the keys of ids) in insertion order.
+	// 读写: core (init reset), discovery (trackSessionID)
+	orderHead int
 	// 读写: discovery, cleanup
 	dirty bool
 	// 读写: discovery, cleanup
