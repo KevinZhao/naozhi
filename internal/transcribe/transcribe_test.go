@@ -206,6 +206,54 @@ func TestBuildInput_MultiLanguage_Spaces(t *testing.T) {
 	}
 }
 
+// TestBuildInput_MultiLangDegradesToSingle pins R202606c-CR-001: a
+// LanguageCode that contains a comma (so isMultiLang() returns true) but
+// normalizes to a single entry — e.g. a trailing comma "zh-CN," or a
+// leading comma ",en-US" — must NOT set IdentifyMultipleLanguages with a
+// one-element LanguageOptions. AWS Transcribe Streaming returns a 400
+// BadRequestException when IdentifyMultipleLanguages=true is paired with
+// fewer than two languages, which would fail every transcription. The
+// builder must degrade to single-LanguageCode using the surviving entry.
+func TestBuildInput_MultiLangDegradesToSingle(t *testing.T) {
+	tests := []struct {
+		name string
+		lang string
+		want string
+	}{
+		{"trailing comma", "zh-CN,", "zh-CN"},
+		{"leading comma", ",en-US", "en-US"},
+		{"double comma around one", ",,ja-JP,,", "ja-JP"},
+		{"spaces and commas", " zh-CN , ", "zh-CN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: tt.lang})
+			// Sanity: these inputs DO trip isMultiLang (they contain a comma),
+			// which is exactly why the degrade path matters.
+			if !svc.isMultiLang() {
+				t.Fatalf("test precondition: isMultiLang() should be true for %q", tt.lang)
+			}
+			input := svc.buildInput(types.MediaEncodingPcm, 16000)
+
+			if input.IdentifyMultipleLanguages {
+				t.Errorf("IdentifyMultipleLanguages should be false when config "+
+					"resolves to a single language (%q)", tt.lang)
+			}
+			if input.LanguageCode != types.LanguageCode(tt.want) {
+				t.Errorf("LanguageCode = %q, want %q", input.LanguageCode, tt.want)
+			}
+			if input.LanguageOptions != nil {
+				t.Errorf("LanguageOptions should be nil for degraded single language, got %v",
+					input.LanguageOptions)
+			}
+			if input.PreferredLanguage != "" {
+				t.Errorf("PreferredLanguage should be empty for degraded single language, got %q",
+					input.PreferredLanguage)
+			}
+		})
+	}
+}
+
 // TestLookupFFmpeg_NoProcessWideCache pins R240-SEC-9 (#1050): the previous
 // implementation memoised the first exec.LookPath result for the lifetime
 // of the process via sync.Once, so a startup-time PATH state stayed pinned
