@@ -427,20 +427,6 @@ func keyScoreDetail(context, key string) (int, int) {
 	return score, matched
 }
 
-// keyScore returns how strongly the context matches a table key. Higher
-// is better. Returns 0 if no key word appears.
-func keyScore(context, key string) int {
-	ctx := strings.ToLower(context)
-	keywords := tokenizeKey(key)
-	score := 0
-	for _, kw := range keywords {
-		if strings.Contains(ctx, strings.ToLower(kw)) {
-			score += len(kw)
-		}
-	}
-	return score
-}
-
 // tokenizeKey splits "Server struct 字段" → ["Server", "struct", "字段"].
 func tokenizeKey(key string) []string {
 	parts := strings.Fields(key)
