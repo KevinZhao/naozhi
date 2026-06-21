@@ -298,6 +298,41 @@ func TestRedactSecrets_EnvAssignment(t *testing.T) {
 			in:   "STRIPE_SECRET=sk_live_abcdefghij0123456789 used",
 			want: "STRIPE_SECRET=[REDACTED] used",
 		},
+		{
+			name: "quoted value with spaces fully masked",
+			in:   `cfg PASSWORD="my long secret" loaded`,
+			want: `cfg PASSWORD="[REDACTED]" loaded`,
+		},
+		{
+			name: "single-quoted value with spaces fully masked",
+			in:   "DB_PASSWORD='p a s s' ok",
+			want: "DB_PASSWORD='[REDACTED]' ok",
+		},
+		{
+			name: "infix marker SECRET_KEY_BASE",
+			in:   "SECRET_KEY_BASE=abc123def456 boot",
+			want: "SECRET_KEY_BASE=[REDACTED] boot",
+		},
+		{
+			name: "run-on MYSECRETKEY",
+			in:   "MYSECRETKEY=opaque used",
+			want: "MYSECRETKEY=[REDACTED] used",
+		},
+		{
+			name: "infix PASSWORD with suffix",
+			in:   "USER_PASSWORD_HASH=deadbeef stored",
+			want: "USER_PASSWORD_HASH=[REDACTED] stored",
+		},
+		{
+			name: "TOKENIZER not masked (suffix anchor)",
+			in:   "TOKENIZER=bpe model",
+			want: "TOKENIZER=bpe model",
+		},
+		{
+			name: "AUTHOR not masked (suffix anchor)",
+			in:   "AUTHOR=alice commit",
+			want: "AUTHOR=alice commit",
+		},
 		// Negative: benign config keys must NOT be masked.
 		{
 			name: "LOG_LEVEL not masked",

@@ -141,11 +141,25 @@ const secretRedactedMarker = "[REDACTED]"
 // Scope is deliberately narrow to honour the package-level false-positive
 // constraint: only keys NAMED like a credential match, so benign config such
 // as `LOG_LEVEL=debug`, `PATH=/usr/bin`, or a generic `KEY=foo` is left
-// untouched. The value run is `\S+` (stops at whitespace), so multi-token
-// prose after the value is preserved. group 3 (the value) is replaced; the key
-// and `=` are kept for operator diagnostics. Idempotent: `[REDACTED]` is `\S+`
-// and re-masks to itself.
-var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*(\S+)`)
+// untouched. The key name and `=` are kept for operator diagnostics; only the
+// value is masked. Idempotent: a re-scan re-matches the `[REDACTED]` value to
+// itself.
+//
+// Marker placement:
+//   - The unambiguous secret words (SECRET / PASSWORD / PASSWD / CREDENTIAL)
+//     match as an INFIX, so `SECRET_KEY_BASE`, `MY_DB_PASSWORD`, and run-on
+//     `MYSECRETKEY` are all covered. These words almost never appear inside a
+//     benign env name, so the rare over-mask (e.g. a hypothetical
+//     `SECRETARY_NAME`) is an acceptable trade for catching real carriers.
+//   - TOKEN / AUTH / the *_KEY families stay SUFFIX-anchored (must sit
+//     immediately before `=`) to avoid false positives on benign names like
+//     `TOKENIZER`, `AUTHOR`, or `KEYBOARD`.
+//
+// Value capture handles three forms: a double-quoted span, a single-quoted
+// span, or a bare whitespace-delimited run. Quoted spans are captured whole so
+// a passphrase with spaces (`PASSWORD="my long secret"`) is fully masked to
+// `PASSWORD="[REDACTED]"` rather than leaking everything after the first word.
+var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)`)
 
 // RedactSecrets walks s once, swapping any occurrence of a well-known
 // secret-prefix pattern for `[REDACTED]`. Returns the original (aliased)
@@ -246,16 +260,26 @@ func redactEnvAssignments(s string) string {
 			return m
 		}
 		// Preserve `KEY` + any spaces + `=` + any spaces; mask only the value
-		// run so operator diagnostics keep the (non-sensitive) key name.
+		// so operator diagnostics keep the (non-sensitive) key name.
 		valStart := idx + 1
 		for valStart < len(m) && (m[valStart] == ' ' || m[valStart] == '\t') {
 			valStart++
 		}
-		// A single leading quote delimits the value but is not part of the
-		// secret; keep it so quoted env dumps (and the PEM `-----BEGIN`
-		// scanner downstream) render cleanly.
-		if valStart < len(m) && (m[valStart] == '"' || m[valStart] == '\'') {
-			valStart++
+		val := m[valStart:]
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			// Properly quoted span: keep both delimiting quotes and mask the
+			// whole span (which may contain spaces), so `PASSWORD="my long
+			// secret"` becomes `PASSWORD="[REDACTED]"` instead of leaking the
+			// tail past the first word.
+			q := string(val[0])
+			return m[:valStart] + q + secretRedactedMarker + q
+		}
+		if len(val) >= 1 && (val[0] == '"' || val[0] == '\'') {
+			// Bare run that merely starts with a quote (no matching close in
+			// this token, e.g. a multiline PEM dump): keep the leading quote,
+			// mask the rest. Preserves the downstream `-----BEGIN` scanner's
+			// view of the remaining line.
+			return m[:valStart+1] + secretRedactedMarker
 		}
 		return m[:valStart] + secretRedactedMarker
 	})
