@@ -82,6 +82,12 @@ func classify(err error, key string) Code {
 		return CodeTimeout
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return CodeRestarting
+	case errors.Is(err, session.ErrRouterStopped):
+		// Shutdown is in progress: GetOrCreate refuses to install a fresh
+		// session. Semantically identical to context.Canceled above — a
+		// "/new reset" cannot succeed either, so surface the restarting hint
+		// instead of the misleading CodeUnknown "/new" advice. [R202606b-CR-003]
+		return CodeRestarting
 	default:
 		return CodeUnknown
 	}

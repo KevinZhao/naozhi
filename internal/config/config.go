@@ -99,6 +99,24 @@ type WorkspaceConfig struct {
 type ProjectsConfig struct {
 	Root            string          `yaml:"root"`                       // projects root directory
 	PlannerDefaults PlannerDefaults `yaml:"planner_defaults,omitempty"` // global planner defaults
+	// IncludeRoot registers the projects root directory itself as a project
+	// (named after its basename) in addition to its subdirectories. This lets
+	// files that live directly under root — not inside any subdirectory
+	// project — resolve to an owning project so the dashboard renders
+	// preview/download buttons for them. Default false.
+	//
+	// SECURITY / threat model: the root project's Path is the whole workspace
+	// tree, so its file endpoints can read files belonging to sibling
+	// subdirectory projects. The dashboard token is the only barrier, so this
+	// is a SINGLE-OPERATOR feature. To bound the blast radius the root project
+	// is treated like the __public_tmp__ pseudo-project on the file endpoints:
+	// the foreign-private-UID, denied-name (sockets/pid/core/ssh) and
+	// irregular-type gates apply, the credential-name filter
+	// (isSensitiveDownloadPath: .env / id_rsa / *.pem / .ssh/** / secrets/**)
+	// applies to BOTH the GET and the batch-exists paths, and every served
+	// file is audit-logged. Scan never writes a .naozhi/project.yaml into the
+	// root (the root project's CreatedAt is in-memory-only).
+	IncludeRoot bool `yaml:"include_root,omitempty"`
 }
 
 type PlannerDefaults struct {
@@ -344,6 +362,22 @@ type FeishuConfig struct {
 	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
+// LogValue implements slog.LogValuer so the Feishu credentials never land in
+// logs. Any slog.* call that serializes a FeishuConfig renders the redacted
+// form instead of the plaintext AppSecret / VerificationToken / EncryptKey.
+// See NodeConfig.LogValue. R20260616-SEC-1.
+func (c FeishuConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("app_id", c.AppID),
+		slog.String("app_secret", redactSecret(c.AppSecret)),
+		slog.String("connection_mode", c.ConnectionMode),
+		slog.String("verification_token", redactSecret(c.VerificationToken)),
+		slog.String("encrypt_key", redactSecret(c.EncryptKey)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+		slog.Bool("allow_insecure_webhook", c.AllowInsecureWebhook),
+	)
+}
+
 type CronConfig struct {
 	StorePath        string `yaml:"store_path"`
 	MaxJobs          int    `yaml:"max_jobs"`
@@ -538,15 +572,45 @@ type SlackConfig struct {
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
+// LogValue implements slog.LogValuer so the Slack credentials never land in
+// logs. Any slog.* call that serializes a SlackConfig redacts BotToken /
+// AppToken while non-secret fields survive. R202606b-SEC-2.
+func (c SlackConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("bot_token", redactSecret(c.BotToken)),
+		slog.String("app_token", redactSecret(c.AppToken)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
+}
+
 type DiscordConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+// LogValue implements slog.LogValuer so the Discord bot token never lands in
+// logs. R202606b-SEC-2.
+func (c DiscordConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("bot_token", redactSecret(c.BotToken)),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
 }
 
 type WeixinConfig struct {
 	Token          string `yaml:"token"`
 	BaseURL        string `yaml:"base_url"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+// LogValue implements slog.LogValuer so the WeCom token never lands in logs.
+// The non-secret BaseURL / MaxReplyLength survive. R202606b-SEC-2.
+func (c WeixinConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("token", redactSecret(c.Token)),
+		slog.String("base_url", c.BaseURL),
+		slog.Int("max_reply_length", c.MaxReplyLength),
+	)
 }
 
 type TranscribeConfig struct {
@@ -1390,6 +1454,10 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // the existing test fixture TEST_NAOZHI_VAR is unaffected).
 var envExpansionDenyPrefixes = []string{
 	"ANTHROPIC_",
+	// CLAUDE_* covers claude CLI credentials such as
+	// CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_API_KEY; an operator may mistake
+	// these for a generic credential alias. R20260614-SEC-5.
+	"CLAUDE_",
 	"AWS_",
 	"AZURE_",
 	"GCP_",

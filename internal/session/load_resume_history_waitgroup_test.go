@@ -87,6 +87,68 @@ func TestLoadResumeHistoryOnSpawn_CancelledPathDoesNotTouchWaitGroup(t *testing.
 	}
 }
 
+// TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic pins the residual
+// TOCTOU the Err()-first ordering alone could not close (R202606b-GO-001,
+// #2186): a cancel landing AFTER the nil-Err check but BEFORE historyWg.Add(1)
+// would re-add to a WaitGroup already drained to 0 with a detached Wait in
+// flight, panicking "WaitGroup is reused before previous Wait has returned".
+//
+// Unlike the cancelled-path test above, here historyCtx starts LIVE and the
+// cancel races the spawn. The producer (loadResumeHistoryOnSpawn) and the
+// shutdown-style cancel both take historyWgMu, so the check+Add is atomic vs
+// the cancel and the detached Wait can never observe a transient +1 at
+// counter 0. Many iterations under -race drive the interleave deterministically.
+func TestLoadResumeHistoryOnSpawn_CancelDuringSpawnNoPanic(t *testing.T) {
+	for iter := 0; iter < 300; iter++ {
+		r := &Router{
+			claudeDir:     "/tmp/does-not-matter",
+			historyLoader: stubHistoryLoader{entries: mkEntries("h", 1)},
+		}
+		r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+
+		panicCh := make(chan any, 2)
+		start := make(chan struct{})
+		var done sync.WaitGroup
+		done.Add(2)
+
+		// Producer: in-flight resume spawn on a (initially) live ctx.
+		go func() {
+			defer done.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					panicCh <- rec
+				}
+			}()
+			<-start
+			r.loadResumeHistoryOnSpawn(context.Background(), &ManagedSession{key: "k"}, "k", "resume-id", "/ws", nil, nil)
+		}()
+
+		// Shutdown side: locked cancel (router_cleanup.go) then detached Wait.
+		go func() {
+			defer done.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					panicCh <- rec
+				}
+			}()
+			<-start
+			r.historyWgMu.Lock()
+			r.historyCancel()
+			r.historyWgMu.Unlock()
+			r.historyWg.Wait()
+		}()
+
+		close(start)
+		done.Wait()
+
+		select {
+		case rec := <-panicCh:
+			t.Fatalf("iter %d: cancel raced check+Add → %v", iter, rec)
+		default:
+		}
+	}
+}
+
 // TestLoadResumeHistoryOnSpawn_LivePathLoadsAndAccounts confirms the happy
 // path still works after reordering: a live historyCtx loads the chain,
 // injects it, and historyWg.Wait blocks until the (synchronous) load returns.

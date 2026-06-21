@@ -37,6 +37,14 @@ type IncomingMessage struct {
 	Text      string
 	MentionMe bool
 	Images    []Image
+	// AgentID, when non-empty, pins the target agent for this message,
+	// bypassing slash-command resolution (session.ResolveAgent). It is set
+	// by synthetic messages that already know their originating agent — e.g.
+	// a Feishu AskUserQuestion card click, whose answer must route back to
+	// the SAME agent session that asked the question rather than defaulting
+	// to "general" (#2148). The dispatcher whitelist-validates the value
+	// against the known agent set before honouring it.
+	AgentID string
 }
 
 // OutgoingMessage is the platform-agnostic outbound message.
@@ -77,6 +85,28 @@ func SupportsInterimMessages(p Platform) bool {
 		return i.SupportsInterimMessages()
 	}
 	return false // default: not supported (opt-in)
+}
+
+// SingleUseReplyTokenCapable is an optional capability: platforms whose
+// outbound reply is authorised by a single-use context token (e.g. WeChat
+// iLink) can deliver only ONE reply per inbound message — the token is
+// consumed by the first send and the second send onward is rejected
+// upstream. #2136: SendSplitReply must NOT fan a long reply into N chunks
+// for these platforms; only chunk 1 would arrive and chunks 2..N would be
+// silently lost. Such platforms opt in here so the dispatcher collapses the
+// reply into a single (truncated) message instead.
+type SingleUseReplyTokenCapable interface {
+	UsesSingleUseReplyToken() bool
+}
+
+// UsesSingleUseReplyToken reports whether a platform can deliver only one
+// reply per inbound message because its reply token is single-use. Defaults
+// to false (opt-in) for platforms that do not implement the capability.
+func UsesSingleUseReplyToken(p Platform) bool {
+	if s, ok := AsCapability[SingleUseReplyTokenCapable](p); ok {
+		return s.UsesSingleUseReplyToken()
+	}
+	return false // default: multi-send allowed (opt-in)
 }
 
 // ReactionType is a platform-agnostic reaction key. Adapters map each type
@@ -183,6 +213,13 @@ type QuestionCard struct {
 	// originating chat type is unknown; adapters then fall back to their own
 	// heuristic.
 	ChatType string
+	// AgentID is the originating session's agent id ("general", "code-reviewer",
+	// …). Adapters whose card-action callback can't recover the agent from the
+	// transport envelope (Feishu) embed it in the button value so the answer
+	// routes back to the SAME agent session that asked the question rather than
+	// defaulting to "general" (#2148). Empty when unknown; adapters then omit it
+	// and the receiver falls back to slash-command resolution.
+	AgentID string
 	// Items is one or more questions. Adapters render each as its own
 	// labelled block.
 	Items []QuestionItem

@@ -361,31 +361,63 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			return
 		}
 
-		// Parse only the key and type for routing + lastEvent tracking.
-		// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.
-		var header struct {
-			Type  string `json:"type"`
-			Key   string `json:"key"`
-			Event struct {
-				Time int64 `json:"time"`
-			} `json:"event"`
-		}
-		if json.Unmarshal(data, &header) != nil {
-			continue
-		}
+		r.forwardEvent(data)
+	}
+}
 
-		// Track last event time for reconnect resubscribe.
-		// SendRaw is a non-blocking channel send; calling it under the lock is safe
-		// and avoids a per-event snapshot slice allocation.
-		tagged := injectNodeField(data, r.nodeField)
-		r.mu.Lock()
-		if header.Type == "event" && header.Event.Time > r.lastEvent[header.Key] {
-			r.lastEvent[header.Key] = header.Event.Time
-		}
-		for _, c := range r.subs[header.Key] {
-			c.SendRaw(tagged)
-		}
-		r.mu.Unlock()
+// forwardEvent parses the routing header from a raw remote message, updates
+// lastEvent under r.mu, snapshots the subscriber list, and fans out SendRaw
+// OUTSIDE the lock.
+//
+// R202606b-GO-002 (#2187): EventSink.SendRaw carries no non-blocking contract;
+// fanning out under r.mu would let a slow/blocked sink stall every
+// Subscribe/Unsubscribe/RemoveClient/Close waiting on the lock. Mirrors
+// ReverseConn.broadcastToSubs — the pooled snapshot keeps steady-state fan-out
+// alloc-free.
+func (r *wsRelay) forwardEvent(data []byte) {
+	// Parse only the key and type for routing + lastEvent tracking.
+	// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.
+	var header struct {
+		Type  string `json:"type"`
+		Key   string `json:"key"`
+		Event struct {
+			Time int64 `json:"time"`
+		} `json:"event"`
+	}
+	if json.Unmarshal(data, &header) != nil {
+		return
+	}
+
+	tagged := injectNodeField(data, r.nodeField)
+	r.mu.Lock()
+	if header.Type == "event" && header.Event.Time > r.lastEvent[header.Key] {
+		r.lastEvent[header.Key] = header.Event.Time
+	}
+	subs := r.subs[header.Key]
+	snapPtr := subSnapPool.Get().(*[]EventSink)
+	clients := *snapPtr
+	if cap(clients) < len(subs) {
+		clients = make([]EventSink, len(subs))
+	} else {
+		clients = clients[:len(subs)]
+	}
+	copy(clients, subs)
+	r.mu.Unlock()
+
+	for _, c := range clients {
+		c.SendRaw(tagged)
+	}
+
+	// Clear pointers so disconnected EventSinks can be GC'd instead of being
+	// pinned in the pooled backing array until the next Get replaces them.
+	for i := range clients {
+		clients[i] = nil
+	}
+	// Drop oversized snapshots so the pool never pins an arbitrarily large
+	// backing array after a brief subscriber spike.
+	if cap(clients) <= 256 {
+		*snapPtr = clients[:0]
+		subSnapPool.Put(snapPtr)
 	}
 }
 

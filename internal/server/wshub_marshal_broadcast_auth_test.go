@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -134,4 +135,99 @@ func TestMarshalBroadcastAuth_WithAuthClient_Delivers(t *testing.T) {
 	if msg.Type != "cron_run_started" {
 		t.Errorf("Type = %q, want cron_run_started", msg.Type)
 	}
+}
+
+// TestSnapshotAuthenticated_SingleLockWindow verifies R20260616-PERF-004 (#2141):
+// the snapshot-based fast-path returns exactly the authenticated clients and the
+// empty-check shares that one snapshot. Two authenticated clients must both be
+// present; the snapshot is returned to the pool by the helper.
+func TestSnapshotAuthenticated_SingleLockWindow(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	c1 := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c1.authenticated.Store(true)
+	c2 := &wsClient{hub: hub, send: make(chan []byte, 8), done: make(chan struct{})}
+	c2.authenticated.Store(true)
+	registerSub(hub, c1, "")
+	registerSub(hub, c2, "")
+
+	snapPtr, snap := hub.snapshotAuthenticated()
+	if got := len(snap); got != 2 {
+		t.Errorf("snapshot len = %d, want 2", got)
+	}
+	releaseBroadcastSnap(snapPtr, snap)
+}
+
+// TestSnapshotAuthenticated_EmptyMirror confirms the snapshot is empty when no
+// authenticated clients exist, which is what drives the marshal fast-path skip.
+func TestSnapshotAuthenticated_EmptyMirror(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	snapPtr, snap := hub.snapshotAuthenticated()
+	if len(snap) != 0 {
+		t.Errorf("snapshot len = %d, want 0", len(snap))
+	}
+	releaseBroadcastSnap(snapPtr, snap)
+}
+
+// TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast stresses the broadcast
+// read side (authMu alone) against register/unregister writers (h.mu + nested
+// authMu) to surface any race introduced by consolidating the lock window.
+// Run with -race.
+func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	const writers = 4
+	const broadcasters = 4
+	const iters = 200
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < broadcasters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				hub.BroadcastCronRunStarted("j", "r", time.Now(), "manual", "", false)
+			}
+		}()
+	}
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				c := &wsClient{hub: hub, send: make(chan []byte, 64), done: make(chan struct{})}
+				c.authenticated.Store(true)
+				// Mirror the real register/unregister writers: mutate the
+				// authClients mirror with authMu nested inside h.mu.
+				hub.mu.Lock()
+				hub.authMu.Lock()
+				hub.clients[c] = struct{}{}
+				hub.authClients[c] = struct{}{}
+				hub.authMu.Unlock()
+				hub.mu.Unlock()
+
+				hub.mu.Lock()
+				hub.authMu.Lock()
+				delete(hub.authClients, c)
+				delete(hub.clients, c)
+				hub.authMu.Unlock()
+				hub.mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(stop)
 }

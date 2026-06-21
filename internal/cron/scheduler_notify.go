@@ -10,6 +10,7 @@ package cron
 import (
 	"context"
 	"log/slog"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -322,6 +323,27 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	// fallback (MaxReplyLength returns the default when the platform reports
 	// <=0) and the SplitText delegation, so cron no longer imports platform.
 	maxLen := r.MaxReplyLength()
+	// #2181 (cron companion to dispatch's #2136): platforms whose reply is
+	// authorised by a single-use token (e.g. WeChat iLink) can deliver only ONE
+	// message per inbound turn — the token is consumed by the first send and
+	// reuse is rejected upstream. Fanning a long notify result into N chunks
+	// would deliver only chunk [1/N] and silently lose [2/N]..[N/N]. Collapse to
+	// a single rune-safe-truncated message with a visible "…(truncated)" marker
+	// so the recipient knows the notice was cut, and return before the chunk
+	// loop. The single-use bit flows through the cron.PlatformReplier interface
+	// (wireup adapter delegates to platform.UsesSingleUseReplyToken) so cron
+	// never imports platform.
+	if r.UsesSingleUseReplyToken() {
+		if utf8.RuneCountInString(text) > maxLen {
+			text = truncateForSingleReply(text, maxLen)
+		}
+		if _, err := r.Reply(replyCtx, chatID, text); err != nil {
+			metrics.CronNotifyPartialTotal.Add(1)
+			slog.Warn("cron notify: single-use reply send failed",
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err) // R090135-LOGIC-3: chatID is attacker-influenced
+		}
+		return
+	}
 	chunks := r.Split(text, maxLen)
 	// R236-SEC-15 (#568): cap the chunk count before the loop. The
 	// composite chunks × retries × per-attempt budget can otherwise
@@ -386,4 +408,27 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		}
 		delivered++
 	}
+}
+
+// singleReplyTruncMarker is appended (within the rune budget) when a cron
+// notify to a single-use-token platform must be truncated to fit one message.
+// #2181. Copied verbatim from internal/dispatch (dispatch.go's #2136 fix):
+// cron CANNOT import internal/dispatch or internal/platform (the
+// no_platform_import_test.go invariant), so this small dup matches the
+// codebase's existing cron↔dispatch boundary handling.
+const singleReplyTruncMarker = "\n…(truncated)"
+
+// truncateForSingleReply trims text to at most maxRunes runes, reserving room
+// for a visible truncation marker so the recipient knows the reply was cut.
+// When maxRunes is too small to fit the marker, it falls back to a bare
+// rune-safe truncation (content kept maximal, marker dropped). #2181 — mirrors
+// internal/dispatch.truncateForSingleReply (the #2136 fix) exactly.
+func truncateForSingleReply(text string, maxRunes int) string {
+	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
+	keep := maxRunes - markerRunes
+	if keep <= 0 {
+		// No room for the marker — keep as much content as fits.
+		return string([]rune(text)[:maxRunes])
+	}
+	return string([]rune(text)[:keep]) + singleReplyTruncMarker
 }

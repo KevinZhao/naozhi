@@ -81,13 +81,14 @@ func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 func (c *knownSessionsCache) lookupFreshFlush() (map[string]struct{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.set == nil || time.Since(c.generatedAt) >= knownSessionsCacheTTL {
+	now := time.Now()
+	if c.set == nil || now.Sub(c.generatedAt) >= knownSessionsCacheTTL {
 		return nil, false
 	}
-	if c.dirty && time.Since(c.lastInvalidatedAt) >= minInvalidateInterval {
+	if c.dirty && now.Sub(c.lastInvalidatedAt) >= minInvalidateInterval {
 		c.set = nil
 		c.dirty = false
-		c.lastInvalidatedAt = time.Now()
+		c.lastInvalidatedAt = now
 		c.gen++
 		return nil, false
 	}

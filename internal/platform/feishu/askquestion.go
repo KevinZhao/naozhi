@@ -218,6 +218,17 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
 				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
 			}
+			// #2148: embed the originating session's agent id so the card-click
+			// answer routes back to the SAME agent session that asked the
+			// question. Feishu's card-action callback carries no agent dimension
+			// and the synthesised answer text has no /agent prefix, so without
+			// this the answer would default to the "general" agent and the
+			// asking (e.g. code-reviewer) session would never see it. Rune-
+			// capped like the other value fields; the dispatcher whitelist-
+			// validates it against the known agent set before honouring it.
+			if card.AgentID != "" {
+				a.Value["agent_id"] = textutil.TruncateRunesNoEllipsis(card.AgentID, cardValueIDMaxRunes)
+			}
 			// Embed the originating chat type so the WebSocket card-action
 			// path (whose callback lacks chat_type and would otherwise infer
 			// "group" from the oc_ prefix even for 1:1 chats) routes the
@@ -303,6 +314,14 @@ type cardActionPayload struct {
 	// prefix heuristic mis-routed 1:1 card answers into a phantom group
 	// session — this field lets the answer land back in the direct session.
 	ChatType string `json:"chat_type,omitempty"`
+	// AgentID carries the originating session's agent id ("general",
+	// "code-reviewer", …). Like ChatType this is whitelist-validated (against
+	// the dispatcher's known agent set) before it can influence routing, so a
+	// hostile relay can't inject an arbitrary agent. Feishu's card-action
+	// callback has no agent dimension and the synthesised answer text has no
+	// /agent prefix; without this the answer would default to "general" and
+	// the asking agent session would never receive it (#2148).
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // handleCardActionWebhook parses an im.card.action.v1_trigger envelope and
@@ -419,6 +438,12 @@ func (f *Feishu) dispatchCardAction(
 		ChatID:    chatID,
 		ChatType:  ct,
 		Text:      text,
+		// #2148: pin the answer to the agent session that asked the question.
+		// The value is sanitised + capped here; the dispatcher additionally
+		// whitelist-validates it against the known agent set before routing,
+		// so an unexpected/relayed value is ignored (falls back to /agent
+		// resolution → "general").
+		AgentID: osutil.SanitizeForLog(val.AgentID, cardValueIDMaxRunes),
 		// Card click on a question targeted to this bot should always route
 		// through dispatch regardless of group mention_only gating — the
 		// user explicitly interacted with the bot's card.
