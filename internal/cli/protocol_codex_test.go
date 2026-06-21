@@ -165,6 +165,37 @@ func TestCodexProtocol_WriteMessage_TurnStart(t *testing.T) {
 	}
 }
 
+// TestCodexProtocol_WriteMessage_AtMentionVerbatim pins the embedded_context
+// mechanism: codex reads @path agentically from the prompt text, so the
+// `@path` token MUST survive verbatim into the turn/start text UserInput
+// (no stripping/rewriting). The dashboard only forwards the @-mention when
+// the backend declares embedded_context=true (profile_codex.go); this test
+// guarantees the wire side keeps the token intact for codex to act on.
+func TestCodexProtocol_WriteMessage_AtMentionVerbatim(t *testing.T) {
+	t.Parallel()
+	p := &CodexProtocol{}
+	p.storeThreadID("t-2")
+	var w bytes.Buffer
+	const msg = "summarize @docs/design.md and @src/main.go please"
+	if err := p.WriteMessage(&w, msg, nil); err != nil {
+		t.Fatalf("WriteMessage error: %v", err)
+	}
+	var req struct {
+		Params struct {
+			Input []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"input"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(w.Bytes(), &req); err != nil {
+		t.Fatalf("turn/start not valid JSON: %v", err)
+	}
+	if len(req.Params.Input) != 1 || req.Params.Input[0].Text != msg {
+		t.Errorf("@-mention text not preserved verbatim; got %+v want %q", req.Params.Input, msg)
+	}
+}
+
 func TestCodexProtocol_WriteInterrupt(t *testing.T) {
 	t.Parallel()
 	p := &CodexProtocol{}

@@ -248,6 +248,19 @@ func TestRegisterDefaults_RegistersClaudeAndKiro(t *testing.T) {
 		if len(codex.RequiredNodeCaps) != 1 || codex.RequiredNodeCaps[0] != "codex-app-server" {
 			t.Errorf("codex RequiredNodeCaps = %v; want [\"codex-app-server\"]", codex.RequiredNodeCaps)
 		}
+		// embedded_context: codex reads @path from inside the prompt
+		// (agentically via shell), satisfying the dashboard gate's contract.
+		// Phase-2 enabled 2026-06-21.
+		if !codex.Features["embedded_context"] {
+			t.Error("codex Features[embedded_context] = false; want true (codex reads @path from prompt)")
+		}
+		// image_input + mcp_http supported; the rest stay phase-1 false.
+		if !codex.Features["image_input"] || !codex.Features["mcp_http"] {
+			t.Error("codex should support image_input + mcp_http")
+		}
+		if codex.Features["askuser"] || codex.Features["passthrough"] {
+			t.Error("codex askuser/passthrough must stay false (phase-2 pipelines not built)")
+		}
 	})
 }
 
