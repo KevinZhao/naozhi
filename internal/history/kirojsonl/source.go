@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // SessionIDFunc returns the kiro session ID for the bound session, or
@@ -359,7 +360,16 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		return cli.EventEntry{}, false
 	}
 
+	// Derive a deterministic UUID so MergedSource can dedup overlapping
+	// pages. Without it the entry carries an empty UUID, which
+	// merged.Source bypasses entirely (see internal/history/merged/source.go)
+	// — so on LoadBefore overlap windows the same kiro line would surface
+	// twice at the merge boundary. The Claude JSONL reader does the same via
+	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). kiro
+	// EventEntries only ever populate Time/Type/Summary, so detail is "" to
+	// match the fields actually present.
 	return cli.EventEntry{
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
 		Time:    timeMS,
 		Type:    entryType,
 		Summary: summary,
