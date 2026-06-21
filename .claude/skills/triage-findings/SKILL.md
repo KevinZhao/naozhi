@@ -1,6 +1,6 @@
 ---
 name: triage-findings
-description: Triage raw review-agent findings before they become noise. Takes a `docs/review/R{ROUND}-raw.md` file (one finding per `- ` bullet, with anchor like `R249-GO-3`) and routes each to one of three buckets - GitHub Issue (real problems), `docs/cosmetic-backlog.md` (godoc/naming/comment-only), or discarded (false positive / already fixed / duplicate). Verifies each finding against the current code (grep file paths, line numbers, function names) before opening anything. TRIGGER when a review skill produces `docs/review/R*-raw.md`, when the user says "triage these findings" / "process this review output", or when about to bulk-import historical findings into issues. DO NOT TRIGGER for one-off bug reports the user types directly - those go straight to a normal bug-fix workflow.
+description: Triage raw review-agent findings before they become noise. Takes a `docs/review/R{ROUND}-raw.md` file (one finding per `- ` bullet, with anchor like `R249-GO-3`) and routes each to one of three buckets - GitHub Issue (real problems), `docs/review/cosmetic-backlog.md` (godoc/naming/comment-only), or discarded (false positive / already fixed / duplicate). Verifies each finding against the current code (grep file paths, line numbers, function names) before opening anything. TRIGGER when a review skill produces `docs/review/R*-raw.md`, when the user says "triage these findings" / "process this review output", or when about to bulk-import historical findings into issues. DO NOT TRIGGER for one-off bug reports the user types directly - those go straight to a normal bug-fix workflow.
 ---
 
 # triage-findings
@@ -33,7 +33,7 @@ Open if ALL of:
 4. NOT purely a godoc/naming/comment suggestion (those are bucket B regardless of priority). If a finding mixes a godoc suggestion AND a functional claim (e.g. "rename and fix the lock"), the functional claim wins — bucket A. The "purely" qualifier is the gate.
 
 ### Bucket B — Cosmetic backlog
-Append to `docs/cosmetic-backlog.md` if BOTH:
+Append to `docs/review/cosmetic-backlog.md` if BOTH:
 - The change has **no observable runtime impact** — no behavior, perf, security, or output difference
 - It's purely about how the source reads: godoc/comment wording, variable/function rename for readability, file split/move that preserves behavior
 
@@ -86,7 +86,7 @@ Drops are NOT silent. Append to the bottom of the same `docs/review/R{ROUND}-raw
      - Issue title: `[R{ROUND}-{CAT}-{IDX}] <symptom>` — keep ≤ 90 chars total.
      - Attach labels: `priority:p{0..3}`, `area:{cron|wshub|dashboard|cli|dispatch|server|session|adapter|shim|persistence}`, `type:{correctness|perf|sec|refactor|ux|feature}`, `source:R{ROUND}` (create the `source:R{ROUND}` label on first use of each round, e.g. `gh label create source:R249 --color C5DEF5 --description "Round 249 finding"`). Optionally add `needs-design` if the proposal is non-obvious or has ≥ 2 candidate approaches. Do NOT use `needs-triage` — that label is reserved for issues filed via the GitHub UI that bypassed this skill.
      - To dedup issues by round, use `gh issue list --label "source:R{ROUND}"` (NOT `--search "source:R{ROUND}"`, which doesn't match label).
-   - Bucket B: append to docs/cosmetic-backlog.md as a single line: `- [R{ROUND}-{CAT}-{IDX}] <one-line> — file:line`
+   - Bucket B: append to docs/review/cosmetic-backlog.md as a single line: `- [R{ROUND}-{CAT}-{IDX}] <one-line> — file:line`
    - Bucket C: append to ## Discarded section in R{ROUND}-raw.md with reason.
 6. Annotate the original bullet in R{ROUND}-raw.md with the outcome: `→ #123` (issue) / `→ cosmetic` / `→ discarded:<reason>`.
 ```
@@ -132,5 +132,5 @@ Do not narrate every finding to the user; the annotations in R{ROUND}-raw.md are
 ## Linked skills
 
 - Produced by: `dev-workflow` skill's review step (the `ecc:code-review` invocation).
-- Output consumed by: GitHub issue tracker + `docs/cosmetic-backlog.md`.
+- Output consumed by: GitHub issue tracker + `docs/review/cosmetic-backlog.md`.
 - Never recreate: `docs/TODO.md` (deleted 2026-05-26 after migration).
