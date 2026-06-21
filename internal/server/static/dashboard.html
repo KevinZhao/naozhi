@@ -1166,7 +1166,13 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    the sidebar .section-header .sh-btn.star-on treatment (#e3b341) so the
    two "this project is starred" surfaces read as the same state. */
 .cmd-palette-item .cp-icon-fav{color:#e3b341}
+.cmd-palette-item .cp-name-alias{font-size:var(--nz-fs-2xs);font-weight:400;color:var(--nz-text-mute);background:var(--nz-hover-bg);padding:1px 6px;border-radius:var(--nz-radius-xs);vertical-align:1px}
 .cmd-palette-item mark{background:transparent;color:#79c0ff;font-weight:600}
+.cmd-palette-item.cp-dir-file{cursor:default;opacity:.7}
+.cmd-palette-item.cp-dir-file:hover{background:transparent}
+.cmd-palette-item .cp-dir-size{font-size:var(--nz-fs-2xs);color:var(--nz-text-dim);flex-shrink:0;font-family:ui-monospace,SFMono-Regular,monospace}
+.cp-breadcrumb{display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid var(--nz-bg-2);font-size:var(--nz-fs-xs);color:var(--nz-text-dim);position:sticky;top:0;background:var(--nz-bg-0);z-index:1}
+.cp-breadcrumb .cp-bc-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
 .cmd-palette-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm2)}
 .cmd-palette-footer{padding:8px 14px;border-top:1px solid var(--nz-bg-2);font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;gap:14px;flex-wrap:wrap;flex-shrink:0;background:var(--nz-bg-0)}
 .cmd-palette-footer kbd{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);font-family:inherit}
