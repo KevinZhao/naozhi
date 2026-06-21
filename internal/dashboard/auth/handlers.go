@@ -655,6 +655,22 @@ func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.IsSecure(r),
 		MaxAge:   -1,
 	})
+	// #2157: also clear the nz_anon per-browser owner label so logout fully
+	// resets browser-held naozhi state. Field set mirrors mintAnonCookie in
+	// internal/server/send_anon_cookie.go. The name is duplicated as a string
+	// literal here — source of truth is internal/server/send_anon_cookie.go's
+	// unexported `anonCookieName` const, which this package cannot import
+	// (server->auth import cycle), matching the unknownIPKey precedent in
+	// cookie.go.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nz_anon",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   a.IsSecure(r),
+		MaxAge:   -1,
+	})
 	httputil.WriteOK(w)
 }
 
