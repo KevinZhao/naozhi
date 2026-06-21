@@ -6637,7 +6637,13 @@ function openProjectPalette(backendsData) {
   document.body.appendChild(overlay);
   trapFocus(overlay);
 
-  const state = {overlay, items: [], activeIdx: 0};
+  // dirBrowse holds the navigable folder-browser state shown in the palette's
+  // idle (empty-query) view: which project/workspace root we're under and the
+  // current relative path inside it. Starts at the default workspace root so
+  // the browser opens on the workspace and lets the user navigate down into
+  // subfolders (and back up) before picking a working directory. Typing a
+  // search query hides the browser and restores the flat project filter.
+  const state = {overlay, items: [], activeIdx: 0, dirBrowse: null, dirBrowseSeq: 0, dirBrowseError: false};
   const input = document.getElementById('cp-input');
   input.addEventListener('input', () => renderPaletteList(state, input.value));
   input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
@@ -6646,7 +6652,66 @@ function openProjectPalette(backendsData) {
   // repaint it against the current query.
   wireNodePicker(function () { renderPaletteList(state, input.value); });
   renderPaletteList(state, '');
+  // Kick off the workspace folder load (local node only — remote nodes have
+  // no client-side workspace root to seed the browser with).
+  if ((selectedNode || 'local') === 'local' && defaultWorkspace) {
+    loadDirBrowse(state, '__workspace__', '');
+  }
   setTimeout(() => input.focus(), 50);
+}
+
+// loadDirBrowse fetches GET /api/projects/dir for the given project/workspace
+// root + relative path and, on success, stores the result on state.dirBrowse
+// and re-renders the idle palette view. Failures fall back silently to the
+// flat project list (state.dirBrowse stays null) with a toast so the palette
+// is never left blank. The `project` arg is the pseudo/real project name the
+// backend understands (`__workspace__` for the default workspace root).
+function loadDirBrowse(state, project, path) {
+  // Request-generation guard: rapid navigation (click subfolder, then up,
+  // then another subfolder) fires overlapping fetches that can resolve out of
+  // order. Capture this call's sequence number and bail in the callbacks if a
+  // newer load has since started — only the most-recent navigation wins.
+  const seq = ++state.dirBrowseSeq;
+  // Bind to the originating overlay so an in-flight fetch from a closed (and
+  // possibly reopened) palette can never repaint a different instance. All DOM
+  // lookups go through this overlay rather than document.getElementById.
+  const overlay = state.overlay;
+  state.dirBrowseLoading = true;
+  const stillCurrent = () => seq === state.dirBrowseSeq && document.body.contains(overlay);
+  const inputEmpty = () => {
+    const inp = overlay.querySelector('#cp-input');
+    return !inp || !inp.value.trim();
+  };
+  // Only repaint if the input is still empty (user may have started typing
+  // a search between the click and the fetch resolving).
+  if (inputEmpty()) renderPaletteList(state, '');
+  fetchJSON('/api/projects/dir?project=' + encodeURIComponent(project) +
+      (path ? '&path=' + encodeURIComponent(path) : ''), { timeoutMs: 10000 })
+    .then(data => {
+      if (!stillCurrent()) return;
+      state.dirBrowseLoading = false;
+      state.dirBrowseError = false;
+      state.dirBrowse = {
+        project: project,
+        path: data.path || '',
+        parent: data.parent || '',
+        atRoot: !!data.at_root,
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        truncated: !!data.truncated,
+      };
+      if (inputEmpty()) renderPaletteList(state, '');
+    })
+    .catch(() => {
+      if (!stillCurrent()) return;
+      state.dirBrowseLoading = false;
+      // Keep the last good view if we have one (a navigation failure shouldn't
+      // discard the directory the user was already browsing); only flag an
+      // error when the very first load failed so the idle view can offer a
+      // retry affordance instead of silently dropping to the flat list.
+      if (!state.dirBrowse) state.dirBrowseError = true;
+      if (typeof showToast === 'function') showToast('无法读取目录', 'warn');
+      if (inputEmpty()) renderPaletteList(state, '');
+    });
 }
 
 function fuzzyMatch(query, text) {
@@ -6747,7 +6812,26 @@ function renderPaletteList(state, query) {
   }
 
   const items = [];
-  if (!q) items.push({type: 'quick'});
+  // Idle view: when the navigable folder browser is active (local node with a
+  // workspace root), it takes the top of the list — "create here" + up + the
+  // current directory's subfolders/files — so the workspace is the default
+  // landing spot and the user can drill into subfolders. Otherwise fall back
+  // to the flat ⚡ 快速新建 row. The flat project list still follows so a
+  // registered project is one click away regardless.
+  const browseActive = !q && state.dirBrowse;
+  if (!q) {
+    if (browseActive) {
+      items.push({type: 'dir-here'});
+      if (!state.dirBrowse.atRoot) items.push({type: 'dir-up'});
+      state.dirBrowse.entries.forEach(e => items.push({type: 'dir-entry', entry: e}));
+    } else if (state.dirBrowseError) {
+      // First folder-browser load failed: offer an explicit retry rather than
+      // silently degrading to the flat list with no way back to the browser.
+      items.push({type: 'dir-retry'});
+    } else {
+      items.push({type: 'quick'});
+    }
+  }
   scored.forEach(s => items.push({type: 'project', data: s}));
   items.push({type: 'custom', query: q});
   state.items = items;
@@ -6764,16 +6848,156 @@ function renderPaletteList(state, query) {
   }
 
   list.innerHTML = '';
+  // Breadcrumb header for the folder browser (not a selectable row — it sits
+  // above the list and reflects state.dirBrowse.path).
+  if (browseActive) list.appendChild(buildDirBreadcrumb(state));
   items.forEach((it, i) => {
     if (it.type === 'quick') {
       list.appendChild(buildQuickRow(i));
+    } else if (it.type === 'dir-here') {
+      list.appendChild(buildDirHereRow(state, i));
+    } else if (it.type === 'dir-up') {
+      list.appendChild(buildDirUpRow(state, i));
+    } else if (it.type === 'dir-entry') {
+      list.appendChild(buildDirEntryRow(state, it.entry, i));
+    } else if (it.type === 'dir-retry') {
+      list.appendChild(buildDirRetryRow(state, i));
     } else if (it.type === 'project') {
       list.appendChild(buildProjectRow(it.data, i));
     } else {
       list.appendChild(buildCustomRow(it.query, i));
     }
   });
+  if (browseActive && state.dirBrowse.truncated) {
+    const note = document.createElement('div');
+    note.className = 'cmd-palette-empty';
+    note.style.padding = '6px 12px';
+    note.textContent = '目录条目过多，仅显示前 ' + state.dirBrowse.entries.length + ' 项';
+    list.appendChild(note);
+  }
   updateActiveRow(state);
+}
+
+// dirBrowseWorkspacePath maps the active dirBrowse (project + rel path) back to
+// an absolute filesystem path for session creation. For the __workspace__
+// pseudo-project the root is defaultWorkspace; for a real project it is that
+// project's path. Joins the relative sub-path the user navigated into.
+function dirBrowseWorkspacePath(state) {
+  const db = state.dirBrowse;
+  if (!db) return defaultWorkspace || '';
+  let root = '';
+  if (db.project === '__workspace__') {
+    root = defaultWorkspace || '';
+  } else {
+    const p = nodeFilteredProjects().find(x => x.name === db.project);
+    root = p ? p.path : '';
+  }
+  if (!root) return '';
+  const base = root.replace(/\/+$/, '');
+  return db.path ? base + '/' + db.path : base;
+}
+
+function buildDirBreadcrumb(state) {
+  const db = state.dirBrowse;
+  const el = document.createElement('div');
+  el.className = 'cp-breadcrumb';
+  const full = dirBrowseWorkspacePath(state);
+  el.innerHTML =
+    '<span class="cp-bc-icon" aria-hidden="true">📂</span>' +
+    '<span class="cp-bc-path" title="' + escAttr(full) + '">' + esc(shortPath(full)) + '</span>';
+  return el;
+}
+
+function buildDirHereRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">✓</span>' +
+    '<div class="cp-main">' +
+      '<div class="cp-name">在此目录新建会话' +
+        ' <span class="cp-name-alias">当前目录</span></div>' +
+    '</div>';
+  el.addEventListener('click', () => pickDirHere(state));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function buildDirUpRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">↑</span>' +
+    '<div class="cp-main"><div class="cp-name">上级目录</div></div>';
+  el.addEventListener('click', () => navigateDirBrowse(state, state.dirBrowse.parent));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function buildDirEntryRow(state, entry, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item' + (entry.is_dir ? '' : ' cp-dir-file');
+  el.dataset.idx = String(idx);
+  const icon = entry.is_dir ? '📁' : '📄';
+  const meta = entry.is_dir ? '' : '<span class="cp-dir-size">' + esc(formatFileBytes(entry.size || 0)) + '</span>';
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">' + icon + '</span>' +
+    '<div class="cp-main"><div class="cp-name">' + esc(entry.name) + '</div></div>' + meta;
+  if (entry.is_dir) {
+    const childRel = state.dirBrowse.path ? state.dirBrowse.path + '/' + entry.name : entry.name;
+    el.addEventListener('click', () => navigateDirBrowse(state, childRel));
+    el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  } else {
+    // Files are shown for context but are not session targets; clicking is a
+    // no-op (dimmed via cp-dir-file). Still allow hover-highlight so keyboard
+    // and mouse stay in sync.
+    el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  }
+  return el;
+}
+
+// navigateDirBrowse drills into (or up to) a sub-path of the current browse
+// root and reloads. The relative path is workspace-relative; "" = root.
+function navigateDirBrowse(state, relPath) {
+  if (!state.dirBrowse) return;
+  loadDirBrowse(state, state.dirBrowse.project, relPath || '');
+}
+
+function buildDirRetryRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">↻</span>' +
+    '<div class="cp-main"><div class="cp-name">文件夹浏览不可用 — 点击重试</div></div>';
+  el.addEventListener('click', () => loadDirBrowse(state, '__workspace__', ''));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+// pickDirHere creates a session in the currently-browsed directory.
+function pickDirHere(state) {
+  const workspace = dirBrowseWorkspacePath(state);
+  if (!workspace) {
+    if (typeof showToast === 'function') showToast('无法解析目录路径', 'warn');
+    return;
+  }
+  const node = selectedNode || 'local';
+  const folderName = workspace.replace(/\/+$/, '').split('/').pop() || 'workspace';
+  doCreateInProject(workspace, folderName, node, undefined, undefined, { mode: 'new' });
+}
+
+// formatFileBytes renders a compact human size for file rows in the folder
+// browser. Named distinctly from cron_view.js's formatBytes (which uses KiB
+// units) to avoid a cross-script top-level redeclaration collision — both
+// files load into the same global scope. See project_dashboard_script_split_scope.
+function formatFileBytes(n) {
+  if (!n || n < 1024) return (n || 0) + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + units[i];
 }
 
 function buildProjectRow(s, idx) {
@@ -6922,7 +7146,18 @@ function handlePaletteKey(e, state, input) {
     const item = state.items[state.activeIdx];
     if (!item) return;
     if (item.type === 'quick') pickPaletteQuick();
-    else if (item.type === 'project') pickPaletteProject(item.data.project);
+    else if (item.type === 'dir-retry') loadDirBrowse(state, '__workspace__', '');
+    else if (item.type === 'dir-here') pickDirHere(state);
+    else if (item.type === 'dir-up') navigateDirBrowse(state, state.dirBrowse.parent);
+    else if (item.type === 'dir-entry') {
+      // Enter on a directory drills in; on a file it's a no-op (files aren't
+      // session targets).
+      if (item.entry.is_dir) {
+        const childRel = state.dirBrowse.path
+          ? state.dirBrowse.path + '/' + item.entry.name : item.entry.name;
+        navigateDirBrowse(state, childRel);
+      }
+    } else if (item.type === 'project') pickPaletteProject(item.data.project);
     else pickPaletteCustom(input.value.trim());
   }
 }

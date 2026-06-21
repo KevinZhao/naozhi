@@ -7426,18 +7426,19 @@ func TestDashboardJS_LightboxGalleryNav(t *testing.T) {
 }
 
 // TestDashboardJS_PaletteWorkspaceFolderRow pins that the new-session folder
-// palette surfaces the default workspace as an explicit, default-selected
-// folder entry (not a vague "quick session" affordance). The idle (empty
-// query) first row IS the workspace folder, and renderPaletteList resets
-// state.activeIdx to 0 so it is highlighted by default.
+// palette opens on the default workspace and lets the user navigate down into
+// subfolders (the navigable folder browser), rather than only offering a flat
+// project list behind a search filter.
 //
-// Three witnesses guard against a coincidental substring match:
-//  1. buildQuickRow renders the 📁 folder icon when a local workspace path
-//     is present (the workspace-folder branch).
-//  2. that branch carries the 工作目录 chip via the cp-name-alias span so the
-//     entry is labelled as the working directory, not a generic folder.
-//  3. renderPaletteList keeps the empty-query first item + activeIdx=0 so the
-//     workspace folder is the default-selected row.
+// Witnesses guard against a coincidental substring match:
+//  1. openProjectPalette seeds the browser at the workspace root on a local
+//     node via loadDirBrowse(state, '__workspace__', ”).
+//  2. the idle view activates the browser (browseActive) and pushes a
+//     "create here" + entry rows when state.dirBrowse is populated.
+//  3. directory entries drill in via navigateDirBrowse, and the fallback
+//     ⚡ 快速新建 row still renders when the browser has not loaded.
+//  4. renderPaletteList resets state.activeIdx to 0 so the top row is
+//     default-selected.
 func TestDashboardJS_PaletteWorkspaceFolderRow(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -7446,20 +7447,49 @@ func TestDashboardJS_PaletteWorkspaceFolderRow(t *testing.T) {
 	}
 	js := string(data)
 
-	// Witness 1: the workspace-folder branch renders a 📁 folder icon.
-	if !strings.Contains(js, `'<span class="cp-icon" aria-hidden="true">📁</span>'`) {
-		t.Error("buildQuickRow must render a 📁 folder icon for the default workspace entry — the palette's first idle row should read as a folder, not a quick-session shortcut")
+	// Witness 1: the palette seeds the folder browser at the workspace root.
+	if !strings.Contains(js, "loadDirBrowse(state, '__workspace__', '');") {
+		t.Error("openProjectPalette must seed the folder browser at the default workspace root (loadDirBrowse '__workspace__') so the browser opens on the workspace by default")
 	}
-	// Witness 2: the 工作目录 chip labels the entry as the working directory.
-	if !strings.Contains(js, `' <span class="cp-name-alias">工作目录</span></div>'`) {
-		t.Error("buildQuickRow workspace entry must carry the 工作目录 cp-name-alias chip so the default folder is explicitly labelled")
+	// Witness 2: the idle view activates the browser when dirBrowse is loaded.
+	if !strings.Contains(js, "const browseActive = !q && state.dirBrowse;") {
+		t.Error("renderPaletteList must activate the folder browser on the empty-query idle view when state.dirBrowse is populated")
 	}
-	// Witness 3: empty-query first item + activeIdx reset keeps the workspace
-	// folder default-selected. Both fragments must survive together.
-	if !strings.Contains(js, "if (!q) items.push({type: 'quick'});") {
-		t.Error("renderPaletteList must push the workspace/quick row first on an empty query so it is the top folder in the browse list")
+	if !strings.Contains(js, "items.push({type: 'dir-here'});") {
+		t.Error("the folder browser must offer a 'create session here' row for the current directory")
 	}
+	// Witness 3: directory entries drill in, and the flat fallback survives.
+	if !strings.Contains(js, "function navigateDirBrowse(state, relPath)") {
+		t.Error("navigateDirBrowse must exist so directory entries can drill into subfolders")
+	}
+	if !strings.Contains(js, "items.push({type: 'quick'});") {
+		t.Error("the flat ⚡ 快速新建 fallback row must still render before the browser loads / on remote nodes")
+	}
+	// Witness 4: activeIdx reset keeps the top row default-selected.
 	if !strings.Contains(js, "state.activeIdx = 0;") {
-		t.Error("renderPaletteList must reset state.activeIdx to 0 so the default workspace folder is highlighted by default")
+		t.Error("renderPaletteList must reset state.activeIdx to 0 so the top folder-browser row is highlighted by default")
+	}
+}
+
+// TestDashboardJS_FolderBrowserBackendContract pins the frontend↔backend
+// contract for the navigable folder browser: it must call the directory
+// endpoint and read the documented response fields.
+func TestDashboardJS_FolderBrowserBackendContract(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "'/api/projects/dir?project='") {
+		t.Error("loadDirBrowse must fetch GET /api/projects/dir — the directory-listing endpoint backing the folder browser")
+	}
+	// The response fields the client depends on (must match dir_list.go's
+	// dirListResp JSON tags).
+	for _, field := range []string{"data.path", "data.parent", "data.at_root", "data.entries", "data.truncated"} {
+		if !strings.Contains(js, field) {
+			t.Errorf("loadDirBrowse must read %s from the /api/projects/dir response (dirListResp contract)", field)
+		}
 	}
 }
