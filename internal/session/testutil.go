@@ -151,7 +151,8 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &ManagedSession{
-		key: key,
+		key:      key,
+		runStore: r.sessionRuns, // mirror production wiring so Send records runs
 	}
 	s.storeProcess(proc)
 	s.touchLastActive()

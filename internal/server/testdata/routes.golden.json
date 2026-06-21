@@ -160,6 +160,11 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/projects/dir",
+    "handler_type": "*dashproject.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/projects/favorite",
     "handler_type": "*dashproject.Handlers"
@@ -172,6 +177,16 @@
   {
     "method": "POST",
     "path": "/api/projects/files/exists",
+    "handler_type": "*dashproject.Handlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/files/list",
+    "handler_type": "*dashproject.Handlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/files/upload",
     "handler_type": "*dashproject.Handlers"
   },
   {
@@ -245,6 +260,11 @@
     "handler_type": "*dashsession.Handlers"
   },
   {
+    "method": "GET",
+    "path": "/api/sessions/runs",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
     "method": "POST",
     "path": "/api/sessions/send",
     "handler_type": "*SendHandler"
@@ -258,6 +278,16 @@
     "method": "POST",
     "path": "/api/sessions/upload",
     "handler_type": "*SendHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/settings",
+    "handler_type": "*Server"
   },
   {
     "method": "GET",
@@ -317,6 +347,11 @@
   {
     "method": "GET",
     "path": "/static/dashboard.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/files_view.js",
     "handler_type": "http.HandlerFunc"
   },
   {

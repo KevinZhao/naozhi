@@ -44,7 +44,9 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
 
-	result, err := proc.SendPassthrough(ctx, text, images, onEvent, priority)
+	rt, evCb := s.instrumentRun(onEvent)
+	result, err := proc.SendPassthrough(ctx, text, images, evCb, priority)
+	s.finishRun(rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)
 		return nil, err
@@ -172,8 +174,11 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	// cached lastActivitySummary; Snapshot() reads that value when the process
 	// is alive. Passing onEvent directly (no wrapper closure) avoids a per-Send
 	// heap allocation on the nil-callback path (cron/connector) and one less
-	// indirect call per event on the Send path.
-	result, err := proc.Send(ctx, text, images, onEvent)
+	// indirect call per event on the Send path. instrumentRun only wraps when
+	// runStore is set, so that fast path is preserved when timing is disabled.
+	rt, evCb := s.instrumentRun(onEvent)
+	result, err := proc.Send(ctx, text, images, evCb)
+	s.finishRun(rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)
 		return nil, err

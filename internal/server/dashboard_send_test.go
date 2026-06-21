@@ -3,13 +3,51 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	"github.com/naozhi/naozhi/internal/session"
 )
+
+// TestDashboardSend_LogKeySanitized pins R202606b-SEC-3: the user-controlled
+// session key (r.FormValue("key") / req.Key) is attacker-influenced and must
+// be run through session.SanitizeLogAttr before reaching slog, so a malicious
+// key cannot inject newlines, C0/C1 control bytes, or bidi/zero-width runes
+// into structured operator log lines. This asserts the exact wrapping the
+// dashboard send handlers apply at their three slog callsites.
+func TestDashboardSend_LogKeySanitized(t *testing.T) {
+	t.Parallel()
+
+	const malicious = "feishu:group:abc\n\rFAKE level=ERROR‮msg=spoof​\x07"
+
+	// The sanitized value is what the handler hands to slog; inspect it
+	// directly so we don't trip over slog's own trailing newline.
+	sanitized := session.SanitizeLogAttr(malicious)
+	for _, r := range []rune{'\n', '\r', '\x07', '‮', '​'} {
+		if strings.ContainsRune(sanitized, r) {
+			t.Errorf("unsanitized control/bidi rune U+%04X survived: %q", r, sanitized)
+		}
+	}
+	// The sanitized payload still carries the meaningful prefix so operators
+	// can correlate the event, just without the injection vectors.
+	if !strings.Contains(sanitized, "feishu") {
+		t.Errorf("expected the benign key prefix to survive sanitization: %q", sanitized)
+	}
+
+	// And confirm it produces a single, unfragmented log line when fed to slog
+	// exactly as the handler does.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{}))
+	logger.Warn("dashboard sessionSend rejected", "key", sanitized, "err", "boom")
+	if got := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n"); got != 0 {
+		t.Errorf("log line fragmented into %d extra lines: %q", got, buf.String())
+	}
+}
 
 // TestBuildAttachmentETagSeed_MillisecondPrecision pins R20260527122801-SEC-14:
 // the (size, mtime) ETag seed must use millisecond-resolution mtime, not

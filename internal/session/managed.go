@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
 const (
@@ -354,6 +355,12 @@ type ManagedSession struct {
 	// onSessionID is called when a session ID is first captured from Send().
 	// Set by the Router to track known IDs for history exclusion.
 	onSessionID func(string)
+
+	// runStore records per-run wall-clock timing for the dashboard's run
+	// history / stats. Shared across all sessions (owned by the Router).
+	// nil in tests / no-persist configs — all call sites are nil-safe, so
+	// the timing instrumentation simply no-ops when unset.
+	runStore *runhistory.Store
 
 	// lastActive stores time.UnixNano atomically to avoid data races
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).

@@ -225,9 +225,9 @@ graph RL
 
 除 `sessions.json` 会话目录外，第二层持久化 `~/.naozhi/events/<keyhash>.log`/`.idx` 记录每一条事件 —— 包括 Claude 自身 JSONL 无法恢复的字段：图片缩略图、附件路径、AskQuestion 卡片、agent-team 关联 ID。配合附件引用计数（`.meta` sidecar 记录引用会话哈希 + 最后引用时间），支持基于双 TTL 的精确回收。
 
-### 多语言 (i18n)
+### 多语言 (i18n)（规划中）
 
-用户可见文案支持中英双语（`zh-CN` / `en-US`），按平台 locale 提示 + 消息内容 CJK 比例启发式自动解析（默认 `zh-CN`）。用户锁定的语言不会被自动来源覆盖。
+中英双语（`zh-CN` / `en-US`）文案框架的纯逻辑内核已落地：按平台 locale 提示 + 消息内容 CJK 比例启发式解析语言（默认 `zh-CN`），用户锁定的语言不会被自动来源覆盖。运行时接线（catalog 加载、配置接入、dashboard 文案渲染）尚未完成，对应设计见 #631 的 follow-up slice，当前用户可见文案仍以中文为主。
 
 ### 自动更新
 
@@ -554,7 +554,7 @@ internal/
   node/ upstream/ wshub/ 多节点协议 + 反向连接 + WebSocket hub
   selfupdate/            自动更新 (GitHub Releases 轮询 + 校验)
   shim/                  零停机重启 sidecar 进程
-  i18n/                  多语言文案解析
+  i18n/                  多语言文案解析（纯逻辑内核，运行时未接线 · 规划中）
   metrics/ runtelemetry/ 指标 + 运行遥测
   config/                YAML 配置 + 环境变量展开
 deploy/                  systemd service unit

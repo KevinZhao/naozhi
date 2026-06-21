@@ -1,23 +1,11 @@
 package session
 
-import "strings"
+import "github.com/naozhi/naozhi/internal/agentroute"
 
-// ResolveAgent parses a /command prefix and returns the agent ID and clean text.
-// The command token match is case-insensitive so that a CJK mobile IME auto-
-// capitalizing the first letter (e.g. "/Review") still routes correctly. Agent
-// registration keys in agentCommands are assumed lowercase.
+// ResolveAgent parses a /command prefix and returns the agent ID and clean
+// text. Thin delegate to the single source of truth in internal/agentroute
+// (R202606b-ARCH-5, #2194); kept as an exported wrapper so existing callers
+// (dispatch.go) need no edit.
 func ResolveAgent(text string, agentCommands map[string]string) (agentID, cleanText string) {
-	if !strings.HasPrefix(text, "/") {
-		return "general", text
-	}
-	parts := strings.SplitN(text, " ", 2)
-	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-	rest := ""
-	if len(parts) > 1 {
-		rest = parts[1]
-	}
-	if id, ok := agentCommands[cmd]; ok {
-		return id, rest
-	}
-	return "general", text
+	return agentroute.ResolveAgent(text, agentCommands)
 }

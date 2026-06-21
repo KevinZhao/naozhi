@@ -319,6 +319,92 @@ func TestSandboxReconcile_NoDoubleFinishForInProcessTerminal(t *testing.T) {
 	}
 }
 
+// TestSandboxReconcile_TransientReadKeepsPendingNoDoubleFinish pins #2149: the
+// dedup guard at sandbox_pending.go fires only on err==nil. When the run is
+// ALREADY terminal in-process (durable record + kept pending file, the #2054
+// scenario) but the reconcile-time read of that record hits a *transient* error
+// (EACCES from the brief post-upgrade -rw------- window, or EIO/ESTALE on a
+// FUSE/NFS backend), s.Run returns a non-nil error that is neither
+// fs.ErrNotExist nor ErrCorruptRun. Pre-fix this fell through to a second
+// finishRun, double-counting the durable RunCounters and emitting a phantom
+// started→ended lifecycle. The fix treats such "fate unknown" reads
+// conservatively: keep the pending file, do NOT re-finish, retry next start.
+func TestSandboxReconcile_TransientReadKeepsPendingNoDoubleFinish(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &fakeSandboxRunner{
+		outcome: SandboxOutcome{State: SandboxStateFailedTransport, ErrMsg: "reset", StopConfirmed: false},
+	}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sandboxJob(t, s)
+
+	// In-process transport failure: finishRun runs once, pending file kept.
+	s.executeOpt(j, true)
+	waitEnded(t, rec)
+
+	startedAfterRun := rec.startedCount()
+	endedAfterRun := rec.endedCount()
+	s.mu.RLock()
+	countersAfterRun := s.jobs[j.ID].RunCounters
+	s.mu.RUnlock()
+	if countersAfterRun.Total != 1 {
+		t.Fatalf("RunCounters.Total after run = %d, want 1", countersAfterRun.Total)
+	}
+
+	left, _ := os.ReadDir(pendingDirOf(storePath))
+	if len(left) != 1 {
+		t.Fatalf("pending files after unconfirmed transport = %d, want 1 (retry handle)", len(left))
+	}
+	pendingPath := filepath.Join(pendingDirOf(storePath), left[0].Name())
+
+	// Make the terminal runs/<jobID>/<runID>.json record unreadable so the
+	// reconcile-time s.Run read returns EACCES (a transient, non-ErrNotExist /
+	// non-ErrCorruptRun error). Run records live under <dir>/runs/<jobID>/.
+	runsDir := filepath.Join(dir, "runs", j.ID)
+	recEntries, err := os.ReadDir(runsDir)
+	if err != nil {
+		t.Fatalf("ReadDir runs: %v", err)
+	}
+	if len(recEntries) != 1 {
+		t.Fatalf("terminal records = %d, want 1", len(recEntries))
+	}
+	recPath := filepath.Join(runsDir, recEntries[0].Name())
+	if err := os.Chmod(recPath, 0o000); err != nil {
+		t.Fatalf("chmod terminal record: %v", err)
+	}
+	// Verify the read actually fails for this uid (root would still read it).
+	if _, rerr := os.ReadFile(recPath); rerr == nil {
+		t.Skip("cannot induce EACCES on this platform/uid; skipping transient-read test")
+	}
+	t.Cleanup(func() { _ = os.Chmod(recPath, 0o600) })
+
+	// Reconcile: transient read error → keep pending, no second finish.
+	s.reconcileSandboxPending()
+
+	runner.mu.Lock()
+	nStopped := len(runner.stopped)
+	runner.mu.Unlock()
+	if nStopped != 1 {
+		t.Fatalf("StopSession calls = %d, want 1 (reconcile still terminates the microVM)", nStopped)
+	}
+	if got := rec.startedCount(); got != startedAfterRun {
+		t.Fatalf("RunStarted count grew %d→%d across reconcile — phantom lifecycle (#2149)", startedAfterRun, got)
+	}
+	if got := rec.endedCount(); got != endedAfterRun {
+		t.Fatalf("RunEnded count grew %d→%d across reconcile — duplicate finish (#2149)", endedAfterRun, got)
+	}
+	s.mu.RLock()
+	countersAfterReconcile := s.jobs[j.ID].RunCounters
+	s.mu.RUnlock()
+	if countersAfterReconcile != countersAfterRun {
+		t.Fatalf("RunCounters changed across reconcile under transient read: %+v → %+v (#2149)", countersAfterRun, countersAfterReconcile)
+	}
+	// The pending file MUST survive a transient read so the next start retries.
+	if _, err := os.Stat(pendingPath); err != nil {
+		t.Fatalf("pending file must be KEPT after a transient read error (#2149); stat err = %v", err)
+	}
+}
+
 // TestSandboxReconcile_BailsWhenStopCtxCancelled pins R20260613-GO-003: if
 // stopCtx is already cancelled when reconcileSandboxPending enters the loop,
 // it must return immediately without calling StopSession on any remaining

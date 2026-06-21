@@ -20,28 +20,45 @@
 package server
 
 import (
+	"context"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/wshub"
 )
 
-// HubRouter is a type alias for wshub.HubRouter.
+// HubRouter is the subset of *session.Router that *Hub consumes on the
+// WebSocket subscribe / send / interrupt paths. Method list = direct
+// h.router. calls (wshub*.go / send.go) PLUS dashboard_scratch.go /
+// dashboard_send.go's h.hub.router.* transits where *ScratchHandler /
+// *SendHandler intentionally borrow Hub's router handle. 14 methods —
+// under the "rethink at >15" threshold from
+// docs/rfc/consumer-interfaces.md §7.2.
 //
-// Phase 4b-router 搬迁（2026-05-28）：完整接口定义已搬到
-// internal/wshub/types.go；server 包用 alias 保持向后兼容，所有 *Server
-// 字段 / *Hub 字段 / handler 字段 / mock 都不需要改 import 路径。Phase 4b
-// 后续刀（subscribe/broadcast/send 方法搬迁）+ Phase 4 全部完成后，
-// 本 alias 可移除（届时 server 包直接 import wshub.HubRouter）。
+// *session.Router satisfies this implicitly via Go structural typing,
+// guarded at CI time by consumer_contract_test.go.
 //
-// 历史 godoc（pre-Phase 4b-router）：
-//
-// HubRouter is the *Hub-only subset of *session.Router. Method list =
-// direct h.router. calls (wshub*.go / send.go) PLUS dashboard_scratch.go
-// / dashboard_send.go's h.hub.router.* transits where *ScratchHandler /
-// *SendHandler intentionally borrow Hub's router handle. 14 methods.
-// See docs/rfc/consumer-interfaces.md §3.2.2.
-type HubRouter = wshub.HubRouter
+// G1 (#2195, docs/rfc/godstruct-extraction.md): this declaration was
+// pulled back here from the internal/wshub leaf package, which held only
+// a stale Phase-4a interface skeleton (the 49-field Hub mirror was
+// deleted in #1741) plus five interfaces with zero live consumers. The
+// `type HubRouter = wshub.HubRouter` alias and the whole wshub package
+// are removed in the same change.
+type HubRouter interface {
+	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	SessionFor(key string) *session.ManagedSession
+	Remove(key string) bool
+	RenameSession(oldKey, newKey string) bool
+	ResetAndDiscardOverride(key string)
+	Workspace(chatKey string) string
+	SetWorkspace(chatKey, path string)
+	SetSessionBackend(key, backend string)
+	DefaultWorkspace() string
+	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
+	InterruptSession(key string) bool
+	InterruptSessionSafe(key string) session.InterruptOutcome
+	InterruptSessionViaControl(key string) session.InterruptOutcome
+	NotifyIdle()
+}
 
 // ScratchRouter is the *ScratchHandler-only subset of *session.Router.
 // Closes the Phase 2.5 cleanup item flagged in the consumer.go godoc

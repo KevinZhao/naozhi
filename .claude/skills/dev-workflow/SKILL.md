@@ -215,13 +215,14 @@ Release flow:
 
 1. Merge the PR to the main branch.
 2. Tag the commit: `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag must live on the main branch — `release.yml` verifies this.
-3. CI cross-compiles the 6-platform binaries and publishes them to a GitHub Release with checksums.
+3. CI cross-compiles the 6-platform binaries, runs the **screenshot release gate** (`e2e-gate` job: boots the binary in dashboard-only mode and asserts every dashboard view renders with zero console errors), and publishes a GitHub Release with checksums **only if the gate passes**. A gate failure blocks the Release — the tag exists but no assets ship, so `naozhi upgrade` cannot pull a dashboard-breaking build.
 4. On each target host run `naozhi upgrade`. It checks the latest GitHub Release, downloads the matching binary, replaces the running one, and restarts the service.
 
 Rules:
 
 - Never deploy by copying a locally built `naozhi` binary to a host (no `scp`, no `git pull && go build` on a target host). The only sanctioned path is `naozhi upgrade` pulling from a tagged release.
 - Tag versions follow semver: bug fixes bump patch, backwards-compatible features bump minor, breaking changes bump major.
+- For UI-touching changes, run `make release-gate` locally before tagging to catch a dashboard break pre-tag (the same gate CI enforces). `make release-gate-live` gates the running systemd instance after `make deploy`. See `docs/ops/release-gate.md`.
 - If the release pipeline fails, fix the pipeline — do not work around it with a manual binary copy.
 - A PR that requires deployment to verify must call out the version it targets (`vX.Y.Z`) in the PR description so the tag step is not forgotten.
 

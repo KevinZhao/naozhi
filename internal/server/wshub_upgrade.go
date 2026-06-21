@@ -59,12 +59,23 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		limiterFn = h.wsAuthLimiter
 	}
 	if limiterFn != nil {
+		// R20260614-SEC-10 (#2120): in trusted-proxy mode an XFF-less /
+		// unparseable request collapses to "" → the shared unknownIPKey
+		// bucket, so a single attacker bypassing the proxy can starve the
+		// WS-upgrade budget for every other XFF-less caller (cross-tenant
+		// lockout). Fail closed instead — mirrors HandleLogin's stance
+		// (R247-SEC-25) and AllowRequest (R244-SEC-P3-3). In !trustedProxy
+		// mode every request resolves, so this is a no-op there.
+		if !requestHasResolvableClientIP(r, h.trustedProxy) {
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", wsAuthRetryAfterSeconds)
+			return
+		}
 		// The underlying *Allow implementations map "" to a shared
 		// unknown-IP bucket, so we do not skip the check on empty IP —
 		// that would let malformed RemoteAddr bypass the per-IP budget
 		// entirely.
 		if !limiterFn(clientIP(r, h.trustedProxy)) {
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", wsAuthRetryAfterSeconds)
 			return
 		}
 	}

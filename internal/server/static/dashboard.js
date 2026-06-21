@@ -58,10 +58,6 @@ let selectedNode = (function() {
   catch(_) { return 'local'; }
 })();
 let nodesData = {};
-// Toggle state for the #node-selector dropdown. Kept in module scope (vs. a
-// DOM attr lookup) so the outside-click listener can bail fast without reading
-// layout. True = dropdown is visible.
-let nodeSelectorOpen = false;
 let lastVersion = 0;
 let lastNodesJSON = '';
 let lastHistoryJSON = '';
@@ -222,8 +218,8 @@ function restorePending() {
 // SetWorkspace), so even a session opened in another browser/device — or one
 // reloaded before its first send — spawns into the right directory. Local
 // nodes only: remote sessions resolve their workspace on their own node.
-// Fire-and-forget — never blocks or fails the creation flow (matches the
-// pushRecentProject swallow convention).
+// Fire-and-forget — never blocks or fails the creation flow: localStorage /
+// network errors are swallowed rather than aborting session creation.
 function eagerBindWorkspace(key, workspace, node) {
   if (!key || !workspace) return;
   const nd = node || 'local';
@@ -261,23 +257,99 @@ function getCurrentTheme() {
   } catch (_) {}
   return 'auto';
 }
-function applyTheme(theme) {
+// applyTheme sets data-theme + writes the localStorage early-paint cache, and
+// when persist is true also pushes the choice to the server (PUT /api/settings)
+// so it survives a browser/device change or cache clear. localStorage stays
+// the first-paint source of truth (the inline applier in dashboard.html reads
+// it before any JS) — the server copy is reconciled in on load by syncThemeFromServer.
+// persist defaults false so the load-time reconcile and the initial
+// applyTheme(getCurrentTheme()) don't echo back to the server.
+function applyTheme(theme, persist) {
   if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+  syncThemeColorMeta();
+  if (persist) persistTheme(theme);
 }
+// persistTheme writes the theme to the server, best-effort: a failure leaves
+// the localStorage copy intact (still applied locally) and just surfaces a
+// toast, since the change isn't lost — only un-synced to other devices.
+function persistTheme(theme) {
+  const headers = { 'Content-Type': 'application/json' };
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
+    .catch(function (err) {
+      if (typeof showToast === 'function') showToast('主题已应用，但未能保存到服务器', 'error');
+      else console.warn('persist theme failed', err);
+    });
+}
+// syncThemeFromServer pulls the server-persisted theme on load and reconciles
+// it with the localStorage cache. The server is the cross-device source of
+// truth, so a differing server value wins and is re-applied (without
+// re-persisting). On error/no-store we keep whatever localStorage gave us.
+function syncThemeFromServer() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  fetchJSON('/api/settings', { headers, timeoutMs: 8000 })
+    .then(function (s) {
+      const srv = s && s.theme;
+      if (THEME_ORDER.indexOf(srv) < 0) return;       // unknown/empty → keep local
+      if (srv === getCurrentTheme()) return;            // already in sync
+      applyTheme(srv);                                  // server wins; persist=false
+      if (activeView === 'settings') renderSettingsView(); // refresh active pill if open
+    })
+    .catch(function () { /* offline / pre-persist server: keep localStorage */ });
+}
+// Keep the PWA/browser chrome (the standalone title bar, mobile status bar)
+// in sync with the active theme. The manifest's static theme_color only
+// covers first paint; once the page is live the resolved --nz-bg-0 is the
+// source of truth, so a dark bar no longer bleeds through in light mode.
+// Reads computed style after the data-theme attribute is set so 'auto' picks
+// up the OS preference too.
+function syncThemeColorMeta() {
+  try {
+    const bg = getComputedStyle(document.documentElement)
+      .getPropertyValue('--nz-bg-0').trim();
+    if (!bg) return;
+    let meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'theme-color');
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute('content', bg);
+  } catch (_) {}
+}
+// In 'auto' mode the resolved bg follows the OS scheme, so re-sync when the
+// system preference flips while the page is open.
+try {
+  if (window.matchMedia) {
+    const _themeMql = window.matchMedia('(prefers-color-scheme: light)');
+    const _onSchemeChange = function () {
+      if (getCurrentTheme() === 'auto') syncThemeColorMeta();
+    };
+    if (_themeMql.addEventListener) _themeMql.addEventListener('change', _onSchemeChange);
+    else if (_themeMql.addListener) _themeMql.addListener(_onSchemeChange);
+  }
+} catch (_) {}
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
   // fetchSessions/send so a reload-before-first-send still carries the chosen
   // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
   restorePending();
   applyTheme(getCurrentTheme());
+  // Reconcile with the server-persisted theme (cross-device source of truth).
+  // Runs after the localStorage-based applyTheme above so first paint is
+  // instant and a differing server value re-applies once it resolves.
+  syncThemeFromServer();
   // Activity-bar view switch (codex-style rail). Wired here (not inline
   // onclick) to keep the script-src inline-handler surface from growing
   // (R236-SEC-02 cap). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
-  ['abnav-chat', 'abnav-assets', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
+  ['abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
@@ -295,7 +367,6 @@ document.addEventListener('DOMContentLoaded', function () {
   bindClick('btn-history', function () { toggleHistory(); });
   bindClick('btn-new-session', function () { createNewSession(); });
   bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
-  bindClick('ns-trigger', function (e) { toggleNodeSelector(e); });
   bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
   // NOTE: the quick-ask form submit is NOT bound here. That form lives in
   // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
@@ -314,20 +385,21 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 // setActivityView('cron') when not already in cron view. We set activeView
 // BEFORE dispatching, so openCronPanel's own `activeView !== 'cron'` guard is
 // already false on the re-entry and the loop terminates after one hop.
-const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'system', 'settings'];
+const ACTIVITY_VIEWS = ['chat', 'assets', 'files', 'cron', 'system', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
   if (view === activeView) return;
   const prev = activeView;
   activeView = view;
   // Rail button active / aria-pressed state.
-  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
+  [['abnav-chat', 'chat'], ['abnav-assets', 'assets'], ['abnav-files', 'files'], ['abnav-cron', 'cron'], ['abnav-system', 'system'], ['abnav-settings', 'settings']]
     .forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) { el.classList.toggle('active', pair[1] === view); el.setAttribute('aria-pressed', String(pair[1] === view)); }
     });
   // Mutually-exclusive view classes. 'chat' clears all of them.
   document.body.classList.toggle('nz-view-assets', view === 'assets');
+  document.body.classList.toggle('nz-view-files', view === 'files');
   document.body.classList.toggle('nz-view-cron', view === 'cron');
   document.body.classList.toggle('nz-view-system', view === 'system');
   document.body.classList.toggle('nz-view-settings', view === 'settings');
@@ -341,6 +413,7 @@ function setActivityView(view) {
   if (sysm) sysm.hidden = view !== 'system';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  if (prev === 'files' && view !== 'files' && window.nzFilesView) window.nzFilesView.hide();
   if (prev === 'system' && view !== 'system') stopSystemPoll();
   // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
   // siblings of .container with no nz-view-* hide rule, so without this they
@@ -352,6 +425,7 @@ function setActivityView(view) {
   }
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
+  else if (view === 'files') { if (window.nzFilesView) window.nzFilesView.show(); }
   else if (view === 'cron') { openCronPanel(); }
   else if (view === 'system') { openSystemPanel(); }
   else if (view === 'settings') { renderSettingsView(); }
@@ -388,7 +462,7 @@ async function fetchSessions() {
       data = await fetchJSON('/api/sessions', { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status === 401 || err.status === 403) {
-        if (!document.querySelector('.modal-overlay')) showAuthModal();
+        showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
         return false;
       }
       if (err.status) return false;
@@ -620,25 +694,16 @@ function renderSidebar(data) {
   });
 
   // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
-  // The node selector dropdown needs unfiltered counts, so allSessionsCache
-  // must hold every node's items. The selector itself is refreshed via the
-  // updateStatusBar() call above (which tail-calls updateNodeSelector — that
-  // path is also fired from setState on every WS transition); session counts
-  // in the dropdown therefore lag by at most one poll cycle, which only
-  // matters while the dropdown is open — an acceptable trade for not paying
-  // two full dropdown repaints per poll.
-
   allSessionsCache = allItemsUnfiltered;
 
-  // Filter the list by selectedNode when multiple nodes are connected. In
-  // single-node setups (selector is hidden) there's nothing to filter and we
-  // pass everything through so the legacy UX is preserved. Transient states
-  // where selectedNode is null (e.g. previewDiscovered) fall through the
-  // falsy branch and show the full list rather than an empty sidebar.
-  const activeFilter = isMultiNode() && selectedNode;
-  const allItems = activeFilter
-    ? allItemsUnfiltered.filter(s => (s.node || 'local') === selectedNode)
-    : allItemsUnfiltered;
+  // The sidebar lists every connected node's sessions together — the old
+  // per-node filter (driven by the sidebar node selector) was removed when
+  // that selector moved into the New Session modal. Each card carries a
+  // .sc-node badge (sessionCardHtml) so operators can still tell which
+  // connection a session lives on. selectedNode now only tracks which node
+  // the *currently-open* session lives on (for dispatch / header), not a
+  // sidebar visibility filter, so nothing here is hidden.
+  const allItems = allItemsUnfiltered;
 
   // Stable sidebar order: oldest at top, newest at bottom, position never
   // shifts on activity or state change. Each session ships a server-stamped
@@ -719,16 +784,13 @@ function renderSidebar(data) {
       }
     });
     // Favorite projects get an empty group so their header is always rendered.
-    // Under the node filter, only inject favorites that belong to the
-    // currently-viewed node — otherwise switching to a remote would surface
-    // an empty header for every local favorite, which defeats the filter.
+    // The sidebar lists every connected node's sessions together (the per-node
+    // filter was removed in #2180 when the node selector moved into the New
+    // Session modal), so every favorite's header renders regardless of which
+    // node it lives on — matching the unfiltered session list above.
     projectsData.forEach(p => {
       if (!p.favorite) return;
       const pNode = p.node || 'local';
-      // Only suppress cross-node favorites when the filter is actually live
-      // (multi-node AND selectedNode non-null). Otherwise fall through to
-      // preserve the legacy "every favorite header always renders" behavior.
-      if (activeFilter && pNode !== selectedNode) return;
       const k = pNode + ':' + p.name;
       if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
     });
@@ -1719,19 +1781,6 @@ function applyFeatureGates() {
   }
 }
 
-// formatCostByUnit returns the cost cell text for the dashboard header.
-// USD: "$0.0024" / "$1.23". credits: "0.024 credits" / "1.23 credits".
-// Empty unit (unknown backend) hides the cell. Multi-Backend RFC §8.3 D5.
-function formatCostByUnit(cost, unit) {
-  if (cost == null || !isFinite(cost)) cost = 0;
-  if (unit === 'credits') {
-    if (cost === 0) return '0 credits';
-    return (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(3)) + ' credits';
-  }
-  // Default: USD
-  return '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
-}
-
 function cliIcon(name) {
   // Kiro official ghost-style mark (sourced from https://kiro.dev/icon.svg).
   // Inlined here so the asset works offline + survives CSP. Compressed to
@@ -1773,11 +1822,15 @@ function sessionCardHtml(s) {
   const unreadBadge = (unreadCount > 0 && !isActive)
     ? '<span class="sc-unread" aria-label="' + unreadCount + ' 条未读">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>'
     : '';
-  // Per-card node badge is no longer needed: the sidebar is filtered to a
-  // single node via the #node-selector, so every visible card is on the
-  // currently-selected node. The badge is kept empty (vs. removed from the
-  // template) so the surrounding .sc-meta layout stays identical.
-  const nodeBadge = '';
+  // Per-card node badge: the sidebar now lists every connected node's
+  // sessions together (the node picker moved into the New Session modal), so
+  // each non-local card is tagged with its connection to disambiguate. Local
+  // sessions stay unmarked — they're the default and the common case. The
+  // hue is derived from the node id (nodeColor) so it matches the palette's
+  // .cp-node badge and the modal node picker.
+  const nodeBadge = (isMultiNode() && sNode !== 'local')
+    ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
+    : '';
 
   const dismissBtn = '<button type="button" class="btn-close btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="移除" aria-label="移除会话">' + ICONS.close + '</button>';
 
@@ -1970,17 +2023,16 @@ function formatOutageDuration(elapsedMs) {
 // state transitions. That DOM was deleted when the sidebar gave its bottom
 // real estate to the session list, after which updateStatusBar early-
 // returns when the container is missing — its only remaining side-effect
-// is updateNodeSelector(), which setState already invokes on every WS
+// is reconcileSelectedNode(), which setState already invokes on every WS
 // state change via updateStatusBar(). The 1s tick therefore had no
-// user-visible effect (the trigger dot updates on real state changes,
-// not by polling) and was a periodic no-op repaint. Issue #434.
+// user-visible effect and was a periodic no-op repaint. Issue #434.
 
 function updateStatusBar() {
   const container = document.getElementById('sidebar-status');
   // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
-  // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
-  // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
-  if (!container) { updateNodeSelector(); return; }
+  // 早退，但仍要 reconcileSelectedNode()——选中的远程节点若已下线，需把
+  // selectedNode 拨回 local，否则 dispatch / 头部会指向一个消失的连接。
+  if (!container) { reconcileSelectedNode(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
   // surfaces per-node status; the sidebar-status bar collapses to "current
@@ -2053,10 +2105,9 @@ function updateStatusBar() {
   }
 
   container.innerHTML = html;
-  // Keep the node selector's trigger dot in sync with live status \u2014 a remote
-  // flipping offline should update both the bar below and the selector above
-  // without waiting for the next /api/sessions poll.
-  updateNodeSelector();
+  // A remote flipping offline must also pull selectedNode back to local if it
+  // was pointing at that now-gone node, without waiting for the next poll.
+  reconcileSelectedNode();
 }
 
 // CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal.
@@ -2218,12 +2269,11 @@ function selectSession(key, node) {
   if (sessionUnread[selSid]) {
     delete sessionUnread[selSid];
   }
-  // Picking a session on a different node shifts the sidebar filter there
-  // too — users expect the selector to follow their click, not strand them
-  // looking at another node's list. Persist + refresh the widget.
+  // Opening a session on another node retargets dispatch (selectedNode drives
+  // the dispatch node + main header). The sidebar no longer filters by node,
+  // so there is no list to re-render — just persist the new target.
   if (prevNode !== selectedNode) {
     try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-    if (typeof updateNodeSelector === 'function') updateNodeSelector();
   }
   lastEventTime = 0;
   lastRenderedEventTime = 0;
@@ -2234,6 +2284,7 @@ function selectSession(key, node) {
   const activeCard = setActiveSessionCard(key, node);
   if (activeCard) updateCardUnreadChip(activeCard, 0);
   renderMainShell();
+  fetchSessionRuns(key, node); // populate the run-history timeline (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
   if (draftInput && sessionDrafts[key]) {
@@ -2250,6 +2301,149 @@ function selectSession(key, node) {
     fetchEvents(true);
     if (eventTimer) clearInterval(eventTimer);
     eventTimer = setInterval(() => fetchEvents(false), 1000);
+  }
+}
+
+// ---- Session run-history timeline (docs/rfc/session-run-metrics.md §8) ----
+//
+// Best-effort: a fetch failure or empty history just leaves the panel hidden;
+// the conversation surface is never blocked on it.
+
+// sessionRunOutcomeMeta maps an outcome to its dot class + Chinese label,
+// reusing the green/red/purple status vocabulary the cron timeline established.
+function sessionRunOutcomeMeta(outcome) {
+  switch (outcome) {
+    case 'completed': return { dot: 'ok', label: '完成' };
+    case 'timeout': return { dot: 'timeout', label: '超时' };
+    case 'canceled': return { dot: 'cancel', label: '已取消' };
+    case 'error': return { dot: 'err', label: '出错' };
+    default: return { dot: '', label: outcome || '—' };
+  }
+}
+
+function sessionRunStatLabel(ms) {
+  // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
+  // a top-level function in the shared script scope.
+  if (typeof formatRunDuration === 'function') return formatRunDuration(ms) || '0ms';
+  return Math.round(ms) + 'ms';
+}
+
+function sessionRunsStatsHtml(stats) {
+  if (!stats || !stats.count) return '';
+  const parts = [];
+  // 对话的单位是「轮」(round)：一次 run = 一轮对话往返。
+  parts.push('<span class="srp-stat">' + esc(stats.count + ' 轮') + '</span>');
+  parts.push('<span class="srp-stat">均 ' + esc(sessionRunStatLabel(stats.avg_ms || 0)) + '</span>');
+  parts.push('<span class="srp-stat">最长 ' + esc(sessionRunStatLabel(stats.max_ms || 0)) + '</span>');
+  if (stats.timeout_count > 0) {
+    parts.push('<span class="srp-stat bad" title="超时次数">⚠ ' + esc(String(stats.timeout_count)) + '</span>');
+  }
+  return parts.join('<span class="srp-stat-sep">·</span>');
+}
+
+function sessionRunRowHtml(r) {
+  const meta = sessionRunOutcomeMeta(r.outcome);
+  // formatAbsTime is the dashboard's single timestamp formatter; use it for
+  // both the visible label and the hover title (ux-contract: timestamps carry
+  // a formatAbsTime title). A relative/colloquial label could be layered later.
+  const started = r.started_at ? formatAbsTime(r.started_at) : '';
+  const startedShort = started || '—';
+  const dur = sessionRunStatLabel(r.duration_ms || 0);
+  const sub = [];
+  if (typeof r.first_byte_ms === 'number' && r.first_byte_ms > 0) {
+    sub.push('<span title="首字节延迟">首字节 ' + esc(sessionRunStatLabel(r.first_byte_ms)) + '</span>');
+  }
+  if (r.cost_usd && typeof formatCostUSD === 'function') {
+    sub.push('<span title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
+  }
+  const subRow = sub.length
+    ? '<div class="srr-sub">' + sub.join('<span class="srr-sep">·</span>') + '</div>'
+    : '';
+  return '<div class="srr">' +
+      '<div class="srr-main">' +
+        '<span class="srr-dot ' + meta.dot + '" aria-hidden="true"></span>' +
+        '<span class="srr-state">' + esc(meta.label) + '</span>' +
+        '<span class="srr-time"' + (started ? ' title="' + escAttr(started) + '"' : '') + '>' + esc(startedShort) + '</span>' +
+        '<span class="srr-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      subRow +
+    '</div>';
+}
+
+// setHeaderRunStats writes (or clears) the aggregate run-stats node that lives
+// in the session-detail header's .detail line. The run-history stats used to
+// sit inside the panel <summary>; they were promoted to the header so the
+// per-session "N 轮 · 均 X · 最长 X" overview is always visible without
+// expanding the (collapsed-by-default) timeline. The header node is built
+// empty by renderMainShell, so absence = no-op rather than throw.
+function setHeaderRunStats(html) {
+  const el = document.getElementById('header-runstats');
+  if (el) el.innerHTML = html || '';
+}
+
+function renderSessionRunsPanel(data) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
+  const stats = data && data.stats;
+  if (!runs.length) {
+    // Hidden entirely when there's no history (mirrors cron :empty behaviour).
+    panel.hidden = true;
+    panel.innerHTML = '';
+    setHeaderRunStats('');
+    return;
+  }
+  panel.hidden = false;
+  // Stats are surfaced in the header; the panel keeps only the per-run detail
+  // rows behind a collapsed disclosure.
+  setHeaderRunStats(sessionRunsStatsHtml(stats));
+  const rowsHtml = runs.map(sessionRunRowHtml).join('');
+  // Collapsed by default everywhere: the run-history timeline grows without
+  // bound as more runs accumulate, so leaving it open would steadily push the
+  // conversation + composer down. The user's manual expand/collapse is honoured
+  // afterwards via data-user-toggled.
+  if (!panel.hasAttribute('data-user-toggled')) {
+    panel.open = false;
+  }
+  panel.innerHTML =
+    '<summary class="srp-summary">' +
+      '<span class="srp-title">运行记录</span>' +
+    '</summary>' +
+    '<div class="srp-body">' +
+      (rowsHtml ? '<div class="srp-rows">' + rowsHtml + '</div>'
+                : '<div class="srp-empty">本会话暂无运行记录</div>') +
+    '</div>';
+}
+
+// Remember the user's manual expand/collapse so a later refresh doesn't fight
+// their choice (one listener, delegated on the panel).
+document.addEventListener('toggle', function (e) {
+  const panel = e.target;
+  if (panel && panel.id === 'session-runs-panel') {
+    panel.setAttribute('data-user-toggled', '1');
+  }
+}, true);
+
+async function fetchSessionRuns(key, node) {
+  const panel = document.getElementById('session-runs-panel');
+  if (!panel) return;
+  // Run history is a local-node concern; remote-node sessions skip it for now.
+  // Clear the header stats too so a remote session doesn't inherit the
+  // previously-selected local session's "N 轮" overview.
+  if (node && node !== 'local') { panel.hidden = true; setHeaderRunStats(''); return; }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
+    if (!resp.ok) { panel.hidden = true; setHeaderRunStats(''); return; }
+    const data = await resp.json();
+    // Guard against a stale response landing after the user switched sessions.
+    if (selectedKey !== key) return;
+    renderSessionRunsPanel(data);
+  } catch (_) {
+    panel.hidden = true;
+    setHeaderRunStats('');
   }
 }
 
@@ -2628,19 +2822,13 @@ function renderMainShell() {
   // surrounding chip was a duplicate signal that competed for attention
   // with cost / turn-timer.
   const headerBackendChip = '';
-  // Multi-Backend RFC §8.3 D5: cost unit comes from the SessionView so
-  // claude shows "$" and kiro shows "credits". Empty unit (unknown backend)
-  // hides the cell — keeps the layout clean rather than rendering "$NaN".
-  const costUnit = s.cost_unit || '';
-  const cost = s.total_cost || 0;
-  const showCost = costUnit !== '';
-  const costText = formatCostByUnit(cost, costUnit);
-  const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
-  // R110-P3 cost tooltip: compute the same detail the live updater
-  // (updateHeaderCost) writes, so the very first render isn't missing
-  // hover content until a subsequent event refresh lands.
-  const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);
-  const costTitleAttr = costTooltip ? ' title="' + escAttr(costTooltip) + '"' : '';
+  // session-run-metrics header cleanup: the per-session cost chip was removed.
+  // The figure came from the CLI's self-reported total_cost_usd, which is
+  // computed against Anthropic list pricing — under Bedrock that diverges
+  // systematically from the actual AWS bill (often reading $0), so it misled
+  // more than it informed. The header now surfaces the run-history overview
+  // (N 轮 · 均 X · 最长 X) instead, injected asynchronously into
+  // #header-runstats by renderSessionRunsPanel.
   // Multi-Backend RFC §8.3 D6: context usage progress bar driven by the
   // UI Round 5 R5-7: header no longer renders ctx-bar — the 48×6 px
   // strip carried low signal (operator can't act on "ctx 12%"), competed
@@ -2684,7 +2872,10 @@ function renderMainShell() {
         headerOriginBadge +
         ctxBarHtml +
         turnTimerHtml +
-        (showCost ? '<span class="' + costClass + '" id="header-cost"' + costTitleAttr + '>' + costText + '</span>' : '') +
+        // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
+        // filled asynchronously by renderSessionRunsPanel once /api/sessions/runs
+        // resolves; stays empty (collapses) for sessions with no recorded runs.
+        '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
     '</div>' +
@@ -2692,6 +2883,11 @@ function renderMainShell() {
     // (#cron-timeline-panel placeholder above the events scroll). It now
     // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
     // is reserved for human conversation surfaces.
+    // session-run-metrics RFC §8.2: the run-history timeline is a NEW sibling
+    // node here (not the relocated cron one). Hidden until renderSessionRunsPanel
+    // populates it; :empty/[hidden] keeps it out of layout when a session has
+    // no recorded runs.
+    '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button type="button" onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
@@ -5859,7 +6055,23 @@ function describeTranscribeError(err) {
 
 // --- Auth modal ---
 
-function showAuthModal() {
+// Auth-prompt de-dupe + debounce. Two guards keep the token modal from
+// machine-gunning back open: (1) only ever one overlay at a time, and
+// (2) after the operator explicitly dismisses the prompt, suppress
+// *background* re-prompts (the 5s /api/sessions poll, WS reconnect) for a
+// cooldown window. User-initiated actions (send / upload) pass {auto:false}
+// and bypass the cooldown so a click still gets immediate feedback. A
+// successful login clears the cooldown.
+let _authModalCooldownUntil = 0;
+const AUTH_MODAL_COOLDOWN_MS = 60000;
+
+function showAuthModal(opts) {
+  opts = opts || {};
+  // De-dupe: never stack a second auth prompt over an existing modal.
+  if (document.querySelector('.modal-overlay')) return;
+  // Debounce: a freshly-dismissed prompt should not be reopened by the
+  // next background poll. User actions (auto !== true) always prompt.
+  if (opts.auto && Date.now() < _authModalCooldownUntil) return;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
@@ -5883,13 +6095,23 @@ function showAuthModal() {
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" onclick="dismissAuthModal()">取消</button>' +
         '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
   trapFocus(overlay);
   setTimeout(() => document.getElementById('token-input').focus(), 100);
+}
+
+// dismissAuthModal closes the auth prompt and starts the background-reprompt
+// cooldown so the next /api/sessions poll (or WS reconnect) doesn't pop it
+// straight back open. The operator can still trigger it immediately via an
+// explicit send/upload.
+function dismissAuthModal() {
+  _authModalCooldownUntil = Date.now() + AUTH_MODAL_COOLDOWN_MS;
+  const overlay = document.querySelector('.modal-overlay');
+  if (overlay) overlay.remove();
 }
 
 async function saveToken() {
@@ -5903,6 +6125,7 @@ async function saveToken() {
       body: JSON.stringify({token: t})
     });
     if (r.ok) {
+      _authModalCooldownUntil = 0; // fresh session — drop any dismiss cooldown
       const overlay = document.querySelector('.modal-overlay');
       if (overlay) overlay.remove();
       wsm.disconnect();
@@ -6136,43 +6359,72 @@ function backendDisplayVersion(backendID) {
   return (e && e.version) ? e.version : '';
 }
 
-// R110-P3 agent picker (Round 167) — returns an HTML fragment for an agent
-// <select>, or an empty string when only the default 'general' agent is
-// configured (no meaningful choice to offer). Mirrors renderBackendPicker's
-// shape: single <select> with id="new-agent", consumed by getSelectedAgent()
-// at submit time, defaulting to the last-picked agent (localStorage) so
-// power users who always want e.g. 'sonnet' don't re-pick every session.
-function renderAgentPicker() {
-  if (!Array.isArray(availableAgents) || availableAgents.length <= 1) return '';
-  // Remember the last picked agent across reloads. Falls back to 'general'
-  // on first use or when the previously-selected agent has been removed
-  // from the backend config (e.g. config.yaml edit). Swallow errors from
-  // private browsing / disabled storage so the picker always renders.
-  let remembered = 'general';
-  try {
-    const v = localStorage.getItem('naozhi_last_agent');
-    if (v && availableAgents.indexOf(v) >= 0) remembered = v;
-  } catch (_) { /* noop */ }
-  const options = availableAgents.map(a => {
-    const selected = a === remembered ? ' selected' : '';
-    return '<option value="' + escAttr(a) + '"' + selected + '>' + esc(a) + '</option>';
+// renderNodePicker returns an HTML fragment for a connection (node) <select>,
+// or an empty string when only the local node is connected (no meaningful
+// choice to offer). It took over the modal slot the agent picker used to
+// occupy: the sidebar node selector was removed, so choosing which connection
+// a new session lives on now happens here, at creation time. Mirrors
+// renderBackendPicker's shape — single <select id="new-node"> consumed by
+// getSelectedNode() at submit time — and pre-selects the current selectedNode
+// so the picker matches whatever the operator was last working on.
+//
+// 'local' is always pinned first (defensive: even if the server's nodes
+// payload omits it). Remotes follow, ordered by display name.
+function renderNodePicker() {
+  if (!isMultiNode()) return '';
+  const ids = Object.keys(nodesData);
+  if (ids.indexOf('local') === -1) ids.unshift('local');
+  const sorted = ids.slice().sort((a, b) => {
+    if (a === 'local' && b !== 'local') return -1;
+    if (b === 'local' && a !== 'local') return 1;
+    return getNodeDisplayName(a).localeCompare(getNodeDisplayName(b));
+  });
+  const current = selectedNode || 'local';
+  const options = sorted.map(id => {
+    const selected = id === current ? ' selected' : '';
+    const status = getNodeStatus(id);
+    const label = getNodeDisplayName(id) + ' · ' + statusLabelForNode(status);
+    return '<option value="' + escAttr(id) + '"' + selected + '>' + esc(label) + '</option>';
   }).join('');
   return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
-    '<select id="new-agent" style="' + PICKER_SELECT_STYLE + '">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-node">连接</label>' +
+    '<select id="new-node" style="' + PICKER_SELECT_STYLE + '">' +
     options +
     '</select>' +
     '</div>';
 }
 
-function getSelectedAgent() {
-  const el = document.getElementById('new-agent');
+// getSelectedNode reads the modal's connection <select>. Falls back to the
+// current selectedNode (then 'local') when the picker isn't rendered — i.e.
+// single-connection setups where there is nothing to choose.
+function getSelectedNode() {
+  const el = document.getElementById('new-node');
   const v = el && el.value ? el.value : '';
-  if (v) {
-    // Persist so the next modal defaults to this agent without asking again.
-    try { localStorage.setItem('naozhi_last_agent', v); } catch (_) { /* noop */ }
-  }
-  return v || 'general';
+  return v || selectedNode || 'local';
+}
+
+// wireNodePicker attaches a change listener to the modal's #new-node <select>
+// (added imperatively to stay clear of CSP's inline-handler ban). Picking a
+// connection updates the global selectedNode + persists it, then runs the
+// caller's onChange so a palette can re-filter its project list to the newly
+// chosen node. No-op when the picker isn't present (single-node setups).
+function wireNodePicker(onChange) {
+  const el = document.getElementById('new-node');
+  if (!el) return;
+  el.addEventListener('change', function () {
+    selectedNode = el.value || 'local';
+    try { localStorage.setItem('nz_selectedNode', selectedNode); } catch (_) { /* noop */ }
+    if (typeof onChange === 'function') onChange();
+  });
+}
+
+// getSelectedAgent resolves the agent segment for the session key. The agent
+// picker was retired (its modal slot now hosts the connection picker), so
+// every dashboard-created session uses the default 'general' agent. Kept as a
+// single resolution point so buildDashboardSessionKey's call sites don't
+// hardcode the literal and a future picker can re-route through here.
+function getSelectedAgent() {
+  return 'general';
 }
 
 // R110-P3 key schema (Round 167) — dashboard sessions historically used
@@ -6321,7 +6573,7 @@ function createNewSession() {
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
           backendPicker +
-          renderAgentPicker() +
+          renderNodePicker() +
           '<div style="margin-bottom:12px">' +
             '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -6333,6 +6585,17 @@ function createNewSession() {
         '</div>';
       document.body.appendChild(overlay);
       trapFocus(overlay);
+      // Switching connection retargets where this custom-workspace session
+      // lands; the workspace placeholder follows (local prefills the default
+      // workspace, remotes clear it since we have no per-node default).
+      wireNodePicker(function () {
+        const wsEl = document.getElementById('new-workspace');
+        if (!wsEl) return;
+        const nowLocal = (selectedNode || 'local') === 'local';
+        const ph = nowLocal ? (defaultWorkspace || '') : '';
+        wsEl.placeholder = ph;
+        if (!wsEl.value) wsEl.value = ph;
+      });
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -6343,16 +6606,15 @@ function createNewSession() {
 
 function openProjectPalette(backendsData) {
   const backendPicker = renderBackendPicker(backendsData);
-  const agentPicker = renderAgentPicker();
-  // Stash the picker HTML on the overlay dataset so the custom-workspace
-  // modal (spawned from a palette row) can surface the same choice. When
-  // only one backend exists, picker is empty and we skip the header slot.
-  // The agent picker is shown inline next to the backend slot so multi-agent
-  // setups can pick both at once without leaving the palette.
-  const pickerSlot = (backendPicker || agentPicker)
+  const nodePicker = renderNodePicker();
+  // The backend + connection pickers sit inline above the search box so the
+  // operator can pick both before choosing a project. The connection picker
+  // replaced the agent picker that used to live here; switching it re-filters
+  // the project list to that node's projects (see nodeFilteredProjects).
+  const pickerSlot = (backendPicker || nodePicker)
     ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px">' +
         (backendPicker ? '<div style="flex:1;min-width:0">' + backendPicker + '</div>' : '') +
-        (agentPicker ? '<div style="flex:1;min-width:0">' + agentPicker + '</div>' : '') +
+        (nodePicker ? '<div style="flex:1;min-width:0">' + nodePicker + '</div>' : '') +
       '</div>'
     : '';
   const overlay = document.createElement('div');
@@ -6376,12 +6638,81 @@ function openProjectPalette(backendsData) {
   document.body.appendChild(overlay);
   trapFocus(overlay);
 
-  const state = {overlay, items: [], activeIdx: 0};
+  // dirBrowse holds the navigable folder-browser state shown in the palette's
+  // idle (empty-query) view: which project/workspace root we're under and the
+  // current relative path inside it. Starts at the default workspace root so
+  // the browser opens on the workspace and lets the user navigate down into
+  // subfolders (and back up) before picking a working directory. Typing a
+  // search query hides the browser and restores the flat project filter.
+  const state = {overlay, items: [], activeIdx: 0, dirBrowse: null, dirBrowseSeq: 0, dirBrowseError: false};
   const input = document.getElementById('cp-input');
   input.addEventListener('input', () => renderPaletteList(state, input.value));
   input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
+  // Re-filter the project list when the connection changes — the list is
+  // scoped to selectedNode (nodeFilteredProjects), so a node switch must
+  // repaint it against the current query.
+  wireNodePicker(function () { renderPaletteList(state, input.value); });
   renderPaletteList(state, '');
+  // Kick off the workspace folder load (local node only — remote nodes have
+  // no client-side workspace root to seed the browser with).
+  if ((selectedNode || 'local') === 'local' && defaultWorkspace) {
+    loadDirBrowse(state, '__workspace__', '');
+  }
   setTimeout(() => input.focus(), 50);
+}
+
+// loadDirBrowse fetches GET /api/projects/dir for the given project/workspace
+// root + relative path and, on success, stores the result on state.dirBrowse
+// and re-renders the idle palette view. Failures fall back silently to the
+// flat project list (state.dirBrowse stays null) with a toast so the palette
+// is never left blank. The `project` arg is the pseudo/real project name the
+// backend understands (`__workspace__` for the default workspace root).
+function loadDirBrowse(state, project, path) {
+  // Request-generation guard: rapid navigation (click subfolder, then up,
+  // then another subfolder) fires overlapping fetches that can resolve out of
+  // order. Capture this call's sequence number and bail in the callbacks if a
+  // newer load has since started — only the most-recent navigation wins.
+  const seq = ++state.dirBrowseSeq;
+  // Bind to the originating overlay so an in-flight fetch from a closed (and
+  // possibly reopened) palette can never repaint a different instance. All DOM
+  // lookups go through this overlay rather than document.getElementById.
+  const overlay = state.overlay;
+  state.dirBrowseLoading = true;
+  const stillCurrent = () => seq === state.dirBrowseSeq && document.body.contains(overlay);
+  const inputEmpty = () => {
+    const inp = overlay.querySelector('#cp-input');
+    return !inp || !inp.value.trim();
+  };
+  // Only repaint if the input is still empty (user may have started typing
+  // a search between the click and the fetch resolving).
+  if (inputEmpty()) renderPaletteList(state, '');
+  fetchJSON('/api/projects/dir?project=' + encodeURIComponent(project) +
+      (path ? '&path=' + encodeURIComponent(path) : ''), { timeoutMs: 10000 })
+    .then(data => {
+      if (!stillCurrent()) return;
+      state.dirBrowseLoading = false;
+      state.dirBrowseError = false;
+      state.dirBrowse = {
+        project: project,
+        path: data.path || '',
+        parent: data.parent || '',
+        atRoot: !!data.at_root,
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        truncated: !!data.truncated,
+      };
+      if (inputEmpty()) renderPaletteList(state, '');
+    })
+    .catch(() => {
+      if (!stillCurrent()) return;
+      state.dirBrowseLoading = false;
+      // Keep the last good view if we have one (a navigation failure shouldn't
+      // discard the directory the user was already browsing); only flag an
+      // error when the very first load failed so the idle view can offer a
+      // retry affordance instead of silently dropping to the flat list.
+      if (!state.dirBrowse) state.dirBrowseError = true;
+      if (typeof showToast === 'function') showToast('无法读取目录', 'warn');
+      if (inputEmpty()) renderPaletteList(state, '');
+    });
 }
 
 function fuzzyMatch(query, text) {
@@ -6448,24 +6779,18 @@ function renderPaletteList(state, query) {
   if (q) {
     scored.sort((a, b) => b.score - a.score);
   } else {
-    // R110-P3 palette idle-state ordering: three-tier sort on empty query.
+    // R110-P3 palette idle-state ordering: two-tier sort on empty query.
     //   Tier 0: favorites — surface "pinned" projects first. Users already
     //           star projects via the sidebar section-header ⭐ button,
     //           which persists to the backend projects config. Reusing
     //           that signal avoids a second "palette-pin" concept (which
     //           would split the mental model and duplicate state).
-    //   Tier 1: recents (localStorage) top-N — most-recently-used.
-    //   Tier 2: everything else in original projectsData order (alpha +
-    //           backend favorite-first order is preserved, so the rest
-    //           bucket doesn't reshuffle unrelated projects).
-    // A project that is BOTH favorite and recent lands in tier 0 only;
-    // the recents lookup skips it so it doesn't appear twice or trigger
-    // a stale rank clash.
-    const recents = loadRecentProjects();
-    const recentRank = new Map();
-    recents.slice(0, RECENT_PROJECTS_SHOW).forEach((e, i) => {
-      recentRank.set(e.name + '|' + (e.node || 'local'), i);
-    });
+    //   Tier 1: everything else by directory filesystem mtime, most-recently-
+    //           modified first (dir_mtime, unix ms, stamped by the backend at
+    //           scan time). The folder you last touched on disk surfaces at
+    //           the top of the non-favorite bucket; un-stat'able / older-remote
+    //           entries (dir_mtime 0) sort last, then original projectsData
+    //           order is the final stable tiebreak.
     const withIndex = scored.map((s, i) => ({s, i}));
     withIndex.sort((a, b) => {
       const pa = a.s.project;
@@ -6474,13 +6799,13 @@ function renderPaletteList(state, query) {
       const fa = pa.favorite ? 0 : 1;
       const fb = pb.favorite ? 0 : 1;
       if (fa !== fb) return fa - fb;
-      // Tier gate 1: within the same tier, recents come before non-recents.
-      const ka = pa.name + '|' + (pa.node || 'local');
-      const kb = pb.name + '|' + (pb.node || 'local');
-      const ra = recentRank.has(ka) ? recentRank.get(ka) : Infinity;
-      const rb = recentRank.has(kb) ? recentRank.get(kb) : Infinity;
-      if (ra !== rb) return ra - rb;
-      // Tier gate 2: stable on original projectsData order (input index).
+      // Tier gate 1: directory mtime descending (most-recently-modified
+      // folder first). Missing/zero dir_mtime sorts last so un-stat'able or
+      // older-protocol remote entries don't jump to the top.
+      const ma = pa.dir_mtime || 0;
+      const mb = pb.dir_mtime || 0;
+      if (ma !== mb) return mb - ma;
+      // Final stable tiebreak: original projectsData order (input index).
       return a.i - b.i;
     });
     scored.length = 0;
@@ -6488,7 +6813,26 @@ function renderPaletteList(state, query) {
   }
 
   const items = [];
-  if (!q) items.push({type: 'quick'});
+  // Idle view: when the navigable folder browser is active (local node with a
+  // workspace root), it takes the top of the list — "create here" + up + the
+  // current directory's subfolders/files — so the workspace is the default
+  // landing spot and the user can drill into subfolders. Otherwise fall back
+  // to the flat ⚡ 快速新建 row. The flat project list still follows so a
+  // registered project is one click away regardless.
+  const browseActive = !q && state.dirBrowse;
+  if (!q) {
+    if (browseActive) {
+      items.push({type: 'dir-here'});
+      if (!state.dirBrowse.atRoot) items.push({type: 'dir-up'});
+      state.dirBrowse.entries.forEach(e => items.push({type: 'dir-entry', entry: e}));
+    } else if (state.dirBrowseError) {
+      // First folder-browser load failed: offer an explicit retry rather than
+      // silently degrading to the flat list with no way back to the browser.
+      items.push({type: 'dir-retry'});
+    } else {
+      items.push({type: 'quick'});
+    }
+  }
   scored.forEach(s => items.push({type: 'project', data: s}));
   items.push({type: 'custom', query: q});
   state.items = items;
@@ -6505,16 +6849,156 @@ function renderPaletteList(state, query) {
   }
 
   list.innerHTML = '';
+  // Breadcrumb header for the folder browser (not a selectable row — it sits
+  // above the list and reflects state.dirBrowse.path).
+  if (browseActive) list.appendChild(buildDirBreadcrumb(state));
   items.forEach((it, i) => {
     if (it.type === 'quick') {
       list.appendChild(buildQuickRow(i));
+    } else if (it.type === 'dir-here') {
+      list.appendChild(buildDirHereRow(state, i));
+    } else if (it.type === 'dir-up') {
+      list.appendChild(buildDirUpRow(state, i));
+    } else if (it.type === 'dir-entry') {
+      list.appendChild(buildDirEntryRow(state, it.entry, i));
+    } else if (it.type === 'dir-retry') {
+      list.appendChild(buildDirRetryRow(state, i));
     } else if (it.type === 'project') {
       list.appendChild(buildProjectRow(it.data, i));
     } else {
       list.appendChild(buildCustomRow(it.query, i));
     }
   });
+  if (browseActive && state.dirBrowse.truncated) {
+    const note = document.createElement('div');
+    note.className = 'cmd-palette-empty';
+    note.style.padding = '6px 12px';
+    note.textContent = '目录条目过多，仅显示前 ' + state.dirBrowse.entries.length + ' 项';
+    list.appendChild(note);
+  }
   updateActiveRow(state);
+}
+
+// dirBrowseWorkspacePath maps the active dirBrowse (project + rel path) back to
+// an absolute filesystem path for session creation. For the __workspace__
+// pseudo-project the root is defaultWorkspace; for a real project it is that
+// project's path. Joins the relative sub-path the user navigated into.
+function dirBrowseWorkspacePath(state) {
+  const db = state.dirBrowse;
+  if (!db) return defaultWorkspace || '';
+  let root = '';
+  if (db.project === '__workspace__') {
+    root = defaultWorkspace || '';
+  } else {
+    const p = nodeFilteredProjects().find(x => x.name === db.project);
+    root = p ? p.path : '';
+  }
+  if (!root) return '';
+  const base = root.replace(/\/+$/, '');
+  return db.path ? base + '/' + db.path : base;
+}
+
+function buildDirBreadcrumb(state) {
+  const db = state.dirBrowse;
+  const el = document.createElement('div');
+  el.className = 'cp-breadcrumb';
+  const full = dirBrowseWorkspacePath(state);
+  el.innerHTML =
+    '<span class="cp-bc-icon" aria-hidden="true">📂</span>' +
+    '<span class="cp-bc-path" title="' + escAttr(full) + '">' + esc(shortPath(full)) + '</span>';
+  return el;
+}
+
+function buildDirHereRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">✓</span>' +
+    '<div class="cp-main">' +
+      '<div class="cp-name">在此目录新建会话' +
+        ' <span class="cp-name-alias">当前目录</span></div>' +
+    '</div>';
+  el.addEventListener('click', () => pickDirHere(state));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function buildDirUpRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">↑</span>' +
+    '<div class="cp-main"><div class="cp-name">上级目录</div></div>';
+  el.addEventListener('click', () => navigateDirBrowse(state, state.dirBrowse.parent));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function buildDirEntryRow(state, entry, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item' + (entry.is_dir ? '' : ' cp-dir-file');
+  el.dataset.idx = String(idx);
+  const icon = entry.is_dir ? '📁' : '📄';
+  const meta = entry.is_dir ? '' : '<span class="cp-dir-size">' + esc(formatFileBytes(entry.size || 0)) + '</span>';
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">' + icon + '</span>' +
+    '<div class="cp-main"><div class="cp-name">' + esc(entry.name) + '</div></div>' + meta;
+  if (entry.is_dir) {
+    const childRel = state.dirBrowse.path ? state.dirBrowse.path + '/' + entry.name : entry.name;
+    el.addEventListener('click', () => navigateDirBrowse(state, childRel));
+    el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  } else {
+    // Files are shown for context but are not session targets; clicking is a
+    // no-op (dimmed via cp-dir-file). Still allow hover-highlight so keyboard
+    // and mouse stay in sync.
+    el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  }
+  return el;
+}
+
+// navigateDirBrowse drills into (or up to) a sub-path of the current browse
+// root and reloads. The relative path is workspace-relative; "" = root.
+function navigateDirBrowse(state, relPath) {
+  if (!state.dirBrowse) return;
+  loadDirBrowse(state, state.dirBrowse.project, relPath || '');
+}
+
+function buildDirRetryRow(state, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon" aria-hidden="true">↻</span>' +
+    '<div class="cp-main"><div class="cp-name">文件夹浏览不可用 — 点击重试</div></div>';
+  el.addEventListener('click', () => loadDirBrowse(state, '__workspace__', ''));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+// pickDirHere creates a session in the currently-browsed directory.
+function pickDirHere(state) {
+  const workspace = dirBrowseWorkspacePath(state);
+  if (!workspace) {
+    if (typeof showToast === 'function') showToast('无法解析目录路径', 'warn');
+    return;
+  }
+  const node = selectedNode || 'local';
+  const folderName = workspace.replace(/\/+$/, '').split('/').pop() || 'workspace';
+  doCreateInProject(workspace, folderName, node, undefined, undefined, { mode: 'new' });
+}
+
+// formatFileBytes renders a compact human size for file rows in the folder
+// browser. Named distinctly from cron_view.js's formatBytes (which uses KiB
+// units) to avoid a cross-script top-level redeclaration collision — both
+// files load into the same global scope. See project_dashboard_script_split_scope.
+function formatFileBytes(n) {
+  if (!n || n < 1024) return (n || 0) + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + units[i];
 }
 
 function buildProjectRow(s, idx) {
@@ -6561,16 +7045,35 @@ function buildProjectRow(s, idx) {
 }
 
 function buildQuickRow(idx) {
-  const ws = defaultWorkspace || '';
+  // The palette's idle (empty-query) first row IS the default workspace
+  // folder: on a local node where stats supplied default_workspace we render
+  // it as an explicit 📁 folder entry (folder name + 工作目录 chip + path) so
+  // the workspace is always the first, default-highlighted folder in the
+  // browse list — not a vague "quick session" affordance. Remote nodes (no
+  // client-side workspace path) and the rare local-without-workspace case
+  // degrade to the original ⚡ 快速新建 label so the row still creates a
+  // session under the node's backend-resolved default cwd.
+  const node = selectedNode || 'local';
+  const ws = node === 'local' ? (defaultWorkspace || '') : '';
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
-  el.innerHTML =
-    '<span class="cp-icon">⚡</span>' +
-    '<div class="cp-main">' +
-      '<div class="cp-name">快速新建</div>' +
-      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
-    '</div>';
+  if (ws) {
+    const folderName = ws.replace(/\/+$/, '').split('/').pop() || ws;
+    el.innerHTML =
+      '<span class="cp-icon" aria-hidden="true">📁</span>' +
+      '<div class="cp-main">' +
+        '<div class="cp-name">' + esc(folderName) +
+          ' <span class="cp-name-alias">工作目录</span></div>' +
+        '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' +
+      '</div>';
+  } else {
+    el.innerHTML =
+      '<span class="cp-icon">⚡</span>' +
+      '<div class="cp-main">' +
+        '<div class="cp-name">快速新建</div>' +
+      '</div>';
+  }
   el.addEventListener('click', () => pickPaletteQuick());
   el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
@@ -6644,7 +7147,18 @@ function handlePaletteKey(e, state, input) {
     const item = state.items[state.activeIdx];
     if (!item) return;
     if (item.type === 'quick') pickPaletteQuick();
-    else if (item.type === 'project') pickPaletteProject(item.data.project);
+    else if (item.type === 'dir-retry') loadDirBrowse(state, '__workspace__', '');
+    else if (item.type === 'dir-here') pickDirHere(state);
+    else if (item.type === 'dir-up') navigateDirBrowse(state, state.dirBrowse.parent);
+    else if (item.type === 'dir-entry') {
+      // Enter on a directory drills in; on a file it's a no-op (files aren't
+      // session targets).
+      if (item.entry.is_dir) {
+        const childRel = state.dirBrowse.path
+          ? state.dirBrowse.path + '/' + item.entry.name : item.entry.name;
+        navigateDirBrowse(state, childRel);
+      }
+    } else if (item.type === 'project') pickPaletteProject(item.data.project);
     else pickPaletteCustom(input.value.trim());
   }
 }
@@ -6660,29 +7174,30 @@ function pickPaletteProject(p) {
 }
 
 function pickPaletteCustom(initialValue) {
-  // Capture the palette's backend + agent choice before we remove the overlay.
-  // The Custom Workspace modal re-renders its own copies of both pickers,
-  // so we need to pass the pre-selection forward rather than relying on the
-  // palette's DOM (which is about to be nuked).
+  // Capture the palette's backend choice before we remove the overlay. The
+  // Custom Workspace modal re-renders its own copies of the pickers, so we
+  // carry the pre-selection forward rather than relying on the palette's DOM
+  // (which is about to be nuked). The connection choice rides on the global
+  // selectedNode (wireNodePicker keeps it current), so renderNodePicker below
+  // pre-selects it without an explicit hand-off.
   const preselectedBackend = getSelectedBackend();
-  const preselectedAgent = getSelectedAgent();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
   // 选中 remote 节点时不用 local 的 defaultWorkspace 占位符，避免误导用户。
   const isLocal = (selectedNode || 'local') === 'local';
   const ws = isLocal ? (defaultWorkspace || '') : '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
-  // Re-render the backend + agent pickers inside the modal and pre-select the
-  // palette's choice, so switching to Custom Workspace doesn't drop either.
+  // Re-render the backend + connection pickers inside the modal and pre-select
+  // the palette's choice, so switching to Custom Workspace doesn't drop either.
   const picker = renderBackendPicker(cliBackends);
-  const agentPicker = renderAgentPicker();
+  const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
       '<h3>自定义工作目录</h3>' +
       picker +
-      agentPicker +
+      nodePicker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -6698,12 +7213,15 @@ function pickPaletteCustom(initialValue) {
     const sel = document.getElementById('new-backend');
     if (sel) sel.value = preselectedBackend;
   }
-  if (preselectedAgent) {
-    const sel = document.getElementById('new-agent');
-    if (sel && Array.from(sel.options).some(o => o.value === preselectedAgent)) {
-      sel.value = preselectedAgent;
-    }
-  }
+  // Switching connection here clears/prefills the workspace placeholder the
+  // same way the no-projects modal does, so a remote pick doesn't dangle the
+  // local default path.
+  wireNodePicker(function () {
+    const wsEl = document.getElementById('new-workspace');
+    if (!wsEl) return;
+    const nowLocal = (selectedNode || 'local') === 'local';
+    wsEl.placeholder = nowLocal ? (defaultWorkspace || '') : '';
+  });
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
     if (el) { el.focus(); el.select(); }
@@ -6742,22 +7260,11 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   persistPending();
   eagerBindWorkspace(key, projectPath, nodeId);
 
-  // R110-P3 recent-projects: every successful project-scoped session
-  // creation bumps the (name,node) pair to the top of the palette's
-  // recent list so next-time access is one click. Custom-workspace paths
-  // are intentionally NOT recorded — they have no stable project.name
-  // and the palette has no row to highlight them against. Errors from
-  // localStorage are swallowed: Safari private-browsing / out-of-quota /
-  // disabled storage all throw on setItem, and a silently-un-recorded
-  // bump is preferable to breaking the creation flow over a UX tweak.
-  pushRecentProject(projectName, nodeId || 'local');
-
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
   selectedNode = nodeId || 'local';
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, selectedNode);
@@ -6768,52 +7275,14 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
-// --- Recent projects (palette ordering) ---
-
-// RECENT_PROJECTS_KEY holds a compact JSON array of {name,node,ts} tuples,
-// ordered by `ts` DESC. Capped at RECENT_PROJECTS_MAX so the stored blob
-// stays small (worst case ~10 * 100 bytes). The palette only surfaces
-// the top 5 (see renderPaletteList) but we retain a deeper tail so a
-// long-absent project can climb back into view after one use.
-const RECENT_PROJECTS_KEY = 'naozhi_recent_projects';
-const RECENT_PROJECTS_MAX = 10;
-const RECENT_PROJECTS_SHOW = 5;
-
-function loadRecentProjects() {
-  try {
-    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Defensive filter: discard entries without a string `name` so a
-    // manually-edited localStorage can't break render.
-    return parsed
-      .filter(e => e && typeof e.name === 'string')
-      .slice(0, RECENT_PROJECTS_MAX);
-  } catch (_) {
-    return [];
-  }
-}
-
-function pushRecentProject(name, node) {
-  if (!name) return;
-  node = node || 'local';
-  try {
-    const list = loadRecentProjects();
-    const filtered = list.filter(e => !(e.name === name && (e.node || 'local') === node));
-    filtered.unshift({name: name, node: node, ts: Date.now()});
-    const trimmed = filtered.slice(0, RECENT_PROJECTS_MAX);
-    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
-  } catch (_) {
-    // Private browsing / quota / disabled storage — swallow, next
-    // successful write reseeds the list.
-  }
-}
-
 function doCreateSession() {
   const workspace = document.getElementById('new-workspace').value.trim();
   const backend = getSelectedBackend();
   const agent = getSelectedAgent();
+  // Read the connection picker directly so the choice lands even if the
+  // change listener never fired (e.g. the operator never re-opened the
+  // select). getSelectedNode falls back to selectedNode / 'local'.
+  const targetNode = getSelectedNode();
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
@@ -6825,11 +7294,6 @@ function doCreateSession() {
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
   const key = buildDashboardSessionKey(ts, folderName, agent);
-
-  // 自定义工作目录的会话目标节点 = 当前选中节点。否则用户从 remote 节点视图
-  // 触发「自定义工作目录」时会被强制拉回 local，与「在远程项目里新建」的
-  // 操作直觉相违。
-  const targetNode = selectedNode || 'local';
 
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
@@ -6843,7 +7307,6 @@ function doCreateSession() {
   selectedKey = key;
   selectedNode = targetNode;
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, targetNode);
@@ -6904,7 +7367,6 @@ function createQuickSession(initialText, onTextStranded) {
   selectedKey = key;
   selectedNode = 'local';
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   setActiveSessionCard(key, 'local');
@@ -9847,7 +10309,7 @@ function renderSettingsView() {
   if (grp) grp.addEventListener('click', function (e) {
     const b = e.target.closest('.settings-theme-opt');
     if (!b) return;
-    applyTheme(b.dataset.theme);
+    applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
   });
 }
@@ -10031,180 +10493,20 @@ function renderSystemView() {
     '</div>';
 }
 
-// updateNodeSelector is the single render entry point for the node-selector
-// trigger + dropdown visibility. Called after every /api/sessions poll (so
-// new/removed remotes appear immediately) and after every open/close toggle.
-// Fast path when multi-node isn't active: hide the whole widget.
-function updateNodeSelector() {
-  const root = document.getElementById('node-selector');
-  if (!root) return;
-
-  const multi = isMultiNode();
-  if (!multi) {
-    root.hidden = true;
-    nodeSelectorOpen = false;
-    return;
-  }
-
-  // If the persisted selection points at a node that no longer exists,
-  // snap it back to 'local' so the sidebar doesn't render an empty list.
-  // Happens when a remote is removed server-side while the dashboard is open.
-  if (selectedNode !== 'local' && !nodesData[selectedNode]) {
+// reconcileSelectedNode keeps `selectedNode` honest now that the sidebar node
+// selector is gone (the node picker moved into the New Session modal). It no
+// longer touches any DOM — the sidebar lists every node's sessions together —
+// but `selectedNode` still drives dispatch targeting and the main header, so
+// if the persisted selection points at a node that has since disappeared
+// (remote removed server-side while the dashboard is open) we snap it back to
+// 'local'. Kept as a single entry point so the many call sites (poll, session
+// switch, session create) don't each need to re-derive the same guard.
+function reconcileSelectedNode() {
+  if (selectedNode && selectedNode !== 'local' && !nodesData[selectedNode]) {
     selectedNode = 'local';
     try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
   }
-
-  root.hidden = false;
-  const trigger = document.getElementById('ns-trigger');
-  const dotEl = document.getElementById('ns-trigger-dot');
-  const labelEl = document.getElementById('ns-trigger-label');
-  const alertEl = document.getElementById('ns-trigger-alert');
-
-  const status = getNodeStatus(selectedNode);
-  const displayName = getNodeDisplayName(selectedNode);
-  const statusLabel = statusLabelForNode(status);
-
-  if (dotEl) {
-    dotEl.className = 'ns-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
-  }
-  if (labelEl) {
-    labelEl.textContent = displayName + ' · ' + statusLabel;
-    labelEl.title = displayName + ' (' + selectedNode + ') · ' + statusLabel;
-  }
-
-  // Aggregated alert dot: any non-current node in a non-ok/connecting state
-  // surfaces a red dot on the trigger so the user knows to open the dropdown.
-  if (alertEl) {
-    let hasAlert = false;
-    for (const id of Object.keys(nodesData)) {
-      if (id === selectedNode) continue;
-      const s = getNodeStatus(id);
-      if (s !== 'ok' && s !== 'connected' && s !== 'connecting' && s !== 'authenticating') {
-        hasAlert = true; break;
-      }
-    }
-    alertEl.hidden = !hasAlert;
-  }
-
-  if (trigger) {
-    trigger.setAttribute('aria-expanded', nodeSelectorOpen ? 'true' : 'false');
-  }
-
-  const dropdown = document.getElementById('ns-dropdown');
-  if (!dropdown) return;
-  if (!nodeSelectorOpen) {
-    dropdown.hidden = true;
-    return;
-  }
-  dropdown.hidden = false;
-  dropdown.innerHTML = renderNodeDropdownHtml();
 }
-
-// renderNodeDropdownHtml builds the list of node options. Local is pinned
-// first; remotes are grouped by status (connected → connecting → offline)
-// then sorted by display name. Each row shows status dot, name, session count,
-// and a check when selected.
-function renderNodeDropdownHtml() {
-  const ids = Object.keys(nodesData);
-  // Ensure 'local' is always present even if the server didn't include it
-  // (defensive — the local node should always be in nodesData, but we don't
-  // want to drop it off the UI if the backend ever forgets to ship it).
-  if (ids.indexOf('local') === -1) ids.unshift('local');
-
-  const rank = { ok: 0, connected: 0, connecting: 1, authenticating: 1, offline: 2, unreachable: 2, error: 2, disconnected: 2, off: 2 };
-  const sortable = ids.map(id => ({
-    id,
-    name: getNodeDisplayName(id),
-    status: getNodeStatus(id),
-    count: getNodeSessionCount(id),
-  }));
-  sortable.sort((a, b) => {
-    // Local always first.
-    if (a.id === 'local' && b.id !== 'local') return -1;
-    if (b.id === 'local' && a.id !== 'local') return 1;
-    const ra = rank[a.status] === undefined ? 9 : rank[a.status];
-    const rb = rank[b.status] === undefined ? 9 : rank[b.status];
-    if (ra !== rb) return ra - rb;
-    return a.name.localeCompare(b.name);
-  });
-
-  let html = '';
-  for (const n of sortable) {
-    const active = n.id === selectedNode;
-    const cls = 'ns-option' + (active ? ' active' : '');
-    const dotCls = VALID_DOT_CLASSES[n.status] || 'offline';
-    const statusLabel = statusLabelForNode(n.status);
-    const addr = (n.id !== 'local' && nodesData[n.id] && nodesData[n.id].remote_addr) ? nodesData[n.id].remote_addr : '';
-    const countBadge = n.count > 0 ? '<span class="ns-count">' + n.count + '</span>' : '';
-    const check = active ? '<span class="ns-check" aria-hidden="true">✓</span>' : '';
-    html += '<button type="button" class="' + cls + '" role="option" aria-selected="' + (active ? 'true' : 'false') + '" data-node="' + escAttr(n.id) + '" onclick="selectNodeFromDropdown(this.dataset.node)">' +
-      '<span class="ns-dot ' + dotCls + '" aria-hidden="true"></span>' +
-      '<span class="ns-body">' +
-        '<span class="ns-name" title="' + escAttr(n.name) + '">' + esc(n.name) + '</span>' +
-        (addr ? '<span class="ns-addr">' + esc(addr) + '</span>' : '') +
-      '</span>' +
-      '<span class="ns-status">' + esc(statusLabel) + '</span>' +
-      countBadge +
-      check +
-      '</button>';
-  }
-  return html;
-}
-
-// toggleNodeSelector is the click handler on the trigger. Flips the dropdown,
-// repaints, and installs a one-shot outside-click listener to close on stray
-// clicks. `event` is stopped so the same click doesn't immediately fire the
-// outside-click listener we're about to install.
-function toggleNodeSelector(event) {
-  if (event) { event.stopPropagation(); event.preventDefault(); }
-  nodeSelectorOpen = !nodeSelectorOpen;
-  updateNodeSelector();
-}
-
-// selectNodeFromDropdown is the click handler on each option. Switches the
-// filter, persists, closes the dropdown, and re-renders the sidebar against
-// the last cached payload so the change is instant (no network round-trip).
-function selectNodeFromDropdown(nodeId) {
-  if (!nodeId) return;
-  nodeSelectorOpen = false;
-  if (nodeId === selectedNode) {
-    updateNodeSelector();
-    return;
-  }
-  selectedNode = nodeId;
-  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
-  updateNodeSelector();
-  // Re-render the sidebar so the filter takes effect. The selected session
-  // key may be on a different node now — we intentionally do NOT clear
-  // selectedKey here: if the user switches back, the card is still active,
-  // and if they pick a session on the new node, selectSession() will swap.
-  if (_lastSidebarData) {
-    renderSidebar(_lastSidebarData);
-  } else {
-    debouncedFetchSessions();
-  }
-  updateStatusBar();
-}
-
-// Outside-click + Esc to close the dropdown. Installed once at startup and
-// cheap to run (early-returns when the dropdown isn't open).
-document.addEventListener('click', function(e) {
-  if (!nodeSelectorOpen) return;
-  const root = document.getElementById('node-selector');
-  if (root && root.contains(e.target)) return;
-  nodeSelectorOpen = false;
-  updateNodeSelector();
-});
-document.addEventListener('keydown', function(e) {
-  if (!nodeSelectorOpen) return;
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    nodeSelectorOpen = false;
-    updateNodeSelector();
-    const trigger = document.getElementById('ns-trigger');
-    if (trigger) trigger.focus();
-  }
-});
 
 /* ===== WebSocket Connection Manager ===== */
 
@@ -10814,7 +11116,6 @@ const wsm = {
       }
     }
     refreshBanner();
-    updateHeaderCost();
   },
 
   onEvent(msg) {
@@ -10837,8 +11138,9 @@ const wsm = {
     } else if (ev.type === 'result') {
       if (ev.cost) {
         const sKey = sid(selectedKey, selectedNode);
+        // total_cost still feeds the Home/recent-sessions aggregate; the header
+        // cost chip itself was removed (see renderMainShell).
         if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
-        updateHeaderCost();
       }
       // Optimistic: result means the turn is done.
       const reKey = sid(selectedKey, selectedNode);
@@ -11172,8 +11474,8 @@ const wsm = {
     }
     updateStatusBar();
     // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
-    // no-op since #sidebar-status DOM was deleted; updateNodeSelector is
-    // already driven by this updateStatusBar() call.)
+    // no-op since #sidebar-status DOM was deleted; selectedNode reconciliation
+    // is already driven by this updateStatusBar() call.)
     if (s === WS_STATES.CONNECTED) {
       // No reconnect toast: the sidebar status row already conveys the
       // transition (amber "connecting..." dot → green "connected" dot,
@@ -11219,75 +11521,6 @@ function updateMainState(state, reason) {
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
   updateSendButton(state);
-}
-
-function updateHeaderCost() {
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const el = document.getElementById('header-cost');
-  if (!el) return;
-  const cost = s.total_cost || 0;
-  // Multi-Backend RFC §8.3 D5: format per session's cost_unit so live
-  // updates honor the same "credits" / "$" choice the initial render made.
-  el.textContent = formatCostByUnit(cost, s.cost_unit || '');
-  el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
-  // R110-P3 cost-detail hover: keep the title attribute in sync so live
-  // updates (ws session_state / result events) don't leave stale metadata
-  // behind the tooltip. formatHeaderCostTooltip silently returns '' for
-  // a zero-cost session so the chip isn't distracted by a "session_id: …"
-  // hint when there's nothing to explain.
-  el.title = formatHeaderCostTooltip(s, selectedKey, selectedNode);
-}
-
-// formatHeaderCostTooltip builds a multi-line plain-text tooltip for the
-// header cost chip. Pure function so a contract test can exercise it
-// without driving the DOM. Return value is a newline-joined string, not
-// HTML — the browser renders native tooltips for `title` attributes, and
-// wrapping the helper so it ALWAYS returns plain text (never HTML) pins
-// the XSS-safe boundary: even when sess fields carry user-controlled
-// characters, the browser treats them as text and won't parse tags.
-//
-// R110-P3 scope: MVP surfaces data the front-end already has — cost
-// (precise), session creation + last-active timestamps, and the last
-// 8 chars of session_id (operators commonly paste that for CLI
-// `--resume`). Full token/input/output/cache breakdown requires backend
-// schema work and is tracked as residual scope.
-function formatHeaderCostTooltip(s, selKey, selNode) {
-  if (!s || typeof s !== 'object') return '';
-  const cost = s.total_cost || 0;
-  if (cost <= 0 && !s.session_id) return '';
-  const lines = [];
-  if (cost > 0) {
-    // Multi-Backend RFC §8.3 D5/D26: tooltip honors cost_unit so kiro
-    // sessions show "0.024 credits" rather than a confusing "$0.024".
-    const unit = s.cost_unit || '';
-    if (unit === 'credits') {
-      lines.push('累计花费: ' + cost.toFixed(4) + ' credits');
-    } else {
-      lines.push('累计花费: $' + cost.toFixed(4));
-    }
-  }
-  // D26: per-turn metering breakdown when kiro reports it. Each row is one
-  // billing dimension (kiro currently emits {value, unit:"credit"}); future
-  // backends may add multiple rows.
-  if (Array.isArray(s.metering_usage) && s.metering_usage.length > 0) {
-    s.metering_usage.forEach(m => {
-      if (!m || typeof m.value !== 'number') return;
-      const unit = m.unit_plural || m.unit || '';
-      lines.push('上一轮: ' + m.value.toFixed(4) + (unit ? ' ' + unit : ''));
-    });
-  }
-  // Server-stamped session creation time; same value drives the sidebar
-  // sort anchor so tooltip and visual position stay consistent.
-  if (s.created_at && s.created_at > 0) {
-    lines.push('创建时间: ' + formatAbsTime(s.created_at));
-  }
-  if (s.last_active && s.last_active > 0) {
-    lines.push('最后活动: ' + formatAbsTime(s.last_active));
-  }
-  if (typeof s.session_id === 'string' && s.session_id.length >= 8) {
-    lines.push('会话 ID: …' + s.session_id.slice(-8));
-  }
-  return lines.join('\n');
 }
 
 function updateHeaderCLI() {

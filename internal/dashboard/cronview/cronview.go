@@ -10,8 +10,10 @@
 // import server). Hoisting the definition into this leaf package — which
 // imports nothing internal and is therefore importable from both sides
 // without a cycle — lets both call sites reference one shape via a type
-// alias, mirroring the `HubRouter = wshub.HubRouter` pattern already used in
-// internal/server/consumer.go.
+// alias. (The server package's HubRouter once used the same leaf-package
+// alias trick via internal/wshub; that package was removed in G1 —
+// docs/rfc/godstruct-extraction.md / #2195 — and HubRouter is now declared
+// directly in internal/server/consumer.go.)
 //
 // *cron.Scheduler satisfies CronView implicitly. The interface stays in a
 // dedicated leaf rather than in the cron package so neither consumer couples

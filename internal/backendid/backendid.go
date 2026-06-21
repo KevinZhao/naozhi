@@ -1,6 +1,6 @@
 // Package backendid centralizes the per-request backend-ID length + charset
 // gate shared by the HTTP send path (internal/server), the WS handlers
-// (internal/server, internal/wshub), and the dashboard cron CRUD endpoints
+// (internal/server), and the dashboard cron CRUD endpoints
 // (internal/dashboard/cron).
 //
 // Before R20260607-ARCH-2 (#1893) the identical const + validator was copied

@@ -95,3 +95,20 @@ const minSendBudget = 30 * time.Second
 // stopCancel) wall-clock. Keep at 30s for symmetry with stopBudget; if
 // a future review tightens stopBudget, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
+
+// sandboxStopTimeout bounds a single sandbox StopSession (microVM teardown)
+// network call during pending reconcile / delete-stop / replay. 30s mirrors
+// cronNotifyTimeout / stopBudget so a hung Stop cannot outlive Stop()'s
+// systemd TimeoutStopSec window. Centralised here (R20260616-ARCH-2) so the
+// per-Stop budget is tuned in one place rather than three call-site literals.
+const sandboxStopTimeout = 30 * time.Second
+
+// sandboxReconcileWorkers caps the concurrent orphan-Stop fan-out in
+// reconcileSandboxPending (R20260616-PERF-006 / #2142). Each orphan's
+// StopSession is an independent ~30s network call; serial N×30s on a slow
+// upstream could stall the startup reconcile pass for minutes. Bounded so a
+// large backlog cannot open an unbounded number of in-flight Stop calls at
+// once — mirrors diskDecodeWorkers' bounded-pool rationale. The reconcile
+// goroutine runs after cron.Start() so it never blocks scheduler startup; the
+// bound only caps peak concurrency, not correctness.
+const sandboxReconcileWorkers = 4

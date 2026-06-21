@@ -217,6 +217,10 @@ func (s *Server) registerDashboard() {
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
+	// instance-wide UI preferences (theme); persisted server-side so the
+	// choice survives a browser/device change or cache clear (dashboard_uiprefs.go)
+	s.mux.HandleFunc("GET /api/settings", auth(s.handleUISettingsGet))
+	s.mux.HandleFunc("PUT /api/settings", auth(s.handleUISettingsPut))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
 	// pprof / expvar debug endpoints: auth-gated + loopback-only AND
 	// gated behind server.debug_mode (default false) so a leaked dashboard
@@ -272,6 +276,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
+	s.mux.HandleFunc("GET /static/files_view.js", auth(handleFilesViewJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -287,6 +292,7 @@ func (s *Server) registerDashboard() {
 func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
+	s.mux.HandleFunc("GET /api/sessions/runs", auth(s.sessionH.HandleRuns))
 	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
@@ -332,6 +338,13 @@ func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
+	// Workspace file browser (docs/rfc/workspace-file-browser.md): read-only
+	// directory listing + write-once upload. Listing reuses HandleFileGet's
+	// path-safety; upload is the only WRITE in the file API (CSRF auto-gated
+	// by RequireAuth on POST).
+	s.mux.HandleFunc("GET /api/projects/files/list", auth(s.projectH.HandleFilesList))
+	s.mux.HandleFunc("POST /api/projects/files/upload", auth(s.projectH.HandleFilesUpload))
+	s.mux.HandleFunc("GET /api/projects/dir", auth(s.projectH.HandleDirList))
 }
 
 // registerDiscoveredRoutes wires the discovered-session route group
@@ -389,9 +402,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		// budget as wsUpgradeLimiter accommodates real users (tab-reload,
 		// mobile-wake, multiple browser windows) while limiting sustained
 		// abuse. Authenticated users are unaffected.
-		if !s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+		// R20260614-SEC-10 (#2120): fail closed when the client IP can't be
+		// resolved in trusted-proxy mode (XFF stripped by a misconfigured /
+		// failed-over proxy) instead of sharing the unknownIPKey bucket —
+		// otherwise one direct-to-origin attacker starves the unauth-dash
+		// budget for every other XFF-less caller. Mirrors HandleLogin
+		// (R247-SEC-25). No-op in !trustedProxy mode (always resolvable).
+		if !requestHasResolvableClientIP(r, s.auth.TrustedProxy) ||
+			!s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}
 		s.auth.ServeLoginPage(w, r)
@@ -675,6 +694,22 @@ func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "asset_browser.js")
+}
+
+// handleFilesViewJS serves static/files_view.js — the workspace file browser
+// view module (docs/rfc/workspace-file-browser.md). Mirrors handleAssetBrowserJS.
+func handleFilesViewJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("files_view.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "files_view.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "files_view.js")
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a

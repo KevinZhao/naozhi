@@ -63,11 +63,12 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		}
 
 		// Parse the outer envelope
-		var envelope struct {
+		type feishuEnvelope struct {
 			Challenge string `json:"challenge"`
 			Token     string `json:"token"`
 			Type      string `json:"type"`
 			Schema    string `json:"schema"`
+			Encrypt   string `json:"encrypt"`
 			Header    *struct {
 				EventID   string `json:"event_id"`
 				EventType string `json:"event_type"`
@@ -75,6 +76,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			} `json:"header"`
 			Event json.RawMessage `json:"event"`
 		}
+		var envelope feishuEnvelope
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -151,6 +153,64 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
+		}
+
+		// #2115: Encrypt Key mode. When an Encrypt Key is configured in the
+		// Feishu event-subscription settings, Feishu AES-256-CBC-encrypts the
+		// ENTIRE push body and sends only `{"encrypt":"<base64>"}`. The v2
+		// signature is computed over this raw (still-encrypted) body, so the
+		// verifySignature gate above has already authenticated it against the
+		// original `body`. Only now do we AES-decrypt the inner payload and
+		// re-parse the real challenge/token/event from it. Without this step the
+		// url_verification handshake never completes (the webhook cannot be
+		// activated in the Feishu console) and every subsequent event is
+		// silently 200-OK dropped because envelope.Type/Header/Event are all
+		// empty on the encrypted outer shell. The WebSocket transport gets this
+		// for free from the SDK EventDispatcher; the hand-written webhook
+		// handler previously did not. Re-parse the token (if any) from the
+		// decrypted payload below, since in encrypt mode the verification token
+		// travels inside the ciphertext, not on the outer envelope.
+		if f.cfg.EncryptKey != "" && envelope.Encrypt != "" {
+			plain, derr := decryptFeishuEvent(f.cfg.EncryptKey, envelope.Encrypt)
+			if derr != nil {
+				slog.Warn("feishu webhook: encrypt payload decrypt failed", "err", derr)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(plain) > maxWebhookBodyBytes {
+				slog.Warn("feishu webhook decrypted body exceeds limit", "limit", maxWebhookBodyBytes)
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
+			var inner feishuEnvelope
+			if err := json.Unmarshal(plain, &inner); err != nil {
+				slog.Warn("feishu webhook: decrypted payload not valid json", "err", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// When a verification_token is also configured, validate it against
+			// the token carried INSIDE the decrypted payload (the outer shell
+			// has none). The earlier outer-envelope token check saw an empty
+			// token and was skipped only because the outer Token was empty; in
+			// encrypt mode the real token lives here.
+			if f.cfg.VerificationToken != "" {
+				token := inner.Token
+				if inner.Header != nil && inner.Header.Token != "" {
+					token = inner.Header.Token
+				}
+				if len(token) > maxWebhookTokenLen {
+					slog.Warn("feishu token too long (encrypted)", "len", len(token))
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if token == "" || !constantTimeEqualString(token, f.cfg.VerificationToken) {
+					slog.Warn("feishu token mismatch (encrypted)", "remote", r.RemoteAddr)
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+			}
+			envelope = inner
+			body = plain
 		}
 
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.

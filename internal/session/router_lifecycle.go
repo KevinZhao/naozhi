@@ -963,6 +963,7 @@ func (r *Router) installFreshSessionLocked(
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		exempt:           exempt,
+		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)
@@ -1158,10 +1159,18 @@ func (r *Router) loadResumeHistoryOnSpawn(
 	// returned") or let Wait return between the Add and the compensating Done.
 	// Checking Err() first means Add(1) only ever happens when we are certainly
 	// loading, so the counter never transiently rises after a cancel.
+	// R202606b-GO-001 (#2186): the check and the Add must be one critical
+	// section vs Shutdown's historyCancel() — the Err()-first ordering alone
+	// still leaves a nanosecond window where a cancel landing after the check
+	// but before the Add re-adds to a drained WaitGroup. historyWgMu closes
+	// it; see its godoc in router_core.go.
+	r.historyWgMu.Lock()
 	if r.historyCtx != nil && r.historyCtx.Err() != nil {
+		r.historyWgMu.Unlock()
 		return
 	}
 	r.historyWg.Add(1)
+	r.historyWgMu.Unlock()
 
 	ids := make([]string, 0, len(prevIDs)+1)
 	ids = append(ids, prevIDs...)
@@ -1544,6 +1553,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		persistedHistory: freshHistory,
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		exempt:           old.exempt,
+		runStore:         r.sessionRuns,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)

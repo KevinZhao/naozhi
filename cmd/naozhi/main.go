@@ -276,7 +276,7 @@ func main() {
 			mgr, err := project.NewManager(root, project.PlannerDefaults{
 				Model:  cfg.Projects.PlannerDefaults.Model,
 				Prompt: cfg.Projects.PlannerDefaults.Prompt,
-			})
+			}, project.WithIncludeRoot(cfg.Projects.IncludeRoot))
 			if err != nil {
 				projErr = fmt.Errorf("init project manager: %w", err)
 				return

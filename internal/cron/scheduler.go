@@ -329,6 +329,24 @@ type Scheduler struct {
 	// transparently (tests / no-disk deployments).
 	runStore *runStore
 
+	// sandboxPendingMu guards sandboxPendingIndex. It is independent of s.mu
+	// (the §6.5 write/remove seams run lock-free w.r.t. the jobs trio) so the
+	// hot delete path never contends with job CRUD. RWMutex so the pure-read
+	// lookup path (lookupSandboxPendingIndex, the hot delete fast path) does not
+	// serialize against concurrent reads [R202606-PERF-001].
+	sandboxPendingMu sync.RWMutex
+	// sandboxPendingIndex maps jobID → its in-flight §6.5 pending file path,
+	// maintained write-authoritatively at the two write paths
+	// (writeSandboxPending sets, the terminal remove clears). It lets
+	// stopSandboxRunsForJob resolve a deleted job's pending file with one map
+	// lookup instead of os.ReadDir + per-file ReadFile/unmarshal over EVERY
+	// concurrent run's record (R20260616-PERF-001 / #2140). Only tracks records
+	// THIS process wrote; orphans inherited from a previous boot are handled by
+	// reconcileSandboxPending (which still scans the dir, by design). The per-
+	// job CAS guarantees at most one in-flight run per job, so a single path
+	// value per key suffices.
+	sandboxPendingIndex map[string]string
+
 	// workDirCache memoises positive workDirResolveUnderRoot results so
 	// fast-firing jobs do not repeat the EvalSymlinks chain (~Lstat+Readlink
 	// per path component) every tick. TTL-bounded
@@ -492,6 +510,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		sandboxPendingIndex:   make(map[string]string),
 		// R247-ARCH-11 (#643): install the real-time clock by default. Tests
 		// swap a fake via the withClock seam to pin lifecycle timestamps
 		// (run DurationMS, skipped-run startedAt) without sleeping.
