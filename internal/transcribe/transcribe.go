@@ -285,6 +285,17 @@ func (s *awsService) buildInput(encoding types.MediaEncoding, sampleRate int32) 
 			input.LanguageCode = types.LanguageCode(s.cfg.LanguageCode)
 			return input
 		}
+		if len(parts) == 1 {
+			// R202606c-CR-001: a comma that stripped down to a single entry
+			// (e.g. "zh-CN," with a trailing comma) is effectively single-
+			// language. AWS Transcribe Streaming rejects
+			// IdentifyMultipleLanguages=true with fewer than two LanguageOptions
+			// (400 BadRequestException), so degrade to single-LanguageCode using
+			// the one surviving normalized entry rather than the raw string.
+			input.IdentifyMultipleLanguages = false
+			input.LanguageCode = types.LanguageCode(parts[0])
+			return input
+		}
 		input.LanguageOptions = aws.String(strings.Join(parts, ","))
 		input.PreferredLanguage = types.LanguageCode(parts[0])
 	} else {

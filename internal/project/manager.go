@@ -105,7 +105,22 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
+//
+// R202606c-CR-002: the whole scan — disk read, CreatedAt migration, and the
+// m.projects swap — runs under the write lock. Previously only the final swap
+// was locked while the on-disk read happened lock-free, so a writer
+// (BindChat/SetFavorite/UpdateConfig/UnbindAllChat) could append+persist a
+// binding in the window between this function reading the pre-change file and
+// installing its fresh map, silently dropping the just-made change from the
+// in-memory index. Serializing the entire scan against those writers (which
+// now also persist under the same lock) makes the two operations atomic w.r.t.
+// each other: a scan either sees a writer's change already on disk or runs
+// entirely before it. Scan is periodic and project mutations are low frequency,
+// so holding the lock across the disk IO is acceptable.
 func (m *Manager) Scan() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
 		return fmt.Errorf("scan projects root: %w", err)
@@ -262,7 +277,6 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	m.mu.Lock()
 	m.projects = projects
 	m.rebuildBindingIndex()
 	// Drop the inode-walk fallback memo: it is keyed to the project set we just
@@ -272,7 +286,6 @@ func (m *Manager) Scan() error {
 	// concurrent ResolveWorkspaces reader never sees fresh projects with a stale
 	// cache. Go 1.21+ sync.Map.Clear.
 	m.resolveCache.Clear()
-	m.mu.Unlock()
 
 	slog.Info("scanned projects", "root", m.root, "count", len(projects))
 	return nil
@@ -338,10 +351,19 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	if err := validateBindingField(platform, chatType, chatID); err != nil {
 		return fmt.Errorf("%w: BindChat: %s", ErrInvalidConfig, err.Error())
 	}
+	// R202606c-CR-002: hold the write lock across saveConfigToPath. The
+	// periodic Scan() (server_loops.go) takes the same write lock and
+	// overwrites m.projects with the map freshly loaded from disk. If the
+	// save happened after Unlock(), a Scan firing in the window between
+	// Unlock and save would reload the pre-binding on-disk file and clobber
+	// the in-memory binding we just appended (lost until the next save+scan).
+	// saveConfigToPath is pure file IO and never re-enters m.mu, so holding
+	// the lock across it is reentrancy-safe; project mutations are low
+	// frequency so the wider lock window is acceptable.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[projectName]
 	if !ok {
-		m.mu.Unlock()
 		// R183-SEC-L1: use %q to mirror UpdateConfig / SetFavorite (lines 211,
 		// 237). An exported function is one future caller away from being
 		// reached without a trust-boundary ValidateProjectName; defense-in-
@@ -355,18 +377,13 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	// Check if already bound
 	for _, b := range p.Config.ChatBindings {
 		if b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType {
-			m.mu.Unlock()
 			return nil // already bound
 		}
 	}
 
 	p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
 	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // UnbindAllChat removes all bindings for a given chat across all projects.
@@ -380,7 +397,12 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 // ("across all projects") and removes the non-deterministic routing that
 // last-writer-wins index rebuilds produced for multi-bound chats.
 func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk configs and resurrect the bindings we just
+	// stripped. See BindChat for the full rationale; saveConfigToPath does not
+	// re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	type pendingSave struct {
 		path string
@@ -408,7 +430,6 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	if changed {
 		m.rebuildBindingIndex()
 	}
-	m.mu.Unlock()
 
 	var firstErr error
 	for _, s := range saves {
@@ -422,33 +443,34 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 // SetFavorite toggles a project's Favorite flag and persists it atomically.
 // Only touches Favorite — other config fields are preserved.
 func (m *Manager) SetFavorite(name string, favorite bool) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk config and drop this Favorite flip. See
+	// BindChat for the full rationale; saveConfigToPath does not re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		m.mu.Unlock()
 		// R182-SEC-L1: %q mirrors UpdateConfig (line 234). set_favorite now
 		// validates at the RPC boundary (R182-SEC-M1), but function is
 		// defense-in-depth for any future caller that forgets to validate.
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	if p.Config.Favorite == favorite {
-		m.mu.Unlock()
 		return nil
 	}
 	p.Config.Favorite = favorite
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // UpdateConfig updates a project's config and persists it.
 func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk config and drop this update. See BindChat
+	// for the full rationale; saveConfigToPath does not re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		m.mu.Unlock()
 		// R181-SEC-P2-2: name comes from reverse-RPC frames (update_config)
 		// and dashboard query strings. %q escapes bidi/C1/newline so the
 		// wrapped error cannot forge structured log entries when the caller
@@ -458,11 +480,7 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 	}
 	p.Config = cfg
 	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // ProjectNames returns the set of current project names.

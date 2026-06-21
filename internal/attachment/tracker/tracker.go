@@ -467,12 +467,17 @@ func (t *Tracker) handleBump(job trackerJob) {
 			t.pendingSize.Add(1)
 			continue
 		}
-		// Keep the highest timeMS observed and push the flushAt
-		// deadline out — coalesce semantics.
+		// Keep the highest timeMS observed, but DO NOT reset flushAt
+		// [R202606c-GO-002]: a key that is bumped faster than the
+		// coalesce window must still flush at its first deadline.
+		// Pushing flushAt out on every bump let a hot key starve
+		// forever (no .meta write until Stop/Flush), during which the
+		// GC reads stale on-disk meta and can delete a still-referenced
+		// attachment. Keep the original deadline so every key lands on
+		// disk within at most one CoalesceWindow of entering pending.
 		if job.timeMS > prev.timeMS {
 			prev.timeMS = job.timeMS
 		}
-		prev.flushAt = flushAt
 		t.pending[key] = prev
 	}
 }
@@ -586,7 +591,7 @@ func (t *Tracker) flushAll() {
 // at ERROR level to avoid log spam for legitimate churn (e.g. a
 // file deleted between persist and bump).
 func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
-	metaPath := metaPathFor(key.absPath)
+	metaPath := attachment.MetaPathFor(key.absPath)
 	changed, err := attachment.UpdateMetaFile(metaPath, func(m *attachment.Meta) bool {
 		addedRef := m.AddReference(key.keyhash)
 		// Always advance LastReferencedAt to max(current, bump) —
@@ -642,15 +647,4 @@ func resolveAttachmentPath(workspace, p string) string {
 		return ""
 	}
 	return filepath.Join(workspace, cleaned)
-}
-
-// metaPathFor mirrors attachment.metaPathFor but is re-exported so
-// tracker tests can round-trip without crossing the package
-// boundary. Strip the payload extension, append .meta.
-func metaPathFor(payload string) string {
-	base := filepath.Base(payload)
-	if idx := strings.LastIndex(base, "."); idx > 0 {
-		return filepath.Join(filepath.Dir(payload), base[:idx]+".meta")
-	}
-	return payload + ".meta"
 }

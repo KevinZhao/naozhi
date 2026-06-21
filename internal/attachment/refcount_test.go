@@ -420,8 +420,10 @@ func TestUpdateMetaFile_AppliesMutation(t *testing.T) {
 // synthesise upload metadata). Tracker callers must check this and
 // log a warning, not crash.
 func TestUpdateMetaFile_MissingSidecar(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "ghost.meta")
 	changed, err := UpdateMetaFile(
-		filepath.Join(t.TempDir(), "ghost.meta"),
+		metaPath,
 		func(m *Meta) bool { return true },
 	)
 	if err == nil {
@@ -429,5 +431,15 @@ func TestUpdateMetaFile_MissingSidecar(t *testing.T) {
 	}
 	if changed {
 		t.Errorf("changed=true for missing sidecar")
+	}
+	// [R202606c-CR-003] The error string must not echo the workspace /
+	// absolute meta path — package policy keeps operator-only paths out
+	// of error strings (the path travels separately to the Observer).
+	msg := err.Error()
+	if strings.Contains(msg, metaPath) || strings.Contains(msg, dir) {
+		t.Errorf("error leaks absolute path: %q", msg)
+	}
+	if strings.ContainsRune(msg, filepath.Separator) {
+		t.Errorf("error contains path separator (likely leaks a path): %q", msg)
 	}
 }

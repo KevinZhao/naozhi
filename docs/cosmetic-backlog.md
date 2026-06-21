@@ -715,3 +715,8 @@
 - [R202606b-ARCH-8] Scheduler 字段索引块与 per-field godoc 双份维护,必漂移 — internal/cron/scheduler.go:28-44
 - [R202606b-PERF-016] prepareInbound 每条入站消息 slog.With 分配新 logger(owner 路径丢弃) — internal/dispatch/dispatch.go:658-661
 - [R202606b-ARCH-7] internal/session/api 包仅 1 消费者(sysession),抽象成本>收益,可并入消费者 — internal/session/api/capabilities.go:1-42
+- [R202606c-GO-003] recordBootStep Get→Register 非原子 TOCTOU(init 期单线程实际无并发 trigger) — internal/wireup/boot.go:96
+- [R202606c-GO-005] selfupdate Checker.installed 无同步(单 goroutine Run 契约,无实际并发) — internal/selfupdate/checker.go:125
+- [R202606c-ARCH-8] wireup requiredBootSteps 缺 schedulers,scheduler 注册漏掉不被 Validate 捕获 — internal/wireup/boot.go:112
+- [R202606c-ARCH-5] attachment.Dir 是可变 package var 被 tracker 路径遍历安全守卫消费,应 const+WithDir — internal/attachment/store.go:43
+- [R202606c-CR-006] sysession renameOne 截断 title 不加省略号,clip 中途断词 — internal/sysession/auto_titler.go:685

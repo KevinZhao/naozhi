@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1050,5 +1051,66 @@ func TestResolveWorkspaces_FallbackCacheInvalidatedOnScan(t *testing.T) {
 	}
 	if got, ok := m.ResolveWorkspaces([]string{aliasWS})[aliasWS]; ok {
 		t.Errorf("post-rescan ResolveWorkspaces(%q) = %q, want no match (cache should be invalidated)", aliasWS, got)
+	}
+}
+
+// TestBindChat_ConcurrentScan_DoesNotDropBinding pins R202606c-CR-002: the
+// periodic Scan() (server_loops.go) takes the manager write lock and replaces
+// m.projects with the map freshly loaded from disk. The original BindChat
+// released the lock BEFORE saveConfigToPath, so a Scan firing in that window
+// would reload the pre-binding on-disk file and clobber the just-appended
+// in-memory binding. With the save moved under the lock, BindChat and Scan are
+// strictly serialized: Scan either observes the binding already persisted, or
+// runs entirely before the append — it can never reload a half-applied state.
+//
+// The test races a BindChat against a Scan many times on the same manager and
+// asserts the binding is never lost. The -race detector also flags the
+// concurrent m.projects access if the locking ever regresses.
+func TestBindChat_ConcurrentScan_DoesNotDropBinding(t *testing.T) {
+	t.Parallel()
+	const iters = 200
+	for i := 0; i < iters; i++ {
+		root := t.TempDir()
+		makeProjectDir(t, root, "racy", nil)
+		m, _ := NewManager(root, PlannerDefaults{})
+		if err := m.Scan(); err != nil {
+			t.Fatalf("initial Scan: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := m.BindChat("racy", "feishu", "group", "chatX"); err != nil {
+				t.Errorf("BindChat: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// Concurrent periodic rescan reloading from disk.
+			if err := m.Scan(); err != nil {
+				t.Errorf("concurrent Scan: %v", err)
+			}
+		}()
+		wg.Wait()
+
+		// After both complete, the binding must be present. If Scan ran first,
+		// it reloaded the empty config but BindChat's later save+append wins; if
+		// BindChat ran first, Scan reloads the persisted binding. Either way the
+		// binding both lives in memory and is on disk. A torn ordering (save
+		// after unlock) would intermittently leave the binding only in a stale
+		// in-memory copy that Scan then overwrote — i.e. lost.
+		if p := m.ProjectForChat("feishu", "group", "chatX"); p == nil {
+			t.Fatalf("iter %d: binding lost from in-memory index after concurrent Scan", i)
+		}
+
+		// And it must be durable: a fresh manager reading purely from disk sees it.
+		m2, _ := NewManager(root, PlannerDefaults{})
+		if err := m2.Scan(); err != nil {
+			t.Fatalf("reload Scan: %v", err)
+		}
+		if p := m2.Get("racy"); p == nil || len(p.Config.ChatBindings) != 1 {
+			t.Fatalf("iter %d: binding not durably persisted; p = %+v", i, p)
+		}
 	}
 }
