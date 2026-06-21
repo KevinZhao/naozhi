@@ -522,9 +522,16 @@ func marshalResult(v any) (json.RawMessage, error) {
 	// does not expect; trim before returning so the wire format matches
 	// the prior json.Marshal output exactly.
 	if err := enc.Encode(v); err != nil {
-		// On error, drop the buffer (potentially partially-written) so a
-		// poison value cannot leak into the next reuse.
-		marshalResultBufPool.Put(new(bytes.Buffer))
+		// On error, Reset clears any partially-written bytes (no poison can
+		// survive), so return the original buffer to the pool instead of
+		// discarding it — discarding shrinks the pool's effective size by one
+		// on every error. Mirror the happy-path oversized-drop policy.
+		buf.Reset()
+		if buf.Cap() <= marshalResultMaxRetainBytes {
+			marshalResultBufPool.Put(buf)
+		} else {
+			marshalResultBufPool.Put(new(bytes.Buffer))
+		}
 		return nil, err
 	}
 	out := buf.Bytes()
