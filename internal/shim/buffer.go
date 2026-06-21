@@ -83,15 +83,20 @@ func (b *RingBuffer) Push(data []byte) int64 {
 	b.seq++
 	assigned := b.seq
 
+	// Drop oversized lines that exceed maxBytes on their own BEFORE evicting
+	// anything (#2182): the old order ran the byte-eviction loop first, so a
+	// single line larger than maxBytes wiped the entire ring and then got
+	// dropped anyway — losing all replay history to a line that could never
+	// be stored. The seq bump above still happens so the drop leaves a hole
+	// rather than reusing the slot (R55-CORR-003 monotonic-seq contract).
+	if int64(len(copied)) > b.maxBytes {
+		slog.Warn("dropping oversized line from ring buffer", "size", len(copied), "max", b.maxBytes)
+		return assigned
+	}
+
 	// Evict oldest to stay within byte limit
 	for b.count > 0 && b.curBytes+int64(len(copied)) > b.maxBytes {
 		b.evictOldest()
-	}
-
-	// Drop oversized lines that exceed maxBytes on their own
-	if b.count == 0 && int64(len(copied)) > b.maxBytes {
-		slog.Warn("dropping oversized line from ring buffer", "size", len(copied), "max", b.maxBytes)
-		return assigned
 	}
 
 	// Evict oldest if at line capacity
