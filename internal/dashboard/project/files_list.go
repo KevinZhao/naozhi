@@ -199,17 +199,38 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dirs first, then names (case-insensitive) so the listing reads like a
-	// file manager regardless of the OS readdir order.
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir != entries[j].IsDir {
-			return entries[i].IsDir
-		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
-	})
+	// file manager regardless of the OS readdir order. Pre-lowercase names once
+	// (paired with their entry) so the comparator avoids two strings.ToLower
+	// allocations per comparison — ~22k comparisons for a 2000-entry dir.
+	sortEntries(entries)
 
 	httputil.WriteJSON(w, map[string]any{
 		"dir":       cleanDir,
 		"entries":   entries,
 		"truncated": truncated,
 	})
+}
+
+// sortEntries orders entries dirs-first, then by case-insensitive name.
+// It pre-computes the lowercased names once (paired with their entry so the
+// pairing survives sort swaps) rather than calling strings.ToLower twice per
+// comparison.
+func sortEntries(entries []listEntry) {
+	type entryWithLower struct {
+		entry listEntry
+		lower string
+	}
+	paired := make([]entryWithLower, len(entries))
+	for i := range entries {
+		paired[i] = entryWithLower{entry: entries[i], lower: strings.ToLower(entries[i].Name)}
+	}
+	sort.Slice(paired, func(i, j int) bool {
+		if paired[i].entry.IsDir != paired[j].entry.IsDir {
+			return paired[i].entry.IsDir
+		}
+		return paired[i].lower < paired[j].lower
+	})
+	for i := range paired {
+		entries[i] = paired[i].entry
+	}
 }
