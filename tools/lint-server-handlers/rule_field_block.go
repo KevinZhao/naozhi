@@ -52,8 +52,10 @@ func scanFieldBlockMarkers(serverPkg string) []Violation {
 			continue
 		}
 		name := e.Name()
-		// Phase 0b 仅扫 wshub*.go (前缀)。Phase 4 抽到 internal/wshub/ 后，
-		// 调用方改 scanFieldBlockMarkers("internal/wshub") 即可复用。
+		// Phase 0b 仅扫 wshub*.go (前缀)，即 internal/server 包内的 Hub 实现
+		// 文件。NB: the former internal/wshub leaf package (interface-only
+		// shell) was removed in G1 — docs/rfc/godstruct-extraction.md / #2195;
+		// the real Hub never moved there, so this prefix scan stays as-is.
 		if !strings.HasPrefix(name, "wshub") {
 			continue
 		}
