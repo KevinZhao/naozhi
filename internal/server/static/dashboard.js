@@ -6820,16 +6820,35 @@ function buildProjectRow(s, idx) {
 }
 
 function buildQuickRow(idx) {
-  const ws = defaultWorkspace || '';
+  // The palette's idle (empty-query) first row IS the default workspace
+  // folder: on a local node where stats supplied default_workspace we render
+  // it as an explicit 📁 folder entry (folder name + 工作目录 chip + path) so
+  // the workspace is always the first, default-highlighted folder in the
+  // browse list — not a vague "quick session" affordance. Remote nodes (no
+  // client-side workspace path) and the rare local-without-workspace case
+  // degrade to the original ⚡ 快速新建 label so the row still creates a
+  // session under the node's backend-resolved default cwd.
+  const node = selectedNode || 'local';
+  const ws = node === 'local' ? (defaultWorkspace || '') : '';
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
-  el.innerHTML =
-    '<span class="cp-icon">⚡</span>' +
-    '<div class="cp-main">' +
-      '<div class="cp-name">快速新建</div>' +
-      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
-    '</div>';
+  if (ws) {
+    const folderName = ws.replace(/\/+$/, '').split('/').pop() || ws;
+    el.innerHTML =
+      '<span class="cp-icon" aria-hidden="true">📁</span>' +
+      '<div class="cp-main">' +
+        '<div class="cp-name">' + esc(folderName) +
+          ' <span class="cp-name-alias">工作目录</span></div>' +
+        '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' +
+      '</div>';
+  } else {
+    el.innerHTML =
+      '<span class="cp-icon">⚡</span>' +
+      '<div class="cp-main">' +
+        '<div class="cp-name">快速新建</div>' +
+      '</div>';
+  }
   el.addEventListener('click', () => pickPaletteQuick());
   el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
