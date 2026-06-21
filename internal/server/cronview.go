@@ -6,10 +6,9 @@
 //
 // R20260531070014-ARCH-2 (#1536): that copy and the byte-identical one in
 // internal/dashboard/session/handlers.go are now both type aliases for the
-// single canonical definition in the leaf package internal/dashboard/cronview
-// — the only consumer that stays independent is wshub/types.go's CronView
-// (HasJob only), a genuinely different shape. Mirrors the
-// `HubRouter = wshub.HubRouter` alias pattern in consumer.go.
+// single canonical definition in the leaf package internal/dashboard/cronview.
+// (The former independent wshub/types.go CronView was removed together with
+// the wshub package in G1 — docs/rfc/godstruct-extraction.md / #2195.)
 
 package server
 
@@ -29,13 +28,12 @@ type CronView = cronview.CronView
 // ServerOptions.Scheduler held the concrete *cron.Scheduler — its full ~60
 // method surface — even though the server package only ever forwards the
 // value into already-narrowed interface fields (cronCommandScheduler via
-// cronDispatchAdapter, cronview.CronView, wshub.CronView) and calls exactly
-// one method on it directly: SetTelemetry (routes.go). This aggregate embeds
-// the two consumer interfaces the value is forwarded into plus that one
-// direct method, so the field type now advertises only what the server
-// actually depends on while *cron.Scheduler continues to satisfy it
-// implicitly (pinned by cronview_contract_test.go). Mirrors the wshub Hub
-// narrowing to CronView.
+// cronDispatchAdapter, cronview.CronView) and calls exactly one method on it
+// directly: SetTelemetry (routes.go). This aggregate embeds the two consumer
+// interfaces the value is forwarded into plus that one direct method, so the
+// field type now advertises only what the server actually depends on while
+// *cron.Scheduler continues to satisfy it implicitly (pinned by
+// cronview_contract_test.go).
 //
 // #1164: the dispatch.CronScheduler embed became the server-local
 // cronCommandScheduler (cron_dispatch_adapter.go) when dispatch's seam was

@@ -3,7 +3,6 @@ package cron
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 )
@@ -126,7 +125,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 				"job_id", jobID, "orig_run_id", origRunID, "runtime_session_id", rec.RuntimeSessionID)
 			return "", ErrStopUnconfirmed
 		}
-		ctx, cancel := context.WithTimeout(s.stopCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
 		stopErr := s.sandbox.StopSession(ctx, rec.RuntimeSessionID)
 		cancel()
 		if stopErr != nil {
@@ -278,6 +277,7 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 						ErrorClass: ErrClassSandboxFailed,
 						ErrorMsg:   "sandbox replay panicked before terminal record",
 					})
+					metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
 				}
 			}
 		}()

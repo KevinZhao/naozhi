@@ -221,8 +221,8 @@ func All() []Profile {
 	return out
 }
 
-// RegisterDefaults registers the built-in profiles (claude, kiro). Must be
-// called once during startup before any consumer touches the registry.
+// RegisterDefaults registers the built-in profiles (claude, kiro, codex). Must
+// be called once during startup before any consumer touches the registry.
 // Idempotency is intentionally NOT supported: calling twice will panic via
 // Register's duplicate check, surfacing accidental double-init.
 //
@@ -232,6 +232,7 @@ func All() []Profile {
 func RegisterDefaults() {
 	Register(claudeProfile())
 	Register(kiroProfile())
+	Register(codexProfile())
 }
 
 // EnsureDefaults is the concurrent-safe, idempotent counterpart to

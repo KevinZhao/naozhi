@@ -65,10 +65,7 @@ const (
 // sandboxAttentionDir resolves the queue directory ("" when persistence is
 // disabled — store-less test fixtures skip the queue entirely).
 func (s *Scheduler) sandboxAttentionDir() string {
-	if s.storePath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(s.storePath), "sandboxattention")
+	return s.stateSubtree("sandboxattention")
 }
 
 // writeSandboxAttention persists one queue record. Best-effort: a write
@@ -86,7 +83,7 @@ func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger)
 		lg.Warn("cron sandbox: attention write rejected non-hex id", "job_id", rec.JobID, "run_id", rec.RunID)
 		return
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := s.mkdirStateSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: attention dir create failed; run not enqueued for confirmation", "err", err)
 		return
 	}

@@ -362,8 +362,13 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
 			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-			d.router.Reset(plannerKey)
+			// #2185: discardQueue BEFORE Reset. Reset synchronously fires
+			// onKeyRetired → msgQueue.Cleanup, which deletes the queue ring
+			// without clearing each parked message's HOURGLASS reaction. Run
+			// the drain-aware discardQueue (the #2013 drain+clear) first, while
+			// the ring is still populated, so those ⏳ marks are cleared.
 			d.discardQueue(ctx, msg, plannerKey)
+			d.router.Reset(plannerKey)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
 			// R0530-CR-1: resolve via the shared helper so this branch gets
@@ -371,8 +376,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			// "/new ReviewerBot" resolves in unbound chats but not here.
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
-				d.router.Reset(key)
+				// #2185: discardQueue before Reset — see the planner branch above.
 				d.discardQueue(ctx, msg, key)
+				d.router.Reset(key)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
 				// R187-SEC-M1: agentToReset is user IM input, sanitize
@@ -410,8 +416,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		}
 	}
 	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	d.router.Reset(key)
+	// #2185: discardQueue before Reset — see the planner branch above.
 	d.discardQueue(ctx, msg, key)
+	d.router.Reset(key)
 	label := ""
 	if agentID != "general" {
 		label = " (" + agentID + ")"

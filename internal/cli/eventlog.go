@@ -129,6 +129,15 @@ type EventLog struct {
 	// "live entries".
 	userTurnCount atomic.Int64
 
+	// countAtomic mirrors `count` for lock-free reads via Count(). Updated
+	// inside l.mu's write lock at every `count++` site (eventlog_append.go),
+	// so it stays consistent with `count`. `count` is monotonic up to maxSize
+	// and never reset/decremented, so a plain Add(1) at each write site keeps
+	// the mirror exact. Locked readers keep using `count` directly; only the
+	// public Count() accessor reads this field to avoid an RLock round-trip
+	// on capacity-estimation hot paths (EntriesSince/LastNAppend).
+	countAtomic atomic.Int64
+
 	// lastEventAt is the wall-clock (unix nano) of the most recent live
 	// Append. Used by Router.Cleanup's stuckKill / idle_timeout checks as a
 	// second-chance activity signal: the session-level lastActive is only

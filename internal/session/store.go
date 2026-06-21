@@ -446,6 +446,14 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 // save retries until the directory is in place.
 var storeDirEnsured sync.Map // map[string]struct{}
 
+// storeMetaWritten tracks which store paths have had their advisory version
+// sidecar written at least once in this process. The sidecar content (Version
+// field = storeFormatVersion) is a compile-time constant and never changes
+// while the process is running, so writing it once per path is sufficient.
+// R20260614-PERF-005: avoids ~4 syscalls + 2 fsyncs on every 30s saveIfDirty
+// tick. A failed write is NOT recorded, allowing retry on the next tick.
+var storeMetaWritten sync.Map // map[string]struct{}
+
 // writeStoreData ensures the store directory exists, atomically writes the
 // pre-marshalled bytes, then writes the advisory version sidecar. Shared by
 // saveStore (map input) and saveStoreSlice (slice input).
@@ -470,7 +478,14 @@ func writeStoreData(path string, data []byte) error {
 	// fail the save: the main store is already durable, and the meta is
 	// advisory (used to detect cross-version downgrades). Log so operators
 	// catch partial-filesystem issues during normal ops.
-	writeStoreMeta(path)
+	// R20260614-PERF-005: skip on subsequent ticks — Version is a compile-time
+	// constant so the sidecar content never changes within a process lifetime.
+	// writeStoreMeta is best-effort (no error return), so we store after the
+	// call unconditionally; a failed write is logged by writeStoreMeta itself.
+	if _, done := storeMetaWritten.Load(path); !done {
+		writeStoreMeta(path)
+		storeMetaWritten.Store(path, struct{}{})
+	}
 	return nil
 }
 
@@ -624,19 +639,41 @@ func loadKnownIDs(storePath string) map[string]bool {
 // NOT re-sort; it trusts the precondition so the O(N log N) cost is paid once
 // per mutation generation rather than on every 5-minute save tick.
 func saveKnownIDs(storePath string, sortedIDs []string) error {
+	data, err := json.Marshal(sortedIDs)
+	if err != nil {
+		return fmt.Errorf("marshal known IDs: %w", err)
+	}
+	return saveKnownIDsBytes(storePath, data)
+}
+
+// saveKnownIDsBytes persists already-marshaled known-ID JSON to disk.
+//
+// R20260616-PERF-009 (#2143): saveKnownIDs re-ran json.Marshal on every
+// throttled 5-minute save tick even when the (already sorted, already memoised)
+// ID set had not changed since the previous save — a ~50KB array of 1000
+// strings re-serialized for nothing. The marshal is now memoised by gen in
+// knownIDsStore.marshaledCache (see snapshotKnownIDsMarshaledLocked), and the
+// periodic save path hands the cached bytes straight here. saveKnownIDs is
+// retained as a thin marshal+delegate wrapper for callers/tests that pass a
+// []string directly.
+func saveKnownIDsBytes(storePath string, data []byte) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy — see saveStore.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create known IDs directory: %w", err)
+		// R20260614-GO-003: reuse storeDirEnsured (same map as writeStoreData)
+		// so the 5-minute knownIDsSaveInterval tick skips MkdirAll+Lstat+Chmod
+		// after the first successful write. Both functions target the same
+		// directory (filepath.Dir of the store path), so one successful
+		// writeStoreData call already guards this save. A failed EnsureDir
+		// is NOT recorded, allowing retry on the next tick.
+		if _, done := storeDirEnsured.Load(dir); !done {
+			if err := datadir.EnsureDir(dir); err != nil {
+				return fmt.Errorf("create known IDs directory: %w", err)
+			}
+			storeDirEnsured.Store(dir, struct{}{})
 		}
-	}
-	data, err := json.Marshal(sortedIDs)
-	if err != nil {
-		return fmt.Errorf("marshal known IDs: %w", err)
 	}
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save known IDs: %w", err)
@@ -746,8 +783,17 @@ type knownIDsStore struct {
 	// oldest (FIFO) rather than picking randomly via map iteration — random
 	// eviction could drop a still-active session ID, causing discovery to
 	// misclassify its CLI process as an external (non-naozhi) session.
+	// The live window is order[orderHead:]: orderHead marks the front of
+	// still-present IDs, advancing on each eviction so the common path is
+	// amortized O(1) (no per-eviction shift). The dead prefix is compacted
+	// into a fresh buffer only when it grows large (see trackSessionID).
 	// 读写: core (init), discovery (trackSessionID)
 	order []string
+	// orderHead is the index of the oldest live entry in order; entries
+	// before it have been evicted and cleared. order[orderHead:] are the
+	// live IDs (mirroring the keys of ids) in insertion order.
+	// 读写: core (init reset), discovery (trackSessionID)
+	orderHead int
 	// 读写: discovery, cleanup
 	dirty bool
 	// 读写: discovery, cleanup
@@ -767,6 +813,15 @@ type knownIDsStore struct {
 	sortedCache []string
 	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
 	sortedGen uint64 // gen the cache slice was sorted at; 0 = unbuilt
+	// marshaledCache caches the JSON serialization of sortedCache so the
+	// throttled save path does not re-run json.Marshal on every 5-minute
+	// tick for an unchanged set. R20260616-PERF-009 (#2143): a 1000-ID set
+	// is ~50KB of JSON re-built for nothing each tick; this memoises it by
+	// gen exactly like sortedCache. nil = unbuilt.
+	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild; invoked from cleanup saveIfDirty/Shutdown)
+	marshaledCache []byte
+	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild/compare)
+	marshaledGen uint64 // gen the marshaled cache was built at; 0 = unbuilt
 	// 读写: cleanup (Cleanup/saveIfDirty)
 	savedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 }
@@ -798,6 +853,47 @@ func (r *Router) snapshotKnownIDsSortedLocked() []string {
 	// Return a copy: callers serialize outside r.mu, and a later rebuild
 	// would otherwise replace the cache slice's backing array under them.
 	return slices.Clone(r.kid.sortedCache)
+}
+
+// snapshotKnownIDsMarshaledLocked returns the JSON serialization of the
+// known-session-ID set suitable for handing directly to saveKnownIDsBytes.
+// Caller MUST hold r.mu.
+//
+// R20260616-PERF-009 (#2143): the prior periodic save path re-ran json.Marshal
+// inside saveKnownIDs on every throttled 5-minute tick, even though the ID set
+// is append-only-ish and almost never changes between windows (a ~50KB array of
+// 1000 strings re-serialized for nothing). This memoises the marshal by gen the
+// same way sortedCache memoises the sort: the bytes are rebuilt only when the
+// gen advanced since the last marshal, otherwise the cached bytes are returned.
+// The sorted slice is materialised via the same gen-keyed cache, so a single
+// gen bump invalidates both the sort and the marshal.
+//
+// Returns a copy of the cached bytes so callers can write them outside r.mu
+// without aliasing the cache (a concurrent trackSessionID would otherwise
+// replace the backing array on a future rebuild).
+func (r *Router) snapshotKnownIDsMarshaledLocked() ([]byte, error) {
+	if r.kid.marshaledCache == nil || r.kid.marshaledGen != r.kid.gen {
+		// Build/refresh the sorted cache first (shares the same gen gate), then
+		// marshal it. We marshal the cache directly rather than the cloned
+		// snapshot to avoid an extra slice copy on the rebuild path.
+		if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
+			sorted := make([]string, 0, len(r.kid.ids))
+			for id := range r.kid.ids {
+				sorted = append(sorted, id)
+			}
+			// R180-GO-P2: deterministic on-disk order — see saveKnownIDsBytes.
+			slices.Sort(sorted)
+			r.kid.sortedCache = sorted
+			r.kid.sortedGen = r.kid.gen
+		}
+		data, err := json.Marshal(r.kid.sortedCache)
+		if err != nil {
+			return nil, fmt.Errorf("marshal known IDs: %w", err)
+		}
+		r.kid.marshaledCache = data
+		r.kid.marshaledGen = r.kid.gen
+	}
+	return slices.Clone(r.kid.marshaledCache), nil
 }
 
 // workspaceOverridesPath returns the path to the workspace overrides file,

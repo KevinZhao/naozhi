@@ -158,7 +158,11 @@ func TestHandleHealth_WSDropped_ZeroEmitted(t *testing.T) {
 func TestHandleHealth_PlatformsShape(t *testing.T) {
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 	// inject a second platform so we exercise the multi-entry path.
+	// R20260616-PERF-002: the served `platforms` map is now pre-built once at
+	// construction (platformsStatus) rather than rebuilt from `platforms` per
+	// request, so override the pre-built map directly here.
 	srv.healthH.platforms = map[string]struct{}{"feishu": {}, "slack": {}}
+	srv.healthH.platformsStatus = map[string]string{"feishu": "registered", "slack": "registered"}
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -178,6 +182,49 @@ func TestHandleHealth_PlatformsShape(t *testing.T) {
 			t.Errorf("platforms[%s] = %v, want \"registered\"", name, v)
 		}
 	}
+}
+
+// TestHealthEndpoints_SecurityHeaders pins the R20260616-SEC-3 fix: /livez,
+// /readyz, and /health (unauth + authed) all carry X-Content-Type-Options:
+// nosniff and Cache-Control: no-store so a browser-renderable response can't be
+// MIME-sniffed and a proxy/CDN can't cache a per-request health snapshot.
+func TestHealthEndpoints_SecurityHeaders(t *testing.T) {
+	assertHeaders := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+		}
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+	}
+
+	t.Run("livez", func(t *testing.T) {
+		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		w := httptest.NewRecorder()
+		srv.healthH.handleLivez(w, httptest.NewRequest(http.MethodGet, "/livez", nil))
+		assertHeaders(t, w)
+	})
+	t.Run("readyz", func(t *testing.T) {
+		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		w := httptest.NewRecorder()
+		srv.healthH.handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		assertHeaders(t, w)
+	})
+	t.Run("health_unauth", func(t *testing.T) {
+		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		w := httptest.NewRecorder()
+		srv.healthH.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+		assertHeaders(t, w)
+	})
+	t.Run("health_authed", func(t *testing.T) {
+		srv := newTestServerWithToken(&mockPlatform{}, "secret")
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		srv.healthH.handleHealth(w, req)
+		assertHeaders(t, w)
+	})
 }
 
 // _ pins a compile-time signature check: the authenticated branch factory

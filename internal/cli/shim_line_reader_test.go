@@ -117,6 +117,66 @@ func TestShimLineReader_HappyPathSkipsHandfulOfPings(t *testing.T) {
 	}
 }
 
+// TestShimLineReader_BoundsOversizeLine pins #2183: a single init-handshake
+// frame larger than maxScannerBufBytes with no newline must be rejected with
+// a cap error (eof=true, data==nil) rather than growing bufio's buffer
+// without bound -> OOM. ReadSlice returns ErrBufferFull mid-frame, so the
+// accumulate loop MUST treat ErrBufferFull as non-terminal until the running
+// length trips the cap.
+func TestShimLineReader_BoundsOversizeLine(t *testing.T) {
+	// One giant frame, no trailing newline, well past the cap. Sized at
+	// twice the cap so the running-length guard trips on a mid-stream
+	// ErrBufferFull chunk (the OOM scenario) rather than at EOF.
+	giant := bytes.Repeat([]byte("a"), 2*maxScannerBufBytes)
+
+	r := &shimLineReader{
+		proc: &Process{shimR: bufio.NewReader(bytes.NewReader(giant))},
+	}
+
+	data, eof, err := r.ReadLine()
+	if err == nil {
+		t.Fatalf("expected error on oversize init line, got nil")
+	}
+	if !eof {
+		t.Errorf("expected eof=true on cap, got false")
+	}
+	if data != nil {
+		t.Errorf("expected nil data on cap, got %d bytes", len(data))
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error should mention the byte cap, got %q", err.Error())
+	}
+}
+
+// TestShimLineReader_HappyPathSpansBufferBoundary verifies the
+// ReadSlice-accumulate loop reassembles a stdout frame whose JSON envelope
+// is larger than bufio's internal buffer (forcing ErrBufferFull mid-frame)
+// but still under the cap. This guards the regression where ReadSlice —
+// unlike the old ReadBytes — surfaces ErrBufferFull that, if treated as
+// terminal, would truncate or drop legitimate large frames.
+func TestShimLineReader_HappyPathSpansBufferBoundary(t *testing.T) {
+	// A stdout line payload bigger than the bufio.Reader buffer below.
+	payload := strings.Repeat("x", 16*1024)
+	frame := `{"type":"stdout","line":"` + payload + `"}` + "\n"
+
+	r := &shimLineReader{
+		// Small reader buffer forces ReadSlice to return ErrBufferFull
+		// repeatedly before the newline is reached.
+		proc: &Process{shimR: bufio.NewReaderSize(strings.NewReader(frame), 1024)},
+	}
+
+	data, eof, err := r.ReadLine()
+	if err != nil {
+		t.Fatalf("unexpected error reassembling boundary-spanning frame: %v", err)
+	}
+	if eof {
+		t.Errorf("unexpected eof=true on valid large frame")
+	}
+	if string(data) != payload {
+		t.Errorf("data len = %d, want %d (line truncated across buffer boundary)", len(data), len(payload))
+	}
+}
+
 // TestShimLineReader_CLIExitedReturnsErrorImmediately verifies that a
 // cli_exited frame short-circuits the loop with an error, regardless of
 // the skip counter state. This mirrors the existing contract — a CLI
