@@ -159,15 +159,65 @@ func TestRingBuffer_OversizedLineDrop(t *testing.T) {
 }
 
 func TestRingBuffer_OversizedLineAfterContent(t *testing.T) {
-	// Oversized line arrives after existing content: evicts all, then drops
+	// #2182: an oversized line arriving after existing content must be dropped
+	// WITHOUT evicting the existing (storable) content. The pre-fix behaviour
+	// ran the byte-eviction loop first, wiping seq=1 before discovering the
+	// new line could never fit — losing replay history to a line that is
+	// dropped anyway. The drop guard now runs before any eviction.
 	b := NewRingBuffer(100, 10)
-	b.Push([]byte("abcde"))                   // seq=1, 5 bytes
-	seq := b.Push([]byte("ABCDEFGHIJKLMNOP")) // 16 bytes > maxBytes=10
+	b.Push([]byte("abcde"))                   // seq=1, 5 bytes, fits
+	seq := b.Push([]byte("ABCDEFGHIJKLMNOP")) // seq=2, 16 bytes > maxBytes=10, dropped
+	if seq != 2 {
+		t.Errorf("oversize push seq = %d, want 2 (seq still bumped -> hole)", seq)
+	}
 
-	_ = seq
-	// After evicting seq=1 to make room, 16>10 so it's dropped
-	if b.Count() != 0 {
-		t.Errorf("Count() = %d, want 0 after oversized drop", b.Count())
+	// Existing content survives the oversize drop.
+	if b.Count() != 1 {
+		t.Errorf("Count() = %d, want 1 (existing line preserved)", b.Count())
+	}
+	if b.Bytes() != 5 {
+		t.Errorf("Bytes() = %d, want 5 (existing line preserved)", b.Bytes())
+	}
+
+	// Replay returns only seq=1 "abcde"; the dropped seq=2 leaves a hole.
+	lines := b.LinesSince(0)
+	if len(lines) != 1 || lines[0].seq != 1 || string(lines[0].data) != "abcde" {
+		t.Errorf("LinesSince(0) = %+v, want [{seq:1 data:\"abcde\"}]", lines)
+	}
+}
+
+// TestRingBuffer_OversizedLineDoesNotEvictExisting pins #2182 with multiple
+// existing lines: an oversize line must not touch the ring at all.
+func TestRingBuffer_OversizedLineDoesNotEvictExisting(t *testing.T) {
+	b := NewRingBuffer(100, 12)
+	b.Push([]byte("aaaa")) // seq=1, 4 bytes
+	b.Push([]byte("bbbb")) // seq=2, 8 bytes total
+	b.Push([]byte("cccc")) // seq=3, 12 bytes total (exactly at cap)
+
+	before := b.Count()
+	beforeBytes := b.Bytes()
+
+	seq := b.Push([]byte("ZZZZZZZZZZZZZZZZ")) // seq=4, 16 bytes > maxBytes=12, dropped
+	if seq != 4 {
+		t.Errorf("oversize push seq = %d, want 4", seq)
+	}
+	if b.Count() != before {
+		t.Errorf("Count() = %d, want %d (oversize drop must not evict)", b.Count(), before)
+	}
+	if b.Bytes() != beforeBytes {
+		t.Errorf("Bytes() = %d, want %d (oversize drop must not evict)", b.Bytes(), beforeBytes)
+	}
+
+	// All three originals replay; the oversize seq=4 is absent (hole).
+	lines := b.LinesSince(0)
+	if len(lines) != 3 {
+		t.Fatalf("LinesSince(0) = %d lines, want 3", len(lines))
+	}
+	wantSeqs := []int64{1, 2, 3}
+	for i, want := range wantSeqs {
+		if lines[i].seq != want {
+			t.Errorf("lines[%d].seq = %d, want %d", i, lines[i].seq, want)
+		}
 	}
 }
 
