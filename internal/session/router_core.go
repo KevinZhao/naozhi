@@ -272,6 +272,13 @@ type Router struct {
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	kiroSessionsDir string
 
+	// codexSessionsDir is the codex session-state root (~/.codex/sessions).
+	// Plumbed into cli.HistoryWiring at attachHistorySource time so the
+	// codexjsonl factory can glob per-thread rollout files. Wired from
+	// RouterConfig.CodexSessionsDir in cmd/naozhi/main.go.
+	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
+	codexSessionsDir string
+
 	// wsStore is the per-chat workspace-override facet (Router P1, #383):
 	// the overrides map plus its dirty flag and mutation gen, extracted into
 	// workspaceStore (router_workspace.go) which carries the verbatim
@@ -713,6 +720,11 @@ type RouterConfig struct {
 	// in this file's import block). Set by cmd/naozhi/main.go from
 	// config. R228-CR-P3-4.
 	KiroSessionsDir string
+	// CodexSessionsDir is the codex CLI's session-state root, typically
+	// ~/.codex/sessions. Empty disables codex history fallback; non-empty
+	// enables the codexjsonl factory (registered via blank import in
+	// wireup). Set by cmd/naozhi/main.go from config.
+	CodexSessionsDir string
 	// EventLogDir is where naozhi's per-session event log files live.
 	// When empty, event log persistence is DISABLED and the router
 	// falls back to Claude CLI JSONL as the sole history source. When
@@ -822,18 +834,19 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
-		maxProcs:        cfg.MaxProcs,
-		ttl:             cfg.TTL,
-		pruneTTL:        cfg.PruneTTL,
-		defaultCWD:      cfg.Workspace,
-		claudeDir:       cfg.ClaudeDir,
-		kiroSessionsDir: cfg.KiroSessionsDir,
-		storePath:       cfg.StorePath,
-		noOutputTimeout: cfg.NoOutputTimeout,
-		totalTimeout:    cfg.TotalTimeout,
-		eventLogDir:     cfg.EventLogDir,
-		historyLoader:   cfg.HistoryLoader,
-		resolver:        cfg.Resolver,
+		maxProcs:         cfg.MaxProcs,
+		ttl:              cfg.TTL,
+		pruneTTL:         cfg.PruneTTL,
+		defaultCWD:       cfg.Workspace,
+		claudeDir:        cfg.ClaudeDir,
+		kiroSessionsDir:  cfg.KiroSessionsDir,
+		codexSessionsDir: cfg.CodexSessionsDir,
+		storePath:        cfg.StorePath,
+		noOutputTimeout:  cfg.NoOutputTimeout,
+		totalTimeout:     cfg.TotalTimeout,
+		eventLogDir:      cfg.EventLogDir,
+		historyLoader:    cfg.HistoryLoader,
+		resolver:         cfg.Resolver,
 	}
 	// ss is a value field (no lock of its own); its maps must be allocated
 	// explicitly since composite-literal sub-struct field init is not used here

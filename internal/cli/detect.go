@@ -73,6 +73,7 @@ type BackendInfo struct {
 var knownBackends = []BackendInfo{
 	{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json", defaultBinary: "claude"},
 	{ID: "kiro", DisplayName: "kiro", Protocol: "acp", defaultBinary: "kiro-cli"},
+	{ID: "codex", DisplayName: "codex", Protocol: "codex-app-server", defaultBinary: "codex"},
 }
 
 // lookupBackend returns the knownBackends row for the given ID and whether it
