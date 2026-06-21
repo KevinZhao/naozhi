@@ -311,30 +311,47 @@ Codex CLI 鉴权三条路径：
 
 | 路径 | 适用 | naozhi 立场 |
 |---|---|---|
-| **Amazon Bedrock**（`AWS_BEARER_TOKEN_BEDROCK` 或 AWS 凭据链） | 复用部署机已有 AWS 接入 | ✅ 已验证连通（见 §7.1 约束） |
-| `CODEX_API_KEY` / `OPENAI_API_KEY` 环境变量 | 完整 agentic（gpt-5.x-codex） | 推荐，无 Bedrock 工具约束 |
+| **Amazon Bedrock + gpt-5.5**（`AWS_BEARER_TOKEN_BEDROCK` 或 AWS 凭据链，us-east-1/2） | 复用部署机 AWS 接入 + 完整 agentic | ✅ **首选**，已验证完整 agentic（见 §7.1） |
+| Amazon Bedrock + gpt-oss（us-west-2） | 纯对话 / function-calling | ⚠️ agentic 受限退路（见 §7.2） |
+| `CODEX_API_KEY` / `OPENAI_API_KEY` 环境变量 | 完整 agentic | 直连 OpenAI，无区域限制 |
 | `codex login` 持久化 ChatGPT 登录态 | 桌面交互 | 不适合 headless naozhi |
 
-### 7.1 Bedrock 部署（已验证 + 两个约束）
+### 7.1 Bedrock + gpt-5.5（首选路径，2026-06-21 实测完整 agentic）
 
-实测环境 `AWS_REGION=us-west-2`，`bedrock-mantle.us-west-2.api.aws/v1/responses` + `openai.gpt-oss-120b` 连通。配置（用**自定义 provider**，不用内置 `amazon-bedrock`）：
+gpt-5.x 在 **us-east-1 / us-east-2** 的 `bedrock-mantle/openai/v1/responses` 上可用（responses-only，不支持 chat completions）。这恰好是 codex **内置 `amazon-bedrock` provider** 的默认路径，所以**直接用内置 provider，无需自定义**：
+
+```toml
+model_provider = "amazon-bedrock"
+model = "openai.gpt-5.5"
+
+[model_providers.amazon-bedrock.aws]
+region = "us-east-2"
+# 凭据走 AWS_BEARER_TOKEN_BEDROCK（Bedrock API key）或标准 AWS 凭据链
+```
+
+实测（codex 0.141.0，`codex exec` + `app-server` 两路径）：
+- ✅ 纯对话返回正确（`turn/completed` status=`completed`）。
+- ✅ **完整 agentic 跑通**：codex 成功调用 shell 工具（`cat probe.txt` 执行并返回正确内容），**不**触发 gpt-oss 的 `namespace` 工具被拒错误。
+
+> 注意：`aws bedrock list-foundation-models` **不列** mantle-only 的 gpt-5.x —— 必须直接探端点确认（404=不存在；400 "does not support /v1/responses"=存在但走 `/openai/v1/responses`）。
+
+### 7.2 Bedrock + gpt-oss（受限退路）
+
+实测 `bedrock-mantle.us-west-2.api.aws/v1/responses` + `openai.gpt-oss-120b` 连通，但有两个约束，需用**自定义 provider**：
 
 ```toml
 [model_providers.bedrockmantle]
 name     = "Bedrock Mantle"
-base_url = "https://bedrock-mantle.<region>.api.aws/v1"   # 注意：无 /openai 前缀
+base_url = "https://bedrock-mantle.us-west-2.api.aws/v1"   # 注意：无 /openai 前缀
 wire_api = "responses"                                     # chat 在 0.141 已废弃
 env_key  = "AWS_BEARER_TOKEN_BEDROCK"
 ```
 
-**约束 1（路径）**：codex 内置 `amazon-bedrock` provider 打到 `/openai/v1/responses`，但 Bedrock 上 gpt-oss 只在 `/v1/responses` 服务 → 必须用上面的自定义 provider 指向正确 base_url。
-
-**约束 2（agentic 受限）**：Bedrock 的 gpt-oss responses 端点拒绝 codex 内置 agentic 工具的 `type:"namespace"` 声明（只认 `function`/`mcp`），完整 shell-agentic turn 会 `status:failed`。**Bedrock gpt-oss 路径仅支持纯对话 / function-calling，不支持 codex 招牌的本地 shell agentic**。完整 agentic 需 OpenAI 凭据 + gpt-5.x-codex。
-
-**模型可用性**：us-west-2 Bedrock 只有 `gpt-oss-{20b,120b,safeguard}`，无 gpt-5.x。
+- **约束 1（路径）**：内置 `amazon-bedrock` provider 打 `/openai/v1/responses`，gpt-oss 只在 `/v1/responses` 服务 → 必须自定义 provider 指向无前缀 base_url。
+- **约束 2（agentic 受限）**：Bedrock gpt-oss responses 拒绝 codex 内置 agentic 工具的 `type:"namespace"` 声明（只认 `function`/`mcp`），完整 shell-agentic turn `status:failed`。**gpt-oss 路径仅纯对话 / function-calling**。
 
 落地前提：
-- 部署文档：启用 codex backend 时，二选一 —— ① Bedrock（`AWS_BEARER_TOKEN_BEDROCK` + 自定义 provider，agentic 受限）；② `CODEX_API_KEY`/`codex login`（完整 agentic）。
+- 部署文档：启用 codex backend 时择一 —— ① **Bedrock + gpt-5.5**（内置 provider，us-east-1/2，完整 agentic，推荐）；② Bedrock + gpt-oss（自定义 provider，us-west-2，agentic 受限）；③ `CODEX_API_KEY`/`codex login`。
 - `cmd/naozhi/doctor.go` 增 codex 健康检查：`codex --version` 能跑 + （`~/.codex/auth.json` / `CODEX_API_KEY` / `AWS_BEARER_TOKEN_BEDROCK` 三选一）。
 
 不在本 RFC 范围：自建凭据池、企业网关代理、按 session 切 key、Bedrock Access Gateway（BAG）代理把 namespace 工具翻译给 gpt-oss。
@@ -391,7 +408,7 @@ env_key  = "AWS_BEARER_TOKEN_BEDROCK"
 | `app-server` 仍是新接口（2025 末才推），可能有未发现的边缘 case | M | Phase 0 实测全跑过；订阅 codex GitHub release notes |
 | 多 thread 共享一个 app-server 进程的并发隔离质量未知（V8） | M | phase1 仍按 1 thread / 进程，跟 claude 对齐；V8 验证后 phase2 做"一进程多 thread"优化 |
 | `turn/steer` 与 naozhi `/urgent` 语义对接细节 | L | phase2 单独 RFC |
-| ~~Codex 模型只能走 OpenAI 自家~~ → **已验证可走 Bedrock**，但 gpt-oss agentic 工具受限（§7.1 约束 2） | M | Bedrock 仅做纯对话/function-calling；完整 agentic 用 `CODEX_API_KEY` + gpt-5.x-codex |
+| ~~Codex 模型只能走 OpenAI 自家~~ → **已验证可走 Bedrock 且完整 agentic**（gpt-5.5 @ us-east-1/2，§7.1）；gpt-oss 路径 agentic 受限（§7.2） | L | 首选 Bedrock + gpt-5.5（内置 provider，完整 shell agentic 实测通过）；gpt-oss 仅纯对话退路 |
 | Approval flow `requestUserInput` 转 AskUserQuestion 卡片的 schema 映射 | L | phase2，phase1 默认拒绝避免悬挂 |
 
 ### 9.2 未决

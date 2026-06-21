@@ -12,12 +12,13 @@
 - ✅ **app-server JSON-RPC 协议完整跑通**：`initialize → initialized → thread/start → turn/start → turn/started → item/started → item/completed → turn/completed`，threadId 正确捕获。RFC §2.4 的事件流草图被实测**证实**。
 - ✅ **method / notification 名经 `generate-json-schema` + 实测全部命中** RFC §2.3/§2.4 的假设（`thread/start`、`turn/start`、`turn/interrupt`、`turn/steer`、`thread/resume`、`item/agentMessage/delta`、`turn/completed` 等）。
 - 🔥 **重大纠正**：RFC §7 / §9.1 称 "Codex 模型只能走 OpenAI 自家（不像 claude 走 Bedrock）" —— **此论断已过时**。codex 0.141 **内置 `amazon-bedrock` model provider**（openai/codex PR #18744，2026-04-20 合入）。实测 `bedrock-mantle.us-west-2.api.aws/v1/responses` + `openai.gpt-oss-120b` 返回真实回复。
-- ⚠️ **两个 Bedrock 约束**（影响 "codex on bedrock" 完整能力，详见 §4）：
-  1. codex 内置 `amazon-bedrock` provider 把请求打到 `/openai/v1/responses`（带 `/openai` 前缀），但 Bedrock 上的 gpt-oss 只在 `/v1/responses`（无前缀）服务 —— 内置 provider 直接报 `model does not support the '/openai/v1/responses' API`。需用**自定义 provider** 指向正确的 `…/v1` base_url 绕过。
-  2. Bedrock 的 gpt-oss responses 端点**拒绝 codex 内置 agentic 工具的 `namespace` tool 变体**（只接受 `function` / `mcp`），完整 shell-agentic turn 因此 `status: failed`。纯对话 / function-calling 可用，但 codex 招牌的本地 shell agentic 能力在 Bedrock gpt-oss 上**受限**。
-- ❌ gpt-5.x 系列在 us-west-2 Bedrock **不可用**，只有 `gpt-oss-*`（20b/120b/safeguard）`ACTIVE`。
+- ✅ **Bedrock + gpt-5.5 = 完整 agentic**（2026-06-21 二次实测，**首选 Bedrock 路径**）：gpt-5.x 在 **us-east-1 / us-east-2** 的 `bedrock-mantle/openai/v1/responses` 可用，直接用 codex **内置 `amazon-bedrock` provider**（其默认路径正是 `/openai/v1/responses`）。`codex exec` + `app-server` 两路径验证：纯对话 + **shell agentic 工具调用全部跑通**（`cat probe.txt` 执行成功），不触发 gpt-oss 的 namespace 工具被拒。
+- ⚠️ **gpt-oss 是受限退路**（详见 §4）：
+  1. codex 内置 `amazon-bedrock` provider 打 `/openai/v1/responses`，但 gpt-oss 只在 `/v1/responses` 服务 → gpt-oss 需**自定义 provider** 指向无前缀 base_url。
+  2. Bedrock gpt-oss responses 端点**拒绝 codex 内置 agentic 工具的 `namespace` tool 变体**（只接受 `function`/`mcp`），shell-agentic turn `status:failed`。gpt-oss 仅纯对话 / function-calling。
+- 模型可用性：us-west-2 只有 `gpt-oss-*`；gpt-5.x 在 us-east-1/2（mantle-only，`list-foundation-models` 不列，须直接探端点）。
 
-**结论**：app-server 协议路线 100% 可行，按 RFC §1.3 实施。Bedrock 作为一个**已验证但 agentic 受限**的部署选项写入 RFC；面向用户的 codex 完整能力仍以 OpenAI 凭据 / ChatGPT 登录为主路径。
+**结论**：app-server 协议路线 100% 可行，按 RFC §1.3 实施。**Bedrock + gpt-5.5（us-east-1/2，内置 provider）是完整 agentic 的首选部署路径**；gpt-oss 是 agentic 受限的退路；OpenAI 直连凭据为第三选择。
 
 ---
 
@@ -171,7 +172,39 @@ ERROR: Failed to deserialize the JSON body into the target type:
 
 codex 内置的 agentic 工具集（shell/apply_patch 等）用 `type:"namespace"` 工具声明，Bedrock 的 gpt-oss responses 端点只认 `function`/`mcp`。手动用 `type:"function"` 工具直接打端点则通过 —— 说明这是 codex 工具声明形态与 Bedrock gpt-oss 子集不兼容，而非链路问题。
 
-**含义**：Bedrock gpt-oss 路径下 codex 可做纯对话 / 自定义 function-calling，但**无法**跑 codex 招牌的本地 shell agentic 工作流。完整 agentic 能力仍需 OpenAI 凭据（gpt-5.x-codex 系列）。
+**含义**：Bedrock **gpt-oss** 路径下 codex 可做纯对话 / 自定义 function-calling，但**无法**跑 codex 招牌的本地 shell agentic 工作流。完整 agentic 能力需走 gpt-5.x（§4.5）或 OpenAI 凭据。
+
+### 4.5 gpt-5.5 完整 agentic（首选路径，2026-06-21 二次实测）
+
+gpt-5.x 与 gpt-oss 行为相反 —— 它走带前缀的 `/openai/v1/responses`，正好是内置 provider 的默认路径，且**没有** namespace 工具约束。
+
+**区域可用性探测**（`list-foundation-models` 不列 mantle-only 模型，须直接探端点）：
+
+| region / path | 结果 |
+|---|---|
+| us-west-2 `/v1/responses` openai.gpt-5.5 | ❌ 404 does not exist |
+| us-east-2 / us-east-1 `/v1/responses` openai.gpt-5.5 | ⚠️ 400 "does not support the '/v1/responses' API"（存在，但走别的路径） |
+| **us-east-2 / us-east-1 `/openai/v1/responses` openai.gpt-5.5** | ✅ **HTTP 200** 真实 response |
+| us-east-2 `/openai/v1/chat/completions` openai.gpt-5.5 | ❌ 400 responses-only |
+
+**端到端（内置 `amazon-bedrock` provider，无需自定义）**：
+
+```toml
+model_provider = "amazon-bedrock"
+model = "openai.gpt-5.5"
+[model_providers.amazon-bedrock.aws]
+region = "us-east-2"
+```
+
+| 验证 | 结果 |
+|---|---|
+| `codex exec` 纯对话 | ✅ 返回 `NAOZHI_GPT55_OK`（7748 tokens） |
+| `codex exec` **shell agentic** | ✅ codex 调用 shell 工具 `cat probe.txt` 成功执行并返回正确内容（15580 tokens），**无 namespace 被拒** |
+| `app-server` 协议层（naozhi 实际路径） | ✅ `turn/completed` status=`completed`，事件流 `item/agentMessage/delta` + `thread/tokenUsage/updated` 完整 |
+
+本机坑：bubblewrap 在容器内报 `Unexpected capabilities but not setuid` → 测 agentic 用 `--dangerously-bypass-approvals-and-sandbox`，与模型/协议无关。
+
+**结论**：**Bedrock + gpt-5.5（us-east-1/2，内置 provider）支持 codex 完整 shell agentic**，是 naozhi 接 codex 的首选 Bedrock 部署路径。RFC §7.1 约束 2 仅适用于 gpt-oss。
 
 ---
 
