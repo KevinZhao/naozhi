@@ -199,6 +199,7 @@ func Run(cfg Config) error {
 	defer func() {
 		f := shimLogFilePtr.Load()
 		if r := recover(); r != nil {
+			slog.Error("shim: Run() panicked", "recover", r, "stack", string(debug.Stack()))
 			if f != nil {
 				fmt.Fprintf(f, "PANIC: %v\n", r)
 			}
