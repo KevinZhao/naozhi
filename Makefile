@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail lint-router lint-router-fail
+.PHONY: build vet test lint vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail lint-router lint-router-fail release-gate release-gate-live
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -76,6 +76,21 @@ release: clean
 	done
 	@cd dist && sha256sum naozhi-* > checksums.txt
 	@echo "Done. Artifacts in dist/"
+
+# Post-deploy screenshot gate. Boots a throwaway dashboard-only instance from a
+# freshly built binary, drives every top-level view with Playwright, and asserts
+# render + zero-console-error per view. Non-zero exit blocks release. This is the
+# CI-equivalent gate runnable locally without a systemd deployment.
+# Playwright deps: (cd test/e2e && npm install)
+release-gate: build
+	NAOZHI_GATE_BIN=bin/$(BINARY) ./scripts/gate-instance.sh
+
+# Gate an already-running instance (e.g. after `make deploy`). Reads the live
+# dashboard token from the systemd EnvironmentFile. Targets 127.0.0.1:8180.
+release-gate-live:
+	@TOKEN=$$(sudo grep -hE '^NAOZHI_DASHBOARD_TOKEN=' /home/ec2-user/.naozhi/env 2>/dev/null | head -1 | cut -d= -f2-); \
+	if [ -z "$$TOKEN" ]; then echo "✗ NAOZHI_DASHBOARD_TOKEN not found in /home/ec2-user/.naozhi/env"; exit 1; fi; \
+	NAOZHI_BASE_URL=http://127.0.0.1:8180 NAOZHI_DASHBOARD_TOKEN="$$TOKEN" node scripts/release-gate.mjs
 
 clean:
 	rm -rf dist/
