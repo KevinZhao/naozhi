@@ -69,3 +69,10 @@ func (r fakePlatformReplier) Reply(ctx context.Context, chatID, text string) (st
 		Text:   text,
 	}, limits.PlatformReplyMaxAttempts)
 }
+
+// UsesSingleUseReplyToken delegates to platform.UsesSingleUseReplyToken,
+// mirroring wireup's production platformReplier so the #2181 collapse path is
+// exercised under the same translation as production.
+func (r fakePlatformReplier) UsesSingleUseReplyToken() bool {
+	return platform.UsesSingleUseReplyToken(r.p)
+}

@@ -486,8 +486,8 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 	if s.storePath == "" {
 		return func([]byte) error { return nil }, func() {}
 	}
-	dir := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir := s.stateSubtree("sandboxevents", jobID)
+	if err := s.mkdirStateSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: event log dir create failed; events not persisted", "err", err)
 		return func([]byte) error { return nil }, func() {}
 	}
@@ -592,7 +592,7 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	default:
 		return nil, false, ErrSandboxEventsBusy
 	}
-	path := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID, runID+".ndjson")
+	path := s.stateSubtree("sandboxevents", jobID, runID+".ndjson")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -698,7 +698,7 @@ func (s *Scheduler) deleteJobSandboxEvents(jobID string) {
 	if s.storePath == "" || !IsValidID(jobID) {
 		return
 	}
-	dir := filepath.Join(filepath.Dir(s.storePath), "sandboxevents", jobID)
+	dir := s.stateSubtree("sandboxevents", jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		slog.Warn("cron sandbox: event subtree delete failed", "job_id", jobID, "err", err)
 	}

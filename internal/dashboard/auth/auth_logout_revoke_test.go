@@ -42,9 +42,19 @@ func TestHandleLogout_DoesNotRevokeConcurrentSessions(t *testing.T) {
 	rec := httptest.NewRecorder()
 	a.HandleLogout(rec, logoutReq)
 
-	// The caller's browser is told to drop the cookie.
-	if mc := rec.Result().Cookies(); len(mc) == 0 || mc[0].MaxAge != -1 {
-		t.Fatalf("logout must emit a clearing Set-Cookie (MaxAge=-1), got %+v", mc)
+	// The caller's browser is told to drop the auth cookie. Look it up by
+	// name rather than index — logout now also clears nz_anon (#2157), so the
+	// auth cookie is no longer guaranteed to be at position 0.
+	var authClear *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == AuthCookieName {
+			authClear = c
+			break
+		}
+	}
+	if authClear == nil || authClear.MaxAge != -1 {
+		t.Fatalf("logout must emit a clearing %s Set-Cookie (MaxAge=-1), got %+v",
+			AuthCookieName, rec.Result().Cookies())
 	}
 
 	// The other concurrent session's cookie MUST still authenticate — logout
@@ -82,6 +92,42 @@ func TestHandleLogout_DoesNotBumpCookieGenSeq(t *testing.T) {
 	a.RotateCookieGen()
 	if got := a.cookieGenSeq.Load(); got != before+1 {
 		t.Errorf("RotateCookieGen did not bump cookieGenSeq: got %d want %d", got, before+1)
+	}
+}
+
+// TestHandleLogout_ClearsAnonCookie pins #2157: logout must emit clearing
+// Set-Cookie headers for BOTH the naozhi_auth credential and the nz_anon
+// per-browser owner label, so logging out fully resets browser-held naozhi
+// state. Previously only naozhi_auth was cleared, leaving the nz_anon owner
+// label alive for its (up to 7-day) MaxAge.
+func TestHandleLogout_ClearsAnonCookie(t *testing.T) {
+	t.Parallel()
+	a := &Handlers{
+		DashboardToken: "anon-clear-token",
+		cookieSecret:   []byte("anon-clear-secret"),
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "http://naozhi.example/api/logout", nil)
+	rec := httptest.NewRecorder()
+	a.HandleLogout(rec, logoutReq)
+
+	cleared := map[string]*http.Cookie{}
+	for _, c := range rec.Result().Cookies() {
+		cleared[c.Name] = c
+	}
+
+	for _, name := range []string{AuthCookieName, "nz_anon"} {
+		c, ok := cleared[name]
+		if !ok {
+			t.Fatalf("logout did not emit a clearing Set-Cookie for %q; got %+v",
+				name, rec.Result().Cookies())
+		}
+		if c.MaxAge != -1 {
+			t.Errorf("%q clearing cookie MaxAge = %d, want -1", name, c.MaxAge)
+		}
+		if c.Value != "" {
+			t.Errorf("%q clearing cookie Value = %q, want empty", name, c.Value)
+		}
 	}
 }
 
