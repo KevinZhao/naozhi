@@ -586,7 +586,7 @@ func (t *Tracker) flushAll() {
 // at ERROR level to avoid log spam for legitimate churn (e.g. a
 // file deleted between persist and bump).
 func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
-	metaPath := metaPathFor(key.absPath)
+	metaPath := attachment.MetaPathFor(key.absPath)
 	changed, err := attachment.UpdateMetaFile(metaPath, func(m *attachment.Meta) bool {
 		addedRef := m.AddReference(key.keyhash)
 		// Always advance LastReferencedAt to max(current, bump) —
@@ -642,15 +642,4 @@ func resolveAttachmentPath(workspace, p string) string {
 		return ""
 	}
 	return filepath.Join(workspace, cleaned)
-}
-
-// metaPathFor mirrors attachment.metaPathFor but is re-exported so
-// tracker tests can round-trip without crossing the package
-// boundary. Strip the payload extension, append .meta.
-func metaPathFor(payload string) string {
-	base := filepath.Base(payload)
-	if idx := strings.LastIndex(base, "."); idx > 0 {
-		return filepath.Join(filepath.Dir(payload), base[:idx]+".meta")
-	}
-	return payload + ".meta"
 }
