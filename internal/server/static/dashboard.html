@@ -308,15 +308,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    pinned to the icon's top-right. */
 .ab-badge{position:absolute;top:6px;right:6px;min-width:8px;height:8px;border-radius:var(--nz-radius-sm);background:var(--nz-red)}
 .ab-badge[hidden]{display:none}
-/* Connection status dot. Color reuses the same status keys as
-   VALID_DOT_CLASSES. Now only used by the settings view's connection section
-   (.settings-conn .ab-conn-dot) — the standalone bottom-rail indicator was
-   removed. */
-.ab-conn-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.ab-conn-dot.ok,.ab-conn-dot.connected{background:var(--nz-green)}
-.ab-conn-dot.connecting,.ab-conn-dot.authenticating{background:var(--nz-amber);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
-.ab-conn-dot.disconnected,.ab-conn-dot.error{background:var(--nz-red)}
-.ab-conn-dot.off,.ab-conn-dot.offline,.ab-conn-dot.unreachable{background:var(--nz-text-faint)}
 
 /* ===== Top-level views (asset / cron / settings) =====
    Each is a full-screen peer of the chat sidebar+main. The chat panels hide
@@ -352,9 +343,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .settings-theme-opt{padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:1px solid var(--nz-border);background:var(--nz-bg-1);font-family:inherit;transition:background .15s,color .15s,border-color .15s}
 .settings-theme-opt:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .settings-theme-opt.active{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-accent)}
-.settings-conn{display:flex;align-items:center;gap:8px;font-size:var(--nz-fs-sm);color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:10px 14px}
-.settings-conn .ab-conn-dot{width:9px;height:9px}
-.settings-conn-meta{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);margin-top:6px}
 
 /* ===== System view (sysession daemons) ===== */
 .system-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--nz-border)}
