@@ -296,10 +296,42 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 	return entries, nil
 }
 
+// userTypeGate / asstTypeGate are cheap byte substrings used to reject
+// lines that cannot be a "user" / "assistant" record before paying for a
+// json.Unmarshal. parseTail walks reverse over multi-MB run logs whose
+// bulk is tool_use / system / thinking records the switch below discards
+// anyway; gating those out avoids the outer historyLine unmarshal (and,
+// for assistant lines, the two further Message/Content unmarshals).
+// R202606d-PERF-001.
+//
+// The gate is a pure fast-negative: it only ever SKIPS a line when NEITHER
+// marker substring is present. Any line that still contains one of them
+// proceeds to the full unmarshal and the authoritative switch on hl.Type,
+// so a marker appearing inside an unrelated string (e.g. a tool_use input
+// that embeds the literal `"type":"user"`) costs at most a wasted unmarshal
+// — never a wrong result. Both compact and single-space-after-colon
+// variants are matched so a producer that pretty-prints the type field is
+// not silently dropped.
+var (
+	userTypeGate       = []byte(`"type":"user"`)
+	userTypeGateSpaced = []byte(`"type": "user"`)
+	asstTypeGate       = []byte(`"type":"assistant"`)
+	asstTypeGateSpaced = []byte(`"type": "assistant"`)
+)
+
 // parseHistoryLine decodes a single JSONL line into zero or more EventEntry
 // values. Returns ok=false for malformed lines so callers can skip them
 // silently (matches parseJSONL's tolerance for partially-flushed tails).
 func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
+	// Fast-negative byte gate (R202606d-PERF-001): a record is only ever
+	// emitted from the "user"/"assistant" arms below, so a line carrying
+	// neither type marker cannot produce an entry. Skip it without the
+	// json.Unmarshal. Conservative by construction — see the var block.
+	if !bytes.Contains(line, userTypeGate) && !bytes.Contains(line, userTypeGateSpaced) &&
+		!bytes.Contains(line, asstTypeGate) && !bytes.Contains(line, asstTypeGateSpaced) {
+		return nil, false
+	}
+
 	var hl historyLine
 	if err := json.Unmarshal(line, &hl); err != nil {
 		slog.Debug("skip malformed tail history line", "err", err)
