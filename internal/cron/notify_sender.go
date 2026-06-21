@@ -37,4 +37,15 @@ type PlatformReplier interface {
 	MaxReplyLength() int
 	Split(text string, maxLen int) []string
 	Reply(ctx context.Context, chatID, text string) (string, error)
+
+	// UsesSingleUseReplyToken reports whether the platform can deliver only ONE
+	// reply per inbound turn because its outbound reply is authorised by a
+	// single-use context token (e.g. WeChat iLink): the token is consumed by
+	// the first send and reuse is rejected upstream. #2181 (cron companion to
+	// dispatch's #2136): when true, notifyTarget MUST collapse a long result
+	// into one rune-safe-truncated message instead of fanning into N chunks —
+	// otherwise only chunk 1 arrives and chunks 2..N are silently lost. The
+	// concrete wireup adapter delegates to platform.UsesSingleUseReplyToken so
+	// cron never imports platform.
+	UsesSingleUseReplyToken() bool
 }
