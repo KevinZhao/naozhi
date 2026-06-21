@@ -3,6 +3,7 @@ package ccassets
 import (
 	"io"
 	"os"
+	"syscall"
 
 	"github.com/naozhi/naozhi/internal/assets"
 )
@@ -15,8 +16,15 @@ const maxRawBytes = 1 << 20
 // it returns errTooLarge rather than a truncated body (a truncated SKILL.md
 // would render misleadingly). The path must already be validated by the
 // caller (resolveUnder).
+//
+// O_NOFOLLOW closes the TOCTOU window between resolveUnder's EvalSymlinks
+// check and this open: an attacker with write access to ~/.claude could swap
+// the final path component for a symlink to an arbitrary file after the check
+// but before the read. With O_NOFOLLOW the open fails if the final component
+// is a symlink, mirroring the O_NOFOLLOW hardening in dashboard files.go
+// (R219-SEC-2) and memory handler.go (R20260606-SEC-6). [R202606d-SEC-1]
 func readCapped(path string, cap int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
