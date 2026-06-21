@@ -29,6 +29,7 @@
 package textutil
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -130,6 +131,22 @@ func buildSecretPrefixIndex() map[byte][]secretPrefix {
 // independently of length-truncation.
 const secretRedactedMarker = "[REDACTED]"
 
+// envAssignmentRe matches `KEY=value` (and `KEY = value`) assignments whose
+// KEY name carries a sensitive marker (SECRET/TOKEN/PASSWORD/…), capturing the
+// value run so RedactSecrets can mask it even when the value is NOT a
+// well-known token prefix (R202606-SEC-008b, #2165). A cron traceback failing
+// with `MY_CUSTOM_SECRET=hunter2` would otherwise transit verbatim to the
+// authenticated dashboard.
+//
+// Scope is deliberately narrow to honour the package-level false-positive
+// constraint: only keys NAMED like a credential match, so benign config such
+// as `LOG_LEVEL=debug`, `PATH=/usr/bin`, or a generic `KEY=foo` is left
+// untouched. The value run is `\S+` (stops at whitespace), so multi-token
+// prose after the value is preserved. group 3 (the value) is replaced; the key
+// and `=` are kept for operator diagnostics. Idempotent: `[REDACTED]` is `\S+`
+// and re-masks to itself.
+var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*(\S+)`)
+
 // RedactSecrets walks s once, swapping any occurrence of a well-known
 // secret-prefix pattern for `[REDACTED]`. Returns the original (aliased)
 // string when no prefix matched, so clean output pays only the single byte
@@ -138,6 +155,11 @@ func RedactSecrets(s string) string {
 	if s == "" {
 		return s
 	}
+	// KEY=value env-assignment masking runs first so that a sensitive value
+	// which is NOT a registered token prefix (e.g. `MY_SECRET=hunter2`) still
+	// gets scrubbed. Gated on a cheap IndexByte('=') so the common no-`=` path
+	// pays nothing (#2165).
+	s = redactEnvAssignments(s)
 	// Cheap early-bail: most output never contains a first byte of any
 	// prefix; in that case the function aliases the input without allocating.
 	if !mayContainSecretPrefix(s) {
@@ -208,4 +230,33 @@ func isSecretTokenByte(b byte) bool {
 // amd64/arm64.
 func mayContainSecretPrefix(s string) bool {
 	return strings.IndexAny(s, "sgAxhnydr-") >= 0
+}
+
+// redactEnvAssignments masks the value of any `KEY=value` assignment whose KEY
+// name looks like a credential (see envAssignmentRe). Returns the input
+// aliased without allocation when no `=` is present (the common case), so the
+// hot path stays zero-alloc. Idempotent. (R202606-SEC-008b, #2165).
+func redactEnvAssignments(s string) string {
+	if strings.IndexByte(s, '=') < 0 {
+		return s
+	}
+	return envAssignmentRe.ReplaceAllStringFunc(s, func(m string) string {
+		idx := strings.IndexByte(m, '=')
+		if idx < 0 {
+			return m
+		}
+		// Preserve `KEY` + any spaces + `=` + any spaces; mask only the value
+		// run so operator diagnostics keep the (non-sensitive) key name.
+		valStart := idx + 1
+		for valStart < len(m) && (m[valStart] == ' ' || m[valStart] == '\t') {
+			valStart++
+		}
+		// A single leading quote delimits the value but is not part of the
+		// secret; keep it so quoted env dumps (and the PEM `-----BEGIN`
+		// scanner downstream) render cleanly.
+		if valStart < len(m) && (m[valStart] == '"' || m[valStart] == '\'') {
+			valStart++
+		}
+		return m[:valStart] + secretRedactedMarker
+	})
 }
