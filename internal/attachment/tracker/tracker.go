@@ -467,12 +467,17 @@ func (t *Tracker) handleBump(job trackerJob) {
 			t.pendingSize.Add(1)
 			continue
 		}
-		// Keep the highest timeMS observed and push the flushAt
-		// deadline out — coalesce semantics.
+		// Keep the highest timeMS observed, but DO NOT reset flushAt
+		// [R202606c-GO-002]: a key that is bumped faster than the
+		// coalesce window must still flush at its first deadline.
+		// Pushing flushAt out on every bump let a hot key starve
+		// forever (no .meta write until Stop/Flush), during which the
+		// GC reads stale on-disk meta and can delete a still-referenced
+		// attachment. Keep the original deadline so every key lands on
+		// disk within at most one CoalesceWindow of entering pending.
 		if job.timeMS > prev.timeMS {
 			prev.timeMS = job.timeMS
 		}
-		prev.flushAt = flushAt
 		t.pending[key] = prev
 	}
 }
