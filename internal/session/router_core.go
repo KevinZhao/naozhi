@@ -363,6 +363,17 @@ type Router struct {
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
 	// 读写: core (init Add/Done), cleanup (Shutdown Wait), lifecycle (loadResumeHistoryOnSpawn Add/Done)
 	historyWg sync.WaitGroup
+	// historyWgMu serialises the "check historyCtx.Err() then historyWg.Add(1)"
+	// pair against Shutdown's historyCancel(), closing the TOCTOU window the
+	// Err()-first ordering alone cannot (R202606b-GO-001 #2186): a cancel
+	// landing between the nil-Err check and the Add could re-add to a
+	// WaitGroup already drained to 0 with a detached Wait in flight, panicking
+	// "WaitGroup is reused before previous Wait has returned". Shutdown takes
+	// this lock around historyCancel() (NOT around Wait), so any producer that
+	// passed the check under the lock completes its Add before the cancel is
+	// observable, and any producer arriving after sees Err()!=nil and bails.
+	// 读写: core (runHistoryTask), lifecycle (loadResumeHistoryOnSpawn), cleanup (Shutdown cancel)
+	historyWgMu sync.Mutex
 
 	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
 	// abort promptly instead of blocking the drain on slow filesystems.
@@ -1639,10 +1650,15 @@ func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {
 	// returned"). Checking Err() first means Add(1) only ever happens when we
 	// are certainly spawning, so the counter never transiently rises after a
 	// cancel.
+	// R202606b-GO-001 (#2186): the Err() check and the Add(1) must be one
+	// critical section vs Shutdown's historyCancel(); see historyWgMu godoc.
+	r.historyWgMu.Lock()
 	if r.historyCtx.Err() != nil {
+		r.historyWgMu.Unlock()
 		return false
 	}
 	r.historyWg.Add(1)
+	r.historyWgMu.Unlock()
 	go func() {
 		defer r.historyWg.Done()
 		fn(r.historyCtx)

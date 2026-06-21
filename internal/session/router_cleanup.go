@@ -844,8 +844,17 @@ func (r *Router) shutdown() {
 	// behind slow filesystem reads. The bounded Wait below provides a hard
 	// deadline on top of cancellation in case a syscall is stuck past the
 	// ctx check point.
+	// R202606b-GO-001 (#2186): take historyWgMu around the cancel so it is
+	// atomic vs the "check Err() then Add(1)" pair in runHistoryTask /
+	// loadResumeHistoryOnSpawn. Any producer that observed a live ctx under
+	// the lock has already completed its Add(1) before this cancel becomes
+	// visible, so the detached Wait() below can never race a late Add against
+	// a drained counter. Wait() stays OUTSIDE the lock to avoid blocking
+	// producers for the whole drain.
 	if r.historyCancel != nil {
+		r.historyWgMu.Lock()
 		r.historyCancel()
+		r.historyWgMu.Unlock()
 	}
 
 	// Wait for startup history-loading goroutines to finish first,
