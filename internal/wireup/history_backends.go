@@ -23,5 +23,6 @@ import (
 	// surfaces accidental double-wireup at startup rather than at
 	// runtime.
 	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
+	_ "github.com/naozhi/naozhi/internal/history/codexjsonl"
 	_ "github.com/naozhi/naozhi/internal/history/kirojsonl"
 )

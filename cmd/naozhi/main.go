@@ -222,7 +222,12 @@ func main() {
 		// CLI's per-session jsonl after naozhi restart. Default path
 		// is the kiro CLI's documented location; a config override is
 		// a follow-up sprint.
-		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
+		KiroSessionsDir: osutil.ExpandHome("~/.kiro/sessions/cli"),
+		// CodexSessionsDir feeds the codexjsonl history factory so "load
+		// earlier" pages can fall back to the codex CLI's date-bucketed
+		// rollout transcripts after a naozhi restart. Default path is the
+		// codex CLI's documented location.
+		CodexSessionsDir:  osutil.ExpandHome("~/.codex/sessions"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})

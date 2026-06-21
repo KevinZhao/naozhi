@@ -117,9 +117,10 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	}
 
 	deps := cli.HistoryWiring{
-		ClaudeDir:       r.claudeDir,
-		KiroSessionsDir: r.kiroSessionsDir,
-		EventLogDir:     r.eventLogDir,
+		ClaudeDir:        r.claudeDir,
+		KiroSessionsDir:  r.kiroSessionsDir,
+		CodexSessionsDir: r.codexSessionsDir,
+		EventLogDir:      r.eventLogDir,
 	}
 
 	// Wrapper.NewHistorySource is nil-safe and never returns nil; the
