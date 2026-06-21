@@ -6,21 +6,24 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// TestResolveAgent_ParityWithSession pins R250531-ARCH-02 (#1506).
+// TestResolveAgent_ParityWithSession pins R250531-ARCH-02 (#1506),
+// R202606b-ARCH-5 (#2194).
 //
-// cron.resolveAgent is a deliberate verbatim fork of session.ResolveAgent so
-// that the cron package keeps zero production import edge onto internal/session
-// (see agent_resolve.go godoc). The risk that motivated the fork is that the
-// two copies silently drift: a semantic change in session.ResolveAgent (new
-// prefix form, unicode-space trimming, different case-folding, ...) would make
-// a `/agent` prefix route one way over the IM/dispatch path and another way
-// when the same text is stored as a cron job — with zero CI signal.
+// History: cron.resolveAgent used to be a verbatim FORK of
+// session.ResolveAgent, kept in sync only by the enumerated table below — a
+// drift hazard (a new prefix form added to one copy and not the other would
+// route a `/agent` prefix one way over IM/dispatch and another when the same
+// text is stored as a cron job, with zero CI signal). #2194 removed the fork:
+// both functions now delegate to the single source of truth in
+// internal/agentroute (a leaf package importing only "strings"), so divergence
+// is structurally impossible while the cron package still carries zero
+// production import edge onto internal/session.
 //
-// This test closes that gap WITHOUT re-introducing a production import: a
-// _test.go importing internal/session does not appear in the cron package's
-// production dependency graph (other cron test files already import session),
-// so the fork stays intact while the parity is enforced. If either copy
-// changes semantics, this test fails and forces both copies to be reconciled.
+// This test is retained as a belt-and-suspenders regression net: it still
+// imports session only as a _test dependency (absent from cron's production
+// dependency graph), and now asserts the two delegating wrappers stay
+// observably equivalent — catching any future re-fork or a wrapper that
+// accidentally stops delegating.
 func TestResolveAgent_ParityWithSession(t *testing.T) {
 	t.Parallel()
 
