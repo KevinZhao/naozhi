@@ -81,3 +81,13 @@ func (r platformReplier) Reply(ctx context.Context, chatID, text string) (string
 		Text:   text,
 	}, limits.PlatformReplyMaxAttempts)
 }
+
+// UsesSingleUseReplyToken delegates to platform.UsesSingleUseReplyToken so the
+// single-use-token bit (e.g. WeChat iLink) flows through this wireup seam into
+// cron's notifyTarget without cron importing internal/platform. #2181 — the
+// cron companion to dispatch's #2136: cron collapses a long notify result into
+// one truncated message for these platforms instead of fanning into N chunks
+// (chunks 2..N would be silently lost once the first send consumes the token).
+func (r platformReplier) UsesSingleUseReplyToken() bool {
+	return platform.UsesSingleUseReplyToken(r.p)
+}
