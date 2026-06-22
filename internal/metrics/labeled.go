@@ -152,6 +152,14 @@ func labelKey(labels []string) string {
 	if len(labels) == 0 {
 		return LabelEmpty
 	}
+	// Fast path: a single label needs no join, so skip the pooled builder.
+	// clipLabelSegment caps each segment at maxLabelSegmentLen (64) which is
+	// below maxLabelKeyLen (256), so the joined-budget overflow check is
+	// unreachable for a single segment — this path is alloc-free and exactly
+	// equivalent to the loop below.
+	if len(labels) == 1 {
+		return clipLabelSegment(labels[0])
+	}
 	b := keyBuilderPool.Get().(*strings.Builder)
 	b.Reset()
 	defer keyBuilderPool.Put(b)
