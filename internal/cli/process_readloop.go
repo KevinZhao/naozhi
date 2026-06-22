@@ -189,6 +189,17 @@ func (p *Process) readLoop() {
 			if cb != nil {
 				cb()
 			}
+			// R202606f-GO-008: unblock any SendPassthrough callers parked on
+			// their slot.resultCh/errCh. The normal transitionToDead path
+			// calls discardAllPending after onTurnDone; the panic recover
+			// previously did not, so a panic left passthrough callers blocked
+			// until the totalTimeout+30s bail timer (~5.5min) fired. Plain
+			// Send callers are unblocked by the deferred close(eventCh), but
+			// passthrough does not consume eventCh, so they need this explicit
+			// discard. discardAllPending is idempotent (it nils both slot
+			// slices), so a later transitionToDead — which never runs after a
+			// panic here, but is safe regardless — is a no-op second call.
+			p.discardAllPending(ErrProcessExited)
 		}
 	}()
 
