@@ -2185,10 +2185,19 @@ function sessionRunStatLabel(ms) {
 function sessionRunsStatsHtml(stats) {
   if (!stats || !stats.count) return '';
   const parts = [];
+  // 头部总览只显示「总计」三项——一共多少轮、总耗时、总花费——回答用户首屏
+  // 关心的"这个会话累计跑了多少"。逐条 run 的耗时/成本/首字节延迟等明细
+  // 保留在下方折叠的「运行记录」面板里（sessionRunRowHtml），保持头部简洁。
   // 对话的单位是「轮」(round)：一次 run = 一轮对话往返。
-  parts.push('<span class="srp-stat">' + esc(stats.count + ' 轮') + '</span>');
-  parts.push('<span class="srp-stat">均 ' + esc(sessionRunStatLabel(stats.avg_ms || 0)) + '</span>');
-  parts.push('<span class="srp-stat">最长 ' + esc(sessionRunStatLabel(stats.max_ms || 0)) + '</span>');
+  parts.push('<span class="srp-stat" title="累计运行轮次">' + esc(stats.count + ' 轮') + '</span>');
+  parts.push('<span class="srp-stat" title="累计耗时">共 ' + esc(sessionRunStatLabel(stats.total_ms || 0)) + '</span>');
+  // 总花费：仅当有成本数据时显示（本机 claude run 通常带 cost_usd；某些
+  // backend / 旧记录可能为 0）。formatCostUSD 对 <$0.01 保留 4 位小数，返回 ''
+  // 时整条不渲染，避免出现无意义的"花费 $0.00"。
+  const costStr = (typeof formatCostUSD === 'function') ? formatCostUSD(stats.total_cost_usd || 0) : '';
+  if (costStr) {
+    parts.push('<span class="srp-stat" title="累计花费">花费 ' + esc(costStr) + '</span>');
+  }
   if (stats.timeout_count > 0) {
     parts.push('<span class="srp-stat bad" title="超时次数">⚠ ' + esc(String(stats.timeout_count)) + '</span>');
   }

@@ -2,6 +2,7 @@ package runhistory
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -245,10 +246,10 @@ func TestStore_ConcurrentAppend(t *testing.T) {
 
 func TestComputeStats(t *testing.T) {
 	runs := []SessionRun{
-		{DurationMS: 100, Outcome: OutcomeCompleted},
-		{DurationMS: 200, Outcome: OutcomeCompleted},
-		{DurationMS: 300, Outcome: OutcomeError},
-		{DurationMS: 400, Outcome: OutcomeTimeout},
+		{DurationMS: 100, Outcome: OutcomeCompleted, CostUSD: 0.01},
+		{DurationMS: 200, Outcome: OutcomeCompleted, CostUSD: 0.02},
+		{DurationMS: 300, Outcome: OutcomeError, CostUSD: 0.03},
+		{DurationMS: 400, Outcome: OutcomeTimeout}, // no cost reported
 	}
 	st := ComputeStats(runs)
 	if st.Count != 4 || st.TotalMS != 1000 || st.AvgMS != 250 || st.MaxMS != 400 {
@@ -256,6 +257,11 @@ func TestComputeStats(t *testing.T) {
 	}
 	if st.CompletedCnt != 2 || st.ErrorCnt != 1 || st.TimeoutCnt != 1 {
 		t.Errorf("outcome counts wrong: %+v", st)
+	}
+	// TotalCostUSD sums CostUSD across all runs; a run without a reported
+	// cost contributes zero rather than poisoning the sum.
+	if math.Abs(st.TotalCostUSD-0.06) > 1e-9 {
+		t.Errorf("TotalCostUSD want 0.06, got %v", st.TotalCostUSD)
 	}
 	// nearest-rank: P50 of [100,200,300,400] rank=ceil(.5*4)=2 -> 200
 	if st.P50MS != 200 {
