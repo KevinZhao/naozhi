@@ -6322,6 +6322,33 @@ func TestDashboardJS_PendingSessionBackendBrand(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CodexSidebarIcon pins that cliIcon has a dedicated codex
+// branch rendering the OpenAI logomark (so a codex session is visually
+// distinct from claude/kiro in the sidebar), and that sessionTypeTag labels
+// it "Codex CLI". Mirrors the kiro ghost-icon contract (round5 e2e). Without
+// the branch a codex session falls through to the default claude logomark,
+// the exact bug the kiro icon fix (R5-1) addressed for kiro.
+func TestDashboardJS_CodexSidebarIcon(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "if (name === 'codex') return") {
+		t.Error("cliIcon missing codex branch — codex sessions would show the claude logomark")
+	}
+	// OpenAI brand green (matches profile_codex.go ChipColor) — pins the
+	// distinctive fill so the icon stays recognizable.
+	if !strings.Contains(js, `fill="#10a37f"`) {
+		t.Error("codex icon should use the OpenAI brand green #10a37f fill")
+	}
+	if !strings.Contains(js, `else if (cliName === 'codex') { label = 'Codex CLI'; }`) {
+		t.Error("sessionTypeTag missing codex → 'Codex CLI' label branch")
+	}
+}
+
 // TestDashboardJS_TableCurrencyDollarNotMathProtected pins the bugfix that
 // renderTable's `$...$` math-protect pass must NOT swallow currency tokens
 // inside a row. A pricing row like `| Pro | $20 | 1,000 | $0.04/credit |`
