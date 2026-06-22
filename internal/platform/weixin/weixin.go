@@ -419,6 +419,14 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 					token:     msg.ContextToken,
 					updatedNs: time.Now().UnixNano(),
 				})
+			} else if len(msg.ContextToken) > maxContextTokenLen {
+				// An oversized token is silently unusable: Reply needs a cached
+				// context_token, so dropping it here means this user's replies
+				// fail forever with no trace. Surface it (length only — never
+				// log the token itself) so the misbehaving relay is diagnosable.
+				slog.Warn("weixin context_token exceeds cap, dropping (replies to this user will fail)",
+					"from", osutil.SanitizeForLog(from, 128),
+					"size", len(msg.ContextToken), "cap", maxContextTokenLen)
 			}
 
 			// EventID is the global dedup key — dispatch.go shares ONE

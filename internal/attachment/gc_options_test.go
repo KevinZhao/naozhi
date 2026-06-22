@@ -48,6 +48,40 @@ func TestGCWithRefs_MaxRemoveCaps(t *testing.T) {
 	}
 }
 
+// TestGCWithRefs_NonPositiveUploadTTLNoOps covers #2226: a zero or negative
+// UploadTTL makes uploadCutoff = now (or future), so without a guard every
+// unreferenced upload — even ones uploaded moments ago — gets reaped. The
+// guard treats a non-positive TTL as "GC disabled" and deletes nothing.
+func TestGCWithRefs_NonPositiveUploadTTLNoOps(t *testing.T) {
+	for _, ttl := range []time.Duration{0, -time.Hour} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			ws := t.TempDir()
+			now := time.Now().UTC()
+			dayDir := seedReapable(t, ws, 3, now) // 3 old, unreferenced files
+
+			res, err := GCWithRefs(context.Background(), ws, GCOptions{
+				UploadTTL: ttl,
+				RefTTL:    DefaultRefTTL,
+				Now:       now,
+			})
+			if err != nil {
+				t.Fatalf("GCWithRefs: %v", err)
+			}
+			if res.Removed != 0 {
+				t.Errorf("Removed=%d, want 0 (GC disabled for non-positive UploadTTL)", res.Removed)
+			}
+			entries, rerr := os.ReadDir(dayDir)
+			if rerr != nil {
+				t.Fatalf("read day dir: %v", rerr)
+			}
+			// 3 payloads + 3 .meta sidecars must all survive.
+			if len(entries) != 6 {
+				t.Errorf("day dir has %d entries, want 6 (all files retained)", len(entries))
+			}
+		})
+	}
+}
+
 // TestGCWithRefs_DryRunBuckets: dry-run deletes nothing but reports
 // WouldRemove bucketed by reason (RFC §6 E4).
 func TestGCWithRefs_DryRunBuckets(t *testing.T) {
