@@ -157,13 +157,6 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// million-entry directory is never fully materialised. The +1 lets us
 	// detect (and flag) truncation without reading the whole dir.
 	dirents, rderr := f.ReadDir(maxListEntries + 1)
-	if rderr != nil && !errors.Is(rderr, io.EOF) && !errors.Is(rderr, fs.ErrNotExist) {
-		// ReadDir(n>0) returns io.EOF once fewer than n entries remain — and on
-		// the FIRST call for an empty directory — so io.EOF is the normal
-		// terminal signal, not a failure. Only a non-EOF error is genuine IO.
-		slog.Warn("project files/list: readdir IO failure", "err", rderr, "project", project)
-	}
-
 	// truncated reflects the RAW child count (pre-filter): the directory held
 	// more than maxListEntries entries, so this listing may be incomplete. It
 	// is intentionally NOT the count of visible entries — computing that would
@@ -173,6 +166,16 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	// even when truncated is true; the flag means "narrow down to see the
 	// rest", not "exactly maxListEntries shown".
 	truncated := false
+	if rderr != nil && !errors.Is(rderr, io.EOF) && !errors.Is(rderr, fs.ErrNotExist) {
+		// ReadDir(n>0) returns io.EOF once fewer than n entries remain — and on
+		// the FIRST call for an empty directory — so io.EOF is the normal
+		// terminal signal, not a failure. Only a non-EOF error is genuine IO
+		// (e.g. an interrupted NFS read): we keep the entries read so far but
+		// flag the listing as possibly incomplete, so the client never mistakes
+		// a partially-read directory for a complete (or empty) one.
+		slog.Warn("project files/list: readdir IO failure", "err", rderr, "project", project)
+		truncated = true
+	}
 	if len(dirents) > maxListEntries {
 		dirents = dirents[:maxListEntries]
 		truncated = true
