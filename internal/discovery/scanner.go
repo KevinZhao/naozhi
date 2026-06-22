@@ -727,9 +727,13 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 	// If the tail scan found no text prompt and we skipped earlier content,
 	// re-scan from the beginning. This handles sessions where the only user
 	// text prompt is near the start and the tail is all tool_result messages.
+	// Cap the fallback read at tailSize too (#2227): without a limit a 10MB
+	// JSONL whose tail is all tool_result lines would be read in full on every
+	// preview refresh. The opening prompt lives near the start, so the first
+	// tailSize bytes carry the same coverage the tail window gives at the end.
 	if lastPrompt == "" && offset > 0 {
 		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			lastPrompt = scanUserPrompt(f)
+			lastPrompt = scanUserPrompt(io.LimitReader(f, tailSize))
 		}
 	}
 
@@ -739,9 +743,9 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 // scanUserPrompt scans lines from the current file position and returns
 // the last user message that contains actual text (not tool_result, and
 // not one of Claude Code's system-injected XML frames).
-func scanUserPrompt(f *os.File) string {
+func scanUserPrompt(r io.Reader) string {
 	var lastPrompt string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	bufPtr := scanUserPromptBufPool.Get().(*[]byte)
 	// bufio.Scanner may grow the provided slice; reset to zero length on
 	// return and rely on Scanner's internal growth not modifying capacity
