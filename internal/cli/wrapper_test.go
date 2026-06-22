@@ -43,6 +43,108 @@ func TestCandidatePaths_Kiro(t *testing.T) {
 	}
 }
 
+// NOT t.Parallel() — mutates process-global env (NVM_BIN etc).
+func TestNpmGlobalBinDirs_EnvDerived(t *testing.T) {
+	// Snapshot + clear the env vars npmGlobalBinDirs reads so the host's real
+	// toolchain doesn't perturb assertions; restore on cleanup.
+	for _, k := range []string{"NVM_BIN", "NPM_CONFIG_PREFIX", "N_PREFIX", "VOLTA_HOME"} {
+		old, had := os.LookupEnv(k)
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv(k, old)
+			} else {
+				_ = os.Unsetenv(k)
+			}
+		})
+		_ = os.Unsetenv(k)
+	}
+
+	t.Setenv("NVM_BIN", "/x/nvm/versions/node/v22.0.0/bin")
+	t.Setenv("NPM_CONFIG_PREFIX", "/x/npmprefix")
+	t.Setenv("VOLTA_HOME", "/x/volta")
+
+	dirs := npmGlobalBinDirs("/home/tester")
+	want := map[string]bool{
+		"/x/nvm/versions/node/v22.0.0/bin": false, // NVM_BIN verbatim
+		"/x/npmprefix/bin":                 false, // NPM_CONFIG_PREFIX + /bin
+		"/x/volta/bin":                     false, // VOLTA_HOME + /bin
+		"/home/tester/.npm-global/bin":     false, // static user prefix
+	}
+	for _, d := range dirs {
+		if _, ok := want[d]; ok {
+			want[d] = true
+		}
+	}
+	for d, found := range want {
+		if !found {
+			t.Errorf("npmGlobalBinDirs missing expected dir %q; got %v", d, dirs)
+		}
+	}
+	// NVM_BIN must come before static fallbacks (env is more specific).
+	if len(dirs) == 0 || dirs[0] != "/x/nvm/versions/node/v22.0.0/bin" {
+		t.Errorf("env-derived NVM_BIN should rank first; got %v", dirs)
+	}
+}
+
+// NOT t.Parallel() — mutates process-global env.
+func TestNpmGlobalBinDirs_Dedup(t *testing.T) {
+	for _, k := range []string{"NVM_BIN", "NPM_CONFIG_PREFIX", "N_PREFIX", "VOLTA_HOME"} {
+		old, had := os.LookupEnv(k)
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv(k, old)
+			} else {
+				_ = os.Unsetenv(k)
+			}
+		})
+		_ = os.Unsetenv(k)
+	}
+	// NVM_BIN equal to the ~/.npm-global/bin static entry → must appear once.
+	t.Setenv("NVM_BIN", "/home/tester/.npm-global/bin")
+	dirs := npmGlobalBinDirs("/home/tester")
+	count := 0
+	for _, d := range dirs {
+		if d == "/home/tester/.npm-global/bin" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("duplicate dir not deduped: appeared %d times in %v", count, dirs)
+	}
+}
+
+// TestCandidatePaths_CodexIncludesNpmGlobal pins that an npm-global backend
+// name composes against the npm-global bin dirs so codex detection no longer
+// depends solely on the service $PATH.
+func TestCandidatePaths_CodexIncludesNpmGlobal(t *testing.T) {
+	old, had := os.LookupEnv("NVM_BIN")
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv("NVM_BIN", old)
+		} else {
+			_ = os.Unsetenv("NVM_BIN")
+		}
+	})
+	t.Setenv("NVM_BIN", "/x/node/bin")
+
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	paths := candidatePaths("codex")
+	want := filepath.Join("/x/node/bin", "codex"+ext)
+	found := false
+	for _, p := range paths {
+		if p == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("candidatePaths(codex) missing npm-global path %q; got %v", want, paths)
+	}
+}
+
 // NOT t.Parallel() — mutates process-global env PATH/HOME via os.Setenv.
 // Parallel siblings reading PATH (e.g., exec.LookPath) would see torn
 // state across the deferred restore window. Serial only.
