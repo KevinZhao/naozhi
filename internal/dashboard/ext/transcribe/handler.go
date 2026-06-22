@@ -31,7 +31,7 @@ const transcribeWallClockCap = 10 * time.Minute
 // Handler handles the audio transcription API endpoint.
 type Handler struct {
 	transcriber       transcribepkg.Service
-	transcribeLimiter IPLimiter    // per-IP transcribe rate limiter (5/min)
+	transcribeLimiter IPLimiter     // per-IP transcribe rate limiter (5/min)
 	sem               chan struct{} // concurrency limiter (capacity TranscribeSemCap)
 }
 
@@ -182,15 +182,30 @@ type Deps struct {
 	SemCap      int
 }
 
+// denyAllLimiter rejects every request. #2235: it is substituted when New
+// is wired without a Limiter so a misconfiguration fails closed (per-IP rate
+// limiting silently disabled) rather than open. Production always injects a
+// real limiter (build_handlers.go buildTranscribeHandler), so this never
+// fires there.
+type denyAllLimiter struct{}
+
+func (denyAllLimiter) Allow(string) bool               { return false }
+func (denyAllLimiter) AllowRequest(*http.Request) bool { return false }
+
 // New constructs a Handler from injected deps.
 func New(d Deps) *Handler {
 	var sem chan struct{}
 	if d.SemCap > 0 {
 		sem = make(chan struct{}, d.SemCap)
 	}
+	limiter := d.Limiter
+	if limiter == nil {
+		// Fail closed: a missing limiter must not disable per-IP throttling.
+		limiter = denyAllLimiter{}
+	}
 	return &Handler{
 		transcriber:       d.Transcriber,
-		transcribeLimiter: d.Limiter,
+		transcribeLimiter: limiter,
 		sem:               sem,
 	}
 }

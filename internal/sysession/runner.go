@@ -425,8 +425,16 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// stderr pump). On the discard path we already swallow overflow
 	// without an error; do the same on writer error so the pump treats
 	// the chunk as fully accepted and keeps draining.
-	if err != nil {
+	//
+	// #2253: we still MUST NOT propagate err (the pump-safety invariant is
+	// load-bearing — see the type godoc), but a fully silent swallow gave an
+	// ENOSPC / dead-sink zero observability. Emit a one-shot Warn on the
+	// failed-transition so the dropped output is at least diagnosable in the
+	// logs; subsequent chunks short-circuit above without re-logging.
+	if err != nil && !lw.failed {
 		lw.failed = true
+		slog.Warn("sysession: limitedWriter inner sink failed; discarding remaining output",
+			"written", lw.n, "err", osutil.SanitizeForLog(err.Error(), 256))
 	}
 	return len(p), nil
 }

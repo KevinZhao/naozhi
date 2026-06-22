@@ -3,6 +3,7 @@ package sysession
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,6 +184,46 @@ func TestLimitedWriter_StopsCallingFailedInnerWriter(t *testing.T) {
 	}
 	if fw.calls != 1 {
 		t.Errorf("inner writer was called %d times after first failure; want exactly 1", fw.calls)
+	}
+}
+
+// countingHandler counts slog records whose message contains substr.
+type countingHandler struct {
+	substr string
+	count  int
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, h.substr) {
+		h.count++
+	}
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestLimitedWriter_LogsInnerFailureOnce pins #2253: a silent swallow of the
+// inner sink error gave ENOSPC / dead-sink zero observability. The
+// failed-transition must emit exactly one Warn (subsequent chunks
+// short-circuit without re-logging), while Write still returns (len(p), nil)
+// so exec.Cmd's pump keeps draining.
+func TestLimitedWriter_LogsInnerFailureOnce(t *testing.T) {
+	prev := slog.Default()
+	h := &countingHandler{substr: "limitedWriter inner sink failed"}
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	lw := &limitedWriter{w: &failingWriter{}, max: 1024}
+	for i := 0; i < 4; i++ {
+		chunk := []byte("line\n")
+		n, err := lw.Write(chunk)
+		if n != len(chunk) || err != nil {
+			t.Fatalf("Write %d = (%d, %v), want (%d, nil)", i, n, err, len(chunk))
+		}
+	}
+	if h.count != 1 {
+		t.Errorf("inner failure logged %d times, want exactly 1", h.count)
 	}
 }
 

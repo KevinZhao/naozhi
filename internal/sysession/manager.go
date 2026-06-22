@@ -660,8 +660,12 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 			isPanic = true
 			tickErr = fmt.Errorf("sysession: daemon %q panicked: %v",
 				rec.daemon.Name(), r)
+			// The recover value can echo arbitrary daemon state (e.g. a
+			// panic carrying conversation text); scrub it before logging so
+			// the same SanitizeForLog policy as env.go/runner.go applies.
 			slog.Error("sysession: daemon panic",
-				"daemon", rec.daemon.Name(), "recover", r)
+				"daemon", rec.daemon.Name(),
+				"recover", osutil.SanitizeForLog(fmt.Sprintf("%v", r), 256))
 		}
 		// inflight reset MUST happen after recover so a panicking Tick
 		// can't permanently jam the CAS gate.  The single combined
