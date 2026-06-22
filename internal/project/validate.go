@@ -65,6 +65,14 @@ const MaxPlannerPromptBytes = 8 * 1024
 // maxPlannerModelBytes is the hard cap on PlannerModel length.
 const maxPlannerModelBytes = 256
 
+// maxGitRemoteBytes / maxMemoryFileBytes cap the GitRemote URL and MemoryFile
+// path. A git remote URL (https / ssh) and a memory-file path under a project
+// are both comfortably under 2 KiB; the cap stops a crafted config from
+// stuffing multi-KB strings into the in-memory project map and any future
+// exec/file-open consumer's argv. R234-SEC.
+const maxGitRemoteBytes = 2048
+const maxMemoryFileBytes = 2048
+
 // plannerModelRe restricts the model identifier to safe characters so a
 // crafted value cannot sneak extra CLI flags (e.g. " --dangerously-skip-permissions")
 // into the exec.Command argv for the planner CLI. Whitespace, dashes at the
@@ -135,20 +143,25 @@ func ValidateConfig(cfg ProjectConfig) error {
 			return fmt.Errorf("%w: emoji contains invalid characters", ErrInvalidConfig)
 		}
 	}
+	// R234-SEC: GitRemote / MemoryFile are attacker-influenced strings that
+	// reach ValidateConfig via untrusted ingress (dashboard PUT + reverse-RPC
+	// update_config) and are persisted to project.yaml. They are slated to feed
+	// exec (git remote) and file-open (memory file) paths, so reject NUL, C0
+	// controls, DEL, and the C1/bidi/LS-PS class IsLogInjectionRune covers, and
+	// cap byte length — mirroring the PlannerPrompt policy above so no ingress
+	// can stage an argv-truncation, NDJSON-framing, or log-injection payload.
+	if err := validateOpaqueField("git_remote", cfg.GitRemote, maxGitRemoteBytes); err != nil {
+		return err
+	}
+	if err := validateOpaqueField("memory_file", cfg.MemoryFile, maxMemoryFileBytes); err != nil {
+		return err
+	}
 	// R184-SEC-M1: reject ChatBindings fields that would break the
 	// bindingIndex key invariant "platform:chatType:chatID". A colon in any
 	// component would collide with an entirely different (platform,chatType,
 	// chatID) triple and silently reroute messages; a NUL byte truncates
 	// argv/YAML parsers unpredictably. Size caps prevent an attacker-crafted
 	// config from stuffing multi-KB strings into the in-memory index.
-	// NOTE: ProjectConfig fields Favorite, GitSync, GitRemote, and
-	// MemoryFile currently have no validator. Favorite/GitSync are bools
-	// (no injection surface). GitRemote and MemoryFile are strings with
-	// no downstream consumers today, so path-traversal / argv-injection
-	// concerns do not yet apply — but the moment a caller wires either
-	// to exec or file-open, extend ValidateConfig to cap byte length +
-	// reject C0/C1/bidi/LS-PS via IsLogInjectionRune, mirroring the
-	// PlannerPrompt policy above.
 	for i, b := range cfg.ChatBindings {
 		// R185-SEC-M2: empty required fields pollute bindingIndex with
 		// nonsense keys like ":group:oc_xxx" or "feishu:group:" that can
@@ -158,6 +171,34 @@ func ValidateConfig(cfg ProjectConfig) error {
 		}
 		if err := validateBindingField(b.Platform, b.ChatType, b.ChatID); err != nil {
 			return fmt.Errorf("%w: chat_bindings[%d]: %s", ErrInvalidConfig, i, err.Error())
+		}
+	}
+	return nil
+}
+
+// validateOpaqueField caps a free-form string config field at maxBytes and
+// rejects NUL, C0 controls, DEL, and the C1/bidi/LS-PS class — the same
+// content policy ValidateConfig applies to PlannerPrompt. Used for GitRemote /
+// MemoryFile, which carry no further structural invariant (a URL or path may
+// legitimately contain ':' or '/') but still must not smuggle control bytes
+// into a future exec argv, NDJSON frame, or slog attr. Empty is allowed
+// (means "unset"). field is the YAML key name, used only for the error.
+func validateOpaqueField(field, value string, maxBytes int) error {
+	if len(value) > maxBytes {
+		return fmt.Errorf("%w: %s exceeds %d-byte limit", ErrInvalidConfig, field, maxBytes)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%w: %s is not valid utf-8", ErrInvalidConfig, field)
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == 0 || c < 0x20 || c == 0x7f {
+			return fmt.Errorf("%w: %s contains invalid control characters", ErrInvalidConfig, field)
+		}
+	}
+	for _, r := range value {
+		if osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: %s contains invalid unicode control characters", ErrInvalidConfig, field)
 		}
 	}
 	return nil
