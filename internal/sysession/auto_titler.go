@@ -751,6 +751,22 @@ func buildExcerpt(seed string) string {
 		b.WriteRune(r)
 		lineWritten += w
 	}
+	// emitMarker writes the inert excerpt-marker placeholder atomically: a
+	// marker must never be split mid-string by the per-line cap (otherwise a
+	// half-placeholder like "[EXCERPT_MARKE" leaks out and confuses the LLM).
+	// If the whole placeholder won't fit under the cap, emit a single ellipsis
+	// instead and mark the line truncated. R202606d-CR-001.
+	emitMarker := func() {
+		if lineWritten+len(excerptMarkerSafe) > autoTitlerLineCapBytes {
+			if !lineTruncated {
+				b.WriteString("…")
+				lineTruncated = true
+			}
+			return
+		}
+		b.WriteString(excerptMarkerSafe)
+		lineWritten += len(excerptMarkerSafe)
+	}
 	for i := 0; i < len(seed); {
 		// R235-GO-4 (#1004): neutralise EXCERPT delimiters in-walk. We
 		// must match BEFORE decoding a single rune so a literal marker is
@@ -760,16 +776,12 @@ func buildExcerpt(seed string) string {
 		// shrinks the output and the cap math stays conservative.
 		if strings.HasPrefix(seed[i:], excerptBeginMarker) {
 			i += len(excerptBeginMarker)
-			for _, pr := range excerptMarkerSafe {
-				writeRune(pr, utf8.RuneLen(pr))
-			}
+			emitMarker()
 			continue
 		}
 		if strings.HasPrefix(seed[i:], excerptEndMarker) {
 			i += len(excerptEndMarker)
-			for _, pr := range excerptMarkerSafe {
-				writeRune(pr, utf8.RuneLen(pr))
-			}
+			emitMarker()
 			continue
 		}
 		r, w := utf8.DecodeRuneInString(seed[i:])

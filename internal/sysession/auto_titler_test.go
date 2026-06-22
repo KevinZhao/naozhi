@@ -179,6 +179,62 @@ func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
 	}
 }
 
+// TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap pins R202606d-CR-001: the
+// inert [EXCERPT_MARKER] placeholder must be emitted atomically with respect
+// to the per-line cap. The previous shape emitted the 16-byte placeholder one
+// rune at a time via writeRune, so when lineWritten was within <16 bytes of
+// autoTitlerLineCapBytes a marker hit would leave a half-placeholder like
+// "[EXCERPT_MARKE…" in the output — an incomplete token that can confuse the
+// LLM. The output must contain EITHER the whole placeholder OR a clean
+// ellipsis, never a partial placeholder fragment.
+func TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap(t *testing.T) {
+	t.Parallel()
+
+	// assertNoPartialPlaceholder fails if any proper non-empty prefix of the
+	// placeholder (other than the full placeholder itself) appears in out.
+	assertNoPartialPlaceholder := func(t *testing.T, out string) {
+		t.Helper()
+		// Strip every full placeholder occurrence; any remaining prefix is a
+		// genuine partial leak.
+		stripped := strings.ReplaceAll(out, excerptMarkerSafe, "")
+		for n := len(excerptMarkerSafe) - 1; n >= 2; n-- {
+			frag := excerptMarkerSafe[:n] // e.g. "[EXCERPT_MARKE"
+			if strings.Contains(stripped, frag) {
+				t.Errorf("partial placeholder fragment %q leaked into output: %q", frag, out)
+				return
+			}
+		}
+	}
+
+	// Case A: pad so the marker is hit with the cap only a few bytes away.
+	// len(placeholder)=16; pad to cap-5 means 16 won't fit (507+16>512) and the
+	// emit must collapse to a single ellipsis, NOT "[EXCE…".
+	padTooTight := strings.Repeat("a", autoTitlerLineCapBytes-5)
+	gotTight := buildExcerpt(padTooTight + excerptBeginMarker + " tail")
+	assertNoPartialPlaceholder(t, gotTight)
+	if strings.Contains(gotTight, excerptBeginMarker) {
+		t.Errorf("raw BEGIN marker survived: %q", gotTight)
+	}
+
+	// Case B: pad so the whole placeholder fits exactly at the cap
+	// (lineWritten + 16 == 512). The full placeholder MUST appear.
+	padExact := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe))
+	gotExact := buildExcerpt(padExact + excerptEndMarker + " tail")
+	assertNoPartialPlaceholder(t, gotExact)
+	if !strings.Contains(gotExact, excerptMarkerSafe) {
+		t.Errorf("full placeholder should fit exactly at cap but was missing: %q", gotExact)
+	}
+
+	// Case C: marker one byte beyond the fit boundary (lineWritten + 16 == 513)
+	// must collapse to ellipsis with no fragment.
+	padOneOver := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe)+1)
+	gotOneOver := buildExcerpt(padOneOver + excerptBeginMarker + " tail")
+	assertNoPartialPlaceholder(t, gotOneOver)
+	if strings.Contains(gotOneOver, excerptBeginMarker) {
+		t.Errorf("raw BEGIN marker survived at one-over boundary: %q", gotOneOver)
+	}
+}
+
 // TestBuildExcerpt_MarkerFoldedIntoWalk pins R20260602-PERF-1 (#1578):
 // folding the delimiter neutralisation into the single rune walk (instead
 // of the prior 2×Contains + 2×ReplaceAll pre-pass) must stay

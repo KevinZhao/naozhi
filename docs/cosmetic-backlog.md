@@ -720,3 +720,11 @@
 - [R202606c-ARCH-8] wireup requiredBootSteps 缺 schedulers,scheduler 注册漏掉不被 Validate 捕获 — internal/wireup/boot.go:112
 - [R202606c-ARCH-5] attachment.Dir 是可变 package var 被 tracker 路径遍历安全守卫消费,应 const+WithDir — internal/attachment/store.go:43
 - [R202606c-CR-006] sysession renameOne 截断 title 不加省略号,clip 中途断词 — internal/sysession/auto_titler.go:685
+- [R202606d-SEC-4] HandleDirList 与 filesExistsLimiter 共享限流,深目录遍历可饿死上传 — internal/dashboard/project/dir_list.go
+- [R202606d-SEC-2] /livez /readyz K8s probe 无任何限流(设计如此,公网部署可无成本探活) — internal/server/health.go:187
+- [R202606d-SEC-3] wsDeriveUploadOwner 503 用 Retry-After:30 而兄弟 429 路径用 60,不一致 — internal/server/wshub_upgrade.go:242
+- [R202606d-ARCH-5] slack/discord botID fail-open self-heal 重复且锁原语分歧(RWMutex vs Mutex+atomic) — internal/platform/discord/discord.go:106
+- [R202606d-ARCH-6] discord/selfupdate 两份近同 SSRF dial guard 独立维护 — internal/selfupdate/selfupdate.go:436
+- [R202606d-CR-006] slack handleMessage 直接读 s.ctx 字段(write-once 安全但未快照),应顶部捕获 — internal/platform/slack/slack.go:505
+- [R202606d-ARCH-3] weixin EditMessage 静默返回 nil 伪装成功而非 unsupported 信号 — internal/platform/weixin/weixin.go:305
+- [R202606d-PERF-014] metrics labelKey 单 label 仍走 pool+String() 分配 — internal/metrics/labeled.go:151

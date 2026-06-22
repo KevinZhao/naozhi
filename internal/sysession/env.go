@@ -223,7 +223,7 @@ func filterEnv(allowlist []string) []string {
 				val := kv[idx+1:]
 				if err := validateBaseURLValue(val); err != nil {
 					slog.Warn("sysession: base-URL env var rejected (unsafe value)",
-						"key", key, "value", val, "err", err)
+						"key", key, "value", osutil.SanitizeForLog(val, 128), "err", err)
 					continue
 				}
 			}

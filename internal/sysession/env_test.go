@@ -1,9 +1,14 @@
 package sysession
 
 import (
+	"bytes"
+	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // envContains returns true iff the "KEY=value" slice has key=want.
@@ -494,5 +499,48 @@ func TestFilterEnv_BaseURLGuardNotBypassedByPrefixAllowlist(t *testing.T) {
 	got := filterEnv([]string{"ANTHROPIC_"})
 	if envHasKey(got, "ANTHROPIC_BASE_URL") {
 		t.Error("prefix allowlist must not bypass the base-URL SSRF guard")
+	}
+}
+
+// TestFilterEnv_BaseURLRejectionLogSanitized pins R202606d-SEC-7: when a
+// base-URL env var is rejected the warning log MUST sanitize the offending
+// value (via osutil.SanitizeForLog) before recording it, matching the AWS
+// profile rejection branch. A raw value could embed credentials, control
+// characters (log injection), or be arbitrarily long — none of which may
+// reach the log sink verbatim.
+func TestFilterEnv_BaseURLRejectionLogSanitized(t *testing.T) {
+	// Control characters + an over-long tail. Use an http (plaintext) scheme
+	// pointed at a non-loopback host so validateBaseURLValue rejects it and we
+	// hit the warning branch.
+	injected := "http://internal-host\r\nFORGED=evil/" + strings.Repeat("x", 400)
+	t.Setenv("ANTHROPIC_BASE_URL", injected)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	got := filterEnv(nil)
+	if envHasKey(got, "ANTHROPIC_BASE_URL") {
+		t.Fatal("rejected base-URL value must not pass through")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "base-URL env var rejected") {
+		t.Fatalf("expected rejection warning, got: %q", logged)
+	}
+	// Isolate the value= attribute (the field the fix sanitizes). The err=
+	// attribute legitimately echoes the parse error and is out of scope here.
+	wantVal := osutil.SanitizeForLog(injected, 128)
+	if !strings.Contains(logged, "value="+strconv.Quote(wantVal)) {
+		t.Errorf("value attr not sanitized via SanitizeForLog(_, 128); got log: %q\nwant value=%q", logged, wantVal)
+	}
+	// Defense-in-depth: the sanitized value must carry no raw CR/LF (the
+	// log-injection vector) and must be clipped to the 128-byte cap.
+	if strings.ContainsAny(wantVal, "\r\n") {
+		t.Errorf("sanitized value still contains raw CR/LF: %q", wantVal)
+	}
+	if len(wantVal) > 128 {
+		t.Errorf("sanitized value exceeds 128-byte cap: len=%d", len(wantVal))
 	}
 }
