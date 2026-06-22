@@ -83,9 +83,18 @@ type storeEntry struct {
 	// "manual"). See docs/rfc/auto-workspace-chain.md §4.6.
 	PrevSessionOrigins []string `json:"prev_session_origins,omitempty"`
 	TotalCost          float64  `json:"total_cost,omitempty"`
-	Workspace          string   `json:"workspace,omitempty"`
-	Backend            string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
-	LastActive         int64    `json:"last_active,omitempty"` // unix nano
+	// CostSpent is the genuine cumulative spend (sum of per-turn deltas),
+	// monotonic across resume/restart — the authoritative session total. It
+	// supersedes TotalCost (which mirrors the CLI's per-incarnation running
+	// total). LastCumulativeCost is the baseline the next per-turn delta diffs
+	// against, persisted so resume continues the delta chain correctly. Both
+	// omitempty + forward-compatible: legacy stores lack them and the restore
+	// path seeds costSpent from TotalCost. See runhistory.TurnCostDelta.
+	CostSpent          float64 `json:"cost_spent,omitempty"`
+	LastCumulativeCost float64 `json:"last_cumulative_cost,omitempty"`
+	Workspace          string  `json:"workspace,omitempty"`
+	Backend            string  `json:"backend,omitempty"`     // "claude" | "kiro" | ...
+	LastActive         int64   `json:"last_active,omitempty"` // unix nano
 	// CreatedAt anchors the session's sidebar position; written once at
 	// creation and persisted across restarts. unix nano. Pre-feature stores
 	// have CreatedAt==0, in which case the router restore copies LastActive
@@ -226,6 +235,8 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		PrevSessionIDs:     prevIDs,
 		PrevSessionOrigins: prevOrigins,
 		TotalCost:          cost,
+		CostSpent:          loadTotalCost(&s.costSpent),
+		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
 		Workspace:          s.Workspace(),
 		Backend:            s.Backend(),
 		LastActive:         s.lastActive.Load(),
@@ -244,6 +255,8 @@ func equalStoreEntry(a, b storeEntry) bool {
 	return a.Key == b.Key &&
 		a.SessionID == b.SessionID &&
 		a.TotalCost == b.TotalCost &&
+		a.CostSpent == b.CostSpent &&
+		a.LastCumulativeCost == b.LastCumulativeCost &&
 		a.Workspace == b.Workspace &&
 		a.Backend == b.Backend &&
 		a.LastActive == b.LastActive &&
