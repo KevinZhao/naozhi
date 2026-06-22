@@ -195,8 +195,25 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)
+	// costSpent is the genuine cumulative spend (sum of per-turn deltas),
+	// monotonic across resume/restart. It is the authoritative session total.
+	// Fall back to sessCost only for legacy sessions whose store predates the
+	// cost_spent field (and for the brief pre-first-turn window after a resume,
+	// where totalCost carries the inherited display value so the header doesn't
+	// flash $0.00). See runhistory.TurnCostDelta and finishRun.
+	//
+	// NOTE: float64 + omitempty cannot distinguish "legacy store (field
+	// absent)" from "post-upgrade session that has genuinely spent 0". Both
+	// map to spent==0 → fall back to sessCost. This is benign: a zero-spend
+	// session's sessCost is also ~0, so the displayed total is correct either
+	// way. The ambiguity only matters if a real spend were ever exactly 0.0,
+	// which TurnCostDelta never produces for a costed turn.
+	spent := loadTotalCost(&s.costSpent)
+	if spent <= 0 {
+		spent = sessCost
+	}
 	if proc == nil {
-		snap.TotalCost = sessCost
+		snap.TotalCost = spent
 		snap.State = "ready"
 		// #1644: a live proc reports UserTurnCount; an evicted / suspended /
 		// stub session has no proc, so fall back to the count of persisted
@@ -260,17 +277,15 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 			}
 			snap.CLIVersion = liveVersion
 		}
-		// Prefer whichever is larger: a freshly resumed process reports 0
-		// until the first `result` event arrives, but s.totalCost carries
-		// the historical cumulative value restored from sessions.json.
-		// Claude CLI's total_cost_usd under --resume is cumulative, so once
-		// the next result lands, proc.TotalCost() will be >= s.totalCost
-		// and the display won't regress.
-		if pc := proc.TotalCost(); pc > sessCost {
-			snap.TotalCost = pc
-		} else {
-			snap.TotalCost = sessCost
-		}
+		// Authoritative total is the monotonic costSpent (sum of per-turn
+		// deltas), which — unlike proc.TotalCost(), the CLI's per-incarnation
+		// running total that RESETS on resume — never regresses across a
+		// process replacement. The old max(proc.TotalCost(), sessCost) logic
+		// was wrong precisely because the CLI re-counts from ~0 after resume,
+		// so the session total would freeze at the pre-resume value until the
+		// new incarnation's running total climbed back past it. costSpent is
+		// updated in finishRun on every completed turn.
+		snap.TotalCost = spent
 		snap.Subagents = proc.TurnAgents()
 		// Prefer the EventLog-maintained summary (updated lock-free on every
 		// event) so we don't need a wrapper closure around Send just to track

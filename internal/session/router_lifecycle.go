@@ -545,9 +545,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 // validate → reserve → spawn → register sequence does not require the
 // reader to scroll through the snapshot block to find the next phase.
 // Behavior is byte-for-byte identical to the previous inline copy.
-func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, int64) {
+func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, int64) {
 	if old == nil {
-		return nil, 0, 0
+		return nil, 0, 0, 0
 	}
 	var oldPrevIDs []string
 	if len(old.prevSessionIDs) > 0 {
@@ -571,7 +571,14 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, int64) {
 	// established sidebar position. installFreshSessionLocked stamps now
 	// when this is zero (genuinely-new key).
 	oldCreatedAt := old.createdAt.Load()
-	return oldPrevIDs, oldTotalCost, oldCreatedAt
+	// costSpent is the genuine monotonic total; it MUST carry across the
+	// process replacement (a resume keeps the same logical session, so the
+	// money already spent stays spent). lastCumulativeCost is deliberately NOT
+	// carried: the new incarnation's CLI re-counts its running total from ~0,
+	// so the fresh session's baseline must start at 0 for the first
+	// post-spawn delta to be computed correctly (see TurnCostDelta).
+	oldCostSpent := loadTotalCost(&old.costSpent)
+	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt
 }
 
 // collectPreviousHistory gathers JSONL-backed history entries and the
@@ -887,7 +894,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	if old != nil {
 		oldSID = old.getSessionID()
 	}
-	oldPrevIDs, oldTotalCost, oldCreatedAt := snapshotOldSessionLocked(old)
+	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt := snapshotOldSessionLocked(old)
 	r.mu.Unlock()
 
 	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
@@ -914,7 +921,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	s := r.installFreshSessionLocked(
 		key, proc, workspace, backendID, wrapper, resumeID,
-		oldHistory, prevIDs, oldTotalCost, oldCreatedAt, opts.Exempt, oldSID,
+		oldHistory, prevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, opts.Exempt, oldSID,
 		oldUserTurns,
 	)
 	r.mu.Unlock()
@@ -975,6 +982,7 @@ func (r *Router) installFreshSessionLocked(
 	oldHistory []cli.EventEntry,
 	prevIDs []string,
 	oldTotalCost float64,
+	oldCostSpent float64,
 	oldCreatedAt int64,
 	exempt bool,
 	oldSID string,
@@ -1007,6 +1015,12 @@ func (r *Router) installFreshSessionLocked(
 		s.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
+	// Carry the genuine cumulative spend across the process replacement so the
+	// session total never regresses on resume. lastCumulativeCost stays 0 in
+	// the fresh struct on purpose: the new CLI incarnation re-counts its
+	// running total from scratch, so the first post-spawn turn's raw reading is
+	// itself the delta (TurnCostDelta).
+	storeTotalCost(&s.costSpent, oldCostSpent)
 	// Sidebar order anchor: inherit oldCreatedAt when this spawn replaces a
 	// prior incarnation (resume / ResetAndRecreate / takeover); fall back to
 	// now for genuinely-new keys via initCreatedAtIfUnset.
@@ -1594,6 +1608,12 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		fresh.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
+	// Rename keeps the SAME live process (only the key changes), so both the
+	// genuine total AND the delta baseline carry over verbatim — the CLI's
+	// running total keeps climbing in the same incarnation, so resetting the
+	// baseline here would double-count the next turn.
+	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
+	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
 	fresh.setWorkspace(old.Workspace())
 	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
 	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an
