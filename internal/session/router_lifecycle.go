@@ -322,6 +322,28 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				r.mu.Unlock()
 				return s, SessionExisting, nil
 			}
+			// #2221: the resume branch (dead session, StateSuspended
+			// mid-state) must honour the SAME spawningKeys coalesce guard
+			// the not-found path uses below. Two concurrent GetOrCreate on
+			// the same dead key would otherwise BOTH call spawnSession; the
+			// second reuses the in-flight done-channel (spawnSession prologue
+			// reused=true) and its defer would close an already-closed
+			// channel → "close of closed channel" panic. Park on the
+			// existing channel exactly like the fresh-spawn path: the winner
+			// (creator, reused=false) owns the close, and after it finishes
+			// we relock and re-evaluate — picking up its freshly-installed
+			// alive session (SessionExisting) or, on its spawn failure,
+			// resuming ourselves.
+			if ch, inflight := r.pp.spawningKeys[key]; inflight {
+				r.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, 0, ctx.Err()
+				case <-ch:
+				}
+				r.mu.Lock()
+				continue
+			}
 			slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
 			s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
 			if err != nil {
