@@ -2,8 +2,6 @@ package ccassets
 
 import (
 	"io"
-	"os"
-	"syscall"
 
 	"github.com/naozhi/naozhi/internal/assets"
 )
@@ -23,8 +21,12 @@ const maxRawBytes = 1 << 20
 // but before the read. With O_NOFOLLOW the open fails if the final component
 // is a symlink, mirroring the O_NOFOLLOW hardening in dashboard files.go
 // (R219-SEC-2) and memory handler.go (R20260606-SEC-6). [R202606d-SEC-1]
+//
+// openNoFollow is platform-specialised: the unix build uses O_NOFOLLOW for a
+// kernel-atomic refusal; the windows build (which lacks O_NOFOLLOW) falls back
+// to an Lstat→Open shim. naozhi's production target is Linux.
 func readCapped(path string, cap int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openNoFollow(path)
 	if err != nil {
 		return nil, err
 	}
