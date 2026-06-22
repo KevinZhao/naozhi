@@ -1566,18 +1566,27 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 // a single-use-token platform must be truncated to fit one message. #2136.
 const singleReplyTruncMarker = "\n…(truncated)"
 
+// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
+// computed once at init rather than on every truncateForSingleReply call
+// (the marker is a compile-time constant). R202606e-PERF-003.
+var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
+
 // truncateForSingleReply trims text to at most maxRunes runes, reserving room
 // for a visible truncation marker so the user knows the reply was cut. When
 // maxRunes is too small to fit the marker, it falls back to a bare rune-safe
 // truncation (content kept maximal, marker dropped).
+//
+// R202606e-PERF-001: uses textutil.TruncateRunesNoEllipsis, which walks at most
+// the truncation point and returns a zero-alloc sub-slice of the original
+// string, rather than materialising the whole reply as a []rune (cost ∝ total
+// length, not the kept prefix).
 func truncateForSingleReply(text string, maxRunes int) string {
-	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
-	keep := maxRunes - markerRunes
+	keep := maxRunes - singleReplyTruncMarkerRunes
 	if keep <= 0 {
 		// No room for the marker — keep as much content as fits.
-		return string([]rune(text)[:maxRunes])
+		return textutil.TruncateRunesNoEllipsis(text, maxRunes)
 	}
-	return string([]rune(text)[:keep]) + singleReplyTruncMarker
+	return textutil.TruncateRunesNoEllipsis(text, keep) + singleReplyTruncMarker
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
