@@ -1045,6 +1045,17 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 		runStore:           r.sessionRuns,
 	}
 	storeTotalCost(&s.totalCost, entry.TotalCost)
+	// Restore the genuine cumulative spend and the delta baseline. Legacy
+	// stores (predating cost_spent) seed costSpent from TotalCost so the
+	// upgraded binary keeps showing the established total; lastCumulativeCost
+	// stays 0 there, which is safe — the first post-upgrade turn's raw CLI
+	// cumulative is treated as a fresh delta against 0 (see TurnCostDelta).
+	if entry.CostSpent > 0 {
+		storeTotalCost(&s.costSpent, entry.CostSpent)
+	} else {
+		storeTotalCost(&s.costSpent, entry.TotalCost)
+	}
+	storeTotalCost(&s.lastCumulativeCost, entry.LastCumulativeCost)
 	s.setWorkspace(entry.Workspace)
 	s.SetBackend(restoreBackendID)
 	s.SetCLIName(cliName)

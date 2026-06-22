@@ -20,6 +20,8 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	src.setLabelOrigin("auto")
 	src.SetModel("claude-opus-4.7")
 	storeTotalCost(&src.totalCost, 3.50)
+	storeTotalCost(&src.costSpent, 4.25)
+	storeTotalCost(&src.lastCumulativeCost, 2.10)
 	src.lastActive.Store(1_700_000_000_000_000_000)
 	src.createdAt.Store(1_600_000_000_000_000_000)
 	src.historyMu.Lock()
@@ -62,6 +64,12 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	if c := loadTotalCost(&got.totalCost); c != 3.50 {
 		t.Errorf("totalCost = %v, want 3.50", c)
 	}
+	if c := loadTotalCost(&got.costSpent); c != 4.25 {
+		t.Errorf("costSpent = %v, want 4.25", c)
+	}
+	if c := loadTotalCost(&got.lastCumulativeCost); c != 2.10 {
+		t.Errorf("lastCumulativeCost = %v, want 2.10", c)
+	}
 	if got.lastActive.Load() != 1_700_000_000_000_000_000 {
 		t.Errorf("lastActive = %d, want 1700000000000000000", got.lastActive.Load())
 	}
@@ -71,6 +79,37 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	chain := got.SnapshotPrevSessionIDs()
 	if len(chain) != 2 || chain[0] != "old-1" || chain[1] != "old-2" {
 		t.Errorf("prevSessionIDs = %v, want [old-1 old-2]", chain)
+	}
+}
+
+// TestRestoreSessionFromEntry_CostSpentLegacyFallback pins the migration path:
+// a store written before the cost_spent field (CostSpent==0 but a non-zero
+// legacy TotalCost) must seed costSpent from TotalCost so the upgraded binary
+// keeps showing the established session total instead of $0.00.
+func TestRestoreSessionFromEntry_CostSpentLegacyFallback(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+
+	key := "feishu:direct:carol:general"
+	src := newSessionWithID(key, "sess-333")
+	storeTotalCost(&src.totalCost, 9.99)
+	// costSpent deliberately left at zero (pre-feature store shape).
+
+	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+		t.Fatalf("saveStore: %v", err)
+	}
+
+	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})
+	t.Cleanup(func() { r.Shutdown() })
+
+	r.mu.RLock()
+	got := r.ss.sessions[key]
+	r.mu.RUnlock()
+	if got == nil {
+		t.Fatal("session not restored")
+	}
+	if c := loadTotalCost(&got.costSpent); c != 9.99 {
+		t.Errorf("legacy costSpent fallback = %v, want 9.99 (seeded from totalCost)", c)
 	}
 }
 

@@ -22,6 +22,8 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	s.SetCLIVersion("2.0.0")
 	s.SetUserLabel("")
 	storeTotalCost(&s.totalCost, 1.42)
+	storeTotalCost(&s.costSpent, 1.42)
+	storeTotalCost(&s.lastCumulativeCost, 1.42)
 	s.lastActive.Store(time.Now().UnixNano())
 
 	r.mu.Lock()
@@ -48,6 +50,15 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	}
 	if gotCost := loadTotalCost(&got.totalCost); gotCost != 1.42 {
 		t.Errorf("totalCost not preserved: %v", gotCost)
+	}
+	// Rename keeps the SAME live process, so both the genuine total and the
+	// delta baseline must carry over verbatim (resetting the baseline would
+	// double-count the next turn).
+	if c := loadTotalCost(&got.costSpent); c != 1.42 {
+		t.Errorf("costSpent not preserved: %v", c)
+	}
+	if c := loadTotalCost(&got.lastCumulativeCost); c != 1.42 {
+		t.Errorf("lastCumulativeCost not preserved: %v", c)
 	}
 	if got.Backend() != "claude" {
 		t.Errorf("backend not preserved: %q", got.Backend())

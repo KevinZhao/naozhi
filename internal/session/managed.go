@@ -397,6 +397,12 @@ type ManagedSession struct {
 	process   atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
 	sendMu    sync.Mutex                 // serializes messages to the same session
 	historyMu sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
+	// costMu serializes the read-modify-write of costSpent/lastCumulativeCost
+	// in finishRun. finishRun runs OUTSIDE sendMu on both paths (Send releases
+	// sendMu before returning, and the passthrough path is lock-free), so this
+	// dedicated mutex is the only serializer for the per-turn delta
+	// accumulation and is required for race-freedom.
+	costMu sync.Mutex
 	// sendCancel holds the in-flight Send()'s cancel func bound to the process
 	// it targets (see cancelBox). Bound so Interrupt() can skip a cancel whose
 	// process has been replaced by a concurrent spawnSession (SM3 / #381).
@@ -463,6 +469,21 @@ type ManagedSession struct {
 	// Read/write via loadTotalCost/storeTotalCost to avoid spreading the
 	// math.Float64bits incantation across call sites.
 	totalCost atomic.Uint64
+
+	// costSpent is the genuine cumulative spend of this session, accumulated
+	// as a sum of per-turn deltas (see runhistory.TurnCostDelta). Unlike
+	// totalCost — which mirrors the CLI's per-incarnation running total and
+	// RESETS on every resume/restart — costSpent is monotonic across process
+	// replacements, so it is the authoritative value for the dashboard's
+	// session-total cost. lastCumulativeCost is the baseline (the previous
+	// turn's raw CLI cumulative reading) the next delta diffs against.
+	//
+	// Both are atomic.Uint64-packed float64 (loadTotalCost/storeTotalCost
+	// convention) and written only from finishRun, which already runs once
+	// per completed turn. Carried across spawnSession and restored from the
+	// store the same way totalCost is.
+	costSpent          atomic.Uint64
+	lastCumulativeCost atomic.Uint64
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
