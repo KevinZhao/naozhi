@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // autoTitlerSystemPrompt is the English system instruction prefixed to
@@ -713,9 +714,13 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	// still yields a usable, recognizable label — strictly better than
 	// leaving the session untitled. TrimSpace after the slice so a cut
 	// that lands right after a space doesn't publish a trailing blank.
-	if utf8.RuneCountInString(title) > autoTitlerMaxTitleRunes {
-		title = strings.TrimSpace(string([]rune(title)[:autoTitlerMaxTitleRunes]))
-	}
+	// Single-pass rune truncation: TruncateRunesNoEllipsis streams once over
+	// the bytes and returns s[:byteOffset] with no intermediate []rune
+	// allocation, replacing the prior RuneCountInString + string([]rune(..)[:N])
+	// double O(n) scan + rune-slice heap alloc [R202606e-PERF-004]. TrimSpace
+	// after the slice so a cut landing right after a space doesn't publish a
+	// trailing blank.
+	title = strings.TrimSpace(textutil.TruncateRunesNoEllipsis(title, autoTitlerMaxTitleRunes))
 	if !a.router.SetUserLabelWithOrigin(key, title, "auto") {
 		// Race-window close fired:  user changed origin to "user" while
 		// our LLM call was in flight.  Not an error per se — the daemon
