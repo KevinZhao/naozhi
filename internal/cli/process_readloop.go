@@ -47,11 +47,15 @@ type shimMsg struct {
 	Signal string      `json:"signal,omitempty"`
 }
 
-// shimMsgCode wraps an int so json.Unmarshal can distinguish absent
+// shimMsgCode wraps an int64 so json.Unmarshal can distinguish absent
 // from explicit zero without allocating *int. Decode-only; never
 // emitted from naozhi side. R222-PERF-13.
+//
+// R202606f-GO-001: Value is int64 (not int) so a large exit code does not
+// silently wrap on a 32-bit build — int is 32-bit there and parseJSONInt64Bytes
+// already produces a full int64, so the previous int(v) narrowing truncated.
 type shimMsgCode struct {
-	Value   int
+	Value   int64
 	Present bool
 }
 
@@ -73,7 +77,7 @@ func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	c.Value = int(v)
+	c.Value = v
 	return nil
 }
 
@@ -482,7 +486,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 // pinging into a dead fd. The caller (handleShimMessage) returns
 // shimDispatchReturn so readLoop unwinds. R214-CODE-3.
 func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
-	code := 0
+	var code int64
 	if msg.Code.Present {
 		code = msg.Code.Value
 	}
@@ -494,7 +498,7 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	// dashboards, so the cold-path savings are trivial but the
 	// replacement is zero-risk.
 	if code != 0 {
-		reason = DeathReasonCLIExited + "_code_" + strconv.Itoa(code)
+		reason = DeathReasonCLIExited + "_code_" + strconv.FormatInt(code, 10)
 	} else if msg.Signal != "" {
 		// R183-SEC-H1: msg.Signal is the Signal field of the shim's
 		// cli_exited JSON frame. Normal shim builds emit canonical
