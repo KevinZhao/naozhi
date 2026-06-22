@@ -48,23 +48,43 @@ func TestInjectHistory_ForwardCopyOutsideLock(t *testing.T) {
 		}
 	}()
 
-	// Give the reader a moment to spin up.
-	time.Sleep(5 * time.Millisecond)
-	startIters := readerIters.Load()
+	// Wait until the reader has actually been scheduled at least once so the
+	// baseline is meaningful even on a busy CI box (a fixed sleep can elapse
+	// before the goroutine first runs).
+	startIters := waitForReaderProgress(t, &readerIters, 0)
 
 	s.InjectHistory(entries)
 
-	// Sample reader progress just after InjectHistory returns. The reader
-	// goroutine doesn't block on InjectHistory's lock-held phase under
-	// the optimisation, so its iteration count should advance.
-	time.Sleep(2 * time.Millisecond)
+	// The reader doesn't block on InjectHistory's lock-held phase under the
+	// optimisation, so it must make further progress after the call returns.
+	// Poll with a generous timeout instead of sampling a fixed window: this
+	// preserves the "not stalled by the lock-held copy" assertion without
+	// assuming the reader goroutine gets scheduled within a few ms (the source
+	// of R237-PERF-6's flakiness under CI scheduling variance).
+	progress := waitForReaderProgress(t, &readerIters, startIters) - startIters
 	close(stop)
 	wg.Wait()
 
-	progress := readerIters.Load() - startIters
 	if progress < 1 {
 		t.Errorf("reader made %d iterations during/after InjectHistory; want ≥1 (lock-held copy would have stalled it)", progress)
 	}
+}
+
+// waitForReaderProgress polls counter until it exceeds baseline, returning the
+// observed value. It fails the test if the counter never advances within a
+// generous timeout — i.e. the reader is genuinely stalled (a real regression),
+// not merely slow to be scheduled.
+func waitForReaderProgress(t *testing.T, counter *atomic.Int64, baseline int64) int64 {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v := counter.Load(); v > baseline {
+			return v
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	t.Fatalf("reader made no progress past %d within timeout; appears genuinely stalled", baseline)
+	return 0
 }
 
 // TestInjectHistory_ForwardSliceIsDefensiveCopy pins the safety contract
