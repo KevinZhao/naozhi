@@ -348,6 +348,119 @@ func TestCacheManager_RefreshFor_preserveOnError(t *testing.T) {
 	}
 }
 
+// ---- Copy-on-write: getters return immutable published maps (#2230) ----
+
+// TestCacheManager_Getters_ImmutableAfterWrite asserts a map reference handed
+// out by a getter is never mutated in place by a subsequent RefreshFor /
+// PurgeNode. This is what lets the getters skip the per-call defensive copy.
+func TestCacheManager_Getters_ImmutableAfterWrite(t *testing.T) {
+	node := &stubConn{
+		nodeID:   "node-z",
+		sessions: []map[string]any{{"session_id": "first"}},
+	}
+	cm := NewCacheManager(
+		func() map[string]Conn { return map[string]Conn{"node-z": node} },
+		nil,
+	)
+	cm.RefreshFor("node-z")
+
+	// Capture the published reference.
+	sessions, status := cm.Sessions()
+	if len(sessions["node-z"]) != 1 {
+		t.Fatalf("setup: expected 1 session, got %d", len(sessions["node-z"]))
+	}
+	if status["node-z"] != "ok" {
+		t.Fatalf("setup: expected status ok, got %q", status["node-z"])
+	}
+
+	// A subsequent write must not mutate the captured snapshot.
+	node.sessions = []map[string]any{{"session_id": "second"}, {"session_id": "third"}}
+	cm.RefreshFor("node-z")
+	if len(sessions["node-z"]) != 1 {
+		t.Errorf("captured sessions map mutated in place: now %d entries", len(sessions["node-z"]))
+	}
+
+	// PurgeNode must not delete from the captured snapshot.
+	cm.PurgeNode("node-z")
+	if _, ok := sessions["node-z"]; !ok {
+		t.Error("captured sessions map had node-z deleted in place by PurgeNode")
+	}
+	if status["node-z"] != "ok" {
+		t.Errorf("captured status map mutated in place by PurgeNode: %q", status["node-z"])
+	}
+
+	// And the live view reflects the purge.
+	live, _ := cm.Sessions()
+	if _, ok := live["node-z"]; ok {
+		t.Error("live sessions still has node-z after PurgeNode")
+	}
+}
+
+// TestCacheManager_ConcurrentReadWrite stresses readers (getters + iteration)
+// against writers (RefreshFor/PurgeNode) to catch concurrent map access under
+// -race. The getters return live references, so iteration must stay race-free.
+func TestCacheManager_ConcurrentReadWrite(t *testing.T) {
+	node := &stubConn{
+		nodeID:   "node-c",
+		sessions: []map[string]any{{"session_id": "s"}},
+		projects: []map[string]any{{"name": "p"}},
+		disc:     []map[string]any{{"session_id": "d"}},
+	}
+	cm := NewCacheManager(
+		func() map[string]Conn { return map[string]Conn{"node-c": node} },
+		nil,
+	)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Writers.
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					cm.RefreshFor("node-c")
+					cm.PurgeNode("node-c")
+				}
+			}
+		}()
+	}
+	// Readers iterating the returned maps (would race if maps mutated in place).
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					sessions, status := cm.Sessions()
+					for k, v := range sessions {
+						_ = k
+						_ = len(v)
+					}
+					for range status {
+					}
+					for range cm.Projects() {
+					}
+					for range cm.Discovered() {
+					}
+				}
+			}
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
 // ---- PurgeNode removes data ----
 
 func TestCacheManager_PurgeNode(t *testing.T) {
@@ -380,9 +493,13 @@ func TestCacheManager_PurgeNode(t *testing.T) {
 	}
 }
 
-// ---- Sessions returns a copy (modifying doesn't affect cache) ----
+// ---- Sessions returns a read-only live view; RefreshAll publishes a fresh
+// map (copy-on-write), so a previously-returned snapshot is never mutated by a
+// later refresh. #2230 changed the getter from a defensive copy to a live view;
+// the invariant that matters is "published maps are immutable", verified here
+// (and in TestCacheManager_Getters_ImmutableAfterWrite for RefreshFor/Purge). ----
 
-func TestCacheManager_Sessions_returnsCopy(t *testing.T) {
+func TestCacheManager_Sessions_publishesFreshMapOnRefresh(t *testing.T) {
 	node := &stubConn{
 		nodeID:   "n1",
 		sessions: []map[string]any{{"session_id": "s1"}},
@@ -393,12 +510,18 @@ func TestCacheManager_Sessions_returnsCopy(t *testing.T) {
 	)
 	cm.RefreshAll()
 
+	// Capture the published snapshot, then trigger another publish.
 	sessions1, _ := cm.Sessions()
-	sessions1["extra-key"] = []map[string]any{{"injected": true}}
+	node.sessions = []map[string]any{{"session_id": "s1"}, {"session_id": "s2"}}
+	cm.RefreshAll()
 
+	// The earlier snapshot must be unaffected by the new publish.
+	if got := len(sessions1["n1"]); got != 1 {
+		t.Errorf("earlier Sessions() snapshot mutated by RefreshAll: %d entries", got)
+	}
 	sessions2, _ := cm.Sessions()
-	if _, ok := sessions2["extra-key"]; ok {
-		t.Error("modifying returned map should not affect cache")
+	if got := len(sessions2["n1"]); got != 2 {
+		t.Errorf("new Sessions() snapshot should reflect refresh: %d entries", got)
 	}
 }
 
