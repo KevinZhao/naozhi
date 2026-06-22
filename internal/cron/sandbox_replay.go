@@ -278,6 +278,14 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 						ErrorMsg:   "sandbox replay panicked before terminal record",
 					})
 					metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
+					// #2223: this panic path bypasses finishSandboxRunWith +
+					// finishRun → bumpRunStateMetrics, so it must bump the
+					// per-state + sandbox failure counters itself (mirrors the
+					// orphan branch in sandbox_pending.go). State is RunStateFailed
+					// by construction; without this CronRunFailedTotal /
+					// CronSandboxRunFailedTotal undercount vs CronRunEndedTotal.
+					metrics.CronRunFailedTotal.Add(1)
+					metrics.CronSandboxRunFailedTotal.Add(1)
 				}
 			}
 		}()

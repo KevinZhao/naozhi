@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -51,6 +52,23 @@ type Manager struct {
 	// Config but never its Path, so a cached ws→name mapping stays correct
 	// across them and they deliberately do NOT clear it.
 	resolveCache sync.Map // ws string → string (project name; "" = no match)
+
+	// resolveGen is bumped (under m.mu.Lock) every time Scan replaces m.projects
+	// and clears resolveCache. The inode fallback now runs lock-free against a
+	// snapshot taken under the RLock, so a concurrent Scan can land between the
+	// snapshot and the cache Store; resolveWorkspaceByInode reads the generation
+	// alongside the snapshot and discards its Store if Scan bumped it meanwhile,
+	// so a stale ws→name computed from the old project set never survives a
+	// rescan (#2228).
+	resolveGen atomic.Uint64
+}
+
+// projRef is a lock-free snapshot of the fields resolveWorkspaceByInode needs
+// from a Project, taken under m.mu.RLock so the inode walk can Stat the FS
+// after the lock is released (#2228).
+type projRef struct {
+	name string
+	path string
 }
 
 // Option customises a Manager at construction time.
@@ -286,6 +304,9 @@ func (m *Manager) Scan() error {
 	// concurrent ResolveWorkspaces reader never sees fresh projects with a stale
 	// cache. Go 1.21+ sync.Map.Clear.
 	m.resolveCache.Clear()
+	// Bump the generation so any inode fallback that snapshotted the old project
+	// set (lock-free, after its RUnlock) discards its now-stale Store (#2228).
+	m.resolveGen.Add(1)
 
 	slog.Info("scanned projects", "root", m.root, "count", len(projects))
 	return nil
@@ -507,11 +528,20 @@ func (m *Manager) ProjectNames() map[string]struct{} {
 // Without the fallback those sessions render with no project/folder label in
 // the dashboard history panel even though they live under root.
 func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
+	// projSnap is a lightweight (name, Path) snapshot of the registered
+	// projects taken under the RLock. The byte-prefix fast path runs under the
+	// lock; the inode fallback (resolveWorkspaceByInode → os.Lstat on every
+	// ancestor) must NOT — holding the RLock across that FS IO blocks every
+	// writer (BindChat / UpdateConfig / Scan, all m.mu.Lock) for the duration
+	// of the syscall fan-out. So we collect the snapshot under the lock and run
+	// the fallback after releasing it. R202606-CONC: ResolveWorkspaces FS-IO
+	// outside lock (#2228).
 	result := make(map[string]string, len(paths))
 	seen := make(map[string]struct{}, len(paths))
+	var fallbacks []string // ws paths that missed the byte prefix
+	var projSnap []projRef
+
+	m.mu.RLock()
 	for _, ws := range paths {
 		if ws == "" {
 			continue
@@ -534,14 +564,32 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 				}
 			}
 		}
-		if bestName == "" {
-			// Byte prefix missed for every project. On a case-insensitive FS the
-			// ws may still live under a project whose Path differs only in case,
-			// so probe inode containment (cached, since it Stats the FS).
-			bestName = m.resolveWorkspaceByInode(ws)
-		}
 		if bestName != "" {
 			result[ws] = bestName
+			continue
+		}
+		// Byte prefix missed for every project. Defer the inode-containment
+		// probe to after the lock is released (it Stats the FS).
+		fallbacks = append(fallbacks, ws)
+	}
+	var snapGen uint64
+	if len(fallbacks) > 0 {
+		projSnap = make([]projRef, 0, len(m.projects))
+		for _, p := range m.projects {
+			projSnap = append(projSnap, projRef{name: p.Name, path: p.Path})
+		}
+		// Read the generation under the same RLock as the snapshot so a Scan
+		// that lands after RUnlock is detectable by resolveWorkspaceByInode.
+		snapGen = m.resolveGen.Load()
+	}
+	m.mu.RUnlock()
+
+	// Inode fallback runs lock-free against the snapshot. On a case-insensitive
+	// FS the ws may still live under a project whose Path differs only in case,
+	// so probe inode containment (cached, since it Stats the FS).
+	for _, ws := range fallbacks {
+		if name := m.resolveWorkspaceByInode(ws, projSnap, snapGen); name != "" {
+			result[ws] = name
 		}
 	}
 	return result
@@ -552,34 +600,51 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 // scan found no project for ws, so on a case-sensitive FS with matching case
 // (the common deployment) it is never called.
 //
-// It walks every registered project and asks osutil.PathContainedInRoot
-// whether ws is the same path as, or beneath, that project's Path — a check
-// that falls back to an os.SameFile ancestor walk and so honours the kernel's
-// case folding without hard-coding any OS-specific rules. Among the projects
-// that contain ws it keeps the longest Path (deepest project wins), preserving
-// the same longest-prefix semantics as the fast path.
+// It walks the projects snapshot and asks osutil.PathContainedInRoot whether ws
+// is the same path as, or beneath, that project's Path — a check that falls
+// back to an os.SameFile ancestor walk and so honours the kernel's case folding
+// without hard-coding any OS-specific rules. Among the projects that contain ws
+// it keeps the longest Path (deepest project wins), preserving the same
+// longest-prefix semantics as the fast path.
+//
+// It operates on a caller-supplied snapshot of (name, Path) pairs rather than
+// reading m.projects, and the caller invokes it WITHOUT holding m.mu — the
+// os.SameFile walk Stats each ancestor, and doing that under the RLock would
+// stall every writer (BindChat / UpdateConfig / Scan) for the syscall fan-out.
 //
 // Results (including a confirmed no-match, cached as "") are memoised in
 // resolveCache because the SameFile walk Stats each ancestor and the dashboard
-// re-resolves the same workspaces at 1 Hz. Callers already hold m.mu.RLock; the
-// cache is a sync.Map so the concurrent reads are safe, and Scan clears it under
-// the write lock when m.projects is replaced.
-func (m *Manager) resolveWorkspaceByInode(ws string) string {
+// re-resolves the same workspaces at 1 Hz. The cache is a sync.Map so concurrent
+// access is safe, and Scan clears it under the write lock when m.projects is
+// replaced.
+//
+// snapGen is the resolveGen value read under the same RLock as the projects
+// snapshot. Because this runs lock-free, a Scan can replace m.projects and
+// Clear() the cache between the snapshot and the Store below; in that case the
+// computed name is stale, so the Store is rolled back when resolveGen has moved
+// on — the cache then re-resolves against the fresh project set next tick (#2228).
+func (m *Manager) resolveWorkspaceByInode(ws string, projects []projRef, snapGen uint64) string {
 	if v, ok := m.resolveCache.Load(ws); ok {
 		return v.(string)
 	}
 	var bestName string
 	var bestLen int
-	for _, p := range m.projects {
-		if len(p.Path) <= bestLen {
+	for _, p := range projects {
+		if len(p.path) <= bestLen {
 			continue // a longer match already won; SameFile walk is the cost we skip
 		}
-		if osutil.PathContainedInRoot(ws, p.Path) {
-			bestName = p.Name
-			bestLen = len(p.Path)
+		if osutil.PathContainedInRoot(ws, p.path) {
+			bestName = p.name
+			bestLen = len(p.path)
 		}
 	}
 	m.resolveCache.Store(ws, bestName)
+	// If a Scan replaced the project set while we were walking lock-free, the
+	// value just stored was computed from a stale snapshot and its Clear() may
+	// have already run; drop it so it can't outlive the rescan.
+	if m.resolveGen.Load() != snapGen {
+		m.resolveCache.Delete(ws)
+	}
 	return bestName
 }
 

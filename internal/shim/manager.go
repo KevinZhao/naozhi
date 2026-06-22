@@ -294,10 +294,10 @@ func (m *Manager) checkStateDirQuota() error {
 // reconnectKey returns (and lazily creates) the per-key mutex used by
 // Reconnect to serialise concurrent attempts on the same key. The
 // returned mutex is shared across all callers for that key and held
-// across the dial — see Reconnect for the rationale. Per-key mutexes
-// stay in the map for the Manager's lifetime; the entries are tiny
-// (sync.Mutex pointer) and the key set is bounded by the lifetime
-// session count, so cleanup is unnecessary.
+// across the dial — see Reconnect for the rationale. Per-key mutexes are
+// reclaimed by Remove(key) when the session goes away (#2251); the entries
+// are tiny (sync.Mutex pointer) but without that cleanup the map grew
+// monotonically with the lifetime count of distinct session keys.
 func (m *Manager) reconnectKey(key string) *sync.Mutex {
 	m.reconnectMu.Lock()
 	defer m.reconnectMu.Unlock()
@@ -1171,6 +1171,18 @@ func (m *Manager) Remove(key string) {
 	m.mu.Lock()
 	delete(m.shims, key)
 	m.mu.Unlock()
+
+	// #2251: also drop the per-key reconnect mutex. reconnectKey lazily
+	// inserts into reconnectKM but nothing ever deletes, so over a long-lived
+	// Manager the map grew monotonically with the count of distinct session
+	// keys. Take reconnectMu separately (NEVER while holding m.mu — see the
+	// reconnectMu field godoc / Reconnect lock-order contract). A Reconnect
+	// racing this Remove just re-creates the entry via reconnectKey on its
+	// next call, which is correct: the session is gone, so a fresh mutex is
+	// equivalent.
+	m.reconnectMu.Lock()
+	delete(m.reconnectKM, key)
+	m.reconnectMu.Unlock()
 }
 
 // CLIPath returns the configured CLI binary path.

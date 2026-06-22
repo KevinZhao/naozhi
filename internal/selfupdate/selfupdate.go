@@ -82,7 +82,7 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	// so httptest servers on loopback work.
 	var latestTransport http.RoundTripper
 	if dialCtx := blockPrivateDialContext(); dialCtx != nil {
-		latestTransport = &http.Transport{DialContext: dialCtx}
+		latestTransport = hardenedTransport(dialCtx)
 	} else {
 		latestTransport = testHTTPTransport // nil in production falls back to http.DefaultTransport
 	}
@@ -472,6 +472,19 @@ func blockPrivateDialContext() func(ctx context.Context, network, addr string) (
 	}
 }
 
+// hardenedTransport clones http.DefaultTransport and overrides only
+// DialContext with the SSRF guard. #2252: constructing a bare
+// &http.Transport{DialContext: dialCtx} zero-valued TLSHandshakeTimeout,
+// IdleConnTimeout, ExpectContinueTimeout and ForceAttemptHTTP2 — losing the
+// stdlib defaults (a never-completing TLS handshake could hang until the
+// outer client Timeout, idle conns would leak, HTTP/2 would not be
+// attempted). Cloning preserves those defaults while keeping the guard.
+func hardenedTransport(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = dialCtx
+	return t
+}
+
 // checkPlatform returns ErrUnsupportedPlatform on operating systems that have
 // no entry in the release matrix (currently Windows only).
 func checkPlatform() error {
@@ -533,7 +546,7 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// and testHTTPTransport is used as-is so httptest servers on loopback work.
 	var transport http.RoundTripper
 	if dialCtx := blockPrivateDialContext(); dialCtx != nil {
-		transport = &http.Transport{DialContext: dialCtx}
+		transport = hardenedTransport(dialCtx)
 	} else {
 		transport = testHTTPTransport // nil in production falls back to http.DefaultTransport
 	}

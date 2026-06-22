@@ -257,6 +257,11 @@ var scanUserPromptBufPool = sync.Pool{
 // on every line of the hot JSONL scan loop.
 var userTypeMarker = []byte(`"type":"user"`)
 
+// summaryStatFn is the os.Stat indirection used by loadSummaryIndex. A
+// package var so tests can count syscalls and assert the #2247 fix elides
+// the redundant in-flight stat on a cache miss.
+var summaryStatFn = os.Stat
+
 func DefaultScanner() *Scanner {
 	defaultScannerOnce.Do(func() {
 		defaultScannerInst = NewScanner()
@@ -727,9 +732,13 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 	// If the tail scan found no text prompt and we skipped earlier content,
 	// re-scan from the beginning. This handles sessions where the only user
 	// text prompt is near the start and the tail is all tool_result messages.
+	// Cap the fallback read at tailSize too (#2227): without a limit a 10MB
+	// JSONL whose tail is all tool_result lines would be read in full on every
+	// preview refresh. The opening prompt lives near the start, so the first
+	// tailSize bytes carry the same coverage the tail window gives at the end.
 	if lastPrompt == "" && offset > 0 {
 		if _, err := f.Seek(0, io.SeekStart); err == nil {
-			lastPrompt = scanUserPrompt(f)
+			lastPrompt = scanUserPrompt(io.LimitReader(f, tailSize))
 		}
 	}
 
@@ -739,9 +748,9 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 // scanUserPrompt scans lines from the current file position and returns
 // the last user message that contains actual text (not tool_result, and
 // not one of Claude Code's system-injected XML frames).
-func scanUserPrompt(f *os.File) string {
+func scanUserPrompt(r io.Reader) string {
 	var lastPrompt string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	bufPtr := scanUserPromptBufPool.Get().(*[]byte)
 	// bufio.Scanner may grow the provided slice; reset to zero length on
 	// return and rely on Scanner's internal growth not modifying capacity
@@ -1005,20 +1014,31 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 // (PERF-10 #1967). ok is false when the index is missing or unparseable.
 func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 	// Fast path: stat once and serve a fresh cache hit without entering
-	// singleflight at all (the common steady-state case).
-	if fi, err := os.Stat(indexPath); err == nil {
+	// singleflight at all (the common steady-state case). On a miss, carry the
+	// stat's mtime into the flight so the closure does not re-stat the same
+	// file (#2247): the fast-path stat is microseconds old and the file is the
+	// same, so a second syscall buys nothing.
+	fastMtime, haveFastMtime := int64(0), false
+	if fi, err := summaryStatFn(indexPath); err == nil {
 		mtime := fi.ModTime().UnixNano()
+		fastMtime, haveFastMtime = mtime, true
 		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
 			return cachedIdx, true
 		}
 	}
 
 	v, err, _ := s.summaryLoad.Do(indexPath, func() (any, error) {
-		fi, err := os.Stat(indexPath)
-		if err != nil {
-			return sessionsIndex{}, err
+		mtime := fastMtime
+		if !haveFastMtime {
+			// The fast-path stat failed for this caller (e.g. a transient
+			// error); stat inside the flight so a genuine miss still surfaces
+			// the file's mtime rather than treating it as missing.
+			fi, err := summaryStatFn(indexPath)
+			if err != nil {
+				return sessionsIndex{}, err
+			}
+			mtime = fi.ModTime().UnixNano()
 		}
-		mtime := fi.ModTime().UnixNano()
 		// Re-check the cache inside the flight: an earlier flight for the same
 		// key may have just populated it, or a parallel fast-path missed by a
 		// hair. This keeps a burst from re-reading the file N times.
