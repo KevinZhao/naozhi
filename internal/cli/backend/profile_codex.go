@@ -26,12 +26,21 @@ func codexProfile() Profile {
 			// ReadEvent (RPC error) are populated (multi-backend RFC §10).
 			return &cli.CodexProtocol{BackendID: "codex"}
 		},
-		// DetectInProc matches a codex process but excludes the non-app-server
-		// subcommands so a transient `codex login` / `codex exec` invocation is
-		// not mislabelled as a hosted naozhi session. We only host codex via
-		// `codex app-server`, so require that substring.
+		// DetectInProc classifies an OS process as codex. The discovery
+		// callers (proc_linux.go / proc_darwin.go detectCLIName) pass the
+		// process's BASENAME here — they truncate /proc/PID/cmdline (or `ps
+		// -o command=`) at the first NUL/space (argv[0]) before filepath.Base,
+		// so the `app-server` subcommand token (argv[1]) is never present.
+		// An earlier `&& Contains(cmdline,"app-server")` guard could therefore
+		// NEVER match a real codex process → it fell through to "cli". Match on
+		// the bare binary name, consistent with how kiro matches "kiro" against
+		// the basename "kiro-cli". We cannot (and need not) distinguish
+		// `codex login` / `codex exec` from `codex app-server` at the basename
+		// level — labelling any codex process as codex in the discovery view is
+		// correct; naozhi-managed sessions carry an explicit backend ID and
+		// never rely on this sniff.
 		DetectInProc: func(cmdline string) bool {
-			return strings.Contains(cmdline, "codex") && strings.Contains(cmdline, "app-server")
+			return strings.Contains(cmdline, "codex")
 		},
 		RequiredNodeCaps: []string{"codex-app-server"},
 		// codex persists threads under ~/.codex/sessions/. Consumed by a
