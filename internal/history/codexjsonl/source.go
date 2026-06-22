@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // SessionIDFunc returns the codex thread ID for the bound session, or ""
@@ -281,8 +282,16 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 	}
 
 	return cli.EventEntry{
-		Time:    timeMS,
-		Type:    entryType,
+		Time: timeMS,
+		Type: entryType,
+		// Derive a deterministic UUID so merged.Source can dedup overlapping
+		// pages. Without it the entry carries an empty UUID, which
+		// merged.mergeSorted treats as un-dedupable — the same codex line then
+		// renders twice whenever a LoadBefore `beforeMS` cursor straddles a
+		// previously-returned entry. claude (via discovery.history_tail) and
+		// kiro (kirojsonl) both set this; codex must match the contract.
+		// Same derivation as kiro: (timeMS, type, summary, detail="").
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, ev.Message, ""),
 		Summary: ev.Message,
 	}, true
 }
