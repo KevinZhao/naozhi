@@ -105,6 +105,12 @@ func (h *Handler) HandleRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Force download rather than inline rendering: operator-installed plugin
+	// assets are untrusted content. Without this, navigating to the raw URL
+	// (or embedding it in an <iframe src>) would render the bytes in the
+	// browser. Content-Disposition does not affect XHR/fetch body reads, so the
+	// asset-browser's normal "fetch the text and display it" path is unchanged.
+	w.Header().Set("Content-Disposition", "attachment")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(raw)
 }
