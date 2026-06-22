@@ -220,9 +220,15 @@ func isLoopbackHost(host string) bool {
 // Remote nodes dial in (reverse connect) to traverse NAT.
 type ReverseServer struct {
 	mu    sync.RWMutex
-	auth  map[string]string       // node_id → expected token
 	names map[string]string       // node_id → configured display_name
 	conns map[string]*ReverseConn // node_id → active connection
+
+	// authHash holds sha256(expected token) per node_id, precomputed at
+	// construction so the auth path only hashes the inbound probe token
+	// instead of re-hashing the (immutable) expected token every connect.
+	// Empty-token entries are omitted (those nodes can never authenticate).
+	// R231-PERF: mirrors the Hub dashTokenHash precompute (wshub.go).
+	authHash map[string][32]byte
 
 	// wsLimiter is an internal per-IP rate limiter store for /ws-node connections.
 	// Separate from the dashboard login limiter to prevent cross-endpoint interference.
@@ -256,18 +262,18 @@ type ReverseNodeAuth struct {
 // trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
 // rate limiting works correctly when deployed behind ALB/CloudFront.
 func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *ReverseServer {
-	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
+	hashes := make(map[string][32]byte, len(auth))
 	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare
 	// 只按值匹配，node_id 在 ReadJSON 那一刻由客户端自报。运维误配（复制粘贴）
 	// 最常见，启动时 WARN 一下，不拒启动（允许临时 rotate 场景）。
 	seen := make(map[string]string, len(auth))
 	for id, e := range auth {
-		tokens[id] = e.Token
 		names[id] = e.DisplayName
 		if e.Token == "" {
 			continue
 		}
+		hashes[id] = sha256.Sum256([]byte(e.Token))
 		if other, dup := seen[e.Token]; dup {
 			slog.Warn("reverse node duplicate token; node_ids are interchangeable under this token — rotate one",
 				"node_id_a", other, "node_id_b", id)
@@ -276,9 +282,9 @@ func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *Rever
 		seen[e.Token] = id
 	}
 	return &ReverseServer{
-		auth:  tokens,
-		names: names,
-		conns: make(map[string]*ReverseConn),
+		names:    names,
+		authHash: hashes,
+		conns:    make(map[string]*ReverseConn),
 		wsLimiter: ratelimit.New(ratelimit.Config{
 			Rate:    rate.Every(5 * time.Second), // 1 per 5s sustained
 			Burst:   10,                          // 10 burst
@@ -351,18 +357,18 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// of the submitted token length — ConstantTimeCompare short-circuits on
 	// length mismatch, so comparing raw bytes would still leak "my stored
 	// expected is (or isn't) the same length as the probe token".
-	expected, ok := s.auth[msg.NodeID]
-	if !ok || expected == "" {
+	// R231-PERF: the expected-token hash is precomputed at construction
+	// (s.authHash), so each connect only hashes the inbound probe token.
+	expectedHash, ok := s.authHash[msg.NodeID]
+	probeHash := sha256.Sum256([]byte(msg.Token))
+	if !ok {
+		// Unknown / empty-token node_id: still run a fixed-length compare
+		// against a zero hash so the reject path's latency does not leak
+		// whether the node_id exists.
 		var dummy [32]byte
-		probe := sha256.Sum256([]byte(msg.Token))
-		_ = subtle.ConstantTimeCompare(dummy[:], probe[:])
+		_ = subtle.ConstantTimeCompare(dummy[:], probeHash[:])
 	}
-	var matched bool
-	if ok && expected != "" {
-		expectedHash := sha256.Sum256([]byte(expected))
-		probeHash := sha256.Sum256([]byte(msg.Token))
-		matched = subtle.ConstantTimeCompare(expectedHash[:], probeHash[:]) == 1
-	}
+	matched := ok && subtle.ConstantTimeCompare(expectedHash[:], probeHash[:]) == 1
 	if !matched {
 		// R180-SEC-H2 / R181-GO-P2-1: msg.NodeID comes from an unauthenticated
 		// 4 KB frame on the public /ws-node endpoint. Anyone can probe with
