@@ -426,8 +426,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .files-sidebar{width:340px;min-width:240px;max-width:60vw;flex-shrink:0;border-right:1px solid var(--nz-border);flex-direction:column;background:var(--nz-bg-0);min-height:0}
 .files-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
 .files-sb-head h1{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;flex:1}
-.files-rootsel{flex-shrink:0;display:flex;align-items:center;gap:8px;margin:0 14px 8px;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute)}
-.files-rootsel select{flex:1;min-width:0;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);padding:5px 8px;outline:none}
+.files-quickjump{flex-shrink:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 14px 8px}
+.files-qj-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-faint);margin-right:2px}
+.files-qj{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);color:var(--nz-text-mute);cursor:pointer;font-family:inherit;font-size:var(--nz-fs-2xs);padding:3px 9px;max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.files-qj:hover{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-accent)}
 .files-toolbar{flex-shrink:0;display:flex;gap:8px;margin:0 14px 8px}
 .files-upbtn{flex:1;padding:6px 10px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
 .files-upbtn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
@@ -2888,7 +2890,7 @@ body.kbd-open .sidebar-footer{display:none}
       <h1>工作区文件</h1>
       <button type="button" class="hdr-btn" id="files-refresh" title="刷新当前目录" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg></button>
     </div>
-    <label class="files-rootsel"><span>项目</span><select id="files-root" aria-label="选择项目"></select></label>
+    <div class="files-quickjump" id="files-quickjump" aria-label="快速跳转" hidden></div>
     <div class="files-toolbar">
       <button type="button" class="files-upbtn" id="files-upload-btn">上传文件</button>
       <input type="file" id="files-upload-input" multiple hidden aria-hidden="true">

@@ -204,6 +204,10 @@ type projectsListEntry struct {
 	Favorite     bool                  `json:"favorite"`
 	GitRemoteURL string                `json:"git_remote_url"`
 	GitHub       bool                  `json:"github"`
+	// IsRoot marks the synthetic projects-root entry (include_root). The
+	// files view defaults its browse root to this project so the operator
+	// lands at the workspace root rather than the first subdirectory project.
+	IsRoot bool `json:"is_root,omitempty"`
 	// DirModTime is the project directory's filesystem mtime (unix ms),
 	// captured at Manager.Scan. The dashboard "new session" picker orders its
 	// fallback tier by this descending so the most-recently-touched workspace
@@ -253,6 +257,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Favorite:     p.Config.Favorite,
 			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
+			IsRoot:       p.IsRoot,
 			DirModTime:   p.DirModTime,
 			StableKey:    stableKey,
 		})
