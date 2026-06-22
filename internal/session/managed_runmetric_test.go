@@ -54,6 +54,103 @@ func TestSend_RecordsCompletedRun(t *testing.T) {
 	}
 }
 
+// TestSend_PerTurnCostDelta verifies that the per-run record stores the
+// genuine single-turn increment (not the CLI's cumulative total_cost_usd) and
+// that the session's authoritative total (costSpent) accumulates those deltas
+// across a sequence of turns within one CLI incarnation.
+func TestSend_PerTurnCostDelta(t *testing.T) {
+	// Monotonic cumulative readings within one incarnation (the per-incarnation
+	// reset on resume is handled at the session boundary, not in finishRun).
+	raws := []float64{2.0, 5.0, 6.0, 9.0}
+	wantDeltas := []float64{2.0, 3.0, 1.0, 3.0} // 2, (5-2), (6-5), (9-6)
+	var idx int
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.ImageData, on cli.EventCallback) (*cli.SendResult, error) {
+		r := &cli.SendResult{Text: "ok", CostUSD: raws[idx]}
+		idx++
+		return r, nil
+	})
+
+	for i := range raws {
+		if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+	store.Close()
+
+	runs := store.Recent(s.key, 0) // newest-first
+	if len(runs) != len(raws) {
+		t.Fatalf("want %d runs, got %d", len(raws), len(runs))
+	}
+	// runs are newest-first; reverse-index into wantDeltas.
+	for i, r := range runs {
+		want := wantDeltas[len(wantDeltas)-1-i]
+		if r.CostUSD < want-1e-9 || r.CostUSD > want+1e-9 {
+			t.Errorf("run[%d] (newest-first) cost = %v, want delta %v", i, r.CostUSD, want)
+		}
+	}
+
+	// Session total = sum of deltas = final cumulative 9.0 (NOT the
+	// over-counted sum-of-snapshots 22.0).
+	const wantTotal = 9.0
+	if got := loadTotalCost(&s.costSpent); got < wantTotal-1e-9 || got > wantTotal+1e-9 {
+		t.Errorf("costSpent = %v, want %v (sum of per-turn deltas)", got, wantTotal)
+	}
+}
+
+// TestFinishRun_ConcurrentOutOfOrderNoOverCount is the regression guard for the
+// passthrough concurrency hazard the adversarial review caught: two same-
+// session turns complete on separate goroutines, so finishRun may apply the
+// later (higher) cumulative before the earlier (lower) one. The session total
+// must equal the highest cumulative regardless of arrival order — never the
+// over-counted sum. Run under -race to also exercise costMu.
+func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
+	store := runhistory.NewStore(t.TempDir(), 0, 0)
+	t.Cleanup(store.Close)
+	s := &ManagedSession{key: "feishu:p2p:concurrent", runStore: store}
+
+	// Drive finishRun directly with two timers and reversed cumulative order:
+	// the higher reading (5.0) lands first, then the lower (2.0).
+	rt1 := &runTimer{started: time.Now()}
+	rt2 := &runTimer{started: time.Now()}
+	done := make(chan struct{}, 2)
+	go func() { s.finishRun(rt1, &cli.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
+	go func() { s.finishRun(rt2, &cli.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
+	<-done
+	<-done
+
+	// Total must be exactly the highest cumulative (5.0), not 7.0.
+	if got := loadTotalCost(&s.costSpent); got < 5.0-1e-9 || got > 5.0+1e-9 {
+		t.Errorf("costSpent = %v, want 5.0 (out-of-order must not over-count)", got)
+	}
+	// Baseline must converge to the max, never regress to the lower value.
+	if got := loadTotalCost(&s.lastCumulativeCost); got != 5.0 {
+		t.Errorf("lastCumulativeCost = %v, want 5.0 (monotonic baseline)", got)
+	}
+}
+
+// TestSend_NoiseTurnDoesNotAdvanceCost verifies a turn that returns no costed
+// result (raw 0 — interrupt / pure-tool / error) contributes nothing and does
+// not corrupt the baseline for the following real turn.
+func TestSend_NoiseTurnDoesNotAdvanceCost(t *testing.T) {
+	raws := []float64{2.0, 0.0, 3.0} // middle turn is noise
+	var idx int
+	s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []cli.ImageData, on cli.EventCallback) (*cli.SendResult, error) {
+		r := &cli.SendResult{Text: "ok", CostUSD: raws[idx]}
+		idx++
+		return r, nil
+	})
+	for range raws {
+		if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	store.Close()
+	// deltas: 2.0, 0 (noise), (3.0-2.0)=1.0 → total 3.0
+	if got := loadTotalCost(&s.costSpent); got < 3.0-1e-9 || got > 3.0+1e-9 {
+		t.Errorf("costSpent = %v, want 3.0", got)
+	}
+}
+
 func TestSend_OutcomeClassification(t *testing.T) {
 	tests := []struct {
 		name string

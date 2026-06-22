@@ -82,7 +82,23 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err err
 		}
 	}
 	if result != nil {
-		rec.CostUSD = result.CostUSD
+		// result.CostUSD is the CLI's cumulative total_cost_usd for the
+		// current process incarnation, which resets on resume/restart. Convert
+		// it to the genuine per-turn delta and fold that into the session's
+		// monotonic running total. costMu serialises the whole read-compute-
+		// store: under passthrough, concurrent same-session turns call finishRun
+		// on separate goroutines, so without the lock two deltas could interleave
+		// and lose an update (or regress the baseline). TurnCostDelta's monotonic
+		// rule additionally makes the result order-independent.
+		s.costMu.Lock()
+		prev := loadTotalCost(&s.lastCumulativeCost)
+		delta, next := runhistory.TurnCostDelta(result.CostUSD, prev)
+		storeTotalCost(&s.lastCumulativeCost, next)
+		if delta != 0 {
+			storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+delta)
+		}
+		s.costMu.Unlock()
+		rec.CostUSD = delta
 	}
 	s.runStore.AppendAsync(rec)
 }

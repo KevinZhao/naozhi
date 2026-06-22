@@ -10696,7 +10696,14 @@ const wsm = {
         if (ev.type === 'result') {
           if (ev.cost) {
             const sKey = sid(selectedKey, selectedNode);
-            if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
+            // ev.cost is the CLI's per-incarnation cumulative total, which
+            // RESETS on resume. The authoritative session total is the
+            // monotonic delta-sum the server ships as total_cost on the next
+            // snapshot poll; never let this optimistic bump regress below it
+            // (post-resume ev.cost is lower than the carried-over total).
+            if (sessionsData[sKey] && ev.cost > (sessionsData[sKey].total_cost || 0)) {
+              sessionsData[sKey].total_cost = ev.cost;
+            }
           }
           // Optimistic: result means the turn is done. Update state to "ready"
           // immediately so the banner hides without waiting for session_state WS msg.
@@ -10737,7 +10744,15 @@ const wsm = {
         const sKey = sid(selectedKey, selectedNode);
         // total_cost still feeds the Home/recent-sessions aggregate; the header
         // cost chip itself was removed (see renderMainShell).
-        if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
+        //
+        // ev.cost is the CLI's per-incarnation cumulative total, which RESETS
+        // on resume. The authoritative session total is the monotonic
+        // delta-sum the server ships as total_cost; never let this optimistic
+        // bump regress below it (post-resume ev.cost is lower than the carried
+        // total). In-process the two agree (deltas sum to the cumulative).
+        if (sessionsData[sKey] && ev.cost > (sessionsData[sKey].total_cost || 0)) {
+          sessionsData[sKey].total_cost = ev.cost;
+        }
       }
       // Optimistic: result means the turn is done.
       const reKey = sid(selectedKey, selectedNode);

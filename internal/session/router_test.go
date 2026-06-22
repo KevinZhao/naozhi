@@ -510,28 +510,33 @@ func TestNewRouterNoStore(t *testing.T) {
 	}
 }
 
-// TestSnapshotCostFallback exercises the Snapshot cost-fallback path that
-// fixes the "$0.00 flash after resume" bug: when a freshly spawned process
-// is attached but hasn't yet received a result event (proc.TotalCost()==0),
-// Snapshot must surface the historical cost carried by s.totalCost rather
-// than 0.
+// TestSnapshotCostFallback pins the Snapshot total-cost source. The
+// authoritative value is costSpent (the monotonic sum of per-turn deltas).
+// totalCost (the CLI's per-incarnation cumulative, carried for the resume
+// "$0.00 flash" guard) is only a fallback for legacy sessions whose store
+// predates costSpent. The live proc.TotalCost() — which RESETS on resume —
+// must NOT override costSpent (the bug the delta accounting fixes).
 func TestSnapshotCostFallback(t *testing.T) {
 	tests := []struct {
-		name     string
-		procCost float64
-		sessCost float64
-		procNil  bool
-		wantCost float64
+		name      string
+		costSpent float64 // genuine monotonic total (0 = legacy/unset)
+		procCost  float64 // CLI per-incarnation cumulative
+		sessCost  float64 // legacy persisted total (fallback)
+		procNil   bool
+		wantCost  float64
 	}{
-		{name: "no process uses session cost", procNil: true, sessCost: 1.25, wantCost: 1.25},
-		{name: "fresh process falls back to session cost", procCost: 0, sessCost: 1.25, wantCost: 1.25},
-		{name: "live process cost overrides session cost", procCost: 2.50, sessCost: 1.25, wantCost: 2.50},
-		{name: "both zero stays zero", procCost: 0, sessCost: 0, wantCost: 0},
+		{name: "no process uses costSpent", procNil: true, costSpent: 3.0, sessCost: 1.25, wantCost: 3.0},
+		{name: "legacy no costSpent falls back to session cost (no proc)", procNil: true, costSpent: 0, sessCost: 1.25, wantCost: 1.25},
+		{name: "live proc does not override costSpent", costSpent: 5.0, procCost: 2.50, sessCost: 1.25, wantCost: 5.0},
+		{name: "post-resume reset proc cost ignored, costSpent wins", costSpent: 8.0, procCost: 1.0, sessCost: 0, wantCost: 8.0},
+		{name: "legacy live falls back to session cost", costSpent: 0, procCost: 2.50, sessCost: 1.25, wantCost: 1.25},
+		{name: "all zero stays zero", costSpent: 0, procCost: 0, sessCost: 0, wantCost: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ManagedSession{key: "k"}
 			storeTotalCost(&s.totalCost, tt.sessCost)
+			storeTotalCost(&s.costSpent, tt.costSpent)
 			if !tt.procNil {
 				p := newIdleProc()
 				p.totalCost = tt.procCost
@@ -2469,16 +2474,16 @@ func TestCollectPreviousHistory(t *testing.T) {
 // plain function so it works without a Router).
 func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("nil returns zero values", func(t *testing.T) {
-		prev, cost, created := snapshotOldSessionLocked(nil)
-		if prev != nil || cost != 0 || created != 0 {
-			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v), want (nil, 0, 0)",
-				prev, cost, created)
+		prev, cost, spent, created := snapshotOldSessionLocked(nil)
+		if prev != nil || cost != 0 || spent != 0 || created != 0 {
+			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v, %v), want (nil, 0, 0, 0)",
+				prev, cost, spent, created)
 		}
 	})
 
 	t.Run("prevSessionIDs defensive copy", func(t *testing.T) {
 		s := &ManagedSession{prevSessionIDs: []string{"id-a", "id-b"}}
-		prev, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _ := snapshotOldSessionLocked(s)
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-b" {
 			t.Fatalf("prev = %v, want [id-a id-b]", prev)
 		}
@@ -2492,16 +2497,25 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("totalCost falls back to store when no proc", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.totalCost, 1.234)
-		_, cost, _ := snapshotOldSessionLocked(s)
+		_, cost, _, _ := snapshotOldSessionLocked(s)
 		if cost != 1.234 {
 			t.Errorf("cost = %v, want 1.234 (from store, proc=nil)", cost)
+		}
+	})
+
+	t.Run("costSpent carries the genuine monotonic total", func(t *testing.T) {
+		s := &ManagedSession{}
+		storeTotalCost(&s.costSpent, 7.5)
+		_, _, spent, _ := snapshotOldSessionLocked(s)
+		if spent != 7.5 {
+			t.Errorf("spent = %v, want 7.5 (carried across spawn)", spent)
 		}
 	})
 
 	t.Run("createdAt round-trips", func(t *testing.T) {
 		s := &ManagedSession{}
 		s.createdAt.Store(123456789)
-		_, _, created := snapshotOldSessionLocked(s)
+		_, _, _, created := snapshotOldSessionLocked(s)
 		if created != 123456789 {
 			t.Errorf("created = %v, want 123456789", created)
 		}
@@ -2509,7 +2523,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 
 	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
 		s := &ManagedSession{}
-		prev, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _ := snapshotOldSessionLocked(s)
 		if prev != nil {
 			t.Errorf("prev = %v, want nil for empty source", prev)
 		}
@@ -2544,6 +2558,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		oldHistory []cli.EventEntry,
 		prevIDs []string,
 		oldTotalCost float64,
+		oldCostSpent float64,
 		oldCreatedAt int64,
 		exempt bool,
 		oldSID string,
