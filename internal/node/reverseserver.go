@@ -203,7 +203,10 @@ func isLoopbackHost(host string) bool {
 			if rb := strings.IndexByte(host, ']'); rb >= 0 {
 				h = host[1:rb]
 			}
-		} else {
+		} else if strings.IndexByte(host, ':') == i {
+			// Exactly one colon → host:port (hostname or IPv4). A bare
+			// unbracketed IPv6 literal (e.g. "::1") has multiple colons
+			// and must be left intact for net.ParseIP below.
 			h = host[:i]
 		}
 	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
