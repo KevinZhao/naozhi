@@ -408,6 +408,14 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 	if workspace == "" {
 		return res, ErrWorkspaceRequired
 	}
+	// A non-positive UploadTTL makes uploadCutoff = now (or the future), so
+	// the "younger than UploadTTL" keep-branch never fires and every
+	// unreferenced upload — including ones uploaded seconds ago — would be
+	// reaped. A zero/negative TTL is a misconfiguration, not "delete
+	// everything": treat it as "GC disabled" and no-op. (#2226)
+	if opts.UploadTTL <= 0 {
+		return res, nil
+	}
 	root := filepath.Join(workspace, Dir)
 	dayEntries, err := os.ReadDir(root)
 	if err != nil {

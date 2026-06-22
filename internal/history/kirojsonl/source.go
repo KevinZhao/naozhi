@@ -31,6 +31,7 @@ package kirojsonl
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -63,6 +65,29 @@ const maxFileBytes = 16 << 20 // 16 MiB
 // cancellation on large jsonl files. 100 mirrors the kiro chunk-rate
 // observation in V5 (≈15 chunks/sec → ~7s of transcript per check).
 const ctxCheckEvery = 100
+
+// scanBufPool recycles the 64 KiB initial line buffer that bufio.Scanner
+// would otherwise heap-allocate on every LoadBefore call. The dashboard
+// paginates a session by issuing one LoadBefore per page, so a fresh 64 KiB
+// alloc per page is pure churn (mirrors discovery/scanner.go's
+// scanUserPromptBufPool and naozhilog/source.go's bufReaderPool).
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 64*1024)
+		return &b
+	},
+}
+
+// kindPromptMarker and kindAsstMarker are byte quick-filters: a jsonl line
+// that contains neither cannot decode into a Prompt or AssistantMessage
+// record, so decodeLine can skip it before paying for two json.Unmarshal
+// calls. Hoisted to package scope so the []byte literals do not allocate on
+// every line of the hot scan loop (mirrors discovery/scanner.go's
+// userTypeMarker).
+var (
+	kindPromptMarker = []byte(`"kind":"Prompt"`)
+	kindAsstMarker   = []byte(`"kind":"AssistantMessage"`)
+)
 
 // Source is the kiro JSONL-backed history.Source.
 type Source struct {
@@ -227,8 +252,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long. Default 64 KiB
-	// would silently truncate on token-rich replies.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	// would silently truncate on token-rich replies. The initial buffer is
+	// pooled: bufio.Scanner only grows (never shrinks below) the slice we hand
+	// it, so returning it at zero length recycles the 64 KiB backing array.
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer func() {
+		b := (*bufPtr)[:0]
+		*bufPtr = b
+		scanBufPool.Put(bufPtr)
+	}()
+	scanner.Buffer(*bufPtr, 1<<20)
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
@@ -250,6 +283,13 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 
 		line := scanner.Bytes()
 		if len(line) == 0 {
+			continue
+		}
+		// Byte quick-filter (#2246): only Prompt / AssistantMessage records
+		// decode into an entry. Skipping everything else here avoids the two
+		// json.Unmarshal calls decodeLine would otherwise spend on tool_use,
+		// system, and other kinds that are unconditionally dropped anyway.
+		if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
 			continue
 		}
 

@@ -234,26 +234,31 @@ func (m *CacheManager) RefreshFor(id string) {
 
 	// Only update successfully-fetched data; preserve existing cache on
 	// transient errors (matching RefreshAll's continue-on-error behavior).
+	//
+	// Copy-on-write: clone the current map, mutate the clone, then swap the
+	// field reference. Published maps are never mutated in place, so the
+	// getters (Sessions/Projects/Discovered) can hand out the live reference
+	// without a per-call full-map copy and readers still iterate race-free.
 	m.mu.Lock()
 	if sessErr == nil {
 		for _, rs := range sessions {
 			rs["node"] = id
 		}
-		m.sessions[id] = sessions
+		m.sessions = cloneSetSlice(m.sessions, id, sessions)
 	}
 	if projErr == nil {
 		for _, rp := range projects {
 			rp["node"] = id
 		}
-		m.projects[id] = projects
+		m.projects = cloneSetSlice(m.projects, id, projects)
 	}
 	if discErr == nil {
 		for _, rd := range discovered {
 			rd["node"] = id
 		}
-		m.discovered[id] = discovered
+		m.discovered = cloneSetSlice(m.discovered, id, discovered)
 	}
-	m.status[id] = status
+	m.status = cloneSetString(m.status, id, status)
 	m.mu.Unlock()
 
 	if m.onChange != nil {
@@ -262,50 +267,75 @@ func (m *CacheManager) RefreshFor(id string) {
 }
 
 // PurgeNode removes all cached data for a node and marks it as error.
-// Called when a reverse-connected node disconnects.
+// Called when a reverse-connected node disconnects. Copy-on-write so the
+// published maps stay immutable (see RefreshFor).
 func (m *CacheManager) PurgeNode(id string) {
 	m.mu.Lock()
-	delete(m.sessions, id)
-	delete(m.projects, id)
-	delete(m.discovered, id)
-	m.status[id] = "error"
+	m.sessions = cloneDeleteSlice(m.sessions, id)
+	m.projects = cloneDeleteSlice(m.projects, id)
+	m.discovered = cloneDeleteSlice(m.discovered, id)
+	m.status = cloneSetString(m.status, id, "error")
 	m.mu.Unlock()
 }
 
-// Sessions returns a snapshot of cached sessions and node status maps.
-// Returns shallow copies so callers can iterate without holding the lock.
+// Sessions returns the cached sessions and node status maps.
+//
+// RefreshAll/RefreshFor/PurgeNode publish maps copy-on-write and never mutate
+// them in place afterwards, so callers may iterate the returned maps directly
+// without holding the lock and without a defensive copy. They MUST treat the
+// returned maps (and their slices/inner maps) as read-only.
 func (m *CacheManager) Sessions() (map[string][]map[string]any, map[string]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	sessions := make(map[string][]map[string]any, len(m.sessions))
-	for k, v := range m.sessions {
-		sessions[k] = v
-	}
-	status := make(map[string]string, len(m.status))
-	for k, v := range m.status {
-		status[k] = v
-	}
-	return sessions, status
+	return m.sessions, m.status
 }
 
-// Projects returns a snapshot of cached projects per node.
+// Projects returns the cached projects per node. Read-only; see Sessions.
 func (m *CacheManager) Projects() map[string][]map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	cp := make(map[string][]map[string]any, len(m.projects))
-	for k, v := range m.projects {
-		cp[k] = v
-	}
-	return cp
+	return m.projects
 }
 
-// Discovered returns a snapshot of cached discovered sessions per node.
+// Discovered returns the cached discovered sessions per node. Read-only; see Sessions.
 func (m *CacheManager) Discovered() map[string][]map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	cp := make(map[string][]map[string]any, len(m.discovered))
-	for k, v := range m.discovered {
-		cp[k] = v
+	return m.discovered
+}
+
+// cloneSetSlice returns a copy of src with key=val set. src is left untouched
+// so any previously-published reference remains valid and immutable.
+func cloneSetSlice(src map[string][]map[string]any, key string, val []map[string]any) map[string][]map[string]any {
+	dst := make(map[string][]map[string]any, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
 	}
-	return cp
+	dst[key] = val
+	return dst
+}
+
+// cloneDeleteSlice returns a copy of src with key removed.
+func cloneDeleteSlice(src map[string][]map[string]any, key string) map[string][]map[string]any {
+	if _, ok := src[key]; !ok {
+		return src
+	}
+	dst := make(map[string][]map[string]any, len(src))
+	for k, v := range src {
+		if k == key {
+			continue
+		}
+		dst[k] = v
+	}
+	return dst
+}
+
+// cloneSetString returns a copy of src with key=val set.
+func cloneSetString(src map[string]string, key, val string) map[string]string {
+	dst := make(map[string]string, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	dst[key] = val
+	return dst
 }

@@ -3,6 +3,7 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -252,6 +253,90 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	if !isEntry || entry.token != "ctx-1" {
 		t.Errorf("context_token not cached, got %v", ct)
 	}
+}
+
+// TestPollLoop_OversizedContextTokenObservable covers #2238: an oversized
+// context_token (> cap) is dropped (so the message still flows), but the drop
+// is now logged at WARN with the length (never the token) so the otherwise
+// silent "this user's replies fail forever" condition is diagnosable.
+func TestPollLoop_OversizedContextTokenObservable(t *testing.T) {
+	const cap = 512
+	oversized := strings.Repeat("A", cap+1)
+
+	var logBuf strings.Builder
+	var logMu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&syncWriter{w: &logBuf, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	pollCount := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pollCount.Add(1) == 1 {
+			json.NewEncoder(w).Encode(getUpdatesResp{
+				Ret: 0,
+				Msgs: []weixinMessage{
+					{
+						MessageID:    7,
+						FromUserID:   "bob",
+						MessageType:  msgTypeUser,
+						ContextToken: oversized,
+						ItemList: []messageItem{
+							{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}},
+						},
+					},
+				},
+				GetUpdatesBuf: "c1",
+			})
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "c1"})
+	}))
+	defer srv.Close()
+
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	var received atomic.Int32
+	if err := w.Start(func(_ context.Context, _ platform.IncomingMessage) { received.Add(1) }); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer w.Stop()
+
+	deadline := time.After(3 * time.Second)
+	for received.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for message")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// Oversized token must NOT be cached.
+	if _, ok := w.contextTokens.Load("bob"); ok {
+		t.Error("oversized context_token should not be cached")
+	}
+
+	logMu.Lock()
+	out := logBuf.String()
+	logMu.Unlock()
+	if !strings.Contains(out, "context_token exceeds cap") {
+		t.Errorf("expected WARN about oversized context_token, got log: %q", out)
+	}
+	if strings.Contains(out, oversized) {
+		t.Error("oversized token value must never be logged")
+	}
+}
+
+// syncWriter serializes concurrent writes from the poll goroutine's slog calls.
+type syncWriter struct {
+	w  *strings.Builder
+	mu *sync.Mutex
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // TestPollLoop_FallbackMessageID covers #2117: when the iLink upstream omits
