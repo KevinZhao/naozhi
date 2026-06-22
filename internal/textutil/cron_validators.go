@@ -80,8 +80,13 @@ func ValidateCronPromptStrict(prompt string) error {
 	if !utf8.ValidString(prompt) {
 		return fmt.Errorf("%w: contains invalid UTF-8", ErrInvalidCronPrompt)
 	}
+	anyHighBit := false
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
+		if c >= 0x80 {
+			anyHighBit = true
+			continue
+		}
 		if c >= 0x20 && c != 0x7f {
 			continue
 		}
@@ -89,6 +94,14 @@ func ValidateCronPromptStrict(prompt string) error {
 			continue
 		}
 		return fmt.Errorf("%w: contains control characters", ErrInvalidCronPrompt)
+	}
+	// R202606e-PERF-005: IsLogInjectionRune only ever flags non-ASCII runes
+	// (C1 / bidi / LS / PS), so a pure-ASCII prompt can skip the second
+	// rune-decoding scan entirely — matching ValidateCronScheduleChars's
+	// existing guard. An 8KB ASCII prompt thus pays one byte scan instead of
+	// a redundant rune scan on top.
+	if !anyHighBit {
+		return nil
 	}
 	for _, r := range prompt {
 		if osutil.IsLogInjectionRune(r) {

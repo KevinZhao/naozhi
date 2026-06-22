@@ -24,6 +24,16 @@ func TestValidateCronPromptStrict(t *testing.T) {
 		{name: "DEL rejected", in: "bad\x7fctl", wantErr: true},
 		{name: "invalid utf8 rejected", in: "bad\xffutf8", wantErr: true},
 		{name: "bidi override rejected", in: "ok‮evil", wantErr: true},
+		// R202606e-PERF-005: large pure-ASCII prompt must still pass after the
+		// anyHighBit fast-path skips the rune scan (no false reject).
+		{name: "large pure ascii ok", in: strings.Repeat("status check ", 600), wantErr: false},
+		// C1 control (U+0085 NEL) is multi-byte UTF-8 (lead byte >= 0x80) so
+		// the byte loop never catches it — only the post-guard rune scan does.
+		// Sets anyHighBit, so the scan must run and reject.
+		{name: "C1 control rejected", in: "ok\u0085evil", wantErr: true},
+		// LS (U+2028) — a non-ASCII rune flagged by IsLogInjectionRune; must
+		// still be rejected via the rune scan.
+		{name: "line separator rejected", in: "ok\u2028evil", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
