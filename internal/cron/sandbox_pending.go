@@ -81,11 +81,11 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 }
 
 // setSandboxPendingIndex records jobID→path for the §6.5 in-flight record.
+// sandboxPendingIndex is allocated in NewScheduler (scheduler.go) and is the
+// only construction path that reaches the sandbox write seam, so the map is
+// guaranteed non-nil here — no nil guard needed [R202606e-GO-001].
 func (s *Scheduler) setSandboxPendingIndex(jobID, path string) {
 	s.sandboxPendingMu.Lock()
-	if s.sandboxPendingIndex == nil {
-		s.sandboxPendingIndex = make(map[string]string)
-	}
 	s.sandboxPendingIndex[jobID] = path
 	s.sandboxPendingMu.Unlock()
 }

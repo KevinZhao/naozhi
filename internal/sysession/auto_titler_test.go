@@ -520,6 +520,14 @@ func TestAutoTitler_TitleRuneCeiling(t *testing.T) {
 		{"mixed under ceiling kept", "auto-titler 命名失败排查", "auto-titler 命名失败排查"},
 		{"ascii over ceiling clipped", strings.Repeat("a", autoTitlerMaxTitleRunes+5), strings.Repeat("a", autoTitlerMaxTitleRunes)},
 		{"cjk over ceiling clipped", strings.Repeat("好", autoTitlerMaxTitleRunes+5), strings.Repeat("好", autoTitlerMaxTitleRunes)},
+		// R202606e-PERF-004: single-pass TruncateRunesNoEllipsis must clip a
+		// mixed ASCII+multibyte title on the SAME rune boundary the prior
+		// string([]rune(..)[:N]) slice produced. Here the 24th rune is a CJK
+		// codepoint, so a byte-naive cut would split it; the rune-aware
+		// stream must land exactly after the 24th rune (10 ASCII + 14 CJK).
+		{"mixed over ceiling clipped on rune boundary",
+			strings.Repeat("a", 10) + strings.Repeat("好", autoTitlerMaxTitleRunes),
+			strings.Repeat("a", 10) + strings.Repeat("好", autoTitlerMaxTitleRunes-10)},
 	}
 	for _, c := range cases {
 		c := c

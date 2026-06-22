@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -418,17 +419,26 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 // codebase's existing cron↔dispatch boundary handling.
 const singleReplyTruncMarker = "\n…(truncated)"
 
+// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
+// computed once at init rather than on every truncateForSingleReply call
+// (the marker is a compile-time constant). R202606e-PERF-003. Mirrors
+// internal/dispatch.
+var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
+
 // truncateForSingleReply trims text to at most maxRunes runes, reserving room
 // for a visible truncation marker so the recipient knows the reply was cut.
 // When maxRunes is too small to fit the marker, it falls back to a bare
 // rune-safe truncation (content kept maximal, marker dropped). #2181 — mirrors
 // internal/dispatch.truncateForSingleReply (the #2136 fix) exactly.
+//
+// R202606e-PERF-001: uses textutil.TruncateRunesNoEllipsis (zero-alloc
+// sub-slice of the original string, walks only up to the truncation point)
+// rather than materialising the whole reply as a []rune.
 func truncateForSingleReply(text string, maxRunes int) string {
-	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
-	keep := maxRunes - markerRunes
+	keep := maxRunes - singleReplyTruncMarkerRunes
 	if keep <= 0 {
 		// No room for the marker — keep as much content as fits.
-		return string([]rune(text)[:maxRunes])
+		return textutil.TruncateRunesNoEllipsis(text, maxRunes)
 	}
-	return string([]rune(text)[:keep]) + singleReplyTruncMarker
+	return textutil.TruncateRunesNoEllipsis(text, keep) + singleReplyTruncMarker
 }
