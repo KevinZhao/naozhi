@@ -204,6 +204,46 @@ func TestParseISOms(t *testing.T) {
 	}
 }
 
+// TestSource_LoadBefore_SetsDedupUUID pins that every surfaced entry carries
+// a non-empty, deterministic UUID so merged.Source can dedup overlapping
+// pages. Without it the same codex line renders twice whenever a LoadBefore
+// cursor straddles a previously-returned entry — claude and kiro both set
+// this; codex must match the contract.
+func TestSource_LoadBefore_SetsDedupUUID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "uuid-thread"
+	writeRollout(t, dir, sid, []string{
+		`{"timestamp":"2026-06-21T09:35:21.000Z","type":"event_msg","payload":{"type":"user_message","message":"q1"}}`,
+		`{"timestamp":"2026-06-21T09:35:23.000Z","type":"event_msg","payload":{"type":"agent_message","message":"a1"}}`,
+	})
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	for i, e := range got {
+		if e.UUID == "" {
+			t.Errorf("entry[%d] (%s/%q) has empty UUID — merged.Source cannot dedup it", i, e.Type, e.Summary)
+		}
+	}
+	if got[0].UUID == got[1].UUID {
+		t.Errorf("distinct entries share a UUID %q — dedup would drop one", got[0].UUID)
+	}
+	// Determinism: re-reading the same file yields the same UUIDs (so a
+	// re-fetched overlapping page dedups against the first fetch).
+	again, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore (2nd): %v", err)
+	}
+	if len(again) != 2 || again[0].UUID != got[0].UUID || again[1].UUID != got[1].UUID {
+		t.Errorf("UUIDs not stable across reads: %v vs %v", []string{got[0].UUID, got[1].UUID}, []string{again[0].UUID, again[1].UUID})
+	}
+}
+
 // stubView is a minimal cli.HistorySessionView for factory tests.
 type stubView struct{ sid string }
 
