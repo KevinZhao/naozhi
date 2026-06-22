@@ -243,6 +243,142 @@ func TestRedactSecrets_R20260602SEC4(t *testing.T) {
 	}
 }
 
+// TestRedactSecrets_EnvAssignment verifies the KEY=value masking branch added
+// in R202606-SEC-008b (#2165): values of credential-named keys are masked even
+// when the value itself is not a well-known token prefix, while benign config
+// assignments are left intact.
+func TestRedactSecrets_EnvAssignment(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "custom secret with non-prefix value",
+			in:   "panic: MY_CUSTOM_SECRET=password123 leaked in traceback",
+			want: "panic: MY_CUSTOM_SECRET=[REDACTED] leaked in traceback",
+		},
+		{
+			name: "DB password",
+			in:   "connect failed DB_PASSWORD=s3cr3t!val host=db",
+			want: "connect failed DB_PASSWORD=[REDACTED] host=db",
+		},
+		{
+			name: "generic token key",
+			in:   "env TOKEN=abc.def.ghi set",
+			want: "env TOKEN=[REDACTED] set",
+		},
+		{
+			name: "API_KEY underscore variant",
+			in:   "MY_API_KEY=opaque-value-not-a-prefix done",
+			want: "MY_API_KEY=[REDACTED] done",
+		},
+		{
+			name: "APIKEY no underscore",
+			in:   "SOMEAPIKEY=zzz used",
+			want: "SOMEAPIKEY=[REDACTED] used",
+		},
+		{
+			name: "credential key",
+			in:   "AWS_CREDENTIAL=raw123 ok",
+			want: "AWS_CREDENTIAL=[REDACTED] ok",
+		},
+		{
+			name: "spaces around equals",
+			in:   "GITHUB_TOKEN = ghx_rawvalue here",
+			want: "GITHUB_TOKEN = [REDACTED] here",
+		},
+		{
+			name: "multiple sensitive assignments",
+			in:   "DB_PASSWORD=p1 and API_TOKEN=t2 both",
+			want: "DB_PASSWORD=[REDACTED] and API_TOKEN=[REDACTED] both",
+		},
+		{
+			name: "value already a known prefix still single redacted",
+			in:   "STRIPE_SECRET=sk_live_abcdefghij0123456789 used",
+			want: "STRIPE_SECRET=[REDACTED] used",
+		},
+		{
+			name: "quoted value with spaces fully masked",
+			in:   `cfg PASSWORD="my long secret" loaded`,
+			want: `cfg PASSWORD="[REDACTED]" loaded`,
+		},
+		{
+			name: "single-quoted value with spaces fully masked",
+			in:   "DB_PASSWORD='p a s s' ok",
+			want: "DB_PASSWORD='[REDACTED]' ok",
+		},
+		{
+			name: "infix marker SECRET_KEY_BASE",
+			in:   "SECRET_KEY_BASE=abc123def456 boot",
+			want: "SECRET_KEY_BASE=[REDACTED] boot",
+		},
+		{
+			name: "run-on MYSECRETKEY",
+			in:   "MYSECRETKEY=opaque used",
+			want: "MYSECRETKEY=[REDACTED] used",
+		},
+		{
+			name: "infix PASSWORD with suffix",
+			in:   "USER_PASSWORD_HASH=deadbeef stored",
+			want: "USER_PASSWORD_HASH=[REDACTED] stored",
+		},
+		{
+			name: "TOKENIZER not masked (suffix anchor)",
+			in:   "TOKENIZER=bpe model",
+			want: "TOKENIZER=bpe model",
+		},
+		{
+			name: "AUTHOR not masked (suffix anchor)",
+			in:   "AUTHOR=alice commit",
+			want: "AUTHOR=alice commit",
+		},
+		// Negative: benign config keys must NOT be masked.
+		{
+			name: "LOG_LEVEL not masked",
+			in:   "LOG_LEVEL=debug verbose",
+			want: "LOG_LEVEL=debug verbose",
+		},
+		{
+			name: "PATH not masked",
+			in:   "PATH=/usr/local/bin:/usr/bin running",
+			want: "PATH=/usr/local/bin:/usr/bin running",
+		},
+		{
+			name: "generic KEY config not masked",
+			in:   "sort KEY=name order",
+			want: "sort KEY=name order",
+		},
+		{
+			name: "no equals untouched",
+			in:   "the SECRET word appears in prose",
+			want: "the SECRET word appears in prose",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactSecrets(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRedactSecrets_EnvAssignment_Idempotent confirms re-running over masked
+// env assignments is a no-op (R202606-SEC-008b, #2165).
+func TestRedactSecrets_EnvAssignment_Idempotent(t *testing.T) {
+	src := "MY_CUSTOM_SECRET=password123 and DB_PASSWORD=hunter2 leaked"
+	once := RedactSecrets(src)
+	twice := RedactSecrets(once)
+	if once != twice {
+		t.Fatalf("not idempotent:\n  once  = %q\n  twice = %q", once, twice)
+	}
+	if strings.Contains(once, "password123") || strings.Contains(once, "hunter2") {
+		t.Fatalf("redactor left a secret value intact: %q", once)
+	}
+}
+
 // TestRedactSecrets_Negative ensures benign output is returned aliased (no
 // allocation, no spurious matches). R234-SEC-7 (#1006).
 func TestRedactSecrets_Negative(t *testing.T) {

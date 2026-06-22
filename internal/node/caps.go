@@ -14,11 +14,12 @@ import (
 //
 // R212-ARCH-402.
 var knownServerCaps = map[string]struct{}{
-	"gemini":  {},
-	"acp":     {},
-	"askuser": {},
-	"attach":  {},
-	"scratch": {},
+	"gemini":           {},
+	"acp":              {},
+	"codex-app-server": {},
+	"askuser":          {},
+	"attach":           {},
+	"scratch":          {},
 }
 
 // logUnknownCaps emits a WARN when `advertised` contains cap strings not

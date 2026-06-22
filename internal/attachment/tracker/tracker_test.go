@@ -637,6 +637,94 @@ func TestStatsPendingNoRace(t *testing.T) {
 	wg.Wait()
 }
 
+// TestHandleBump_DoesNotDeferFlushDeadline (R202606c-GO-002) pins the
+// fix for the starvation bug: a key bumped repeatedly faster than the
+// coalesce window must still flush at its FIRST deadline, not have its
+// flushAt pushed out on every bump. Before the fix, a hot key never
+// reached flushDue until Stop/Flush, leaving its .meta stale on disk
+// long enough for the GC to delete a still-referenced attachment.
+//
+// We drive handleBump directly on the test goroutine after stopping the
+// worker (same pattern as the SecondSelectHonorsClose tests) so reads of
+// t.pending are race-free, and inject a mutable clock so the deadline is
+// deterministic.
+func TestHandleBump_DoesNotDeferFlushDeadline(t *testing.T) {
+	ws := t.TempDir()
+	rel, _ := writeAttachment(t, ws, time.Now().Format("2006-01-02"), "hot",
+		attachment.Meta{UploadedAt: time.Now()})
+
+	var clockMu sync.Mutex
+	nowT := time.Unix(1_000_000, 0)
+	clock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return nowT
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		nowT = nowT.Add(d)
+	}
+
+	window := time.Second
+	tr, err := NewTracker(Options{
+		Workspaces:     func(string) string { return ws },
+		CoalesceWindow: window,
+		ChannelBuffer:  64,
+		Clock:          clock,
+		Observer:       &countingObs{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stop the worker so we can drive handleBump synchronously and read
+	// t.pending without racing the run goroutine.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := tr.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	abs := filepath.Join(ws, filepath.FromSlash(rel))
+	key := coalesceKey{keyhash: "kh", absPath: abs}
+
+	// First bump at T0 → flushAt should be T0+window.
+	tr.handleBump(trackerJob{kind: jobKindBump, keyhash: "kh",
+		absPaths: []string{rel}, timeMS: 100})
+	prev, ok := tr.pending[key]
+	if !ok {
+		t.Fatalf("key not pending after first bump")
+	}
+	wantDeadline := time.Unix(1_000_000, 0).Add(window)
+	if !prev.flushAt.Equal(wantDeadline) {
+		t.Fatalf("first flushAt=%v want %v", prev.flushAt, wantDeadline)
+	}
+
+	// Several more bumps, each advancing the clock by less than the
+	// window. The deadline must NOT move.
+	for i := 0; i < 5; i++ {
+		advance(window / 4)
+		tr.handleBump(trackerJob{kind: jobKindBump, keyhash: "kh",
+			absPaths: []string{rel}, timeMS: int64(101 + i)})
+		got := tr.pending[key]
+		if !got.flushAt.Equal(wantDeadline) {
+			t.Fatalf("flushAt moved on bump %d: got %v want %v (first deadline must hold)",
+				i, got.flushAt, wantDeadline)
+		}
+		// timeMS still tracks the latest observed value.
+		if want := int64(101 + i); got.timeMS != want {
+			t.Fatalf("timeMS=%d want %d", got.timeMS, want)
+		}
+	}
+
+	// Once the clock passes the first deadline, flushDue must drain it.
+	advance(window)
+	tr.flushDue()
+	if _, still := tr.pending[key]; still {
+		t.Fatalf("key still pending after deadline elapsed; flush was starved")
+	}
+}
+
 // TestPendingSize_TracksMapLen pins the invariant that pendingSize
 // stays in sync with len(t.pending) across the three mutation
 // paths (insert, update, delete). A divergence — e.g. forgetting

@@ -313,8 +313,37 @@ func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Sliding renewal: refresh the cookie's MaxAge on each authenticated
+		// request so an active operator never trips the 1h idle expiry and
+		// gets re-prompted mid-session. Only re-issue when the request actually
+		// carried a valid nz_auth cookie — Bearer-token / no-token callers must
+		// not be handed a session cookie they didn't ask for, and re-issuing
+		// keeps the same HMAC value so the replay window stays a sliding 1h
+		// (no security regression vs the fixed-window MaxAge).
+		if a.cookieRequestAuthenticated(r) {
+			a.writeAuthCookie(w, r)
+		}
 		next(w, r)
 	}
+}
+
+// cookieRequestAuthenticated reports whether the request is authenticated
+// specifically via a valid nz_auth cookie (as opposed to a Bearer header or
+// the no-token open mode). Used to scope sliding-renewal cookie re-issue to
+// browser sessions that already hold a cookie.
+func (a *Handlers) cookieRequestAuthenticated(r *http.Request) bool {
+	if a.DashboardToken == "" {
+		return false
+	}
+	c, err := r.Cookie(AuthCookieName)
+	if err != nil {
+		return false
+	}
+	expected := a.CookieMAC()
+	if expected == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(expected)) == 1
 }
 
 func (a *Handlers) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -580,6 +609,15 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	a.writeAuthCookie(w, r)
+	httputil.WriteOK(w)
+}
+
+// writeAuthCookie issues (or re-issues) the nz_auth session cookie with a
+// fresh MaxAge window. Used both on login and on every authenticated request
+// (sliding renewal) so an actively-used dashboard never trips the 1h MaxAge
+// and prompts for re-login mid-session — only a genuinely idle tab does.
+func (a *Handlers) writeAuthCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    a.CookieMAC(), // HMAC-derived, not raw token
@@ -589,7 +627,6 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.IsSecure(r),
 		MaxAge:   authCookieMaxAgeSeconds,
 	})
-	httputil.WriteOK(w)
 }
 
 func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
@@ -611,6 +648,22 @@ func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	// weaponised to evict every other authenticated user.
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   a.IsSecure(r),
+		MaxAge:   -1,
+	})
+	// #2157: also clear the nz_anon per-browser owner label so logout fully
+	// resets browser-held naozhi state. Field set mirrors mintAnonCookie in
+	// internal/server/send_anon_cookie.go. The name is duplicated as a string
+	// literal here — source of truth is internal/server/send_anon_cookie.go's
+	// unexported `anonCookieName` const, which this package cannot import
+	// (server->auth import cycle), matching the unknownIPKey precedent in
+	// cookie.go.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nz_anon",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,

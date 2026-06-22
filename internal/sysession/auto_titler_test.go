@@ -179,6 +179,62 @@ func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
 	}
 }
 
+// TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap pins R202606d-CR-001: the
+// inert [EXCERPT_MARKER] placeholder must be emitted atomically with respect
+// to the per-line cap. The previous shape emitted the 16-byte placeholder one
+// rune at a time via writeRune, so when lineWritten was within <16 bytes of
+// autoTitlerLineCapBytes a marker hit would leave a half-placeholder like
+// "[EXCERPT_MARKE…" in the output — an incomplete token that can confuse the
+// LLM. The output must contain EITHER the whole placeholder OR a clean
+// ellipsis, never a partial placeholder fragment.
+func TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap(t *testing.T) {
+	t.Parallel()
+
+	// assertNoPartialPlaceholder fails if any proper non-empty prefix of the
+	// placeholder (other than the full placeholder itself) appears in out.
+	assertNoPartialPlaceholder := func(t *testing.T, out string) {
+		t.Helper()
+		// Strip every full placeholder occurrence; any remaining prefix is a
+		// genuine partial leak.
+		stripped := strings.ReplaceAll(out, excerptMarkerSafe, "")
+		for n := len(excerptMarkerSafe) - 1; n >= 2; n-- {
+			frag := excerptMarkerSafe[:n] // e.g. "[EXCERPT_MARKE"
+			if strings.Contains(stripped, frag) {
+				t.Errorf("partial placeholder fragment %q leaked into output: %q", frag, out)
+				return
+			}
+		}
+	}
+
+	// Case A: pad so the marker is hit with the cap only a few bytes away.
+	// len(placeholder)=16; pad to cap-5 means 16 won't fit (507+16>512) and the
+	// emit must collapse to a single ellipsis, NOT "[EXCE…".
+	padTooTight := strings.Repeat("a", autoTitlerLineCapBytes-5)
+	gotTight := buildExcerpt(padTooTight + excerptBeginMarker + " tail")
+	assertNoPartialPlaceholder(t, gotTight)
+	if strings.Contains(gotTight, excerptBeginMarker) {
+		t.Errorf("raw BEGIN marker survived: %q", gotTight)
+	}
+
+	// Case B: pad so the whole placeholder fits exactly at the cap
+	// (lineWritten + 16 == 512). The full placeholder MUST appear.
+	padExact := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe))
+	gotExact := buildExcerpt(padExact + excerptEndMarker + " tail")
+	assertNoPartialPlaceholder(t, gotExact)
+	if !strings.Contains(gotExact, excerptMarkerSafe) {
+		t.Errorf("full placeholder should fit exactly at cap but was missing: %q", gotExact)
+	}
+
+	// Case C: marker one byte beyond the fit boundary (lineWritten + 16 == 513)
+	// must collapse to ellipsis with no fragment.
+	padOneOver := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe)+1)
+	gotOneOver := buildExcerpt(padOneOver + excerptBeginMarker + " tail")
+	assertNoPartialPlaceholder(t, gotOneOver)
+	if strings.Contains(gotOneOver, excerptBeginMarker) {
+		t.Errorf("raw BEGIN marker survived at one-over boundary: %q", gotOneOver)
+	}
+}
+
 // TestBuildExcerpt_MarkerFoldedIntoWalk pins R20260602-PERF-1 (#1578):
 // folding the delimiter neutralisation into the single rune walk (instead
 // of the prior 2×Contains + 2×ReplaceAll pre-pass) must stay
@@ -374,7 +430,7 @@ func TestAutoTitler_PromptStructure(t *testing.T) {
 			"CRITICAL RULES",
 			"---BEGIN CONVERSATION EXCERPT---",
 			"---END CONVERSATION EXCERPT---",
-			"REMINDER: Output only the Chinese title",
+			"REMINDER: Output one line, majority Chinese",
 			"请把工作流改成 docker",
 		} {
 			if !strings.Contains(prompt, want) {
@@ -383,6 +439,168 @@ func TestAutoTitler_PromptStructure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("runner.Run was not invoked")
+	}
+}
+
+// TestAutoTitler_PromptRecognizabilityContract pins the recognizability
+// redesign (#2115). The system prompt must instruct the model to (a) keep
+// identifying tokens verbatim, (b) drop the current project/repo name, (c)
+// cap the title at 24 chars, and (d) fall back to 未命名会话 ONLY for
+// no-usable-text input. These are the wording changes that lifted titles
+// from generic phrases ("自动命名失败排查") to distinguishing ones
+// ("auto-titler 命名失败"). A future "tidy-up" that re-introduces the old
+// "Han characters and Arabic digits only" / ≤16 / broad-fallback wording
+// would silently regress naming quality with no test failure otherwise.
+func TestAutoTitler_PromptRecognizabilityContract(t *testing.T) {
+	t.Parallel()
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{
+		{Key: "feishu:direct:u1:general", MessageCount: 5, LastPrompt: "auto-titler 命名失败"},
+	})
+	captured := make(chan string, 1)
+	runner := &capturingRunner{captured: captured, resp: "auto-titler 命名失败"}
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	if _, err := a.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick err: %v", err)
+	}
+	select {
+	case prompt := <-captured:
+		for _, want := range []string{
+			"majority Chinese characters",
+			"real, recognizable proper-noun identifiers",
+			"Do NOT include the current project name or repository name",
+			"at most 24 characters",
+			"no usable topic",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("prompt missing recognizability instruction %q\nfull:\n%s", want, prompt)
+			}
+		}
+		// The old over-constraining wording must be gone — its presence is
+		// exactly what suppressed proper nouns and tripped the broad
+		// fallback. Guard against an accidental revert.
+		for _, gone := range []string{
+			"Han characters and Arabic digits only",
+			"≤16 Chinese characters",
+			"off-topic, or impossible to summarize",
+		} {
+			if strings.Contains(prompt, gone) {
+				t.Errorf("prompt still contains retired over-constraint %q — recognizability regression", gone)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner.Run was not invoked")
+	}
+}
+
+// TestAutoTitler_TitleRuneCeiling pins the autoTitlerMaxTitleRunes gate at
+// its post-#2115 value (24) AND the clip-on-overflow behaviour. A title at
+// or under the ceiling is written verbatim; an over-length title is clipped
+// to the ceiling on a rune boundary and STILL written (not rejected) — the
+// redesign instructs the model to keep rune-dense ASCII identifiers, so an
+// overshoot must degrade to a usable label rather than a silent no-rename.
+// Mixed CJK+ASCII is used because the gate counts runes, not bytes.
+func TestAutoTitler_TitleRuneCeiling(t *testing.T) {
+	t.Parallel()
+	const key = "feishu:direct:u1:general"
+	cases := []struct {
+		name      string
+		title     string
+		wantLabel string // exact label expected to be written
+	}{
+		{"exactly at ceiling kept", strings.Repeat("a", autoTitlerMaxTitleRunes), strings.Repeat("a", autoTitlerMaxTitleRunes)},
+		{"cjk at ceiling kept", strings.Repeat("好", autoTitlerMaxTitleRunes), strings.Repeat("好", autoTitlerMaxTitleRunes)},
+		{"mixed under ceiling kept", "auto-titler 命名失败排查", "auto-titler 命名失败排查"},
+		{"ascii over ceiling clipped", strings.Repeat("a", autoTitlerMaxTitleRunes+5), strings.Repeat("a", autoTitlerMaxTitleRunes)},
+		{"cjk over ceiling clipped", strings.Repeat("好", autoTitlerMaxTitleRunes+5), strings.Repeat("好", autoTitlerMaxTitleRunes)},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			router := newSnapshotFakeRouter([]session.SessionSnapshot{
+				{Key: key, MessageCount: 5, LastPrompt: "msg"},
+			})
+			runner := &fakeRunner{resp: c.title}
+			a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+			rep, err := a.Tick(context.Background())
+			if err != nil {
+				t.Fatalf("Tick err = %v, want nil (clip, not reject)", err)
+			}
+			if rep.Acted != 1 {
+				t.Fatalf("Acted = %d, want 1 (title %q must be clipped+written)", rep.Acted, c.title)
+			}
+			got := router.fakeRouter.label(key)
+			if got != c.wantLabel {
+				t.Errorf("written label = %q, want %q", got, c.wantLabel)
+			}
+			if n := len([]rune(got)); n > autoTitlerMaxTitleRunes {
+				t.Errorf("written label is %d runes, exceeds ceiling %d", n, autoTitlerMaxTitleRunes)
+			}
+		})
+	}
+}
+
+// TestAutoTitler_KeepsAsciiIdentifierTitle locks the core recognizability
+// win: a title containing verbatim ASCII identifiers (component + file +
+// error tokens) must pass the full renameOne pipeline (ValidateUserLabel +
+// the rune ceiling) and be written with origin=auto. Pre-#2115 the prompt
+// forbade non-Han characters; even though ValidateUserLabel always allowed
+// ASCII, the prompt suppressed it. This test asserts the pipeline itself
+// admits such titles so the prompt change isn't silently undone by a
+// validator tightening later.
+func TestAutoTitler_KeepsAsciiIdentifierTitle(t *testing.T) {
+	t.Parallel()
+	const key = "feishu:direct:u1:general"
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{
+		{Key: key, MessageCount: 5, LastPrompt: "NLB 拿不到真实 IP"},
+	})
+	runner := &fakeRunner{resp: "NLB 拿不到客户端真实IP"}
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	rep, err := a.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick err = %v", err)
+	}
+	if rep.Acted != 1 {
+		t.Fatalf("Acted = %d, want 1", rep.Acted)
+	}
+	if got := router.fakeRouter.label(key); got != "NLB 拿不到客户端真实IP" {
+		t.Errorf("written label = %q, want the verbatim ASCII-bearing title", got)
+	}
+}
+
+// TestAutoTitler_ClipTrimsTrailingSpace covers the clip boundary case where
+// the rune-slice cut lands right after a space (#2115). Without the
+// post-clip TrimSpace the published label would carry a trailing blank,
+// which ValidateUserLabel tolerates (it only trims surrounding whitespace
+// on entry, not after our slice) and which renders as a ragged sidebar
+// title. Build a title whose 24th rune is a space so the naive slice would
+// end in " ".
+func TestAutoTitler_ClipTrimsTrailingSpace(t *testing.T) {
+	t.Parallel()
+	const key = "feishu:direct:u1:general"
+	// 23 non-space runes + a space at rune index 23 (the 24th rune), then
+	// more text that pushes past the ceiling. Slicing to 24 runes yields
+	// "...<space>"; TrimSpace must drop it.
+	title := strings.Repeat("好", 23) + " 多余的尾巴内容"
+	if len([]rune(title)) <= autoTitlerMaxTitleRunes {
+		t.Fatalf("test misconfigured: title is %d runes, need > %d", len([]rune(title)), autoTitlerMaxTitleRunes)
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{
+		{Key: key, MessageCount: 5, LastPrompt: "msg"},
+	})
+	runner := &fakeRunner{resp: title}
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	rep, err := a.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick err = %v", err)
+	}
+	if rep.Acted != 1 {
+		t.Fatalf("Acted = %d, want 1", rep.Acted)
+	}
+	got := router.fakeRouter.label(key)
+	want := strings.Repeat("好", 23) // trailing space trimmed
+	if got != want {
+		t.Errorf("clipped label = %q, want %q (trailing space must be trimmed)", got, want)
 	}
 }
 
@@ -1091,7 +1309,7 @@ type cancelAfterFirstRunnerHelper struct {
 func (c *cancelAfterFirstRunnerHelper) Run(_ context.Context, _ string) (string, error) {
 	n := c.called.Add(1)
 	if n == 1 {
-		c.cancel()        // cancel the outer ctx so next iteration's ctx.Err() fires
+		c.cancel() // cancel the outer ctx so next iteration's ctx.Err() fires
 		return "", c.errReturn
 	}
 	return "", context.Canceled

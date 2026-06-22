@@ -24,15 +24,46 @@ type Manager struct {
 	root     string
 	defaults PlannerDefaults
 
+	// includeRoot registers the root directory itself as a project (named
+	// after its basename) in addition to its subdirectories. See
+	// ProjectsConfig.IncludeRoot. Files directly under root then resolve to an
+	// owning project so the dashboard renders preview/download buttons.
+	includeRoot bool
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
 	// bindingIndex: "platform:chatType:chatID" -> project name (built from all ChatBindings)
 	bindingIndex map[string]string
+
+	// resolveCache memoises ResolveWorkspaces' inode-walk fallback (ws path →
+	// project name, or "" for a confirmed no-match). It is consulted ONLY after
+	// the byte-wise strings.HasPrefix fast path misses, so the common (case-
+	// matching) workspace pays nothing. The fallback Stats every ancestor of a
+	// ws on a case-insensitive FS (macOS APFS/HFS+, Windows NTFS) where the
+	// configured projects_root and the on-disk path differ only in case — at
+	// 1 Hz × N dashboard polls that syscall fan-out would repeat every tick
+	// without this cache. Keyed by the raw ws string the caller passes.
+	//
+	// Lifetime: entries are valid only against the current m.projects snapshot,
+	// so Scan() clears the cache under m.mu.Lock when it swaps projects. The
+	// other writers (BindChat / SetFavorite / UpdateConfig) mutate a project's
+	// Config but never its Path, so a cached ws→name mapping stays correct
+	// across them and they deliberately do NOT clear it.
+	resolveCache sync.Map // ws string → string (project name; "" = no match)
+}
+
+// Option customises a Manager at construction time.
+type Option func(*Manager)
+
+// WithIncludeRoot registers the projects root directory itself as a project
+// (in addition to its subdirectories) when enabled.
+func WithIncludeRoot(enabled bool) Option {
+	return func(m *Manager) { m.includeRoot = enabled }
 }
 
 // NewManager creates a project manager for the given root directory.
-func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
+func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve projects root: %w", err)
@@ -44,16 +75,52 @@ func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("projects root is not a directory: %s", absRoot)
 	}
-	return &Manager{
+	m := &Manager{
 		root:         absRoot,
 		defaults:     defaults,
 		projects:     make(map[string]*Project),
 		bindingIndex: make(map[string]string),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m, nil
+}
+
+// dirModTimeMillis returns the directory's filesystem mtime in unix ms.
+// It prefers the cheap os.DirEntry.Info() (already cached from ReadDir on most
+// platforms) and falls back to os.Stat(path) when entry is nil (the synthetic
+// root project) or Info() fails. Returns 0 on any error so the caller treats
+// the mtime as unknown and the picker falls back to backend order.
+func dirModTimeMillis(entry os.DirEntry, path string) int64 {
+	if entry != nil {
+		if info, err := entry.Info(); err == nil {
+			return info.ModTime().UnixMilli()
+		}
+	}
+	if info, err := os.Stat(path); err == nil {
+		return info.ModTime().UnixMilli()
+	}
+	return 0
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
+//
+// R202606c-CR-002: the whole scan — disk read, CreatedAt migration, and the
+// m.projects swap — runs under the write lock. Previously only the final swap
+// was locked while the on-disk read happened lock-free, so a writer
+// (BindChat/SetFavorite/UpdateConfig/UnbindAllChat) could append+persist a
+// binding in the window between this function reading the pre-change file and
+// installing its fresh map, silently dropping the just-made change from the
+// in-memory index. Serializing the entire scan against those writers (which
+// now also persist under the same lock) makes the two operations atomic w.r.t.
+// each other: a scan either sees a writer's change already on disk or runs
+// entirely before it. Scan is periodic and project mutations are low frequency,
+// so holding the lock across the disk IO is acceptable.
 func (m *Manager) Scan() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
 		return fmt.Errorf("scan projects root: %w", err)
@@ -97,6 +164,45 @@ func (m *Manager) Scan() error {
 			Config:       cfg,
 			GitRemoteURL: remote,
 			IsGitHub:     isGH,
+			DirModTime:   dirModTimeMillis(entry, absPath),
+		}
+	}
+
+	// IncludeRoot: register the root directory itself as a project so files
+	// living directly under root (not inside any subdirectory project) resolve
+	// to an owning project and the dashboard renders preview/download buttons.
+	// The root project uses basename(root) as its name; a real subdirectory of
+	// the same name wins (it was inserted above) so we never shadow it. Path
+	// resolution is longest-prefix everywhere (ResolveWorkspaces here,
+	// resolveProjectForAbsPath in the dashboard), so a file under a deeper
+	// subdirectory project still resolves there — root only catches the leftovers.
+	if m.includeRoot {
+		rootName := filepath.Base(m.root)
+		if err := ValidateProjectName(rootName); err != nil {
+			slog.Warn("include_root: root basename is not a valid project name; skipping root project",
+				"root", m.root, "name", rootName, "err", err)
+		} else if _, clash := projects[rootName]; clash {
+			slog.Warn("include_root: a subdirectory already uses the root basename; skipping root project",
+				"root", m.root, "name", rootName)
+		} else {
+			cfg, err := loadConfig(m.root)
+			if err != nil {
+				slog.Warn("include_root: skip root project with bad config", "root", m.root, "err", err)
+			} else if err := ValidateConfig(cfg); err != nil {
+				slog.Warn("include_root: skip root project with invalid config", "root", m.root, "err", err)
+			} else {
+				remote, isGH := DetectGitHubRemote(m.root)
+				projects[rootName] = &Project{
+					Name:         rootName,
+					Path:         m.root,
+					PathPrefix:   m.root + string(filepath.Separator),
+					Config:       cfg,
+					GitRemoteURL: remote,
+					IsGitHub:     isGH,
+					IsRoot:       true,
+					DirModTime:   dirModTimeMillis(nil, m.root),
+				}
+			}
 		}
 	}
 
@@ -117,6 +223,13 @@ func (m *Manager) Scan() error {
 	// No current caller invokes Scan concurrently.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
+		// The root project (include_root) is synthetic: it has no
+		// .naozhi/project.yaml and we must NOT auto-create one inside the user's
+		// top-level workspace. Skip it here and stamp an in-memory-only
+		// CreatedAt below so the migration never persists to root.
+		if p.IsRoot {
+			continue
+		}
 		if p.Config.CreatedAt == 0 {
 			missing = append(missing, name)
 		}
@@ -138,10 +251,41 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	m.mu.Lock()
+	// Root project sidebar order: assign an in-memory-only CreatedAt that sorts
+	// the root entry strictly LAST among all projects so it lands at the bottom
+	// of the sidebar. Never persisted (that is the point of skipping it above),
+	// so it is recomputed every boot; because it is always the max, its relative
+	// position is stable across reboots regardless of the synthetic value.
+	//
+	// Override unconditionally (not just when CreatedAt==0): if the operator
+	// dropped a real .naozhi/project.yaml at the workspace root, loadConfig
+	// would have read its created_at and that would otherwise place root in the
+	// middle of the list, breaking the "root sorts last" invariant. The root
+	// project is synthetic, so its sidebar position is always derived here.
+	for _, p := range projects {
+		if p.IsRoot {
+			var maxCreated int64
+			for _, q := range projects {
+				if q.IsRoot {
+					continue
+				}
+				if q.Config.CreatedAt > maxCreated {
+					maxCreated = q.Config.CreatedAt
+				}
+			}
+			p.Config.CreatedAt = maxCreated + 1
+		}
+	}
+
 	m.projects = projects
 	m.rebuildBindingIndex()
-	m.mu.Unlock()
+	// Drop the inode-walk fallback memo: it is keyed to the project set we just
+	// replaced, so a stale ws→name (e.g. a renamed/removed project, or a path
+	// that now resolves to a different deepest project) must not survive a
+	// rescan. Clear under the same write lock that swaps m.projects so a
+	// concurrent ResolveWorkspaces reader never sees fresh projects with a stale
+	// cache. Go 1.21+ sync.Map.Clear.
+	m.resolveCache.Clear()
 
 	slog.Info("scanned projects", "root", m.root, "count", len(projects))
 	return nil
@@ -207,10 +351,19 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	if err := validateBindingField(platform, chatType, chatID); err != nil {
 		return fmt.Errorf("%w: BindChat: %s", ErrInvalidConfig, err.Error())
 	}
+	// R202606c-CR-002: hold the write lock across saveConfigToPath. The
+	// periodic Scan() (server_loops.go) takes the same write lock and
+	// overwrites m.projects with the map freshly loaded from disk. If the
+	// save happened after Unlock(), a Scan firing in the window between
+	// Unlock and save would reload the pre-binding on-disk file and clobber
+	// the in-memory binding we just appended (lost until the next save+scan).
+	// saveConfigToPath is pure file IO and never re-enters m.mu, so holding
+	// the lock across it is reentrancy-safe; project mutations are low
+	// frequency so the wider lock window is acceptable.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[projectName]
 	if !ok {
-		m.mu.Unlock()
 		// R183-SEC-L1: use %q to mirror UpdateConfig / SetFavorite (lines 211,
 		// 237). An exported function is one future caller away from being
 		// reached without a trust-boundary ValidateProjectName; defense-in-
@@ -224,18 +377,13 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	// Check if already bound
 	for _, b := range p.Config.ChatBindings {
 		if b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType {
-			m.mu.Unlock()
 			return nil // already bound
 		}
 	}
 
 	p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
 	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // UnbindAllChat removes all bindings for a given chat across all projects.
@@ -249,7 +397,12 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 // ("across all projects") and removes the non-deterministic routing that
 // last-writer-wins index rebuilds produced for multi-bound chats.
 func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk configs and resurrect the bindings we just
+	// stripped. See BindChat for the full rationale; saveConfigToPath does not
+	// re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	type pendingSave struct {
 		path string
@@ -277,7 +430,6 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	if changed {
 		m.rebuildBindingIndex()
 	}
-	m.mu.Unlock()
 
 	var firstErr error
 	for _, s := range saves {
@@ -291,33 +443,34 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 // SetFavorite toggles a project's Favorite flag and persists it atomically.
 // Only touches Favorite — other config fields are preserved.
 func (m *Manager) SetFavorite(name string, favorite bool) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk config and drop this Favorite flip. See
+	// BindChat for the full rationale; saveConfigToPath does not re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		m.mu.Unlock()
 		// R182-SEC-L1: %q mirrors UpdateConfig (line 234). set_favorite now
 		// validates at the RPC boundary (R182-SEC-M1), but function is
 		// defense-in-depth for any future caller that forgets to validate.
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	if p.Config.Favorite == favorite {
-		m.mu.Unlock()
 		return nil
 	}
 	p.Config.Favorite = favorite
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // UpdateConfig updates a project's config and persists it.
 func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
+	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
+	// reload the pre-change on-disk config and drop this update. See BindChat
+	// for the full rationale; saveConfigToPath does not re-enter m.mu.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		m.mu.Unlock()
 		// R181-SEC-P2-2: name comes from reverse-RPC frames (update_config)
 		// and dashboard query strings. %q escapes bidi/C1/newline so the
 		// wrapped error cannot forge structured log entries when the caller
@@ -327,11 +480,7 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 	}
 	p.Config = cfg
 	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
+	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
 // ProjectNames returns the set of current project names.
@@ -347,6 +496,16 @@ func (m *Manager) ProjectNames() map[string]struct{} {
 
 // ResolveWorkspaces maps workspace paths to project names in a single lock acquisition.
 // Returns a map from workspace path to project name. Paths that don't match any project are omitted.
+//
+// Matching is longest-prefix over the registered projects. The primary check is
+// a byte-wise strings.HasPrefix, which is exact and allocation-free. When that
+// misses for a ws, ResolveWorkspaces falls back to an inode-aware containment
+// walk (resolveWorkspaceByInode) so a case-insensitive filesystem (macOS
+// APFS/HFS+, Windows NTFS) still resolves the project even when the configured
+// projects_root and the on-disk workspace path differ only in case — e.g. root
+// "/Users/me/Workspace" vs a Claude-recorded cwd "/Users/me/workspace/foo".
+// Without the fallback those sessions render with no project/folder label in
+// the dashboard history panel even though they live under root.
 func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -375,11 +534,53 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 				}
 			}
 		}
+		if bestName == "" {
+			// Byte prefix missed for every project. On a case-insensitive FS the
+			// ws may still live under a project whose Path differs only in case,
+			// so probe inode containment (cached, since it Stats the FS).
+			bestName = m.resolveWorkspaceByInode(ws)
+		}
 		if bestName != "" {
 			result[ws] = bestName
 		}
 	}
 	return result
+}
+
+// resolveWorkspaceByInode is the inode-aware longest-prefix fallback for
+// ResolveWorkspaces. It is reached only when the byte-wise strings.HasPrefix
+// scan found no project for ws, so on a case-sensitive FS with matching case
+// (the common deployment) it is never called.
+//
+// It walks every registered project and asks osutil.PathContainedInRoot
+// whether ws is the same path as, or beneath, that project's Path — a check
+// that falls back to an os.SameFile ancestor walk and so honours the kernel's
+// case folding without hard-coding any OS-specific rules. Among the projects
+// that contain ws it keeps the longest Path (deepest project wins), preserving
+// the same longest-prefix semantics as the fast path.
+//
+// Results (including a confirmed no-match, cached as "") are memoised in
+// resolveCache because the SameFile walk Stats each ancestor and the dashboard
+// re-resolves the same workspaces at 1 Hz. Callers already hold m.mu.RLock; the
+// cache is a sync.Map so the concurrent reads are safe, and Scan clears it under
+// the write lock when m.projects is replaced.
+func (m *Manager) resolveWorkspaceByInode(ws string) string {
+	if v, ok := m.resolveCache.Load(ws); ok {
+		return v.(string)
+	}
+	var bestName string
+	var bestLen int
+	for _, p := range m.projects {
+		if len(p.Path) <= bestLen {
+			continue // a longer match already won; SameFile walk is the cost we skip
+		}
+		if osutil.PathContainedInRoot(ws, p.Path) {
+			bestName = p.Name
+			bestLen = len(p.Path)
+		}
+	}
+	m.resolveCache.Store(ws, bestName)
+	return bestName
 }
 
 // EffectivePlannerModel returns the model for the planner (project override > global default > "sonnet").

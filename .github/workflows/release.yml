@@ -12,7 +12,7 @@ jobs:
   check-branch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Verify tag is on master
@@ -44,7 +44,7 @@ jobs:
           # CYGWIN and the shim requires POSIX process semantics (Setsid, Kill)
           # that have no Windows equivalent even with the syscall build-tag split.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -66,14 +66,59 @@ jobs:
           name: naozhi-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
 
-  release:
+  # Post-deploy screenshot gate. Boots the freshly built linux/amd64 binary in
+  # dashboard-only mode (no Feishu creds, stub CLI) and drives every top-level
+  # dashboard view with Playwright, asserting render + zero-console-error per
+  # view. `release` needs this job, so a gate failure blocks the GitHub Release
+  # from being published — `naozhi upgrade` only sees tagged Release assets, so
+  # a broken dashboard can never reach an upgrading operator even though the tag
+  # already exists. Runner cannot reach the operator's systemd instance, so this
+  # validates the binary's own embedded dashboard, which is byte-identical to
+  # what ships. See scripts/release-gate.mjs + docs/ops/release-gate.md.
+  e2e-gate:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: naozhi-linux-amd64
+          path: dist/
+
+      - name: Install Playwright + chromium
+        working-directory: test/e2e
+        # npm install (not ci): repo policy gitignores package-lock.json
+        # (.gitignore:18), and the suite has a single pinned dep.
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run screenshot gate
+        env:
+          NAOZHI_GATE_BIN: dist/naozhi-linux-amd64
+        run: |
+          chmod +x dist/naozhi-linux-amd64
+          ./scripts/gate-instance.sh
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-gate-screenshots
+          path: tmp/release-gate/
+          if-no-files-found: warn
+
+  release:
+    needs: [build, e2e-gate]
     runs-on: ubuntu-latest
     steps:
       # Need the repo for install.sh to ship as a release asset. install.sh
       # is intentionally static (no per-release substitution); it fetches
       # checksums.txt from whichever tag it targets at runtime.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:

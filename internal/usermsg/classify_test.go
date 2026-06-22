@@ -37,6 +37,7 @@ func TestClassify_SentinelToCode(t *testing.T) {
 		{"MessageTooLarge", cli.ErrMessageTooLarge, "", CodeMessageTooLarge},
 		{"Canceled", context.Canceled, "", CodeRestarting},
 		{"DeadlineExceeded", context.DeadlineExceeded, "", CodeRestarting},
+		{"RouterStopped", session.ErrRouterStopped, "", CodeRestarting},
 		{"wrapped sentinel via errors.Is", wrapErr(session.ErrMaxProcs), "", CodeMaxProcs},
 	}
 	for _, tt := range tests {

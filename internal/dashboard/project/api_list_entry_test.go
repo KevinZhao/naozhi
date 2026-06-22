@@ -55,6 +55,26 @@ func TestProjectsListEntry_JSONShape(t *testing.T) {
 		if strings.Contains(got, `"node"`) {
 			t.Errorf("json = %s\nmust omit zero `node` (multi-node merge stamps `local` before serialise)", got)
 		}
+		// dir_mtime carries omitempty too: an un-stat'able directory (mtime 0)
+		// drops the key, and the picker reads `p.dir_mtime || 0`, so it must
+		// NOT appear when zero.
+		if strings.Contains(got, `"dir_mtime"`) {
+			t.Errorf("json = %s\nmust omit zero `dir_mtime` (picker reads `p.dir_mtime || 0`)", got)
+		}
+	})
+
+	t.Run("dir_mtime present when non-zero", func(t *testing.T) {
+		buf, err := json.Marshal(projectsListEntry{
+			Name: "demo", Path: "/tmp/demo",
+			PlannerState: "none", PlannerModel: "m",
+			DirModTime: 1_700_000_000_000,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if got := string(buf); !strings.Contains(got, `"dir_mtime":1700000000000`) {
+			t.Errorf("json = %s\nmissing `\"dir_mtime\":1700000000000`", got)
+		}
 	})
 
 	t.Run("multi-node entry stamps node", func(t *testing.T) {

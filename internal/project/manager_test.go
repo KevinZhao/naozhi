@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // makeProjectDir creates a minimal project directory under root:
@@ -400,6 +402,47 @@ func TestAll_OrderedByCreatedAt(t *testing.T) {
 			t.Errorf("All()[%d].Name = %q, want %q (creation-order driven)",
 				i, all[i].Name, want)
 		}
+	}
+}
+
+// TestScan_CapturesDirModTime locks the "new session" picker contract: Scan
+// stamps each project's DirModTime from the directory's filesystem mtime so
+// the dashboard folder picker can order its fallback tier by most-recently-
+// touched. The value is runtime-derived (not persisted) and must be non-zero
+// for a normally-stat'able directory.
+func TestScan_CapturesDirModTime(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeProjectDir(t, root, "alpha", nil)
+	makeProjectDir(t, root, "beta", nil)
+
+	// Force a distinct, older mtime on "alpha" so the comparison is not at the
+	// mercy of sub-millisecond create timing. "beta" keeps its fresh mtime.
+	oldTime := time.Unix(1_600_000_000, 0) // 2020-09-13, safely in the past
+	if err := os.Chtimes(filepath.Join(root, "alpha"), oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes alpha: %v", err)
+	}
+
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	byName := map[string]*Project{}
+	for _, p := range m.All() {
+		byName[p.Name] = p
+	}
+	if byName["alpha"].DirModTime == 0 || byName["beta"].DirModTime == 0 {
+		t.Fatalf("DirModTime not stamped: alpha=%d beta=%d",
+			byName["alpha"].DirModTime, byName["beta"].DirModTime)
+	}
+	if got := byName["alpha"].DirModTime; got != oldTime.UnixMilli() {
+		t.Errorf("alpha DirModTime = %d, want %d (chtimes mtime in ms)",
+			got, oldTime.UnixMilli())
+	}
+	if byName["beta"].DirModTime <= byName["alpha"].DirModTime {
+		t.Errorf("beta (fresh) DirModTime %d should exceed alpha (backdated) %d",
+			byName["beta"].DirModTime, byName["alpha"].DirModTime)
 	}
 }
 
@@ -848,5 +891,226 @@ func TestRebuildBindingIndex_OverwriteOnBind(t *testing.T) {
 	// the function doesn't panic and returns a non-nil project.
 	if p2 == nil {
 		t.Error("ProjectForChat after double-bind = nil")
+	}
+}
+
+// ---- ResolveWorkspaces inode-walk fallback (case-insensitive FS) ----
+
+// TestResolveWorkspaces_InodeFallback is the CI-safe proxy for the macOS/Windows
+// case-fold bug where projects_root is configured as "/Users/me/Workspace" but
+// Claude records cwds as "/Users/me/workspace/foo" (the on-disk case). The byte
+// prefix then misses and the session renders with no folder label.
+//
+// On case-sensitive Linux CI we reproduce the exact "byte-different path, same
+// inode" condition with a symlink: <root>/proj is the real project, and we ask
+// ResolveWorkspaces to resolve a ws routed through an <alias> symlink that names
+// the same inode as root. HasPrefix fails (alias != root byte-wise), so the
+// inode walk must rescue the match — the same code path the real case-fold bug
+// exercises.
+func TestResolveWorkspaces_InodeFallback(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// alias -> real, so aliasWS is byte-different from the registered project
+	// Path (<root>/proj) yet names the same inode as <root>/proj/sub.
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "proj", "sub")
+
+	// Sanity: the byte fast path must genuinely miss, otherwise the test would
+	// pass without exercising the fallback.
+	if strings.HasPrefix(aliasWS+"/", filepath.Join(root, "proj")+"/") {
+		t.Fatalf("precondition failed: %q byte-prefixes the project path; "+
+			"fallback would not be exercised", aliasWS)
+	}
+
+	result := m.ResolveWorkspaces([]string{aliasWS})
+	if got := result[aliasWS]; got != "proj" {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want \"proj\" (inode fallback should match)", aliasWS, got)
+	}
+}
+
+// TestResolveWorkspaces_InodeFallback_LongestWins pins that the fallback keeps
+// the longest-prefix (deepest project) semantics of the byte fast path: when a
+// ws (reached via an inode-equal alias) lives under both an outer and an inner
+// registered project, the inner one must win.
+func TestResolveWorkspaces_InodeFallback_LongestWins(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	// outer = <root>/outer ; inner = <root>/outer/inner — both registered as
+	// projects (any non-hidden subdir under root is a project, and Scan also
+	// walks nested dirs that contain their own marker only via top-level
+	// ReadDir, so register inner as a sibling top-level whose Path nests under
+	// outer by constructing the tree explicitly).
+	makeProjectDir(t, root, "outer", nil)
+	innerName := "inner"
+	if err := os.MkdirAll(filepath.Join(root, "outer", innerName), 0o755); err != nil {
+		t.Fatalf("mkdir inner: %v", err)
+	}
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// Only top-level dirs under root become projects, so "outer" is the only
+	// registered project here; a ws under outer/inner must still resolve to
+	// "outer" via the fallback (deepest *registered* project).
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "outer", innerName, "deep")
+	result := m.ResolveWorkspaces([]string{aliasWS})
+	if got := result[aliasWS]; got != "outer" {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want \"outer\"", aliasWS, got)
+	}
+}
+
+// TestResolveWorkspaces_InodeFallback_SiblingNotMatched guards that the fallback
+// does not over-match a sibling directory. A ws under <tmp>/realOther (a
+// sibling of root, not beneath it) must resolve to nothing even though the
+// inode walk is in play.
+func TestResolveWorkspaces_InodeFallback_SiblingNotMatched(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	other := filepath.Join(tmp, "realOther")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatalf("mkdir other: %v", err)
+	}
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	otherWS := filepath.Join(other, "whatever")
+	result := m.ResolveWorkspaces([]string{otherWS})
+	if got, ok := result[otherWS]; ok {
+		t.Errorf("ResolveWorkspaces(%q) = %q, want no match (sibling of root)", otherWS, got)
+	}
+}
+
+// TestResolveWorkspaces_FallbackCacheInvalidatedOnScan verifies the inode-walk
+// memo does not outlive a project rescan: a ws that resolved to a project must
+// stop resolving once that project's directory is removed and Scan re-runs.
+func TestResolveWorkspaces_FallbackCacheInvalidatedOnScan(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "real")
+	makeProjectDir(t, root, "proj", nil)
+
+	m, err := NewManager(root, PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	alias := filepath.Join(tmp, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	aliasWS := filepath.Join(alias, "proj", "sub")
+
+	// First resolve populates the fallback cache with proj→"proj".
+	if got := m.ResolveWorkspaces([]string{aliasWS})[aliasWS]; got != "proj" {
+		t.Fatalf("pre-rescan ResolveWorkspaces(%q) = %q, want \"proj\"", aliasWS, got)
+	}
+
+	// Remove the project directory and rescan; the cached mapping must be
+	// dropped so the ws no longer resolves.
+	if err := os.RemoveAll(filepath.Join(root, "proj")); err != nil {
+		t.Fatalf("remove proj: %v", err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if got, ok := m.ResolveWorkspaces([]string{aliasWS})[aliasWS]; ok {
+		t.Errorf("post-rescan ResolveWorkspaces(%q) = %q, want no match (cache should be invalidated)", aliasWS, got)
+	}
+}
+
+// TestBindChat_ConcurrentScan_DoesNotDropBinding pins R202606c-CR-002: the
+// periodic Scan() (server_loops.go) takes the manager write lock and replaces
+// m.projects with the map freshly loaded from disk. The original BindChat
+// released the lock BEFORE saveConfigToPath, so a Scan firing in that window
+// would reload the pre-binding on-disk file and clobber the just-appended
+// in-memory binding. With the save moved under the lock, BindChat and Scan are
+// strictly serialized: Scan either observes the binding already persisted, or
+// runs entirely before the append — it can never reload a half-applied state.
+//
+// The test races a BindChat against a Scan many times on the same manager and
+// asserts the binding is never lost. The -race detector also flags the
+// concurrent m.projects access if the locking ever regresses.
+func TestBindChat_ConcurrentScan_DoesNotDropBinding(t *testing.T) {
+	t.Parallel()
+	const iters = 200
+	for i := 0; i < iters; i++ {
+		root := t.TempDir()
+		makeProjectDir(t, root, "racy", nil)
+		m, _ := NewManager(root, PlannerDefaults{})
+		if err := m.Scan(); err != nil {
+			t.Fatalf("initial Scan: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := m.BindChat("racy", "feishu", "group", "chatX"); err != nil {
+				t.Errorf("BindChat: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// Concurrent periodic rescan reloading from disk.
+			if err := m.Scan(); err != nil {
+				t.Errorf("concurrent Scan: %v", err)
+			}
+		}()
+		wg.Wait()
+
+		// After both complete, the binding must be present. If Scan ran first,
+		// it reloaded the empty config but BindChat's later save+append wins; if
+		// BindChat ran first, Scan reloads the persisted binding. Either way the
+		// binding both lives in memory and is on disk. A torn ordering (save
+		// after unlock) would intermittently leave the binding only in a stale
+		// in-memory copy that Scan then overwrote — i.e. lost.
+		if p := m.ProjectForChat("feishu", "group", "chatX"); p == nil {
+			t.Fatalf("iter %d: binding lost from in-memory index after concurrent Scan", i)
+		}
+
+		// And it must be durable: a fresh manager reading purely from disk sees it.
+		m2, _ := NewManager(root, PlannerDefaults{})
+		if err := m2.Scan(); err != nil {
+			t.Fatalf("reload Scan: %v", err)
+		}
+		if p := m2.Get("racy"); p == nil || len(p.Config.ChatBindings) != 1 {
+			t.Fatalf("iter %d: binding not durably persisted; p = %+v", i, p)
+		}
 	}
 }

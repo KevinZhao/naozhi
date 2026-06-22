@@ -16,6 +16,11 @@ type NodeAccessor interface {
 	// LookupNode returns the node or writes an HTTP 400 error.
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 	KnownNodes() map[string]string // id → displayName, includes disconnected
+	// NodesStatus returns id → connection status for every known node,
+	// "disconnected" for known-but-not-connected nodes. Built under a single
+	// RLock so the /health handler pays one lock acquisition instead of one
+	// per node via repeated NodeByID calls. R20260616-PERF-003.
+	NodesStatus() map[string]string
 }
 
 // nodeAccessor implements NodeAccessor using Server's shared mutex and maps.
@@ -109,4 +114,24 @@ func (a *nodeAccessor) LookupNode(w http.ResponseWriter, id string) (node.Conn, 
 // The returned map is immutable after Server construction — safe to read without locking.
 func (a *nodeAccessor) KnownNodes() map[string]string {
 	return a.knownNodes
+}
+
+// NodesStatus snapshots the status of every known node in a single RLock,
+// returning id → status with "disconnected" for nodes that are configured
+// (in knownNodes) but not currently in the live nodes map. R20260616-PERF-003:
+// the prior /health path called NodeByID per node, taking K RLock/RUnlock
+// cycles for K nodes; this collapses that into one. knownNodes is immutable
+// after construction; only the nodes map needs lock protection.
+func (a *nodeAccessor) NodesStatus() map[string]string {
+	out := make(map[string]string, len(a.knownNodes))
+	a.mu.RLock()
+	for id := range a.knownNodes {
+		if nc, ok := a.nodes[id]; ok {
+			out[id] = nc.Status()
+		} else {
+			out[id] = "disconnected"
+		}
+	}
+	a.mu.RUnlock()
+	return out
 }

@@ -180,16 +180,19 @@ func TestRegisterDefaults_RegistersClaudeAndKiro(t *testing.T) {
 		RegisterDefaults()
 
 		all := All()
-		if len(all) != 2 {
-			t.Fatalf("RegisterDefaults: All() len = %d; want 2", len(all))
+		if len(all) != 3 {
+			t.Fatalf("RegisterDefaults: All() len = %d; want 3", len(all))
 		}
 
-		// Registration order is claude then kiro per the function body.
+		// Registration order is claude, kiro, codex per the function body.
 		if all[0].ID != "claude" {
 			t.Errorf("first default profile = %q; want %q", all[0].ID, "claude")
 		}
 		if all[1].ID != "kiro" {
 			t.Errorf("second default profile = %q; want %q", all[1].ID, "kiro")
+		}
+		if all[2].ID != "codex" {
+			t.Errorf("third default profile = %q; want %q", all[2].ID, "codex")
 		}
 
 		claude, ok := Get("claude")
@@ -225,6 +228,39 @@ func TestRegisterDefaults_RegistersClaudeAndKiro(t *testing.T) {
 		if len(kiro.RequiredNodeCaps) != 1 || kiro.RequiredNodeCaps[0] != "acp" {
 			t.Errorf("kiro RequiredNodeCaps = %v; want [\"acp\"]", kiro.RequiredNodeCaps)
 		}
+
+		codex, ok := Get("codex")
+		if !ok {
+			t.Fatal("Get(\"codex\") missing after RegisterDefaults")
+		}
+		if codex.DisplayName != "codex" {
+			t.Errorf("codex DisplayName = %q; want %q", codex.DisplayName, "codex")
+		}
+		if codex.DefaultBinary != "codex" {
+			t.Errorf("codex DefaultBinary = %q; want %q", codex.DefaultBinary, "codex")
+		}
+		if codex.DefaultTag != "cdx" {
+			t.Errorf("codex DefaultTag = %q; want %q", codex.DefaultTag, "cdx")
+		}
+		if codex.CostUnit != "tokens" {
+			t.Errorf("codex CostUnit = %q; want %q", codex.CostUnit, "tokens")
+		}
+		if len(codex.RequiredNodeCaps) != 1 || codex.RequiredNodeCaps[0] != "codex-app-server" {
+			t.Errorf("codex RequiredNodeCaps = %v; want [\"codex-app-server\"]", codex.RequiredNodeCaps)
+		}
+		// embedded_context: codex reads @path from inside the prompt
+		// (agentically via shell), satisfying the dashboard gate's contract.
+		// Phase-2 enabled 2026-06-21.
+		if !codex.Features["embedded_context"] {
+			t.Error("codex Features[embedded_context] = false; want true (codex reads @path from prompt)")
+		}
+		// image_input + mcp_http supported; the rest stay phase-1 false.
+		if !codex.Features["image_input"] || !codex.Features["mcp_http"] {
+			t.Error("codex should support image_input + mcp_http")
+		}
+		if codex.Features["askuser"] || codex.Features["passthrough"] {
+			t.Error("codex askuser/passthrough must stay false (phase-2 pipelines not built)")
+		}
 	})
 }
 
@@ -248,8 +284,8 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 		wg.Wait()
 
 		all := All()
-		if len(all) != 2 {
-			t.Fatalf("after %d concurrent EnsureDefaults: All() len = %d; want 2", N, len(all))
+		if len(all) != 3 {
+			t.Fatalf("after %d concurrent EnsureDefaults: All() len = %d; want 3", N, len(all))
 		}
 		if _, ok := Get("claude"); !ok {
 			t.Error("claude missing after concurrent EnsureDefaults")
@@ -257,12 +293,15 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 		if _, ok := Get("kiro"); !ok {
 			t.Error("kiro missing after concurrent EnsureDefaults")
 		}
+		if _, ok := Get("codex"); !ok {
+			t.Error("codex missing after concurrent EnsureDefaults")
+		}
 
 		// Subsequent calls must be no-ops (no panic, no extra registrations).
 		EnsureDefaults()
 		EnsureDefaults()
-		if got := len(All()); got != 2 {
-			t.Errorf("repeat EnsureDefaults registered extra: All() len = %d; want 2", got)
+		if got := len(All()); got != 3 {
+			t.Errorf("repeat EnsureDefaults registered extra: All() len = %d; want 3", got)
 		}
 	})
 }
@@ -283,8 +322,8 @@ func TestEnsureDefaults_CleanRegistryReBootstraps(t *testing.T) {
 			t.Fatalf("clean registry should start empty; All() len = %d", got)
 		}
 		EnsureDefaults()
-		if got := len(All()); got != 2 {
-			t.Fatalf("EnsureDefaults inside clean registry did not re-bootstrap: All() len = %d; want 2 (defaultsOnce reset missing?)", got)
+		if got := len(All()); got != 3 {
+			t.Fatalf("EnsureDefaults inside clean registry did not re-bootstrap: All() len = %d; want 3 (defaultsOnce reset missing?)", got)
 		}
 		if _, ok := Get("claude"); !ok {
 			t.Error("claude missing after re-bootstrap")

@@ -471,7 +471,7 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 				continue
 			}
 			abs := filepath.Join(dayPath, name)
-			metaPath := metaPathFor(abs)
+			metaPath := MetaPathFor(abs)
 
 			keep, reason, err := shouldKeepAttachment(metaPath, dayTime, uploadCutoff, refCutoffMS)
 			if err != nil {
@@ -626,10 +626,12 @@ func loadMetaFile(path string) (*Meta, error) {
 	return &m, nil
 }
 
-// metaPathFor returns the sibling .meta path for an attachment
+// MetaPathFor returns the sibling .meta path for an attachment
 // payload file. Matches the layout Persist creates: strips the
-// payload extension and appends ".meta".
-func metaPathFor(absPayload string) string {
+// payload extension and appends ".meta". Exported so the tracker
+// shares one implementation instead of mirroring it (a divergence
+// would silently split the .meta namespace between GC and tracker).
+func MetaPathFor(absPayload string) string {
 	base := filepath.Base(absPayload)
 	if idx := strings.LastIndex(base, "."); idx > 0 {
 		return filepath.Join(filepath.Dir(absPayload), base[:idx]+".meta")
@@ -661,8 +663,10 @@ func UpdateMetaFile(metaPath string, mutate func(*Meta) bool) (bool, error) {
 	if m == nil {
 		// Legacy attachment with no meta; we cannot append references
 		// without inventing upload metadata, so we refuse rather than
-		// write a partial sidecar.
-		return false, fmt.Errorf("meta sidecar missing: %s", metaPath)
+		// write a partial sidecar. Keep the path out of the error
+		// string (package policy: workspace paths are operator-only).
+		// The caller already has metaPath for its OnMetaWriteError log.
+		return false, errors.New("meta sidecar missing")
 	}
 	if !mutate(m) {
 		return false, nil

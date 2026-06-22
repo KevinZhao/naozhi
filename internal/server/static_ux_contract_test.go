@@ -448,18 +448,15 @@ func TestDashboardJS_LoginRetryCountdown(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_RecentProjectsPaletteOrdering pins the R110-P3 recent
-// projects feature. Three invariants worth protecting:
-//  1. doCreateInProject must push the (name,node) pair so project
-//     creations are the only events that feed the recent list — custom
-//     workspaces have no stable identifier.
-//  2. loadRecentProjects must tolerate localStorage corruption / empty
-//     / Safari-private errors by returning []; the palette must not
-//     crash if the JSON is manually edited.
-//  3. renderPaletteList's q=="" branch must consult the recent list
-//     and apply it via a rank map. The search branch (q!="") must
-//     stay untouched — recent projects mustn't jump matches.
-func TestDashboardJS_RecentProjectsPaletteOrdering(t *testing.T) {
+// TestDashboardJS_PaletteIdleOrdering guards the two invariants the mtime
+// switch is responsible for, orthogonal to the tier comparator itself (which
+// TestDashboardJS_R110P3_PaletteFavoriteSort pins):
+//  1. The search branch (q!="") keeps its standalone fuzzy-score sort — the
+//     idle-state mtime ordering must not perturb match ranking.
+//  2. The retired recent-projects subsystem is fully gone: no dead
+//     localStorage writer that is never read back (the codebase guards
+//     against write-only dead code elsewhere too).
+func TestDashboardJS_PaletteIdleOrdering(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -467,50 +464,25 @@ func TestDashboardJS_RecentProjectsPaletteOrdering(t *testing.T) {
 	}
 	js := string(data)
 
-	// Constants must be defined so callers can't accidentally grow them
-	// to unsafe sizes — the stored blob is surfaced to every tab.
-	for _, want := range []string{
-		"const RECENT_PROJECTS_KEY = 'naozhi_recent_projects';",
-		"const RECENT_PROJECTS_MAX = 10;",
-		"const RECENT_PROJECTS_SHOW = 5;",
-	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("missing constant: %s", want)
-		}
-	}
-
-	// Loader must exist and swallow errors (try/catch with return []).
-	if !strings.Contains(js, "function loadRecentProjects()") {
-		t.Error("loadRecentProjects helper must be defined")
-	}
-	// The error-silent contract: the only way the palette stays robust
-	// to private-browsing setItem throws is a try/catch that returns [].
-	if !strings.Contains(js, "} catch (_) {") {
-		t.Error("loadRecentProjects must catch JSON/localStorage errors and fall back to []")
-	}
-
-	// Writer must exist and be invoked from doCreateInProject.
-	if !strings.Contains(js, "function pushRecentProject(name, node)") {
-		t.Error("pushRecentProject helper must be defined")
-	}
-	if !strings.Contains(js, "pushRecentProject(projectName, nodeId || 'local');") {
-		t.Error("doCreateInProject must invoke pushRecentProject for every successful creation")
-	}
-
-	// Render branch: q==="" must call loadRecentProjects and build a
-	// rank map. Search branch must remain its standalone sort. The rank
-	// map was renamed rankMap → recentRank in the R110-P3 three-tier sort
-	// (favorite + recent + rest); accept the current name so the
-	// refactor doesn't break this older test — it's an orthogonal
-	// invariant about the recent-projects signal still being consulted.
-	if !strings.Contains(js, "const recents = loadRecentProjects();") {
-		t.Error("renderPaletteList q='' branch must consult loadRecentProjects")
-	}
-	if !strings.Contains(js, "recentRank.set(e.name + '|' + (e.node || 'local'), i);") {
-		t.Error("renderPaletteList must compose rank keys as name|node for partition (look for recentRank.set after the R110-P3 three-tier sort refactor)")
-	}
+	// Search branch must remain its standalone fuzzy-score sort.
 	if !strings.Contains(js, "if (q) {\n    scored.sort((a, b) => b.score - a.score);") {
-		t.Error("search branch (q!='') must keep its standalone sort untouched")
+		t.Error("search branch (q!='') must keep its standalone score sort untouched")
+	}
+
+	// The recent-projects subsystem was removed when the picker switched to
+	// mtime ordering. Guard against it (or a stray write-only localStorage
+	// helper) creeping back: every symbol must be gone.
+	for _, gone := range []string{
+		"loadRecentProjects",
+		"pushRecentProject",
+		"RECENT_PROJECTS_KEY",
+		"RECENT_PROJECTS_MAX",
+		"RECENT_PROJECTS_SHOW",
+		"naozhi_recent_projects",
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("retired recent-projects symbol %q still present; the mtime-ordered picker no longer reads it", gone)
+		}
 	}
 }
 
@@ -2169,105 +2141,20 @@ func TestDashboardJS_R110P1_CronStepValueHumanize(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R110P3_CostTooltipHelper pins the R110-P3 cost-detail
-// hover MVP. The session header's `$N.NN` chip previously had no
-// tooltip — operators couldn't see when the spend accumulated, which
-// session ID it belonged to, or for how long the session had been open.
-// The full TODO ask (input/output/cache token breakdown) requires
-// backend schema extension and is tracked as residual scope; this MVP
-// surfaces the four data points the front-end already has (precise
-// cost, firstSeen, lastActive, session_id tail).
+// TestDashboardJS_R110P3_PaletteFavoriteSort pins the palette idle-state
+// (empty-query) ordering. Originally a three-tier sort (favorites → recents →
+// rest); the recents tier was retired when the picker switched to ordering the
+// non-favorite bucket by directory filesystem mtime, leaving two tiers:
 //
-// The helper is pure so a future unit-test harness can exercise it
-// without DOM setup, and — importantly — it MUST return plain text
-// (never HTML). Native `title` attributes render as text, so an XSS
-// payload in s.user_label that somehow reached this helper would be
-// harmless. Pinning the "return lines.join('\\n')" shape locks that
-// invariant.
-func TestDashboardJS_R110P3_CostTooltipHelper(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-
-	// 1) Pure helper at module scope. Not a closure inside updateHeaderCost
-	//    so a contract test can reach it via Node/JSDOM harness later.
-	if !strings.Contains(js, "function formatHeaderCostTooltip(s, selKey, selNode)") {
-		t.Error("dashboard.js missing formatHeaderCostTooltip helper — R110-P3 cost hover needs a pure text builder")
-	}
-
-	// 2) Guard: zero cost + no session_id returns ''. Prevents an empty
-	//    chip from having a phantom "$0 · …" tooltip that distracts
-	//    operators on a freshly-created pending session.
-	if !strings.Contains(js, "if (cost <= 0 && !s.session_id) return '';") {
-		t.Error("formatHeaderCostTooltip must short-circuit when there's nothing meaningful to show — zero cost + empty session_id should return ''")
-	}
-
-	// 3) Four data-point labels in Chinese. Pinning the literal copy so
-	//    an i18n refactor touches this line with intent. "创建时间" replaced
-	//    "首次打开" when sidebar order migrated from per-client localStorage
-	//    firstSeen to the server-stamped session created_at: the tooltip
-	//    now mirrors the same value the comparator uses, instead of a
-	//    separate per-dashboard timestamp.
-	for _, label := range []string{
-		"'累计花费: $'",
-		"'创建时间: '",
-		"'最后活动: '",
-		"'会话 ID: …'",
-	} {
-		if !strings.Contains(js, label) {
-			t.Errorf("formatHeaderCostTooltip missing label %q — cost hover MVP requires all four data-point labels", label)
-		}
-	}
-
-	// 4) session_id must use the last 8 chars (common shim for CLI
-	//    --resume handoffs). If somebody changes to first 8, operators
-	//    would paste a prefix that doesn't match anything.
-	if !strings.Contains(js, "s.session_id.slice(-8)") {
-		t.Error("formatHeaderCostTooltip must show the LAST 8 chars of session_id (last is what operators paste for --resume)")
-	}
-
-	// 5) Plain-text return contract: must use \n joiner (native `title`
-	//    renders line breaks), NOT <br> or similar HTML. If somebody
-	//    later switches to a custom tooltip component they must update
-	//    this test together with the HTML escaping story.
-	if !strings.Contains(js, "return lines.join('\\n');") {
-		t.Error("formatHeaderCostTooltip must return plain text joined with '\\n' — using HTML markers would require an explicit escape story, not yet in place")
-	}
-
-	// 6) Live-update integration: updateHeaderCost must refresh the
-	//    title on every cost tick so hover content doesn't go stale
-	//    when result events arrive mid-session.
-	if !strings.Contains(js, "el.title = formatHeaderCostTooltip(s, selectedKey, selectedNode);") {
-		t.Error("updateHeaderCost must refresh el.title via formatHeaderCostTooltip on each tick — otherwise the tooltip drifts behind live cost updates")
-	}
-
-	// 7) First-render integration: renderMainShell must seed the title
-	//    via costTitleAttr so the very first hover after selection has
-	//    the detail, not an empty popup that waits for updateHeaderCost.
-	if !strings.Contains(js, "const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);") {
-		t.Error("renderMainShell must compute costTooltip at render time so initial hover isn't empty")
-	}
-	if !strings.Contains(js, "' title=\"' + escAttr(costTooltip) + '\"'") {
-		t.Error("renderMainShell must emit the title attribute with escAttr so any user-controlled characters in s fields can't break out of the attribute")
-	}
-}
-
-// TestDashboardJS_R110P3_PaletteFavoriteSort pins the R110-P3 palette
-// ordering fix. Before this change, the empty-query "idle" palette only
-// boosted localStorage recents; user-favorited projects (starred via the
-// sidebar ⭐ button, persisted via /api/projects/favorite) had no
-// palette-side affordance at all. The fix introduces a three-tier sort:
-//
-//	Tier 0 — favorites (all of them, regardless of recent-ness)
-//	Tier 1 — recents top-N not already in favorites
-//	Tier 2 — everything else (original projectsData order)
+//	Tier 0 — favorites (all of them, regardless of mtime)
+//	Tier 1 — everything else by dir_mtime descending (most-recently-modified
+//	         first), original projectsData order as the stable tiebreak
 //
 // Reusing the backend `favorite` field (instead of inventing a new
 // "palette-pin" concept in localStorage) keeps one source of truth and
 // means pinning from the sidebar immediately affects palette order.
+//
+// The retired-recents removal is asserted by TestDashboardJS_PaletteIdleOrdering.
 func TestDashboardJS_R110P3_PaletteFavoriteSort(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -2278,7 +2165,7 @@ func TestDashboardJS_R110P3_PaletteFavoriteSort(t *testing.T) {
 
 	// 1) Tier-0 gate: favorite trumps everything. Pinning the exact
 	//    comparator line catches a subtle regression where someone
-	//    might reorder tiers (e.g. put recents first) and break the
+	//    might reorder tiers (e.g. put mtime first) and break the
 	//    user expectation that "I starred this, why isn't it on top".
 	if !strings.Contains(js, "const fa = pa.favorite ? 0 : 1;") {
 		t.Error("palette empty-query sort missing favorite-first gate — `pa.favorite ? 0 : 1` is the tier-0 boost")
@@ -2287,25 +2174,24 @@ func TestDashboardJS_R110P3_PaletteFavoriteSort(t *testing.T) {
 		t.Error("palette empty-query sort missing tier-0 gate for pb (both sides of comparator must test favorite)")
 	}
 	if !strings.Contains(js, "if (fa !== fb) return fa - fb;") {
-		t.Error("palette empty-query sort must return early when favorite tiers differ — otherwise tier-1 recents could override tier-0 favorites")
+		t.Error("palette empty-query sort must return early when favorite tiers differ — otherwise tier-1 mtime could override tier-0 favorites")
 	}
 
-	// 2) Tier-1: recents still work for non-favorite projects.
-	//    Verify the Map lookup + Infinity fallback — the exact shape
-	//    is load-bearing because changing Infinity to a large number
-	//    would silently re-rank non-recents.
-	if !strings.Contains(js, "const ra = recentRank.has(ka) ? recentRank.get(ka) : Infinity;") {
-		t.Error("palette tier-1 recent-boost must use Infinity sentinel so non-recents sort stable on input index")
+	// 2) Tier-1: non-favorite projects sort by dir_mtime descending.
+	//    `|| 0` is load-bearing — an un-stat'able / older-remote entry has
+	//    no dir_mtime and must sink to the bottom (0), never to the top.
+	if !strings.Contains(js, "const ma = pa.dir_mtime || 0;") ||
+		!strings.Contains(js, "const mb = pb.dir_mtime || 0;") {
+		t.Error("palette tier-1 must read dir_mtime defensively as `p.dir_mtime || 0` so missing mtime sorts last")
 	}
-	if !strings.Contains(js, "if (ra !== rb) return ra - rb;") {
-		t.Error("palette tier-1 gate must early-return on differing recent ranks")
+	if !strings.Contains(js, "if (ma !== mb) return mb - ma;") {
+		t.Error("palette tier-1 must sort by dir_mtime DESCENDING (mb - ma) so the most-recently-modified folder is first")
 	}
 
-	// 3) Tier-2: stable tail on input index. Preserving projectsData
-	//    order means alpha + backend favorite-first continues to work
-	//    as the implicit "rest" ordering.
+	// 3) Tier-1 stable tail on input index. Preserving projectsData
+	//    order means same-mtime entries keep backend (favorite-first) order.
 	if !strings.Contains(js, "return a.i - b.i;") {
-		t.Error("palette tier-2 stable fallback must sort by input index so projectsData order is preserved for the rest bucket")
+		t.Error("palette stable fallback must sort by input index so projectsData order is the tiebreak for equal mtime")
 	}
 
 	// 4) Visual indicator: favorite rows get the ★ glyph instead of the
@@ -2342,162 +2228,6 @@ func TestDashboardHTML_R110P3_PaletteFavoriteStyles(t *testing.T) {
 	// changes, THIS is where we notice and update both sides together.
 	if !strings.Contains(css, ".section-header .sh-btn.star-on{color:#e3b341}") {
 		t.Error("sidebar .sh-btn.star-on color changed — update .cp-icon-fav (palette favorite) to match or justify the divergence")
-	}
-}
-
-// TestDashboardJS_UXP3_SidebarSearchHelper pins the UX-P3 sidebar-search
-// surface. Operators with many sessions couldn't quickly locate one —
-// the sidebar had no filter box. The fix adds a toggle-revealed input
-// in .sidebar-header, a pure filter helper, and a `/` keyboard shortcut
-// mirroring the `?` help-modal pattern. The renderer reads the live
-// query on every repaint so sessions_update deltas don't clobber the
-// filter. Local re-render on keystroke (against _lastSidebarData) avoids
-// per-keystroke /api/sessions hits.
-func TestDashboardJS_UXP3_SidebarSearchHelper(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-
-	// 1) Pure helpers must exist at module scope.
-	for _, need := range []string{
-		"function filterSessionsByQuery(items, query)",
-		"function readSidebarSearchQuery()",
-		"function toggleSidebarSearch()",
-		"function closeSidebarSearch()",
-		"function initSidebarSearch()",
-	} {
-		if !strings.Contains(js, need) {
-			t.Errorf("dashboard.js missing %q — UX-P3 sidebar-search needs this module-scope helper", need)
-		}
-	}
-
-	// 2) Match surface: substring, case-insensitive, hitting these six
-	//    fields. session_id intentionally excluded (opaque hash; matching
-	//    on `key` covers the "paste a key slice" workflow without forcing
-	//    every test session to carry a human-shaped session_id).
-	if !strings.Contains(js, "s.user_label, s.summary, s.last_prompt,") {
-		t.Error("filterSessionsByQuery must match user_label/summary/last_prompt as the primary prompt-derived fields")
-	}
-	if !strings.Contains(js, "s.project, s.cli_name, s.key,") {
-		t.Error("filterSessionsByQuery must extend the match surface to project/cli_name/key")
-	}
-	if !strings.Contains(js, "typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1") {
-		t.Error("filterSessionsByQuery must do case-insensitive substring match, guarded by typeof check (some fields may be absent)")
-	}
-
-	// 3) Render integration: renderSidebar must read the live query via
-	//    readSidebarSearchQuery and skip grouping when filter is active.
-	//    Pinning the conditional shape catches a refactor that might
-	//    accidentally call the filter twice or run grouping+filter
-	//    concurrently.
-	if !strings.Contains(js, "const filterQuery = readSidebarSearchQuery();") {
-		t.Error("renderSidebar must consult readSidebarSearchQuery() so each repaint re-applies the current filter")
-	}
-	if !strings.Contains(js, "const filterActive = !!filterQuery;") {
-		t.Error("renderSidebar must derive filterActive from the query so both the render branch and the empty-state branch agree")
-	}
-	if !strings.Contains(js, "if (!filterActive) {") {
-		t.Error("renderSidebar must gate grouping behind !filterActive so filter mode skips project grouping")
-	}
-
-	// 4) Local re-render on keystroke: the oninput handler must target
-	//    _lastSidebarData, NOT debouncedFetchSessions — the latter would
-	//    issue one /api/sessions per keystroke. The fallback to
-	//    debouncedFetchSessions when the cache is empty is intentional
-	//    for the first-paint corner case.
-	if !strings.Contains(js, "if (_lastSidebarData) {") {
-		t.Error("sidebar-search input handler must short-circuit via _lastSidebarData cache to avoid server DoS on keystroke")
-	}
-	if !strings.Contains(js, "renderSidebar(_lastSidebarData);") {
-		t.Error("sidebar-search oninput must re-render locally via renderSidebar(_lastSidebarData) on cache hit")
-	}
-
-	// 5) Keyboard shortcut: `/` opens search unless user is already in
-	//    an input. Mirror of the `?` help-modal pattern, so pin both the
-	//    key + the tagname skip rules.
-	if !strings.Contains(js, "if (e.key !== '/') return;") {
-		t.Error("initSidebarSearch must register a `/` global shortcut")
-	}
-	if !strings.Contains(js, "tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable") {
-		t.Error("`/` shortcut must skip when the focus target is an input/textarea/contenteditable")
-	}
-	// Esc inside the search input must close the pane, not bubble to
-	// other Esc handlers (like the lightbox).
-	if !strings.Contains(js, "if (e.key === 'Escape') { e.preventDefault(); closeSidebarSearch(); }") {
-		t.Error("sidebar-search input must intercept Esc and route to closeSidebarSearch")
-	}
-
-	// 6) Filter-mode empty state: distinct from the "no sessions" global
-	//    empty state. Pin the filter-specific copy so future i18n passes
-	//    keep the two messages separate.
-	if !strings.Contains(js, "没有匹配的会话") {
-		t.Error("renderSidebar must emit a filter-specific empty-state line (没有匹配的会话); the 'no sessions' CTA would mislead into thinking zero sessions exist")
-	}
-	// The legacy "no sessions" CTA must NOT be emitted in filter mode —
-	// assert the gate condition.
-	if !strings.Contains(js, "if (!html && !filterActive)") {
-		t.Error("renderSidebar must gate the 'no sessions' CTA behind !filterActive so filter mode doesn't render a misleading 'no sessions' shell")
-	}
-}
-
-// TestDashboardHTML_UXP3_SidebarSearchUI pins the HTML + CSS the JS
-// helper relies on. Missing hooks would leave the pane functionally
-// intact but visually broken (e.g. input with no styling, no hover on
-// the clear button), which is a silent UX regression. Also locks the
-// sidebar-search position OUTSIDE #session-list so sessions_update
-// re-renders don't blow away the input value.
-func TestDashboardHTML_UXP3_SidebarSearchUI(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(data)
-
-	// Toggle button in the header-row btns: clicking fires toggleSidebarSearch.
-	// The handler is bound via addEventListener in dashboard.js (#922 / #479
-	// inline-handler migration) rather than an inline onclick=, so the static
-	// HTML only needs the stable #btn-sidebar-search anchor.
-	if !strings.Contains(html, `id="btn-sidebar-search"`) {
-		t.Error("dashboard.html must expose the btn-sidebar-search trigger with id=btn-sidebar-search")
-	}
-	js2, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	if !strings.Contains(string(js2), `bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });`) {
-		t.Error("dashboard.js must bind btn-sidebar-search click to toggleSidebarSearch() via addEventListener")
-	}
-
-	// The search pane must exist inside .sidebar-header and OUTSIDE
-	// #session-list. Verify by checking the ordering of the two ids.
-	paneIdx := strings.Index(html, `id="sidebar-search"`)
-	listIdx := strings.Index(html, `id="session-list"`)
-	if paneIdx <= 0 {
-		t.Fatal("sidebar-search id not found in dashboard.html")
-	}
-	if listIdx <= 0 {
-		t.Fatal("session-list id not found in dashboard.html")
-	}
-	if paneIdx > listIdx {
-		t.Error("sidebar-search must appear BEFORE session-list in dashboard.html so it lives inside .sidebar-header, not inside #session-list (which gets innerHTML-replaced on every sessions_update)")
-	}
-
-	// CSS rules the JS handler + layout depend on.
-	for _, rule := range []string{
-		`.sidebar-search{`,
-		`.sidebar-search-input{`,
-		`.sidebar-search-input:focus{`,
-		`.sidebar-search-clear{`,
-		`.session-list-filter-empty{`,
-		`.hdr-btn.active{`,
-	} {
-		if !strings.Contains(html, rule) {
-			t.Errorf("dashboard.html missing CSS rule %q required by UX-P3 sidebar search", rule)
-		}
 	}
 }
 
@@ -4381,8 +4111,9 @@ func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 //     filter — cron-heavy workspaces accumulate cost overnight).
 //     Input shape tolerant: missing fields contribute zero / are skipped.
 //  2. formatHomeCost keeps sub-cent precision (4 decimals) for tiny
-//     values, 2 decimals once cost is measurable — mirrors the session
-//     card header-cost chip behavior.
+//     values, 2 decimals once cost is measurable. (The per-session header
+//     cost chip was later removed — Bedrock pricing made it misleading —
+//     but the Home-panel aggregate retains this formatter.)
 //  3. renderRecentSessionsPanel emits the stats strip above the session
 //     list AND passes Date.now() into computeHomeStats (not a hardcoded
 //     constant — obvious bug bait if a future refactor captures a stale
@@ -4940,20 +4671,24 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R167_AgentPicker locks the Round 167 R110-P3 agent-picker
-// contract. The feature lets operators pick an agent (e.g. sonnet / haiku /
-// a custom config.yaml entry) when creating a new dashboard session, and
-// rewrites the key schema so the server-side buildSessionOpts correctly
-// resolves AgentOpts from parts[3].
+// TestDashboardJS_NodePicker locks the connection (node) picker contract. The
+// sidebar node selector was removed and the per-session connection choice now
+// lives in the New Session modal, in the slot the agent picker used to occupy.
+// The Round 167 key schema (agentID as parts[3]) is unchanged — every
+// dashboard session uses the default 'general' agent, resolved via
+// getSelectedAgent so buildSessionOpts still reads a well-formed key.
 //
 // Invariants:
-//  1. renderAgentPicker helper exists, emits a <select id="new-agent"> when
-//     availableAgents.length > 1, and collapses to an empty string otherwise.
-//  2. getSelectedAgent reads the <select>, defaults to "general", and
-//     persists the pick to localStorage under `naozhi_last_agent`.
-//  3. Three session-creation entry points call renderAgentPicker: the
-//     no-projects modal in createNewSession, the palette in
-//     openProjectPalette, and the Custom Workspace modal in pickPaletteCustom.
+//  1. renderNodePicker helper exists, emits a <select id="new-node"> only when
+//     isMultiNode() (more than the local connection), labels it 连接, and
+//     collapses to an empty string for single-connection setups.
+//  2. getSelectedNode reads the <select> and falls back to selectedNode then
+//     'local'; wireNodePicker persists the pick + re-filters; getSelectedAgent
+//     resolves to 'general' (the agent picker was retired).
+//  3. Three session-creation entry points call renderNodePicker: the
+//     no-projects modal in createNewSession, the palette in openProjectPalette,
+//     and the Custom Workspace modal in pickPaletteCustom. The retired agent
+//     picker (renderAgentPicker / #new-agent) must not resurface.
 //  4. buildDashboardSessionKey emits 4-segment keys with agentID as parts[3]
 //     (not projectName), and sanitizeKeySlug normalizes project/folder names.
 //  5. doCreateInProject and doCreateSession construct keys via the new
@@ -4962,7 +4697,7 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 //  6. keyTailDisplay provides a safe fallback for the sidebar/main-header
 //     displayName so the schema change doesn't regress the empty-fallback
 //     UI to showing raw agentIDs ("general") as session labels.
-func TestDashboardJS_R167_AgentPicker(t *testing.T) {
+func TestDashboardJS_NodePicker(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -4970,35 +4705,46 @@ func TestDashboardJS_R167_AgentPicker(t *testing.T) {
 	}
 	js := string(data)
 
-	// Invariant 1: renderAgentPicker helper.
+	// Invariant 1: renderNodePicker helper.
 	for _, need := range []string{
-		"function renderAgentPicker()",
-		"availableAgents.length <= 1",
-		`id="new-agent"`,
-		`localStorage.getItem('naozhi_last_agent')`,
+		"function renderNodePicker()",
+		"if (!isMultiNode()) return '';",
+		`id="new-node"`,
+		`for="new-node">连接`,
 	} {
 		if !strings.Contains(js, need) {
-			t.Errorf("renderAgentPicker invariant missing: %q", need)
+			t.Errorf("renderNodePicker invariant missing: %q", need)
 		}
 	}
 
-	// Invariant 2: getSelectedAgent helper.
+	// Invariant 2: getSelectedNode / wireNodePicker / getSelectedAgent.
 	for _, need := range []string{
+		"function getSelectedNode()",
+		`document.getElementById('new-node')`,
+		"return v || selectedNode || 'local';",
+		"function wireNodePicker(onChange)",
 		"function getSelectedAgent()",
-		`document.getElementById('new-agent')`,
-		`localStorage.setItem('naozhi_last_agent', v)`,
-		"return v || 'general';",
+		"return 'general';",
 	} {
 		if !strings.Contains(js, need) {
-			t.Errorf("getSelectedAgent invariant missing: %q", need)
+			t.Errorf("node-picker helper invariant missing: %q", need)
 		}
 	}
 
-	// Invariant 3: three call sites. Tolerate whitespace shuffles by
-	// counting occurrences rather than matching exact formatting.
-	if c := strings.Count(js, "renderAgentPicker()"); c < 4 {
+	// Invariant 3: three call sites for renderNodePicker, and the retired
+	// agent picker must be gone. Count occurrences to tolerate formatting.
+	if c := strings.Count(js, "renderNodePicker()"); c < 4 {
 		// 1 definition + 3 call sites = 4 minimum occurrences.
-		t.Errorf("renderAgentPicker() must have at least 3 call sites (found %d total incl. definition)", c)
+		t.Errorf("renderNodePicker() must have at least 3 call sites (found %d total incl. definition)", c)
+	}
+	for _, gone := range []string{
+		"function renderAgentPicker()",
+		`id="new-agent"`,
+		`getElementById('new-agent')`,
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("retired agent picker resurfaced: %q — the modal slot now hosts renderNodePicker", gone)
+		}
 	}
 
 	// Invariant 4: key builder.
@@ -6573,6 +6319,33 @@ func TestDashboardJS_PendingSessionBackendBrand(t *testing.T) {
 	}
 	if !strings.Contains(js, ": (backendDisplayVersion(pendingBackend) || defaultCLIVersion)") {
 		t.Error("non-default-backend pending session must prefer its manifest version, not defaultCLIVersion")
+	}
+}
+
+// TestDashboardJS_CodexSidebarIcon pins that cliIcon has a dedicated codex
+// branch rendering the OpenAI logomark (so a codex session is visually
+// distinct from claude/kiro in the sidebar), and that sessionTypeTag labels
+// it "Codex CLI". Mirrors the kiro ghost-icon contract (round5 e2e). Without
+// the branch a codex session falls through to the default claude logomark,
+// the exact bug the kiro icon fix (R5-1) addressed for kiro.
+func TestDashboardJS_CodexSidebarIcon(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "if (name === 'codex') return") {
+		t.Error("cliIcon missing codex branch — codex sessions would show the claude logomark")
+	}
+	// OpenAI brand green (matches profile_codex.go ChipColor) — pins the
+	// distinctive fill so the icon stays recognizable.
+	if !strings.Contains(js, `fill="#10a37f"`) {
+		t.Error("codex icon should use the OpenAI brand green #10a37f fill")
+	}
+	if !strings.Contains(js, `else if (cliName === 'codex') { label = 'Codex CLI'; }`) {
+		t.Error("sessionTypeTag missing codex → 'Codex CLI' label branch")
 	}
 }
 

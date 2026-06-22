@@ -361,6 +361,27 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 	return shimDispatchContinue
 }
 
+// rpcErrorTurnEnd reports whether err is a protocol RPC-error sentinel that
+// ReadEvent returns (with done=true) to signal "the backend rejected the
+// request — close the turn". When it is, ok=true and tag is the short
+// backend prefix for the synthesized result text. A non-RPC error (e.g. an
+// unparseable frame) returns ok=false so the readLoop skips it.
+//
+// Every backend whose ReadEvent surfaces a post-handshake RPC error this way
+// MUST register its sentinel here, else handleShimStdout drops the error and
+// the session hangs in state=running. ACP/kiro: ErrACPRPC (session/prompt
+// reject); codex: ErrCodexRPC (deferred turn/start reject, #2216).
+func rpcErrorTurnEnd(err error) (tag string, ok bool) {
+	switch {
+	case errors.Is(err, ErrACPRPC):
+		return "[kiro] ", true
+	case errors.Is(err, ErrCodexRPC):
+		return "[codex] ", true
+	default:
+		return "", false
+	}
+}
+
 // handleShimStdout decodes a stdout frame into one or more protocol Events
 // and runs each through HandleEvent / dispatchProtocolEvent. Returns
 // shimDispatchReturn when dispatch reports killCh fired so the readLoop
@@ -381,20 +402,28 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		events, _, err = p.protocol.ReadEvent(msg.Line)
 	}
 	if err != nil {
-		// ACP RPC errors: kiro returned an error response to a request
-		// we sent (typically session/prompt). The turn is over from
-		// kiro's POV — done=true comes back from ReadEvent so we
-		// can synthesize a visible "result" event and let the active
-		// Send() unblock. Without this, state stays "running" forever
-		// (operator-visible as "kiro session never replies"; reproduced
-		// 2026-05-19 r3-cancel/r3-lifecycle stuck after restart).
-		if errors.Is(err, ErrACPRPC) {
+		// Protocol RPC errors: the backend returned an error response to a
+		// request we sent (ACP/kiro: session/prompt; codex: the deferred
+		// turn/start reply on the main readLoop). The turn is over from the
+		// backend's POV — done=true comes back from ReadEvent so we can
+		// synthesize a visible "result" event and let the active Send()
+		// unblock. Without this, state stays "running" forever (operator-
+		// visible as "session never replies"; ACP reproduced 2026-05-19
+		// r3-cancel/r3-lifecycle stuck after restart; codex turn/start is
+		// sent fire-and-forget via WriteMessage so any error reply — e.g.
+		// -32001 overload — lands here and must close the turn).
+		//
+		// Both backends use distinct sentinels (ErrACPRPC / ErrCodexRPC);
+		// rpcErrorTurnEnd centralises the recognition so a new protocol that
+		// surfaces RPC errors this way only needs to register its sentinel
+		// there — otherwise its post-handshake failures are silently swallowed.
+		if tag, ok := rpcErrorTurnEnd(err); ok {
 			events = []Event{{
 				Type:    "result",
 				SubType: "error",
-				Result:  "[kiro] " + err.Error(),
+				Result:  tag + err.Error(),
 			}}
-			log.Warn("readLoop: kiro returned RPC error; surfacing as failed turn",
+			log.Warn("readLoop: backend returned RPC error; surfacing as failed turn",
 				"err", err, "seq", msg.Seq)
 			// Fall through into the normal turn-end dispatch path
 			// below so the assistant bubble + state transition happen.

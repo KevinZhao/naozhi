@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -12,7 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -536,8 +537,8 @@ func (f *Feishu) evictOldestNonces() int {
 	if len(entries) == 0 {
 		return 0
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].expiry < entries[j].expiry
+	slices.SortFunc(entries, func(a, b nonceEntry) int {
+		return cmp.Compare(a.expiry, b.expiry)
 	})
 	limit := nonceEvictionBatch
 	if limit > len(entries) {

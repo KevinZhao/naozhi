@@ -249,8 +249,8 @@ func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
 // handler surface in static/dashboard.html (R236-SEC-02 / #479, also tracked
 // as #922). The dashboard CSP still ships `script-src 'unsafe-inline'`
 // because the static HTML contains a fixed set of `onclick=` attributes on
-// header buttons (sidebar search, history, new session, cron panel,
-// sidebar-search-clear, ns-trigger, sidebar-toggle resizer). Migrating to
+// header buttons (history, new session, cron panel,
+// sidebar-toggle resizer). Migrating to
 // hash/nonce CSP requires moving those handlers into dashboard.js as
 // addEventListener bindings.
 //
@@ -276,8 +276,8 @@ func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
 	html := string(body)
 
 	// Cap on `onclick=` attributes. R249-SEC-9 (#922) migration: the static
-	// HTML's header/sidebar handlers (sidebar-search, history, new-session,
-	// cron, sidebar-search-clear, ns-trigger, sidebar-toggle) plus the
+	// HTML's header/sidebar handlers (history, new-session, cron,
+	// sidebar-toggle) plus the
 	// quick-ask form's onsubmit were moved into dashboard.js as
 	// addEventListener binds (DOMContentLoaded header binder + wireQuickAskInput
 	// for the repaint-prone quick-ask form), driving the static surface to 0.
@@ -365,11 +365,8 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 		id      string
 		handler string
 	}{
-		{"btn-sidebar-search", "toggleSidebarSearch"},
 		{"btn-history", "toggleHistory"},
 		{"btn-new-session", "createNewSession"},
-		{"sidebar-search-clear", "closeSidebarSearch"},
-		{"ns-trigger", "toggleNodeSelector"},
 		{"btn-sidebar-toggle", "toggleSidebarCollapsed"},
 		{"quick-ask-form", "submitQuickAsk"},
 	}
@@ -484,6 +481,7 @@ var generatedOnclickBundle = []string{
 	"cron_view.js",
 	"agent_view.js",
 	"asset_browser.js",
+	"files_view.js",
 	"nz_util.js",
 }
 

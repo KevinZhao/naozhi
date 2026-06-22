@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -433,7 +434,7 @@ type Handlers struct {
 	// historyCacheMu so concurrent fast-path readers cannot observe the
 	// atomic say "fresh" while the slice has not yet been installed.
 	historyCacheTimeUnixNano atomic.Int64
-	historyCacheMu           sync.Mutex
+	historyCacheMu           sync.RWMutex
 	historyFlight            singleflight.Group
 	// warmHistoryWg tracks the WarmHistoryCache goroutine so callers (server
 	// shutdown) can wait for the background FS scan to finish before tearing
@@ -444,7 +445,7 @@ type Handlers struct {
 	// (N os.Stat + package-level lock) on every GET /api/sessions poll.
 	summaryCache     map[string]string
 	summaryCacheTime time.Time
-	summaryCacheMu   sync.Mutex
+	summaryCacheMu   sync.RWMutex
 	// summaryFlight collapses concurrent misses at the 30s TTL boundary into
 	// a single LookupSummaries invocation. Before this, N simultaneous tab
 	// polls that missed the cache each performed a full N×os.Stat scan over
@@ -630,9 +631,9 @@ func parseETagVersion(etag string) uint64 {
 // a stale read.
 func (h *Handlers) sessionsListETag(version uint64) string {
 	historyEpoch := h.historyCacheTimeUnixNano.Load()
-	h.historyCacheMu.Lock()
+	h.historyCacheMu.RLock()
 	historyLen := len(h.historyCache)
-	h.historyCacheMu.Unlock()
+	h.historyCacheMu.RUnlock()
 	// Quoted opaque validator per RFC 7232 §2.3.
 	return `"v` + strconv.FormatUint(version, 10) +
 		`-h` + strconv.FormatInt(historyEpoch, 10) +
@@ -1561,17 +1562,17 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 	// for the cold (TTL-expired) path that subsequently dropped through
 	// to singleflight without using the cached slice at all.
 	if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
-		h.historyCacheMu.Lock()
+		h.historyCacheMu.RLock()
 		// Re-confirm under lock — between Load() and Lock() a writer could
 		// have invalidated the cache (InvalidateHistoryCache writes 0).
 		// Without this re-check we could return a stale slice header that
 		// was being concurrently nilled out.
 		if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
 			cached := h.historyCache
-			h.historyCacheMu.Unlock()
+			h.historyCacheMu.RUnlock()
 			return cached
 		}
-		h.historyCacheMu.Unlock()
+		h.historyCacheMu.RUnlock()
 	}
 
 	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
@@ -1590,13 +1591,13 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 		// misclassified as "not cached" and drove a redundant FS scan
 		// every TTL window. R67-GO-5.
 		if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
-			h.historyCacheMu.Lock()
+			h.historyCacheMu.RLock()
 			if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
 				cached := h.historyCache
-				h.historyCacheMu.Unlock()
+				h.historyCacheMu.RUnlock()
 				return cached, nil
 			}
-			h.historyCacheMu.Unlock()
+			h.historyCacheMu.RUnlock()
 		}
 		return h.loadHistorySessions(), nil
 	})
@@ -1786,13 +1787,13 @@ func (h *Handlers) InvalidateHistoryCache() {
 func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot) map[string]string {
 	const summaryTTL = 30 * time.Second
 
-	h.summaryCacheMu.Lock()
+	h.summaryCacheMu.RLock()
 	if h.summaryCache != nil && time.Since(h.summaryCacheTime) < summaryTTL {
 		cached := h.summaryCache
-		h.summaryCacheMu.Unlock()
+		h.summaryCacheMu.RUnlock()
 		return cached
 	}
-	h.summaryCacheMu.Unlock()
+	h.summaryCacheMu.RUnlock()
 
 	// singleflight collapses concurrent callers into one LookupSummaries
 	// run. Followers get the same map the leader computed, so we also
@@ -1811,13 +1812,13 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 	v, _, _ := h.summaryFlight.Do("summary", func() (any, error) {
 		// Re-check under lock — a prior leader could have populated the
 		// cache between our expiry detection and this closure running.
-		h.summaryCacheMu.Lock()
+		h.summaryCacheMu.RLock()
 		if h.summaryCache != nil && time.Since(h.summaryCacheTime) < summaryTTL {
 			cached := h.summaryCache
-			h.summaryCacheMu.Unlock()
+			h.summaryCacheMu.RUnlock()
 			return cached, nil
 		}
-		h.summaryCacheMu.Unlock()
+		h.summaryCacheMu.RUnlock()
 
 		// R040034-PERF-4 (#1403): only ask discovery.LookupSummaries
 		// for sessions that don't already carry a Summary on the
@@ -1888,6 +1889,12 @@ func (h *Handlers) FlushRetiredStore() {
 	}
 }
 
+// historyScanTimeout bounds the loadHistorySessions FS walk. PERF-009
+// (#2134): the scan runs inside the 120s-TTL singleflight leader, so an
+// unbounded walk over a slow home blocks all concurrent pollers; 5s is
+// generously above a healthy walk yet caps a hung-FS stall.
+const historyScanTimeout = 5 * time.Second
+
 func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
 
@@ -1904,7 +1911,12 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	if h.cronSessions != nil {
 		filter.skipSessions = h.cronSessions.KnownSessionIDs()
 	}
-	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
+	// PERF-009 (#2134): cap the FS walk so a slow/hung home (NFS, FUSE)
+	// can't pin this singleflight leader — and with it every concurrent
+	// poll goroutine waiting on the flight — for the full traversal.
+	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
+	defer cancel()
+	all := discovery.RecentSessionsCtx(ctx, h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
 	// Resolve project names in batch.  R217-PERF-10 (#616): borrow the
 	// pooled []string scratch (same pool fillProjectAndSummary uses) so

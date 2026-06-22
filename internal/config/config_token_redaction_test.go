@@ -61,6 +61,101 @@ func TestUpstreamConfig_LogValue_RedactsToken(t *testing.T) {
 	}
 }
 
+// R20260616-SEC-1: FeishuConfig implements slog.LogValuer so a direct slog
+// serialization redacts AppSecret / VerificationToken / EncryptKey instead of
+// leaking them, while non-secret fields (app_id, connection_mode) survive.
+func TestFeishuConfig_LogValue_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+	cfg := FeishuConfig{
+		AppID:             "cli_app_1234",
+		AppSecret:         "feishu-app-secret-PLAINTEXT-1",
+		ConnectionMode:    "websocket",
+		VerificationToken: "verify-token-PLAINTEXT-2",
+		EncryptKey:        "encrypt-key-PLAINTEXT-3",
+		MaxReplyLength:    4000,
+	}
+	out := logLine(t, "feishu", cfg)
+	for _, secret := range []string{
+		"feishu-app-secret-PLAINTEXT-1",
+		"verify-token-PLAINTEXT-2",
+		"encrypt-key-PLAINTEXT-3",
+	} {
+		if strings.Contains(out, secret) {
+			t.Errorf("plaintext secret %q leaked into log output: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in log output: %s", out)
+	}
+	if !strings.Contains(out, "cli_app_1234") {
+		t.Errorf("non-secret app_id should still be logged: %s", out)
+	}
+	if !strings.Contains(out, "websocket") {
+		t.Errorf("non-secret connection_mode should still be logged: %s", out)
+	}
+}
+
+// R202606b-SEC-2: SlackConfig / DiscordConfig / WeixinConfig implement
+// slog.LogValuer so a direct slog serialization redacts their bot/app tokens
+// instead of leaking them, while non-secret fields survive.
+func TestSlackConfig_LogValue_RedactsTokens(t *testing.T) {
+	t.Parallel()
+	cfg := SlackConfig{
+		BotToken:       "xoxb-slack-bot-PLAINTEXT-1",
+		AppToken:       "xapp-slack-app-PLAINTEXT-2",
+		MaxReplyLength: 3000,
+	}
+	out := logLine(t, "slack", cfg)
+	for _, secret := range []string{
+		"xoxb-slack-bot-PLAINTEXT-1",
+		"xapp-slack-app-PLAINTEXT-2",
+	} {
+		if strings.Contains(out, secret) {
+			t.Errorf("plaintext secret %q leaked into log output: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in log output: %s", out)
+	}
+	if !strings.Contains(out, "3000") {
+		t.Errorf("non-secret max_reply_length should still be logged: %s", out)
+	}
+}
+
+func TestDiscordConfig_LogValue_RedactsToken(t *testing.T) {
+	t.Parallel()
+	cfg := DiscordConfig{
+		BotToken:       "discord-bot-token-PLAINTEXT-1",
+		MaxReplyLength: 2000,
+	}
+	out := logLine(t, "discord", cfg)
+	if strings.Contains(out, "discord-bot-token-PLAINTEXT-1") {
+		t.Errorf("plaintext token leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in log output: %s", out)
+	}
+}
+
+func TestWeixinConfig_LogValue_RedactsToken(t *testing.T) {
+	t.Parallel()
+	cfg := WeixinConfig{
+		Token:          "weixin-token-PLAINTEXT-1",
+		BaseURL:        "https://wecom.example/api",
+		MaxReplyLength: 2048,
+	}
+	out := logLine(t, "weixin", cfg)
+	if strings.Contains(out, "weixin-token-PLAINTEXT-1") {
+		t.Errorf("plaintext token leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker in log output: %s", out)
+	}
+	if !strings.Contains(out, "wecom.example") {
+		t.Errorf("non-secret base_url should still be logged: %s", out)
+	}
+}
+
 // An empty token must render empty (not "[REDACTED]") so logs distinguish
 // "configured but hidden" from "absent".
 func TestConfig_LogValue_EmptyTokenNotRedacted(t *testing.T) {

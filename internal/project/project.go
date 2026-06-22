@@ -22,6 +22,23 @@ type Project struct {
 	// Runtime-derived fields (not persisted, refreshed on Scan).
 	GitRemoteURL string `json:"git_remote_url,omitempty"`
 	IsGitHub     bool   `json:"is_github,omitempty"`
+
+	// DirModTime is the project directory's filesystem mtime captured at Scan
+	// time (unix ms). The dashboard "new session" folder picker orders its
+	// fallback tier by this value descending so the most-recently-touched
+	// workspace surfaces first — distinct from Config.CreatedAt (which anchors
+	// the persisted sidebar order). Not persisted; refreshed every Scan. Zero
+	// when the directory could not be stat'd (the picker then falls back to
+	// the backend order for that entry).
+	DirModTime int64 `json:"dir_mtime,omitempty"`
+
+	// IsRoot marks the synthetic project that represents the projects root
+	// directory itself (registered only when ProjectsConfig.IncludeRoot is on).
+	// Its Path is the whole workspace tree, so it is treated like the
+	// __public_tmp__ pseudo-project on the file endpoints: the foreign-private
+	// UID / denied-name / irregular-type gates apply, and Scan never persists a
+	// CreatedAt for it (no .naozhi/project.yaml is auto-written into the root).
+	IsRoot bool `json:"is_root,omitempty"`
 }
 
 // ProjectConfig is persisted to .naozhi/project.yaml inside each project directory.

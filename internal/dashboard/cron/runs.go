@@ -299,9 +299,17 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	// textutil.RedactSecrets replaces known secret-token shapes with [REDACTED]
 	// while preserving JSON validity: secret chars are alphanumeric/-/_ which
 	// are all legal inside a JSON string, and [REDACTED] is equally legal there.
+	//
+	// [R202606-SEC-008] also redact absolute filesystem paths, matching the
+	// transcript endpoint's order (RedactSecrets → RedactAbsolutePaths in
+	// sanitizeWireText). A sandbox tool-call input can echo host paths (e.g.
+	// /home/<user>/.aws/credentials, ~/.ssh/id_rsa) which leak the host's
+	// filesystem layout to an authenticated operator. osutil.RedactAbsolutePaths
+	// swaps each path token for the literal "<path>", which is legal inside a
+	// JSON string, so the NDJSON line stays valid JSON.
 	events := make([]json.RawMessage, len(lines))
 	for i, ln := range lines {
-		redacted := textutil.RedactSecrets(string(ln))
+		redacted := osutil.RedactAbsolutePaths(textutil.RedactSecrets(string(ln)))
 		events[i] = json.RawMessage(redacted)
 	}
 	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
@@ -356,6 +364,16 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
 		return
 	}
+	// [R20260614-GO-004] Cross-ownership check: mirrors HandleRunDetail (line 183)
+	// and HandleRunTranscript (transcript.go:327). Path isolation already
+	// prevents cross-job reads (runsnapshots/<jobID>/<runID>.json), but an
+	// explicit guard here ensures a future refactor that loosens the path
+	// convention cannot silently expose another job's snapshot.
+	if man.JobID != "" && man.JobID != jobID {
+		slog.Warn("cron snapshot: job_id mismatch", "url_job_id", jobID, "man_job_id", man.JobID, "run_id", runID)
+		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
+		return
+	}
 	prompt, perr := h.scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
 	if perr != nil {
 		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
@@ -377,8 +395,11 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		Available: true,
 		// Prompt was validated non-control at the cron write edge, but
 		// SanitizeForLog defensively in case a blob predates that policy.
-		Prompt:       osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
-		PromptHash:   man.PromptHash,
+		Prompt: osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
+		// [R20260614-GO-005] SanitizeForLog PromptHash: should be 64 lowercase
+		// hex chars (sha256), but the manifest is a disk JSON that can be
+		// hand-edited. Clamp to 64 to match the expected field width.
+		PromptHash:   osutil.SanitizeForLog(man.PromptHash, 64),
 		Model:        osutil.SanitizeForLog(man.Model, 128),
 		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),
 		SecretRefs:   secretRefs,

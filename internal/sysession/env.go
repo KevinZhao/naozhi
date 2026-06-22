@@ -113,12 +113,6 @@ var envAlwaysPassthrough = map[string]struct{}{
 // inherits the runner env.
 type backendMode = envpolicy.BackendMode
 
-const (
-	backendAnthropic = envpolicy.BackendAnthropic
-	backendBedrock   = envpolicy.BackendBedrock
-	backendVertex    = envpolicy.BackendVertex
-)
-
 // detectBackendFromEnv delegates to envpolicy.DetectBackendFromEnv (#891).
 func detectBackendFromEnv(parent []string) backendMode {
 	return envpolicy.DetectBackendFromEnv(parent)
@@ -229,7 +223,7 @@ func filterEnv(allowlist []string) []string {
 				val := kv[idx+1:]
 				if err := validateBaseURLValue(val); err != nil {
 					slog.Warn("sysession: base-URL env var rejected (unsafe value)",
-						"key", key, "value", val, "err", err)
+						"key", key, "value", osutil.SanitizeForLog(val, 128), "err", err)
 					continue
 				}
 			}

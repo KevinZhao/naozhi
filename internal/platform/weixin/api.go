@@ -238,7 +238,10 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(data))
+		// data is the raw iLink API response body and may contain C1/bidi/
+		// control bytes; sanitize before embedding in the error string so it
+		// cannot poison structured logs / terminal rendering at the caller.
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, osutil.SanitizeForLog(string(data), 256))
 	}
 	return data, nil
 }

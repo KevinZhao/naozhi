@@ -222,7 +222,12 @@ func main() {
 		// CLI's per-session jsonl after naozhi restart. Default path
 		// is the kiro CLI's documented location; a config override is
 		// a follow-up sprint.
-		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
+		KiroSessionsDir: osutil.ExpandHome("~/.kiro/sessions/cli"),
+		// CodexSessionsDir feeds the codexjsonl history factory so "load
+		// earlier" pages can fall back to the codex CLI's date-bucketed
+		// rollout transcripts after a naozhi restart. Default path is the
+		// codex CLI's documented location.
+		CodexSessionsDir:  osutil.ExpandHome("~/.codex/sessions"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
@@ -271,7 +276,7 @@ func main() {
 			mgr, err := project.NewManager(root, project.PlannerDefaults{
 				Model:  cfg.Projects.PlannerDefaults.Model,
 				Prompt: cfg.Projects.PlannerDefaults.Prompt,
-			})
+			}, project.WithIncludeRoot(cfg.Projects.IncludeRoot))
 			if err != nil {
 				projErr = fmt.Errorf("init project manager: %w", err)
 				return

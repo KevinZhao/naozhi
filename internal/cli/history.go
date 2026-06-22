@@ -74,6 +74,10 @@ type HistoryWiring struct {
 	// the kirojsonl factory reads per-session JSONL files from beneath this
 	// directory. R228-CR-P3-6.
 	KiroSessionsDir string
+	// CodexSessionsDir is ~/.codex/sessions. Wired from cmd/naozhi/main.go;
+	// the codexjsonl factory globs date-bucketed rollout files
+	// (YYYY/MM/DD/rollout-*-<threadId>.jsonl) beneath this directory.
+	CodexSessionsDir string
 	// EventLogDir is naozhi's per-session event log directory. Listed
 	// here for symmetry; current backend factories don't read it
 	// (naozhilog is the local tier in MergedSource and is wired
