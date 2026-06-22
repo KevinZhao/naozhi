@@ -527,7 +527,67 @@ func candidatePaths(name string) []string {
 		}
 	}
 
+	// npm-global backends (codex is @openai/codex; future gemini-cli etc.)
+	// install into a node version-manager's bin dir that the hard-coded
+	// locations above don't cover (e.g. ~/.nvm/versions/node/<ver>/bin).
+	// detectCLI's exec.LookPath fallback finds them only when naozhi's $PATH
+	// includes that dir — which a bare systemd unit often strips. Probing the
+	// version-manager bin dirs here makes npm-CLI detection independent of the
+	// service PATH, the same robustness claude/kiro already get from
+	// ~/.local/bin + /usr/local/bin. Each path is os.Stat-guarded by the
+	// caller, so a non-existent candidate costs only one stat.
+	for _, dir := range npmGlobalBinDirs(home) {
+		paths = append(paths, filepath.Join(dir, name+ext))
+	}
+
 	return paths
+}
+
+// npmGlobalBinDirs returns directories where an npm-global CLI's launcher may
+// live, derived from node version-manager env vars and common static layouts.
+// Returned dirs may not exist; the caller os.Stat-guards each composed path.
+// Env-derived dirs come first (exact for the running shell's toolchain), then
+// static fallbacks. nvm has a per-node-version bin dir, so when NVM_BIN is
+// unset we glob ~/.nvm/versions/node/*/bin to cover all installed versions.
+func npmGlobalBinDirs(home string) []string {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if d == "" || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+
+	// Exact, from the environment naozhi inherited.
+	add(os.Getenv("NVM_BIN")) // nvm exports the active node's bin dir verbatim
+	if p := os.Getenv("NPM_CONFIG_PREFIX"); p != "" {
+		add(filepath.Join(p, "bin")) // user-set npm prefix (e.g. ~/.npm-global)
+	}
+	if p := os.Getenv("N_PREFIX"); p != "" { // tj/n version manager
+		add(filepath.Join(p, "bin"))
+	}
+	if p := os.Getenv("VOLTA_HOME"); p != "" {
+		add(filepath.Join(p, "bin"))
+	}
+
+	if home != "" {
+		// Common user-level npm prefixes that don't export an env var.
+		add(filepath.Join(home, ".npm-global", "bin"))
+		add(filepath.Join(home, ".npm-packages", "bin"))
+		add(filepath.Join(home, ".volta", "bin"))
+		// nvm without NVM_BIN: enumerate every installed node version's bin.
+		// Glob errors (bad pattern — impossible here) and no-match both yield
+		// an empty slice, so this is a safe best-effort.
+		if matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin")); len(matches) > 0 {
+			for _, m := range matches {
+				add(m)
+			}
+		}
+	}
+
+	return dirs
 }
 
 // Spawn starts a new CLI process via shim and returns a connected Process.
