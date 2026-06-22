@@ -40,6 +40,28 @@ func TestValidateConfig(t *testing.T) {
 		{"bindings NUL in chat_id rejected", ProjectConfig{ChatBindings: []ChatBinding{{Platform: "feishu", ChatID: "oc\x00"}}}, false},
 		{"bindings oversized chat_id rejected", ProjectConfig{ChatBindings: []ChatBinding{{Platform: "feishu", ChatID: strings.Repeat("x", 257)}}}, false},
 		{"bindings oversized platform rejected", ProjectConfig{ChatBindings: []ChatBinding{{Platform: strings.Repeat("x", 65), ChatID: "oc"}}}, false},
+
+		// R234-SEC (#2234): GitRemote / MemoryFile are untrusted strings
+		// persisted to YAML and slated for exec/file-open consumers. A URL or
+		// path legitimately contains ':' and '/', but must not smuggle control
+		// bytes, oversized payloads, or bidi/LS-PS runes.
+		{"git_remote https passes", ProjectConfig{GitRemote: "https://github.com/o/r.git"}, true},
+		{"git_remote ssh passes", ProjectConfig{GitRemote: "git@github.com:o/r.git"}, true},
+		{"memory_file path passes", ProjectConfig{MemoryFile: "docs/MEMORY.md"}, true},
+		{"git_remote over cap rejected", ProjectConfig{GitRemote: "https://x/" + strings.Repeat("a", 2048)}, false},
+		{"git_remote NUL rejected", ProjectConfig{GitRemote: "https://x\x00/r"}, false},
+		{"git_remote LF rejected", ProjectConfig{GitRemote: "https://x\n/r"}, false},
+		{"git_remote CR rejected", ProjectConfig{GitRemote: "https://x\r/r"}, false},
+		{"git_remote DEL rejected", ProjectConfig{GitRemote: "https://x\x7f/r"}, false},
+		{"git_remote ESC rejected", ProjectConfig{GitRemote: "https://x\x1b/r"}, false},
+		{"git_remote TAB rejected", ProjectConfig{GitRemote: "https://x\t/r"}, false},
+		{"git_remote C1 rejected", ProjectConfig{GitRemote: "https://x/r"}, false},
+		{"git_remote RLO rejected", ProjectConfig{GitRemote: "https://x‮/r"}, false},
+		{"git_remote LS rejected", ProjectConfig{GitRemote: "https://x /r"}, false},
+		{"memory_file over cap rejected", ProjectConfig{MemoryFile: strings.Repeat("a", 2049)}, false},
+		{"memory_file NUL rejected", ProjectConfig{MemoryFile: "docs/\x00MEM.md"}, false},
+		{"memory_file LF rejected", ProjectConfig{MemoryFile: "docs/\nMEM.md"}, false},
+		{"memory_file RLO rejected", ProjectConfig{MemoryFile: "docs/‮MEM.md"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

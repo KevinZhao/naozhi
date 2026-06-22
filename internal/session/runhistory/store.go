@@ -228,6 +228,12 @@ func (s *Store) trimLocked(e *sessionEntry, dir string) {
 
 // warmLocked scans the session's on-disk directory into the ring, applying
 // the keepWindow age filter and keepCount cap. Caller holds e.mu.
+//
+// Expired files (older than keepWindow) are deleted from disk as they are
+// skipped, not merely filtered out of the ring (#2225): warm is the only path
+// that touches a session's subtree after it stops appending (a reset/removed
+// or long-idle session never re-Appends, so trimLocked never runs again), so
+// without this GC the expired run JSON files accumulate unbounded.
 func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 	e.warmed = true
 	dir := filepath.Join(s.root, dirHash)
@@ -257,6 +263,9 @@ func (s *Store) warmLocked(e *sessionEntry, dirHash string) {
 			continue
 		}
 		if run.StartedAt.Before(cutoff) {
+			// GC expired record: skipped from the ring AND removed from disk so
+			// stale run JSON does not pile up for slow/removed sessions (#2225).
+			_ = os.Remove(filepath.Join(dir, name))
 			continue
 		}
 		runs = append(runs, run)
