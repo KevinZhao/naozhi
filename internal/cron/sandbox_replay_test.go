@@ -380,6 +380,42 @@ func TestReplay_PanicKeepsStartedEndedBalanced(t *testing.T) {
 	}
 }
 
+// TestReplay_PanicBumpsFailedCounters pins #2223: when the replay goroutine
+// panics before reaching finishSandboxRun, the recover path bumps
+// CronRunEndedTotal but historically skipped the per-state failure counters
+// (the finishRun → bumpRunStateMetrics + finishSandboxRunWith path it bypasses).
+// Without the fix CronRunFailedTotal / CronSandboxRunFailedTotal undercount vs
+// CronRunEndedTotal, hiding the panic from failure alerts.
+func TestReplay_PanicBumpsFailedCounters(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &panicReplayRunner{}
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+	origRunID := "feedfacefeedface"
+	s.writeSandboxSnapshot(j.ID, origRunID, "panic failed-counter test", "haiku", "img-v1", nil, slog.Default())
+
+	failedBefore := metrics.CronRunFailedTotal.Value()
+	sandboxFailedBefore := metrics.CronSandboxRunFailedTotal.Value()
+	endedBefore := metrics.CronRunEndedTotal.Value()
+
+	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
+		t.Fatalf("ReplaySandboxRun: %v", err)
+	}
+	waitEnded(t, rec)
+
+	if d := metrics.CronRunFailedTotal.Value() - failedBefore; d != 1 {
+		t.Fatalf("CronRunFailedTotal delta = %d, want 1 [#2223]", d)
+	}
+	if d := metrics.CronSandboxRunFailedTotal.Value() - sandboxFailedBefore; d != 1 {
+		t.Fatalf("CronSandboxRunFailedTotal delta = %d, want 1 [#2223]", d)
+	}
+	// Failed count must match the Ended count this panic produced (no undercount).
+	if ended, failed := metrics.CronRunEndedTotal.Value()-endedBefore, metrics.CronRunFailedTotal.Value()-failedBefore; ended != failed {
+		t.Fatalf("ended delta %d != failed delta %d — counters imbalanced [#2223]", ended, failed)
+	}
+}
+
 // TestReplay_InvalidID: a non-hex id is rejected before any work.
 func TestReplay_InvalidID(t *testing.T) {
 	dir := t.TempDir()
