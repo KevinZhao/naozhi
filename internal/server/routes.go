@@ -344,7 +344,6 @@ func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerF
 	// by RequireAuth on POST).
 	s.mux.HandleFunc("GET /api/projects/files/list", auth(s.projectH.HandleFilesList))
 	s.mux.HandleFunc("POST /api/projects/files/upload", auth(s.projectH.HandleFilesUpload))
-	s.mux.HandleFunc("GET /api/projects/dir", auth(s.projectH.HandleDirList))
 }
 
 // registerDiscoveredRoutes wires the discovered-session route group

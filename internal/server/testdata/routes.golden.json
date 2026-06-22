@@ -160,11 +160,6 @@
     "handler_type": "*dashproject.Handlers"
   },
   {
-    "method": "GET",
-    "path": "/api/projects/dir",
-    "handler_type": "*dashproject.Handlers"
-  },
-  {
     "method": "POST",
     "path": "/api/projects/favorite",
     "handler_type": "*dashproject.Handlers"

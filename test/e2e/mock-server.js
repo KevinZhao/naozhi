@@ -489,44 +489,6 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify(defaultProjects()));
       return;
     }
-    // Folder browser: GET /api/projects/dir lists children of a directory.
-    // A small in-memory tree rooted at the default workspace so e2e can
-    // navigate down into a subfolder and back up.
-    if (pathname === '/api/projects/dir' && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const relPath = url.searchParams.get('path') || '';
-      const tree = {
-        '': {
-          entries: [
-            { name: 'src', is_dir: true },
-            { name: 'docs', is_dir: true },
-            { name: 'README.md', is_dir: false, size: 1234 },
-          ],
-        },
-        'src': {
-          entries: [
-            { name: 'main.go', is_dir: false, size: 567 },
-          ],
-        },
-        'docs': { entries: [] },
-      };
-      const node = tree[relPath];
-      if (!node) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'directory not found' }));
-        return;
-      }
-      const atRoot = relPath === '';
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        project: url.searchParams.get('project') || '__workspace__',
-        path: relPath,
-        parent: atRoot ? '' : relPath.split('/').slice(0, -1).join('/'),
-        at_root: atRoot,
-        entries: node.entries,
-      }));
-      return;
-    }
     if (pathname === '/api/projects/favorite' && req.method === 'POST') {
       if (!checkAuth()) return;
       const name = url.searchParams.get('name');
