@@ -728,3 +728,11 @@
 - [R202606d-CR-006] slack handleMessage 直接读 s.ctx 字段(write-once 安全但未快照),应顶部捕获 — internal/platform/slack/slack.go:505
 - [R202606d-ARCH-3] weixin EditMessage 静默返回 nil 伪装成功而非 unsupported 信号 — internal/platform/weixin/weixin.go:305
 - [R202606d-PERF-014] metrics labelKey 单 label 仍走 pool+String() 分配 — internal/metrics/labeled.go:151
+- [R202606e-SEC-2] /livez /readyz 无限流(静态响应无指纹信息,设计如此) — internal/server/health.go:187
+- [R202606e-SEC-3] mintAnonCookie 失败用 Retry-After:30 而兄弟 429 用 60 — internal/server/wshub_upgrade.go:242
+- [R202606e-SEC-5] memory popover renderMd 允许 LLM 写的 http:// 可点链接(open-redirect/钓鱼向) — internal/server/static/dashboard.js:13216
+- [R202606e-SEC-6] reconcileSandboxPending os.ReadDir 无 entry 上限,对抗性目录可 startup IO 停顿 — internal/cron/sandbox_pending.go:155
+- [R202606e-PERF-006] ObserveCronExecutionDuration 遍历全 9 桶无早 break — internal/metrics/cron_histogram.go:85
+- [R202606e-ARCH-7] backend 注册双轨语义(panic vs once+recover)易踩,应迁 registry.Typed — internal/cli/backend/profile.go:232
+- [R202606e-GO-009] internal/registry 包零生产 importer,基础设施死代码 — internal/registry/registry.go:1
+- [R202606e-CR-008] TurnCostDelta raw<0 且 prev==0 首轮负读测试缺口 — internal/session/runhistory/cost_test.go:23
