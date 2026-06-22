@@ -77,6 +77,26 @@ func TestProjectsListEntry_JSONShape(t *testing.T) {
 		}
 	})
 
+	t.Run("is_root omitted when false, present when true", func(t *testing.T) {
+		// Default subdirectory project: is_root carries omitempty, so it must
+		// NOT appear when false — the files view reads `p.is_root === true`.
+		buf, _ := json.Marshal(projectsListEntry{
+			Name: "demo", Path: "/tmp/demo", PlannerState: "none", PlannerModel: "m",
+		})
+		if strings.Contains(string(buf), `"is_root"`) {
+			t.Errorf("json = %s\nmust omit zero `is_root`", string(buf))
+		}
+		// The synthetic root project surfaces is_root:true so the files view
+		// can default its browse root to the workspace root.
+		buf, _ = json.Marshal(projectsListEntry{
+			Name: "workspace", Path: "/home/u/workspace",
+			PlannerState: "none", PlannerModel: "m", IsRoot: true,
+		})
+		if !strings.Contains(string(buf), `"is_root":true`) {
+			t.Errorf("json = %s\nmissing `\"is_root\":true`", string(buf))
+		}
+	})
+
 	t.Run("multi-node entry stamps node", func(t *testing.T) {
 		buf, err := json.Marshal(projectsListEntry{
 			Name: "demo", Path: "/tmp/demo", Node: "local",

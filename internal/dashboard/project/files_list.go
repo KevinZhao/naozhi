@@ -74,6 +74,10 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 
 	project := r.URL.Query().Get("project")
 	dir := r.URL.Query().Get("dir")
+	// show_hidden=1 surfaces dotfiles and noise directories (node_modules,
+	// dist, …) that are hidden by default. The files-view UI keeps them out of
+	// the way for everyday browsing but lets the operator opt in.
+	showHidden := r.URL.Query().Get("show_hidden") == "1"
 	if project == "" {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
@@ -160,6 +164,14 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("project files/list: readdir IO failure", "err", rderr, "project", project)
 	}
 
+	// truncated reflects the RAW child count (pre-filter): the directory held
+	// more than maxListEntries entries, so this listing may be incomplete. It
+	// is intentionally NOT the count of visible entries — computing that would
+	// require reading (and filtering) the whole directory, defeating the cap
+	// that bounds the ReadDir/Info fan-out. After hiding dotfiles/noise/
+	// sensitive children the visible count can be well below maxListEntries
+	// even when truncated is true; the flag means "narrow down to see the
+	// rest", not "exactly maxListEntries shown".
 	truncated := false
 	if len(dirents) > maxListEntries {
 		dirents = dirents[:maxListEntries]
@@ -173,6 +185,12 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		// enumerable. Scans the full child path so a sensitive *segment*
 		// (e.g. the dir is named ".ssh") is caught too.
 		if isSensitiveDownloadPath(filepath.Join(dirResolved, name)) {
+			continue
+		}
+		// Hide dotfiles and well-known noise directories unless the caller
+		// opted in. Keeps the everyday listing focused on the operator's own
+		// files instead of .git / node_modules / build output.
+		if !showHidden && isHiddenBrowseEntry(name) {
 			continue
 		}
 		fi, ierr := de.Info()
@@ -209,6 +227,30 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 		"entries":   entries,
 		"truncated": truncated,
 	})
+}
+
+// noiseBrowseDirs are directory names hidden from the files-view listing by
+// default: build output, dependency trees, and tool caches that bury the
+// operator's own files. Dotfiles are handled separately (name starts with ".")
+// so this set only needs the non-dot offenders. show_hidden=1 bypasses both.
+var noiseBrowseDirs = map[string]bool{
+	"node_modules": true,
+	"dist":         true,
+	"build":        true,
+	"target":       true,
+	"vendor":       true,
+	"__pycache__":  true,
+}
+
+// isHiddenBrowseEntry reports whether a child name should be omitted from the
+// default files-view listing: any dotfile (".git", ".naozhi", …) or a
+// well-known noise directory. Pure name check — the caller has already applied
+// the credential filter and decided whether show_hidden was requested.
+func isHiddenBrowseEntry(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	return noiseBrowseDirs[name]
 }
 
 // sortEntries orders entries dirs-first, then by case-insensitive name.
