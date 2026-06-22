@@ -42,6 +42,7 @@ type shimMsg struct {
 	Type   string      `json:"type"`
 	Seq    int64       `json:"seq,omitempty"`
 	Line   string      `json:"line,omitempty"`
+	Msg    string      `json:"msg,omitempty"`
 	Code   shimMsgCode `json:"code,omitempty"`
 	Signal string      `json:"signal,omitempty"`
 }
@@ -356,7 +357,19 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 		// boundary (degraded/tampered shim could emit arbitrary bytes).
 		// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
 		// cli_exited.Signal and ACP rpc error messages.
-		log.Warn("shim error", "msg", osutil.SanitizeForLog(msg.Line, 256))
+		//
+		// R202606f-ARCH-1: the shim emits error frames as
+		// ServerMsg{Type:"error", Msg:"..."} (internal/shim/server.go) —
+		// the human-readable text lives in the `msg` JSON field, not
+		// `line`. Reading msg.Line here left every "shim error" log with
+		// msg="" so operators could not see duplicate-attach / replay
+		// failures. Prefer Msg; fall back to Line for any legacy frame
+		// that still carries text there.
+		errText := msg.Msg
+		if errText == "" {
+			errText = msg.Line
+		}
+		log.Warn("shim error", "msg", osutil.SanitizeForLog(errText, 256))
 	}
 	return shimDispatchContinue
 }

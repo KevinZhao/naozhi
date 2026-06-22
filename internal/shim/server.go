@@ -487,15 +487,21 @@ type shimServer struct {
 	watchdog  *Watchdog
 	startedAt time.Time
 
-	mu         sync.Mutex
-	state      State
-	clientConn net.Conn      // current connected client (at most one)
-	writeCh    chan []byte   // buffered channel for async writes to client
-	clientDone chan struct{} // closed to signal writer goroutine + enqueueWrite to stop
-	graceTimer *time.Timer
-	idleTimer  *time.Timer
-	done       chan struct{} // closed on shutdown
-	doneOnce   sync.Once
+	mu    sync.Mutex
+	state State
+	// sessionIDKnown mirrors state.SessionID != "" so the stdout hot path
+	// (tryExtractSessionID, 5-50 lines/s/session) can skip the per-line
+	// bytes.Contains scan + json.Unmarshal once the ID is set, without
+	// taking s.mu. The ID is assigned exactly once (system/init or the first
+	// result / ACP frame) and never cleared, so a one-way latch is safe.
+	sessionIDKnown atomic.Bool
+	clientConn     net.Conn      // current connected client (at most one)
+	writeCh        chan []byte   // buffered channel for async writes to client
+	clientDone     chan struct{} // closed to signal writer goroutine + enqueueWrite to stop
+	graceTimer     *time.Timer
+	idleTimer      *time.Timer
+	done           chan struct{} // closed on shutdown
+	doneOnce       sync.Once
 }
 
 func (s *shimServer) initiateShutdown() {

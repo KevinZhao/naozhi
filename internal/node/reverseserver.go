@@ -209,8 +209,13 @@ func isLoopbackHost(host string) bool {
 	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		h = host[1 : len(host)-1]
 	}
-	switch strings.ToLower(h) {
-	case "localhost", "127.0.0.1", "::1":
+	if strings.ToLower(h) == "localhost" {
+		return true
+	}
+	// Cover the entire 127.0.0.0/8 range and ::1, not just the canonical
+	// literals — 127.0.0.2, 127.255.255.254 etc. are valid loopback
+	// addresses (Linux can bind them) and must be treated as local.
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
 		return true
 	}
 	return false
