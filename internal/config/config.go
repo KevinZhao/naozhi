@@ -542,6 +542,7 @@ type SysessionDaemonConfig struct {
 	Tick    string `yaml:"tick,omitempty"`
 
 	// AutoTitler-specific fields.
+	MinFirstTurns     int    `yaml:"min_first_turns,omitempty"`
 	MinUserTurns      int    `yaml:"min_user_turns,omitempty"`
 	MinRenameInterval string `yaml:"min_rename_interval,omitempty"`
 	BatchPerTick      int    `yaml:"batch_per_tick,omitempty"`

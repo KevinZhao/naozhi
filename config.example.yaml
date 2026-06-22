@@ -194,6 +194,11 @@ sysession:
     auto-titler:
       enabled: true
       tick: 30s
+      # min_first_turns: 首次自动命名门槛。会话累计到这么多轮即可命名,
+      # 默认 1 —— 即"不管多短都先给个标题"。设 0 或留空走默认 1。
+      min_first_turns: 1
+      # min_user_turns: 重命名节流。首次命名后, 必须再新增这么多轮才会
+      # 重新提炼标题, 默认 3, 防止标题随每条追问反复抖动 + 抑制 claude -p 频次。
       min_user_turns: 3
       min_rename_interval: 5m
       batch_per_tick: 1
