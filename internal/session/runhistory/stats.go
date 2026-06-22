@@ -17,6 +17,7 @@ func ComputeStats(runs []SessionRun) SessionRunStats {
 		d := runs[i].DurationMS
 		durs = append(durs, d)
 		st.TotalMS += d
+		st.TotalCostUSD += runs[i].CostUSD
 		if d > st.MaxMS {
 			st.MaxMS = d
 		}

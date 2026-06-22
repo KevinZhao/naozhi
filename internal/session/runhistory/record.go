@@ -51,14 +51,15 @@ type SessionRun struct {
 // SessionRunStats is the aggregate view shown above a session's timeline.
 // Computed on demand from the recent ring; never persisted.
 type SessionRunStats struct {
-	Count        int   `json:"count"`
-	TotalMS      int64 `json:"total_ms"`
-	AvgMS        int64 `json:"avg_ms"`
-	P50MS        int64 `json:"p50_ms"`
-	MaxMS        int64 `json:"max_ms"`
-	CompletedCnt int   `json:"completed_count"`
-	ErrorCnt     int   `json:"error_count"`
-	TimeoutCnt   int   `json:"timeout_count"`
+	Count        int     `json:"count"`
+	TotalMS      int64   `json:"total_ms"`
+	AvgMS        int64   `json:"avg_ms"`
+	P50MS        int64   `json:"p50_ms"`
+	MaxMS        int64   `json:"max_ms"`
+	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	CompletedCnt int     `json:"completed_count"`
+	ErrorCnt     int     `json:"error_count"`
+	TimeoutCnt   int     `json:"timeout_count"`
 }
 
 // hexIDLen is the byte length of a generated run ID's entropy (8 bytes ->
