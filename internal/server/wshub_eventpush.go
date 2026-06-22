@@ -451,6 +451,16 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			staleUnsub = u
 			delete(c.subscriptions, key)
 			h.decSubscriberCountLocked(key)
+			// #2224: mark subGen[key] for delayed reclamation, matching
+			// handleUnsubscribe. Without this the resubscribe-timeout path
+			// deleted the subscription but left subGen[key] pinned for the
+			// whole connection lifetime (sweepSubGenExpiredLocked only scans
+			// keys present in subGenReleaseAt), so a dashboard client that
+			// flaps through many session panels and times out on resubscribe
+			// grows c.subGen without bound.
+			nowNanos := time.Now().UnixNano()
+			c.markSubGenReleasable(key, nowNanos)
+			c.sweepSubGenExpiredLocked(nowNanos)
 			// R20260610-085718-LB-5 (#2010): drop the marshal cache slot when
 			// this stale cleanup removed the last subscriber, matching
 			// handleUnsubscribe/unregister.

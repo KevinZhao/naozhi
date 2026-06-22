@@ -75,6 +75,18 @@ const (
 	autoTitlerLineCapBytes = 512
 
 	// Default behavioural knobs.  Operators override via Configure.
+	//
+	// minFirstTurns is the FIRST-title floor (gate 4): a never-auto-titled
+	// session becomes eligible once it reaches this many turns.  Default 1
+	// so even a single-turn conversation gets summarised — the product
+	// intent is "always name a session, regardless of length".
+	//
+	// minUserTurns is the RE-title throttle (gate 5b / no_new_turns): after
+	// an auto title is written, that many NEW turns must accumulate before
+	// the title is regenerated.  Kept at 3 so the title doesn't thrash on
+	// every single follow-up message (and doesn't spawn a `claude -p` per
+	// turn).
+	autoTitlerDefaultMinFirstTurns     = 1
 	autoTitlerDefaultMinUserTurns      = 3
 	autoTitlerDefaultMinRenameInterval = 5 * time.Minute
 	autoTitlerDefaultBatchPerTick      = 1
@@ -163,6 +175,7 @@ type autoTitler struct {
 	runner Runner
 
 	// Configurable knobs.
+	minFirstTurns     int
 	minUserTurns      int
 	minRenameInterval time.Duration
 	batchPerTick      int
@@ -188,6 +201,7 @@ func newAutoTitler(deps DaemonDeps) (Daemon, error) {
 	a := &autoTitler{
 		router:            deps.Router,
 		runner:            deps.Runner,
+		minFirstTurns:     autoTitlerDefaultMinFirstTurns,
 		minUserTurns:      autoTitlerDefaultMinUserTurns,
 		minRenameInterval: autoTitlerDefaultMinRenameInterval,
 		batchPerTick:      autoTitlerDefaultBatchPerTick,
@@ -218,6 +232,15 @@ func (a *autoTitler) Configure(cfg DaemonConfig) error {
 	// log) from key-present-wrong-type (operator error, slog.Warn). Each
 	// knob still applies its existing validation (>0 / clamp) after the
 	// type check.
+	if raw, present := cfg["min_first_turns"]; present {
+		if v, ok := raw.(int); ok {
+			if v > 0 {
+				a.minFirstTurns = v
+			}
+		} else {
+			warnMistypedKnob("min_first_turns", "int", raw)
+		}
+	}
 	if raw, present := cfg["min_user_turns"]; present {
 		if v, ok := raw.(int); ok {
 			if v > 0 {
@@ -360,10 +383,13 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			bumpSkip("origin_user")
 			return true
 		}
-		// 4. Min-turn threshold:  the user has to have actually
-		//    talked enough to give the LLM something to summarize.
-		if snap.MessageCount < int64(a.minUserTurns) {
-			bumpSkip("min_user_turns")
+		// 4. First-title floor:  the user has to have talked enough to
+		//    give the LLM something to summarize.  This is the FIRST-title
+		//    gate (minFirstTurns, default 1) — distinct from the re-title
+		//    throttle below (gate 5b) so even a short conversation gets a
+		//    title while a longer one isn't re-summarised on every turn.
+		if snap.MessageCount < int64(a.minFirstTurns) {
+			bumpSkip("min_first_turns")
 			return true
 		}
 		// 5. Min-rename-interval and high-water gate.  Reads from
@@ -373,7 +399,12 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			bumpSkip("min_rename_interval")
 			return true
 		}
-		if snap.MessageCount-hw.lastRenameAtTurn < int64(a.minUserTurns) {
+		// Re-title throttle: only applies once we have actually written an
+		// auto title for this session (lastRenamedAt set). For a never-titled
+		// session lastRenameAtTurn is 0, and gating on minUserTurns here would
+		// re-impose the old 3-turn floor and defeat the minFirstTurns=1 intent
+		// above — so the throttle is skipped entirely on the first title.
+		if !hw.lastRenamedAt.IsZero() && snap.MessageCount-hw.lastRenameAtTurn < int64(a.minUserTurns) {
 			bumpSkip("no_new_turns")
 			return true
 		}

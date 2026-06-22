@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,6 +118,52 @@ func TestReverseServer_Register_unknownNodeID(t *testing.T) {
 	resp := reverseAuth(t, conn, "unknown-node", "tok", "host")
 	if resp.Type != "register_fail" {
 		t.Fatalf("expected 'register_fail', got %q", resp.Type)
+	}
+}
+
+// ---- Precomputed token hash cache (R231-PERF / #2231) ----
+
+// TestReverseServer_AuthHashPrecomputed asserts NewReverseServer precomputes
+// sha256(expected token) per node_id and omits empty-token entries (which can
+// never authenticate). #2231.
+func TestReverseServer_AuthHashPrecomputed(t *testing.T) {
+	rs := NewReverseServer(map[string]ReverseNodeAuth{
+		"node-1": {Token: "secret"},
+		"node-2": {Token: ""}, // empty token: never authenticatable
+	}, false)
+
+	want := sha256.Sum256([]byte("secret"))
+	got, ok := rs.authHash["node-1"]
+	if !ok {
+		t.Fatal("node-1 missing from authHash")
+	}
+	if got != want {
+		t.Fatalf("node-1 authHash = %x, want %x", got, want)
+	}
+	if _, ok := rs.authHash["node-2"]; ok {
+		t.Error("empty-token node-2 must not appear in authHash")
+	}
+}
+
+// TestReverseServer_Register_emptyConfiguredToken asserts a node configured
+// with an empty token cannot authenticate even if the probe token is also
+// empty (the zero-value collision the fast path must not allow). #2231.
+func TestReverseServer_Register_emptyConfiguredToken(t *testing.T) {
+	rs := NewReverseServer(map[string]ReverseNodeAuth{
+		"node-1": {Token: ""},
+	}, false)
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws-node", rs)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	conn := dialReverseNode(t, srv)
+	defer conn.Close()
+
+	resp := reverseAuth(t, conn, "node-1", "", "host")
+	if resp.Type != "register_fail" {
+		t.Fatalf("expected 'register_fail' for empty configured token, got %q", resp.Type)
 	}
 }
 

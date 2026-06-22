@@ -577,6 +577,13 @@ async function fetchSessions() {
             platform: parts[0] || 'dashboard',
             agent: pendingAgent,
             workspace: sessionWorkspaces[key],
+            // Stamp the pending card with "now" so the sidebar sort (oldest
+            // top, newest bottom — see renderSidebar) lands it at the bottom
+            // immediately. Leaving created_at/last_active at 0 sorts it to the
+            // TOP, then the real backend session (with a real created_at) snaps
+            // it to the bottom — the card visibly jumps. The server-stamped
+            // created_at on the real session is ~equal, so no jump on promote.
+            created_at: Date.now(),
             last_active: 0,
             last_prompt: '',
             last_response: '',

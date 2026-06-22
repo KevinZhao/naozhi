@@ -117,6 +117,35 @@ func TestStore_KeepWindow_AgesOutOnWarm(t *testing.T) {
 	}
 }
 
+func TestStore_KeepWindow_DeletesExpiredFilesOnWarm(t *testing.T) {
+	// #2225: expired run JSON must be removed from disk on warm, not merely
+	// filtered out of the ring — otherwise stale records for slow/removed
+	// sessions accumulate unbounded.
+	dir := t.TempDir()
+	const key = "feishu:p2p:zoe"
+	st1 := NewStore(dir, 0, time.Hour)
+	// two stale (>1h ago), one fresh
+	st1.Append(mkRun(t, key, 10, time.Now().Add(-3*time.Hour), OutcomeCompleted))
+	st1.Append(mkRun(t, key, 11, time.Now().Add(-2*time.Hour), OutcomeCompleted))
+	st1.Append(mkRun(t, key, 20, time.Now(), OutcomeCompleted))
+
+	hashDir := filepath.Join(dir, "session-runs", dirHashFor(key))
+	if ents, _ := os.ReadDir(hashDir); len(ents) != 3 {
+		t.Fatalf("precondition: want 3 files on disk, got %d", len(ents))
+	}
+
+	// Fresh store warms from disk, applying the keepWindow filter + GC.
+	st2 := NewStore(dir, 0, time.Hour)
+	if got := st2.Recent(key, 0); len(got) != 1 || got[0].DurationMS != 20 {
+		t.Fatalf("stale runs not aged out of ring: %+v", got)
+	}
+	// The two expired files must be gone from disk; only the fresh one remains.
+	ents, _ := os.ReadDir(hashDir)
+	if len(ents) != 1 {
+		t.Fatalf("expired files not GC'd from disk: want 1, got %d", len(ents))
+	}
+}
+
 func TestStore_NegativeDurationClamped(t *testing.T) {
 	st := NewStore(t.TempDir(), 0, 0)
 	const key = "feishu:p2p:eve"

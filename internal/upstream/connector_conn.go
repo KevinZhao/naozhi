@@ -69,14 +69,21 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	// R51-REL-005: bound the shutdown-of-handleConn on a hard deadline so a
 	// stuck worker goroutine (typically a send-RPC blocked on sess.Send that
 	// can wait up to CLI watchdog timeout ≈ 5 min) cannot pin reconnect.
-	// connCancel() above already fired by the time we reach this defer —
-	// every wg participant either responds to connCtx or is inherently
-	// short-running (ping ticker, response writer), so the grace timer
-	// covers only the pathological case where a downstream Send refuses
-	// to honour ctx. Exceeding the budget leaks the stuck goroutine to
-	// process teardown, which is strictly better than blocking the whole
-	// upstream reconnect loop.
+	// #2222: cancel connCtx as the FIRST action of this defer so it fires
+	// before wg.Wait() below. The bare `defer connCancel()` at the top of
+	// handleConn runs LIFO — i.e. AFTER this drain defer returns — so on a
+	// plain ReadJSON-error disconnect (parent ctx still live) the ping
+	// goroutine (selects only on its 30s ticker / connCtx.Done) would stay
+	// parked, pinning wg.Wait() for the full drain budget and emitting a
+	// spurious "drain exceeded budget" WARN. Cancelling here lets every
+	// connCtx-observing participant (ping ticker, streamEvents) exit at once.
+	// Every wg participant either responds to connCtx or is inherently
+	// short-running (response writer), so the grace timer covers only the
+	// pathological case where a downstream Send refuses to honour ctx.
+	// Exceeding the budget leaks the stuck goroutine to process teardown,
+	// which is strictly better than blocking the whole upstream reconnect loop.
 	defer func() {
+		connCancel()
 		done := make(chan struct{})
 		go func() {
 			wg.Wait()

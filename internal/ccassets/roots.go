@@ -66,6 +66,13 @@ func resolveUnder(root, rel string) (string, error) {
 	if strings.Contains(rel, "..") {
 		return "", errPathEscape
 	}
+	// #2250: rel originates from a user-controlled Ref.RelPath. Mirror the
+	// dashboard project files.go:431/437 guard — reject NUL (fails before the
+	// arg reaches filepath.Join) and absolute paths (`/foo` joined with root
+	// silently discards root on some platforms, escaping the allowed tree).
+	if strings.ContainsRune(rel, 0) || filepath.IsAbs(rel) {
+		return "", errPathEscape
+	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", err

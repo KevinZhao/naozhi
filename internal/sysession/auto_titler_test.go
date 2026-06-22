@@ -353,12 +353,20 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 			runnerResp: "新主题",
 		},
 		{
-			name: "below min user turns",
+			name: "single-turn session is renamed (min_first_turns=1)",
 			snap: session.SessionSnapshot{
 				Key: "feishu:direct:u1:general", MessageCount: 1,
+				LastPrompt: "帮我查个 bug", LastActive: now.UnixMilli(),
+			},
+			runnerResp: "查 bug",
+		},
+		{
+			name: "below min first turns",
+			snap: session.SessionSnapshot{
+				Key: "feishu:direct:u1:general", MessageCount: 0,
 				LastPrompt: "msg",
 			},
-			wantBucket: "min_user_turns",
+			wantBucket: "min_first_turns",
 		},
 		{
 			name: "group chat respected when enabled",
@@ -657,6 +665,74 @@ func TestAutoTitler_HighwaterPreventsRapidRename(t *testing.T) {
 	}
 	if runner.calls.Load() != 1 {
 		t.Errorf("runner called %d times, want 1", runner.calls.Load())
+	}
+}
+
+// TestAutoTitler_FirstTitleUsesMinFirstTurns pins the two-threshold split:
+// the FIRST title is gated by minFirstTurns (default 1), independent of the
+// larger minUserTurns re-title throttle. A short session at exactly
+// minFirstTurns turns — but below minUserTurns — must still be titled.
+func TestAutoTitler_FirstTitleUsesMinFirstTurns(t *testing.T) {
+	t.Parallel()
+	// minFirstTurns=2, minUserTurns=5: a 2-turn session is below the
+	// re-title throttle (5) but at/above the first-title floor (2), so it
+	// must be renamed on the first tick. If gate 4 had used minUserTurns
+	// (the old behaviour) this session would be skipped.
+	snap := session.SessionSnapshot{
+		Key: "feishu:direct:u1:general", MessageCount: 2,
+		LastPrompt: "帮我看下登录报错", LastActive: time.Now().UnixMilli(),
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
+	runner := &fakeRunner{resp: "登录报错排查"}
+	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+	if err := a.(Configurable).Configure(DaemonConfig{
+		"min_first_turns": 2,
+		"min_user_turns":  5,
+	}); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	rep, err := a.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick err = %v", err)
+	}
+	if rep.Acted != 1 {
+		t.Fatalf("Acted = %d, want 1; report=%+v", rep.Acted, rep)
+	}
+	if rep.Skipped["min_user_turns"] != 0 || rep.Skipped["no_new_turns"] != 0 {
+		t.Fatalf("first title must not hit the re-title throttle: %v", rep.Skipped)
+	}
+}
+
+// TestAutoTitler_BelowMinFirstTurnsSkipped is the negative companion: a
+// session with fewer turns than minFirstTurns is skipped under the
+// min_first_turns bucket (never the legacy min_user_turns bucket).
+func TestAutoTitler_BelowMinFirstTurnsSkipped(t *testing.T) {
+	t.Parallel()
+	snap := session.SessionSnapshot{
+		Key: "feishu:direct:u1:general", MessageCount: 1,
+		LastPrompt: "hi", LastActive: time.Now().UnixMilli(),
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
+	runner := &fakeRunner{resp: "x"}
+	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+	if err := a.(Configurable).Configure(DaemonConfig{"min_first_turns": 3}); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	rep, err := a.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick err = %v", err)
+	}
+	if rep.Acted != 0 {
+		t.Fatalf("Acted = %d, want 0", rep.Acted)
+	}
+	if rep.Skipped["min_first_turns"] == 0 {
+		t.Fatalf("expected min_first_turns skip, got %v", rep.Skipped)
 	}
 }
 
@@ -1127,6 +1203,11 @@ func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
 		wantKey string // substring expected in the warn log
 	}{
 		{
+			name:    "min_first_turns int64 instead of int",
+			cfg:     DaemonConfig{"min_first_turns": int64(2)},
+			wantKey: "min_first_turns",
+		},
+		{
 			name:    "min_user_turns int64 instead of int",
 			cfg:     DaemonConfig{"min_user_turns": int64(7)},
 			wantKey: "min_user_turns",
@@ -1166,6 +1247,7 @@ func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
 
 			// Snapshot defaults so we can assert the mistyped value did
 			// not get applied.
+			gotFirstTurns := a.minFirstTurns
 			gotMinTurns := a.minUserTurns
 			gotInterval := a.minRenameInterval
 			gotBatch := a.batchPerTick
@@ -1175,7 +1257,8 @@ func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
 				t.Fatalf("Configure: %v", err)
 			}
 
-			if a.minUserTurns != gotMinTurns || a.minRenameInterval != gotInterval ||
+			if a.minFirstTurns != gotFirstTurns || a.minUserTurns != gotMinTurns ||
+				a.minRenameInterval != gotInterval ||
 				a.batchPerTick != gotBatch || a.includeGroupChat != gotGroup {
 				t.Fatalf("mistyped knob mutated config: %+v", a)
 			}
@@ -1210,6 +1293,7 @@ func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
 	a := d.(*autoTitler)
 
 	cfg := DaemonConfig{
+		"min_first_turns":     2,
 		"min_user_turns":      9,
 		"min_rename_interval": 42 * time.Minute,
 		"batch_per_tick":      7,
@@ -1217,6 +1301,9 @@ func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
 	}
 	if err := a.Configure(cfg); err != nil {
 		t.Fatalf("Configure: %v", err)
+	}
+	if a.minFirstTurns != 2 {
+		t.Fatalf("minFirstTurns = %d, want 2", a.minFirstTurns)
 	}
 	if a.minUserTurns != 9 {
 		t.Fatalf("minUserTurns = %d, want 9", a.minUserTurns)

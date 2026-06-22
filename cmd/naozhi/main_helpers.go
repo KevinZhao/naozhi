@@ -373,6 +373,9 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		}
 		specific := sysession.DaemonConfig{}
 		if name == sysession.DaemonAutoTitler {
+			if dcfg.MinFirstTurns > 0 {
+				specific["min_first_turns"] = dcfg.MinFirstTurns
+			}
 			if dcfg.MinUserTurns > 0 {
 				specific["min_user_turns"] = dcfg.MinUserTurns
 			}
