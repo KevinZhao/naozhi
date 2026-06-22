@@ -2182,6 +2182,17 @@ function sessionRunStatLabel(ms) {
   return Math.round(ms) + 'ms';
 }
 
+// sessionRunTotalLabel formats a CUMULATIVE duration for the header's
+// 「共 X」total. Unlike sessionRunStatLabel (per-run, reuses formatRunDuration
+// which tops out at "Xm Ys"), a session's total across many runs routinely
+// exceeds an hour — so we use formatDurationShort, which carries an "Xh YYm"
+// tier and renders "3h 07m" instead of an unreadable "187m 3s". Per-run rows
+// keep sessionRunStatLabel so their second-level precision ("26.5s") is intact.
+function sessionRunTotalLabel(ms) {
+  if (typeof formatDurationShort === 'function') return formatDurationShort(ms);
+  return sessionRunStatLabel(ms);
+}
+
 function sessionRunsStatsHtml(stats) {
   if (!stats || !stats.count) return '';
   const parts = [];
@@ -2190,7 +2201,7 @@ function sessionRunsStatsHtml(stats) {
   // 保留在下方折叠的「运行记录」面板里（sessionRunRowHtml），保持头部简洁。
   // 对话的单位是「轮」(round)：一次 run = 一轮对话往返。
   parts.push('<span class="srp-stat" title="累计运行轮次">' + esc(stats.count + ' 轮') + '</span>');
-  parts.push('<span class="srp-stat" title="累计耗时">共 ' + esc(sessionRunStatLabel(stats.total_ms || 0)) + '</span>');
+  parts.push('<span class="srp-stat" title="累计耗时">共 ' + esc(sessionRunTotalLabel(stats.total_ms || 0)) + '</span>');
   // 总花费：仅当有成本数据时显示（本机 claude run 通常带 cost_usd；某些
   // backend / 旧记录可能为 0）。formatCostUSD 对 <$0.01 保留 4 位小数，返回 ''
   // 时整条不渲染，避免出现无意义的"花费 $0.00"。
