@@ -1811,10 +1811,19 @@ function cronJobCardHtml(j) {
     '</div>';
   }
 
+  // Status dot is the only at-a-glance signal of a job's run state; give it a
+  // text label so it doesn't rely on colour alone (a11y) and so hover/SR users
+  // get the same information sighted users read from the colour.
+  const dotLabel = isRunning ? '运行中'
+    : isPaused ? '已暂停'
+    : isError ? '上次运行出错'
+    : isMissed ? '已错过计划运行'
+    : '已启用';
+
   return '<div class="' + rowClasses.join(' ') + ' cron-card" data-cron-id="' + escAttr(j.id) + '" role="button" tabindex="0" ' +
     'onclick="openCronDetail(\'' + escJs(j.id) + '\', this)" ' +
     'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronDetail(\'' + escJs(j.id) + '\', this)}">' +
-    '<span class="cj-dot" aria-hidden="true"></span>' +
+    '<span class="cj-dot" role="img" title="' + escAttr(dotLabel) + '" aria-label="' + escAttr('状态：' + dotLabel) + '"></span>' +
     '<div class="cj-main">' +
       '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
       subRow +
