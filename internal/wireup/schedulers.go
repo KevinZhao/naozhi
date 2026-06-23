@@ -222,6 +222,22 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 	out.Cron = scheduler
 
+	// Record the schedulers boot step so the bootRegistry audit surface
+	// (BootSteps) reflects what actually ran. The package godoc and boot.go
+	// both document "schedulers" as one of the three inspectable boot steps,
+	// but until now WireSchedulers never recorded it — so a dropped cron
+	// wireup would slip past BootSteps()/the startup audit silently, exactly
+	// the static-degrade failure the bootRegistry was introduced to catch
+	// (#2314, #1579/#1165). Recorded after a successful cron.Start so the
+	// step reflects a live scheduler. Not added to requiredBootSteps: cron is
+	// terminal on Start failure (returned above) and sysession is
+	// intentionally degradable, so the step stays auditable without forcing
+	// Validate to abort startup.
+	recordBootStep("schedulers", BootStep{
+		Kind:   "schedulers",
+		Detail: "cron scheduler + sysession construction/Start",
+	})
+
 	// (auto-workspace-chain SessionIDExcluder registration removed — RFC
 	// docs/rfc/project-stable-session-key.md §9.1. The cron Scheduler's
 	// IsExcluded / RecentSessionsFilter is retained because the history
