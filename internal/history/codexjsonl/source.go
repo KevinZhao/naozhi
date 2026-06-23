@@ -295,6 +295,11 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		return cli.EventEntry{}, false
 	}
 
+	// Truncate to the same caps the claude path uses (history_tail.go): a
+	// 120-rune Summary and a 16000-rune Detail. Without this the full message
+	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
+	// boundary, and the dashboard renders an unbounded mega-bubble.
+	summary, detail := textutil.TruncateRunesPair(ev.Message, 120, 16000)
 	return cli.EventEntry{
 		Time: timeMS,
 		Type: entryType,
@@ -304,9 +309,10 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		// renders twice whenever a LoadBefore `beforeMS` cursor straddles a
 		// previously-returned entry. claude (via discovery.history_tail) and
 		// kiro (kirojsonl) both set this; codex must match the contract.
-		// Same derivation as kiro: (timeMS, type, summary, detail="").
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, ev.Message, ""),
-		Summary: ev.Message,
+		// Derivation uses an empty detail arg to match kiro's pinned key.
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
+		Summary: summary,
+		Detail:  detail,
 	}, true
 }
 

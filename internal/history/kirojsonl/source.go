@@ -402,7 +402,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		timeMS = lastPromptMS + 1 + asstOffset
 	}
 
-	summary := concatTextChunks(data.Content)
+	fullText := concatTextChunks(data.Content)
 
 	// Strict cc-parity for AssistantMessage: drop the entry entirely
 	// when the model produced no plain-text output (only thinking +
@@ -410,9 +410,15 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 	// tool-driven turn injects a blank card into the transcript.
 	// Prompts (user messages) keep the legacy permissive behaviour:
 	// surface even an empty Summary so pagination time cursors advance.
-	if entryType == "text" && strings.TrimSpace(summary) == "" {
+	if entryType == "text" && strings.TrimSpace(fullText) == "" {
 		return cli.EventEntry{}, false
 	}
+
+	// Truncate to the same caps the claude path uses (history_tail.go): a
+	// 120-rune Summary and a 16000-rune Detail. Without this the full message
+	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
+	// boundary, and the dashboard renders an unbounded mega-bubble.
+	summary, detail := textutil.TruncateRunesPair(fullText, 120, 16000)
 
 	// Derive a deterministic UUID so MergedSource can dedup overlapping
 	// pages. Without it the entry carries an empty UUID, which
@@ -427,6 +433,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		Time:    timeMS,
 		Type:    entryType,
 		Summary: summary,
+		Detail:  detail,
 	}, true
 }
 
