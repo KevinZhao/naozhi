@@ -83,6 +83,13 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	switch {
 	case localErr != nil && fallbackErr != nil:
 		return nil, localErr
+	case localErr != nil:
+		// Single-source failure: the godoc promises we "log and degrade"
+		// to the other tier. Without this an operator gets a silently
+		// truncated response and no signal that the local tier failed.
+		slog.Warn("merged: local source failed; degrading to fallback", "err", localErr)
+	case fallbackErr != nil:
+		slog.Warn("merged: fallback source failed; degrading to local", "err", fallbackErr)
 	}
 
 	merged := mergeDedup(local, fallback, beforeMS)

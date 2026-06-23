@@ -1,12 +1,26 @@
 package merged
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
+
+// captureSlog redirects the default slog logger to an in-memory buffer
+// for the duration of the test, restoring the prior default on cleanup.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
 // stubSource is a minimal history.Source implementation — returns
 // canned entries (optionally with an error). Used to pump predictable
@@ -179,6 +193,7 @@ func TestMerged_LimitTailKept(t *testing.T) {
 // short-circuit — the other side's data still surfaces. Matches
 // "fallback when local misbehaves" contract.
 func TestMerged_OneSourceErrors(t *testing.T) {
+	buf := captureSlog(t)
 	m := &Source{
 		Local:    &stubSource{err: errors.New("local disk full")},
 		Fallback: &stubSource{entries: []cli.EventEntry{{UUID: "a", Time: 1}}},
@@ -189,6 +204,30 @@ func TestMerged_OneSourceErrors(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("got %d, want 1 from fallback", len(got))
+	}
+	// [R202606g-CR-001] operator must get a signal the local tier failed.
+	if log := buf.String(); !strings.Contains(log, "local source failed") || !strings.Contains(log, "local disk full") {
+		t.Errorf("expected WARN about local-source failure, got log: %q", log)
+	}
+}
+
+// TestMerged_FallbackSourceErrors is the symmetric case: fallback fails,
+// local has data. Result is local, and a WARN is logged. [R202606g-CR-001]
+func TestMerged_FallbackSourceErrors(t *testing.T) {
+	buf := captureSlog(t)
+	m := &Source{
+		Local:    &stubSource{entries: []cli.EventEntry{{UUID: "a", Time: 1}}},
+		Fallback: &stubSource{err: errors.New("jsonl unreadable")},
+	}
+	got, err := m.LoadBefore(context.Background(), 0, 100)
+	if err != nil {
+		t.Errorf("merged surfaced error despite local having data: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d, want 1 from local", len(got))
+	}
+	if log := buf.String(); !strings.Contains(log, "fallback source failed") || !strings.Contains(log, "jsonl unreadable") {
+		t.Errorf("expected WARN about fallback-source failure, got log: %q", log)
 	}
 }
 
