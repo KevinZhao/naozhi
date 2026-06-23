@@ -741,19 +741,21 @@ func (r *Router) saveIfDirty() {
 	var knownIDsCopy []byte
 	var snapshotKnownIDsGen uint64
 	var knownIDsMarshalErr error
-	if knownIDsDue {
-		// R220123-PERF-19 (#1638): memoised sorted snapshot.
-		// R20260616-PERF-009 (#2143): marshal is memoised by gen too, so an
-		// unchanged set re-uses the cached bytes instead of re-serializing.
-		knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
-		snapshotKnownIDsGen = r.kid.gen
-	}
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
 	snapshotWsGen := r.wsStore.gen.Load()
 	r.mu.RUnlock()
 
 	if knownIDsDue {
+		// R202606g-GO-002 (#2306): snapshotKnownIDsMarshaledLocked
+		// unconditionally writes r.kid.{sortedCache,sortedGen,marshaledCache,
+		// marshaledGen} (store.go memoised caches), so it MUST run under the
+		// write lock, not the RLock above. Cleanup's caller already holds the
+		// write lock; saveIfDirty previously called it under RLock — safe only
+		// because both share the single cleanup goroutine, but a lock-contract
+		// violation that -race would flag if the structure ever changed. Fold
+		// the throttle re-verify and the memoised marshal into one Lock block.
+		//
 		// Commit savedAt under the write lock so a concurrent Cleanup tick
 		// re-checking the throttle skips — both paths share the same .tmp
 		// target file and torn writes cannot be recovered. Re-verify the
@@ -762,10 +764,15 @@ func (r *Router) saveIfDirty() {
 		r.mu.Lock()
 		if r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval {
 			r.kid.savedAt = time.Now()
-		} else {
-			// Lost the race; another tick already claimed this save window.
-			knownIDsCopy = nil
+			// R220123-PERF-19 (#1638): memoised sorted snapshot.
+			// R20260616-PERF-009 (#2143): marshal is memoised by gen too, so
+			// an unchanged set re-uses the cached bytes instead of
+			// re-serializing.
+			knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
+			snapshotKnownIDsGen = r.kid.gen
 		}
+		// else: lost the race; another tick already claimed this save window.
+		// knownIDsCopy stays nil so the write below is skipped.
 		r.mu.Unlock()
 	}
 
