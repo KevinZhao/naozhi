@@ -35,6 +35,33 @@ func TestWriteFileAtomic_CreatesAndReplaces(t *testing.T) {
 	}
 }
 
+// TestWriteFileAtomic_SyncDirFailureIsSoft pins R202606e-GO-003 (#2279): the
+// os.Rename has already succeeded by the time SyncDir runs, so a dir-fsync
+// failure must NOT propagate as a hard error — the data is durably in place.
+// A hard error here made callers (cron sandbox_pending) treat a fully written
+// file as a write failure and skip restart-reconcile index registration.
+func TestWriteFileAtomic_SyncDirFailureIsSoft(t *testing.T) {
+	// Not parallel: mutates the package-level syncDirFn.
+	orig := syncDirFn
+	t.Cleanup(func() { syncDirFn = orig })
+	syncDirFn = func(string) error { return fmt.Errorf("injected dir fsync failure") }
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.json")
+	if err := WriteFileAtomic(path, []byte("payload"), 0600); err != nil {
+		t.Fatalf("WriteFileAtomic: want nil despite SyncDir failure (data already renamed), got %v", err)
+	}
+	// Data must be on disk: the rename happened before SyncDir.
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("read = %q, err=%v; want %q", got, err, "payload")
+	}
+	// No lingering temp file.
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("tmp file lingered: err=%v", err)
+	}
+}
+
 func TestSyncDir_Exists(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
