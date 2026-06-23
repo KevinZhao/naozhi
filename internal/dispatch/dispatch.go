@@ -1375,6 +1375,21 @@ func (d *Dispatcher) sendAndReply(
 	replyText := d.decorateReplyText(result, sess)
 	outImages, replyText := d.readTurnImages(replyText)
 
+	// R20260623-LB-6 (#2316): on graceful shutdown the passthrough turn ctx
+	// is bound to d.stopCtx (mergeStopAndValues) so an in-flight turn can
+	// observe SIGTERM. If the cancel lands in the race window between
+	// d.caps.Send returning (answer already generated, markReplySuccess
+	// recorded above) and the reply being delivered, every delivery below
+	// reuses a Done ctx and the http request aborts — silently dropping the
+	// answer the user waited for. The two error-reply paths and the panic /
+	// card / todo paths already swap to a fresh shutdown-budget ctx via
+	// resolveReplyCtx; the success path was the only delivery path left on a
+	// bare ctx. Align it so the real answer also lands during shutdown.
+	ctx, cleanup := resolveReplyCtx(ctx)
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	tracker.waitReady(ctx)
 
 	// AskUserQuestion suppression: when this turn surfaced an interactive
