@@ -127,6 +127,14 @@ const (
 // Promoted here so all three adapters share one source of truth.
 const DefaultMaxReplyLen = 4000
 
+// DiscordMaxReplyLen is Discord's hard per-message content ceiling (2000
+// characters, BASE_TYPE_MAX_LENGTH). Unlike Feishu/Slack/Weixin — which
+// fall back to DefaultMaxReplyLen — Discord cannot exceed this API limit, so
+// the divergence is declared here in the policy package rather than buried as
+// an inline literal in the adapter, keeping all per-platform reply ceilings in
+// one source of truth. R202606c-ARCH-3 (#2236).
+const DiscordMaxReplyLen = 2000
+
 // DefaultMaxIncomingBytes caps the per-message text byte length that any
 // platform adapter forwards into dispatch. ~8 KiB is well above any
 // reasonable single-message payload from a human user and bounds the

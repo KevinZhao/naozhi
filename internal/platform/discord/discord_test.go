@@ -19,8 +19,18 @@ func TestNew_Defaults(t *testing.T) {
 	if d.Name() != "discord" {
 		t.Errorf("Name() = %q, want discord", d.Name())
 	}
-	if d.MaxReplyLength() != 2000 {
-		t.Errorf("MaxReplyLength() = %d, want 2000", d.MaxReplyLength())
+	if d.MaxReplyLength() != platform.DiscordMaxReplyLen {
+		t.Errorf("MaxReplyLength() = %d, want %d", d.MaxReplyLength(), platform.DiscordMaxReplyLen)
+	}
+}
+
+// TestDiscordMaxReplyLen_Constant pins the Discord ceiling at its documented
+// API limit and guards the policy-package source of truth (#2236). Discord's
+// BASE_TYPE_MAX_LENGTH is 2000; this must not be silently changed.
+func TestDiscordMaxReplyLen_Constant(t *testing.T) {
+	t.Parallel()
+	if platform.DiscordMaxReplyLen != 2000 {
+		t.Errorf("platform.DiscordMaxReplyLen = %d, want 2000", platform.DiscordMaxReplyLen)
 	}
 }
 

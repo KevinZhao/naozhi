@@ -72,7 +72,7 @@ type Discord struct {
 // New creates a Discord platform adapter.
 func New(cfg Config) *Discord {
 	if cfg.MaxReplyLen <= 0 {
-		cfg.MaxReplyLen = 2000 // Discord's actual limit
+		cfg.MaxReplyLen = platform.DiscordMaxReplyLen // Discord's actual API limit
 	}
 	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
 }
