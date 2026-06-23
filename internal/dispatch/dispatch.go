@@ -1430,10 +1430,17 @@ func (d *Dispatcher) sendAndReply(
 	// after the AskUserQuestion card, confusing the user.
 	if !tracker.askQuestionFired.Load() {
 		for _, img := range outImages {
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{
+			// R20260623-LB-3 (#2305): deliver via ReplyWithRetry (not bare
+			// Reply) so an outbound image inherits the same token-invalidation
+			// one-shot retry the text path gets. Previously a single-image
+			// reply that hit Feishu token-expiry (99991671) was lost silently:
+			// the platform cleared the cache but the bare Reply never retried
+			// with the rotated token. ReplyWithRetry grants the extra rotation
+			// attempt so the image lands on the fresh token.
+			if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
 				ChatID: msg.ChatID,
 				Images: []platform.Image{img},
-			}); err != nil {
+			}, limits.PlatformReplyMaxAttempts); err != nil {
 				slog.Warn("send image failed", "err", err)
 			}
 		}
