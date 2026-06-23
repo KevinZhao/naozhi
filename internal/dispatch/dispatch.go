@@ -1696,7 +1696,11 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// at maxLen+suffix > maxLen. Detect that case and suppress the page
 	// suffix entirely rather than emit guaranteed-oversized chunks.
 	suppressSuffix := false
-	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
+	// #2283: compute the rune count once here and reuse it both for the
+	// page-suffix reservation and SplitTextWithCount below, instead of
+	// scanning the same string twice (here + inside platform.SplitText).
+	runeCount := utf8.RuneCountInString(text)
+	if runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
 		// reservation to the worst-case suffix for the resulting chunk count.
 		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
@@ -1709,7 +1713,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		}
 	}
 
-	chunks := platform.SplitText(text, splitLen)
+	chunks := platform.SplitTextWithCount(text, splitLen, runeCount)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 && !suppressSuffix {

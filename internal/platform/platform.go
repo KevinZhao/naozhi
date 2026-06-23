@@ -278,7 +278,17 @@ func RecoverHandler(label string) {
 // SplitText splits text into chunks of at most maxRunes runes, preferring
 // newline boundaries in the second half of each chunk when possible.
 func SplitText(text string, maxRunes int) []string {
-	if utf8.RuneCountInString(text) <= maxRunes {
+	return SplitTextWithCount(text, maxRunes, utf8.RuneCountInString(text))
+}
+
+// SplitTextWithCount is SplitText for callers that have already computed the
+// rune count of text (e.g. dispatch.SendSplitReply, which needs the count to
+// size the page-suffix reservation). Passing it in avoids a second O(n)
+// utf8.RuneCountInString full scan of the same string. R202606e-PERF-002
+// (#2283). runeCount must equal utf8.RuneCountInString(text); a wrong value
+// only affects the single-chunk fast path, never chunk boundaries.
+func SplitTextWithCount(text string, maxRunes, runeCount int) []string {
+	if runeCount <= maxRunes {
 		return []string{text}
 	}
 	var chunks []string
