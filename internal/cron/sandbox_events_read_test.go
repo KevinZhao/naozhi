@@ -56,6 +56,39 @@ func TestSandboxRunEvents_ReadsAllLines(t *testing.T) {
 	}
 }
 
+// TestSandboxEventSink_CloserIdempotent pins #2317: executeSandbox now
+// `defer closeSink()` as a panic-safe fd-release fallback in addition to the
+// explicit ordered close before the terminal broadcast. That double-invoke is
+// only safe if the closer is idempotent (sync.Once) — otherwise the second
+// f.Close() would log a spurious "close failed" WARN. Here we drive the real
+// sink, flush a line, then call the closer twice and assert the event log was
+// written exactly once and the second close is a no-op.
+func TestSandboxEventSink_CloserIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, storePath)
+
+	jobID, runID := "0123456789abcdef", "feedfacefeedface"
+	sink, closeSink := s.sandboxEventSink(jobID, runID, slog.Default())
+
+	if err := sink([]byte(`{"kind":"boot"}`)); err != nil {
+		t.Fatalf("sink write: %v", err)
+	}
+
+	// Two closes must not panic and must not corrupt the flushed file. The
+	// second is the defer-fallback firing after the explicit close already ran.
+	closeSink()
+	closeSink()
+
+	got, _, err := s.SandboxRunEvents(jobID, runID, 100)
+	if err != nil {
+		t.Fatalf("SandboxRunEvents: %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != `{"kind":"boot"}` {
+		t.Fatalf("event log after double-close = %v, want exactly the one flushed line", got)
+	}
+}
+
 func TestSandboxRunEvents_MissingFileIsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron_jobs.json")
