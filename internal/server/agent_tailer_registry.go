@@ -202,6 +202,32 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.mu.Unlock()
 		return false
 	}
+	// R20260622-LB-1 (#2259): guard against the attach/detachClient race.
+	// writePump can exit first (TCP RST on ping write, or slow-client drop),
+	// run the one-and-only detachClient via its unregister defer, and then
+	// close the conn — all while readPump is mid-flight in handleAgentSubscribe
+	// here. Without this check attach would re-insert the already-dead client
+	// into t.subs and bump refCount back to 1; the second unregister sees
+	// removed=false and skips detachClient, pinning the dead client in the
+	// tailer forever (refCount stuck at 1, idle-reap never fires, every tick
+	// broadcasts to a dead client). Observing c.done under t.mu — mirroring
+	// rekeyOwnerSlot (wshub.go:1050) — closes the window: detachClient closes
+	// c.done before it could have removed us, so we bail and roll back the
+	// clientSubs entry we optimistically added above.
+	select {
+	case <-c.done:
+		t.mu.Unlock()
+		r.mu.Lock()
+		if subs, found := r.clientSubs[c]; found {
+			delete(subs, tk)
+			if len(subs) == 0 {
+				delete(r.clientSubs, c)
+			}
+		}
+		r.mu.Unlock()
+		return false
+	default:
+	}
 	if _, exists := t.subs[c]; !exists {
 		t.subs[c] = struct{}{}
 		t.refCount.Add(1)

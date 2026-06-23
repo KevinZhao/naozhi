@@ -284,6 +284,53 @@ func TestTailer_DetachDoesNotStopTailer(t *testing.T) {
 // TestTailer_DetachClientDropsAllSubscriptions: on WS disconnect, the
 // registry must drop every subscription the client held so stale pointers
 // don't linger in `subs` maps.
+// TestTailer_AttachAfterDoneClosedIsNoOp reproduces R20260622-LB-1 (#2259):
+// when a client's done channel is already closed (its pumps have torn down and
+// detachClient already ran), a late attach — readPump still mid-flight in
+// handleAgentSubscribe — must NOT re-insert the dead client into the tailer.
+// Before the fix, attach only checked t.closed and would pin the dead client
+// in t.subs with refCount stuck at 1, defeating idle-reap forever.
+func TestTailer_AttachAfterDoneClosedIsNoOp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p1 := writeJSONL(t, dir, "one", false)
+
+	r := newTailerRegistry(nil)
+	defer r.Shutdown()
+
+	r.ensureTailer("k", "t1", "u", p1)
+	c, _ := newCapturedClient(t, nil)
+
+	// Simulate the pump teardown that closed c.done before the buffered
+	// agent_subscribe frame reaches attach.
+	c.closeDone()
+
+	if r.attach(tailerKey{"k", "t1"}, c) {
+		t.Fatal("attach should return false for an already-done client")
+	}
+
+	r.mu.RLock()
+	tl := r.byTask[tailerKey{"k", "t1"}]
+	_, tracked := r.clientSubs[c]
+	r.mu.RUnlock()
+	if tracked {
+		t.Error("reverse index must not retain a done client")
+	}
+	if tl == nil {
+		t.Fatal("tailer missing")
+	}
+	tl.mu.Lock()
+	_, inSubs := tl.subs[c]
+	rc := tl.refCount.Load()
+	tl.mu.Unlock()
+	if inSubs {
+		t.Error("done client must not be pinned in t.subs")
+	}
+	if rc != 0 {
+		t.Errorf("refCount = %d, want 0 (idle-reap would never fire otherwise)", rc)
+	}
+}
+
 func TestTailer_DetachClientDropsAllSubscriptions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
