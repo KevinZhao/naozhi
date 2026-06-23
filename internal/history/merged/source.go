@@ -176,7 +176,15 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 	// in the common case. Two-way merge is allocation-identical to
 	// the old code (one map, one result slice) so there's no memory
 	// regression either.
-	if slices.IsSortedFunc(local, entryCmp) && slices.IsSortedFunc(fallback, entryCmp) {
+	//
+	// R202606g-PERF-001 (#2307): the dominant LoadBefore shapes are
+	// single-tier (events/ empty so only fallback carries rows, or
+	// Claude JSONL absent so only local does). isSortedContract skips
+	// the scan entirely for a slice of length ≤1 (trivially sorted),
+	// so the single-tier and empty-tier cases pay for exactly one
+	// O(n) scan instead of two — without weakening the correctness
+	// fallback for the genuinely-unsorted case.
+	if isSortedContract(local) && isSortedContract(fallback) {
 		return mergeSorted(local, fallback, beforeMS)
 	}
 
@@ -188,6 +196,20 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 	slog.Warn("merged: source returned unsorted entries; repairing with sort",
 		"local_len", len(local), "fallback_len", len(fallback))
 	return mergeSortFallback(local, fallback, beforeMS)
+}
+
+// isSortedContract reports whether s honours the (Time, UUID) chronological
+// contract that lets mergeDedup take the linear merge path. A slice of length
+// ≤1 is trivially sorted and skips the scan outright — this is the common
+// single-tier LoadBefore shape (one source empty, the other carrying the page)
+// where forcing the second IsSortedFunc walk was pure overhead (R202606g-PERF-001,
+// #2307). For len > 1 it delegates to slices.IsSortedFunc so the defensive
+// concat+sort fallback still fires on a genuine contract violation.
+func isSortedContract(s []cli.EventEntry) bool {
+	if len(s) <= 1 {
+		return true
+	}
+	return slices.IsSortedFunc(s, entryCmp)
 }
 
 // mergeSorted walks two already-sorted input slices linearly and
