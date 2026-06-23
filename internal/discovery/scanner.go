@@ -387,6 +387,17 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	return DefaultScanner().Scan(claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
+// ScanContext is the cancellation-aware variant of Scan. The prompt-extraction
+// fan-out (bounded by promptSem) performs unbounded filesystem IO
+// (os.Open + bufio.Scanner over up to 512KiB), so a slow or hung filesystem
+// (NFS/FUSE/ESTALE) could otherwise park the worker goroutines indefinitely
+// and stall shutdown past systemd TimeoutStopSec. Passing a cancelable ctx
+// (e.g. derived from SIGTERM) lets the semaphore-acquire select abandon
+// not-yet-started extractions promptly. R202606d-GO-002 (#2244).
+func ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+	return DefaultScanner().ScanContext(ctx, claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
+}
+
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
 // that are not managed by naozhi (excluded via excludePIDs). The discovered
 // SessionID is taken verbatim from each {pid}.json — modern Claude CLI keeps
@@ -402,6 +413,12 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 // removed. See the second-pass note in the body and
 // TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+	return s.ScanContext(context.Background(), claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
+}
+
+// ScanContext is the cancellation-aware variant of (*Scanner).Scan. See the
+// ScanContext package-level wrapper for rationale (R202606d-GO-002 #2244).
+func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -531,7 +548,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		promptWg.Add(1)
 		go func(idx int) {
 			defer promptWg.Done()
-			promptSem <- struct{}{}
+			// R202606d-GO-002 (#2244): abandon not-yet-started extractions when
+			// ctx is canceled (SIGTERM) so a slow/hung FS cannot park this
+			// goroutine waiting on promptSem past shutdown deadline. Leaving
+			// prompts[idx] as its zero value ("") is the same outcome as an
+			// empty/failed extraction, so callers stay correct.
+			select {
+			case promptSem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-promptSem }()
 			prompts[idx] = s.extractLastPrompt(claudeDir, candidates[idx].sf.CWD, candidates[idx].sf.SessionID)
 		}(i)
@@ -1116,12 +1142,27 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	return DefaultScanner().RefreshDynamic(claudeDir, sessions)
 }
 
+// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic.
+// Like ScanContext it guards the promptSem fan-out so a slow/hung filesystem
+// cannot park the prompt-extraction goroutines past shutdown. R202606d-GO-002
+// (#2244).
+func RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
+	return DefaultScanner().RefreshDynamicContext(ctx, claudeDir, sessions)
+}
+
 // RefreshDynamic deliberately does NOT advance promptCache/summaryCache
 // generations — Scan is the sole authority for aging. Advancing here would
 // double-tick gen when Scan and RefreshDynamic run in the same cycle,
 // halving the effective cache lifetime (entries evicted after 1 cycle
 // instead of 2) and triggering repeated JSONL parses.
 func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
+	return s.RefreshDynamicContext(context.Background(), claudeDir, sessions)
+}
+
+// RefreshDynamicContext is the cancellation-aware variant of
+// (*Scanner).RefreshDynamic. See RefreshDynamicContext package wrapper for
+// rationale (R202606d-GO-002 #2244).
+func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false
 	}
@@ -1146,7 +1187,16 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			sem <- struct{}{}
+			// R202606d-GO-002 (#2244): abandon not-yet-started extractions on
+			// ctx cancellation (SIGTERM) so a hung FS cannot park this goroutine
+			// on the semaphore past shutdown. mtimeOK[idx] stays false, so the
+			// merge loop below falls back to the existing StartedAt — the same
+			// path taken when the JSONL did not exist.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
 			prompts[idx], mtimes[idx], mtimeOK[idx] = s.extractLastPromptWithMtime(
 				claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
