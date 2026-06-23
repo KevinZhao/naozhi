@@ -13,6 +13,7 @@ package server
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -408,6 +409,21 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	if key == "" || summary == "" {
 		return
+	}
+	// R202606g-PERF-003 (#2308): zero-subscriber fast path. Remote/background
+	// sessions frequently have nobody watching when a send/interrupt fails;
+	// in that case both pool slices (candPtr + snapPtr) are taken and returned
+	// unused. Probe the lock-free subscriberCountFast mirror first and bail
+	// before any pool round trip when the key has zero subscribers, mirroring
+	// marshalBroadcastAuth's zero-client short-circuit (R20260616-PERF-004).
+	// The mirror is at most one writer-critical-section stale; a false "0"
+	// only suppresses a best-effort failure notice that no live subscriber
+	// could have received anyway, and the count is bumped under h.mu before
+	// any client's subscriptions map carries the key.
+	if h.subscriberCount != nil {
+		if v, ok := h.subscriberCountFast.Load(key); !ok || v.(*atomic.Int32).Load() == 0 {
+			return
+		}
 	}
 	// Snapshot the session's subscribers BEFORE marshalling. Remote/background
 	// sessions frequently have nobody watching when a send/interrupt fails —
