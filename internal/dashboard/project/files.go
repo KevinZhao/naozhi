@@ -1097,9 +1097,12 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	info = finfo
 	defer f.Close()
 
-	// ETag hashes (size, mtime-ns) so the header does not leak exact byte
-	// count or nanosecond modification timestamp to authenticated clients.
-	// Matches the attachment endpoint convention — see handleAttachment.
+	// ETag hashes (size, mtime-millis) so the header does not leak exact byte
+	// count or fine-grained modification timestamp to authenticated clients.
+	// Matches the attachment endpoint convention — see buildAttachmentETagSeed,
+	// which was downgraded from UnixNano to UnixMilli (R20260527122801-SEC-14)
+	// to shed timing-oracle bits; keep both seeds on the same precision so the
+	// two endpoints never diverge if FileETagSalt is ever removed/misconfigured.
 	//
 	// R224-PERF-4: same strconv-into-stack-buffer trick as dashboard_send's
 	// handleAttachment to skip fmt.Sprintf's reflection path.
@@ -1115,7 +1118,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	var etagBuf [80]byte
 	etagSeed := strconv.AppendInt(etagBuf[:0], info.Size(), 10)
 	etagSeed = append(etagSeed, '|')
-	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
+	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixMilli(), 10)
 	etagSeed = append(etagSeed, '|')
 	etagSeed = append(etagSeed, FileETagSalt...)
 	etagSum := sha256.Sum256(etagSeed)

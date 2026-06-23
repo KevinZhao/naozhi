@@ -763,7 +763,15 @@ func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 			// still receive them via DoneOrDrain — but nothing
 			// guarantees a next Enqueue arrives. Draining here ensures
 			// progress even on a quiet session.
-			drained = sq.ring.drainAll()
+			// Reuse the ring's scratch instead of allocating a fresh slice
+			// (R20260606-PERF-3, mirrors DoneOrDrain). Aliasing is safe here:
+			// the entry is deleted from q.queues immediately below, so this
+			// ring is never reused — a later Enqueue for the same key builds a
+			// brand-new sessionQueue — and the drained batch is fully consumed
+			// by the out-of-lock onDrain loop before this call returns, with no
+			// concurrent drainInto/drainAll able to clobber the backing array.
+			drained = sq.ring.drainInto(sq.ring.scratch)
+			sq.ring.scratch = drained
 			// Entry becomes eligible for deletion now that it carries no
 			// queued state; mirroring the empty branch above keeps the map
 			// from accumulating idle sessionQueue instances.

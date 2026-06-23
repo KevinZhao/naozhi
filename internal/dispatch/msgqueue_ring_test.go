@@ -226,6 +226,62 @@ func TestMsgQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
 	}
 }
 
+// TestMsgQueue_ReleaseWithDrain_UsesRingScratch regresses R202606g-PERF-018:
+// ReleaseWithDrain must drain via the ring's scratch (drainInto) rather than
+// allocating a fresh slice (drainAll). When the owning sessionQueue has already
+// warmed its scratch (sized to hold the next batch) via a prior DoneOrDrain,
+// the batch delivered by ReleaseWithDrain must be backed by that same scratch
+// array — not a freshly allocated one.
+func TestMsgQueue_ReleaseWithDrain_UsesRingScratch(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(8, 0)
+
+	// Owner turn warms the ring scratch via DoneOrDrain; ownership is kept
+	// because the drained batch is non-empty.
+	_, _, _, gen, _ := q.Enqueue("k", QueuedMsg{Text: "owner"})
+	q.Enqueue("k", QueuedMsg{Text: "w1"})
+	q.Enqueue("k", QueuedMsg{Text: "w2"})
+	_ = q.DoneOrDrain("k", gen)
+
+	// Grab a reference to the warmed scratch backing array on the live
+	// sessionQueue (re-sliced to full cap so we can observe writes past len).
+	q.mu.Lock()
+	sq := q.queues["k"]
+	if sq == nil {
+		q.mu.Unlock()
+		t.Fatal("sessionQueue evicted unexpectedly after non-empty DoneOrDrain")
+	}
+	if cap(sq.ring.scratch) < 2 {
+		q.mu.Unlock()
+		t.Fatalf("scratch cap = %d, expected warmed to >=2", cap(sq.ring.scratch))
+	}
+	scratch := sq.ring.scratch[:cap(sq.ring.scratch)]
+	q.mu.Unlock()
+
+	// Two follow-ups land in the busy window, then the SessionGuard path
+	// releases-with-drain.
+	q.Enqueue("k", QueuedMsg{Text: "x1"})
+	q.Enqueue("k", QueuedMsg{Text: "x2"})
+
+	var got []string
+	q.ReleaseWithDrain("k", func(m QueuedMsg) {
+		got = append(got, m.Text)
+	})
+	if len(got) != 2 || got[0] != "x1" || got[1] != "x2" {
+		t.Fatalf("drained = %v, want [x1 x2]", got)
+	}
+
+	// drainInto writes the drained messages into the warmed scratch array in
+	// place (cap was >=2, so no realloc). If ReleaseWithDrain had instead used
+	// drainAll, the drained batch would be a brand-new slice and this captured
+	// scratch array would still hold the cleared/old values. Observing the new
+	// values here proves the scratch was reused.
+	if scratch[0].Text != "x1" || scratch[1].Text != "x2" {
+		t.Fatalf("warmed scratch = [%q %q] after drain, want [x1 x2] — ReleaseWithDrain allocated a fresh slice (drainAll) instead of reusing scratch",
+			scratch[0].Text, scratch[1].Text)
+	}
+}
+
 // TestMsgQueue_Enqueue_RingPath_FullEvictsAndDrains is an end-to-end check
 // that the ring buffer integration into MessageQueue still produces the
 // FIFO drain order documented on Enqueue/DoneOrDrain. Mirrors

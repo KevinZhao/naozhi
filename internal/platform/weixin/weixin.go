@@ -474,7 +474,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			case w.hookSem <- struct{}{}:
 			default:
 				slog.Warn("weixin: handler semaphore full, dropping message",
-					"user", from)
+					"user", osutil.SanitizeForLog(from, 128))
 				continue
 			}
 			w.handlerWg.Add(1)

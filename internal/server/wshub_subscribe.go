@@ -311,6 +311,21 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	h.clientWG.Add(1)
 	h.mu.Unlock()
 
+	// R202606g-GO-001: balance clientWG.Add(1) if we never reach the goroutine
+	// spawn below. Everything between here and `spawned = true` (Snapshot, up to
+	// two history fetches, marshalPooled, two Send calls) can panic; readPump's
+	// top-level recover (wsclient.go) then unwinds this frame via unregister
+	// without ever running the goroutine's `defer h.clientWG.Done()`, orphaning
+	// the slot and hanging Hub.Shutdown's clientWG.Wait(). Once the goroutine is
+	// successfully spawned, spawned=true makes this defer a no-op and the
+	// goroutine's own deferred Done() owns the balance.
+	spawned := false
+	defer func() {
+		if !spawned {
+			h.clientWG.Done()
+		}
+	}()
+
 	snap := sess.Snapshot()
 
 	var entries []cli.EventEntry
@@ -362,6 +377,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}})
 	}
 
+	spawned = true
 	go func() {
 		defer h.clientWG.Done()
 		h.eventPushLoop(c, key, gen, notify, sess, lastTime)
