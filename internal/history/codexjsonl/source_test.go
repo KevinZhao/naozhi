@@ -244,6 +244,67 @@ func TestSource_LoadBefore_SetsDedupUUID(t *testing.T) {
 	}
 }
 
+// TestSource_LoadBefore_AlreadyOrderedPreserved pins that an in-order rollout
+// (codex's normal append contract) round-trips unchanged — the IsSorted
+// fast-path must be behaviour-equivalent to an unconditional stable sort.
+func TestSource_LoadBefore_AlreadyOrderedPreserved(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "ordered-thread"
+	writeRollout(t, dir, sid, []string{
+		`{"timestamp":"2026-06-21T09:35:21.000Z","type":"event_msg","payload":{"type":"user_message","message":"a"}}`,
+		`{"timestamp":"2026-06-21T09:35:22.000Z","type":"event_msg","payload":{"type":"agent_message","message":"b"}}`,
+		`{"timestamp":"2026-06-21T09:35:23.000Z","type":"event_msg","payload":{"type":"user_message","message":"c"}}`,
+	})
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Summary != w {
+			t.Errorf("entry[%d] = %q; want %q", i, got[i].Summary, w)
+		}
+	}
+}
+
+// TestSource_LoadBefore_OutOfOrderSorted pins that the defensive fallback still
+// sorts a rollout whose timestamps arrive out of order, so the IsSorted
+// fast-path never leaves an unsorted result for downstream pagination.
+func TestSource_LoadBefore_OutOfOrderSorted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "unordered-thread"
+	writeRollout(t, dir, sid, []string{
+		`{"timestamp":"2026-06-21T09:35:23.000Z","type":"event_msg","payload":{"type":"user_message","message":"late"}}`,
+		`{"timestamp":"2026-06-21T09:35:21.000Z","type":"event_msg","payload":{"type":"agent_message","message":"early"}}`,
+		`{"timestamp":"2026-06-21T09:35:22.000Z","type":"event_msg","payload":{"type":"user_message","message":"mid"}}`,
+	})
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	want := []string{"early", "mid", "late"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Summary != w {
+			t.Errorf("entry[%d] = %q; want %q (out-of-order input must be sorted)", i, got[i].Summary, w)
+		}
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Time > got[i].Time {
+			t.Errorf("result not sorted at %d: %d > %d", i, got[i-1].Time, got[i].Time)
+		}
+	}
+}
+
 // stubView is a minimal cli.HistorySessionView for factory tests.
 type stubView struct{ sid string }
 

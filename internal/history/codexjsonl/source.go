@@ -162,9 +162,14 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 
 	entries := s.parseFile(ctx, f, beforeMS)
 
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Time < entries[j].Time
-	})
+	// codex appends in chronological order, so parseFile already returns
+	// sorted entries in the common case. Skip the O(n log n) stable sort when
+	// the slice is already ordered; only pay it on the (defensive) out-of-order
+	// path. merged.mergeDedup applies the same IsSorted fast-path downstream.
+	less := func(i, j int) bool { return entries[i].Time < entries[j].Time }
+	if !sort.SliceIsSorted(entries, less) {
+		sort.SliceStable(entries, less)
+	}
 
 	if len(entries) > limit {
 		entries = entries[len(entries)-limit:]
