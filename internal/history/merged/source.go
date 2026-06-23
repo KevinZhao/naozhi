@@ -194,23 +194,29 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// merge loop never runs (no local), and only the fallback tail-flush
 	// executes. That flush is: keep empty-UUID entries unconditionally;
 	// for non-empty UUIDs, keep the FIRST occurrence and drop later dups;
-	// all subject to emit's cutoff. We replicate that self-dedup exactly so
-	// the output matches the general path element-for-element. The map is
-	// only allocated when fallback actually contains a non-empty UUID dup
-	// candidate — here we still build it (fallback may carry dups) but skip
-	// seeding from a (non-existent) local tier.
+	// all subject to emit's cutoff. Because fallback is sorted by
+	// (Time, UUID) — and a stable UUID is per-turn so duplicate UUIDs share
+	// the same Time and therefore sort adjacently — "drop later dups"
+	// reduces to "drop a non-empty UUID equal to the last non-empty UUID
+	// emitted". A single lastUUID tracker replaces the dedup map entirely,
+	// so this single-tier fast path allocates only the result slice.
+	//
+	// Empty UUIDs are always kept (they bypass the dedup branch) and do NOT
+	// clear lastUUID: leaving the tracker intact across an empty-UUID entry
+	// means a `b, <empty>, b` run still drops the trailing `b`, matching the
+	// reference's global-set "keep first occurrence" rule element-for-element.
 	if len(local) == 0 {
-		seen := make(map[string]struct{}, len(fallback))
 		out := make([]cli.EventEntry, 0, len(fallback))
+		lastUUID := ""
 		for _, e := range fallback {
 			if beforeMS > 0 && e.Time >= beforeMS {
 				continue
 			}
 			if e.UUID != "" {
-				if _, dup := seen[e.UUID]; dup {
+				if e.UUID == lastUUID {
 					continue
 				}
-				seen[e.UUID] = struct{}{}
+				lastUUID = e.UUID
 			}
 			out = append(out, e)
 		}

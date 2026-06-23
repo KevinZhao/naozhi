@@ -538,6 +538,29 @@ func TestMergeSorted_FastPathLocalEmpty_EquivalentToGeneral(t *testing.T) {
 	}
 }
 
+// TestMergeSorted_LocalEmpty_EmptyUUIDBetweenDups pins the [R202606g-PERF-011]
+// lastUUID tracker against the reference's global-set dedup for the
+// `b, <empty>, b` pattern: the empty-UUID entry must NOT reset the tracker,
+// so the trailing duplicate `b` is still dropped exactly as the reference
+// (keep-first-occurrence) would. An empty-UUID entry sitting between two
+// copies of the same UUID is the one input that distinguishes a naive
+// reset-on-empty tracker from the reference.
+func TestMergeSorted_LocalEmpty_EmptyUUIDBetweenDups(t *testing.T) {
+	fallback := []cli.EventEntry{
+		{UUID: "b", Time: 100, Summary: "b1"},
+		{UUID: "", Time: 110, Summary: "legacy"},
+		{UUID: "b", Time: 120, Summary: "b2-dup"}, // global dup of first b
+		{UUID: "c", Time: 130, Summary: "c"},
+	}
+	for _, beforeMS := range []int64{0, -1, 110, 120, 121, 1000} {
+		fast := mergeSorted(nil, fallback, beforeMS)
+		ref := generalMergeSorted(nil, fallback, beforeMS)
+		if !eventsEqual(fast, ref) {
+			t.Errorf("beforeMS=%d: fast=%+v ref=%+v", beforeMS, fast, ref)
+		}
+	}
+}
+
 // TestMerged_NilReceiver: methods on nil receiver don't panic. The
 // router's attachHistorySource may install MergedSource as nil on
 // older sessions that opt out.
