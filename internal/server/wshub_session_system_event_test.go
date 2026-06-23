@@ -26,6 +26,13 @@ func registerSub(h *Hub, c *wsClient, key string) {
 	}
 	if key != "" {
 		c.subscriptions[key] = func() {}
+		// Mirror the real subscribe path's lock-free subscriberCountFast bump
+		// (wshub_subscribe.go) so broadcastSessionSystemEvent's #2308 zero-
+		// subscriber fast path sees a live count for this key.
+		if h.subscriberCount != nil {
+			h.subscriberCount[key]++
+			h.setSubscriberCountFast(key, h.subscriberCount[key])
+		}
 	}
 	h.mu.Unlock()
 }
@@ -108,6 +115,27 @@ func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
 
 	if _, ok := recvMsg(t, out); ok {
 		t.Fatal("a session with no subscribers should deliver nothing")
+	}
+}
+
+// TestBroadcastSessionSystemEvent_ZeroCountFastPath verifies R202606g-PERF-003
+// (#2308): when subscriberCountFast reports zero for the key the broadcast
+// returns before touching the snapshot pool. We assert observable behaviour —
+// nothing is delivered — even though a client is wired into the Hub maps for a
+// DIFFERENT key, so the target key's fast count stays absent/zero.
+func TestBroadcastSessionSystemEvent_ZeroCountFastPath(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	// A live, authenticated client subscribed elsewhere; the target key has no
+	// subscriberCountFast entry, exercising the !ok branch of the fast path.
+	c, out := newCapturedClient(t, hub)
+	registerSub(hub, c, "feishu:p2p:elsewhere")
+
+	hub.broadcastSessionSystemEvent("feishu:p2p:zero", "发送失败：x")
+
+	if _, ok := recvMsg(t, out); ok {
+		t.Fatal("zero-subscriber key must deliver nothing via the fast path")
 	}
 }
 

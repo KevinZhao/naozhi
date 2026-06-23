@@ -249,6 +249,17 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // unix seconds, so adjacent prompts are ≥1000 ms apart) so chronology
 // across prompts is preserved.
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+	// Read the LAST maxFileBytes, not the first. kiro appends chronologically
+	// to a single rotation-free file, so a long session can exceed the cap;
+	// reading from offset 0 would surface only the oldest prompts and the
+	// newest messages would never be parsed. Seek to the tail window and drop
+	// the first (likely partial) line so the cap covers recent bytes.
+	skipPartialFirstLine := false
+	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
+		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
+			skipPartialFirstLine = true
+		}
+	}
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long. Default 64 KiB
@@ -262,6 +273,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		scanBufPool.Put(bufPtr)
 	}()
 	scanner.Buffer(*bufPtr, 1<<20)
+	if skipPartialFirstLine && scanner.Scan() {
+		// Discard the partial line straddling the seek boundary.
+	}
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
@@ -388,7 +402,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		timeMS = lastPromptMS + 1 + asstOffset
 	}
 
-	summary := concatTextChunks(data.Content)
+	fullText := concatTextChunks(data.Content)
 
 	// Strict cc-parity for AssistantMessage: drop the entry entirely
 	// when the model produced no plain-text output (only thinking +
@@ -396,9 +410,15 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 	// tool-driven turn injects a blank card into the transcript.
 	// Prompts (user messages) keep the legacy permissive behaviour:
 	// surface even an empty Summary so pagination time cursors advance.
-	if entryType == "text" && strings.TrimSpace(summary) == "" {
+	if entryType == "text" && strings.TrimSpace(fullText) == "" {
 		return cli.EventEntry{}, false
 	}
+
+	// Truncate to the same caps the claude path uses (history_tail.go): a
+	// 120-rune Summary and a 16000-rune Detail. Without this the full message
+	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
+	// boundary, and the dashboard renders an unbounded mega-bubble.
+	summary, detail := textutil.TruncateRunesPair(fullText, 120, 16000)
 
 	// Derive a deterministic UUID so MergedSource can dedup overlapping
 	// pages. Without it the entry carries an empty UUID, which
@@ -413,6 +433,7 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		Time:    timeMS,
 		Type:    entryType,
 		Summary: summary,
+		Detail:  detail,
 	}, true
 }
 

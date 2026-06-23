@@ -31,9 +31,15 @@ import (
 //   - After rename, the parent directory is fsynced so the new directory
 //     entry is persisted on XFS/tmpfs (ext4 data=ordered usually handles
 //     this automatically, but paying one extra syscall is cheap vs. a
-//     lost store file on crash). Failure to sync the directory is logged
-//     by the caller context via the wrapped error but does not undo the
-//     rename — the data is already on disk.
+//     lost store file on crash). The rename has already succeeded by this
+//     point, so a SyncDir failure is a SOFT degradation (the data is
+//     atomically in place and survives a clean reboot; only an unclean
+//     crash before the dir entry flushes could lose it on XFS/tmpfs). We
+//     therefore log it at WARN and return nil rather than a hard error —
+//     R202606e-GO-003 (#2279): a hard error here made callers (e.g. cron
+//     sandbox_pending) treat a fully-persisted file as a write failure and
+//     skip index registration, defeating restart reconcile for a file that
+//     is actually on disk.
 //
 // Callers still own mkdir of the parent directory so they can pick an
 // appropriate permission and surface a distinct error (vs a write failure).
@@ -43,6 +49,11 @@ import (
 // race on the temp file. Historic callers that took a per-store mutex may
 // keep it for higher-level reasons (ordering of data written) but are not
 // required to protect the temp file itself.
+// syncDirFn is the directory-fsync step, indirected through a package var so
+// tests can inject a failure to exercise the post-rename soft-degradation path
+// (#2279) without a fault-injecting filesystem. Production wiring is SyncDir.
+var syncDirFn = SyncDir
+
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
@@ -79,8 +90,17 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		cleanup()
 		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
 	}
-	if err := SyncDir(dir); err != nil {
-		return fmt.Errorf("fsync dir %s: %w", dir, err)
+	if err := syncDirFn(dir); err != nil {
+		// R202606e-GO-003 (#2279): the rename above already succeeded, so
+		// `path` now holds the new data atomically. A directory-entry fsync
+		// failure only risks losing that entry on an UNCLEAN crash on
+		// XFS/tmpfs — it does NOT mean the write failed. Returning a hard
+		// error here caused callers to treat a durable file as failed and
+		// skip downstream bookkeeping (cron restart-reconcile index). Log
+		// and report success: the data the caller asked us to write is on
+		// disk.
+		slog.Warn("osutil.WriteFileAtomic: dir fsync failed after rename; data is on disk, durability of dir entry degraded",
+			"dir", dir, "path", path, "err", err)
 	}
 	return nil
 }

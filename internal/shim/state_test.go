@@ -398,9 +398,11 @@ func TestKeyHash_Properties(t *testing.T) {
 			if h1 != h2 {
 				t.Errorf("KeyHash(%q) not deterministic: %q vs %q", tc.key, h1, h2)
 			}
-			// Length = 16 hex chars (8 bytes)
-			if len(h1) != 16 {
-				t.Errorf("KeyHash(%q) length = %d, want 16", tc.key, len(h1))
+			// Length = 32 hex chars (16 bytes / 128 bits). Widened from 64
+			// bits in #2298 to keep the birthday-collision bound negligible
+			// for long-lived hosts that mint billions of distinct keys.
+			if len(h1) != 32 {
+				t.Errorf("KeyHash(%q) length = %d, want 32", tc.key, len(h1))
 			}
 			// No collisions with other test keys
 			if prev, ok := seen[h1]; ok {

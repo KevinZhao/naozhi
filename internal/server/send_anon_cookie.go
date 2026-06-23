@@ -41,7 +41,19 @@ const anonCookieHexLen = 32
 // which a stale label can be reused after a service restart, token-mode
 // toggle, or non-TLS sniff. Pulled out as a const so regression tests can
 // pin the value without parsing the cookie header.
-const anonCookieMaxAgeSeconds = 7 * 24 * 3600
+//
+// R202606f-SEC-005 / #2297: aligned down to the nz_auth session lifetime
+// (authCookieMaxAgeSeconds = 3600 / 1h in internal/dashboard/auth). The 7-day
+// label outlived the 1h auth session by 7×, so on a shared device a second
+// user arriving after the first user's auth cookie had expired (but before
+// logout, which #2157 wires to clear nz_anon) could still inherit the first
+// user's owner bucket and TakeAll their pending uploads. Bounding the label to
+// the auth session closes that cross-user reuse window: once the auth cookie
+// expires the browser must re-authenticate, and the owner label expires
+// alongside it. Kept as a literal (not a cross-package reference) so this file
+// owns its own security knob; anonCookieMaxAgeMatchesAuth in the test pins the
+// two values together so a future change to either is caught.
+const anonCookieMaxAgeSeconds = 3600 // 1 hour, aligned to nz_auth session
 
 // isValidAnonCookieValue reports whether v looks like a freshly-minted
 // nz_anon value: exactly anonCookieHexLen bytes, all lowercase hex.

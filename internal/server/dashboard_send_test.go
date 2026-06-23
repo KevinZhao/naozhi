@@ -89,24 +89,23 @@ func TestBuildAttachmentETagSeed_MillisecondPrecision(t *testing.T) {
 	}
 }
 
-// TestAnonCookieMaxAge_BoundedAt7Days pins R247-SEC-15 / #514: the nz_anon
-// MaxAge MUST be bounded at the 7-day floor encoded by
-// anonCookieMaxAgeSeconds. The previous 30-day MaxAge let a stale per-
-// browser owner label survive across token-mode toggles and service
-// restarts that the operator may have used as an implicit invalidation
-// step. The label is not an auth credential, but a sniffed value over a
-// non-TLS deployment can still be replayed to claim a peer user's
-// uploadOwner bucket; shrinking the window 4× is the contained fix here
-// (the cookieGen-coupled rotation in #514 is a deeper follow-up).
+// TestAnonCookieMaxAge_AlignedToAuthSession pins R202606f-SEC-005 / #2297
+// (which supersedes the R247-SEC-15 / #514 7-day floor): the nz_anon MaxAge
+// MUST equal the nz_auth session lifetime (1h). Previously the label lived 7
+// days — 7× the auth session — so on a shared device a second user arriving
+// after the first user's auth cookie expired (but before logout, which #2157
+// wires to clear nz_anon) could inherit the first user's uploadOwner bucket
+// and TakeAll their pending uploads. Bounding the label to the auth session
+// closes that reuse window.
 //
-// We assert the constant directly so a future refactor that re-introduces
-// a longer MaxAge (e.g. a "remember me" UX request) is forced to update
-// the constant rather than silently widen the window via a magic literal.
-func TestAnonCookieMaxAge_BoundedAt7Days(t *testing.T) {
+// We assert the constant directly so a future refactor that re-introduces a
+// longer MaxAge (e.g. a "remember me" UX request) is forced to update the
+// constant rather than silently widen the window via a magic literal.
+func TestAnonCookieMaxAge_AlignedToAuthSession(t *testing.T) {
 	t.Parallel()
-	const sevenDays = 7 * 24 * 3600
-	if anonCookieMaxAgeSeconds != sevenDays {
-		t.Fatalf("R247-SEC-15 regression: anonCookieMaxAgeSeconds = %d; want 7 days (%d). Bumping the cap re-opens the 30d sniff-replay window — update the const intentionally and adjust this test if you really mean to widen the floor.", anonCookieMaxAgeSeconds, sevenDays)
+	const oneHour = 3600 // mirrors internal/dashboard/auth authCookieMaxAgeSeconds
+	if anonCookieMaxAgeSeconds != oneHour {
+		t.Fatalf("#2297 regression: anonCookieMaxAgeSeconds = %d; want 1h (%d) aligned to the nz_auth session. A longer-lived anon label re-opens the shared-device upload-bucket reuse window — update the const intentionally and adjust this test if you really mean to widen it.", anonCookieMaxAgeSeconds, oneHour)
 	}
 
 	// Mint a cookie via the real path and confirm Max-Age on the wire

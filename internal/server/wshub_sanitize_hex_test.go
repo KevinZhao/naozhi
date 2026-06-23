@@ -3,6 +3,8 @@ package server
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestSanitizeHexIDForBroadcast locks the R222-PERF-15 contract: the broadcast
@@ -55,5 +57,63 @@ func TestSanitizeHexIDForBroadcast_FastPathReturnsInput(t *testing.T) {
 	got := sanitizeHexIDForBroadcast(id, 64)
 	if got != id {
 		t.Fatalf("fast path mutated input: got %q want %q", got, id)
+	}
+}
+
+// TestSanitizeTriggerForBroadcast locks R202606c-PERF-007 (#2232): the known
+// TriggerKind enum values short-circuit unchanged; anything else routes through
+// the sanitiser (preserving the log/payload-injection defence for a future
+// externally-derived trigger name).
+func TestSanitizeTriggerForBroadcast(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"scheduled enum", string(cron.TriggerScheduled), "scheduled"},
+		{"manual enum", string(cron.TriggerManual), "manual"},
+		{"catchup enum", "catchup", "catchup"},
+		{"empty falls through unchanged", "", ""},
+		{"unknown ascii routes via sanitiser kept", "webhook", "webhook"},
+		{"injection routes via sanitiser scrubbed", "evil\ntrigger", "evil_trigger"},
+		{"oversized non-enum truncated at 32",
+			strings.Repeat("x", 40), strings.Repeat("x", 32)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sanitizeTriggerForBroadcast(c.in); got != c.want {
+				t.Errorf("sanitizeTriggerForBroadcast(%q) = %q; want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeSessionIDForBroadcast locks R202606c-PERF-007 (#2232): canonical
+// UUID session IDs pass through unchanged; non-UUID shapes route through the
+// sanitiser.
+func TestSanitizeSessionIDForBroadcast(t *testing.T) {
+	t.Parallel()
+	const uuid = "0123abcd-4567-89ab-cdef-0123456789ab"
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"canonical uuid passthrough", uuid, uuid},
+		{"empty routes via sanitiser", "", ""},
+		{"uppercase non-uuid routes via sanitiser kept",
+			"0123ABCD-4567-89AB-CDEF-0123456789AB", "0123ABCD-4567-89AB-CDEF-0123456789AB"},
+		{"injection routes via sanitiser scrubbed", "sess\nid", "sess_id"},
+		{"wrong length routes via sanitiser kept", "short", "short"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sanitizeSessionIDForBroadcast(c.in); got != c.want {
+				t.Errorf("sanitizeSessionIDForBroadcast(%q) = %q; want %q", c.in, got, c.want)
+			}
+		})
 	}
 }

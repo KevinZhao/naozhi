@@ -201,11 +201,25 @@ func (s *Source) findRollout(sid string) (string, error) {
 // never poisons the rest of the file. Returns entries in arrival order
 // (chronological per codex's append contract).
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+	// Read the LAST maxFileBytes of the file, not the first. codex appends
+	// chronologically with no rotation, so a long agentic session can exceed
+	// the cap; reading from offset 0 would surface only the oldest turns and
+	// the newest messages would never be parsed. Seek to the tail window and
+	// drop the first (likely partial) line so the cap covers recent bytes.
+	skipPartialFirstLine := false
+	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
+		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
+			skipPartialFirstLine = true
+		}
+	}
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long; the default 64 KiB
 	// would truncate token-rich replies.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	if skipPartialFirstLine && scanner.Scan() {
+		// Discard the partial line straddling the seek boundary.
+	}
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
@@ -281,6 +295,11 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		return cli.EventEntry{}, false
 	}
 
+	// Truncate to the same caps the claude path uses (history_tail.go): a
+	// 120-rune Summary and a 16000-rune Detail. Without this the full message
+	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
+	// boundary, and the dashboard renders an unbounded mega-bubble.
+	summary, detail := textutil.TruncateRunesPair(ev.Message, 120, 16000)
 	return cli.EventEntry{
 		Time: timeMS,
 		Type: entryType,
@@ -290,9 +309,10 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		// renders twice whenever a LoadBefore `beforeMS` cursor straddles a
 		// previously-returned entry. claude (via discovery.history_tail) and
 		// kiro (kirojsonl) both set this; codex must match the contract.
-		// Same derivation as kiro: (timeMS, type, summary, detail="").
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, ev.Message, ""),
-		Summary: ev.Message,
+		// Derivation uses an empty detail arg to match kiro's pinned key.
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
+		Summary: summary,
+		Detail:  detail,
 	}, true
 }
 

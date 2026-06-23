@@ -388,6 +388,65 @@ func TestEnqueueWrite_ClientDone_Drops(t *testing.T) {
 	s.enqueueWrite([]byte("data"))
 }
 
+// --- readStdout: skip marshal when no client attached (#2295) ---
+
+// TestReadStdout_NoClient_SkipsMarshalButStillBuffers pins R202606f-PERF-006
+// (#2295): with no naozhi attached, readStdout must NOT enqueue a marshalled
+// frame (it would only be dropped), but buffer.Push / session-ID extraction
+// MUST still run so replay-on-attach and the session-ID latch stay correct.
+func TestReadStdout_NoClient_SkipsMarshalButStillBuffers(t *testing.T) {
+	dir := t.TempDir()
+	// Emit three NDJSON lines then exit. One carries a session_id so we can
+	// also confirm extraction still happens with no client.
+	script := `printf '{"type":"a"}\n{"type":"system","subtype":"init","session_id":"sess-x"}\n{"type":"b"}\n'`
+	cli, err := startCLI("sh", []string{"-c", script}, dir)
+	if err != nil {
+		t.Fatalf("startCLI: %v", err)
+	}
+	defer cli.kill()
+
+	s := &shimServer{
+		cli:    cli,
+		buffer: NewRingBuffer(100, 1024*1024),
+		state:  State{Key: "noclient:key"},
+		done:   make(chan struct{}),
+	}
+	s.watchdog = NewWatchdog(30*time.Second, nil)
+
+	// Attach a writeCh but leave clientAttached false: enqueueWrite would
+	// deliver here if readStdout marshalled, so an empty channel proves the
+	// marshal+enqueue path was skipped.
+	ch := make(chan []byte, 16)
+	s.mu.Lock()
+	s.writeCh = ch
+	s.clientDone = make(chan struct{})
+	s.mu.Unlock()
+	// clientAttached defaults to false (zero value).
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.readStdout() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("readStdout did not return")
+	}
+
+	// All three lines must have been buffered for replay.
+	if got := s.buffer.Count(); got != 3 {
+		t.Errorf("buffer.Count = %d, want 3 (Push must run even with no client)", got)
+	}
+	// Session-ID extraction must have run despite no client.
+	if !s.sessionIDKnown.Load() {
+		t.Errorf("sessionIDKnown = false, want true (extraction must run with no client)")
+	}
+	// No frame should have been enqueued (marshal skipped).
+	select {
+	case frame := <-ch:
+		t.Errorf("frame enqueued with no client attached: %q (marshal should be skipped)", frame)
+	default:
+	}
+}
+
 // --- setClient / clearClient ---
 
 func TestSetClient_ReplacesOld(t *testing.T) {

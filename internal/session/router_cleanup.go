@@ -108,18 +108,24 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// teardown now potentially running in a detached goroutine, proc.Close
 		// no longer completes before HandleDelete returns, so the shim socket
 		// can still be bound when the next GetOrCreate dials it — hitting the
-		// "refusing to clobber" dial-first guard. Mirror finishResetUnlocked:
-		// wait up to 2s for the socket to vanish and, on timeout, flag the key
-		// so the next GetOrCreate wraps its spawn error with ErrShimStuck for
-		// an actionable diagnosis instead of the generic session error.
+		// "refusing to clobber" dial-first guard.
+		//
+		// R20260622-LB-3 (#2261): we deliberately do NOT re-set
+		// shimStuckOnReset[key] here. Remove is a TERMINAL operation —
+		// unregisterSessionLocked (router_lifecycle.go) already delete()d the
+		// key from shimStuckOnReset as a leak-prevention clear (R090031-CR-5),
+		// and the flag is consumed ONLY by a subsequent same-key GetOrCreate
+		// (router_lifecycle.go:384). Re-inserting it after the terminal clear
+		// left a permanent entry for every one-shot key that is never
+		// recreated with the same key (dashboard:direct:*, scratch, planner,
+		// cron run keys), since nothing ever consumes or GCs it — a slow
+		// unbounded map leak on the 2s socket-wait timeout. The Reset /
+		// ResetAndRecreate paths legitimately keep setting the flag because
+		// they reuse the same key and a GetOrCreate consumes it; Remove does
+		// not, so the recreate (if any) falls back to the still-present
+		// "refusing to clobber" dial-first guard for its diagnosis.
 		if !waitSocketGoneForKey(key, 2*time.Second) {
-			r.mu.Lock()
-			if r.pp.shimStuckOnReset == nil {
-				r.pp.shimStuckOnReset = make(map[string]bool)
-			}
-			r.pp.shimStuckOnReset[key] = true
-			r.mu.Unlock()
-			slog.Warn("shim socket still bound after Remove wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
+			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
 				"key", key)
 		}
 	}
@@ -741,19 +747,21 @@ func (r *Router) saveIfDirty() {
 	var knownIDsCopy []byte
 	var snapshotKnownIDsGen uint64
 	var knownIDsMarshalErr error
-	if knownIDsDue {
-		// R220123-PERF-19 (#1638): memoised sorted snapshot.
-		// R20260616-PERF-009 (#2143): marshal is memoised by gen too, so an
-		// unchanged set re-uses the cached bytes instead of re-serializing.
-		knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
-		snapshotKnownIDsGen = r.kid.gen
-	}
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
 	snapshotWsGen := r.wsStore.gen.Load()
 	r.mu.RUnlock()
 
 	if knownIDsDue {
+		// R202606g-GO-002 (#2306): snapshotKnownIDsMarshaledLocked
+		// unconditionally writes r.kid.{sortedCache,sortedGen,marshaledCache,
+		// marshaledGen} (store.go memoised caches), so it MUST run under the
+		// write lock, not the RLock above. Cleanup's caller already holds the
+		// write lock; saveIfDirty previously called it under RLock — safe only
+		// because both share the single cleanup goroutine, but a lock-contract
+		// violation that -race would flag if the structure ever changed. Fold
+		// the throttle re-verify and the memoised marshal into one Lock block.
+		//
 		// Commit savedAt under the write lock so a concurrent Cleanup tick
 		// re-checking the throttle skips — both paths share the same .tmp
 		// target file and torn writes cannot be recovered. Re-verify the
@@ -762,10 +770,15 @@ func (r *Router) saveIfDirty() {
 		r.mu.Lock()
 		if r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval {
 			r.kid.savedAt = time.Now()
-		} else {
-			// Lost the race; another tick already claimed this save window.
-			knownIDsCopy = nil
+			// R220123-PERF-19 (#1638): memoised sorted snapshot.
+			// R20260616-PERF-009 (#2143): marshal is memoised by gen too, so
+			// an unchanged set re-uses the cached bytes instead of
+			// re-serializing.
+			knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
+			snapshotKnownIDsGen = r.kid.gen
 		}
+		// else: lost the race; another tick already claimed this save window.
+		// knownIDsCopy stays nil so the write below is skipped.
 		r.mu.Unlock()
 	}
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/limits"
@@ -240,6 +241,12 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	s.writeSandboxSnapshot(a.snap.jobID, a.runID, a.prompt, a.model, "", nil, a.lg)
 
 	sink, closeSink := s.sandboxEventSink(a.snap.jobID, a.runID, a.lg)
+	// Panic-safe fd release (#2317): RunJob is an interface call into
+	// SDK/streaming code that can panic; the explicit closeSink() below is a
+	// plain statement that a panic would skip, leaking the event-log fd across
+	// the upstream recover. closeSink is idempotent (sync.Once), so this defer
+	// only fires when the ordered close did not run.
+	defer closeSink()
 	outcome, err := s.sandbox.RunJob(ctx, SandboxJob{
 		JobID:            a.snap.jobID,
 		RunID:            a.runID,
@@ -544,13 +551,22 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		}
 		return nil
 	}
+	// R20260623-020028-LB-7 (#2317): the closer is the single fd-release path
+	// and callers invoke it as a plain statement (so the explicit flush can be
+	// ordered before the terminal RunEnded broadcast). A panic in RunJob would
+	// skip that statement and leak the *os.File. Make the body idempotent with
+	// sync.Once so callers can also `defer closeSink()` as a panic-safe
+	// fallback without double-closing the fd.
+	var closeOnce sync.Once
 	closer = func() {
-		if err := w.Flush(); err != nil && !degraded {
-			lg.Warn("cron sandbox: event log flush failed", "err", err)
-		}
-		if err := f.Close(); err != nil {
-			lg.Warn("cron sandbox: event log close failed", "err", err)
-		}
+		closeOnce.Do(func() {
+			if err := w.Flush(); err != nil && !degraded {
+				lg.Warn("cron sandbox: event log flush failed", "err", err)
+			}
+			if err := f.Close(); err != nil {
+				lg.Warn("cron sandbox: event log close failed", "err", err)
+			}
+		})
 	}
 	return sink, closer
 }

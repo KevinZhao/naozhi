@@ -13,12 +13,15 @@ package server
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
 // File: wshub_broadcast.go
@@ -359,8 +362,8 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		StartedAt: startedAt.UnixMilli(),
-		Trigger:   osutil.SanitizeForLog(trigger, 32),
-		SessionID: osutil.SanitizeForLog(sessionID, 128),
+		Trigger:   sanitizeTriggerForBroadcast(trigger),
+		SessionID: sanitizeSessionIDForBroadcast(sessionID),
 		Fresh:     fresh,
 	})
 }
@@ -384,10 +387,10 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		StartedAt:  startedAt.UnixMilli(),
 		EndedAt:    endedAt.UnixMilli(),
 		DurationMS: durationMS,
-		SessionID:  osutil.SanitizeForLog(sessionID, 128),
+		SessionID:  sanitizeSessionIDForBroadcast(sessionID),
 		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		ErrorMsg:   errMsg,
-		Trigger:    osutil.SanitizeForLog(trigger, 32),
+		Trigger:    sanitizeTriggerForBroadcast(trigger),
 	})
 }
 
@@ -408,6 +411,21 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	if key == "" || summary == "" {
 		return
+	}
+	// R202606g-PERF-003 (#2308): zero-subscriber fast path. Remote/background
+	// sessions frequently have nobody watching when a send/interrupt fails;
+	// in that case both pool slices (candPtr + snapPtr) are taken and returned
+	// unused. Probe the lock-free subscriberCountFast mirror first and bail
+	// before any pool round trip when the key has zero subscribers, mirroring
+	// marshalBroadcastAuth's zero-client short-circuit (R20260616-PERF-004).
+	// The mirror is at most one writer-critical-section stale; a false "0"
+	// only suppresses a best-effort failure notice that no live subscriber
+	// could have received anyway, and the count is bumped under h.mu before
+	// any client's subscriptions map carries the key.
+	if h.subscriberCount != nil {
+		if v, ok := h.subscriberCountFast.Load(key); !ok || v.(*atomic.Int32).Load() == 0 {
+			return
+		}
 	}
 	// Snapshot the session's subscribers BEFORE marshalling. Remote/background
 	// sessions frequently have nobody watching when a send/interrupt fails —
@@ -589,4 +607,30 @@ func sanitizeHexIDForBroadcast(id string, maxLen int) string {
 		return id
 	}
 	return osutil.SanitizeForLog(id, maxLen)
+}
+
+// sanitizeTriggerForBroadcast short-circuits the known-safe cron TriggerKind
+// enum values (typed lowercase-ASCII constants the scheduler controls) so the
+// hot cron-run-started/ended fan-out skips SanitizeForLog's byte-scan entirely.
+// Anything outside the closed enum — a future externally-derived webhook
+// trigger name, say — still routes through the sanitiser, preserving the
+// log/payload-injection defence the original SanitizeForLog call provided.
+// R202606c-PERF-007 (#2232); mirrors sanitizeHexIDForBroadcast's IsValidID gate.
+func sanitizeTriggerForBroadcast(trigger string) string {
+	switch cron.TriggerKind(trigger) {
+	case cron.TriggerScheduled, cron.TriggerManual, runtelemetry.TriggerCatchup:
+		return trigger
+	}
+	return osutil.SanitizeForLog(trigger, 32)
+}
+
+// sanitizeSessionIDForBroadcast short-circuits canonical UUID session IDs
+// (the form every cron run records) so the fan-out skips SanitizeForLog on the
+// common case. Non-UUID shapes still fall through to the sanitiser.
+// R202606c-PERF-007 (#2232).
+func sanitizeSessionIDForBroadcast(sessionID string) string {
+	if discovery.IsValidSessionID(sessionID) {
+		return sessionID
+	}
+	return osutil.SanitizeForLog(sessionID, 128)
 }

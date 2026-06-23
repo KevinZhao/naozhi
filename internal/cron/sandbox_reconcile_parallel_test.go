@@ -47,6 +47,50 @@ func (r *concurrencyProbeRunner) StopSession(_ context.Context, _ string) error 
 	return nil
 }
 
+// R202606e-GO-002: when stopCtx is already cancelled, the multi-orphan feed
+// loop must bail via its select on stopCtx instead of handing off every orphan
+// on the unbuffered jobs channel. Workers skip Stops while shutting down, so a
+// regression here would still iterate the whole orphan slice and hold up
+// close(jobs)/wg.Wait() against the gcWaitBudget. We assert reconcile returns
+// promptly and never Stops anything once shutdown has begun.
+func TestReconcileSandboxPending_BailsSendSideOnStopCtx(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	runner := &concurrencyProbeRunner{delay: 50 * time.Millisecond}
+	s, _ := sandboxTestScheduler(t, runner, storePath)
+
+	const nOrphans = 50
+	for i := 0; i < nOrphans; i++ {
+		runID := fmt.Sprintf("feedface0001%04d", i)
+		writePendingFixture(t, storePath, sandboxPending{
+			JobID:            fmt.Sprintf("0123456789cd%04d", i),
+			RunID:            runID,
+			RuntimeSessionID: "run-" + runID + "-1234567890123456789",
+			StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+		})
+	}
+
+	// Cancel before the pass so both the worker-side gate and the send-side
+	// select see a done stopCtx.
+	s.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		s.reconcileSandboxPending()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcileSandboxPending did not return promptly after stopCtx cancel; send side likely blocked feeding all orphans")
+	}
+
+	if got := runner.total.Load(); got != 0 {
+		t.Fatalf("StopSession called %d time(s) after stopCtx cancel; want 0", got)
+	}
+}
+
 func TestReconcileSandboxPending_ParallelStopsAllOrphans(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -338,6 +338,15 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		return nil, false
 	}
 	ts := parseTimestamp(hl.Timestamp)
+	// Drop records whose timestamp is missing or unparseable. An emitted
+	// Time=0 entry survives the strict-< pagination filter (0 < beforeMS is
+	// always true), sorts to the head of the chunk, and pins the LoadBefore
+	// cursor at before=0 — which LoadHistoryChainBeforeCtx degrades to a
+	// newest-tail read, repeating already-seen entries. codexjsonl/kirojsonl
+	// drop ts<=0 for exactly this reason; the claude path must match.
+	if ts <= 0 {
+		return nil, false
+	}
 
 	switch hl.Type {
 	case "user":

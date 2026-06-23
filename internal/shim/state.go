@@ -191,8 +191,18 @@ func StateFilePath(stateDir, keyHash string) string {
 }
 
 // KeyHash returns a truncated SHA-256 hex hash of the session key.
-// Produces a 16-character string with negligible collision probability.
+// Produces a 32-character string with negligible collision probability.
+//
+// R202606f-SEC-004 (#2298): widened from 64 bits (h[:8]) to 128 bits
+// (h[:16]). The hash names both the socket file (shim-<hash>.sock) and the
+// state file (<hash>.json); a collision maps two distinct session keys to the
+// same paths, clobbering a live session's state file and corrupting its
+// reconnect token. At 64 bits the birthday bound (~n²/2^65) becomes
+// non-negligible once a long-lived host accumulates billions of distinct keys
+// (an IM bot mints a fresh key per session). 128 bits pushes the bound back
+// into the cryptographically-irrelevant range. No protocol change — only the
+// file/socket name length grows.
 func KeyHash(key string) string {
 	h := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(h[:8])
+	return hex.EncodeToString(h[:16])
 }
