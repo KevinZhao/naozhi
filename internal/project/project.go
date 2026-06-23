@@ -6,9 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"gopkg.in/yaml.v3"
 )
 
@@ -114,8 +114,14 @@ func (p *Project) snapshotLight() *Project {
 
 // IsPlannerKey returns true if the session key is a project planner key.
 // Format: "project:{name}:planner".
+//
+// R202606g-CR-002 / R040034-ARCH-2 (#1412): delegates to the single source
+// of truth in internal/sessionkey rather than re-implementing the prefix/
+// suffix/len check. sessionkey is a zero-internal-import leaf, so this does
+// not create an import cycle (and project does not import internal/session —
+// see no_session_import_test.go).
 func IsPlannerKey(key string) bool {
-	return strings.HasPrefix(key, "project:") && strings.HasSuffix(key, ":planner") && len(key) > len("project::planner")
+	return sessionkey.IsPlannerKey(key)
 }
 
 const configDir = ".naozhi"
