@@ -38,10 +38,11 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 	body := string(src)
 
 	// Collect the source offsets of every error/cancel-path stub refresh call
-	// (both the value receiver `stubRefresh.run()` in execSendError and the
-	// struct-field `a.stubRefresh.run()` in executeGetSession) and every
-	// finishRun(finishArgs{...}) terminal call.
-	reStub := regexp.MustCompile(`(?:a\.)?stubRefresh\.run\(\)`)
+	// (the value receiver `stubRefresh.run()` in execSendError, the struct-field
+	// `a.stubRefresh.run()` in executeGetSession, and the local `refresh.run()`
+	// the preflight helper now fires on its delete-mid-execute failure branch —
+	// R202606h-GO-009b / #2318) and every finishRun(finishArgs{...}) call.
+	reStub := regexp.MustCompile(`(?:a\.stubRefresh|stubRefresh|\brefresh)\.run\(\)`)
 	stubMatches := reStub.FindAllStringIndex(body, -1)
 	if len(stubMatches) == 0 {
 		t.Fatal("scheduler_run.go: no stubRefresh.run() call found — refactor removed the error-path stub re-register?")
@@ -51,26 +52,19 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 		t.Fatal("scheduler_run.go: no finishRun(finishArgs{...}) call found")
 	}
 
-	// The four error/cancel paths (execSendError cancel + non-cancel,
-	// executeGetSession cancel + non-cancel) each call stubRefresh.run() once.
-	// execPrepareSpawn's preflight failure also calls stubRefresh.run() but its
-	// finishRun fires INSIDE freshContextPreflightP0 (not at the call site), so
-	// that call legitimately has no following finishRun in this file's
-	// call-site set within its own branch — exclude it by requiring only that
-	// each stub call which is part of a finishRun-bearing branch precedes a
-	// finishRun. We assert the structural property per stub call: for every
-	// stub-refresh call, the nearest finishRun(finishArgs{...}) that shares the
-	// branch must appear AFTER it (not before). We approximate "shares the
-	// branch" by: there exists a finishRun between this stub call and the next
-	// stub call (or EOF). The execPrepareSpawn preflight call is the only one
-	// whose following region up to the next stub call contains no finishRun,
-	// and it is allowed because finishRun ran inside the helper.
+	// FIVE error/cancel paths each re-register the stub once and then finishRun:
+	//   1. execSendError cancel branch          (stubRefresh.run())
+	//   2. execSendError non-cancel branch       (stubRefresh.run())
+	//   3. executeGetSession cancel branch       (a.stubRefresh.run())
+	//   4. executeGetSession non-cancel branch   (a.stubRefresh.run())
+	//   5. freshContextPreflightP0 delete branch (refresh.run() — #2318)
 	//
-	// To keep the guard precise for the FOUR fixed call sites, we require: the
-	// COUNT of stub calls immediately followed (before the next stub call) by a
-	// finishRun is at least 4. Pre-fix, those four had finishRun BEFORE the stub
-	// (so the region after each stub up to the next stub had no finishRun) and
-	// this count would be < 4.
+	// The structural invariant: for every stub-refresh call there must be a
+	// finishRun(finishArgs{...}) between it and the NEXT stub call (or EOF) —
+	// i.e. the stub re-register precedes the finishRun that releases the CAS
+	// gate. Pre-fix, each of these had finishRun BEFORE the stub (the region
+	// after the stub up to the next stub had no finishRun), so the count was
+	// lower. We now require >=5 to also pin the preflight-helper fix (#2318).
 	stubBeforeFinish := 0
 	for i, sm := range stubMatches {
 		regionEnd := len(body)
@@ -84,7 +78,7 @@ func TestErrorPaths_StubRefreshBeforeFinishRun_SourceAnchor(t *testing.T) {
 			}
 		}
 	}
-	if stubBeforeFinish < 4 {
-		t.Errorf("scheduler_run.go: only %d stubRefresh.run() calls precede their branch finishRun; expected >=4 (the execSendError + executeGetSession cancel/non-cancel paths). A stub refresh placed AFTER finishRun releases the CAS gate, reopening the phantom-stub race (R202606h-GO-009/GO-010).", stubBeforeFinish)
+	if stubBeforeFinish < 5 {
+		t.Errorf("scheduler_run.go: only %d stub-refresh calls precede their branch finishRun; expected >=5 (execSendError + executeGetSession cancel/non-cancel paths plus the freshContextPreflightP0 delete-mid-execute branch). A stub refresh placed AFTER finishRun releases the CAS gate reopens the phantom-stub race (R202606h-GO-009/GO-009b/GO-010).", stubBeforeFinish)
 	}
 }

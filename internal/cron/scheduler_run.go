@@ -143,12 +143,28 @@ func (r stubRefresher) run() {
 // (broadcast cron_run_ended + counters + LastErrorClass write) participates.
 //
 // Returns:
-//   - stubRefresh: closure that re-registers the sidebar stub on error
-//     paths so the cron row stays visible. Caller invokes after error
-//     branches; never invoke on success (live session owns the row).
+//   - stubRefresh: closure that re-registers the sidebar stub. On the SUCCESS
+//     return (ok=true) it carries the snap-time chain anchor so a downstream
+//     send/spawn failure can re-register the stub BEFORE its finishRun releases
+//     the CAS gate (see execSend/executeGetSession). On every FAILURE return
+//     (ok=false) it is the no-op zero value: the helper has already run the
+//     stub re-registration itself, BEFORE its own internal finishRun (R202606h-
+//     GO-009b / #2318), so the caller must NOT invoke run() again.
 //   - ok: false means the caller MUST return immediately. The helper has
 //     already written the appropriate slog.Info/Warn + finishRun() for
-//     the failure mode.
+//     the failure mode, and already re-registered the sidebar stub where
+//     applicable.
+//
+// R202606h-GO-009b (#2318): the helper owns the stub re-registration on its
+// failure branches because it ALSO owns the finishRun on those branches.
+// finishRun → finalizer.finalize() releases the inflight CAS gate, so a stub
+// run() that fired AFTER the helper returned (the previous caller-side
+// `stubRefresh.run()` at the preflight call site) sat in the post-CAS-release
+// window: a concurrent TriggerNow could win the gate, spawn run-B's live
+// session+stub, and then have run-A's stale-chain stub clobber it (phantom
+// sidebar pointing at the prior session's JSONL). Re-registering BEFORE the
+// internal finishRun closes that window, mirroring the four symmetric
+// error/cancel paths fixed under R202606h-GO-009.
 //
 // In persistent mode (snap.fresh=false) the helper short-circuits with
 // ok=true and a no-op stubRefresh so the caller's flow is uniform.
@@ -280,6 +296,15 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	s.mu.RUnlock()
 	if !stillExists {
 		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
+		// R202606h-GO-009b (#2318): re-register the sidebar stub BEFORE the
+		// finishRun below releases the inflight CAS gate. run() itself re-checks
+		// existence under s.mu, so for the steady-state delete it is a no-op;
+		// but doing it here (not at the caller AFTER the helper returns) closes
+		// the post-CAS-release window where a concurrent TriggerNow wins the
+		// gate, spawns run-B's live session+stub, and run-A's stale stub would
+		// otherwise clobber it. Return noopRefresh so the caller does not fire
+		// run() a second time.
+		refresh.run()
 		// Job deleted mid-execute: treat as canceled; no recordResult
 		// (matches historical behaviour) but broadcast for visibility.
 		s.finishRun(finishArgs{
@@ -289,7 +314,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: args.finalizer,
 		})
-		return refresh, false
+		return noopRefresh, false
 	}
 	return refresh, true
 }
@@ -980,7 +1005,11 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 		finalizer: finalizer,
 	})
 	if !okPreflight {
-		stubRefresh.run()
+		// R202606h-GO-009b (#2318): do NOT call stubRefresh.run() here. The
+		// preflight helper owns its failure-path finishRun (which releases the
+		// inflight CAS gate), so it now also re-registers the sidebar stub
+		// BEFORE that finishRun and returns the no-op zero refresher. A run()
+		// here would sit in the post-CAS-release window the fix is closing.
 		return AgentOpts{}, "", "", stubRefresher{}, false
 	}
 	return opts, key, cleanText, stubRefresh, true
