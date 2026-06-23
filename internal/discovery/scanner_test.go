@@ -19,6 +19,14 @@ func newPromptEntry(mtime int64, prompt string, gen uint64) *promptCacheEntry {
 	return e
 }
 
+// newSummaryEntry builds a *summaryCacheEntry with gen initialised to v. The
+// map stores *summaryCacheEntry (#2330) with an inline atomic gen.
+func newSummaryEntry(mtime int64, idx sessionsIndex, gen uint64) *summaryCacheEntry {
+	e := &summaryCacheEntry{mtime: mtime, index: idx}
+	e.gen.Store(gen)
+	return e
+}
+
 // ---------------------------------------------------------------------------
 // helpers shared across scanner tests
 // ---------------------------------------------------------------------------
@@ -36,8 +44,8 @@ func resetCaches(t *testing.T) {
 	sc.promptCache.Unlock()
 
 	sc.summaryCache.Lock()
-	sc.summaryCache.entries = make(map[string]summaryCacheEntry)
-	sc.summaryCache.generation = 0
+	sc.summaryCache.entries = make(map[string]*summaryCacheEntry)
+	sc.summaryCache.generation.Store(0)
 	sc.summaryCache.Unlock()
 
 	t.Cleanup(func() {
@@ -48,8 +56,8 @@ func resetCaches(t *testing.T) {
 		sc.promptCache.Unlock()
 
 		sc.summaryCache.Lock()
-		sc.summaryCache.entries = make(map[string]summaryCacheEntry)
-		sc.summaryCache.generation = 0
+		sc.summaryCache.entries = make(map[string]*summaryCacheEntry)
+		sc.summaryCache.generation.Store(0)
 		sc.summaryCache.Unlock()
 	})
 }
@@ -707,10 +715,10 @@ func TestEvictSummaryCache_OverThreshold(t *testing.T) {
 	sc.summaryCache.Lock()
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("idx%d", i)
-		sc.summaryCache.entries[key] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 0}
+		sc.summaryCache.entries[key] = newSummaryEntry(1, sessionsIndex{}, 0)
 	}
-	sc.summaryCache.entries["current"] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 3}
-	sc.summaryCache.generation = 3
+	sc.summaryCache.entries["current"] = newSummaryEntry(1, sessionsIndex{}, 3)
+	sc.summaryCache.generation.Store(3)
 	sc.evictSummaryCache()
 	afterLen := len(sc.summaryCache.entries)
 	_, hasCurrent := sc.summaryCache.entries["current"]

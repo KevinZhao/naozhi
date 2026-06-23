@@ -106,14 +106,21 @@ type promptCacheEntry struct {
 
 type summaryCacheState struct {
 	sync.RWMutex
-	entries    map[string]summaryCacheEntry
-	generation uint64
+	entries map[string]*summaryCacheEntry
+	// generation is bumped once per Scan. Atomic (like promptCache.generation)
+	// so getCachedSummary can refresh a hit entry's gen lock-free instead of
+	// upgrading its RLock to a write lock (R202606h-PERF-011 #2330 / PERF-6
+	// #1966).
+	generation atomic.Uint64
 }
 
 type summaryCacheEntry struct {
 	mtime int64
 	index sessionsIndex
-	gen   uint64
+	// gen is an inline atomic. The map stores *summaryCacheEntry so &gen stays
+	// stable for the entry's lifetime, letting getCachedSummary refresh it via
+	// a lock-free Store on a cache hit (#2330).
+	gen atomic.Uint64
 }
 
 // pathCacheState maps (claudeDir + "\x00" + sessionID) to the resolved
@@ -231,7 +238,7 @@ func readBoundedSessionFile(path string) ([]byte, error) {
 func NewScanner() *Scanner {
 	return &Scanner{
 		promptCache:  promptCacheState{entries: make(map[string]*promptCacheEntry)},
-		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
+		summaryCache: summaryCacheState{entries: make(map[string]*summaryCacheEntry)},
 		pathCache:    pathCacheState{entries: make(map[pathKey]pathCacheEntry)},
 		promptSem:    make(chan struct{}, promptSemCap),
 	}
@@ -295,8 +302,9 @@ func (s *Scanner) evictSummaryCache() {
 	if len(s.summaryCache.entries) <= 500 {
 		return
 	}
+	gen := s.summaryCache.generation.Load()
 	for k, v := range s.summaryCache.entries {
-		if v.gen+1 < s.summaryCache.generation {
+		if v.gen.Load()+1 < gen {
 			delete(s.summaryCache.entries, k)
 		}
 	}
@@ -431,10 +439,9 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
 	s.promptCache.generation.Add(1)
-
-	s.summaryCache.Lock()
-	s.summaryCache.generation++
-	s.summaryCache.Unlock()
+	// #2330: generation is now atomic, matching promptCache — no write lock
+	// needed to advance it.
+	s.summaryCache.generation.Add(1)
 
 	// First pass: collect alive sessions with their original session IDs.
 	var candidates []scanCandidate
@@ -1107,19 +1114,16 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
 	s.summaryCache.RLock()
 	cached, ok := s.summaryCache.entries[indexPath]
-	gen := s.summaryCache.generation
 	s.summaryCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return sessionsIndex{}, false
 	}
-	if cached.gen != gen {
-		s.summaryCache.Lock()
-		if e, ok2 := s.summaryCache.entries[indexPath]; ok2 && e.mtime == mtime {
-			e.gen = s.summaryCache.generation
-			s.summaryCache.entries[indexPath] = e
-		}
-		s.summaryCache.Unlock()
-	}
+	// Refresh the entry's generation lock-free so eviction keeps it alive. The
+	// *summaryCacheEntry address (and thus &gen) is stable for the entry's
+	// lifetime, so this Store needs no write-lock upgrade — avoiding the
+	// per-hit Lock() that serialised concurrent LookupSummaries readers
+	// (R202606h-PERF-011 #2330 / PERF-6 #1966).
+	cached.gen.Store(s.summaryCache.generation.Load())
 	return cached.index, true
 }
 
@@ -1127,7 +1131,9 @@ func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex
 func (s *Scanner) setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
 	s.summaryCache.Lock()
 	defer s.summaryCache.Unlock()
-	s.summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: s.summaryCache.generation}
+	entry := &summaryCacheEntry{mtime: mtime, index: idx}
+	entry.gen.Store(s.summaryCache.generation.Load())
+	s.summaryCache.entries[indexPath] = entry
 	s.evictSummaryCache()
 }
 
