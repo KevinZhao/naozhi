@@ -1867,6 +1867,27 @@ func TestFilterDeniedFlags(t *testing.T) {
 			t.Errorf("got %v, want %v", out, want)
 		}
 	})
+	t.Run("strip_model_bare_form", func(t *testing.T) {
+		t.Parallel()
+		// R202606f-SEC-001: SpawnOptions.Model owns model selection. A
+		// second --model injected via ExtraArgs would otherwise be the
+		// last --model on argv and silently override the per-session model.
+		in := []string{"--model", "sonnet", "--keep"}
+		out := filterDeniedFlags(in)
+		want := []string{"--keep"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("strip_model_equals_form", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--model=sonnet", "--keep"}
+		out := filterDeniedFlags(in)
+		want := []string{"--keep"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
 }
 
 // TestBuildArgs_StripsDeniedExtraArgs is an end-to-end check via the public
@@ -1893,6 +1914,37 @@ func TestBuildArgs_StripsDeniedExtraArgs(t *testing.T) {
 	}
 	if !saw {
 		t.Errorf("--debug should pass through, got %v", args)
+	}
+}
+
+// TestBuildArgs_ExtraArgsModelCannotOverride is an end-to-end check that an
+// injected --model in ExtraArgs is stripped so it cannot override the
+// per-session SpawnOptions.Model (R202606f-SEC-001). BuildArgs appends the
+// SpawnOptions.Model --model first and ExtraArgs last; the CLI takes the last
+// --model, so an un-stripped injected flag would silently win.
+func TestBuildArgs_ExtraArgsModelCannotOverride(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{
+		Model:     "opus",
+		ExtraArgs: []string{"--model", "haiku"},
+	})
+	// Exactly one --model must survive, and its value must be the
+	// per-session "opus", not the injected "haiku".
+	modelCount := 0
+	for i, a := range args {
+		if a == "--model" {
+			modelCount++
+			if i+1 >= len(args) || args[i+1] != "opus" {
+				t.Errorf("--model value = %v, want opus; args=%v", args[i+1:], args)
+			}
+		}
+		if a == "haiku" {
+			t.Errorf("injected model value leaked into argv: %v", args)
+		}
+	}
+	if modelCount != 1 {
+		t.Errorf("--model count = %d, want exactly 1; args=%v", modelCount, args)
 	}
 }
 

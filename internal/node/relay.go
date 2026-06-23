@@ -195,6 +195,12 @@ func (r *wsRelay) ensureConnected() error {
 		<-ch
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		// Close() may have raced with the dial and torn down the relay while
+		// still observing a freshly stored conn; bail rather than hand a
+		// caller a conn on a relay being shut down. [R202606f-GO-002]
+		if r.closed {
+			return fmt.Errorf("relay closed")
+		}
 		if r.conn != nil {
 			return nil
 		}

@@ -588,7 +588,15 @@ func (c *ReverseConn) readLoop() {
 
 	for {
 		var msg ReverseMsg
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		// Mirror wsRelay.readLoop: ReadMessage + Unmarshal avoids the
+		// per-frame json.Decoder + intermediate buffer alloc that
+		// ReadJSON incurs on every message. [R202606f-PERF-001]
+		_, data, err := c.conn.ReadMessage()
+		if err != nil {
+			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
+			return
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
 		}

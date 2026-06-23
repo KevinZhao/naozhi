@@ -736,3 +736,12 @@
 - [R202606e-ARCH-7] backend 注册双轨语义(panic vs once+recover)易踩,应迁 registry.Typed — internal/cli/backend/profile.go:232
 - [R202606e-GO-009] internal/registry 包零生产 importer,基础设施死代码 — internal/registry/registry.go:1
 - [R202606e-CR-008] TurnCostDelta raw<0 且 prev==0 首轮负读测试缺口 — internal/session/runhistory/cost_test.go:23
+- [R202606f-PERF-004] shim readStderr scanner.Text() 每行 3 分配,应仿 MarshalStdoutLine 加 MarshalStderrLine — internal/shim/server.go:759
+- [R202606f-PERF-009] dispatchProtocolEvent 每 passthrough 事件 make+copy slot 快照无 pool — internal/cli/process_readloop.go:714
+- [R202606f-PERF-010] shim handleClientCommand write 用 []byte(msg.Line+"\n") 双分配 — internal/shim/server.go:1202
+- [R202606f-PERF-012] shim WriteStateFile 用 json.MarshalIndent,生产无人读应 json.Marshal — internal/shim/state.go:83
+- [R202606f-PERF-013] reverseconn.rpc 每请求 make(chan,1),高频 FetchEvents 可池化 — internal/node/reverseconn.go:187
+- [R202606f-GO-007] wsRelay.reconnect 重订阅快照后并发 Unsubscribe 致 stale subscribe — internal/node/relay.go:508
+- [R202606f-ARCH-7] shim.ParseServerMsg 零 in-tree 消费者,cli 自己手 Unmarshal — internal/shim/protocol.go:166
+- [R202606f-ARCH-8] reverseserver host:port 剥离逻辑在 isPrivateHost/isLoopbackHost 重复 — internal/node/reverseserver.go:175
+- [R202606f-SEC-006] dashboard style-src unsafe-inline(CSS 注入 exfil 向,与已关 #2177 script-src 同源) — internal/server/routes.go:535

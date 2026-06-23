@@ -262,6 +262,59 @@ func TestTryExtractSessionID_ACPDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+// TestTryExtractSessionID_FastPathSkipsAfterKnown verifies the R202606f-PERF-003
+// fast path: once the session ID is set, the latch is raised and subsequent
+// lines are not re-parsed, so a malformed line carrying a session_id token
+// cannot disturb the captured ID and the known flag stays set.
+func TestTryExtractSessionID_FastPathSkipsAfterKnown(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"sess_known"}`))
+	if !s.sessionIDKnown.Load() {
+		t.Fatal("sessionIDKnown latch not raised after init")
+	}
+
+	// A later line still containing the token (even a result that would
+	// otherwise be parsed) must be skipped entirely by the fast path.
+	s.tryExtractSessionID([]byte(`{"type":"result","session_id":"later_attempt"}`))
+
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+	if got != "sess_known" {
+		t.Errorf("SessionID = %q, want sess_known (fast path must skip later lines)", got)
+	}
+	if !s.sessionIDKnown.Load() {
+		t.Error("sessionIDKnown latch should remain set")
+	}
+}
+
+// TestTryExtractSessionID_LatchNotSetWhenUnknown verifies the latch stays
+// unraised for lines that don't yield a session ID, so extraction keeps
+// running until a real ID arrives.
+func TestTryExtractSessionID_LatchNotSetWhenUnknown(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	s.tryExtractSessionID([]byte(`{"type":"message","session_id":"should_not_set"}`))
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":""}`))
+	s.tryExtractSessionID([]byte("not json"))
+	if s.sessionIDKnown.Load() {
+		t.Fatal("sessionIDKnown latch raised without a valid session ID")
+	}
+
+	// A real ID now arrives and is captured.
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"real_id"}`))
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+	if got != "real_id" {
+		t.Errorf("SessionID = %q, want real_id", got)
+	}
+	if !s.sessionIDKnown.Load() {
+		t.Error("sessionIDKnown latch should be set after capturing real_id")
+	}
+}
+
 // --- enqueueWrite ---
 
 func TestEnqueueWrite_NoClient(t *testing.T) {

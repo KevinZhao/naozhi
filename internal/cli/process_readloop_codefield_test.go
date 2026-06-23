@@ -20,7 +20,7 @@ func TestShimMsgCode_AbsentVsPresent(t *testing.T) {
 		name        string
 		raw         string
 		wantPresent bool
-		wantValue   int
+		wantValue   int64
 	}{
 		{name: "absent", raw: `{"type":"cli_exited"}`, wantPresent: false, wantValue: 0},
 		{name: "present_zero", raw: `{"type":"cli_exited","code":0}`, wantPresent: true, wantValue: 0},
