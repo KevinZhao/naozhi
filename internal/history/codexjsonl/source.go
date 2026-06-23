@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -57,6 +58,17 @@ const maxFileBytes = 16 << 20 // 16 MiB
 // ctxCheckEvery is how many parsed lines elapse between context.Done
 // checks during parsing. Mirrors kirojsonl.
 const ctxCheckEvery = 100
+
+// scanBufPool recycles the 64 KiB initial line buffer that bufio.Scanner
+// would otherwise heap-allocate on every parseFile call. The dashboard
+// paginates a session by issuing one LoadBefore per page, so a fresh 64 KiB
+// alloc per page is pure churn (mirrors kirojsonl's scanBufPool).
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 64*1024)
+		return &b
+	},
+}
 
 // Source is the codex rollout-JSONL-backed history.Source.
 type Source struct {
@@ -215,8 +227,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long; the default 64 KiB
-	// would truncate token-rich replies.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	// would truncate token-rich replies. The initial buffer is pooled:
+	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
+	// returning it at zero length recycles the 64 KiB backing array.
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer func() {
+		b := (*bufPtr)[:0]
+		*bufPtr = b
+		scanBufPool.Put(bufPtr)
+	}()
+	scanner.Buffer(*bufPtr, 1<<20)
 	if skipPartialFirstLine && scanner.Scan() {
 		// Discard the partial line straddling the seek boundary.
 	}
