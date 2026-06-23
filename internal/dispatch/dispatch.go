@@ -1364,6 +1364,20 @@ func (d *Dispatcher) sendAndReply(
 	// reply on its own bubble; followers should surface a short "合并" hint
 	// on the user's original message instead of echoing the same text again.
 	if result.MergedCount > 1 && result.Text == "" {
+		// #2290: a follower's tracker may have already posted a "💭思考中…"
+		// banner if interim assistant events fanned out to its onEvent
+		// before the merge collapsed the turn (process_readloop interim
+		// fan-out claims all currentTurnSlots, followers included). The
+		// follower carries no final text to overwrite that banner, so
+		// without an explicit edit the bubble is orphaned forever. Wait
+		// for any pending banner Reply to land, then collapse it into the
+		// same merge hint the follower surfaces on the user's message.
+		tracker.waitReady(ctx)
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
+				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+			}
+		}
 		d.ackMergedFollower(ctx, msg, key, result.MergedCount, lg)
 		d.markReplySuccess()
 		return
