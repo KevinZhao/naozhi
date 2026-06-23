@@ -19,9 +19,12 @@ import (
 func TestStopGodoc_EnumeratesWatchdogOrphan(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("scheduler.go")
+	// #2193: Stop + its godoc moved to scheduler_lifecycle.go (move-only
+	// split of the 1300-line scheduler.go). The anchor assertions are
+	// unchanged; only the file they read followed the Stop method.
+	src, err := os.ReadFile("scheduler_lifecycle.go")
 	if err != nil {
-		t.Fatalf("read scheduler.go: %v", err)
+		t.Fatalf("read scheduler_lifecycle.go: %v", err)
 	}
 	body := string(src)
 

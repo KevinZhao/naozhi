@@ -43,7 +43,15 @@ type replyTracker struct {
 	sent          sync.Once
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
-	linesMu       sync.Mutex    // guards statusLines
+	// finalized is set by sendAndReply just before it writes the final
+	// answer onto the thinking banner. editLoop checks it after waking on a
+	// buffered editCh signal: a late status redraw firing between the final
+	// EditMessage and the deferred stop() would otherwise overwrite the
+	// real answer with stale interim status (#2291). The window exists
+	// because stop() is deferred — editLoop is still live across the final
+	// edit and editCh (cap 1) may hold a residual signal.
+	finalized atomic.Bool
+	linesMu   sync.Mutex // guards statusLines
 	// statusLines is a pre-allocated slice capped at maxStatusLines (8) by
 	// appendStatusLine — it grows up to that bound and then drops the head
 	// via copy-to-front (see status.go). Joining to a single string is
@@ -119,6 +127,14 @@ func (t *replyTracker) releaseInitialReplySlot() {
 	t.initialReplyReservation.Do(func() {
 		t.loopWG.Done()
 	})
+}
+
+// markFinalized signals that the final answer is being (or has been)
+// committed to the banner. After this, editLoop drops any pending status
+// redraw rather than overwriting the answer with stale interim status
+// (#2291). Idempotent.
+func (t *replyTracker) markFinalized() {
+	t.finalized.Store(true)
 }
 
 // getThinkingMsgID returns the id or "" if not yet set.
@@ -506,6 +522,13 @@ func (t *replyTracker) editLoop() {
 	for {
 		select {
 		case <-t.editCh:
+			// #2291: skip the redraw once sendAndReply has committed (or is
+			// about to commit) the final answer onto the banner. A residual
+			// buffered editCh signal must not repaint stale interim status
+			// over the real reply.
+			if t.finalized.Load() {
+				continue
+			}
 			// Render lazily — only once per rate-limited edit rather than per event.
 			text := t.renderStatus()
 			if msgID := t.getThinkingMsgID(); msgID != "" && text != "" {

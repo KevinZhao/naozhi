@@ -73,17 +73,18 @@
       });
       // Find the workspace root (include_root). When present, default the
       // browse root to it so the operator starts at the workspace top and
-      // navigates down. Fall back to the shortest path (the closest thing to
-      // a root) and finally roots[0] so the view still works without
-      // include_root enabled.
+      // navigates down. Without include_root there is no real workspace
+      // root, so fall back to roots[0] — the operator's first-configured
+      // project — rather than a shortest-path heuristic. The old heuristic
+      // (shortest .path wins) could pick an unrelated short-path project
+      // (e.g. "/x" beating "/home/user/workspace"), landing the operator in
+      // the wrong tree on multi-project deployments (#2282).
       var root = null;
       state.roots.forEach(function (p) {
         if (p.is_root) root = p;
       });
       if (!root && state.roots.length) {
-        root = state.roots.reduce(function (a, b) {
-          return (b.path || '').length < (a.path || '').length ? b : a;
-        });
+        root = state.roots[0];
       }
       state.rootName = root ? root.name : '';
       if (!state.project) state.project = state.rootName || (state.roots[0] && state.roots[0].name) || '';
@@ -272,6 +273,13 @@
     if (ext === 'pdf') {
       body.innerHTML = '';
       var frame = document.createElement('iframe');
+      // Defense-in-depth: serveRaw redirects application/pdf to a forced
+      // attachment download today, so this iframe never inline-renders. But
+      // if a proxy strips Content-Disposition (or serveRaw later renders PDF
+      // inline) an un-sandboxed frame would let the PDF plugin execute embedded
+      // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
+      // plugins — while still allowing the browser's native PDF viewer.
+      frame.setAttribute('sandbox', '');
       frame.src = fileApiUrl(state.project, 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);

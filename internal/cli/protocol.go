@@ -119,8 +119,18 @@ type Protocol interface {
 	WriteInterrupt(w io.Writer, requestID string) error
 
 	// ReadEvent parses a single NDJSON line from stdout into zero or more
-	// unified Events. Returns the events, whether this line completes the
-	// current turn, and any error.
+	// unified Events. Returns the events, an advisory done flag, and any error.
+	//
+	// IMPORTANT — done is NOT the turn-completion signal. Every production
+	// caller discards it (process_readloop.go handleShimStdout, wrapper.go
+	// replay, router_shim.go replay all read it as _). Turn-end is detected
+	// downstream by inspecting the emitted events: an event with
+	// Type=="result" (claude/ACP) or the codex turn-end frame closes the turn
+	// and unblocks the active Send(). A new protocol implementation MUST emit
+	// a result/turn-end Event to end a turn; returning done=true alone is
+	// silently ignored and would leave the session stuck in state=running.
+	// The flag is retained only because the existing test contract is
+	// load-bearing on it; treat it as advisory.
 	//
 	// Returning a slice (rather than a single Event) lets a protocol surface
 	// "one wire frame → multiple semantic events" without overloading a single
@@ -150,6 +160,8 @@ type Protocol interface {
 // The returned slice is backed by buf and is only valid until the next call
 // sharing that buf, so callers must consume it before reusing buf.
 type eventReaderInto interface {
+	// The done return mirrors ReadEvent's advisory done — discarded by callers;
+	// turn-end is driven by a result/turn-end Event, not by this flag.
 	ReadEventInto(line string, buf []Event) (events []Event, done bool, err error)
 }
 
@@ -196,7 +208,9 @@ type ProtocolCore interface {
 	WriteMessage(w io.Writer, text string, images []ImageData) error
 
 	// ReadEvent parses a single NDJSON line from stdout into zero or more
-	// unified Events.
+	// unified Events. The done return is advisory and discarded by all
+	// production callers; turn-end is detected via a result/turn-end Event,
+	// not via done. See the Protocol.ReadEvent godoc for the full contract.
 	ReadEvent(line string) (events []Event, done bool, err error)
 
 	// HandleEvent allows the protocol to react to events.

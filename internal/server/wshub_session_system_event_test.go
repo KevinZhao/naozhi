@@ -19,8 +19,15 @@ func registerSub(h *Hub, c *wsClient, key string) {
 	if h.authClients == nil {
 		h.authClients = make(map[*wsClient]struct{})
 	}
+	if h.authClientsIdx == nil {
+		h.authClientsIdx = make(map[*wsClient]int)
+	}
 	h.clients[c] = struct{}{}
-	h.authClients[c] = struct{}{}
+	// R202606g-PERF-020 (#2310): keep the slice mirror in step with the map so
+	// snapshotAuthenticated (which now copies the slice) sees this client.
+	h.authMu.Lock()
+	h.addAuthClientLocked(c)
+	h.authMu.Unlock()
 	if c.subscriptions == nil {
 		c.subscriptions = make(map[string]func())
 	}
@@ -247,14 +254,14 @@ func TestBroadcastSessionSystemEvent_ConcurrentChurn(t *testing.T) {
 					h := hub
 					h.mu.Lock()
 					h.authMu.Lock()
-					delete(h.authClients, c)
+					h.removeAuthClientLocked(c)
 					h.authMu.Unlock()
 					delete(c.subscriptions, key)
 					h.mu.Unlock()
 
 					h.mu.Lock()
 					h.authMu.Lock()
-					h.authClients[c] = struct{}{}
+					h.addAuthClientLocked(c)
 					h.authMu.Unlock()
 					c.subscriptions[key] = func() {}
 					h.mu.Unlock()

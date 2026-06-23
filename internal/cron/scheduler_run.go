@@ -1292,6 +1292,9 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		// R202606e-ARCH-1 (#2280): persist the local-run cost so per-job
+		// monthly aggregates stop reading 0 for the common local cron path.
+		costUSD:   result.CostUSD,
 		finalizer: finalizer,
 	})
 

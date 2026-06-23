@@ -233,6 +233,20 @@ type Hub struct {
 	// under h.mu because that map is h.mu-owned.
 	authMu      sync.RWMutex
 	authClients map[*wsClient]struct{}
+	// authClientsSlice mirrors authClients as a contiguous slice so the hot
+	// broadcast read side (snapshotAuthenticated) can copy() a sequential
+	// backing array instead of range-ing a hash map: at 500 clients the map
+	// walk chases scattered buckets under authMu.RLock on every cron tick /
+	// session-state change / BroadcastSessionsUpdate, while copy() is a single
+	// linear memmove. R202606g-PERF-020 (#2310). authClientsIdx maps each
+	// client to its slot in authClientsSlice so unregister can swap-delete in
+	// O(1) (move the tail element into the freed slot, fix its index, truncate)
+	// rather than rescanning the slice. Both are maintained under authMu
+	// alongside authClients by the same three writers + Shutdown, so the slice
+	// and the map never drift. Hand-rolled test hubs that leave authClients nil
+	// also leave these nil and fall through to the legacy h.clients scan.
+	authClientsSlice []*wsClient
+	authClientsIdx   map[*wsClient]int
 	// subscriberCount tracks per-key subscriber count for the
 	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
 	// cap check in handleSubscribe scanned every connected client × every
@@ -605,6 +619,7 @@ func NewHub(opts HubOptions) *Hub {
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
 		authClients:      make(map[*wsClient]struct{}),
+		authClientsIdx:   make(map[*wsClient]int),
 		subscriberCount:  make(map[string]int),
 		enforceCaps:      true,
 		router:           opts.Router,
@@ -766,10 +781,53 @@ func (h *Hub) register(c *wsClient) {
 		// h.mu so the broadcast read side (authMu alone) sees a consistent
 		// mirror without contending on the Hub-wide lock.
 		h.authMu.Lock()
-		h.authClients[c] = struct{}{}
+		h.addAuthClientLocked(c)
 		h.authMu.Unlock()
 	}
 	h.mu.Unlock()
+}
+
+// addAuthClientLocked inserts c into the authClients map and its slice mirror.
+// Idempotent: a client already present is left untouched so the slice cannot
+// grow duplicate entries (register's pre-auth insert can be followed by a
+// markAuthenticated for the same client). Caller MUST hold authMu (write).
+// R202606g-PERF-020 (#2310).
+func (h *Hub) addAuthClientLocked(c *wsClient) {
+	if _, ok := h.authClients[c]; ok {
+		return
+	}
+	h.authClients[c] = struct{}{}
+	if h.authClientsIdx != nil {
+		h.authClientsIdx[c] = len(h.authClientsSlice)
+		h.authClientsSlice = append(h.authClientsSlice, c)
+	}
+}
+
+// removeAuthClientLocked deletes c from the authClients map and swap-deletes it
+// from the slice mirror in O(1): the tail element is moved into c's slot and
+// its recorded index fixed up, then the slice is truncated. A no-op if c is not
+// present. Caller MUST hold authMu (write). R202606g-PERF-020 (#2310).
+func (h *Hub) removeAuthClientLocked(c *wsClient) {
+	if _, ok := h.authClients[c]; !ok {
+		return
+	}
+	delete(h.authClients, c)
+	if h.authClientsIdx == nil {
+		return
+	}
+	i, ok := h.authClientsIdx[c]
+	delete(h.authClientsIdx, c)
+	if !ok {
+		return
+	}
+	last := len(h.authClientsSlice) - 1
+	if i != last {
+		moved := h.authClientsSlice[last]
+		h.authClientsSlice[i] = moved
+		h.authClientsIdx[moved] = i
+	}
+	h.authClientsSlice[last] = nil // let the removed client be GC'd
+	h.authClientsSlice = h.authClientsSlice[:last]
 }
 
 // markAuthenticated inserts c into the authClients mirror after handleAuth
@@ -791,7 +849,7 @@ func (h *Hub) markAuthenticated(c *wsClient) {
 		if _, ok := h.clients[c]; ok {
 			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
 			h.authMu.Lock()
-			h.authClients[c] = struct{}{}
+			h.addAuthClientLocked(c)
 			h.authMu.Unlock()
 		}
 	}
@@ -831,7 +889,7 @@ func (h *Hub) unregister(c *wsClient) {
 		if h.authClients != nil {
 			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
 			h.authMu.Lock()
-			delete(h.authClients, c)
+			h.removeAuthClientLocked(c)
 			h.authMu.Unlock()
 		}
 		if n := len(c.subscriptions); n > 0 {
@@ -1204,6 +1262,17 @@ func (h *Hub) Shutdown() {
 	h.authMu.Lock()
 	for c := range h.authClients {
 		delete(h.authClients, c)
+	}
+	// R202606g-PERF-020 (#2310): keep the slice mirror in step with the map
+	// drain. nil every slot first so straggler broadcasts cannot reach a
+	// torn-down client, then reset the slice + index map. The map is preserved
+	// (empty, not nil) above; mirror it here.
+	for i := range h.authClientsSlice {
+		h.authClientsSlice[i] = nil
+	}
+	h.authClientsSlice = h.authClientsSlice[:0]
+	for c := range h.authClientsIdx {
+		delete(h.authClientsIdx, c)
 	}
 	h.authMu.Unlock()
 	h.mu.Unlock()

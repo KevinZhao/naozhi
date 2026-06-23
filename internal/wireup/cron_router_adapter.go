@@ -156,7 +156,9 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	if r == nil {
 		return cron.SendResult{}, err
 	}
-	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
+	// R202606e-ARCH-1 (#2280): carry CostUSD across the cron boundary so
+	// local (non-sandbox) runs persist their cost instead of always 0.
+	return cron.SendResult{Text: r.Text, SessionID: r.SessionID, CostUSD: r.CostUSD}, err
 }
 
 // SessionID forwards to *session.ManagedSession.SessionID so the cron inflight

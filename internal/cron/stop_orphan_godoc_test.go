@@ -39,15 +39,17 @@ import (
 func TestStopGodoc_EnumeratesAllThreeOrphanSites(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("scheduler.go")
+	// #2193: Stop + its godoc moved to scheduler_lifecycle.go (move-only
+	// split). Assertions unchanged; only the source file followed Stop.
+	src, err := os.ReadFile("scheduler_lifecycle.go")
 	if err != nil {
-		t.Fatalf("read scheduler.go: %v", err)
+		t.Fatalf("read scheduler_lifecycle.go: %v", err)
 	}
 	body := string(src)
 
 	idxStop := regexp.MustCompile(`func\s+\(\s*s\s+\*Scheduler\s*\)\s+Stop\s*\(`).FindStringIndex(body)
 	if idxStop == nil {
-		t.Fatalf("scheduler.go: Stop method definition not found")
+		t.Fatalf("scheduler_lifecycle.go: Stop method definition not found")
 	}
 	preamble := body[:idxStop[0]]
 

@@ -155,9 +155,19 @@ func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	snap := (*snapPtr)[:0]
 
 	if h.authClients != nil {
+		// R202606g-PERF-020 (#2310): copy the contiguous slice mirror instead
+		// of range-ing the map. At 500 clients the map walk chases scattered
+		// buckets under authMu.RLock on every broadcast wave; copy() is a single
+		// sequential memmove into the pooled backing array. The slice is kept in
+		// lockstep with authClients by add/removeAuthClientLocked + Shutdown.
 		h.authMu.RLock()
-		for c := range h.authClients {
-			snap = append(snap, c)
+		if n := len(h.authClientsSlice); n > 0 {
+			if cap(snap) < n {
+				snap = make([]*wsClient, n)
+			} else {
+				snap = snap[:n]
+			}
+			copy(snap, h.authClientsSlice)
 		}
 		h.authMu.RUnlock()
 	} else {
@@ -454,9 +464,16 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		// and a non-blocking SendRaw to a closing client is already tolerated.
 		candPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 		cand := (*candPtr)[:0]
+		// R202606g-PERF-020 (#2310): copy the slice mirror rather than range the
+		// map (see snapshotAuthenticated).
 		h.authMu.RLock()
-		for c := range h.authClients {
-			cand = append(cand, c)
+		if n := len(h.authClientsSlice); n > 0 {
+			if cap(cand) < n {
+				cand = make([]*wsClient, n)
+			} else {
+				cand = cand[:n]
+			}
+			copy(cand, h.authClientsSlice)
 		}
 		h.authMu.RUnlock()
 

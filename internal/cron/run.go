@@ -73,6 +73,13 @@ type CronRun struct {
 	// surfaces it; summary() deliberately drops it (list endpoints load
 	// 50 jobs × 5 recent runs — receipts would bloat the payload).
 	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
+
+	// CostUSD is the per-run cost for LOCAL (non-sandbox) runs, captured from
+	// the CLI's cumulative total_cost_usd via SendResult.CostUSD
+	// (R202606e-ARCH-1 #2280). Sandbox runs carry cost in SandboxMeta instead
+	// and leave this 0. summary() prefers SandboxMeta.CostUSD when present and
+	// falls back to this field so per-job monthly aggregates count local runs.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // CronRunSummary is the slim shape returned by list endpoints + the
@@ -118,6 +125,11 @@ func (r *CronRun) summary() CronRunSummary {
 	}
 	if r.SandboxMeta != nil {
 		s.CostUSD = r.SandboxMeta.CostUSD
+	} else {
+		// R202606e-ARCH-1 (#2280): local runs have no SandboxMeta receipt;
+		// fall back to the run's own captured cost so the per-job monthly
+		// aggregate (front-end sum over recent_runs) counts local cron too.
+		s.CostUSD = r.CostUSD
 	}
 	return s
 }

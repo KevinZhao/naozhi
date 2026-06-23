@@ -427,6 +427,73 @@ func TestMerged_AboveCutoffLocalDoesNotEvictFallback(t *testing.T) {
 	}
 }
 
+// TestMerged_CrossSourceContentDedup is the [R20260622-184753-LB-3]
+// regression: the SAME turn carries DIFFERENT UUIDs across tiers — the
+// naozhi-native capture stamps a crypto/rand UUID while the Claude JSONL
+// fallback carries Claude's own message uuid. A UUID-only dedup would
+// render the turn twice. The content key (Time,Type,Summary,Detail)
+// must collapse them to the single (richer) local entry.
+func TestMerged_CrossSourceContentDedup(t *testing.T) {
+	m := &Source{
+		Local: &stubSource{entries: []cli.EventEntry{
+			{UUID: "nativecryptorand0000000000000000", Time: 100, Type: "text", Summary: "hi", Detail: "hello world", Images: []string{"data:image/png;base64,A="}},
+		}},
+		Fallback: &stubSource{entries: []cli.EventEntry{
+			{UUID: "claudemsguuid00000000000000000000", Time: 100, Type: "text", Summary: "hi", Detail: "hello world"},
+		}},
+	}
+	got, _ := m.LoadBefore(context.Background(), 0, 100)
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1 (cross-source content dedup)", len(got))
+	}
+	if got[0].UUID != "nativecryptorand0000000000000000" || len(got[0].Images) != 1 {
+		t.Errorf("local (richer) entry should win dedup, got %+v", got[0])
+	}
+}
+
+// TestMerged_CrossSourceContentDedup_DistinctNotCollapsed: entries that
+// share Time+Type+Summary but DIFFER in Detail must NOT be deduped —
+// Detail is the discriminator that keeps genuinely distinct turns apart.
+func TestMerged_CrossSourceContentDedup_DistinctNotCollapsed(t *testing.T) {
+	m := &Source{
+		Local: &stubSource{entries: []cli.EventEntry{
+			{UUID: "u1", Time: 100, Type: "text", Summary: "reply", Detail: "answer A"},
+		}},
+		Fallback: &stubSource{entries: []cli.EventEntry{
+			{UUID: "u2", Time: 100, Type: "text", Summary: "reply", Detail: "answer B"},
+		}},
+	}
+	got, _ := m.LoadBefore(context.Background(), 0, 100)
+	if len(got) != 2 {
+		t.Errorf("got %d, want 2 (different Detail must not collapse)", len(got))
+	}
+}
+
+// TestMerged_CrossSourceContentDedup_SlowPath: the same cross-source
+// dedup must hold on the defensive concat+sort path (unsorted inputs).
+func TestMerged_CrossSourceContentDedup_SlowPath(t *testing.T) {
+	m := &Source{
+		Local: &stubSource{entries: []cli.EventEntry{
+			// Descending Time forces mergeSortFallback.
+			{UUID: "nativeB", Time: 200, Type: "text", Summary: "two", Detail: "d2"},
+			{UUID: "nativeA", Time: 100, Type: "text", Summary: "one", Detail: "d1"},
+		}},
+		Fallback: &stubSource{entries: []cli.EventEntry{
+			{UUID: "claudeB", Time: 200, Type: "text", Summary: "two", Detail: "d2"}, // dup of nativeB by content
+			{UUID: "claudeA", Time: 100, Type: "text", Summary: "one", Detail: "d1"}, // dup of nativeA by content
+		}},
+	}
+	got, _ := m.LoadBefore(context.Background(), 0, 100)
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2 (both turns deduped cross-source on slow path)", len(got))
+	}
+	for _, e := range got {
+		if e.UUID != "nativeA" && e.UUID != "nativeB" {
+			t.Errorf("local should win cross-source dedup, got UUID %q", e.UUID)
+		}
+	}
+}
+
 // generalMergeSorted is the pre-fast-path reference implementation of
 // mergeSorted: it always seeds `seen` from local and runs the full
 // two-way merge regardless of whether a tier is empty. The fast-path

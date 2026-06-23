@@ -214,13 +214,13 @@ func TestMarshalBroadcastAuth_ConcurrentRegisterAndBroadcast(t *testing.T) {
 				hub.mu.Lock()
 				hub.authMu.Lock()
 				hub.clients[c] = struct{}{}
-				hub.authClients[c] = struct{}{}
+				hub.addAuthClientLocked(c)
 				hub.authMu.Unlock()
 				hub.mu.Unlock()
 
 				hub.mu.Lock()
 				hub.authMu.Lock()
-				delete(hub.authClients, c)
+				hub.removeAuthClientLocked(c)
 				delete(hub.clients, c)
 				hub.authMu.Unlock()
 				hub.mu.Unlock()

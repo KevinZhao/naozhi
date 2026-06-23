@@ -1037,7 +1037,16 @@ func (d *Dispatcher) ownerLoop(
 		// Drained queued messages were acknowledged with a queue reaction
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
-		d.clearQueuedReactions(ctx, msg.Platform, queued, lg)
+		//
+		// #2262: detach via WithoutCancel like the sibling discard path
+		// above. ownerLoop's ctx is the platform stopCtx; on a
+		// shutdown-during-turn race it is already Done by the time we reach
+		// here, and a child WithTimeout would be born cancelled — every
+		// RemoveReaction would short-circuit and the ⏳ HOURGLASS on this
+		// just-drained batch would hang until the platform's ~12h reaction
+		// TTL. This was the only clear point in ownerLoop still using the
+		// live (cancellable) ctx.
+		d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, queued, lg)
 		// Reactions cleared on the normal path — drop the recover-defer's
 		// fallback handle so a panic in the NEXT loop iteration (before the
 		// next DoneOrDrain) doesn't redundantly re-clear this batch.
@@ -1355,6 +1364,20 @@ func (d *Dispatcher) sendAndReply(
 	// reply on its own bubble; followers should surface a short "合并" hint
 	// on the user's original message instead of echoing the same text again.
 	if result.MergedCount > 1 && result.Text == "" {
+		// #2290: a follower's tracker may have already posted a "💭思考中…"
+		// banner if interim assistant events fanned out to its onEvent
+		// before the merge collapsed the turn (process_readloop interim
+		// fan-out claims all currentTurnSlots, followers included). The
+		// follower carries no final text to overwrite that banner, so
+		// without an explicit edit the bubble is orphaned forever. Wait
+		// for any pending banner Reply to land, then collapse it into the
+		// same merge hint the follower surfaces on the user's message.
+		tracker.waitReady(ctx)
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
+				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+			}
+		}
 		d.ackMergedFollower(ctx, msg, key, result.MergedCount, lg)
 		d.markReplySuccess()
 		return
@@ -1391,6 +1414,12 @@ func (d *Dispatcher) sendAndReply(
 	}
 
 	tracker.waitReady(ctx)
+
+	// #2291: mark the turn finalized before the final banner edit so a late
+	// editLoop redraw (residual buffered editCh signal firing after the
+	// final EditMessage but before the deferred stop()) skips the repaint
+	// instead of overwriting the real answer with stale interim status.
+	tracker.markFinalized()
 
 	// AskUserQuestion suppression: when this turn surfaced an interactive
 	// question card, `claude -p` also emits a bailout text ("I've asked you
