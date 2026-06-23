@@ -110,6 +110,25 @@ func TestInjectNodeField_nodeKeyInValue_notSkipped(t *testing.T) {
 	}
 }
 
+// TestInjectNodeField_probeIsHoisted pins R202606f-PERF-002 (#2296): the
+// "node" probe pattern is a package-level var, not re-allocated per call. The
+// skip path (message already has a node key) must therefore perform zero
+// allocations — it neither builds the probe nor allocates a result buffer.
+func TestInjectNodeField_probeIsHoisted(t *testing.T) {
+	if string(nodeKeyProbe) != `"node":` {
+		t.Fatalf("nodeKeyProbe mismatch: %q", nodeKeyProbe)
+	}
+	nodeField := []byte(`"node":"n1",`)
+	input := []byte(`{"node":"remote","type":"event","key":"k"}`)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = injectNodeField(input, nodeField)
+	})
+	if allocs != 0 {
+		t.Fatalf("skip path should be alloc-free now the probe is hoisted, got %.1f allocs/op", allocs)
+	}
+}
+
 func TestInjectNodeField_windowTruncationGuard(t *testing.T) {
 	// Build an object where "node": pattern is beyond 256 bytes.
 	// The window guard should NOT see it and injection should still proceed

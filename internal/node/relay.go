@@ -427,10 +427,25 @@ func (r *wsRelay) forwardEvent(data []byte) {
 	}
 }
 
+// nodeKeyProbe is the package-level pattern injectNodeField scans for to
+// decide whether a remote message already carries a "node" key. Hoisting it
+// out of the function body avoids a per-event []byte allocation on the relay
+// readLoop hot path (dozens of events/s/session). R202606f-PERF-002 (#2296).
+var nodeKeyProbe = []byte(`"node":`)
+
 // injectNodeField inserts a pre-computed "node":"id", field into raw JSON bytes
 // without full decode/encode. JSON objects always start with '{'.
 // If the message already contains a "node" key, it is returned as-is to prevent
 // duplicate-key ambiguity across JSON parsers.
+//
+// Allocation note (R202606f-PERF-002 / #2296): the result buffer is freshly
+// allocated per call and is NOT pooled. The returned slice is handed to
+// wsClient.SendRaw, which enqueues it by reference into each subscriber's send
+// channel (no copy) and is consumed asynchronously by the client write pump.
+// The same buffer is therefore shared across all fan-out subscribers and stays
+// live until every send channel drains it, so there is no safe point to return
+// it to a sync.Pool. Pooling here would risk reusing a buffer still queued for
+// a slow client and corrupting its outbound frame.
 func injectNodeField(data, nodeField []byte) []byte {
 	if len(data) == 0 || data[0] != '{' {
 		return data
@@ -446,7 +461,7 @@ func injectNodeField(data, nodeField []byte) []byte {
 	// real node ID). A Contains scan on a ~KB to multi-KB slice is O(n) but
 	// runs once per inbound message; the bytes package uses SIMD-friendly
 	// search, so the cost is negligible versus the correctness gain.
-	if bytes.Contains(data, []byte(`"node":`)) {
+	if bytes.Contains(data, nodeKeyProbe) {
 		return data
 	}
 	// Guard: empty object "{}" — nodeField ends with ',' which would produce
