@@ -501,6 +501,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	// The upgrade is removed; the SessionID is whatever {pid}.json records.
 	// Regression: TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 
+	// No live candidates: the summary/prompt batch and the result loop below
+	// all iterate over `candidates`, so with none they produce an empty result
+	// (LookupSummaries returns nil on an empty map, the prompt slice is empty,
+	// and the final loop never runs). Skip the map/slice allocations entirely —
+	// between active sessions this is the steady-state path on every ~10s scan.
+	// R202606h-PERF-005.
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
 	// Batch-lookup summaries from sessions-index.json for all candidates.
 	candidateWorkspaces := make(map[string]string, len(candidates))
 	for i := range candidates {

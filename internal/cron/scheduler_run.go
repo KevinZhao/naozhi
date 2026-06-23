@@ -1130,6 +1130,15 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 		if snap.fresh {
 			s.router.Reset(key)
 		}
+		// R202606h-GO-009: re-register the sidebar stub BEFORE finishRun
+		// releases the inflight CAS gate (finishRun → finalizer.finalize()).
+		// Mirrors the Reset ordering above (R20260608-CORR-1 / #1956) and the
+		// success path's reapFreshSessionLocked→finishRun sequence. A late
+		// stub refresh run AFTER the gate releases lets a concurrent TriggerNow
+		// win the CAS, spawn run-B's live session+stub, and then have run-A's
+		// stale-chain stub clobber it (phantom sidebar pointing at the prior
+		// session's JSONL).
+		stubRefresh.run()
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1137,7 +1146,6 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
 		})
-		stubRefresh.run()
 		return
 	}
 	state, errClass := classifyExecError(err, ErrClassSendError)
