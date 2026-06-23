@@ -74,6 +74,16 @@ var scanBufPool = sync.Pool{
 type Source struct {
 	rootDir   string        // ~/.codex/sessions — empty disables the source
 	sessionID SessionIDFunc // produces the current codex thread ID
+
+	// findRollout caches the resolved rollout path per thread id. A session's
+	// thread id is stable for its lifetime and the date-bucketed tree it lives
+	// in can hold thousands of files after months of codex use, so a full
+	// filepath.WalkDir on every LoadBefore (session first render + each "load
+	// more") is wasted work. mu guards the cache because the dashboard issues
+	// LoadBefore concurrently across requests.
+	mu         sync.Mutex
+	cachedSid  string
+	cachedPath string
 }
 
 // New constructs a Source. If rootDir is empty or sessionIDFn is nil, the
@@ -185,6 +195,19 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // UUID), the lexicographically last is returned so a resumed/forked thread
 // reading the freshest file wins.
 func (s *Source) findRollout(sid string) (string, error) {
+	// Cache hit: the thread id is unchanged and we previously resolved a path.
+	// A stale path (file deleted/moved) is self-healing — the caller's os.Open
+	// fails and LoadBefore falls through to its (nil,nil) tail, and the next
+	// distinct sid (or process restart) re-walks. We trade that rare miss for
+	// skipping a full-tree WalkDir on the hot pagination path.
+	s.mu.Lock()
+	if s.cachedSid == sid && s.cachedPath != "" {
+		p := s.cachedPath
+		s.mu.Unlock()
+		return p, nil
+	}
+	s.mu.Unlock()
+
 	suffix := "-" + sid + ".jsonl"
 	var best string
 	walkErr := filepath.WalkDir(s.rootDir, func(p string, d os.DirEntry, err error) error {
@@ -208,6 +231,15 @@ func (s *Source) findRollout(sid string) (string, error) {
 	})
 	if walkErr != nil && best == "" {
 		return "", walkErr
+	}
+	// Cache the resolved path so subsequent pages for the same thread skip the
+	// WalkDir. Only cache a non-empty hit; an empty result (no rollout flushed
+	// yet) must keep re-walking until codex writes the file.
+	if best != "" {
+		s.mu.Lock()
+		s.cachedSid = sid
+		s.cachedPath = best
+		s.mu.Unlock()
 	}
 	return best, nil
 }

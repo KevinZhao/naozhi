@@ -305,6 +305,47 @@ func TestSource_LoadBefore_OutOfOrderSorted(t *testing.T) {
 	}
 }
 
+// TestSource_findRollout_CachesPerSid pins that a resolved rollout path is
+// cached per thread id: a second lookup for the same sid returns the cached
+// path without re-walking, and a different sid invalidates and re-resolves.
+func TestSource_findRollout_CachesPerSid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "cache-thread"
+	writeRollout(t, dir, sid, []string{
+		`{"timestamp":"2026-06-21T09:35:21.000Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}`,
+	})
+	src := New(dir, func() string { return sid })
+
+	p1, err := src.findRollout(sid)
+	if err != nil || p1 == "" {
+		t.Fatalf("findRollout(%q) = (%q,%v); want non-empty path", sid, p1, err)
+	}
+	// Cache must be populated after the first resolve.
+	src.mu.Lock()
+	gotSid, gotPath := src.cachedSid, src.cachedPath
+	src.mu.Unlock()
+	if gotSid != sid || gotPath != p1 {
+		t.Fatalf("cache = (%q,%q); want (%q,%q)", gotSid, gotPath, sid, p1)
+	}
+
+	// Move the real file away: a cache HIT must still return the old path
+	// (proving it did not re-walk), whereas a re-walk would now find nothing.
+	if err := os.RemoveAll(filepath.Join(dir, "2026")); err != nil {
+		t.Fatalf("remove tree: %v", err)
+	}
+	p2, err := src.findRollout(sid)
+	if err != nil || p2 != p1 {
+		t.Fatalf("cached findRollout(%q) = (%q,%v); want (%q,nil) from cache", sid, p2, err, p1)
+	}
+
+	// A different sid must bypass the cache and re-walk (now empty tree → "").
+	p3, err := src.findRollout("other-thread")
+	if err != nil || p3 != "" {
+		t.Fatalf("findRollout(other) = (%q,%v); want (\"\",nil) after re-walk", p3, err)
+	}
+}
+
 // stubView is a minimal cli.HistorySessionView for factory tests.
 type stubView struct{ sid string }
 
