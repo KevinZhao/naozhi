@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -141,9 +142,16 @@ func (r *Router) runOrphanSweep() {
 	}
 	r.mu.RUnlock()
 
-	r.historyWg.Add(1)
-	go func() {
-		defer r.historyWg.Done()
+	// R202606g-GO-003: spawn via runHistoryTask so the historyWg.Add(1) is
+	// taken under r.historyWgMu, atomic with Shutdown's historyCancel()
+	// (R202606b-GO-001 / #2186). The prior bare r.historyWg.Add(1) was safe
+	// only because runOrphanSweep is invoked once via startOnce.Do before
+	// Shutdown; a future lazy-start or a test that calls Start after Shutdown
+	// would otherwise panic("WaitGroup is reused before previous Wait has
+	// returned"). runHistoryTask also returns false (no goroutine) when
+	// historyCtx is already cancelled. The sweep itself does not need the ctx
+	// (a directory walk is cheap and the original ran uncancellable).
+	r.runHistoryTask(func(context.Context) {
 		n, err := sweepOrphanEventLogs(r.eventLogDir, known, time.Now())
 		if err != nil {
 			slog.Warn("eventlog orphan sweep failed",
@@ -154,5 +162,5 @@ func (r *Router) runOrphanSweep() {
 			slog.Info("eventlog orphan sweep completed",
 				"dir", r.eventLogDir, "removed", n)
 		}
-	}()
+	})
 }
