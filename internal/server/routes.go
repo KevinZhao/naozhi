@@ -262,6 +262,11 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", handleManifest)
 	s.mux.HandleFunc("GET /sw.js", handleSW)
+	// Favicon: unauthenticated like /manifest.json and /sw.js so the tab icon
+	// loads on the login page and the browser's implicit /favicon.ico probe
+	// stops 404-ing. Both paths serve the same embedded SVG.
+	s.mux.HandleFunc("GET /favicon.ico", handleFavicon)
+	s.mux.HandleFunc("GET /favicon.svg", handleFavicon)
 	// R20260527122801-SEC-4 (#1328): the dashboard JS modules embed the
 	// list of authenticated API endpoints, the cron polling cadence, and
 	// the dashboard's client-side schema. Serving them to unauthenticated
@@ -582,6 +587,26 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("manifest write", "err", err)
 	}
+}
+
+// handleFavicon serves the site/PWA icon. Registered unauthenticated alongside
+// /manifest.json and /sw.js so the icon resolves on the login page too and the
+// browser's automatic /favicon.ico probe stops 404-ing. We serve a single SVG
+// (the Claude logomark) and point both /favicon.ico and /favicon.svg at it;
+// modern browsers honour SVG favicons and the manifest's sizes:"any" entry.
+func handleFavicon(w http.ResponseWriter, r *http.Request) {
+	data := staticAssetBytes("favicon.svg")
+	if data == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "max-age=86400")
+	if serveStaticWithETag(w, r, "favicon.svg") {
+		return
+	}
+	writeStaticAssetBody(w, r, "favicon.svg")
 }
 
 func handleSW(w http.ResponseWriter, r *http.Request) {

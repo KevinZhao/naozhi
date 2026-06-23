@@ -1269,6 +1269,7 @@ function toggleHistory() {
   popover.innerHTML =
     '<div class="history-popover-header">' +
       '<span>历史 <span class="hp-count" id="hp-count">(' + merged.length + ')</span></span>' +
+      '<span class="hp-subtitle">侧栏为当前活跃会话，此处为全部历史会话</span>' +
     '</div>' +
     (merged.length > 0
       ? '<div class="history-popover-search">' +
@@ -10011,6 +10012,7 @@ const SYSTEM_STAT_LABELS = {
   skipped_origin_user: '跳过·用户已命名',
   skipped_min_user_turns: '跳过·轮次不足',
   skipped_no_new_turns: '跳过·无新增对话',
+  skipped_min_rename_interval: '跳过·命名间隔未到',
 };
 function systemStatLabel(key) {
   if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
@@ -10054,9 +10056,9 @@ function renderSystemView() {
         '</div>';
       const stats = lr.stats || {};
       const chips = Object.keys(stats).map(function (k) {
-        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' ' + (stats[k] || 0) + '</span>';
+        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' <b>' + (stats[k] || 0) + '</b></span>';
       });
-      if (chips.length) statsBlock = '<div class="sys-stats">' + chips.join('') + '</div>';
+      if (chips.length) statsBlock = '<div class="sys-stats-label">本次统计</div><div class="sys-stats">' + chips.join('') + '</div>';
     }
     let warnBlock = '';
     const cliF = d.consecutive_cli_failures || 0;
