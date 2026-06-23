@@ -46,6 +46,9 @@ var assetBrowserJS embed.FS
 //go:embed static/files_view.js
 var filesViewJS embed.FS
 
+//go:embed static/favicon.svg
+var faviconSVG embed.FS
+
 // staticAsset is the once-read, immutable view of an embedded dashboard asset:
 // its decompressed bytes and precomputed strong-form ETag. Go's
 // embed.FS.ReadFile returns a *fresh copy* on every call (`[]byte(string)` —
@@ -129,6 +132,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
 		{"manifest.json", manifestJSON, "static/manifest.json", false},
 		{"sw.js", swJS, "static/sw.js", false},
+		{"favicon.svg", faviconSVG, "static/favicon.svg", true},
 	} {
 		if a, ok := read(e.fsys, e.name, e.compress); ok {
 			out[e.key] = a
