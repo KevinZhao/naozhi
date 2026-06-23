@@ -331,6 +331,31 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-project upload quota (R202606g-SEC-3, #2311): reserve the declared
+	// part size against this project's running total BEFORE writing a byte, so a
+	// single tenant cannot fill the shared disk via this endpoint. fh.Size is the
+	// multipart header's declared length; the body is independently capped at
+	// maxUploadFileBytes (MaxBytesReader + the io.Copy ceiling below), so a lying
+	// header cannot under-reserve past the per-file cap. Clamp the reservation to
+	// that cap so a wildly inflated declared size cannot exhaust quota for a file
+	// that can never actually exceed the cap. The reservation is released on any
+	// failure path and reconciled against the true byte count on success. A nil
+	// quota (enforcement disabled) makes reserve a no-op.
+	reserveBytes := fh.Size
+	if reserveBytes > maxUploadFileBytes {
+		reserveBytes = maxUploadFileBytes
+	}
+	if !h.uploadQuota.reserve(project, reserveBytes) {
+		httputil.WriteJSONStatus(w, http.StatusInsufficientStorage, map[string]string{"error": "project upload quota exceeded"})
+		return
+	}
+	quotaCommitted := false
+	defer func() {
+		if !quotaCommitted {
+			h.uploadQuota.release(project, reserveBytes)
+		}
+	}()
+
 	// Create the leaf with O_NOFOLLOW (refuse symlinked leaf) + O_EXCL (refuse
 	// silent overwrite) or O_TRUNC (explicit overwrite=1). This openat IS the
 	// atomic security boundary for the leaf.
@@ -416,6 +441,20 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = osutil.SyncDir(parentResolved)
+
+	// Commit the quota reservation: the file is durably on disk. Reconcile the
+	// reserved estimate against the true byte count so a part whose declared
+	// header size differed from the actual stream does not leave the running
+	// total skewed (release the over-reserved slack; charge any extra). The copy
+	// is hard-capped at maxUploadFileBytes above, so `written` is bounded.
+	quotaCommitted = true
+	if delta := reserveBytes - written; delta > 0 {
+		h.uploadQuota.release(project, delta)
+	} else if delta < 0 {
+		// written exceeded the reservation (declared size under-reported);
+		// charge the difference best-effort so the running total stays honest.
+		_ = h.uploadQuota.reserve(project, -delta)
+	}
 
 	httputil.WriteJSON(w, map[string]any{
 		"ok":   true,

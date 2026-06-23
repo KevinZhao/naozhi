@@ -17,6 +17,12 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// defaultUploadQuotaBytes caps cumulative per-project upload bytes per process
+// (R202606g-SEC-3, #2311). 4 GiB ≈ 16 max-size (256 MiB) files — generous for
+// the build-artefact push use case while bounding a single tenant's ability to
+// fill a shared disk through the upload endpoint.
+const defaultUploadQuotaBytes int64 = 4 << 30
+
 // build_handlers.go is part of the buildServer split (R246-CR-004 / #738).
 // Each helper constructs one handler-struct group from ServerOptions plus
 // already-resolved derived state (cookieSecret, claudeDir, agents, etc.).
@@ -238,7 +244,13 @@ func buildProjectHandlers(
 		NodeCache:          nodeCache,
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
-		PublicTmpEnabled:   opts.PublicTmpEnabled,
+		// R202606g-SEC-3 (#2311): bound cumulative per-project upload bytes per
+		// process so one tenant cannot fill a shared disk through the upload
+		// endpoint. 4 GiB is ~16 max-size files — generous for the build-artefact
+		// use case while finite. Process-local (resets on restart); a true
+		// filesystem quota is out of scope for this guard.
+		UploadQuotaBytes: defaultUploadQuotaBytes,
+		PublicTmpEnabled: opts.PublicTmpEnabled,
 
 		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
