@@ -2,6 +2,46 @@ package envpolicy
 
 import "testing"
 
+// TestValidateBaseURLValue_PrivateHTTPS covers R202606e-SEC-1 (#2278): the
+// https branch must reject RFC1918 private IPs by default (SSRF guard) but
+// honour the NAOZHI_ALLOW_PRIVATE_BASE_URL escape hatch — while still always
+// rejecting the IMDS metadata address even when the hatch is open.
+func TestValidateBaseURLValue_PrivateHTTPS(t *testing.T) {
+	privateHTTPS := []string{
+		"https://10.0.0.1/v1",
+		"https://172.16.5.4/v1",
+		"https://192.168.1.10/v1",
+		"https://127.0.0.1/v1",
+	}
+
+	// Default (hatch closed): rejected.
+	t.Setenv("NAOZHI_ALLOW_PRIVATE_BASE_URL", "")
+	for _, v := range privateHTTPS {
+		if err := ValidateBaseURLValue(v); err == nil {
+			t.Errorf("default %q: got nil, want SSRF rejection", v)
+		}
+	}
+	// IMDS always rejected.
+	if err := ValidateBaseURLValue("https://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Errorf("default IMDS: got nil, want rejection")
+	}
+
+	// Hatch open: private ranges allowed, IMDS still rejected.
+	t.Setenv("NAOZHI_ALLOW_PRIVATE_BASE_URL", "1")
+	for _, v := range privateHTTPS {
+		if err := ValidateBaseURLValue(v); err != nil {
+			t.Errorf("hatch-open %q: got err=%v, want nil", v, err)
+		}
+	}
+	if err := ValidateBaseURLValue("https://169.254.169.254/"); err == nil {
+		t.Errorf("hatch-open IMDS: got nil, want rejection (link-local always blocked)")
+	}
+	// Public host unaffected by the hatch.
+	if err := ValidateBaseURLValue("https://api.anthropic.com"); err != nil {
+		t.Errorf("hatch-open public: got err=%v, want nil", err)
+	}
+}
+
 // TestValidateBaseURLValue covers the allow/deny boundary for base-URL env
 // values (RFC §4). R090031-SEC-1 (#1687) / R20260602-SEC-1 (#1576).
 func TestValidateBaseURLValue(t *testing.T) {
