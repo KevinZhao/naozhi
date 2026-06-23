@@ -8815,6 +8815,12 @@ async function openFilePreview(wrapEl) {
   if (mime === 'application/pdf') {
     body.innerHTML = '';
     const frame = document.createElement('iframe');
+    // Defense-in-depth: serveRaw forces application/pdf to an attachment
+    // download so this never inline-renders today. sandbox="" guards the
+    // case where Content-Disposition is stripped (proxy) or serveRaw later
+    // renders PDF inline — zero capabilities, no plugin/script execution,
+    // while the native PDF viewer still works.
+    frame.setAttribute('sandbox', '');
     frame.src = fileApiUrl(project, node, path, 'raw');
     frame.title = path;
     body.appendChild(frame);
