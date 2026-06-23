@@ -249,6 +249,17 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // unix seconds, so adjacent prompts are ≥1000 ms apart) so chronology
 // across prompts is preserved.
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+	// Read the LAST maxFileBytes, not the first. kiro appends chronologically
+	// to a single rotation-free file, so a long session can exceed the cap;
+	// reading from offset 0 would surface only the oldest prompts and the
+	// newest messages would never be parsed. Seek to the tail window and drop
+	// the first (likely partial) line so the cap covers recent bytes.
+	skipPartialFirstLine := false
+	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
+		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
+			skipPartialFirstLine = true
+		}
+	}
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long. Default 64 KiB
@@ -262,6 +273,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		scanBufPool.Put(bufPtr)
 	}()
 	scanner.Buffer(*bufPtr, 1<<20)
+	if skipPartialFirstLine && scanner.Scan() {
+		// Discard the partial line straddling the seek boundary.
+	}
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0

@@ -201,11 +201,25 @@ func (s *Source) findRollout(sid string) (string, error) {
 // never poisons the rest of the file. Returns entries in arrival order
 // (chronological per codex's append contract).
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
+	// Read the LAST maxFileBytes of the file, not the first. codex appends
+	// chronologically with no rotation, so a long agentic session can exceed
+	// the cap; reading from offset 0 would surface only the oldest turns and
+	// the newest messages would never be parsed. Seek to the tail window and
+	// drop the first (likely partial) line so the cap covers recent bytes.
+	skipPartialFirstLine := false
+	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
+		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
+			skipPartialFirstLine = true
+		}
+	}
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long; the default 64 KiB
 	// would truncate token-rich replies.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	if skipPartialFirstLine && scanner.Scan() {
+		// Discard the partial line straddling the seek boundary.
+	}
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
