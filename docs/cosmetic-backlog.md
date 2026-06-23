@@ -745,3 +745,8 @@
 - [R202606f-ARCH-7] shim.ParseServerMsg 零 in-tree 消费者,cli 自己手 Unmarshal — internal/shim/protocol.go:166
 - [R202606f-ARCH-8] reverseserver host:port 剥离逻辑在 isPrivateHost/isLoopbackHost 重复 — internal/node/reverseserver.go:175
 - [R202606f-SEC-006] dashboard style-src unsafe-inline(CSS 注入 exfil 向,与已关 #2177 script-src 同源) — internal/server/routes.go:535
+- [R202606g-GO-005] BroadcastSessionsUpdate 内联 time.AfterFunc fallback 仅影响 test hub(生产用预分配 timer) — internal/server/wshub_broadcast.go:295
+- [R202606g-PERF-002] ratelimit.Allow TTL 过期时锁内 rate.NewLimiter 分配,可锁外预分配再换 — internal/ratelimit/limiter.go:106
+- [R202606g-ARCH-3] naozhilog.LoadLatest 是 off-interface 方法,router 经具体类型调,弱化 history.Source 抽象 — internal/history/naozhilog/source.go:98
+- [R202606g-ARCH-4] sysession 称 cli-free 但 VisitSessions 传 SessionSnapshot 带 []cli.SubagentInfo/[]cli.MeteringEntry — internal/sysession/router.go:44
+- [R202606g-SEC-6] HandleLogin 缺 XFF 返回 400 而 HandleUpgrade/handleDashboard 返回 429,不一致 — internal/dashboard/auth/handlers.go:556
