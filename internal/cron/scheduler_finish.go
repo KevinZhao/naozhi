@@ -292,6 +292,10 @@ type finishArgs struct {
 	// (RFC §7.3). nil for local runs — finishRun attaches it to the CronRun
 	// only when non-nil, so a local run's record carries no sandbox_meta.
 	sandboxMeta *SandboxRunMeta
+	// costUSD is the per-run cost for LOCAL runs, taken from
+	// SendResult.CostUSD (R202606e-ARCH-1 #2280). finishRun persists it onto
+	// CronRun.CostUSD; sandbox runs leave it 0 and carry cost via sandboxMeta.
+	costUSD float64
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -461,6 +465,9 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			// Sandbox execution receipt (RFC §7.3) — nil for local runs, so
 			// their record carries no sandbox_meta key (wire-read-safe).
 			SandboxMeta: a.sandboxMeta,
+			// R202606e-ARCH-1 (#2280): local-run cost (0 for sandbox runs,
+			// which report cost via SandboxMeta instead).
+			CostUSD: a.costUSD,
 		})
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next
