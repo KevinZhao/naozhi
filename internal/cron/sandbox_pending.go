@@ -240,8 +240,20 @@ func (s *Scheduler) reconcileSandboxPending() {
 			}
 		}()
 	}
+	// R202606e-GO-002: select on stopCtx while feeding the unbuffered jobs
+	// channel. Without this a SIGTERM during a multi-orphan reconcile cannot
+	// unblock the send side: workers stop dispatching Stops (line 236) but keep
+	// draining, while the sender stays parked on `jobs <- o` until every orphan
+	// is handed off — so close(jobs)/wg.Wait() (and the gcWaitBudget) are held
+	// hostage by the remaining sends. Bail out of feeding once shutdown begins.
 	for _, o := range orphans {
-		jobs <- o
+		select {
+		case jobs <- o:
+		case <-s.stopCtx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		}
 	}
 	close(jobs)
 	wg.Wait()
