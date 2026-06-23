@@ -11,6 +11,29 @@ import (
 // folded the open-coded lock/check/store triples into methods on the cache
 // type. Cold lookup misses; publish makes a fresh snapshot hit; an aged
 // snapshot misses again; invalidate forces a miss.
+// TestKnownSessionsCache_ColdSetFastPath pins R202606h-PERF-004: a cache with
+// a nil set must miss via the clock-free fast path regardless of how its
+// (unused) timestamps are set, matching the prior fall-through-to-flush
+// behaviour.
+func TestKnownSessionsCache_ColdSetFastPath(t *testing.T) {
+	var c knownSessionsCache
+	// set is nil; stale generatedAt and a pending dirty flag must not matter.
+	c.generatedAt = time.Now().Add(-knownSessionsCacheTTL - time.Hour)
+	c.dirty = true
+	if set, ok := c.lookupFresh(); ok || set != nil {
+		t.Fatalf("nil-set lookupFresh = (%v, %v), want (nil, false)", set, ok)
+	}
+	// After publishing a real set the same call must hit, proving the early
+	// return only short-circuits the cold case.
+	want := map[string]struct{}{"s": {}}
+	if !c.publish(want, c.beginBuild()) {
+		t.Fatal("publish on quiescent cache = false")
+	}
+	if _, ok := c.lookupFresh(); !ok {
+		t.Fatal("lookupFresh after publish = miss, want hit")
+	}
+}
+
 func TestKnownSessionsCache_LookupPublishInvalidate(t *testing.T) {
 	var c knownSessionsCache
 

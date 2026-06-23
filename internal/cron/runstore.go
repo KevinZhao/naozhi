@@ -792,6 +792,12 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 	// first List/Recent), so the steady-state allocation profile is the
 	// fast path above.
 	rows := s.List(jobID, n, time.Time{})
+	// No runs recorded (job never ran, or all runs predate retention): skip the
+	// slice/map allocs, mirroring the warm-path empty-ring guard above.
+	// R202606h-PERF-006.
+	if len(rows) == 0 {
+		return nil
+	}
 	out := make([]string, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for i := range rows {

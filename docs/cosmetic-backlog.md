@@ -750,3 +750,8 @@
 - [R202606g-ARCH-3] naozhilog.LoadLatest 是 off-interface 方法,router 经具体类型调,弱化 history.Source 抽象 — internal/history/naozhilog/source.go:98
 - [R202606g-ARCH-4] sysession 称 cli-free 但 VisitSessions 传 SessionSnapshot 带 []cli.SubagentInfo/[]cli.MeteringEntry — internal/sysession/router.go:44
 - [R202606g-SEC-6] HandleLogin 缺 XFF 返回 400 而 HandleUpgrade/handleDashboard 返回 429,不一致 — internal/dashboard/auth/handlers.go:556
+- [R202606h-GO-001] tracker.Stats LastDrainMs int64 下溢(仅测试 step-back clock 触发,生产 time.Now 单调) — internal/attachment/tracker/tracker.go:343
+- [R202606h-PERF-008] agentcore holdStream var env Envelope 在循环内,RawMessage 字段致 sink(&env) 每帧逃逸堆 — internal/agentcore/client.go:222
+- [R202606h-ARCH-3] agentcore RunResult.ExitCode 无 omitempty,transport-failed 的 exit_status:0 与"干净退出0"不可区分 — internal/cron/sandbox.go:110
+- [R202606h-SEC-12-dup] ServerConfig.DashboardToken 仅警告空 token 无最小长度(已 CLOSED #1047) — internal/config/config.go:1076
+- [R202606h-PERF-007] attachment GCWithRefs MetaGrace os.Stat 与 shouldKeepAttachment 的 ReadFile 重复 stat — internal/attachment/store.go:501

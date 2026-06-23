@@ -301,3 +301,26 @@ func TestPayload_MarshalSizeCeiling(t *testing.T) {
 		t.Fatal("want oversize error")
 	}
 }
+
+func TestPayload_MarshalRejectsBadEnvKeys(t *testing.T) {
+	cases := map[string]string{
+		"empty key":  "",
+		"equals key": "FOO=BAR",
+		"nul key":    "FOO\x00BAR",
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := &Payload{Prompt: "x", Env: map[string]string{key: "v"}}
+			if _, err := p.Marshal(); err == nil {
+				t.Fatalf("want error for env key %q, got nil", key)
+			}
+		})
+	}
+}
+
+func TestPayload_MarshalAcceptsValidEnv(t *testing.T) {
+	p := &Payload{Prompt: "x", Env: map[string]string{"AWS_REGION": "us-east-1"}}
+	if _, err := p.Marshal(); err != nil {
+		t.Fatalf("want success for valid env, got %v", err)
+	}
+}

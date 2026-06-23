@@ -293,6 +293,49 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 	}
 }
 
+// TestResolveImageContentType_EmptyBody verifies that a 200-with-empty-body
+// response is rejected rather than forwarding the upstream (CDN-controlled)
+// Content-Type. This closes the path where a malicious edge returns an empty
+// body with `Content-Type: text/html`, which could XSS IM clients that render
+// inline HTML. (R202606h-SEC-10)
+func TestResolveImageContentType_EmptyBody(t *testing.T) {
+	t.Parallel()
+	ct, err := resolveImageContentType(nil, "text/html", "cdn.discordapp.com")
+	if err == nil {
+		t.Fatalf("empty body: expected error, got ct=%q", ct)
+	}
+	if ct != "" {
+		t.Errorf("empty body: ct should be empty on error, got %q", ct)
+	}
+	if !strings.Contains(err.Error(), "empty body") {
+		t.Errorf("empty body: error = %q; want 'empty body'", err.Error())
+	}
+}
+
+// TestResolveImageContentType_SniffsImage verifies the normal path: a real
+// image body yields the sniffed image/* type and ignores the upstream header.
+func TestResolveImageContentType_SniffsImage(t *testing.T) {
+	t.Parallel()
+	// Minimal PNG signature is enough for http.DetectContentType -> image/png.
+	png := []byte("\x89PNG\r\n\x1a\n")
+	ct, err := resolveImageContentType(png, "text/html", "cdn.discordapp.com")
+	if err != nil {
+		t.Fatalf("valid image: unexpected error: %v", err)
+	}
+	if ct != "image/png" {
+		t.Errorf("valid image: ct = %q; want image/png (sniffed, not header)", ct)
+	}
+}
+
+// TestResolveImageContentType_NonImageRejected verifies a non-empty, non-image
+// body is rejected on mime mismatch.
+func TestResolveImageContentType_NonImageRejected(t *testing.T) {
+	t.Parallel()
+	if ct, err := resolveImageContentType([]byte("<html>"), "image/png", "cdn.discordapp.com"); err == nil {
+		t.Fatalf("non-image body: expected mime mismatch error, got ct=%q", ct)
+	}
+}
+
 // TestDownloadURL_BlocksPrivateIP verifies that blockPrivateDial (wired into
 // discordHTTPClient.Transport) refuses any host that resolves to a reserved IP
 // range, closing the DNS-rebinding SSRF path where cdn.discordapp.com is made

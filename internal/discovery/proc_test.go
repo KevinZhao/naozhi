@@ -290,6 +290,36 @@ func TestScan_SkipsExcludedPID(t *testing.T) {
 	}
 }
 
+// TestScan_NoLiveCandidatesReturnsEmpty pins the R202606h-PERF-005 early
+// return: when every session file is filtered out (here, a dead PID), the
+// candidate list is empty and Scan must not panic and must return an empty
+// result, equivalent to the pre-optimisation full-loop path.
+func TestScan_NoLiveCandidatesReturnsEmpty(t *testing.T) {
+	claudeDir := makeClaudeDir(t)
+	sessDir := filepath.Join(claudeDir, "sessions")
+
+	// Pick a PID that is almost certainly dead so processAlive filters it out,
+	// leaving candidates empty after the filter loop.
+	deadPID := 1<<30 + 1
+	sf := sessionFile{
+		PID:        deadPID,
+		SessionID:  "aaaaaaaa-1234-1234-1234-0000000000ff",
+		CWD:        "/tmp/scan-dead-pid",
+		StartedAt:  time.Now().UnixMilli(),
+		Kind:       "interactive",
+		Entrypoint: "cli",
+	}
+	makeSessionFile(t, sessDir, sf)
+
+	sessions, err := Scan(claudeDir, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected 0 sessions when no live candidates, got %d: %+v", len(sessions), sessions)
+	}
+}
+
 func TestScan_SkipsNonCLIEntrypoint(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	sessDir := filepath.Join(claudeDir, "sessions")
