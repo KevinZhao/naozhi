@@ -108,18 +108,24 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// teardown now potentially running in a detached goroutine, proc.Close
 		// no longer completes before HandleDelete returns, so the shim socket
 		// can still be bound when the next GetOrCreate dials it — hitting the
-		// "refusing to clobber" dial-first guard. Mirror finishResetUnlocked:
-		// wait up to 2s for the socket to vanish and, on timeout, flag the key
-		// so the next GetOrCreate wraps its spawn error with ErrShimStuck for
-		// an actionable diagnosis instead of the generic session error.
+		// "refusing to clobber" dial-first guard.
+		//
+		// R20260622-LB-3 (#2261): we deliberately do NOT re-set
+		// shimStuckOnReset[key] here. Remove is a TERMINAL operation —
+		// unregisterSessionLocked (router_lifecycle.go) already delete()d the
+		// key from shimStuckOnReset as a leak-prevention clear (R090031-CR-5),
+		// and the flag is consumed ONLY by a subsequent same-key GetOrCreate
+		// (router_lifecycle.go:384). Re-inserting it after the terminal clear
+		// left a permanent entry for every one-shot key that is never
+		// recreated with the same key (dashboard:direct:*, scratch, planner,
+		// cron run keys), since nothing ever consumes or GCs it — a slow
+		// unbounded map leak on the 2s socket-wait timeout. The Reset /
+		// ResetAndRecreate paths legitimately keep setting the flag because
+		// they reuse the same key and a GetOrCreate consumes it; Remove does
+		// not, so the recreate (if any) falls back to the still-present
+		// "refusing to clobber" dial-first guard for its diagnosis.
 		if !waitSocketGoneForKey(key, 2*time.Second) {
-			r.mu.Lock()
-			if r.pp.shimStuckOnReset == nil {
-				r.pp.shimStuckOnReset = make(map[string]bool)
-			}
-			r.pp.shimStuckOnReset[key] = true
-			r.mu.Unlock()
-			slog.Warn("shim socket still bound after Remove wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
+			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
 				"key", key)
 		}
 	}
