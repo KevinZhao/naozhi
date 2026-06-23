@@ -1037,7 +1037,16 @@ func (d *Dispatcher) ownerLoop(
 		// Drained queued messages were acknowledged with a queue reaction
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
-		d.clearQueuedReactions(ctx, msg.Platform, queued, lg)
+		//
+		// #2262: detach via WithoutCancel like the sibling discard path
+		// above. ownerLoop's ctx is the platform stopCtx; on a
+		// shutdown-during-turn race it is already Done by the time we reach
+		// here, and a child WithTimeout would be born cancelled — every
+		// RemoveReaction would short-circuit and the ⏳ HOURGLASS on this
+		// just-drained batch would hang until the platform's ~12h reaction
+		// TTL. This was the only clear point in ownerLoop still using the
+		// live (cancellable) ctx.
+		d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, queued, lg)
 		// Reactions cleared on the normal path — drop the recover-defer's
 		// fallback handle so a panic in the NEXT loop iteration (before the
 		// next DoneOrDrain) doesn't redundantly re-clear this batch.
