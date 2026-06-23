@@ -51,23 +51,35 @@ var (
 	SessionActiveByBackend = NewLabeledGauge("naozhi_session_active_by_backend")
 )
 
-// ProtocolRPCErrorTotalByBackend records JSON-RPC errors emitted by a CLI
+// ProtocolRPCErrorTotal records JSON-RPC errors emitted by a CLI
 // backend (currently ACP-only — Claude's stream-json is not RPC-shaped).
 // Labels: backend, method, code. method is the RPC method that caused
 // the error (e.g. "session/prompt"); code is the JSON-RPC integer code
 // stringified ("-32601", "0", etc.).
 //
 // No legacy unlabeled counterpart — this metric is new with this RFC.
-var ProtocolRPCErrorTotalByBackend = NewLabeledCounter("naozhi_protocol_rpc_error_total")
+//
+// Naming (R202606d-ARCH-1 / #2243): this is a labeled-only metric with no
+// unlabeled mirror, so it keeps the bare wire name
+// `naozhi_protocol_rpc_error_total` (documented in docs/ops/pprof.md) and the
+// Go identifier intentionally omits the `ByBackend` suffix. The `*ByBackend`
+// convention is reserved for vectors that ALSO maintain an unlabeled mirror
+// (CLISpawnTotal / SessionActive) and therefore carry a `_by_backend` wire
+// alias; using it here would falsely imply a wire alias that does not exist.
+var ProtocolRPCErrorTotal = NewLabeledCounter("naozhi_protocol_rpc_error_total")
 
-// ACPCancelTotalByBackend counts session/cancel notifications successfully
+// ACPCancelTotal counts session/cancel notifications successfully
 // written by ACPProtocol.WriteInterrupt. Cancel attempts that hit the
 // pre-handshake "no session yet" path return ErrInterruptUnsupported and
 // do NOT increment this — they are not real cancels reaching the agent.
 //
 // Label: backend (always "kiro" today; future ACP-speaking backends will
 // share the metric).
-var ACPCancelTotalByBackend = NewLabeledCounter("naozhi_acp_cancel_total")
+//
+// Naming (R202606d-ARCH-1 / #2243): labeled-only, no unlabeled mirror — keeps
+// the bare wire name `naozhi_acp_cancel_total` and omits the `ByBackend`
+// suffix for the same reason as ProtocolRPCErrorTotal above.
+var ACPCancelTotal = NewLabeledCounter("naozhi_acp_cancel_total")
 
 // RecordCLISpawn bumps both the legacy CLISpawnTotal and the labeled
 // vector. The single helper at every call site ensures the two cannot
@@ -116,11 +128,11 @@ func RecordSessionActive(backendID string, delta int) {
 // All three labels go through clipLabelSegment so an attacker-controlled
 // method/code from a malicious agent can't blow up cardinality.
 func RecordProtocolRPCError(backendID, method, code string) {
-	ProtocolRPCErrorTotalByBackend.Add(1, backendID, method, code)
+	ProtocolRPCErrorTotal.Add(1, backendID, method, code)
 }
 
 // RecordACPCancel increments the cancel counter. Called from
 // ACPProtocol.WriteInterrupt's success path only — see metric doc above.
 func RecordACPCancel(backendID string) {
-	ACPCancelTotalByBackend.Add(1, backendID)
+	ACPCancelTotal.Add(1, backendID)
 }

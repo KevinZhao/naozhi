@@ -83,13 +83,13 @@ func TestProtocolRPCErrorTotal_LabelsRoundTrip(t *testing.T) {
 	}
 	starts := make([]int64, len(cases))
 	for i, c := range cases {
-		starts[i] = ProtocolRPCErrorTotalByBackend.Get(c.backend, c.method, c.code)
+		starts[i] = ProtocolRPCErrorTotal.Get(c.backend, c.method, c.code)
 	}
 	for _, c := range cases {
 		RecordProtocolRPCError(c.backend, c.method, c.code)
 	}
 	for i, c := range cases {
-		got := ProtocolRPCErrorTotalByBackend.Get(c.backend, c.method, c.code) - starts[i]
+		got := ProtocolRPCErrorTotal.Get(c.backend, c.method, c.code) - starts[i]
 		if got != 1 {
 			t.Errorf("tuple (%q,%q,%q) delta = %d, want 1", c.backend, c.method, c.code, got)
 		}
@@ -113,9 +113,9 @@ func TestACPCancelTotal_BackendLabel(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			start := ACPCancelTotalByBackend.Get(tc.key)
+			start := ACPCancelTotal.Get(tc.key)
 			RecordACPCancel(tc.backend)
-			if got := ACPCancelTotalByBackend.Get(tc.key) - start; got != 1 {
+			if got := ACPCancelTotal.Get(tc.key) - start; got != 1 {
 				t.Errorf("delta = %d, want 1", got)
 			}
 		})
@@ -170,15 +170,15 @@ func TestLabelKey_OverlongCollapsesToOverflow(t *testing.T) {
 	// 64 bytes + 4 separators = 324 > 256.
 	long := strings.Repeat("a", 80) // > maxLabelSegmentLen, clipped to 64
 	startOverflow := overflowCount.Value()
-	startBucket := ProtocolRPCErrorTotalByBackend.Get(LabelOverflow)
+	startBucket := ProtocolRPCErrorTotal.Get(LabelOverflow)
 	// Use 5 long segments to definitely exceed even after per-segment clip.
 	// RecordProtocolRPCError takes 3, so call the underlying counter directly
 	// with a 5-segment tuple to drive the maxLabelKeyLen path.
-	ProtocolRPCErrorTotalByBackend.Add(1, long, long, long, long, long)
+	ProtocolRPCErrorTotal.Add(1, long, long, long, long, long)
 	if got := overflowCount.Value() - startOverflow; got != 1 {
 		t.Errorf("overflowCount delta = %d, want 1", got)
 	}
-	if got := ProtocolRPCErrorTotalByBackend.Get(LabelOverflow) - startBucket; got != 1 {
+	if got := ProtocolRPCErrorTotal.Get(LabelOverflow) - startBucket; got != 1 {
 		t.Errorf("overflow bucket delta = %d, want 1", got)
 	}
 }
@@ -375,6 +375,42 @@ func TestRegisteredMetricNames(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if v := expvar.Get(name); v == nil {
 				t.Fatalf("metric %q not registered", name)
+			}
+		})
+	}
+}
+
+// TestByBackendNamingConvention pins R202606d-ARCH-1 (#2243): a Go metric
+// identifier ending in `ByBackend` advertises an unlabeled mirror and MUST
+// register a `_by_backend`-suffixed wire name; a labeled-only metric (no
+// unlabeled mirror) MUST keep the bare wire name and a Go identifier WITHOUT
+// the `ByBackend` suffix. Before this fix ProtocolRPCErrorTotalByBackend /
+// ACPCancelTotalByBackend claimed the suffix in Go but registered bare wire
+// names, so `_by_backend` jq queries silently missed them.
+func TestByBackendNamingConvention(t *testing.T) {
+	cases := []struct {
+		goIdent  string // exported Go identifier
+		wireName string // registered expvar name
+	}{
+		// ByBackend identifiers => wire name MUST end in _by_backend.
+		{"CLISpawnTotalByBackend", "naozhi_cli_spawn_total_by_backend"},
+		{"SessionActiveByBackend", "naozhi_session_active_by_backend"},
+		// Labeled-only metrics => bare wire name, no ByBackend in Go ident.
+		{"ProtocolRPCErrorTotal", "naozhi_protocol_rpc_error_total"},
+		{"ACPCancelTotal", "naozhi_acp_cancel_total"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.goIdent, func(t *testing.T) {
+			hasGoSuffix := strings.HasSuffix(tc.goIdent, "ByBackend")
+			hasWireSuffix := strings.HasSuffix(tc.wireName, "_by_backend")
+			if hasGoSuffix != hasWireSuffix {
+				t.Errorf("naming mismatch: Go %q (ByBackend=%v) vs wire %q (_by_backend=%v): "+
+					"a ByBackend identifier must register a _by_backend wire name and vice versa",
+					tc.goIdent, hasGoSuffix, tc.wireName, hasWireSuffix)
+			}
+			if expvar.Get(tc.wireName) == nil {
+				t.Errorf("wire metric %q not registered", tc.wireName)
 			}
 		})
 	}
