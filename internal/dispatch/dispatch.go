@@ -1415,6 +1415,12 @@ func (d *Dispatcher) sendAndReply(
 
 	tracker.waitReady(ctx)
 
+	// #2291: mark the turn finalized before the final banner edit so a late
+	// editLoop redraw (residual buffered editCh signal firing after the
+	// final EditMessage but before the deferred stop()) skips the repaint
+	// instead of overwriting the real answer with stale interim status.
+	tracker.markFinalized()
+
 	// AskUserQuestion suppression: when this turn surfaced an interactive
 	// question card, `claude -p` also emits a bailout text ("I've asked you
 	// two questions ...") because it auto-rejects the tool to unblock
