@@ -82,7 +82,7 @@ const promptSemCap = 4
 
 type promptCacheState struct {
 	sync.RWMutex
-	entries map[string]promptCacheEntry
+	entries map[string]*promptCacheEntry
 	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
 	// refresh a hit entry's generation without upgrading the RLock to a write
 	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
@@ -94,10 +94,14 @@ type promptCacheState struct {
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	// gen is a heap-allocated atomic so its address stays stable while the
-	// entry lives in the map: getCachedPrompt refreshes it lock-free via
-	// Store, and evictPromptCache reads it via Load under the write lock.
-	gen *atomic.Uint64
+	// gen is an inline atomic. The map stores *promptCacheEntry so the entry's
+	// address (and thus &gen) stays stable for its lifetime: getCachedPrompt
+	// refreshes it lock-free via Store, and evictPromptCache reads it via Load
+	// under the write lock. Storing the pointer avoids the prior per-miss
+	// new(atomic.Uint64) heap allocation (R202606h-PERF-003 #2322) while keeping
+	// the stable-address contract that the lock-free Store on hit requires
+	// (PERF-6 #1966).
+	gen atomic.Uint64
 }
 
 type summaryCacheState struct {
@@ -226,7 +230,7 @@ func readBoundedSessionFile(path string) ([]byte, error) {
 // wrappers which hit DefaultScanner.
 func NewScanner() *Scanner {
 	return &Scanner{
-		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
+		promptCache:  promptCacheState{entries: make(map[string]*promptCacheEntry)},
 		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
 		pathCache:    pathCacheState{entries: make(map[pathKey]pathCacheEntry)},
 		promptSem:    make(chan struct{}, promptSemCap),
@@ -709,9 +713,9 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
 	s.promptCache.Lock()
 	defer s.promptCache.Unlock()
-	gen := new(atomic.Uint64)
-	gen.Store(s.promptCache.generation.Load())
-	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: gen}
+	entry := &promptCacheEntry{mtime: mtime, prompt: result}
+	entry.gen.Store(s.promptCache.generation.Load())
+	s.promptCache.entries[path] = entry
 	s.evictPromptCache()
 }
 
