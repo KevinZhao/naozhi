@@ -59,6 +59,50 @@ func TestReplay_HappyPath(t *testing.T) {
 	}
 }
 
+// TestReplay_SanitizesLegacySnapshotPrompt pins R202606h-SEC-2 (#2319): a
+// snapshot prompt written by an older naozhi version can carry C0 controls and
+// bidi/LS-PS runes the current write-edge allowlist would reject. ReplaySandbox-
+// Run must scrub the prompt (osutil.SanitizeForLog) before it is injected into
+// the microVM, so those runes never reach the dispatched SandboxJob.Prompt.
+func TestReplay_SanitizesLegacySnapshotPrompt(t *testing.T) {
+	runner := &fakeSandboxRunner{
+		lines:   []string{`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok"}}`},
+		outcome: SandboxOutcome{State: SandboxStateSuccess, ResultText: "ok"},
+	}
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron_jobs.json")
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	j := sideEffectsJob(t, s)
+	origRunID := "feedfacefeedface"
+
+	// U+202E (RLO) bidi override + a raw NUL (C0): both are in the
+	// containsCronUnsafe / SanitizeForLog deny set.
+	dirty := "do safe‮rm -rf\x00 thing"
+	s.writeSandboxSnapshot(j.ID, origRunID, dirty, "haiku", "img-v1", nil, slog.Default())
+
+	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
+		t.Fatalf("ReplaySandboxRun: %v", err)
+	}
+	waitEnded(t, rec)
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.gotJobs) != 1 {
+		t.Fatalf("runner saw %d jobs, want 1 replay invocation", len(runner.gotJobs))
+	}
+	got := runner.gotJobs[0].Prompt
+	if got == dirty {
+		t.Fatalf("replay injected the raw legacy prompt %q without sanitising it", got)
+	}
+	if containsCronUnsafe(got) {
+		t.Fatalf("replay injected prompt still contains cron-unsafe runes: %q", got)
+	}
+	want := "do safe_rm -rf_ thing" // RLO and NUL each become '_'
+	if got != want {
+		t.Fatalf("sanitised prompt = %q, want %q", got, want)
+	}
+}
+
 // TestReplay_StopsBeforeReplayWhenQueued: a queued (transport-failed) run is
 // Stopped FIRST (§6.2 rule 1) before the replay dispatches.
 func TestReplay_StopsBeforeReplayWhenQueued(t *testing.T) {
