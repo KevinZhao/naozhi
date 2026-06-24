@@ -219,6 +219,71 @@ func TestUploadStoreBytesReleasedOnTake(t *testing.T) {
 	}
 }
 
+// TestUploadStoreTakeAll_DuplicateIDQuotaDoubleDeduct pins
+// R20260624-015340-LB-C2 / #2335: a `send` whose file_ids array contains
+// the same id twice (e.g. ["abc","abc"]) used to run removeEntryLocked
+// twice for the single underlying entry — the second delete was a no-op
+// but totalBytes / ownerBytes / ownerCounts were decremented a second
+// time. When the owner still held other live entries the ≤0 clamp could
+// not catch the drift, so the quota counters drifted permanently down,
+// loosening the per-owner and global caps. The fix (existence guard in
+// removeEntryLocked) makes the duplicate's second decrement a no-op.
+func TestUploadStoreTakeAll_DuplicateIDQuotaDoubleDeduct(t *testing.T) {
+	s := newUploadStore()
+	// alice keeps extra live entries so the ≤0 clamp cannot mask drift.
+	keepA, _ := s.Put("alice", cli.ImageData{Data: []byte("keepA"), MimeType: "image/png"})
+	keepB, _ := s.Put("alice", cli.ImageData{Data: []byte("keepB"), MimeType: "image/png"})
+	dup, _ := s.Put("alice", cli.ImageData{Data: []byte("dup"), MimeType: "image/png"})
+	if keepA == "" || keepB == "" || dup == "" {
+		t.Fatal("Put returned empty id")
+	}
+
+	s.mu.Lock()
+	wantCount := s.ownerCounts["alice"] // 3
+	wantTotal := s.totalBytes
+	wantOwnerBytes := s.ownerBytes["alice"]
+	dupSz := entrySize(s.entries[dup].Image)
+	s.mu.Unlock()
+	if wantCount != 3 {
+		t.Fatalf("setup: ownerCounts[alice]=%d, want 3", wantCount)
+	}
+
+	// Duplicate id in the batch — resolves both slots to the same entry.
+	taken, err := s.TakeAll([]string{dup, dup}, "alice")
+	if err != nil {
+		t.Fatalf("TakeAll with duplicate id: %v", err)
+	}
+	if len(taken) != 2 {
+		t.Fatalf("TakeAll returned %d images, want 2 (one per slot)", len(taken))
+	}
+
+	s.mu.Lock()
+	gotCount := s.ownerCounts["alice"]
+	gotTotal := s.totalBytes
+	gotOwnerBytes := s.ownerBytes["alice"]
+	s.mu.Unlock()
+
+	// Only ONE entry was actually removed (the dup), so each counter must
+	// drop by exactly one entry's worth — never two.
+	if gotCount != wantCount-1 {
+		t.Errorf("ownerCounts[alice]=%d after dup TakeAll, want %d (single decrement)", gotCount, wantCount-1)
+	}
+	if gotTotal != wantTotal-dupSz {
+		t.Errorf("totalBytes=%d after dup TakeAll, want %d (single decrement)", gotTotal, wantTotal-dupSz)
+	}
+	if gotOwnerBytes != wantOwnerBytes-dupSz {
+		t.Errorf("ownerBytes[alice]=%d after dup TakeAll, want %d (single decrement)", gotOwnerBytes, wantOwnerBytes-dupSz)
+	}
+
+	// The two surviving entries are still present and retrievable.
+	if s.Take(keepA, "alice") == nil {
+		t.Error("keepA should survive a duplicate-id TakeAll of a different id")
+	}
+	if s.Take(keepB, "alice") == nil {
+		t.Error("keepB should survive a duplicate-id TakeAll of a different id")
+	}
+}
+
 // TestUploadStoreTakeAll_EmptySliceReturnsNilNoErr documents the
 // trivial case so callers can pass a nil/empty slice unconditionally
 // without special-casing it.

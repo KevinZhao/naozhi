@@ -177,6 +177,17 @@ func entrySize(img cli.ImageData) int64 {
 // one place preserves the ownerCounts / ownerBytes / totalBytes invariants
 // across Take/evict paths.
 func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
+	// Existence guard: a duplicate id in a batch (e.g. TakeAll with
+	// ["abc","abc"]) resolves both slots to the same *uploadEntry and would
+	// otherwise call this twice, double-decrementing totalBytes / ownerBytes
+	// / ownerCounts while the second delete is a no-op — permanently
+	// loosening the quota (R20260624-015340-LB-C2 / #2335). If the id is no
+	// longer present (or now maps to a different entry after a concurrent
+	// re-Put under the same lock — impossible today but cheap to guard), the
+	// accounting was already applied, so make the second call a no-op.
+	if cur, ok := s.entries[id]; !ok || cur != e {
+		return
+	}
 	delete(s.entries, id)
 	sz := entrySize(e.Image)
 	s.totalBytes -= sz
