@@ -111,6 +111,67 @@ func TestStartStop(t *testing.T) {
 	}
 }
 
+// TestStartStop_JoinsPollLoop regresses R202606j-CR-001+CR-004: Start must
+// publish the lifecycle handles (cancel/handler) under startMu so a racing
+// Stop snapshots a non-nil cancel, and Stop must join the pollLoop goroutine
+// (w.pollWg.Wait) so no poll goroutine outlives Stop's return. We assert this
+// by tracking pollLoop's entry/exit via a poll handler that bumps a counter:
+// after Stop returns, the loop goroutine must have observed ctx cancellation
+// and exited, which we verify by confirming the server stops being polled.
+func TestStartStop_JoinsPollLoop(t *testing.T) {
+	t.Parallel()
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		// Short long-poll so Stop's cancel is observed promptly.
+		time.Sleep(20 * time.Millisecond)
+		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
+	}))
+	defer srv.Close()
+
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	handler := func(_ context.Context, _ platform.IncomingMessage) {}
+
+	if err := w.Start(handler); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	// Let the loop poll at least once so it is genuinely in-flight.
+	deadline := time.After(2 * time.Second)
+	for polls.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for first poll")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Stop must not panic and must block until pollLoop has joined.
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	// After Stop returns, pollWg has drained — no further polls may occur.
+	// Snapshot the count, wait past one full poll cycle, and assert it is
+	// unchanged (the loop goroutine has exited rather than issuing a new poll).
+	before := polls.Load()
+	time.Sleep(150 * time.Millisecond)
+	if after := polls.Load(); after != before {
+		t.Errorf("pollLoop still polling after Stop: before=%d after=%d", before, after)
+	}
+}
+
+// TestStop_BeforeStart verifies Stop is a safe no-op when Start never ran:
+// the nil-cancel snapshot guard (mirroring slack) must not panic or block.
+func TestStop_BeforeStart(t *testing.T) {
+	t.Parallel()
+	w := New(Config{Token: "tok"})
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop() before Start should be a no-op, got: %v", err)
+	}
+}
+
 func TestReply_NoContextToken(t *testing.T) {
 	t.Parallel()
 	w := New(Config{Token: "tok"})
