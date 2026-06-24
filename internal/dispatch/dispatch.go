@@ -1475,20 +1475,36 @@ func (d *Dispatcher) sendAndReply(
 	// also be suppressed — otherwise orphaned /tmp image bubbles are sent
 	// after the AskUserQuestion card, confusing the user.
 	if !tracker.askQuestionFired.Load() {
-		for _, img := range outImages {
-			// R20260623-LB-3 (#2305): deliver via ReplyWithRetry (not bare
-			// Reply) so an outbound image inherits the same token-invalidation
-			// one-shot retry the text path gets. Previously a single-image
-			// reply that hit Feishu token-expiry (99991671) was lost silently:
-			// the platform cleared the cache but the bare Reply never retried
-			// with the rotated token. ReplyWithRetry grants the extra rotation
-			// attempt so the image lands on the fresh token.
-			if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
-				ChatID: msg.ChatID,
-				Images: []platform.Image{img},
-			}, limits.PlatformReplyMaxAttempts); err != nil {
-				slog.Warn("send image failed", "err", err)
-			}
+		d.sendOutboundImages(ctx, p, msg.ChatID, outImages)
+	}
+}
+
+// sendOutboundImages delivers each turn image as its own reply bubble.
+//
+// Extracted from sendAndReply (mirroring readTurnImages) so the
+// failure-accounting contract is unit-testable without a full sendAndReply
+// roundtrip.
+func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, chatID string, images []platform.Image) {
+	for _, img := range images {
+		// R20260623-LB-3 (#2305): deliver via ReplyWithRetry (not bare
+		// Reply) so an outbound image inherits the same token-invalidation
+		// one-shot retry the text path gets. Previously a single-image
+		// reply that hit Feishu token-expiry (99991671) was lost silently:
+		// the platform cleared the cache but the bare Reply never retried
+		// with the rotated token. ReplyWithRetry grants the extra rotation
+		// attempt so the image lands on the fresh token.
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
+			ChatID: chatID,
+			Images: []platform.Image{img},
+		}, limits.PlatformReplyMaxAttempts); err != nil {
+			// R202606j-CR-007: a failed outbound image send must be visible
+			// in /health metrics, matching the text reply paths (single-use
+			// token, split chunk, error reply). Without this an image-only
+			// reply that fails after retries was lost silently — invisible
+			// to dispatchSendFailTotal / sendFailCount.
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Warn("send image failed", "err", err)
 		}
 	}
 }
