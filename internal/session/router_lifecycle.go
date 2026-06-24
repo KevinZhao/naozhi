@@ -142,6 +142,26 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 
 // ResetChat resets all sessions belonging to a chat (all agents).
 func (r *Router) ResetChat(chatKeyPrefix string) {
+	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, "", false)
+}
+
+// ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
+// and installs a new workspace override for it under a single r.mu critical
+// section. The /cd command needs this: doing ResetChat() then SetWorkspace()
+// as two separate locked calls opens a window (R202606j-CR-006, #2342) where a
+// concurrent message for the same chat key sees the key idle (already reset)
+// AND the override already deleted, so GetOrCreate spawns a session in the OLD
+// (default) workspace before SetWorkspace re-installs the new path. Folding
+// both mutations into one locked section closes that gap.
+func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
+	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, path, true)
+}
+
+// resetChatAndMaybeSetWorkspace is the shared locked core for ResetChat and
+// ResetChatAndSetWorkspace. When setWorkspace is true it installs `path` as the
+// chat's workspace override before releasing r.mu, so callers that reset+set
+// observe no intermediate state.
+func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWorkspace bool) {
 	r.mu.Lock()
 	var toClose []processIface
 	var closedActive int
@@ -190,6 +210,23 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		// the override on restart and silently undo the user's reset.
 		r.wsStore.dirty = true
 		r.wsStore.gen.Add(1)
+	}
+	if setWorkspace && chatKeyPrefix != "" {
+		// Install the new override in the SAME locked section as the reset
+		// above so no concurrent GetOrCreate observes the chat reset but the
+		// override still gone (#2342). We just deleted any existing override
+		// for this key, so this is always a fresh insert; mirror
+		// SetWorkspace's bookkeeping (cap eviction, seq, dirty, gen).
+		if len(r.wsStore.overrides) >= maxWorkspaceOverrides {
+			if !r.evictWorkspaceOverrideLocked() {
+				slog.Warn("workspaceOverrides at capacity and no session-less entry to evict; dropping override",
+					"chat_key", chatKeyPrefix, "cap", maxWorkspaceOverrides)
+			} else {
+				r.setWorkspaceOverrideLocked(chatKeyPrefix, path)
+			}
+		} else {
+			r.setWorkspaceOverrideLocked(chatKeyPrefix, path)
+		}
 	}
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
