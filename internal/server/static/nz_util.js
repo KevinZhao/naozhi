@@ -43,7 +43,32 @@
   // Escape for embedding inside a JS string literal (e.g. inline onclick="f('…')").
   function escJs(s) {
     if (!s) return '';
-    return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+    // R202606j-SEC-9 (#2344): besides the obvious string-breakers, escape
+    // every C0/C1 control char (U+0000-001F, U+007F-009F) plus Unicode
+    // zero-width / bidi format chars (ZWSP..RLM, LRE..RLO/PDF, WJ, isolates),
+    // the line/paragraph separators U+2028/U+2029 (which are raw JS line
+    // terminators and can break the literal), and the BOM U+FEFF. Such runes
+    // can survive a filesystem path name and ride into the inline onclick
+    // attribute; mapping each to its \\uXXXX escape keeps the emitted literal
+    // inert and prevents visual path spoofing. Printables (CJK, emoji,
+    // accented latin) pass through unchanged.
+    let out = String(s)
+      .replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n').replace(/\r/g, '\\r')
+      .replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+    return out.replace(/[\s\S]/g, ch => {
+      const c = ch.charCodeAt(0);
+      const dangerous =
+        (c <= 0x1f) ||
+        (c >= 0x7f && c <= 0x9f) ||
+        (c >= 0x200b && c <= 0x200f) ||
+        (c >= 0x202a && c <= 0x202e) ||
+        c === 0x2060 ||
+        (c >= 0x2066 && c <= 0x2069) ||
+        c === 0x2028 || c === 0x2029 ||
+        c === 0xfeff;
+      return dangerous ? '\\u' + c.toString(16).padStart(4, '0') : ch;
+    });
   }
 
   // fetchJSON wraps fetch() with a hard timeout (default 10s) so spinners and
