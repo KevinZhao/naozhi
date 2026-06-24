@@ -577,6 +577,18 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 	// carried: the new incarnation's CLI re-counts its running total from ~0,
 	// so the fresh session's baseline must start at 0 for the first
 	// post-spawn delta to be computed correctly (see TurnCostDelta).
+	//
+	// KNOWN LOSS WINDOW (R202606e-CR-004 / #2284): this reads old.costSpent at
+	// spawn time. If a passthrough turn is still in flight on the OLD process
+	// when spawn happens (resume-triggered respawn races an unfinished turn),
+	// that turn's finishRun lands its cost delta on the now-orphaned old
+	// *ManagedSession — which is no longer in r.ss.sessions — so the new
+	// session never sees it and the last few cents are silently undercounted.
+	// Closing the window cleanly requires a process-level "no in-flight turn"
+	// barrier before snapshotting, which the current lock model does not
+	// provide; documented here so the divergence is intentional, not a missing
+	// carry. The error is bounded (only turns straddling the spawn instant) and
+	// cost is advisory, not billing-authoritative.
 	oldCostSpent := loadTotalCost(&old.costSpent)
 	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt
 }

@@ -59,6 +59,17 @@ func TestExpandEnvVars_DenyUpstreamCredentials(t *testing.T) {
 		{"MISTRAL_API_KEY", "mistral-secret"},
 		{"HUGGINGFACE_TOKEN", "hf_secret"},
 		{"HUGGING_FACE_HUB_TOKEN", "hf_secret"},
+		// R202606h-SEC-6 (#2320): generic org-secret naming patterns must
+		// also be refused even without a known provider prefix.
+		{"DATABASE_PASSWORD", "db-secret-do-not-leak"},
+		{"DATABASE_URL_TOKEN", "db-token-do-not-leak"},
+		{"SECRET_KEY", "rails-secret-do-not-leak"},
+		{"APP_SECRET_KEY", "app-secret-do-not-leak"},
+		{"MY_SERVICE_API_KEY", "svc-key-do-not-leak"},
+		{"REDIS_PASSWORD", "redis-secret"},
+		{"VAULT_TOKEN", "vault-secret"},
+		{"STRIPE_PRIVATE_KEY", "stripe-secret"},
+		{"DB_CREDENTIALS", "creds-do-not-leak"},
 	}
 	for _, tc := range denyCases {
 		t.Run(tc.envName, func(t *testing.T) {
@@ -87,6 +98,9 @@ func TestExpandEnvVars_DenyUpstreamCredentials(t *testing.T) {
 		{"FEISHU_APP_SECRET", "feishu-secret"},
 		{"SLACK_BOT_TOKEN", "xoxb-tok"},
 		{"PC_REVERSE_TOKEN", "pc-tok"},
+		// #2320: a generic non-secret config value must still expand even
+		// though it shares no provider prefix and ends in nothing secret.
+		{"TEST_NAOZHI_HOSTNAME", "example.com"},
 	}
 	for _, tc := range allowCases {
 		t.Run("allow_"+tc.envName, func(t *testing.T) {

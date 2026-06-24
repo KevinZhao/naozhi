@@ -204,6 +204,14 @@ type Dispatcher struct {
 	// fields (sendFn / takeoverFn / replyFooterFn) into this single
 	// interface to make wireup harder to forget.
 	caps Capabilities
+
+	// inboundLogCache memoizes the per-(platform,user,chat) slog.Logger built
+	// in prepareInbound so a chat that bursts N messages reuses one handler
+	// chain instead of allocating slog.With(platform,user,chat) N times.
+	// R202606c-PERF-010 (#2233). Zero value is ready to use; entries are
+	// immutable *slog.Logger values (safe for concurrent use). See
+	// inbound_logcache.go for the bounded-map semantics.
+	inboundLogCache inboundLogCache
 }
 
 // keyForChat returns the routed session key for the given chat coordinates
@@ -666,11 +674,20 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// session-key component sanitization (strips C0/bidi/zero-width,
 	// replaces colons, bounds length) so the logger's attr view matches
 	// the session-key view in the log. R60-GO-H1.
-	lg := slog.With(
-		"platform", session.SanitizeLogAttr(msg.Platform),
-		"user", session.SanitizeLogAttr(msg.UserID),
-		"chat", session.SanitizeLogAttr(msg.ChatID),
-	)
+	// #2233: a chat bursting many messages would otherwise pay
+	// slog.With(platform,user,chat) — a fresh handler chain — per message.
+	// Memoize on the sanitized triple so repeat traffic from the same
+	// (platform,user,chat) reuses one logger. The sanitized values ARE the
+	// attr values, so the cache key cannot diverge from the logger contents.
+	sp := session.SanitizeLogAttr(msg.Platform)
+	su := session.SanitizeLogAttr(msg.UserID)
+	sc := session.SanitizeLogAttr(msg.ChatID)
+	logKey := sp + "\x00" + su + "\x00" + sc
+	lg := d.inboundLogCache.get(logKey)
+	if lg == nil {
+		lg = slog.With("platform", sp, "user", su, "chat", sc)
+		d.inboundLogCache.put(logKey, lg)
+	}
 	trimmed := strings.TrimSpace(msg.Text)
 
 	// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
@@ -1696,7 +1713,11 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// at maxLen+suffix > maxLen. Detect that case and suppress the page
 	// suffix entirely rather than emit guaranteed-oversized chunks.
 	suppressSuffix := false
-	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
+	// #2283: compute the rune count once here and reuse it both for the
+	// page-suffix reservation and SplitTextWithCount below, instead of
+	// scanning the same string twice (here + inside platform.SplitText).
+	runeCount := utf8.RuneCountInString(text)
+	if runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
 		// reservation to the worst-case suffix for the resulting chunk count.
 		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
@@ -1709,7 +1730,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		}
 	}
 
-	chunks := platform.SplitText(text, splitLen)
+	chunks := platform.SplitTextWithCount(text, splitLen, runeCount)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 && !suppressSuffix {

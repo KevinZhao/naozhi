@@ -641,3 +641,72 @@ func TestMerged_NilReceiver(t *testing.T) {
 		t.Errorf("nil-receiver returned data: %+v", got)
 	}
 }
+
+// TestIsSortedContract_ShortCircuit verifies the R202606g-PERF-001 (#2307)
+// short-circuit: slices of length ≤1 are reported sorted without invoking
+// the O(n) comparison walk, while a genuinely unsorted slice of length >1
+// still returns false so the defensive concat+sort fallback fires.
+func TestIsSortedContract_ShortCircuit(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []cli.EventEntry
+		want bool
+	}{
+		{"nil", nil, true},
+		{"empty", []cli.EventEntry{}, true},
+		{"single", []cli.EventEntry{{UUID: "a", Time: 100}}, true},
+		{"sorted-pair", []cli.EventEntry{{UUID: "a", Time: 100}, {UUID: "b", Time: 200}}, true},
+		{"sorted-tie-uuid", []cli.EventEntry{{UUID: "a", Time: 100}, {UUID: "b", Time: 100}}, true},
+		{"unsorted-time", []cli.EventEntry{{UUID: "b", Time: 200}, {UUID: "a", Time: 100}}, false},
+		{"unsorted-tie-uuid", []cli.EventEntry{{UUID: "b", Time: 100}, {UUID: "a", Time: 100}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSortedContract(tc.in); got != tc.want {
+				t.Errorf("isSortedContract(%+v) = %v; want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMerged_SingleTierTakesFastPath_NoWarn guards the optimization's
+// observable contract: a single-tier LoadBefore (one source empty, the
+// other sorted) must take the linear fast path and emit NO "unsorted
+// entries" repair WARN. The empty side skips its scan; the non-empty side
+// is sorted so the contract holds. A regression that mis-classified the
+// empty side as unsorted would surface here as a spurious WARN.
+func TestMerged_SingleTierTakesFastPath_NoWarn(t *testing.T) {
+	buf := captureSlog(t)
+	m := &Source{
+		Local: &stubSource{entries: []cli.EventEntry{
+			{UUID: "a", Time: 100},
+			{UUID: "b", Time: 200},
+		}},
+		Fallback: &stubSource{}, // empty — its scan must be skipped
+	}
+	got, err := m.LoadBefore(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatalf("LoadBefore err: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	if strings.Contains(buf.String(), "unsorted entries") {
+		t.Errorf("single-tier sorted input took repair path; log:\n%s", buf.String())
+	}
+}
+
+// BenchmarkMergeDedup_SingleTier exercises the dominant LoadBefore shape
+// (fallback empty, local carries the page) so the #2307 saved scan shows
+// up as a measurable allocation/time delta vs. the prior double-scan.
+func BenchmarkMergeDedup_SingleTier(b *testing.B) {
+	local := make([]cli.EventEntry, 256)
+	for i := range local {
+		local[i] = cli.EventEntry{UUID: string(rune('a' + i%26)), Time: int64(i)}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = mergeDedup(local, nil, 0)
+	}
+}

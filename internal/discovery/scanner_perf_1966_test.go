@@ -40,6 +40,50 @@ func TestGetCachedPrompt_LockFreeGenRefresh(t *testing.T) {
 	}
 }
 
+// TestSetCachedPrompt_StableEntryAddressNoSeparateAtomicAlloc verifies the
+// #2322 change: the prompt cache stores *promptCacheEntry with an inline
+// atomic gen field (no separate new(atomic.Uint64) per cache miss). The
+// lock-free gen Store on a hit requires the gen field's address to stay stable
+// for the entry's lifetime — which holds because the entry itself is heap-
+// allocated once and the map holds the pointer. Re-writing the same key with a
+// fresh mtime installs a new entry (address may change), but within one
+// installed entry the &gen address never moves under hit refreshes.
+func TestSetCachedPrompt_StableEntryAddressNoSeparateAtomicAlloc(t *testing.T) {
+	t.Parallel()
+	sc := NewScanner()
+	const path = "/p/stable.jsonl"
+	const mtime int64 = 11
+
+	sc.setCachedPrompt(path, mtime, "v1")
+
+	sc.promptCache.RLock()
+	e1 := sc.promptCache.entries[path]
+	sc.promptCache.RUnlock()
+	genAddr := &e1.gen
+
+	// Many hit refreshes must mutate the same gen field in place — the entry
+	// pointer and the &gen address must not change across hits.
+	for i := 0; i < 10; i++ {
+		sc.promptCache.generation.Add(1)
+		if _, ok := sc.getCachedPrompt(path, mtime); !ok {
+			t.Fatalf("iter %d: expected cache hit", i)
+		}
+		sc.promptCache.RLock()
+		e2 := sc.promptCache.entries[path]
+		sc.promptCache.RUnlock()
+		if e2 != e1 {
+			t.Fatalf("iter %d: entry pointer changed on hit refresh", i)
+		}
+		if &e2.gen != genAddr {
+			t.Fatalf("iter %d: &gen address moved on hit refresh", i)
+		}
+	}
+
+	if e1.gen.Load() != sc.promptCache.generation.Load() {
+		t.Errorf("gen = %d, want current %d", e1.gen.Load(), sc.promptCache.generation.Load())
+	}
+}
+
 // TestGetCachedPrompt_ConcurrentHits exercises many goroutines refreshing the
 // same entry concurrently while the generation advances. With -race this
 // catches any unsynchronised access — the gen refresh must be a lock-free

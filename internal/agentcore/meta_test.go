@@ -57,6 +57,48 @@ func TestResultMetaOf(t *testing.T) {
 	}
 }
 
+// TestParseResultLine pins R202606h-PERF-002 (#2321): a single decode of the
+// result line yields every facet (text/cost/duration/error), and the three
+// facet helpers (ResultText / ResultMetaOf / isResultLine) stay consistent
+// with that single source of truth — they now delegate to ParseResultLine
+// rather than each re-decoding the same bytes.
+func TestParseResultLine(t *testing.T) {
+	line := json.RawMessage(`{"type":"result","subtype":"success","is_error":false,"result":"all done","total_cost_usd":0.5,"duration_ms":1234}`)
+
+	p, ok := ParseResultLine(line)
+	if !ok {
+		t.Fatalf("ParseResultLine ok=false, want true")
+	}
+	if p.Result != "all done" || p.CostUSD != 0.5 || p.DurationMS != 1234 || p.IsError {
+		t.Fatalf("probe = %+v, want result/cost/dur/!err", p)
+	}
+
+	// Facet helpers must agree with the single decode.
+	if txt, ok := ResultText(line); !ok || txt != p.Result {
+		t.Errorf("ResultText = (%q,%v), want (%q,true)", txt, ok, p.Result)
+	}
+	if m, ok := ResultMetaOf(line); !ok || m.CostUSD != p.CostUSD || m.DurationMS != p.DurationMS {
+		t.Errorf("ResultMetaOf = (%+v,%v), want cost/dur match", m, ok)
+	}
+	if isRes, isErr := isResultLine(line); !isRes || isErr {
+		t.Errorf("isResultLine = (%v,%v), want (true,false)", isRes, isErr)
+	}
+
+	// subtype-only error path still classifies as error.
+	errLine := json.RawMessage(`{"type":"result","subtype":"error_during_execution","is_error":false}`)
+	if isRes, isErr := isResultLine(errLine); !isRes || !isErr {
+		t.Errorf("subtype-only error: isResultLine = (%v,%v), want (true,true)", isRes, isErr)
+	}
+
+	// non-result + malformed short-circuit.
+	if _, ok := ParseResultLine(json.RawMessage(`{"type":"assistant"}`)); ok {
+		t.Error("non-result line: ok=true, want false")
+	}
+	if _, ok := ParseResultLine(json.RawMessage(`{not json but "type":"result"`)); ok {
+		t.Error("malformed result line: ok=true, want false")
+	}
+}
+
 // TestRun_CapturesMetaFromStream pins the end-to-end agentcore capture:
 // cost/duration from the result event, image/memory from the meta frame.
 func TestRun_CapturesMetaFromStream(t *testing.T) {

@@ -845,6 +845,8 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 		if replays[i].Type != "replay" {
 			continue
 		}
+		// done is intentionally discarded: turn-end is read off the emitted
+		// events' Type below, not the advisory bool (R202606f-ARCH-5, #2303).
 		events, _, err := proto.ReadEvent(replays[i].Line)
 		if err != nil || len(events) == 0 {
 			continue

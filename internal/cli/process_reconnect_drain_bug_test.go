@@ -174,3 +174,33 @@ func TestIsMidTurn(t *testing.T) {
 		})
 	}
 }
+
+// doneIgnoringProtocol embeds *ClaudeProtocol (inheriting the full Protocol
+// surface) and overrides only ReadEvent to return done=true alongside a NON
+// result event. It pins the R202606f-ARCH-5 (#2303) contract: turn-end is
+// driven by a result Event, never by the advisory `done` bool. Clone returns
+// the same wrapped behaviour so isMidTurn's call path is exercised faithfully.
+type doneIgnoringProtocol struct{ *ClaudeProtocol }
+
+func (d doneIgnoringProtocol) ReadEvent(line string) ([]Event, bool, error) {
+	// Always claim the turn is done, but only ever emit an assistant event.
+	// A caller that honoured `done` would treat this as turn-complete; the
+	// documented contract says it must NOT, because there is no result Event.
+	return []Event{{Type: "assistant"}}, true, nil
+}
+
+func (d doneIgnoringProtocol) Clone() Protocol { return d }
+
+// TestIsMidTurn_IgnoresAdvisoryDone verifies isMidTurn does not let a
+// protocol's done=true short-circuit the result-Event-based turn-end
+// detection. The last (and only) emitted event is an assistant frame, so the
+// turn is still in progress regardless of done=true (#2303).
+func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
+	proto := doneIgnoringProtocol{ClaudeProtocol: &ClaudeProtocol{}}
+	replays := []shim.ServerMsg{
+		{Type: "replay", Line: `{"ignored":"the stub ignores the line"}`},
+	}
+	if got := isMidTurn(replays, proto); !got {
+		t.Errorf("isMidTurn = false; want true — done=true must NOT settle a turn that emitted no result Event (#2303)")
+	}
+}
