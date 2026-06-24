@@ -755,3 +755,9 @@
 - [R202606h-ARCH-3] agentcore RunResult.ExitCode 无 omitempty,transport-failed 的 exit_status:0 与"干净退出0"不可区分 — internal/cron/sandbox.go:110
 - [R202606h-SEC-12-dup] ServerConfig.DashboardToken 仅警告空 token 无最小长度(已 CLOSED #1047) — internal/config/config.go:1076
 - [R202606h-PERF-007] attachment GCWithRefs MetaGrace os.Stat 与 shouldKeepAttachment 的 ReadFile 重复 stat — internal/attachment/store.go:501
+- [R202606j-PERF-012] snapshot 每 poll 调 costUnitForBackend(map+once),backend/cost 一旦定不变,可缓存于 ManagedSession — internal/session/managed_query.go:1064
+- [R202606j-PERF-005] formatToolUse 对 Bash/Grep/Glob/Agent 各 json.Unmarshal,单字段可手解析 — internal/dispatch/status.go:82
+- [R202606j-PERF-002] mergeStopAndValues 返回 mergedCtx 接口装箱致每 passthrough 消息逃逸堆 — internal/dispatch/passthrough_stopctx.go:35
+- [R202606j-GO-003] ManagedState 无锁读 s.exempt(write-once-at-construction 实际安全),宜 atomic.Bool 或文档化 — internal/session/managed_state.go:82
+- [R202606j-CR-005] i18n.compile 畸形占位符守卫查 { 不查 },{a}} 静默丢第二个 } — internal/i18n/printer.go:50
+- [R202606j-PERF-007] apierr.Localize 每 reply strings.ToLower(prefix) 分配,可 EqualFold 免分配 — internal/apierr/apierr.go:71
