@@ -59,6 +59,29 @@ const (
 // load-bearing as a refactor-that-never-came. Treat this field list as the
 // canonical current shape: when a field genuinely moves out, delete it here in
 // the same change rather than pre-annotating an intended destination.
+//
+// R202606b-ARCH-3 (#2197): this is a known god-struct (~48 fields). A prior
+// proposal to fold the dashboard/API handler group below into a `handlers`
+// sub-struct was evaluated and rejected as net-negative: those `*xHandler`
+// fields are reached via the `s.cronH.HandleX` / `srv.sessionH.HandleX`
+// receiver path from routes.go and ~50 test call sites, and the
+// routes_snapshot_test.go AST contract pattern-matches the exact
+// `s.<handlerField>.<method>` selector shape to derive the handler type. A
+// sub-struct would force `s.handlers.cronH…` everywhere and break that
+// contract for no behavioural gain. The struct stays flat; the role-grouped
+// dividers below ARE the cognitive map — read the section a field lives in to
+// know its role. Field groups, in declaration order:
+//
+//	HTTP entry           — addr / mux / startedAt / onReady / appCtx / logger
+//	core deps            — router / scheduler / hub / projectMgr
+//	multi-node           — nodes / reverseNodeServer / nodesMu
+//	handler groups       — auth + the *xHandler dashboard/API handlers
+//	send / dispatch      — dedup / sessionGuard / msgQueue / agents / tokens / timeouts
+//	paths / caches       — claudeDir / discoveryCache / scratchPool / sysessionMgr / …
+//	modes / resolver     — debugMode / headless / resolver / nodeCache
+//	watchdog / shutdown  — watchdog counters / shutdownComplete
+//	platforms            — platforms / knownNodes
+//
 // Verification rule:
 //
 //	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
