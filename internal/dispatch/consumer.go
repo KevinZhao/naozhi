@@ -48,6 +48,9 @@ type SessionRouter interface {
 	ResetChat(chatKeyPrefix string)
 	Workspace(chatKey string) string
 	SetWorkspace(chatKey, path string)
+	// ResetChatAndSetWorkspace atomically resets the chat and installs a new
+	// workspace override (#2342) — used by /cd to avoid the reset/set race.
+	ResetChatAndSetWorkspace(chatKeyPrefix, path string)
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()
 }

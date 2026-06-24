@@ -542,6 +542,18 @@ type ManagedSession struct {
 	// allowed to silently misalign origin labels with their session IDs.
 	prevSessionOrigins []string
 
+	// prevHistoryGen increments on every mutation of prevSessionIDs /
+	// prevSessionOrigins (under historyMu, by SetPrevSessionOrigins /
+	// ReplacePrevSessionIDs / RebuildChainFiltered). The per-session
+	// marshal cache (R202606j-PERF-014, #2346) stamps the gen it observed
+	// so equalStoreEntry can compare an O(1) counter instead of running
+	// slices.Equal over the (≤32-entry) parallel chain slices on every 30s
+	// saveIfDirty tick. Construction-time direct field writes leave gen at
+	// 0, which is correct: the cache starts empty so the first encode always
+	// rebuilds. Atomic so SnapshotPrevSessionIDs-class readers that hold only
+	// historyMu.RLock observe a torn-free value.
+	prevHistoryGen atomic.Uint64
+
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool

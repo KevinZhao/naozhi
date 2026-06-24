@@ -9016,12 +9016,22 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     // Isolation is unchanged (opaque origin, see above). No blob URL is
     // allocated, so there is nothing to track or revoke.
     //
-    // Accepted trade-offs vs. the desktop blob path (all strictly better
-    // than the blank frame mobile users get today; tracked for follow-up):
-    //   - CSP: srcdoc documents inherit the dashboard page CSP, so workspace
-    //     HTML loading an external <script> is restricted to the script-src
-    //     allowlist AND require-sri-for (i.e. even jsdelivr needs integrity=).
-    //     Inline scripts (MathJax/KaTeX/Mermaid) still run via allow-scripts.
+    // R202606j-SEC-1 (#2341): srcdoc documents inherit the PARENT page CSP,
+    // unlike the desktop blob: path which carries no inherited policy. Left
+    // unguarded, workspace HTML would execute under the dashboard's own CSP
+    // — including its script-src allowlist and connect-src endpoints — so a
+    // hostile .html could fetch dashboard-allowlisted origins. Prepend a
+    // self-contained <meta> CSP that REPLACES the inherited dashboard policy
+    // with one scoped to the opaque-origin preview: inline scripts still run
+    // (parity with the desktop blob path: MathJax/KaTeX/Mermaid), but the
+    // document gets its own connect/img/style budget rather than borrowing
+    // the dashboard's. A <meta> http-equiv CSP can only further restrict the
+    // inherited policy, never widen it, so this is strictly safe. It is
+    // injected as the document's first child so the parser applies it before
+    // any subsequent inline <script> executes.
+    //
+    // Other accepted trade-offs vs. the desktop blob path (all strictly
+    // better than the blank frame mobile users get today):
     //   - Encoding: srcdoc is parsed as UTF-8 per spec and an in-document
     //     <meta charset> is ignored, so a non-UTF-8 file (e.g. GBK) renders
     //     garbled here. TextDecoder defaults to fatal:false (U+FFFD on bad
@@ -9030,7 +9040,8 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     //   - SVG: srcdoc is HTML-parsed, not XML-parsed. A single <svg> root
     //     renders as foreign content; XML-only features (CDATA, xml:* attrs)
     //     may parse differently than the desktop image/svg+xml blob path.
-    frame.srcdoc = new TextDecoder('utf-8').decode(bytes);
+    const sandboxCsp = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; connect-src 'none'\">";
+    frame.srcdoc = sandboxCsp + new TextDecoder('utf-8').decode(bytes);
     body.appendChild(frame);
   } catch (e) {
     if (mySeq !== _sandboxRenderSeq) return;
