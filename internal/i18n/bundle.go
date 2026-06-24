@@ -7,6 +7,12 @@
 // follow-up slice; this package currently imports only stdlib + golang.org/x/text.
 package i18n
 
+import (
+	"sync"
+
+	"golang.org/x/text/language"
+)
+
 // HeuristicCfg controls the CJK rune-ratio language guess (§3.5, NNM5).
 type HeuristicCfg struct {
 	Enabled      bool
@@ -24,6 +30,14 @@ type Bundle struct {
 	supported     []string
 	heuristicCfg  HeuristicCfg
 	msgs          map[string]map[string]*compiledTemplate
+
+	// matcherOnce/cachedMatcher memoize the x/text language.Matcher. The
+	// Bundle is immutable after construction and language.Matcher is safe for
+	// concurrent use, so building it once (instead of per Accept-Language
+	// request) avoids re-parsing supportedTags + rebuilding the matcher trie on
+	// every inbound HTTP request. R202606j-CR-002.
+	matcherOnce   sync.Once
+	cachedMatcher language.Matcher
 }
 
 // NewForTest builds a Bundle from an in-memory map (locale → key → template
