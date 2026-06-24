@@ -176,7 +176,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 		path := filepath.Join(dir, e.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			slog.Warn("cron sandbox: pending read failed; skipping", "file", e.Name(), "err", err)
+			slog.Warn("cron sandbox: pending read failed; skipping", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
 			continue
 		}
 		var p sandboxPending
@@ -194,7 +194,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 			// skip the StopSession block yet still call finishRun and
 			// remove the file, breaking §6.2 containment. Treat as corrupt:
 			// drop+warn, aligned with stopSandboxRunsForJob's guard.
-			slog.Warn("cron sandbox: corrupt pending record dropped", "file", e.Name(), "err", err)
+			slog.Warn("cron sandbox: corrupt pending record dropped", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
 			_ = os.Remove(path)
 			continue
 		}

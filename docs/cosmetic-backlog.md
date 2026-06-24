@@ -761,3 +761,7 @@
 - [R202606j-GO-003] ManagedState 无锁读 s.exempt(write-once-at-construction 实际安全),宜 atomic.Bool 或文档化 — internal/session/managed_state.go:82
 - [R202606j-CR-005] i18n.compile 畸形占位符守卫查 { 不查 },{a}} 静默丢第二个 } — internal/i18n/printer.go:50
 - [R202606j-PERF-007] apierr.Localize 每 reply strings.ToLower(prefix) 分配,可 EqualFold 免分配 — internal/apierr/apierr.go:71
+- [R202606i-PERF-004] shim WriteStateFile 用 json.MarshalIndent,生产无人读应 json.Marshal(重复发现,见 R202606f-PERF-012) — internal/shim/state.go:83
+- [R202606i-CR-003] R202606-CORR-002 测试锚点无对应 tracking issue,traceability 缺失 — internal/server/unauth_unknownip_failclosed_test.go:124
+- [R202606i-SEC-2] stopOneSandboxPendingFile 重读 pending 文件(需 operator 写权限的 TOCTOU,低危) — internal/cron/sandbox_pending.go:562
+- [R202606i-ARCH-2] runtelemetry.RunEndedEvent 无 SandboxMeta/cost 字段,cost 受据无法经统一 telemetry 到 WS(已 #2286 覆盖) — internal/runtelemetry/event.go:65

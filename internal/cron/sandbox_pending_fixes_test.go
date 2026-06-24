@@ -613,8 +613,9 @@ func TestReconcileOrphan_NoGhostAttentionWhenJobDeletedBeforeRecheck(t *testing.
 
 	startedBefore := rec.startedCount()
 	s.reconcileOneSandboxOrphan(p, path)
-	// deleted-job branch does not broadcast; wait a tick to be sure.
-	time.Sleep(5 * time.Millisecond)
+	// reconcileOneSandboxOrphan's deleted-job branch is fully synchronous
+	// (metrics bumps + os.Remove, no goroutine/broadcast), so its effects are
+	// complete the moment the call returns — assert directly, no sleep needed.
 
 	// No broadcast expected from the deleted-job branch.
 	if rec.endedCount() != 0 {

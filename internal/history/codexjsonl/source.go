@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -58,10 +59,31 @@ const maxFileBytes = 16 << 20 // 16 MiB
 // checks during parsing. Mirrors kirojsonl.
 const ctxCheckEvery = 100
 
+// scanBufPool recycles the 64 KiB initial line buffer that bufio.Scanner
+// would otherwise heap-allocate on every parseFile call. The dashboard
+// paginates a session by issuing one LoadBefore per page, so a fresh 64 KiB
+// alloc per page is pure churn (mirrors kirojsonl's scanBufPool).
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 64*1024)
+		return &b
+	},
+}
+
 // Source is the codex rollout-JSONL-backed history.Source.
 type Source struct {
 	rootDir   string        // ~/.codex/sessions — empty disables the source
 	sessionID SessionIDFunc // produces the current codex thread ID
+
+	// findRollout caches the resolved rollout path per thread id. A session's
+	// thread id is stable for its lifetime and the date-bucketed tree it lives
+	// in can hold thousands of files after months of codex use, so a full
+	// filepath.WalkDir on every LoadBefore (session first render + each "load
+	// more") is wasted work. mu guards the cache because the dashboard issues
+	// LoadBefore concurrently across requests.
+	mu         sync.Mutex
+	cachedSid  string
+	cachedPath string
 }
 
 // New constructs a Source. If rootDir is empty or sessionIDFn is nil, the
@@ -150,9 +172,14 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 
 	entries := s.parseFile(ctx, f, beforeMS)
 
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Time < entries[j].Time
-	})
+	// codex appends in chronological order, so parseFile already returns
+	// sorted entries in the common case. Skip the O(n log n) stable sort when
+	// the slice is already ordered; only pay it on the (defensive) out-of-order
+	// path. merged.mergeDedup applies the same IsSorted fast-path downstream.
+	less := func(i, j int) bool { return entries[i].Time < entries[j].Time }
+	if !sort.SliceIsSorted(entries, less) {
+		sort.SliceStable(entries, less)
+	}
 
 	if len(entries) > limit {
 		entries = entries[len(entries)-limit:]
@@ -168,6 +195,19 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // UUID), the lexicographically last is returned so a resumed/forked thread
 // reading the freshest file wins.
 func (s *Source) findRollout(sid string) (string, error) {
+	// Cache hit: the thread id is unchanged and we previously resolved a path.
+	// A stale path (file deleted/moved) is self-healing — the caller's os.Open
+	// fails and LoadBefore falls through to its (nil,nil) tail, and the next
+	// distinct sid (or process restart) re-walks. We trade that rare miss for
+	// skipping a full-tree WalkDir on the hot pagination path.
+	s.mu.Lock()
+	if s.cachedSid == sid && s.cachedPath != "" {
+		p := s.cachedPath
+		s.mu.Unlock()
+		return p, nil
+	}
+	s.mu.Unlock()
+
 	suffix := "-" + sid + ".jsonl"
 	var best string
 	walkErr := filepath.WalkDir(s.rootDir, func(p string, d os.DirEntry, err error) error {
@@ -192,6 +232,15 @@ func (s *Source) findRollout(sid string) (string, error) {
 	if walkErr != nil && best == "" {
 		return "", walkErr
 	}
+	// Cache the resolved path so subsequent pages for the same thread skip the
+	// WalkDir. Only cache a non-empty hit; an empty result (no rollout flushed
+	// yet) must keep re-walking until codex writes the file.
+	if best != "" {
+		s.mu.Lock()
+		s.cachedSid = sid
+		s.cachedPath = best
+		s.mu.Unlock()
+	}
 	return best, nil
 }
 
@@ -215,8 +264,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
 	// Allow 1 MiB lines — assistant messages can be long; the default 64 KiB
-	// would truncate token-rich replies.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	// would truncate token-rich replies. The initial buffer is pooled:
+	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
+	// returning it at zero length recycles the 64 KiB backing array.
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer func() {
+		b := (*bufPtr)[:0]
+		*bufPtr = b
+		scanBufPool.Put(bufPtr)
+	}()
+	scanner.Buffer(*bufPtr, 1<<20)
 	if skipPartialFirstLine && scanner.Scan() {
 		// Discard the partial line straddling the seek boundary.
 	}
