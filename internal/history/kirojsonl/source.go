@@ -254,10 +254,24 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	// reading from offset 0 would surface only the oldest prompts and the
 	// newest messages would never be parsed. Seek to the tail window and drop
 	// the first (likely partial) line so the cap covers recent bytes.
+	//
+	// Only drop the first line when it is genuinely a half-record straddling
+	// the seek boundary. Probe the byte immediately before the window start:
+	// if it is '\n', the window begins exactly on a record boundary and the
+	// first line is a complete, valid JSONL record — dropping it would lose
+	// the oldest in-window turn (kirojsonl is that turn's only source).
 	skipPartialFirstLine := false
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
-		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
-			skipPartialFirstLine = true
+		off := fi.Size() - maxFileBytes
+		// off > 0 here because Size() > maxFileBytes. Read the boundary byte
+		// at off-1; if it is not a newline the first line is a partial.
+		var b [1]byte
+		atBoundary := false
+		if _, err := f.ReadAt(b[:], off-1); err == nil {
+			atBoundary = b[0] == '\n'
+		}
+		if _, err := f.Seek(off, io.SeekStart); err == nil {
+			skipPartialFirstLine = !atBoundary
 		}
 	}
 	limited := io.LimitReader(f, maxFileBytes)
