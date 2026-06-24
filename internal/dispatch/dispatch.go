@@ -1687,6 +1687,25 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		return
 	}
 
+	// R202606j-PERF-006: byte-length fast path. maxLen is a rune count
+	// (compared against utf8.RuneCountInString below). Since a string's byte
+	// length is an upper bound on its rune count, len(text) <= maxLen implies
+	// the rune count is also <= maxLen, so the reply can never need splitting.
+	// Emit the single chunk directly and skip the full-text rune scan (which
+	// on a ~50KB reply would walk every byte just to conclude "no split").
+	// Mirrors the single-chunk branch of the loop below (no page suffix,
+	// one ReplyWithRetry, markReplySuccess on success).
+	if len(text) <= maxLen {
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", 1, "err", err)
+		} else {
+			d.markReplySuccess()
+		}
+		return
+	}
+
 	// #2008: when the reply needs splitting we append a "\n— [i/N]" page
 	// suffix to each chunk. Splitting at the raw platform limit yields a
 	// full chunk of exactly maxLen runes; the suffix then pushes it to

@@ -247,6 +247,65 @@ func TestSendSplitReply_SingleUseTokenShortReplyUnchanged(t *testing.T) {
 	}
 }
 
+// TestSendSplitReply_ByteFastPath_ShortAsciiSingleChunk verifies the
+// R202606j-PERF-006 byte-length fast path: an ASCII reply whose byte length is
+// <= maxLen is sent as a single verbatim chunk (no page suffix), matching the
+// pre-optimisation behaviour.
+func TestSendSplitReply_ByteFastPath_ShortAsciiSingleChunk(t *testing.T) {
+	const limit = 2000
+	hp := &hardLimitPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	text := makeRunes('a', 100) // len(text)=100 bytes <= maxLen
+
+	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	if len(hp.accepted) != 1 {
+		t.Fatalf("expected 1 chunk via byte fast path, got %d", len(hp.accepted))
+	}
+	if hp.accepted[0] != text {
+		t.Errorf("fast-path chunk altered: got %q want %q", hp.accepted[0], text)
+	}
+	if lastPageSuffixIndex(hp.accepted[0]) >= 0 {
+		t.Errorf("fast-path single chunk unexpectedly carries a page suffix: %q", hp.accepted[0])
+	}
+}
+
+// TestSendSplitReply_ByteFastPath_MultibyteFallthroughSingleChunk guards the
+// fast-path boundary: a multibyte reply whose BYTE length exceeds maxLen but
+// whose RUNE count still fits (so it should not split) must fall through the
+// byte fast path and still be delivered as a single chunk by the rune-count
+// path. This confirms the fast path's len()<=maxLen guard is conservative
+// (never over-fires) and that the slow path remains correct for such inputs.
+func TestSendSplitReply_ByteFastPath_MultibyteFallthroughSingleChunk(t *testing.T) {
+	const limit = 2000
+	hp := &hardLimitPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	// 1500 CJK runes: rune count 1500 <= 2000 (no split needed), but byte
+	// length is 4500 (3 bytes/rune) > maxLen, so the byte fast path is skipped.
+	text := makeRunes('好', 1500)
+	if len(text) <= limit {
+		t.Fatalf("test setup: expected byte length > limit, got %d", len(text))
+	}
+
+	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	if len(hp.rejected) != 0 {
+		t.Fatalf("platform rejected %d chunk(s); want 0", len(hp.rejected))
+	}
+	if len(hp.accepted) != 1 {
+		t.Fatalf("expected 1 chunk (rune count fits), got %d", len(hp.accepted))
+	}
+	if hp.accepted[0] != text {
+		t.Errorf("single chunk altered: got %d-rune chunk want original", utf8.RuneCountInString(hp.accepted[0]))
+	}
+}
+
 func makeRunes(r rune, n int) string {
 	buf := make([]rune, n)
 	for i := range buf {
