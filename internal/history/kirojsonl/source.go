@@ -439,11 +439,14 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 	// merged.Source bypasses entirely (see internal/history/merged/source.go)
 	// — so on LoadBefore overlap windows the same kiro line would surface
 	// twice at the merge boundary. The Claude JSONL reader does the same via
-	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). kiro
-	// EventEntries only ever populate Time/Type/Summary, so detail is "" to
-	// match the fields actually present.
+	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). Fold the
+	// real detail (not "") into the hash so two turns sharing the same
+	// wall-clock second and same 120-rune summary but differing only in the
+	// detail tail (runes 120..16000) derive distinct UUIDs; otherwise the
+	// second turn collides and MergedSource's UUID-first dedup silently drops
+	// it before the detail-aware contentKey check.
 	return cli.EventEntry{
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
 		Time:    timeMS,
 		Type:    entryType,
 		Summary: summary,
