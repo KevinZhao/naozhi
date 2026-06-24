@@ -113,6 +113,15 @@ type storeEntry struct {
 	// the dashboard can keep showing the right model after naozhi
 	// restart, before the next turn re-emits init. UI Round 5 R5-3.
 	Model string `json:"model,omitempty"`
+
+	// prevGen is the ManagedSession.prevHistoryGen value observed when the
+	// PrevSessionIDs / PrevSessionOrigins slices above were snapshotted. It is
+	// unexported so encoding/json never serialises it (on-disk shape is
+	// unchanged). equalStoreEntry compares this O(1) counter instead of running
+	// slices.Equal over the chain slices on every 30s saveIfDirty tick
+	// (R202606j-PERF-014, #2346). Because the gen is bumped under historyMu on
+	// every chain mutation, equal gen ⇒ identical chain contents.
+	prevGen uint64
 }
 
 // storeFormatVersion is the current schema version for `sessions.json`.
