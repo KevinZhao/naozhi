@@ -210,6 +210,18 @@ func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribe
 
 	transcript, err := collectTranscripts(stream)
 	if err != nil {
+		// R202606j-CR-003: previously this returned immediately and the
+		// ffmpeg exit error was discarded — an operator seeing only the
+		// Transcribe failure had no signal that the underlying conversion
+		// (e.g. an unsupported codec) was the real cause. The sender
+		// goroutine is the sole owner of pcm.Close() and always sends its
+		// result on the buffered (cap-1) ffmpegErrCh before closing
+		// senderDone, so join senderDone first, then read the ffmpeg error
+		// race-free and join it onto the transcript error when present.
+		<-senderDone
+		if ffmpegErr := <-ffmpegErrCh; ffmpegErr != nil {
+			return "", errors.Join(err, fmt.Errorf("audio convert: %w", ffmpegErr))
+		}
 		return "", err
 	}
 	// #1781: a non-empty transcript means usable PCM still reached Transcribe
