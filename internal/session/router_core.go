@@ -1563,9 +1563,11 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refs := (*refsPtr)[:0]
 	r.mu.RLock()
 	if cap(refs) < len(r.ss.sessions) {
-		// Pool slice too small for this poll — drop it (next caller will
-		// pull a fresh one) and grow once instead of paying the append
-		// growth path.
+		// Pool slice too small for this poll — grow once to the new max
+		// instead of paying the append growth path. The grown backing array
+		// is returned to the pool by the `*refsPtr = refs[:0]` write-back
+		// before Put below, so the pool keeps recycling the larger buffer
+		// (regression guard: listrefspool_grow_2309_test.go).
 		refs = make([]*ManagedSession, 0, len(r.ss.sessions))
 	}
 	for _, s := range r.ss.sessions {
