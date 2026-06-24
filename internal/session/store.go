@@ -230,7 +230,13 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// publish a half-mutated pair.
 	var prevIDs []string
 	var prevOrigins []string
+	var prevGen uint64
 	s.historyMu.RLock()
+	// Read prevHistoryGen inside the same RLock that snapshots the slices so
+	// the (gen, slices) pair is mutually consistent: a writer that bumps gen
+	// holds historyMu.Lock, so we cannot observe a gen that does not match the
+	// slice contents captured here. (#2346)
+	prevGen = s.prevHistoryGen.Load()
 	if len(s.prevSessionIDs) > 0 {
 		prevIDs = slices.Clone(s.prevSessionIDs)
 	}
@@ -243,6 +249,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		SessionID:          sid,
 		PrevSessionIDs:     prevIDs,
 		PrevSessionOrigins: prevOrigins,
+		prevGen:            prevGen,
 		TotalCost:          cost,
 		CostSpent:          loadTotalCost(&s.costSpent),
 		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
@@ -260,6 +267,13 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 // identical, including the slice fields that make `==` illegal. Used by the
 // per-session marshal cache (R20260531A-PERF-2) to decide whether the cached
 // JSON encoding can be reused.
+//
+// R202606j-PERF-014 (#2346): the PrevSessionIDs / PrevSessionOrigins chains are
+// compared via the prevGen counter (bumped under historyMu on every chain
+// mutation) rather than slices.Equal. Equal gen ⇒ identical chain contents, so
+// the O(1) counter compare replaces the per-tick O(len) slice scan. Both
+// entries here always originate from sessionToStoreEntry (the cache stores one,
+// the candidate is freshly built), so both carry a populated prevGen.
 func equalStoreEntry(a, b storeEntry) bool {
 	return a.Key == b.Key &&
 		a.SessionID == b.SessionID &&
@@ -273,8 +287,7 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.UserLabel == b.UserLabel &&
 		a.LabelOrigin == b.LabelOrigin &&
 		a.Model == b.Model &&
-		slices.Equal(a.PrevSessionIDs, b.PrevSessionIDs) &&
-		slices.Equal(a.PrevSessionOrigins, b.PrevSessionOrigins)
+		a.prevGen == b.prevGen
 }
 
 // encodeStoreEntryCached returns the JSON object encoding for s's current
