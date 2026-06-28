@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,22 +92,34 @@ func TestReaperGoroutine_OnlyCapturesLocalKeyHash(t *testing.T) {
 	if len(matches) == 0 {
 		t.Fatal("could not locate reaper goroutine in manager.go — has the spawn site moved? Update the regex above.")
 	}
+	// Permitted m.* references inside the reaper body, each reviewed under
+	// R216-GO-6:
+	//   - m.reaperWG          the WaitGroup contract itself (Done()).
+	//   - m.removeShimIfCurrent an identity-checked, lock-guarded map delete.
+	//     It reads no captured Manager *value* into the closure — the handle it
+	//     compares against arrives via a function-local atomic.Pointer
+	//     (reaperHandle), so the "snapshot-and-pass-by-value" escape hatch named
+	//     in the godoc above applies. Added to drop the dead shim from m.shims
+	//     so the map stops growing unbounded across distinct session keys
+	//     (the "max shims reached" leak).
+	allowedMethodRefs := map[string]bool{
+		"m.reaperWG":            true,
+		"m.removeShimIfCurrent": true,
+	}
 	for i, m := range matches {
 		body := string(m[1])
 		// Forbid any reference to `m.` inside the goroutine body except the
-		// permitted `m.reaperWG.Done()` Done call. Anything like `m.shims`
-		// or `m.someField` would imply a captured Manager-state read.
+		// allowlisted methods above. Anything like `m.shims` or `m.someField`
+		// would imply a captured Manager-state *read*, which the WaitGroup
+		// contract alone does not make safe.
 		// Lines starting with `//` are comments; strip those before checking.
 		stripped := stripComments(body)
-		// Permitted: `m.reaperWG.Done()` and any `m.reaperWG` reference is
-		// part of the WaitGroup contract itself, not a Manager-state read.
-		// Anything else (m.shims, m.cgroup, ...) is a violation.
 		fieldRefs := regexp.MustCompile(`\bm\.[A-Za-z_]\w*`).FindAllString(stripped, -1)
 		for _, ref := range fieldRefs {
-			if ref == "m.reaperWG" {
+			if allowedMethodRefs[ref] {
 				continue
 			}
-			t.Fatalf("reaper goroutine #%d body captures Manager state %q — R216-GO-6 contract requires only function-local captures (keyHash) plus the WaitGroup contract (m.reaperWG). Body:\n%s",
+			t.Fatalf("reaper goroutine #%d body captures Manager state %q — R216-GO-6 contract requires only function-local captures (keyHash, key, reaperHandle) plus the allowlisted methods (m.reaperWG, m.removeShimIfCurrent). A new m.* reference needs a fresh R216-GO-6 review before being added to allowedMethodRefs. Body:\n%s",
 				i, ref, body)
 		}
 	}
@@ -117,6 +130,35 @@ func TestReaperGoroutine_OnlyCapturesLocalKeyHash(t *testing.T) {
 func stripComments(src string) string {
 	re := regexp.MustCompile(`(?m)//[^\n]*`)
 	return re.ReplaceAllString(src, "")
+}
+
+// TestReaperGoroutine_DropsShimFromMap pins that the reaper goroutine actually
+// wires the map-leak fix: its body MUST call removeShimIfCurrent after
+// cmd.Wait() returns. Without this call the "max shims reached (50)" leak
+// regresses — m.shims would again only shrink via ForceCleanupZombie / the
+// uncalled Manager.Remove, so a long-lived naozhi minting a fresh timestamped
+// session key per dashboard quick-session wedges at the cap with only a couple
+// of live shims. A source-level pin is the right altitude here: a runtime test
+// would require spawning a real shim subprocess (full ready-handshake +
+// socket), which the package deliberately does not do in unit tests.
+func TestReaperGoroutine_DropsShimFromMap(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("manager.go")
+	if err != nil {
+		t.Skipf("manager.go not readable in cwd; skipping source-shape pin: %v", err)
+	}
+	re := regexp.MustCompile(`(?s)m\.reaperWG\.Add\(1\)\s*\n\s*go func\(\) \{(.*?)\}\(\)`)
+	matches := re.FindAllSubmatch(src, -1)
+	if len(matches) == 0 {
+		t.Fatal("could not locate reaper goroutine in manager.go — has the spawn site moved? Update the regex above.")
+	}
+	for i, m := range matches {
+		body := stripComments(string(m[1]))
+		if !strings.Contains(body, "removeShimIfCurrent(") {
+			t.Fatalf("reaper goroutine #%d does not call removeShimIfCurrent — the m.shims map-leak fix has been removed. The reaper must drop the dead shim's entry so len(m.shims) reflects live shims, not lifetime spawn count. Body:\n%s",
+				i, body)
+		}
+	}
 }
 
 // TestStopAll_DrainsWhenReapersExit verifies the happy path: when the
