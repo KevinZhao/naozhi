@@ -144,7 +144,7 @@
   // truth so the wording can't drift between paths.
   var TOAST_NO_RECORD = '该 agent 暂无内部记录';
   // §#398-sibling: the agent drill-in panel renders ALL internal events
-  // (tool_use / thinking / task_*), so its DOM grows even faster than the
+  // (tool_use / task_*), so its DOM grows even faster than the
   // main panel. Neither renderAgentEvents (reset render) nor appendAgentEvent
   // (WS live push + HTTP-poll fallback) bounded the node count, so a long
   // agent task could OOM the tab while drilled in. Cap higher than the
@@ -296,7 +296,7 @@
     // definitions; fall back to a plain-text stub only if both are somehow
     // missing (unexpected — contract is enforced by dashboard.html script
     // ordering).
-    // includeInternal=true keeps tool_use / thinking / task_* bubbles that
+    // includeInternal=true keeps tool_use / task_* bubbles that
     // the parent view hides — for a sub-agent panel those ARE the content.
     var renderOpts = { includeInternal: true };
     var renderAll = typeof window.renderEventsWithDividers === 'function'

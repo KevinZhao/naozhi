@@ -3608,16 +3608,17 @@ function stripLeakedToolCalls(text) {
 }
 
 // eventHtml renders one EventEntry bubble.
-// opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
+// opts.includeInternal=true keeps tool_use / task_* / agent / result
 // events that the parent view hides (banner handles them there). The sub-agent
 // internal view (agent_view.js) needs them — a team member's work is almost
-// entirely tool_use + thinking; filtering those out leaves the panel looking
+// entirely tool_use; filtering those out leaves the panel looking
 // empty even when the jsonl transcript is full of content. RFC v4 §3.6.7 /
 // §3.6.1 contract: parent and agent views share the bubble renderer but
 // differ on the filter policy.
 function eventHtml(e, opts) {
+  if (e && e.type === 'thinking') return '';
   const includeInternal = !!(opts && opts.includeInternal);
-  if (!includeInternal && (isInternalEvent(e) || e.type === 'thinking')) return '';
+  if (!includeInternal && isInternalEvent(e)) return '';
   // AskUserQuestion interactive card: dedicated renderer with option buttons.
   // The matching tool_use entry is already filtered out via INTERNAL_EVENT_TYPES,
   // so the card stands alone in the transcript.
