@@ -118,3 +118,70 @@ func TestSetWorkspace_DiskLoadedKeysEvictedFirst(t *testing.T) {
 		t.Errorf("seq-tracked key evicted before disk-loaded keys: got %q want /ws/seqd", got)
 	}
 }
+
+// TestResetChatAndSetWorkspace_AtomicNoIntermediateState is the regression guard
+// for #2342: /cd used to call ResetChat then SetWorkspace as two separate locked
+// sections, so a concurrent reader between them could observe the chat reset AND
+// the old override deleted, resolving the workspace to defaultCWD before the new
+// path was installed. The atomic method must leave no such window: the override
+// is either the old value or the new value, never absent.
+func TestResetChatAndSetWorkspace_AtomicNoIntermediateState(t *testing.T) {
+	r := NewRouter(RouterConfig{Workspace: "/default"})
+	chatKey := "feishu:group:c1"
+	r.SetWorkspace(chatKey, "/ws/old")
+
+	if got := r.Workspace(chatKey); got != "/ws/old" {
+		t.Fatalf("precondition: Workspace=%q want /ws/old", got)
+	}
+
+	r.ResetChatAndSetWorkspace(chatKey, "/ws/new")
+	if got := r.Workspace(chatKey); got != "/ws/new" {
+		t.Errorf("after ResetChatAndSetWorkspace: Workspace(%q)=%q want /ws/new", chatKey, got)
+	}
+}
+
+// TestResetChatAndSetWorkspace_FreshKey verifies the atomic method installs an
+// override for a chat that had none (first /cd in a chat).
+func TestResetChatAndSetWorkspace_FreshKey(t *testing.T) {
+	r := NewRouter(RouterConfig{Workspace: "/default"})
+	chatKey := "feishu:group:fresh"
+
+	if got := r.Workspace(chatKey); got != "/default" {
+		t.Fatalf("precondition: Workspace=%q want /default", got)
+	}
+
+	r.ResetChatAndSetWorkspace(chatKey, "/ws/fresh")
+	if got := r.Workspace(chatKey); got != "/ws/fresh" {
+		t.Errorf("Workspace(%q)=%q want /ws/fresh", chatKey, got)
+	}
+}
+
+// TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault hammers the
+// atomic method from one goroutine while a reader polls Workspace from another.
+// Because reset+set are fused under r.mu, the reader must only ever observe the
+// old or the new override value, never the default (which the #2342 two-call
+// ordering would briefly expose). Run with -race.
+func TestResetChatAndSetWorkspace_ConcurrentReaderNeverSeesDefault(t *testing.T) {
+	r := NewRouter(RouterConfig{Workspace: "/default"})
+	chatKey := "feishu:group:hot"
+	r.SetWorkspace(chatKey, "/ws/0")
+
+	done := make(chan struct{})
+	go func() {
+		for i := 1; i <= 2000; i++ {
+			r.ResetChatAndSetWorkspace(chatKey, fmt.Sprintf("/ws/%d", i))
+		}
+		close(done)
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			if got := r.Workspace(chatKey); got == "/default" {
+				t.Fatalf("reader observed default workspace mid-/cd — reset/set not atomic (#2342)")
+			}
+		}
+	}
+}

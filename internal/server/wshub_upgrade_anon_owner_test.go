@@ -99,3 +99,33 @@ func TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests(t *testing.T) {
 		t.Fatalf("owner=%q; want raw IP fallback for legacy test harness", owner)
 	}
 }
+
+// TestWSDeriveUploadOwner_NilAuthEmptyIPGetsUniqueOwner pins R202606j-SEC-8
+// (#2343): in the Auth-less fallback branch an empty client IP (trusted-proxy
+// mode with an XFF-less request) must NOT collapse to the empty-string owner
+// key. reserveOwnerSlot treats "" as the legacy cap-exempt single-user bucket,
+// so a shared empty owner would let every such connection bypass
+// maxConnsPerOwner and exhaust the global pool. Each empty-IP connection must
+// instead receive a distinct, non-empty crypto-random owner so the per-owner
+// cap applies independently.
+func TestWSDeriveUploadOwner_NilAuthEmptyIPGetsUniqueOwner(t *testing.T) {
+	t.Parallel()
+	h := &Hub{} // dashToken == "" AND auth == nil → harness fallback
+
+	seen := make(map[string]bool)
+	for i := 0; i < 8; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+		w := httptest.NewRecorder()
+		owner, authed, ok := wsDeriveUploadOwner(w, r, h, "" /* empty clientIP */)
+		if !ok || !authed {
+			t.Fatalf("ok=%v authed=%v; empty-IP fallback must still authenticate", ok, authed)
+		}
+		if owner == "" {
+			t.Fatalf("owner empty — would share the cap-exempt zero bucket (SEC-8 #2343 regression)")
+		}
+		if seen[owner] {
+			t.Fatalf("owner %q repeated across connections — empty-IP path must mint a unique owner per connection", owner)
+		}
+		seen[owner] = true
+	}
+}

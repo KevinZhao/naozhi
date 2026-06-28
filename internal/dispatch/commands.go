@@ -830,8 +830,12 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		}
 	}
 
-	d.router.ResetChat(chatKey)
-	d.router.SetWorkspace(chatKey, absPath)
+	// Atomic reset+set under a single Router lock so a concurrent message for
+	// the same chat key cannot slip in between (see #2342): a non-atomic
+	// ResetChat()+SetWorkspace() pair leaves a window where the chat is reset
+	// AND the override deleted, letting GetOrCreate spawn a session in the old
+	// (default) workspace before the new path is installed.
+	d.router.ResetChatAndSetWorkspace(chatKey, absPath)
 
 	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
 	// expansion + Clean) rather than absPath or post-expansion path, which
