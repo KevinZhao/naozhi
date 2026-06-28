@@ -508,16 +508,43 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// returns nil and stays quiet; any other exit surfaces in journald with
 	// the keyHash so operators can correlate with the next dial failure.
 	//
+	// reaperHandle is published by the map-insert section below — Stored under
+	// m.mu, in the same critical section that installs this spawn's ShimHandle
+	// under `key`. The reaper goroutine reads it back after cmd.Wait() returns
+	// so it can drop the now-dead shim from m.shims — but ONLY if the map still
+	// points at THIS handle (removeShimIfCurrent's identity check). Passing the
+	// handle via a function-local atomic.Pointer (not a captured m.* field)
+	// keeps the reaper closure compliant with the R216-GO-6 capture contract
+	// while closing the map-leak: before this, m.shims grew by one entry per
+	// distinct session key for the process lifetime (a fresh dashboard
+	// quick-session mints a new timestamped key every time), so a long-lived
+	// naozhi hit ErrMaxShims with only a handful of live shims. The pointer is
+	// nil if the spawn fails before the map insert; the reaper's nil-guard skips
+	// the removal in that case (the failed spawn never added a map entry).
+	var reaperHandle atomic.Pointer[ShimHandle]
+
 	// R216-GO-6 (#565): tracked via m.reaperWG so StopAll can bound the
-	// shutdown path on these goroutines. Today the goroutine only reads
-	// the function-local `keyHash` string — Add(1) here and Done() inside
-	// the goroutine make the structural contract explicit so future edits
-	// that capture Manager state are caught by the WaitGroup-on-shutdown
-	// contract rather than by silent races.
+	// shutdown path on these goroutines. The goroutine reads the function-local
+	// `keyHash` string, the function-local `key`, and the function-local
+	// reaperHandle atomic — Add(1) here and Done() inside the goroutine make
+	// the structural contract explicit so future edits that capture Manager
+	// state are caught by the WaitGroup-on-shutdown contract rather than by
+	// silent races. The lone m.* touch is m.removeShimIfCurrent, an
+	// identity-checked map delete reviewed under R216-GO-6 — see the
+	// capture-contract test allowance.
 	m.reaperWG.Add(1)
 	go func() {
 		defer m.reaperWG.Done()
-		if err := cmd.Wait(); err != nil {
+		err := cmd.Wait()
+		// Drop the dead shim from m.shims so the live count reflects reality.
+		// Identity-checked: a concurrent StartShim/Reconnect that already
+		// replaced this key's handle must NOT have its live entry deleted by
+		// the prior process's reaper. A nil snapshot means the spawn never
+		// reached the map insert, so there is nothing to remove.
+		if h := reaperHandle.Load(); h != nil {
+			m.removeShimIfCurrent(key, h)
+		}
+		if err != nil {
 			slog.Warn("shim exited unexpectedly", "key_hash", keyHash, "err", err)
 		}
 	}()
@@ -588,6 +615,19 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	m.shims[key] = handle
 	m.pendingShims-- // slot fulfilled: transfer from pending to active
 	slotReleased = true
+	// Publish the handle to the reaper UNDER the lock, in the same critical
+	// section that installs the map entry. The shim process cannot exit (and
+	// cmd.Wait cannot return) before cmd.Start has run, which happened above —
+	// but a fast-dying shim could still have its reaper reach reaperHandle.Load
+	// the instant we release m.mu. Storing here, before Unlock, guarantees the
+	// reaper observes either nil (spawn failed before ever reaching this insert,
+	// so there is no map entry to drop — correct skip) or exactly this handle
+	// (installed and counted, so the reaper's identity-checked delete reclaims
+	// the slot). A Store placed AFTER Unlock would open a window where the
+	// process dies, the reaper Loads nil, skips the delete, and the entry leaks
+	// forever — the very "max shims reached" bug this change fixes. Keep the
+	// Store inside the lock.
+	reaperHandle.Store(handle)
 	m.mu.Unlock()
 	if oldHandle != nil {
 		oldHandle.Close()
@@ -1183,6 +1223,42 @@ func (m *Manager) Remove(key string) {
 	m.reconnectMu.Lock()
 	delete(m.reconnectKM, key)
 	m.reconnectMu.Unlock()
+}
+
+// removeShimIfCurrent deletes key from m.shims only when the stored handle is
+// still `want` — the exact handle the caller installed. This is the reaper's
+// map-cleanup hook: when a spawned shim process exits, its reaper drops the
+// dead entry so the admission count (len(m.shims)+pendingShims, gated against
+// maxShims in StartShimWithBackend) reflects reality instead of growing
+// unbounded across distinct session keys.
+//
+// Background: m.shims previously only shrank via ForceCleanupZombie (ENOENT
+// reconnect) and Manager.Remove (which has no production caller). Normal shim
+// death — idle-timeout exit, CLI exit, Process.Close()/Kill() from session TTL
+// eviction — left the map entry behind because cli.Process holds no back-
+// reference to the Manager. A fresh dashboard quick-session mints a new
+// timestamped key every time, so the map grew by one per distinct key and a
+// long-lived naozhi eventually wedged at "max shims reached (50)" with only a
+// couple of live shims. Hooking the reaper closes that leak at its source: the
+// same goroutine that already reaps the OS process now also reaps the map slot.
+//
+// The identity check is the load-bearing invariant. Between this shim's spawn
+// and its death, a concurrent StartShim/Reconnect for the same key may have
+// swapped in a fresh, live handle (the oldHandle.Close() paths in
+// StartShimWithBackend/Reconnect). Deleting unconditionally on the old
+// process's reaper would evict that live entry, stranding a running shim that
+// no longer counts toward maxShims and breaking the next Reconnect's map
+// lookup. Comparing pointers ensures only the still-current entry is removed; a
+// superseded reaper is a no-op (the replacement's own reaper cleans up when it
+// dies). reconnectKM is intentionally NOT touched here — a live replacement
+// under the same key still needs its per-key serialise mutex; only the terminal
+// Manager.Remove (session fully gone) reclaims that entry.
+func (m *Manager) removeShimIfCurrent(key string, want *ShimHandle) {
+	m.mu.Lock()
+	if m.shims[key] == want {
+		delete(m.shims, key)
+	}
+	m.mu.Unlock()
 }
 
 // CLIPath returns the configured CLI binary path.
