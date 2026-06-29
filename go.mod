@@ -5,14 +5,14 @@ go 1.26.4
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
-	github.com/aws/aws-sdk-go-v2/service/bedrockagentcore v1.31.0
+	github.com/aws/aws-sdk-go-v2/service/bedrockagentcore v1.32.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.3
 	github.com/aws/aws-sdk-go-v2/service/transcribestreaming v1.35.2
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/larksuite/oapi-sdk-go/v3 v3.9.6
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.7
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/slack-go/slack v0.26.0
+	github.com/slack-go/slack v0.27.0
 	golang.org/x/image v0.43.0
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.46.0
