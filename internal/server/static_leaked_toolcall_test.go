@@ -1,9 +1,10 @@
 package server
 
 import (
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/leakguard"
 )
 
 // Leaked-tool-call rendering guard.
@@ -32,19 +33,13 @@ import (
 //     `<invoke …>` in backticks) is NEVER flagged. A false positive here is
 //     worse than the bug — it would shred legitimate technical discussion.
 
-// leakedToolcallRe mirrors LEAKED_TOOLCALL_RE in dashboard.js. Kept in lockstep
-// by TestDashboardJS_LeakedToolCall_RegexInSync below, which asserts the JS
-// source still carries the same anchor so this Go copy cannot silently drift.
-var leakedToolcallRe = regexp.MustCompile(`(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="`)
-
-// detectLeak is the Go equivalent of stripLeakedToolCalls — returns true when
-// the text contains a leaked tool-call block under a `call` / `<function_calls>`
-// line anchor with a paired </invoke>.
+// detectLeak delegates to the runtime detector in internal/leakguard — the
+// single source of truth shared by the backend auto-continue path and this
+// drift guard. TestLeakguardAnchor_MatchesJS below asserts leakguard.Anchor
+// still equals the LEAKED_TOOLCALL_RE literal in dashboard.js, so JS ⇄ Go ⇄
+// runtime cannot drift.
 func detectLeak(text string) bool {
-	if !strings.Contains(text, "</invoke>") {
-		return false
-	}
-	return leakedToolcallRe.MatchString(text)
+	return leakguard.Detect(text)
 }
 
 func TestDashboardJS_LeakedToolCall_DetectionBoundary(t *testing.T) {
@@ -163,11 +158,26 @@ func TestDashboardJS_LeakedToolCall_RegexInSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
-	// The canonical anchor body as written in the JS regex literal. If a future
-	// edit relaxes/tightens the JS pattern, update leakedToolcallRe above (and
-	// these samples) in the same change.
-	const anchor = `(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="`
-	if !strings.Contains(string(js), anchor) {
-		t.Errorf("LEAKED_TOOLCALL_RE in dashboard.js drifted from the Go mirror in this test.\nExpected JS to contain anchor:\n  %s\nUpdate leakedToolcallRe + samples here to match.", anchor)
+	// The canonical anchor is now owned by internal/leakguard (the runtime
+	// detector). Assert the JS literal still contains it verbatim; if a future
+	// edit relaxes/tightens the JS pattern, update leakguard.Anchor (and the
+	// leakguard test samples) in the same change.
+	if !strings.Contains(string(js), leakguard.Anchor) {
+		t.Errorf("LEAKED_TOOLCALL_RE in dashboard.js drifted from leakguard.Anchor.\nExpected JS to contain anchor:\n  %s\nUpdate leakguard.Anchor + samples to match.", leakguard.Anchor)
+	}
+}
+
+// TestLeakguardAnchor_MatchesJS is the JS→Go leg of the three-way lock: the
+// runtime detector's Anchor must appear verbatim in the shipped dashboard.js,
+// so the backend auto-continue path and the frontend cosmetic fold can never
+// diverge on what counts as a leak.
+func TestLeakguardAnchor_MatchesJS(t *testing.T) {
+	t.Parallel()
+	js, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	if !strings.Contains(string(js), leakguard.Anchor) {
+		t.Errorf("leakguard.Anchor not found verbatim in dashboard.js:\n  %s", leakguard.Anchor)
 	}
 }
