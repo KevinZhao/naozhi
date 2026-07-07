@@ -340,9 +340,11 @@ var (
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
 
 	// CronSandboxRunFailedTotal counts sandbox-placement cron runs that
-	// ended in any non-success state (failed-clean, failed-transport,
-	// unavailable). Sandbox failures additionally land in the per-state
-	// counters above; this dedicated counter exists because transport
+	// ended in RunStateFailed (failed-clean, failed-transport, unavailable).
+	// Timed-out runs are counted in CronSandboxRunTimedOutTotal and canceled
+	// runs are not counted here — the timeout split (#2091) keeps this counter
+	// free of double-counting. Sandbox failures additionally land in the
+	// per-state counters above; this dedicated counter exists because transport
 	// failures carry §6.2 double-run risk and operators alert on them
 	// specifically (agentcore-cloud-sandbox RFC §6.2).
 	CronSandboxRunFailedTotal = expvar.NewInt("naozhi_cron_sandbox_run_failed_total")

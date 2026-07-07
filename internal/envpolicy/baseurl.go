@@ -12,8 +12,24 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 )
+
+// allowPrivateBaseURLEnv is the escape hatch for deployments that legitimately
+// point ANTHROPIC_BASE_URL at an internal HTTPS gateway/proxy on an RFC1918
+// address (e.g. an in-cluster bedrock-proxy). When set to a truthy value the
+// https branch skips the private-IP SSRF guard. The IMDS metadata address
+// (169.254.169.254) and link-local ranges are ALWAYS rejected regardless —
+// there is no legitimate reason to base a Claude endpoint there, and that is
+// the high-value SSRF target. R202606e-SEC-1 (#2278).
+func allowPrivateBaseURL() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NAOZHI_ALLOW_PRIVATE_BASE_URL"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 // ValidateBaseURLValue enforces that an API base-URL passed through to a Claude
 // subprocess uses https:// unless it targets a loopback host (localhost /
@@ -34,6 +50,14 @@ func ValidateBaseURLValue(v string) error {
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 				return fmt.Errorf("link-local host %q rejected (SSRF/IMDS guard)", host)
+			}
+			// RFC1918 / unique-local / loopback private ranges are rejected
+			// to stop a poisoned parent env pointing the base URL at an
+			// internal HTTPS service for SSRF. Operators with a legitimate
+			// internal HTTPS gateway opt out via NAOZHI_ALLOW_PRIVATE_BASE_URL.
+			// R202606e-SEC-1 (#2278).
+			if (ip.IsPrivate() || ip.IsLoopback()) && !allowPrivateBaseURL() {
+				return fmt.Errorf("private-range host %q rejected (SSRF guard); set NAOZHI_ALLOW_PRIVATE_BASE_URL=1 to allow", host)
 			}
 		}
 		return nil

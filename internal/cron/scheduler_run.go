@@ -143,12 +143,28 @@ func (r stubRefresher) run() {
 // (broadcast cron_run_ended + counters + LastErrorClass write) participates.
 //
 // Returns:
-//   - stubRefresh: closure that re-registers the sidebar stub on error
-//     paths so the cron row stays visible. Caller invokes after error
-//     branches; never invoke on success (live session owns the row).
+//   - stubRefresh: closure that re-registers the sidebar stub. On the SUCCESS
+//     return (ok=true) it carries the snap-time chain anchor so a downstream
+//     send/spawn failure can re-register the stub BEFORE its finishRun releases
+//     the CAS gate (see execSend/executeGetSession). On every FAILURE return
+//     (ok=false) it is the no-op zero value: the helper has already run the
+//     stub re-registration itself, BEFORE its own internal finishRun (R202606h-
+//     GO-009b / #2318), so the caller must NOT invoke run() again.
 //   - ok: false means the caller MUST return immediately. The helper has
 //     already written the appropriate slog.Info/Warn + finishRun() for
-//     the failure mode.
+//     the failure mode, and already re-registered the sidebar stub where
+//     applicable.
+//
+// R202606h-GO-009b (#2318): the helper owns the stub re-registration on its
+// failure branches because it ALSO owns the finishRun on those branches.
+// finishRun → finalizer.finalize() releases the inflight CAS gate, so a stub
+// run() that fired AFTER the helper returned (the previous caller-side
+// `stubRefresh.run()` at the preflight call site) sat in the post-CAS-release
+// window: a concurrent TriggerNow could win the gate, spawn run-B's live
+// session+stub, and then have run-A's stale-chain stub clobber it (phantom
+// sidebar pointing at the prior session's JSONL). Re-registering BEFORE the
+// internal finishRun closes that window, mirroring the four symmetric
+// error/cancel paths fixed under R202606h-GO-009.
 //
 // In persistent mode (snap.fresh=false) the helper short-circuits with
 // ok=true and a no-op stubRefresh so the caller's flow is uniform.
@@ -280,6 +296,15 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	s.mu.RUnlock()
 	if !stillExists {
 		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
+		// R202606h-GO-009b (#2318): re-register the sidebar stub BEFORE the
+		// finishRun below releases the inflight CAS gate. run() itself re-checks
+		// existence under s.mu, so for the steady-state delete it is a no-op;
+		// but doing it here (not at the caller AFTER the helper returns) closes
+		// the post-CAS-release window where a concurrent TriggerNow wins the
+		// gate, spawns run-B's live session+stub, and run-A's stale stub would
+		// otherwise clobber it. Return noopRefresh so the caller does not fire
+		// run() a second time.
+		refresh.run()
 		// Job deleted mid-execute: treat as canceled; no recordResult
 		// (matches historical behaviour) but broadcast for visibility.
 		s.finishRun(finishArgs{
@@ -289,7 +314,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: args.finalizer,
 		})
-		return refresh, false
+		return noopRefresh, false
 	}
 	return refresh, true
 }
@@ -980,7 +1005,11 @@ func (s *Scheduler) execPrepareSpawn(j *Job, snap jobSnapshot, runID string, sta
 		finalizer: finalizer,
 	})
 	if !okPreflight {
-		stubRefresh.run()
+		// R202606h-GO-009b (#2318): do NOT call stubRefresh.run() here. The
+		// preflight helper owns its failure-path finishRun (which releases the
+		// inflight CAS gate), so it now also re-registers the sidebar stub
+		// BEFORE that finishRun and returns the no-op zero refresher. A run()
+		// here would sit in the post-CAS-release window the fix is closing.
 		return AgentOpts{}, "", "", stubRefresher{}, false
 	}
 	return opts, key, cleanText, stubRefresh, true
@@ -1130,6 +1159,15 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 		if snap.fresh {
 			s.router.Reset(key)
 		}
+		// R202606h-GO-009: re-register the sidebar stub BEFORE finishRun
+		// releases the inflight CAS gate (finishRun → finalizer.finalize()).
+		// Mirrors the Reset ordering above (R20260608-CORR-1 / #1956) and the
+		// success path's reapFreshSessionLocked→finishRun sequence. A late
+		// stub refresh run AFTER the gate releases lets a concurrent TriggerNow
+		// win the CAS, spawn run-B's live session+stub, and then have run-A's
+		// stale-chain stub clobber it (phantom sidebar pointing at the prior
+		// session's JSONL).
+		stubRefresh.run()
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1137,7 +1175,6 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			finalizer: finalizer,
 		})
-		stubRefresh.run()
 		return
 	}
 	state, errClass := classifyExecError(err, ErrClassSendError)
@@ -1180,6 +1217,12 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 	if snap.fresh {
 		s.router.Reset(key)
 	}
+	// R202606h-GO-009: re-register the sidebar stub BEFORE finishRun releases
+	// the inflight CAS gate — see the cancel branch above for the full
+	// rationale (avoid the post-CAS-release window where a concurrent
+	// TriggerNow wins the gate and run-A's stale stub clobbers run-B's live
+	// session). deliverNotice (IM, stub-independent) stays after finishRun.
+	stubRefresh.run()
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 		state: state, errClass: errClass, errMsg: "send error: " + sanitiseRunErrMsg(err.Error()), // R20260607-GO-004: strip IP:port/paths, mirrors lg.Error above
@@ -1187,7 +1230,6 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error) 
 		finalizer: finalizer,
 	})
 	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
-	stubRefresh.run()
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -1250,6 +1292,9 @@ func (s *Scheduler) execFinishSuccess(j *Job, snap jobSnapshot, key string, resu
 		job: j, runID: runID, startedAt: startedAt, endedAt: successEndedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		// R202606e-ARCH-1 (#2280): persist the local-run cost so per-job
+		// monthly aggregates stop reading 0 for the common local cron path.
+		costUSD:   result.CostUSD,
 		finalizer: finalizer,
 	})
 
@@ -1441,6 +1486,11 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			if a.snap.fresh {
 				s.router.Reset(a.key)
 			}
+			// R202606h-GO-009: re-register the sidebar stub BEFORE finishRun
+			// releases the inflight CAS gate — see execSendError for the full
+			// rationale. Mirrors the Reset ordering above (#1956) and the
+			// success path's reapFreshSessionLocked→finishRun sequence.
+			a.stubRefresh.run()
 			s.finishRun(finishArgs{
 				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1448,7 +1498,6 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 				prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 				finalizer: a.finalizer,
 			})
-			a.stubRefresh.run()
 			return nil, spawnStart, true
 		}
 		state, errClass := classifyExecError(err, ErrClassSessionError)
@@ -1467,6 +1516,10 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		if a.snap.fresh {
 			s.router.Reset(a.key)
 		}
+		// R202606h-GO-009: re-register the sidebar stub BEFORE finishRun
+		// releases the inflight CAS gate — see execSendError for the full
+		// rationale. deliverNotice (IM, stub-independent) stays after finishRun.
+		a.stubRefresh.run()
 		s.finishRun(finishArgs{
 			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 			state: state, errClass: errClass, errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // R20260613-LOGIC-1: mirrors send-error path
@@ -1474,7 +1527,6 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			finalizer: a.finalizer,
 		})
 		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
-		a.stubRefresh.run()
 		return nil, spawnStart, true
 	}
 	// R250-GO-15 (#1078): GetOrCreate consumed ctx; nothing below references

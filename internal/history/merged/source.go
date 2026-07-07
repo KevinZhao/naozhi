@@ -11,11 +11,18 @@
 //     coming from Claude JSONL.
 //   - No silent drops. "local if non-empty" would hide Claude JSONL
 //     on the very first event, making the gap VERY visible.
-//   - Dedup. Once a naozhi-native entry is written, its UUID is
-//     stable (crypto/rand) AND a Claude JSONL copy of the same
-//     turn derives the SAME uuid (textutil.DeriveLegacyUUID) —
-//     MergedSource collapses the two to one entry rather than
-//     doubling it.
+//   - Dedup. Two tiers can describe the SAME turn with DIFFERENT
+//     UUIDs: the naozhi-native capture path stamps a crypto/rand
+//     UUID (cli.newEventUUID) on assistant/tool_use/thinking events,
+//     while the Claude JSONL fallback carries Claude's own message
+//     uuid (discovery.uuidFromClaudeLine prefers hl.UUID). These two
+//     identities never coincide, so a UUID-only dedup would render
+//     the overlapping turn twice. MergedSource therefore dedups a
+//     fallback entry against local on EITHER an exact UUID match OR a
+//     matching content key (Time, Type, Summary, Detail) — see
+//     contentKey and mergeSorted. UUID still wins where present (the
+//     legacy / DeriveLegacyUUID case); the content key is the safety
+//     net for the modern crypto-rand-vs-Claude-uuid steady state.
 //
 // Ordering:
 //   - Merged result is strictly ordered by (Time, UUID) ascending.
@@ -36,6 +43,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -83,6 +91,13 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	switch {
 	case localErr != nil && fallbackErr != nil:
 		return nil, localErr
+	case localErr != nil:
+		// Single-source failure: the godoc promises we "log and degrade"
+		// to the other tier. Without this an operator gets a silently
+		// truncated response and no signal that the local tier failed.
+		slog.Warn("merged: local source failed; degrading to fallback", "err", localErr)
+	case fallbackErr != nil:
+		slog.Warn("merged: fallback source failed; degrading to local", "err", fallbackErr)
 	}
 
 	merged := mergeDedup(local, fallback, beforeMS)
@@ -103,6 +118,30 @@ func entryCmp(a, b cli.EventEntry) int {
 		return c
 	}
 	return strings.Compare(a.UUID, b.UUID)
+}
+
+// contentKey is the cross-source identity used to dedup a fallback
+// entry against local when the two tiers carry different UUIDs for the
+// same turn (native crypto/rand UUID vs Claude's own message uuid).
+// Keyed on (Time, Type, Summary, Detail): the same rendered turn yields
+// identical values on both sources, while two genuinely distinct events
+// almost never collide on all four (Detail in particular separates same
+// -timestamp same-summary siblings). Only ever consulted for fallback
+// entries against a local-seeded set, so it can NEVER collapse two
+// distinct LOCAL entries — local is always emitted verbatim.
+//
+// The 0x1f unit separators keep field boundaries unambiguous so a value
+// can't be forged by content that happens to contain the delimiter.
+func contentKey(e cli.EventEntry) string {
+	var b strings.Builder
+	b.WriteString(strconv.FormatInt(e.Time, 10))
+	b.WriteByte(0x1f)
+	b.WriteString(e.Type)
+	b.WriteByte(0x1f)
+	b.WriteString(e.Summary)
+	b.WriteByte(0x1f)
+	b.WriteString(e.Detail)
+	return b.String()
 }
 
 // mergeDedup implements the core merge algorithm. Callers pass
@@ -137,7 +176,15 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 	// in the common case. Two-way merge is allocation-identical to
 	// the old code (one map, one result slice) so there's no memory
 	// regression either.
-	if slices.IsSortedFunc(local, entryCmp) && slices.IsSortedFunc(fallback, entryCmp) {
+	//
+	// R202606g-PERF-001 (#2307): the dominant LoadBefore shapes are
+	// single-tier (events/ empty so only fallback carries rows, or
+	// Claude JSONL absent so only local does). isSortedContract skips
+	// the scan entirely for a slice of length ≤1 (trivially sorted),
+	// so the single-tier and empty-tier cases pay for exactly one
+	// O(n) scan instead of two — without weakening the correctness
+	// fallback for the genuinely-unsorted case.
+	if isSortedContract(local) && isSortedContract(fallback) {
 		return mergeSorted(local, fallback, beforeMS)
 	}
 
@@ -149,6 +196,20 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 	slog.Warn("merged: source returned unsorted entries; repairing with sort",
 		"local_len", len(local), "fallback_len", len(fallback))
 	return mergeSortFallback(local, fallback, beforeMS)
+}
+
+// isSortedContract reports whether s honours the (Time, UUID) chronological
+// contract that lets mergeDedup take the linear merge path. A slice of length
+// ≤1 is trivially sorted and skips the scan outright — this is the common
+// single-tier LoadBefore shape (one source empty, the other carrying the page)
+// where forcing the second IsSortedFunc walk was pure overhead (R202606g-PERF-001,
+// #2307). For len > 1 it delegates to slices.IsSortedFunc so the defensive
+// concat+sort fallback still fires on a genuine contract violation.
+func isSortedContract(s []cli.EventEntry) bool {
+	if len(s) <= 1 {
+		return true
+	}
+	return slices.IsSortedFunc(s, entryCmp)
 }
 
 // mergeSorted walks two already-sorted input slices linearly and
@@ -187,23 +248,29 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// merge loop never runs (no local), and only the fallback tail-flush
 	// executes. That flush is: keep empty-UUID entries unconditionally;
 	// for non-empty UUIDs, keep the FIRST occurrence and drop later dups;
-	// all subject to emit's cutoff. We replicate that self-dedup exactly so
-	// the output matches the general path element-for-element. The map is
-	// only allocated when fallback actually contains a non-empty UUID dup
-	// candidate — here we still build it (fallback may carry dups) but skip
-	// seeding from a (non-existent) local tier.
+	// all subject to emit's cutoff. Because fallback is sorted by
+	// (Time, UUID) — and a stable UUID is per-turn so duplicate UUIDs share
+	// the same Time and therefore sort adjacently — "drop later dups"
+	// reduces to "drop a non-empty UUID equal to the last non-empty UUID
+	// emitted". A single lastUUID tracker replaces the dedup map entirely,
+	// so this single-tier fast path allocates only the result slice.
+	//
+	// Empty UUIDs are always kept (they bypass the dedup branch) and do NOT
+	// clear lastUUID: leaving the tracker intact across an empty-UUID entry
+	// means a `b, <empty>, b` run still drops the trailing `b`, matching the
+	// reference's global-set "keep first occurrence" rule element-for-element.
 	if len(local) == 0 {
-		seen := make(map[string]struct{}, len(fallback))
 		out := make([]cli.EventEntry, 0, len(fallback))
+		lastUUID := ""
 		for _, e := range fallback {
 			if beforeMS > 0 && e.Time >= beforeMS {
 				continue
 			}
 			if e.UUID != "" {
-				if _, dup := seen[e.UUID]; dup {
+				if e.UUID == lastUUID {
 					continue
 				}
-				seen[e.UUID] = struct{}{}
+				lastUUID = e.UUID
 			}
 			out = append(out, e)
 		}
@@ -222,9 +289,19 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// populate a slot, but over-allocating a few map buckets is cheaper
 	// than a rehash when the map grows during the fallback tail flush.
 	seen := make(map[string]struct{}, len(local))
+	// seenContent mirrors `seen` but keys on contentKey, so a fallback
+	// entry whose UUID differs from local (the native-crypto-rand vs
+	// Claude-uuid steady state) is still recognised as the same turn.
+	// Seeded ONLY from local entries the merge will emit; never written
+	// from fallback-against-fallback, so it cannot collapse two distinct
+	// LOCAL events — those are always emitted via the local branch.
+	seenContent := make(map[string]struct{}, len(local))
 	for _, e := range local {
-		if e.UUID != "" && (beforeMS <= 0 || e.Time < beforeMS) {
-			seen[e.UUID] = struct{}{}
+		if beforeMS <= 0 || e.Time < beforeMS {
+			if e.UUID != "" {
+				seen[e.UUID] = struct{}{}
+			}
+			seenContent[contentKey(e)] = struct{}{}
 		}
 	}
 
@@ -234,6 +311,19 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 			return
 		}
 		out = append(out, e)
+	}
+	// fallbackDup reports whether a fallback entry duplicates a local
+	// entry (by UUID or by content key). Empty-UUID fallback entries
+	// still get the content-key check so a legacy-derived fallback row
+	// and its native local twin don't both render.
+	fallbackDup := func(f cli.EventEntry) bool {
+		if f.UUID != "" {
+			if _, dup := seen[f.UUID]; dup {
+				return true
+			}
+		}
+		_, dup := seenContent[contentKey(f)]
+		return dup
 	}
 
 	// Step 2: two-way merge. `entryCmp(..) <= 0` picks local on an
@@ -247,10 +337,11 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 			continue
 		}
 		f := fallback[j]
-		if f.UUID == "" {
-			emit(f)
-		} else if _, dup := seen[f.UUID]; !dup {
-			seen[f.UUID] = struct{}{}
+		if !fallbackDup(f) {
+			if f.UUID != "" {
+				seen[f.UUID] = struct{}{}
+			}
+			seenContent[contentKey(f)] = struct{}{}
 			emit(f)
 		}
 		j++
@@ -260,14 +351,13 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	}
 	for ; j < len(fallback); j++ {
 		f := fallback[j]
-		if f.UUID == "" {
-			emit(f)
+		if fallbackDup(f) {
 			continue
 		}
-		if _, dup := seen[f.UUID]; dup {
-			continue
+		if f.UUID != "" {
+			seen[f.UUID] = struct{}{}
 		}
-		seen[f.UUID] = struct{}{}
+		seenContent[contentKey(f)] = struct{}{}
 		emit(f)
 	}
 	return out
@@ -285,6 +375,11 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 // defensive behaviour.
 func mergeSortFallback(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
 	seen := make(map[string]struct{}, len(local))
+	// seenContent: cross-source content-key dedup, identical semantics to
+	// the fast path — fallback dups local on UUID OR (Time,Type,Summary,
+	// Detail). Seeded only from emitted local entries so local-vs-local
+	// is never collapsed.
+	seenContent := make(map[string]struct{}, len(local))
 	out := make([]cli.EventEntry, 0, len(local)+len(fallback))
 	for _, e := range local {
 		if beforeMS > 0 && e.Time >= beforeMS {
@@ -293,6 +388,7 @@ func mergeSortFallback(local, fallback []cli.EventEntry, beforeMS int64) []cli.E
 		if e.UUID != "" {
 			seen[e.UUID] = struct{}{}
 		}
+		seenContent[contentKey(e)] = struct{}{}
 		out = append(out, e)
 	}
 	for _, e := range fallback {
@@ -303,8 +399,14 @@ func mergeSortFallback(local, fallback []cli.EventEntry, beforeMS int64) []cli.E
 			if _, dup := seen[e.UUID]; dup {
 				continue
 			}
+		}
+		if _, dup := seenContent[contentKey(e)]; dup {
+			continue
+		}
+		if e.UUID != "" {
 			seen[e.UUID] = struct{}{}
 		}
+		seenContent[contentKey(e)] = struct{}{}
 		out = append(out, e)
 	}
 	// SortStableFunc preserves local-first ordering for entries that

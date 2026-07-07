@@ -306,6 +306,16 @@
   },
   {
     "method": "GET",
+    "path": "/favicon.ico",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/favicon.svg",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/health",
     "handler_type": "*HealthHandler"
   },

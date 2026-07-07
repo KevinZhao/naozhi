@@ -844,14 +844,24 @@ func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 		lastMsgID = id
 	}
 
-	// Send image messages. Image failures are log-and-continue (the text part
-	// already landed), but the token-invalidation side effect still needs to
-	// happen so a subsequent Reply call on the same Feishu instance picks up
-	// a fresh token instead of re-hammering with the rejected one.
+	// Send image messages. Non-token image failures are log-and-continue (the
+	// text part already landed), but a token-invalidation error must PROPAGATE
+	// so platform.ReplyWithRetry can grant its one-shot rotation retry with a
+	// fresh token. R20260623-LB-3 (#2305): swallowing the token error to nil
+	// here meant a single-image reply that hit token-expiry (99991671) cleared
+	// the cache but never retried — the only image was lost silently, an
+	// asymmetry with the text path (which always goes through ReplyWithRetry).
+	// The maybeInvalidateOnTokenError side effect still clears the cache so the
+	// retry attempt carries a fresh token. Multi-image replies keep their
+	// log-and-continue behaviour for non-token failures (the earlier text /
+	// images already landed and the next image can self-heal on the rotated
+	// token), but a token error still short-circuits to the retry path.
 	for _, img := range msg.Images {
 		id, err := f.sendImage(ctx, msg.ChatID, img)
 		if err != nil {
-			f.maybeInvalidateOnTokenError(err)
+			if invErr := f.maybeInvalidateOnTokenError(err); platform.IsTokenInvalidated(invErr) {
+				return lastMsgID, invErr
+			}
 			slog.Warn("feishu send image failed", "err", err)
 			continue
 		}

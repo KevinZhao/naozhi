@@ -113,6 +113,14 @@ func TestHandleRaw_OK(t *testing.T) {
 	if !containsStr(rec.Body.String(), "hello world body") {
 		t.Errorf("raw body missing content: %s", rec.Body.String())
 	}
+	// Untrusted operator-installed assets must download, never render inline:
+	// Content-Disposition: attachment alongside the nosniff guard.
+	if cd := rec.Header().Get("Content-Disposition"); cd != "attachment" {
+		t.Errorf("Content-Disposition = %q, want attachment", cd)
+	}
+	if xcto := rec.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
+	}
 }
 
 func TestHandleRaw_Traversal404(t *testing.T) {

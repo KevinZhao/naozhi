@@ -1477,6 +1477,53 @@ var envExpansionDenyPrefixes = []string{
 	"MISTRAL_",
 	"HUGGINGFACE_",
 	"HUGGING_FACE_",
+	// Generic org-secret name prefixes (SECRET_KEY / SECRET_KEY_BASE /
+	// PASSWORD_*). R202606h-SEC-6 (#2320). Suffix variants are handled by
+	// envExpansionDenySuffixes below.
+	"SECRET_",
+	"PASSWORD_",
+}
+
+// envExpansionDenySuffixes lists generic credential-naming suffixes that we
+// refuse to expand regardless of provider prefix. The prefix list above only
+// catches known LLM/cloud providers; organisations commonly name their own
+// secrets DATABASE_PASSWORD / SECRET_KEY_BASE / SOME_API_TOKEN, and an
+// operator writing `dashboard_token: ${DATABASE_PASSWORD}` would otherwise
+// materialise that value into a string field that may be logged
+// (slog.Info("config loaded")) or echoed by the dashboard config inspector.
+// Matched case-insensitively against the *full* env name. R202606h-SEC-6
+// (#2320). Keep these conservative: only suffixes that are near-universally
+// secret-bearing, so legitimate non-secret config aliases are unaffected.
+//
+// envExpansionAllowPrefixes overrides the suffix deny-list: naozhi-side
+// secret aliases (NAOZHI_DASHBOARD_TOKEN, FEISHU_APP_SECRET, SLACK_BOT_TOKEN,
+// …) DO have a legitimate config use — they ARE the values an operator wires
+// into dashboard_token / app_secret fields. These naozhi-owned namespaces are
+// not the upstream-credential leak vector the deny-list defends against, so a
+// matching prefix re-allows expansion even when the suffix looks secret.
+var envExpansionDenySuffixes = []string{
+	"_SECRET",
+	"_PASSWORD",
+	"_PASSWD",
+	"_TOKEN",
+	"_APIKEY",
+	"_API_KEY",
+	"_ACCESS_KEY",
+	"_SECRET_KEY",
+	"_PRIVATE_KEY",
+	"_CREDENTIALS",
+}
+
+// envExpansionAllowPrefixes are naozhi-owned env namespaces whose values are
+// legitimately injected into config string fields. A match here re-permits
+// expansion even if the name ends in a deny-suffix above. It does NOT override
+// envExpansionDenyPrefixes (upstream provider credentials stay blocked).
+var envExpansionAllowPrefixes = []string{
+	"NAOZHI_",
+	"FEISHU_",
+	"SLACK_",
+	"PC_",
+	"IM_",
 }
 
 // allowEnvExpansion reports whether key is safe to expand in config.yaml.
@@ -1487,6 +1534,18 @@ func allowEnvExpansion(key string) bool {
 	upper := strings.ToUpper(key)
 	for _, p := range envExpansionDenyPrefixes {
 		if strings.HasPrefix(upper, p) {
+			return false
+		}
+	}
+	// naozhi-owned namespaces re-allow even when the suffix looks secret;
+	// these values are the legitimate dashboard_token / app_secret inputs.
+	for _, p := range envExpansionAllowPrefixes {
+		if strings.HasPrefix(upper, p) {
+			return true
+		}
+	}
+	for _, s := range envExpansionDenySuffixes {
+		if strings.HasSuffix(upper, s) {
 			return false
 		}
 	}

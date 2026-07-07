@@ -65,6 +65,7 @@ type Weixin struct {
 	cancel    context.CancelFunc
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
+	pollWg    sync.WaitGroup // tracks the pollLoop goroutine
 
 	// hookSem caps concurrent inbound message-handler goroutines.
 	// Mirrors feishu/slack/discord hookSem (20). R236-SEC-1.
@@ -213,16 +214,24 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("weixin platform already started")
 	}
 	w.started = true
-	w.startMu.Unlock()
-
-	w.handler = handler
-
+	// Assign lifecycle handles (handler/cancel) BEFORE releasing startMu so a
+	// concurrent Stop() that snapshots them under the same lock observes a
+	// fully-initialised value rather than a nil/torn cancel. Mirrors
+	// slack.go:139-154. The goroutines launched after Unlock only read fields
+	// already published inside the critical section, and the WaitGroup Add
+	// calls precede the goroutine spawns so Stop's Wait can never miss them.
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
-
-	go w.pollLoop(ctx)
-
+	w.handler = handler
+	w.pollWg.Add(1)
 	w.cleanupWg.Add(1)
+	w.startMu.Unlock()
+
+	go func() {
+		defer w.pollWg.Done()
+		w.pollLoop(ctx)
+	}()
+
 	go func() {
 		defer w.cleanupWg.Done()
 		w.cleanupTokensLoop(ctx)
@@ -234,9 +243,21 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform.
 func (w *Weixin) Stop() error {
-	if w.cancel != nil {
-		w.cancel()
+	// Snapshot lifecycle handles under startMu so a pre-Start Stop() or a
+	// racing Start() cannot hand us a nil/torn cancel (the read now has a
+	// happens-before edge with Start's write). Mirrors slack.go:201-205.
+	// Release the lock BEFORE the Wait calls — pollLoop/cleanup/handler
+	// goroutines never take startMu, but holding it across a blocking Wait
+	// is needless lock contention and a future deadlock hazard.
+	w.startMu.Lock()
+	cancel := w.cancel
+	started := w.started
+	w.startMu.Unlock()
+	if !started || cancel == nil {
+		return nil
 	}
+	cancel()
+	w.pollWg.Wait()
 	w.handlerWg.Wait()
 	w.cleanupWg.Wait()
 	return nil
@@ -474,7 +495,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			case w.hookSem <- struct{}{}:
 			default:
 				slog.Warn("weixin: handler semaphore full, dropping message",
-					"user", from)
+					"user", osutil.SanitizeForLog(from, 128))
 				continue
 			}
 			w.handlerWg.Add(1)

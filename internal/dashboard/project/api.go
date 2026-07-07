@@ -110,6 +110,10 @@ type Handlers struct {
 	// Nil-safe in tests; HandleConfigPut guards with a nil check.
 	// R247-SEC-7.
 	configPutLimiter IPLimiter
+	// uploadQuota bounds cumulative bytes accepted per project by the upload
+	// endpoint within this process (R202606g-SEC-3, #2311). Nil disables
+	// enforcement (single-operator model / tests that build Handlers by hand).
+	uploadQuota *uploadQuota
 	// publicTmpEnabled gates the __public_tmp__ pseudo-project (R237-SEC-5,
 	// #646). When false (default), any request naming publicTmpProject as
 	// the project field is rejected as "project not found" — same surface
@@ -140,6 +144,10 @@ type Deps struct {
 	FilesExistsLimiter IPLimiter
 	ConfigPutLimiter   IPLimiter
 	PublicTmpEnabled   bool
+	// UploadQuotaBytes caps cumulative per-project upload bytes within a
+	// process (R202606g-SEC-3, #2311). <=0 disables enforcement, preserving
+	// the original single-operator trade-off.
+	UploadQuotaBytes int64
 	// ProjectStableKeyEnabled toggles the StableKey field in the list
 	// response. Production wires cfg.Session.ProjectStableKey.ResolvedEnabled(true).
 	ProjectStableKeyEnabled bool
@@ -155,6 +163,7 @@ func New(d Deps) *Handlers {
 		nodeCache:          d.NodeCache,
 		filesExistsLimiter: d.FilesExistsLimiter,
 		configPutLimiter:   d.ConfigPutLimiter,
+		uploadQuota:        newUploadQuota(d.UploadQuotaBytes),
 		publicTmpEnabled:   d.PublicTmpEnabled,
 
 		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
@@ -204,6 +213,10 @@ type projectsListEntry struct {
 	Favorite     bool                  `json:"favorite"`
 	GitRemoteURL string                `json:"git_remote_url"`
 	GitHub       bool                  `json:"github"`
+	// IsRoot marks the synthetic projects-root entry (include_root). The
+	// files view defaults its browse root to this project so the operator
+	// lands at the workspace root rather than the first subdirectory project.
+	IsRoot bool `json:"is_root,omitempty"`
 	// DirModTime is the project directory's filesystem mtime (unix ms),
 	// captured at Manager.Scan. The dashboard "new session" picker orders its
 	// fallback tier by this descending so the most-recently-touched workspace
@@ -253,6 +266,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Favorite:     p.Config.Favorite,
 			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
+			IsRoot:       p.IsRoot,
 			DirModTime:   p.DirModTime,
 			StableKey:    stableKey,
 		})

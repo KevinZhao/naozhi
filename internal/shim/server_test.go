@@ -262,6 +262,59 @@ func TestTryExtractSessionID_ACPDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+// TestTryExtractSessionID_FastPathSkipsAfterKnown verifies the R202606f-PERF-003
+// fast path: once the session ID is set, the latch is raised and subsequent
+// lines are not re-parsed, so a malformed line carrying a session_id token
+// cannot disturb the captured ID and the known flag stays set.
+func TestTryExtractSessionID_FastPathSkipsAfterKnown(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"sess_known"}`))
+	if !s.sessionIDKnown.Load() {
+		t.Fatal("sessionIDKnown latch not raised after init")
+	}
+
+	// A later line still containing the token (even a result that would
+	// otherwise be parsed) must be skipped entirely by the fast path.
+	s.tryExtractSessionID([]byte(`{"type":"result","session_id":"later_attempt"}`))
+
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+	if got != "sess_known" {
+		t.Errorf("SessionID = %q, want sess_known (fast path must skip later lines)", got)
+	}
+	if !s.sessionIDKnown.Load() {
+		t.Error("sessionIDKnown latch should remain set")
+	}
+}
+
+// TestTryExtractSessionID_LatchNotSetWhenUnknown verifies the latch stays
+// unraised for lines that don't yield a session ID, so extraction keeps
+// running until a real ID arrives.
+func TestTryExtractSessionID_LatchNotSetWhenUnknown(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	s.tryExtractSessionID([]byte(`{"type":"message","session_id":"should_not_set"}`))
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":""}`))
+	s.tryExtractSessionID([]byte("not json"))
+	if s.sessionIDKnown.Load() {
+		t.Fatal("sessionIDKnown latch raised without a valid session ID")
+	}
+
+	// A real ID now arrives and is captured.
+	s.tryExtractSessionID([]byte(`{"type":"system","subtype":"init","session_id":"real_id"}`))
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+	if got != "real_id" {
+		t.Errorf("SessionID = %q, want real_id", got)
+	}
+	if !s.sessionIDKnown.Load() {
+		t.Error("sessionIDKnown latch should be set after capturing real_id")
+	}
+}
+
 // --- enqueueWrite ---
 
 func TestEnqueueWrite_NoClient(t *testing.T) {
@@ -333,6 +386,65 @@ func TestEnqueueWrite_ClientDone_Drops(t *testing.T) {
 
 	// Should not block or panic
 	s.enqueueWrite([]byte("data"))
+}
+
+// --- readStdout: skip marshal when no client attached (#2295) ---
+
+// TestReadStdout_NoClient_SkipsMarshalButStillBuffers pins R202606f-PERF-006
+// (#2295): with no naozhi attached, readStdout must NOT enqueue a marshalled
+// frame (it would only be dropped), but buffer.Push / session-ID extraction
+// MUST still run so replay-on-attach and the session-ID latch stay correct.
+func TestReadStdout_NoClient_SkipsMarshalButStillBuffers(t *testing.T) {
+	dir := t.TempDir()
+	// Emit three NDJSON lines then exit. One carries a session_id so we can
+	// also confirm extraction still happens with no client.
+	script := `printf '{"type":"a"}\n{"type":"system","subtype":"init","session_id":"sess-x"}\n{"type":"b"}\n'`
+	cli, err := startCLI("sh", []string{"-c", script}, dir)
+	if err != nil {
+		t.Fatalf("startCLI: %v", err)
+	}
+	defer cli.kill()
+
+	s := &shimServer{
+		cli:    cli,
+		buffer: NewRingBuffer(100, 1024*1024),
+		state:  State{Key: "noclient:key"},
+		done:   make(chan struct{}),
+	}
+	s.watchdog = NewWatchdog(30*time.Second, nil)
+
+	// Attach a writeCh but leave clientAttached false: enqueueWrite would
+	// deliver here if readStdout marshalled, so an empty channel proves the
+	// marshal+enqueue path was skipped.
+	ch := make(chan []byte, 16)
+	s.mu.Lock()
+	s.writeCh = ch
+	s.clientDone = make(chan struct{})
+	s.mu.Unlock()
+	// clientAttached defaults to false (zero value).
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.readStdout() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("readStdout did not return")
+	}
+
+	// All three lines must have been buffered for replay.
+	if got := s.buffer.Count(); got != 3 {
+		t.Errorf("buffer.Count = %d, want 3 (Push must run even with no client)", got)
+	}
+	// Session-ID extraction must have run despite no client.
+	if !s.sessionIDKnown.Load() {
+		t.Errorf("sessionIDKnown = false, want true (extraction must run with no client)")
+	}
+	// No frame should have been enqueued (marshal skipped).
+	select {
+	case frame := <-ch:
+		t.Errorf("frame enqueued with no client attached: %q (marshal should be skipped)", frame)
+	default:
+	}
 }
 
 // --- setClient / clearClient ---

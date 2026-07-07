@@ -69,6 +69,41 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 
 	// Slow path: fragmented writes, use buffer.
 	w.buf.Write(data)
+
+	// R202606f-GO-009 (#2293): validate the size of EVERY complete line
+	// currently buffered BEFORE sending any of them. The previous loop sent
+	// each line as it scanned, so if a later line exceeded maxStdinLineBytes
+	// the earlier lines had already gone out on the CLI stdin — w.buf.Reset()
+	// could discard the oversized remainder but could not un-send the bytes
+	// already written, leaving a truncated NDJSON frame stream on the wire
+	// (broken protocol framing). Scanning sizes first makes the oversized-line
+	// rejection atomic: we either send all complete lines in this buffer or
+	// none, never a partial prefix.
+	if buffered := w.buf.Bytes(); bytes.IndexByte(buffered, '\n') != -1 {
+		off := 0
+		for off < len(buffered) {
+			nl := bytes.IndexByte(buffered[off:], '\n')
+			if nl == -1 {
+				break // trailing partial line — not yet a complete frame
+			}
+			lineLen := nl // bytes before '\n'
+			if lineLen > maxStdinLineBytes {
+				// Reject before any send. Discard the whole buffer: the
+				// oversized line plus any trailing partial cannot be salvaged
+				// into a valid frame, and leaving them would let the next
+				// Write concatenate fresh bytes onto a broken prefix.
+				w.buf.Reset()
+				return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, lineLen, maxStdinLineBytes)
+			}
+			off += nl + 1
+		}
+	}
+
+	// All complete lines pass the size check; now drain them. A send error
+	// (socket failure) is unavoidably non-atomic, but those are connection
+	// faults that already tear down the process, not protocol-frame
+	// corruption caused by our own size rejection.
+	//
 	// io.Writer contract: when returning a non-nil error, n must reflect
 	// the count of input bytes already accepted by the writer. Tracking
 	// consumed bytes prevents callers from re-sending lines that the shim
@@ -86,18 +121,6 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 		// but stay defensive: a zero-length line would panic on the slice below.
 		if len(line) == 0 {
 			continue
-		}
-		if len(line)-1 > maxStdinLineBytes {
-			// The offending line was already consumed from w.buf by ReadBytes
-			// above; discard any trailing partial lines so the next Write()
-			// doesn't concatenate fresh data onto a broken prefix the shim
-			// never received.
-			w.buf.Reset()
-			n := consumed + len(line)
-			if n > len(data) {
-				n = len(data)
-			}
-			return n, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
 		}
 		// A bare "\n" line (e.g. left-over from a previous Write that put
 		// back a partial residual starting with newline) skips the send

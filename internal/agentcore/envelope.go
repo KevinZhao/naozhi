@@ -70,14 +70,21 @@ type Envelope struct {
 	TS              string `json:"ts"`
 }
 
-// resultProbe is the minimal projection of a claude stream-json `result`
-// event needed for terminal-state classification (RFC §6.1). Full event
-// parsing belongs to cli.Protocol — this probe must never grow beyond
-// classification needs.
+// resultProbe is the full projection of a claude stream-json `result`
+// event the agentcore layer needs: classification (type/subtype/is_error),
+// the final text, and the cost/duration receipt. R202606h-PERF-002 (#2321):
+// previously three call sites (isResultLine / ResultText / ResultMetaOf) each
+// re-decoded the SAME result line into three overlapping structs. Folding the
+// fields into one probe lets a caller that wants more than one facet decode
+// once via ParseResultLine. Full event parsing still belongs to cli.Protocol —
+// this probe must never grow beyond agentcore's run-record needs.
 type resultProbe struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	IsError bool   `json:"is_error"`
+	Type       string  `json:"type"`
+	Subtype    string  `json:"subtype"`
+	IsError    bool    `json:"is_error"`
+	Result     string  `json:"result"`
+	CostUSD    float64 `json:"total_cost_usd"`
+	DurationMS int64   `json:"duration_ms"`
 }
 
 // resultTypeMarker gates the probe unmarshal: the stream carries thousands
@@ -86,20 +93,30 @@ type resultProbe struct {
 // ReadEventInto fast-path precedent in protocol_claude.go).
 var resultTypeMarker = []byte(`"type":"result"`)
 
+// ParseResultLine decodes a kind=cli envelope line ONCE when it is the
+// stream-json result event, returning the full probe. ok=false (and the
+// cheap bytes.Contains short-circuit) for every other line. Callers that
+// need more than one result facet should use this instead of calling the
+// individual ResultText/ResultMetaOf/isResultLine helpers in sequence —
+// each of those re-runs the marker scan + json.Unmarshal on the same bytes.
+func ParseResultLine(line json.RawMessage) (p resultProbe, ok bool) {
+	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
+		return resultProbe{}, false
+	}
+	if err := json.Unmarshal(line, &p); err != nil || p.Type != "result" {
+		return resultProbe{}, false
+	}
+	return p, true
+}
+
 // isResultLine reports whether a kind=cli envelope line is the stream-json
 // result event, and if so whether the CLI flagged it as an error. Error is
 // signalled by is_error OR an error_* subtype — defence against CLI builds
 // that report errors via subtype only (a missing is_error field decodes to
 // false, which must not silently classify a failed run as Success).
 func isResultLine(line json.RawMessage) (isResult, isError bool) {
-	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
-		return false, false
-	}
-	var p resultProbe
-	if err := json.Unmarshal(line, &p); err != nil {
-		return false, false
-	}
-	if p.Type != "result" {
+	p, ok := ParseResultLine(line)
+	if !ok {
 		return false, false
 	}
 	return true, p.IsError || strings.HasPrefix(p.Subtype, "error")
@@ -110,14 +127,8 @@ func isResultLine(line json.RawMessage) (isResult, isError bool) {
 // line. Consumers (cron run records) get the CLI's last-turn text without
 // growing their own stream-json knowledge.
 func ResultText(line json.RawMessage) (text string, ok bool) {
-	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
-		return "", false
-	}
-	var p struct {
-		Type   string `json:"type"`
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(line, &p); err != nil || p.Type != "result" {
+	p, ok := ParseResultLine(line)
+	if !ok {
 		return "", false
 	}
 	return p.Result, true
@@ -136,15 +147,8 @@ type ResultMeta struct {
 // fast path as ResultText so the thousands of non-result lines per run pay
 // only a bytes.Contains. ok=false for every other line.
 func ResultMetaOf(line json.RawMessage) (m ResultMeta, ok bool) {
-	if len(line) == 0 || !bytes.Contains(line, resultTypeMarker) {
-		return ResultMeta{}, false
-	}
-	var p struct {
-		Type       string  `json:"type"`
-		CostUSD    float64 `json:"total_cost_usd"`
-		DurationMS int64   `json:"duration_ms"`
-	}
-	if err := json.Unmarshal(line, &p); err != nil || p.Type != "result" {
+	p, ok := ParseResultLine(line)
+	if !ok {
 		return ResultMeta{}, false
 	}
 	return ResultMeta{CostUSD: p.CostUSD, DurationMS: p.DurationMS}, true

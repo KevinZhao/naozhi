@@ -127,6 +127,14 @@ const (
 // Promoted here so all three adapters share one source of truth.
 const DefaultMaxReplyLen = 4000
 
+// DiscordMaxReplyLen is Discord's hard per-message content ceiling (2000
+// characters, BASE_TYPE_MAX_LENGTH). Unlike Feishu/Slack/Weixin — which
+// fall back to DefaultMaxReplyLen — Discord cannot exceed this API limit, so
+// the divergence is declared here in the policy package rather than buried as
+// an inline literal in the adapter, keeping all per-platform reply ceilings in
+// one source of truth. R202606c-ARCH-3 (#2236).
+const DiscordMaxReplyLen = 2000
+
 // DefaultMaxIncomingBytes caps the per-message text byte length that any
 // platform adapter forwards into dispatch. ~8 KiB is well above any
 // reasonable single-message payload from a human user and bounds the
@@ -270,7 +278,17 @@ func RecoverHandler(label string) {
 // SplitText splits text into chunks of at most maxRunes runes, preferring
 // newline boundaries in the second half of each chunk when possible.
 func SplitText(text string, maxRunes int) []string {
-	if utf8.RuneCountInString(text) <= maxRunes {
+	return SplitTextWithCount(text, maxRunes, utf8.RuneCountInString(text))
+}
+
+// SplitTextWithCount is SplitText for callers that have already computed the
+// rune count of text (e.g. dispatch.SendSplitReply, which needs the count to
+// size the page-suffix reservation). Passing it in avoids a second O(n)
+// utf8.RuneCountInString full scan of the same string. R202606e-PERF-002
+// (#2283). runeCount must equal utf8.RuneCountInString(text); a wrong value
+// only affects the single-chunk fast path, never chunk boundaries.
+func SplitTextWithCount(text string, maxRunes, runeCount int) []string {
+	if runeCount <= maxRunes {
 		return []string{text}
 	}
 	var chunks []string

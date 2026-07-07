@@ -65,13 +65,18 @@ type Session interface {
 	InterruptViaControl() InterruptOutcome
 }
 
-// SendResult is the cron-local subset of cli.SendResult. cron only
-// reads Text (for IM notify + run history) and SessionID (for stub
-// chain refresh). No alloc-sensitive paths cross this boundary so a
-// fresh struct per Send is fine.
+// SendResult is the cron-local subset of cli.SendResult. cron reads
+// Text (for IM notify + run history), SessionID (for stub chain
+// refresh) and CostUSD (R202606e-ARCH-1 #2280: per-run cost for local
+// runs, which have no SandboxMeta receipt to carry it). No alloc-
+// sensitive paths cross this boundary so a fresh struct per Send is fine.
 type SendResult struct {
 	Text      string
 	SessionID string
+	// CostUSD is the CLI's cumulative total_cost_usd for the run (mirrors
+	// cli.SendResult.CostUSD). Local (non-sandbox) cron runs persist this
+	// onto CronRun so per-job monthly cost aggregates stop reading 0.
+	CostUSD float64
 }
 
 // InterruptOutcome mirrors session.InterruptOutcome value-for-value

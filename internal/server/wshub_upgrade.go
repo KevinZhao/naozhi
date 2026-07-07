@@ -11,6 +11,7 @@
 package server
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -248,6 +249,28 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 		// AuthHandlers not wired (test harness only). Preserve the
 		// legacy IP-fallback so unit tests that bypass NewHub continue
 		// to authenticate.
+		//
+		// R202606j-SEC-8 (#2343): in trusted-proxy mode an XFF-less request
+		// yields clientIP=="" so the owner key would be the empty string.
+		// reserveOwnerSlot treats "" as the legacy cap-exempt single-user
+		// bucket, so every such connection would share one unbounded slot —
+		// a headless (Auth-less) Hub reached over a trusted proxy could let a
+		// single source exhaust the global pool. Substitute a per-request
+		// crypto-random owner so each connection lands in its own per-owner
+		// bucket and is subject to the normal cap. A non-empty ip keeps its
+		// stable (co-NAT-shared) bucket, preserving the legacy harness shape.
+		if ip == "" {
+			var b [16]byte
+			if _, err := rand.Read(b[:]); err != nil {
+				// Entropy source failed: refuse rather than fall back to the
+				// shared empty bucket (mirrors mintAnonCookie's ok=false).
+				slog.Warn("ws upgrade: rand.Read failed deriving anon owner; refusing upgrade", "err", err)
+				w.Header().Set("Retry-After", "30")
+				http.Error(w, "could not derive upload owner; please retry", http.StatusServiceUnavailable)
+				return "", false, false
+			}
+			return hex.EncodeToString(b[:]), true, true
+		}
 		return ip, true, true
 	}
 	// Token mode: only the auth-cookie path is examined here. WS clients

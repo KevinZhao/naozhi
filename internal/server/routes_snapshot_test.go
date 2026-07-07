@@ -280,6 +280,7 @@ var packageFuncType = map[string]string{
 	"handleAgentViewJS":    "http.HandlerFunc",
 	"handleAssetBrowserJS": "http.HandlerFunc",
 	"handleFilesViewJS":    "http.HandlerFunc",
+	"handleFavicon":        "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{

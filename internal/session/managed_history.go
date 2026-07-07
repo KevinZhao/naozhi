@@ -120,6 +120,9 @@ func (s *ManagedSession) SetPrevSessionOrigins(ids []string, origin string) {
 	for i := range ids {
 		s.prevSessionOrigins[start+i] = origin
 	}
+	// Bump the chain generation so the store marshal cache (#2346) can
+	// detect this mutation via an O(1) counter compare instead of slices.Equal.
+	s.prevHistoryGen.Add(1)
 }
 
 // SnapshotPrevSessionOrigins returns a defensive copy of the parallel
@@ -171,9 +174,11 @@ func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
 	defer s.historyMu.Unlock()
 	if len(ids) == 0 {
 		s.prevSessionIDs = nil
+		s.prevHistoryGen.Add(1)
 		return
 	}
 	s.prevSessionIDs = slices.Clone(ids)
+	s.prevHistoryGen.Add(1)
 }
 
 // RebuildChainFiltered atomically rebuilds prevSessionIDs and
@@ -235,10 +240,12 @@ func (s *ManagedSession) RebuildChainFiltered(keepMask []bool) int {
 	if len(newIDs) == 0 {
 		s.prevSessionIDs = nil
 		s.prevSessionOrigins = nil
+		s.prevHistoryGen.Add(1)
 		return removed
 	}
 	s.prevSessionIDs = newIDs
 	s.prevSessionOrigins = newOrigins
+	s.prevHistoryGen.Add(1)
 	return removed
 }
 

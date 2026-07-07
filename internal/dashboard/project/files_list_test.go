@@ -264,6 +264,104 @@ func TestHandleFilesList_IrregularTypeSkipped(t *testing.T) {
 	}
 }
 
+func TestHandleFilesList_HidesDotfilesAndNoiseDirs(t *testing.T) {
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
+		"app.go":                "package main",
+		"README.md":             "hi",
+		".gitignore":            "node_modules",
+		".git/config":           "[core]",
+		".naozhi/project.yaml":  "name: demo",
+		"node_modules/dep/i.js": "x",
+		"dist/bundle.js":        "y",
+		"__pycache__/m.pyc":     "z",
+	})
+
+	// Default: dotfiles + noise dirs are omitted; ordinary files remain.
+	_, resp := doList(t, h, "project="+proj)
+	names := entryNames(resp.Entries)
+	for _, hidden := range []string{".gitignore", ".git", ".naozhi", "node_modules", "dist", "__pycache__"} {
+		if _, ok := names[hidden]; ok {
+			t.Errorf("%q should be hidden by default (got %v)", hidden, keysOf(names))
+		}
+	}
+	for _, want := range []string{"app.go", "README.md", "CLAUDE.md"} {
+		if _, ok := names[want]; !ok {
+			t.Errorf("ordinary entry %q should be listed (got %v)", want, keysOf(names))
+		}
+	}
+
+	// show_hidden=1: dotfiles + noise dirs reappear (but credential files,
+	// gated by isSensitiveDownloadPath, stay hidden regardless — covered by
+	// the sensitive tests). .git here is a plain dir, not a sensitive segment.
+	_, resp = doList(t, h, "project="+proj+"&show_hidden=1")
+	names = entryNames(resp.Entries)
+	for _, want := range []string{".gitignore", ".git", ".naozhi", "node_modules", "dist", "__pycache__"} {
+		if _, ok := names[want]; !ok {
+			t.Errorf("%q should be visible with show_hidden=1 (got %v)", want, keysOf(names))
+		}
+	}
+}
+
+// Credential files must stay hidden even with show_hidden=1: the sensitive
+// filter runs BEFORE the dotfile/noise filter, so opting into hidden entries
+// never exposes .env / id_rsa / .ssh. Closes the test gap flagged in review.
+func TestHandleFilesList_ShowHiddenStillOmitsCredentials(t *testing.T) {
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
+		"app.go":               "package main",
+		".env":                 "SECRET=1",
+		"id_rsa":               "-----BEGIN-----",
+		".ssh/authorized_keys": "ssh-rsa",
+		".gitignore":           "x", // ordinary dotfile — should reappear
+	})
+	_, resp := doList(t, h, "project="+proj+"&show_hidden=1")
+	names := entryNames(resp.Entries)
+	for _, banned := range []string{".env", "id_rsa", ".ssh"} {
+		if _, ok := names[banned]; ok {
+			t.Errorf("credential %q must stay hidden even with show_hidden=1 (got %v)", banned, keysOf(names))
+		}
+	}
+	// A non-sensitive dotfile is revealed by show_hidden=1.
+	if _, ok := names[".gitignore"]; !ok {
+		t.Errorf(".gitignore should be visible with show_hidden=1 (got %v)", keysOf(names))
+	}
+}
+
+func TestIsHiddenBrowseEntry(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{".git", true},
+		{".naozhi", true},
+		{".gitignore", true},
+		{".env", true},
+		{"node_modules", true},
+		{"dist", true},
+		{"build", true},
+		{"target", true},
+		{"vendor", true},
+		{"__pycache__", true},
+		{"app.go", false},
+		{"README.md", false},
+		{"src", false},
+		{"distribution", false}, // not an exact match for "dist"
+		{"mybuild", false},
+	}
+	for _, tc := range cases {
+		if got := isHiddenBrowseEntry(tc.name); got != tc.want {
+			t.Errorf("isHiddenBrowseEntry(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func keysOf(m map[string]listEntry) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // itoa avoids importing strconv just for the truncation test loop.
 func itoa(i int) string {
 	if i == 0 {

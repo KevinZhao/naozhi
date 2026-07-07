@@ -487,15 +487,29 @@ type shimServer struct {
 	watchdog  *Watchdog
 	startedAt time.Time
 
-	mu         sync.Mutex
-	state      State
-	clientConn net.Conn      // current connected client (at most one)
-	writeCh    chan []byte   // buffered channel for async writes to client
-	clientDone chan struct{} // closed to signal writer goroutine + enqueueWrite to stop
-	graceTimer *time.Timer
-	idleTimer  *time.Timer
-	done       chan struct{} // closed on shutdown
-	doneOnce   sync.Once
+	mu    sync.Mutex
+	state State
+	// sessionIDKnown mirrors state.SessionID != "" so the stdout hot path
+	// (tryExtractSessionID, 5-50 lines/s/session) can skip the per-line
+	// bytes.Contains scan + json.Unmarshal once the ID is set, without
+	// taking s.mu. The ID is assigned exactly once (system/init or the first
+	// result / ACP frame) and never cleared, so a one-way latch is safe.
+	sessionIDKnown atomic.Bool
+	// clientAttached mirrors `clientConn != nil` for the stdout hot path so
+	// readStdout can skip MarshalStdoutLine's per-line JSON allocation when no
+	// naozhi is attached (idle cron sessions running long tool calls emit
+	// 20-50 lines/s that would otherwise be marshalled into a frame and
+	// dropped). R202606f-PERF-006 (#2295). It is a hint only: a benign race
+	// where it reads true just as a client detaches simply falls through to
+	// enqueueWrite, which is already nil-safe (drops the frame).
+	clientAttached atomic.Bool
+	clientConn     net.Conn      // current connected client (at most one)
+	writeCh        chan []byte   // buffered channel for async writes to client
+	clientDone     chan struct{} // closed to signal writer goroutine + enqueueWrite to stop
+	graceTimer     *time.Timer
+	idleTimer      *time.Timer
+	done           chan struct{} // closed on shutdown
+	doneOnce       sync.Once
 }
 
 func (s *shimServer) initiateShutdown() {
@@ -600,6 +614,7 @@ func (s *shimServer) setClient(conn net.Conn) (writeCh chan []byte, clientDone c
 	s.clientConn = conn
 	s.writeCh = make(chan []byte, 256)
 	s.clientDone = make(chan struct{})
+	s.clientAttached.Store(true)
 
 	// Cancel SIGTERM grace period
 	if s.graceTimer != nil {
@@ -620,6 +635,7 @@ func (s *shimServer) clearClient(conn net.Conn) {
 			close(s.clientDone)
 		}
 		s.clientConn = nil
+		s.clientAttached.Store(false)
 		s.writeCh = nil
 		s.clientDone = nil
 	}
@@ -662,6 +678,19 @@ func (s *shimServer) readStdout() {
 		// Extract session_id from init/result events
 		s.tryExtractSessionID(line)
 
+		// R202606f-PERF-006 (#2295): skip the per-line JSON frame allocation
+		// when no naozhi is attached. buffer.Push / tryExtractSessionID /
+		// watchdog.Reset above still run (they feed replay, session-ID latch,
+		// and liveness regardless of a client), but MarshalStdoutLine +
+		// enqueueWrite are pure waste with no consumer — an idle cron session
+		// running a long tool call emits 20-50 lines/s that were marshalled
+		// into a frame only for enqueueWrite to drop on a nil channel. The
+		// atomic latch is a hint: a client attaching mid-line just misses one
+		// frame, which replay (buffer.Push, already done) backfills on attach.
+		if !s.clientAttached.Load() {
+			continue
+		}
+
 		// Build message and enqueue (non-blocking, no lock during Flush).
 		//
 		// R67-PERF-3: route the stdout hot path through MarshalStdoutLine,
@@ -681,16 +710,33 @@ func (s *shimServer) readStdout() {
 	slog.Info("CLI stdout EOF")
 }
 
+// Search patterns for tryExtractSessionID, hoisted to package scope so the
+// per-line hot path reuses these byte slices instead of allocating a fresh
+// []byte for each bytes.Contains call. snake = claude stream-json frames,
+// camel = ACP/kiro frames.
+var (
+	sessionIDSnakeKey = []byte(`"session_id"`)
+	sessionIDCamelKey = []byte(`"sessionId"`)
+)
+
 func (s *shimServer) tryExtractSessionID(line []byte) {
-	// Fast gate: fires on every CLI stdout line (5-50/s during active turns).
+	// Fast path: the ID is assigned exactly once and never cleared, so once
+	// it is known every later stdout line (5-50/s/session) can skip the
+	// bytes.Contains scan + json.Unmarshal entirely. The atomic latch lets us
+	// bail without taking s.mu on the overwhelmingly common already-known case.
+	if s.sessionIDKnown.Load() {
+		return
+	}
+
+	// Fast gate: fires on every CLI stdout line until the ID is known.
 	// Only init / result / ACP session/new events carry session_id; the vast
 	// majority of lines are assistant_delta / tool_use and contain neither
 	// token. Two bytes.Contains scans cover both the claude (snake_case
 	// "session_id") and ACP/kiro (camelCase "sessionId") frame conventions.
 	// R65-PERF-H-3 design preserved: still no full decoder-state alloc when
 	// the line lacks both tokens.
-	hasSnake := bytes.Contains(line, []byte(`"session_id"`))
-	hasCamel := bytes.Contains(line, []byte(`"sessionId"`))
+	hasSnake := bytes.Contains(line, sessionIDSnakeKey)
+	hasCamel := bytes.Contains(line, sessionIDCamelKey)
 	if !hasSnake && !hasCamel {
 		return
 	}
@@ -709,7 +755,11 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 			if ev.Type == "result" && s.state.SessionID == "" {
 				s.state.SessionID = ev.SessionID
 			}
+			known := s.state.SessionID != ""
 			s.mu.Unlock()
+			if known {
+				s.sessionIDKnown.Store(true)
+			}
 			return
 		}
 	}
@@ -741,7 +791,11 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 		if s.state.SessionID == "" {
 			s.state.SessionID = sid
 		}
+		known := s.state.SessionID != ""
 		s.mu.Unlock()
+		if known {
+			s.sessionIDKnown.Store(true)
+		}
 	}
 }
 

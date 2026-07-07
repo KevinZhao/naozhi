@@ -91,6 +91,14 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 			return
 		}
 	}
+	r.setWorkspaceOverrideLocked(chatKey, path)
+}
+
+// setWorkspaceOverrideLocked writes the override entry plus its LRU seq stamp
+// and bumps dirty/gen. Caller holds r.mu and has already enforced the capacity
+// bound. Shared by SetWorkspace and the atomic ResetChatAndSetWorkspace path
+// (#2342) so the seq/dirty/gen bookkeeping lives in one place.
+func (r *Router) setWorkspaceOverrideLocked(chatKey, path string) {
 	if r.wsStore.seq == nil {
 		r.wsStore.seq = make(map[string]uint64)
 	}

@@ -1269,6 +1269,7 @@ function toggleHistory() {
   popover.innerHTML =
     '<div class="history-popover-header">' +
       '<span>历史 <span class="hp-count" id="hp-count">(' + merged.length + ')</span></span>' +
+      '<span class="hp-subtitle">侧栏为当前活跃会话，此处为全部历史会话</span>' +
     '</div>' +
     (merged.length > 0
       ? '<div class="history-popover-search">' +
@@ -3607,16 +3608,17 @@ function stripLeakedToolCalls(text) {
 }
 
 // eventHtml renders one EventEntry bubble.
-// opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
+// opts.includeInternal=true keeps tool_use / task_* / agent / result
 // events that the parent view hides (banner handles them there). The sub-agent
 // internal view (agent_view.js) needs them — a team member's work is almost
-// entirely tool_use + thinking; filtering those out leaves the panel looking
+// entirely tool_use; filtering those out leaves the panel looking
 // empty even when the jsonl transcript is full of content. RFC v4 §3.6.7 /
 // §3.6.1 contract: parent and agent views share the bubble renderer but
 // differ on the filter policy.
 function eventHtml(e, opts) {
+  if (e && e.type === 'thinking') return '';
   const includeInternal = !!(opts && opts.includeInternal);
-  if (!includeInternal && (isInternalEvent(e) || e.type === 'thinking')) return '';
+  if (!includeInternal && isInternalEvent(e)) return '';
   // AskUserQuestion interactive card: dedicated renderer with option buttons.
   // The matching tool_use entry is already filtered out via INTERNAL_EVENT_TYPES,
   // so the card stands alone in the transcript.
@@ -8814,6 +8816,12 @@ async function openFilePreview(wrapEl) {
   if (mime === 'application/pdf') {
     body.innerHTML = '';
     const frame = document.createElement('iframe');
+    // Defense-in-depth: serveRaw forces application/pdf to an attachment
+    // download so this never inline-renders today. sandbox="" guards the
+    // case where Content-Disposition is stripped (proxy) or serveRaw later
+    // renders PDF inline — zero capabilities, no plugin/script execution,
+    // while the native PDF viewer still works.
+    frame.setAttribute('sandbox', '');
     frame.src = fileApiUrl(project, node, path, 'raw');
     frame.title = path;
     body.appendChild(frame);
@@ -9009,12 +9017,22 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     // Isolation is unchanged (opaque origin, see above). No blob URL is
     // allocated, so there is nothing to track or revoke.
     //
-    // Accepted trade-offs vs. the desktop blob path (all strictly better
-    // than the blank frame mobile users get today; tracked for follow-up):
-    //   - CSP: srcdoc documents inherit the dashboard page CSP, so workspace
-    //     HTML loading an external <script> is restricted to the script-src
-    //     allowlist AND require-sri-for (i.e. even jsdelivr needs integrity=).
-    //     Inline scripts (MathJax/KaTeX/Mermaid) still run via allow-scripts.
+    // R202606j-SEC-1 (#2341): srcdoc documents inherit the PARENT page CSP,
+    // unlike the desktop blob: path which carries no inherited policy. Left
+    // unguarded, workspace HTML would execute under the dashboard's own CSP
+    // — including its script-src allowlist and connect-src endpoints — so a
+    // hostile .html could fetch dashboard-allowlisted origins. Prepend a
+    // self-contained <meta> CSP that REPLACES the inherited dashboard policy
+    // with one scoped to the opaque-origin preview: inline scripts still run
+    // (parity with the desktop blob path: MathJax/KaTeX/Mermaid), but the
+    // document gets its own connect/img/style budget rather than borrowing
+    // the dashboard's. A <meta> http-equiv CSP can only further restrict the
+    // inherited policy, never widen it, so this is strictly safe. It is
+    // injected as the document's first child so the parser applies it before
+    // any subsequent inline <script> executes.
+    //
+    // Other accepted trade-offs vs. the desktop blob path (all strictly
+    // better than the blank frame mobile users get today):
     //   - Encoding: srcdoc is parsed as UTF-8 per spec and an in-document
     //     <meta charset> is ignored, so a non-UTF-8 file (e.g. GBK) renders
     //     garbled here. TextDecoder defaults to fatal:false (U+FFFD on bad
@@ -9023,7 +9041,8 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     //   - SVG: srcdoc is HTML-parsed, not XML-parsed. A single <svg> root
     //     renders as foreign content; XML-only features (CDATA, xml:* attrs)
     //     may parse differently than the desktop image/svg+xml blob path.
-    frame.srcdoc = new TextDecoder('utf-8').decode(bytes);
+    const sandboxCsp = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; connect-src 'none'\">";
+    frame.srcdoc = sandboxCsp + new TextDecoder('utf-8').decode(bytes);
     body.appendChild(frame);
   } catch (e) {
     if (mySeq !== _sandboxRenderSeq) return;
@@ -10011,6 +10030,7 @@ const SYSTEM_STAT_LABELS = {
   skipped_origin_user: '跳过·用户已命名',
   skipped_min_user_turns: '跳过·轮次不足',
   skipped_no_new_turns: '跳过·无新增对话',
+  skipped_min_rename_interval: '跳过·命名间隔未到',
 };
 function systemStatLabel(key) {
   if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
@@ -10054,9 +10074,9 @@ function renderSystemView() {
         '</div>';
       const stats = lr.stats || {};
       const chips = Object.keys(stats).map(function (k) {
-        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' ' + (stats[k] || 0) + '</span>';
+        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' <b>' + (stats[k] || 0) + '</b></span>';
       });
-      if (chips.length) statsBlock = '<div class="sys-stats">' + chips.join('') + '</div>';
+      if (chips.length) statsBlock = '<div class="sys-stats-label">本次统计</div><div class="sys-stats">' + chips.join('') + '</div>';
     }
     let warnBlock = '';
     const cliF = d.consecutive_cli_failures || 0;

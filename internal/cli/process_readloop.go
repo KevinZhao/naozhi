@@ -42,15 +42,20 @@ type shimMsg struct {
 	Type   string      `json:"type"`
 	Seq    int64       `json:"seq,omitempty"`
 	Line   string      `json:"line,omitempty"`
+	Msg    string      `json:"msg,omitempty"`
 	Code   shimMsgCode `json:"code,omitempty"`
 	Signal string      `json:"signal,omitempty"`
 }
 
-// shimMsgCode wraps an int so json.Unmarshal can distinguish absent
+// shimMsgCode wraps an int64 so json.Unmarshal can distinguish absent
 // from explicit zero without allocating *int. Decode-only; never
 // emitted from naozhi side. R222-PERF-13.
+//
+// R202606f-GO-001: Value is int64 (not int) so a large exit code does not
+// silently wrap on a 32-bit build — int is 32-bit there and parseJSONInt64Bytes
+// already produces a full int64, so the previous int(v) narrowing truncated.
 type shimMsgCode struct {
-	Value   int
+	Value   int64
 	Present bool
 }
 
@@ -72,7 +77,7 @@ func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	c.Value = int(v)
+	c.Value = v
 	return nil
 }
 
@@ -188,6 +193,17 @@ func (p *Process) readLoop() {
 			if cb != nil {
 				cb()
 			}
+			// R202606f-GO-008: unblock any SendPassthrough callers parked on
+			// their slot.resultCh/errCh. The normal transitionToDead path
+			// calls discardAllPending after onTurnDone; the panic recover
+			// previously did not, so a panic left passthrough callers blocked
+			// until the totalTimeout+30s bail timer (~5.5min) fired. Plain
+			// Send callers are unblocked by the deferred close(eventCh), but
+			// passthrough does not consume eventCh, so they need this explicit
+			// discard. discardAllPending is idempotent (it nils both slot
+			// slices), so a later transitionToDead — which never runs after a
+			// panic here, but is safe regardless — is a no-op second call.
+			p.discardAllPending(ErrProcessExited)
 		}
 	}()
 
@@ -356,7 +372,19 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 		// boundary (degraded/tampered shim could emit arbitrary bytes).
 		// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
 		// cli_exited.Signal and ACP rpc error messages.
-		log.Warn("shim error", "msg", osutil.SanitizeForLog(msg.Line, 256))
+		//
+		// R202606f-ARCH-1: the shim emits error frames as
+		// ServerMsg{Type:"error", Msg:"..."} (internal/shim/server.go) —
+		// the human-readable text lives in the `msg` JSON field, not
+		// `line`. Reading msg.Line here left every "shim error" log with
+		// msg="" so operators could not see duplicate-attach / replay
+		// failures. Prefer Msg; fall back to Line for any legacy frame
+		// that still carries text there.
+		errText := msg.Msg
+		if errText == "" {
+			errText = msg.Line
+		}
+		log.Warn("shim error", "msg", osutil.SanitizeForLog(errText, 256))
 	}
 	return shimDispatchContinue
 }
@@ -396,6 +424,11 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		events []Event
 		err    error
 	)
+	// done is intentionally discarded (R202606f-ARCH-5, #2303): turn-end is
+	// driven authoritatively by a result Event in the dispatch loop below
+	// (and by the rpcErrorTurnEnd synthesis path on err), never by this
+	// advisory bool. A protocol that needs a turn to close MUST emit a result
+	// Event — see ProtocolCore.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
 	} else {
@@ -458,7 +491,7 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 // pinging into a dead fd. The caller (handleShimMessage) returns
 // shimDispatchReturn so readLoop unwinds. R214-CODE-3.
 func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
-	code := 0
+	var code int64
 	if msg.Code.Present {
 		code = msg.Code.Value
 	}
@@ -470,7 +503,7 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	// dashboards, so the cold-path savings are trivial but the
 	// replacement is zero-risk.
 	if code != 0 {
-		reason = DeathReasonCLIExited + "_code_" + strconv.Itoa(code)
+		reason = DeathReasonCLIExited + "_code_" + strconv.FormatInt(code, 10)
 	} else if msg.Signal != "" {
 		// R183-SEC-H1: msg.Signal is the Signal field of the shim's
 		// cli_exited JSON frame. Normal shim builds emit canonical

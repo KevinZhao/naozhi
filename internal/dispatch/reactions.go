@@ -75,6 +75,21 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 	if d.ackQueuedWithReaction(ctx, msg, lg) {
 		return
 	}
+	// #2260: single-use reply-token platforms (WeChat/iLink) cache one
+	// context_token per user that the head slot's reply already consumed.
+	// Reusing it here for the text fallback is rejected upstream (the
+	// notice is silently dropped) and worse, races the head's real answer
+	// for the last-write-wins cached token. Mirror the #2136 gate: when
+	// the platform uses single-use tokens and offers no reaction surface,
+	// rely on reaction-only ack and skip the doomed text fallback.
+	if p := d.platforms[msg.Platform]; p != nil && platform.UsesSingleUseReplyToken(p) {
+		useLg := lg
+		if useLg == nil {
+			useLg = slog.Default()
+		}
+		useLg.Debug("merge follower text fallback skipped", "reason", "single_use_token", "platform", msg.Platform)
+		return
+	}
 	if d.queue != nil && !d.queue.ShouldNotify(key) {
 		return
 	}

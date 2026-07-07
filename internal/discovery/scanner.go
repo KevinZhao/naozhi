@@ -82,7 +82,7 @@ const promptSemCap = 4
 
 type promptCacheState struct {
 	sync.RWMutex
-	entries map[string]promptCacheEntry
+	entries map[string]*promptCacheEntry
 	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
 	// refresh a hit entry's generation without upgrading the RLock to a write
 	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
@@ -94,22 +94,33 @@ type promptCacheState struct {
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	// gen is a heap-allocated atomic so its address stays stable while the
-	// entry lives in the map: getCachedPrompt refreshes it lock-free via
-	// Store, and evictPromptCache reads it via Load under the write lock.
-	gen *atomic.Uint64
+	// gen is an inline atomic. The map stores *promptCacheEntry so the entry's
+	// address (and thus &gen) stays stable for its lifetime: getCachedPrompt
+	// refreshes it lock-free via Store, and evictPromptCache reads it via Load
+	// under the write lock. Storing the pointer avoids the prior per-miss
+	// new(atomic.Uint64) heap allocation (R202606h-PERF-003 #2322) while keeping
+	// the stable-address contract that the lock-free Store on hit requires
+	// (PERF-6 #1966).
+	gen atomic.Uint64
 }
 
 type summaryCacheState struct {
 	sync.RWMutex
-	entries    map[string]summaryCacheEntry
-	generation uint64
+	entries map[string]*summaryCacheEntry
+	// generation is bumped once per Scan. Atomic (like promptCache.generation)
+	// so getCachedSummary can refresh a hit entry's gen lock-free instead of
+	// upgrading its RLock to a write lock (R202606h-PERF-011 #2330 / PERF-6
+	// #1966).
+	generation atomic.Uint64
 }
 
 type summaryCacheEntry struct {
 	mtime int64
 	index sessionsIndex
-	gen   uint64
+	// gen is an inline atomic. The map stores *summaryCacheEntry so &gen stays
+	// stable for the entry's lifetime, letting getCachedSummary refresh it via
+	// a lock-free Store on a cache hit (#2330).
+	gen atomic.Uint64
 }
 
 // pathCacheState maps (claudeDir + "\x00" + sessionID) to the resolved
@@ -226,8 +237,8 @@ func readBoundedSessionFile(path string) ([]byte, error) {
 // wrappers which hit DefaultScanner.
 func NewScanner() *Scanner {
 	return &Scanner{
-		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
-		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
+		promptCache:  promptCacheState{entries: make(map[string]*promptCacheEntry)},
+		summaryCache: summaryCacheState{entries: make(map[string]*summaryCacheEntry)},
 		pathCache:    pathCacheState{entries: make(map[pathKey]pathCacheEntry)},
 		promptSem:    make(chan struct{}, promptSemCap),
 	}
@@ -291,8 +302,9 @@ func (s *Scanner) evictSummaryCache() {
 	if len(s.summaryCache.entries) <= 500 {
 		return
 	}
+	gen := s.summaryCache.generation.Load()
 	for k, v := range s.summaryCache.entries {
-		if v.gen+1 < s.summaryCache.generation {
+		if v.gen.Load()+1 < gen {
 			delete(s.summaryCache.entries, k)
 		}
 	}
@@ -383,6 +395,17 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	return DefaultScanner().Scan(claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
+// ScanContext is the cancellation-aware variant of Scan. The prompt-extraction
+// fan-out (bounded by promptSem) performs unbounded filesystem IO
+// (os.Open + bufio.Scanner over up to 512KiB), so a slow or hung filesystem
+// (NFS/FUSE/ESTALE) could otherwise park the worker goroutines indefinitely
+// and stall shutdown past systemd TimeoutStopSec. Passing a cancelable ctx
+// (e.g. derived from SIGTERM) lets the semaphore-acquire select abandon
+// not-yet-started extractions promptly. R202606d-GO-002 (#2244).
+func ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+	return DefaultScanner().ScanContext(ctx, claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
+}
+
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
 // that are not managed by naozhi (excluded via excludePIDs). The discovered
 // SessionID is taken verbatim from each {pid}.json — modern Claude CLI keeps
@@ -398,6 +421,12 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 // removed. See the second-pass note in the body and
 // TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+	return s.ScanContext(context.Background(), claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
+}
+
+// ScanContext is the cancellation-aware variant of (*Scanner).Scan. See the
+// ScanContext package-level wrapper for rationale (R202606d-GO-002 #2244).
+func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -410,10 +439,9 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
 	s.promptCache.generation.Add(1)
-
-	s.summaryCache.Lock()
-	s.summaryCache.generation++
-	s.summaryCache.Unlock()
+	// #2330: generation is now atomic, matching promptCache — no write lock
+	// needed to advance it.
+	s.summaryCache.generation.Add(1)
 
 	// First pass: collect alive sessions with their original session IDs.
 	var candidates []scanCandidate
@@ -501,6 +529,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	// The upgrade is removed; the SessionID is whatever {pid}.json records.
 	// Regression: TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
 
+	// No live candidates: the summary/prompt batch and the result loop below
+	// all iterate over `candidates`, so with none they produce an empty result
+	// (LookupSummaries returns nil on an empty map, the prompt slice is empty,
+	// and the final loop never runs). Skip the map/slice allocations entirely —
+	// between active sessions this is the steady-state path on every ~10s scan.
+	// R202606h-PERF-005.
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
 	// Batch-lookup summaries from sessions-index.json for all candidates.
 	candidateWorkspaces := make(map[string]string, len(candidates))
 	for i := range candidates {
@@ -517,7 +555,16 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		promptWg.Add(1)
 		go func(idx int) {
 			defer promptWg.Done()
-			promptSem <- struct{}{}
+			// R202606d-GO-002 (#2244): abandon not-yet-started extractions when
+			// ctx is canceled (SIGTERM) so a slow/hung FS cannot park this
+			// goroutine waiting on promptSem past shutdown deadline. Leaving
+			// prompts[idx] as its zero value ("") is the same outcome as an
+			// empty/failed extraction, so callers stay correct.
+			select {
+			case promptSem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-promptSem }()
 			prompts[idx] = s.extractLastPrompt(claudeDir, candidates[idx].sf.CWD, candidates[idx].sf.SessionID)
 		}(i)
@@ -699,9 +746,9 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
 	s.promptCache.Lock()
 	defer s.promptCache.Unlock()
-	gen := new(atomic.Uint64)
-	gen.Store(s.promptCache.generation.Load())
-	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: gen}
+	entry := &promptCacheEntry{mtime: mtime, prompt: result}
+	entry.gen.Store(s.promptCache.generation.Load())
+	s.promptCache.entries[path] = entry
 	s.evictPromptCache()
 }
 
@@ -1067,19 +1114,16 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
 	s.summaryCache.RLock()
 	cached, ok := s.summaryCache.entries[indexPath]
-	gen := s.summaryCache.generation
 	s.summaryCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return sessionsIndex{}, false
 	}
-	if cached.gen != gen {
-		s.summaryCache.Lock()
-		if e, ok2 := s.summaryCache.entries[indexPath]; ok2 && e.mtime == mtime {
-			e.gen = s.summaryCache.generation
-			s.summaryCache.entries[indexPath] = e
-		}
-		s.summaryCache.Unlock()
-	}
+	// Refresh the entry's generation lock-free so eviction keeps it alive. The
+	// *summaryCacheEntry address (and thus &gen) is stable for the entry's
+	// lifetime, so this Store needs no write-lock upgrade — avoiding the
+	// per-hit Lock() that serialised concurrent LookupSummaries readers
+	// (R202606h-PERF-011 #2330 / PERF-6 #1966).
+	cached.gen.Store(s.summaryCache.generation.Load())
 	return cached.index, true
 }
 
@@ -1087,7 +1131,9 @@ func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex
 func (s *Scanner) setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
 	s.summaryCache.Lock()
 	defer s.summaryCache.Unlock()
-	s.summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: s.summaryCache.generation}
+	entry := &summaryCacheEntry{mtime: mtime, index: idx}
+	entry.gen.Store(s.summaryCache.generation.Load())
+	s.summaryCache.entries[indexPath] = entry
 	s.evictSummaryCache()
 }
 
@@ -1102,12 +1148,27 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	return DefaultScanner().RefreshDynamic(claudeDir, sessions)
 }
 
+// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic.
+// Like ScanContext it guards the promptSem fan-out so a slow/hung filesystem
+// cannot park the prompt-extraction goroutines past shutdown. R202606d-GO-002
+// (#2244).
+func RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
+	return DefaultScanner().RefreshDynamicContext(ctx, claudeDir, sessions)
+}
+
 // RefreshDynamic deliberately does NOT advance promptCache/summaryCache
 // generations — Scan is the sole authority for aging. Advancing here would
 // double-tick gen when Scan and RefreshDynamic run in the same cycle,
 // halving the effective cache lifetime (entries evicted after 1 cycle
 // instead of 2) and triggering repeated JSONL parses.
 func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
+	return s.RefreshDynamicContext(context.Background(), claudeDir, sessions)
+}
+
+// RefreshDynamicContext is the cancellation-aware variant of
+// (*Scanner).RefreshDynamic. See RefreshDynamicContext package wrapper for
+// rationale (R202606d-GO-002 #2244).
+func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false
 	}
@@ -1132,7 +1193,16 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			sem <- struct{}{}
+			// R202606d-GO-002 (#2244): abandon not-yet-started extractions on
+			// ctx cancellation (SIGTERM) so a hung FS cannot park this goroutine
+			// on the semaphore past shutdown. mtimeOK[idx] stays false, so the
+			// merge loop below falls back to the existing StartedAt — the same
+			// path taken when the JSONL did not exist.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
 			prompts[idx], mtimes[idx], mtimeOK[idx] = s.extractLastPromptWithMtime(
 				claudeDir, sessions[idx].CWD, sessions[idx].SessionID)

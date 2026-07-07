@@ -72,7 +72,7 @@ type Discord struct {
 // New creates a Discord platform adapter.
 func New(cfg Config) *Discord {
 	if cfg.MaxReplyLen <= 0 {
-		cfg.MaxReplyLen = 2000 // Discord's actual limit
+		cfg.MaxReplyLen = platform.DiscordMaxReplyLen // Discord's actual API limit
 	}
 	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
 }
@@ -617,22 +617,29 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	headerCT := stripMIMEParams(resp.Header.Get("Content-Type"))
-	// Prefer the sniffed type over the CDN header: the header is upstream-
-	// controlled and can carry parameters, arbitrary media types, or
-	// deliberate mismatches. The sniffed value is derived from the bytes
-	// we just read and is safer to forward downstream.
-	ct := headerCT
-	if len(data) > 0 {
-		sniffed := stripMIMEParams(http.DetectContentType(data))
-		if !strings.HasPrefix(sniffed, "image/") {
-			return nil, "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", headerCT, sniffed)
-		}
-		ct = sniffed
-	}
-	if ct == "" {
-		ct = "image/png"
+	ct, err := resolveImageContentType(data, headerCT, u.Hostname())
+	if err != nil {
+		return nil, "", err
 	}
 	return data, ct, nil
+}
+
+// resolveImageContentType decides the Content-Type forwarded downstream for a
+// downloaded attachment. It always derives the type from the bytes (sniffing),
+// never from the upstream header, because the header is CDN-controlled and a
+// malicious edge could declare e.g. text/html to attempt XSS on IM clients that
+// render inline HTML. An empty body is treated as an error: an image download
+// that yields zero bytes is anomalous, and forwarding the upstream header for a
+// bodyless response would re-open exactly that header-trust hole.
+func resolveImageContentType(data []byte, headerCT, host string) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("download: empty body from %s", host)
+	}
+	sniffed := stripMIMEParams(http.DetectContentType(data))
+	if !strings.HasPrefix(sniffed, "image/") {
+		return "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", headerCT, sniffed)
+	}
+	return sniffed, nil
 }
 
 func stripMIMEParams(ct string) string {

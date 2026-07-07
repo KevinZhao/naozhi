@@ -121,6 +121,13 @@ func (b *Bundle) supportedTags() []language.Tag {
 	return tags
 }
 
+// languageMatcher returns the cached x/text Matcher, building it once on first
+// use. The Bundle is immutable after construction, so a single matcher is valid
+// for the Bundle's whole lifetime; sync.Once makes the lazy init concurrency
+// safe. R202606j-CR-002.
 func (b *Bundle) languageMatcher() language.Matcher {
-	return language.NewMatcher(b.supportedTags())
+	b.matcherOnce.Do(func() {
+		b.cachedMatcher = language.NewMatcher(b.supportedTags())
+	})
+	return b.cachedMatcher
 }

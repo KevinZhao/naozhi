@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -107,6 +108,67 @@ func TestStartStop(t *testing.T) {
 
 	if err := w.Stop(); err != nil {
 		t.Fatalf("Stop() error: %v", err)
+	}
+}
+
+// TestStartStop_JoinsPollLoop regresses R202606j-CR-001+CR-004: Start must
+// publish the lifecycle handles (cancel/handler) under startMu so a racing
+// Stop snapshots a non-nil cancel, and Stop must join the pollLoop goroutine
+// (w.pollWg.Wait) so no poll goroutine outlives Stop's return. We assert this
+// by tracking pollLoop's entry/exit via a poll handler that bumps a counter:
+// after Stop returns, the loop goroutine must have observed ctx cancellation
+// and exited, which we verify by confirming the server stops being polled.
+func TestStartStop_JoinsPollLoop(t *testing.T) {
+	t.Parallel()
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls.Add(1)
+		// Short long-poll so Stop's cancel is observed promptly.
+		time.Sleep(20 * time.Millisecond)
+		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
+	}))
+	defer srv.Close()
+
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	handler := func(_ context.Context, _ platform.IncomingMessage) {}
+
+	if err := w.Start(handler); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	// Let the loop poll at least once so it is genuinely in-flight.
+	deadline := time.After(2 * time.Second)
+	for polls.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for first poll")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Stop must not panic and must block until pollLoop has joined.
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	// After Stop returns, pollWg has drained — no further polls may occur.
+	// Snapshot the count, wait past one full poll cycle, and assert it is
+	// unchanged (the loop goroutine has exited rather than issuing a new poll).
+	before := polls.Load()
+	time.Sleep(150 * time.Millisecond)
+	if after := polls.Load(); after != before {
+		t.Errorf("pollLoop still polling after Stop: before=%d after=%d", before, after)
+	}
+}
+
+// TestStop_BeforeStart verifies Stop is a safe no-op when Start never ran:
+// the nil-cancel snapshot guard (mirroring slack) must not panic or block.
+func TestStop_BeforeStart(t *testing.T) {
+	t.Parallel()
+	w := New(Config{Token: "tok"})
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop() before Start should be a no-op, got: %v", err)
 	}
 }
 
@@ -324,6 +386,123 @@ func TestPollLoop_OversizedContextTokenObservable(t *testing.T) {
 	}
 	if strings.Contains(out, oversized) {
 		t.Error("oversized token value must never be logged")
+	}
+}
+
+// TestPollLoop_SemaphoreFullDropSanitizesUser regresses R202606g-SEC-1: the
+// semaphore-full drop WARN logs the attacker-influenced FromUserID, which a
+// hostile iLink relay can stuff with C0/C1/bidi/newline bytes to poison the
+// operator's structured logs. The drop-path log MUST route from through
+// osutil.SanitizeForLog like every other from-bearing log in this file.
+func TestPollLoop_SemaphoreFullDropSanitizesUser(t *testing.T) {
+	var logBuf strings.Builder
+	var logMu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&syncWriter{w: &logBuf, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	// from with embedded control bytes (NUL, BEL, ESC, newline). This is the
+	// 21st message in the poll, so with 20 handler slots held by the earlier
+	// blocking handlers it lands on the semaphore-full drop path.
+	const poisonFrom = "evil\x00\x07\x1b\nuser"
+
+	// Block the first weixinHookConcurrency handlers so the sem saturates.
+	release := make(chan struct{})
+	var startedHandlers atomic.Int32
+
+	msgs := make([]weixinMessage, 0, weixinHookConcurrency+1)
+	for i := 0; i < weixinHookConcurrency; i++ {
+		msgs = append(msgs, weixinMessage{
+			MessageID:   i + 1,
+			FromUserID:  "filler-" + strconv.Itoa(i),
+			MessageType: msgTypeUser,
+			ItemList:    []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "hi"}}},
+		})
+	}
+	// The overflow message carries the poison from.
+	msgs = append(msgs, weixinMessage{
+		MessageID:   weixinHookConcurrency + 1,
+		FromUserID:  poisonFrom,
+		MessageType: msgTypeUser,
+		ItemList:    []messageItem{{Type: msgItemTypeText, TextItem: &textItem{Text: "overflow"}}},
+	})
+
+	pollCount := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if pollCount.Add(1) == 1 {
+			json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, Msgs: msgs, GetUpdatesBuf: "c1"})
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0, GetUpdatesBuf: "c1"})
+	}))
+	defer srv.Close()
+
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	handler := func(_ context.Context, _ platform.IncomingMessage) {
+		startedHandlers.Add(1)
+		<-release // hold the semaphore slot until the test releases it
+	}
+	if err := w.Start(handler); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		close(release)
+		w.Stop()
+	}()
+
+	// Wait until all 20 slots are occupied so the 21st is forced onto the drop
+	// path and its WARN is emitted.
+	deadline := time.After(3 * time.Second)
+	for startedHandlers.Load() < int32(weixinHookConcurrency) {
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: only %d/%d handlers started", startedHandlers.Load(), weixinHookConcurrency)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Give the drop-path WARN a moment to flush.
+	dropDeadline := time.After(2 * time.Second)
+	for {
+		logMu.Lock()
+		out := logBuf.String()
+		logMu.Unlock()
+		if strings.Contains(out, "semaphore full") {
+			break
+		}
+		select {
+		case <-dropDeadline:
+			t.Fatalf("timeout waiting for semaphore-full WARN; log: %q", out)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	logMu.Lock()
+	out := logBuf.String()
+	logMu.Unlock()
+
+	// No raw control byte from the poison from may survive into the log line.
+	for _, b := range []byte{0x00, 0x07, 0x1b, '\n'} {
+		// '\n' is a legitimate record separator in the text handler output, so
+		// only assert on the genuinely dangerous C0/C1/ESC bytes here.
+		if b == '\n' {
+			continue
+		}
+		if strings.IndexByte(out, b) >= 0 {
+			t.Errorf("semaphore-full log still contains raw control byte 0x%02x: %q", b, out)
+		}
+	}
+	// The raw poison user string must not appear verbatim (its control bytes
+	// would have been replaced with '_' by SanitizeForLog).
+	if strings.Contains(out, poisonFrom) {
+		t.Errorf("raw unsanitized from leaked into log: %q", out)
+	}
+	// The sanitized form keeps the printable skeleton.
+	if !strings.Contains(out, "evil") || !strings.Contains(out, "user") {
+		t.Errorf("expected sanitized from skeleton in log, got: %q", out)
 	}
 }
 

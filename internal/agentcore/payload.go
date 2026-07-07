@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,15 @@ const maxPayloadBytes = 100 << 20
 func (p *Payload) Marshal() ([]byte, error) {
 	if p.Prompt == "" {
 		return nil, fmt.Errorf("agentcore: payload prompt is required")
+	}
+	// Enforce the Env-key contract here, at the sole wire-serialization gate,
+	// rather than deferring to the microVM bootstrap (which only surfaces an
+	// opaque error). Keys must be non-empty and free of '=' (would break the
+	// KEY=VALUE env encoding) and NUL (illegal in C env strings).
+	for k := range p.Env {
+		if k == "" || strings.ContainsAny(k, "=\x00") {
+			return nil, fmt.Errorf("agentcore: invalid env key %q: must be non-empty and free of '=' and NUL", k)
+		}
 	}
 	b, err := json.Marshal(p)
 	if err != nil {

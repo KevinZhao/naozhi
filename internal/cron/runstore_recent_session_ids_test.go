@@ -137,6 +137,30 @@ func TestRunStore_RecentSessionIDs_DedupColdPath(t *testing.T) {
 	}
 }
 
+// TestRunStore_RecentSessionIDs_ColdPathNoRuns pins the R202606h-PERF-006
+// early return: a valid job that has never recorded a run hits the cold path
+// (empty recentCache) and List returns no rows, so RecentSessionIDs must
+// return nil/empty without allocating the out/seen pair.
+func TestRunStore_RecentSessionIDs_ColdPathNoRuns(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "cron_jobs.json")
+	store := newRunStore(storePath, 200, 30*24*time.Hour)
+	if store == nil || store.disabled {
+		t.Fatalf("newRunStore disabled/nil")
+	}
+	jobID := mustGenerateID()
+	// Never Append for jobID, so recentCache has no entry → cold path, and
+	// List returns zero rows.
+	if _, ok := store.recentCache.Load(jobID); ok {
+		t.Fatalf("cache unexpectedly warm; cold path not exercised")
+	}
+	got := store.RecentSessionIDs(jobID, 10)
+	if len(got) != 0 {
+		t.Fatalf("cold-path no-run RecentSessionIDs = %v, want empty", got)
+	}
+}
+
 // TestRunStore_RecentSessionIDs_NilSafe / disabled / invalid jobID early
 // returns mirror Recent's contract and prevent the new method from being
 // a panic surface for nil-receiver callers (parity with Recent).

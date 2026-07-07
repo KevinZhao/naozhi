@@ -204,6 +204,14 @@ type Dispatcher struct {
 	// fields (sendFn / takeoverFn / replyFooterFn) into this single
 	// interface to make wireup harder to forget.
 	caps Capabilities
+
+	// inboundLogCache memoizes the per-(platform,user,chat) slog.Logger built
+	// in prepareInbound so a chat that bursts N messages reuses one handler
+	// chain instead of allocating slog.With(platform,user,chat) N times.
+	// R202606c-PERF-010 (#2233). Zero value is ready to use; entries are
+	// immutable *slog.Logger values (safe for concurrent use). See
+	// inbound_logcache.go for the bounded-map semantics.
+	inboundLogCache inboundLogCache
 }
 
 // keyForChat returns the routed session key for the given chat coordinates
@@ -666,11 +674,20 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// session-key component sanitization (strips C0/bidi/zero-width,
 	// replaces colons, bounds length) so the logger's attr view matches
 	// the session-key view in the log. R60-GO-H1.
-	lg := slog.With(
-		"platform", session.SanitizeLogAttr(msg.Platform),
-		"user", session.SanitizeLogAttr(msg.UserID),
-		"chat", session.SanitizeLogAttr(msg.ChatID),
-	)
+	// #2233: a chat bursting many messages would otherwise pay
+	// slog.With(platform,user,chat) — a fresh handler chain — per message.
+	// Memoize on the sanitized triple so repeat traffic from the same
+	// (platform,user,chat) reuses one logger. The sanitized values ARE the
+	// attr values, so the cache key cannot diverge from the logger contents.
+	sp := session.SanitizeLogAttr(msg.Platform)
+	su := session.SanitizeLogAttr(msg.UserID)
+	sc := session.SanitizeLogAttr(msg.ChatID)
+	logKey := sp + "\x00" + su + "\x00" + sc
+	lg := d.inboundLogCache.get(logKey)
+	if lg == nil {
+		lg = slog.With("platform", sp, "user", su, "chat", sc)
+		d.inboundLogCache.put(logKey, lg)
+	}
 	trimmed := strings.TrimSpace(msg.Text)
 
 	// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
@@ -1037,7 +1054,16 @@ func (d *Dispatcher) ownerLoop(
 		// Drained queued messages were acknowledged with a queue reaction
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
-		d.clearQueuedReactions(ctx, msg.Platform, queued, lg)
+		//
+		// #2262: detach via WithoutCancel like the sibling discard path
+		// above. ownerLoop's ctx is the platform stopCtx; on a
+		// shutdown-during-turn race it is already Done by the time we reach
+		// here, and a child WithTimeout would be born cancelled — every
+		// RemoveReaction would short-circuit and the ⏳ HOURGLASS on this
+		// just-drained batch would hang until the platform's ~12h reaction
+		// TTL. This was the only clear point in ownerLoop still using the
+		// live (cancellable) ctx.
+		d.clearQueuedReactions(context.WithoutCancel(ctx), msg.Platform, queued, lg)
 		// Reactions cleared on the normal path — drop the recover-defer's
 		// fallback handle so a panic in the NEXT loop iteration (before the
 		// next DoneOrDrain) doesn't redundantly re-clear this batch.
@@ -1355,6 +1381,20 @@ func (d *Dispatcher) sendAndReply(
 	// reply on its own bubble; followers should surface a short "合并" hint
 	// on the user's original message instead of echoing the same text again.
 	if result.MergedCount > 1 && result.Text == "" {
+		// #2290: a follower's tracker may have already posted a "💭思考中…"
+		// banner if interim assistant events fanned out to its onEvent
+		// before the merge collapsed the turn (process_readloop interim
+		// fan-out claims all currentTurnSlots, followers included). The
+		// follower carries no final text to overwrite that banner, so
+		// without an explicit edit the bubble is orphaned forever. Wait
+		// for any pending banner Reply to land, then collapse it into the
+		// same merge hint the follower surfaces on the user's message.
+		tracker.waitReady(ctx)
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
+				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+			}
+		}
 		d.ackMergedFollower(ctx, msg, key, result.MergedCount, lg)
 		d.markReplySuccess()
 		return
@@ -1375,7 +1415,28 @@ func (d *Dispatcher) sendAndReply(
 	replyText := d.decorateReplyText(result, sess)
 	outImages, replyText := d.readTurnImages(replyText)
 
+	// R20260623-LB-6 (#2316): on graceful shutdown the passthrough turn ctx
+	// is bound to d.stopCtx (mergeStopAndValues) so an in-flight turn can
+	// observe SIGTERM. If the cancel lands in the race window between
+	// d.caps.Send returning (answer already generated, markReplySuccess
+	// recorded above) and the reply being delivered, every delivery below
+	// reuses a Done ctx and the http request aborts — silently dropping the
+	// answer the user waited for. The two error-reply paths and the panic /
+	// card / todo paths already swap to a fresh shutdown-budget ctx via
+	// resolveReplyCtx; the success path was the only delivery path left on a
+	// bare ctx. Align it so the real answer also lands during shutdown.
+	ctx, cleanup := resolveReplyCtx(ctx)
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	tracker.waitReady(ctx)
+
+	// #2291: mark the turn finalized before the final banner edit so a late
+	// editLoop redraw (residual buffered editCh signal firing after the
+	// final EditMessage but before the deferred stop()) skips the repaint
+	// instead of overwriting the real answer with stale interim status.
+	tracker.markFinalized()
 
 	// AskUserQuestion suppression: when this turn surfaced an interactive
 	// question card, `claude -p` also emits a bailout text ("I've asked you
@@ -1414,13 +1475,36 @@ func (d *Dispatcher) sendAndReply(
 	// also be suppressed — otherwise orphaned /tmp image bubbles are sent
 	// after the AskUserQuestion card, confusing the user.
 	if !tracker.askQuestionFired.Load() {
-		for _, img := range outImages {
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{
-				ChatID: msg.ChatID,
-				Images: []platform.Image{img},
-			}); err != nil {
-				slog.Warn("send image failed", "err", err)
-			}
+		d.sendOutboundImages(ctx, p, msg.ChatID, outImages)
+	}
+}
+
+// sendOutboundImages delivers each turn image as its own reply bubble.
+//
+// Extracted from sendAndReply (mirroring readTurnImages) so the
+// failure-accounting contract is unit-testable without a full sendAndReply
+// roundtrip.
+func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, chatID string, images []platform.Image) {
+	for _, img := range images {
+		// R20260623-LB-3 (#2305): deliver via ReplyWithRetry (not bare
+		// Reply) so an outbound image inherits the same token-invalidation
+		// one-shot retry the text path gets. Previously a single-image
+		// reply that hit Feishu token-expiry (99991671) was lost silently:
+		// the platform cleared the cache but the bare Reply never retried
+		// with the rotated token. ReplyWithRetry grants the extra rotation
+		// attempt so the image lands on the fresh token.
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
+			ChatID: chatID,
+			Images: []platform.Image{img},
+		}, limits.PlatformReplyMaxAttempts); err != nil {
+			// R202606j-CR-007: a failed outbound image send must be visible
+			// in /health metrics, matching the text reply paths (single-use
+			// token, split chunk, error reply). Without this an image-only
+			// reply that fails after retries was lost silently — invisible
+			// to dispatchSendFailTotal / sendFailCount.
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Warn("send image failed", "err", err)
 		}
 	}
 }
@@ -1566,18 +1650,27 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 // a single-use-token platform must be truncated to fit one message. #2136.
 const singleReplyTruncMarker = "\n…(truncated)"
 
+// singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
+// computed once at init rather than on every truncateForSingleReply call
+// (the marker is a compile-time constant). R202606e-PERF-003.
+var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
+
 // truncateForSingleReply trims text to at most maxRunes runes, reserving room
 // for a visible truncation marker so the user knows the reply was cut. When
 // maxRunes is too small to fit the marker, it falls back to a bare rune-safe
 // truncation (content kept maximal, marker dropped).
+//
+// R202606e-PERF-001: uses textutil.TruncateRunesNoEllipsis, which walks at most
+// the truncation point and returns a zero-alloc sub-slice of the original
+// string, rather than materialising the whole reply as a []rune (cost ∝ total
+// length, not the kept prefix).
 func truncateForSingleReply(text string, maxRunes int) string {
-	markerRunes := utf8.RuneCountInString(singleReplyTruncMarker)
-	keep := maxRunes - markerRunes
+	keep := maxRunes - singleReplyTruncMarkerRunes
 	if keep <= 0 {
 		// No room for the marker — keep as much content as fits.
-		return string([]rune(text)[:maxRunes])
+		return textutil.TruncateRunesNoEllipsis(text, maxRunes)
 	}
-	return string([]rune(text)[:keep]) + singleReplyTruncMarker
+	return textutil.TruncateRunesNoEllipsis(text, keep) + singleReplyTruncMarker
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
@@ -1610,6 +1703,25 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		return
 	}
 
+	// R202606j-PERF-006: byte-length fast path. maxLen is a rune count
+	// (compared against utf8.RuneCountInString below). Since a string's byte
+	// length is an upper bound on its rune count, len(text) <= maxLen implies
+	// the rune count is also <= maxLen, so the reply can never need splitting.
+	// Emit the single chunk directly and skip the full-text rune scan (which
+	// on a ~50KB reply would walk every byte just to conclude "no split").
+	// Mirrors the single-chunk branch of the loop below (no page suffix,
+	// one ReplyWithRetry, markReplySuccess on success).
+	if len(text) <= maxLen {
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
+			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
+			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", 1, "err", err)
+		} else {
+			d.markReplySuccess()
+		}
+		return
+	}
+
 	// #2008: when the reply needs splitting we append a "\n— [i/N]" page
 	// suffix to each chunk. Splitting at the raw platform limit yields a
 	// full chunk of exactly maxLen runes; the suffix then pushes it to
@@ -1636,7 +1748,11 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	// at maxLen+suffix > maxLen. Detect that case and suppress the page
 	// suffix entirely rather than emit guaranteed-oversized chunks.
 	suppressSuffix := false
-	if runeCount := utf8.RuneCountInString(text); runeCount > maxLen {
+	// #2283: compute the rune count once here and reuse it both for the
+	// page-suffix reservation and SplitTextWithCount below, instead of
+	// scanning the same string twice (here + inside platform.SplitText).
+	runeCount := utf8.RuneCountInString(text)
+	if runeCount > maxLen {
 		// First-pass reservation assuming a 1-digit count, then widen the
 		// reservation to the worst-case suffix for the resulting chunk count.
 		reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
@@ -1649,7 +1765,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		}
 	}
 
-	chunks := platform.SplitText(text, splitLen)
+	chunks := platform.SplitTextWithCount(text, splitLen, runeCount)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 && !suppressSuffix {

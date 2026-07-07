@@ -81,11 +81,11 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 }
 
 // setSandboxPendingIndex records jobID→path for the §6.5 in-flight record.
+// sandboxPendingIndex is allocated in NewScheduler (scheduler.go) and is the
+// only construction path that reaches the sandbox write seam, so the map is
+// guaranteed non-nil here — no nil guard needed [R202606e-GO-001].
 func (s *Scheduler) setSandboxPendingIndex(jobID, path string) {
 	s.sandboxPendingMu.Lock()
-	if s.sandboxPendingIndex == nil {
-		s.sandboxPendingIndex = make(map[string]string)
-	}
 	s.sandboxPendingIndex[jobID] = path
 	s.sandboxPendingMu.Unlock()
 }
@@ -176,7 +176,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 		path := filepath.Join(dir, e.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			slog.Warn("cron sandbox: pending read failed; skipping", "file", e.Name(), "err", err)
+			slog.Warn("cron sandbox: pending read failed; skipping", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
 			continue
 		}
 		var p sandboxPending
@@ -194,7 +194,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 			// skip the StopSession block yet still call finishRun and
 			// remove the file, breaking §6.2 containment. Treat as corrupt:
 			// drop+warn, aligned with stopSandboxRunsForJob's guard.
-			slog.Warn("cron sandbox: corrupt pending record dropped", "file", e.Name(), "err", err)
+			slog.Warn("cron sandbox: corrupt pending record dropped", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
 			_ = os.Remove(path)
 			continue
 		}
@@ -240,8 +240,20 @@ func (s *Scheduler) reconcileSandboxPending() {
 			}
 		}()
 	}
+	// R202606e-GO-002: select on stopCtx while feeding the unbuffered jobs
+	// channel. Without this a SIGTERM during a multi-orphan reconcile cannot
+	// unblock the send side: workers stop dispatching Stops (line 236) but keep
+	// draining, while the sender stays parked on `jobs <- o` until every orphan
+	// is handed off — so close(jobs)/wg.Wait() (and the gcWaitBudget) are held
+	// hostage by the remaining sends. Bail out of feeding once shutdown begins.
 	for _, o := range orphans {
-		jobs <- o
+		select {
+		case jobs <- o:
+		case <-s.stopCtx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		}
 	}
 	close(jobs)
 	wg.Wait()

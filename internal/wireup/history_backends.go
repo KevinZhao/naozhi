@@ -18,10 +18,9 @@ package wireup
 import (
 	// Side-effect imports: each backend's init() registers its
 	// history.Source factory with cli.RegisterHistoryFactory.
-	// Order is irrelevant — RegisterHistoryFactory is idempotent
-	// per backend ID and panics on duplicate registration, which
-	// surfaces accidental double-wireup at startup rather than at
-	// runtime.
+	// Order is irrelevant — RegisterHistoryFactory is last-write-wins
+	// per backend ID (a duplicate ID silently overwrites; ID collisions
+	// are NOT caught at startup).
 	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
 	_ "github.com/naozhi/naozhi/internal/history/codexjsonl"
 	_ "github.com/naozhi/naozhi/internal/history/kirojsonl"

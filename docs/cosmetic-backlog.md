@@ -728,3 +728,40 @@
 - [R202606d-CR-006] slack handleMessage 直接读 s.ctx 字段(write-once 安全但未快照),应顶部捕获 — internal/platform/slack/slack.go:505
 - [R202606d-ARCH-3] weixin EditMessage 静默返回 nil 伪装成功而非 unsupported 信号 — internal/platform/weixin/weixin.go:305
 - [R202606d-PERF-014] metrics labelKey 单 label 仍走 pool+String() 分配 — internal/metrics/labeled.go:151
+- [R202606e-SEC-2] /livez /readyz 无限流(静态响应无指纹信息,设计如此) — internal/server/health.go:187
+- [R202606e-SEC-3] mintAnonCookie 失败用 Retry-After:30 而兄弟 429 用 60 — internal/server/wshub_upgrade.go:242
+- [R202606e-SEC-5] memory popover renderMd 允许 LLM 写的 http:// 可点链接(open-redirect/钓鱼向) — internal/server/static/dashboard.js:13216
+- [R202606e-SEC-6] reconcileSandboxPending os.ReadDir 无 entry 上限,对抗性目录可 startup IO 停顿 — internal/cron/sandbox_pending.go:155
+- [R202606e-PERF-006] ObserveCronExecutionDuration 遍历全 9 桶无早 break — internal/metrics/cron_histogram.go:85
+- [R202606e-ARCH-7] backend 注册双轨语义(panic vs once+recover)易踩,应迁 registry.Typed — internal/cli/backend/profile.go:232
+- [R202606e-GO-009] internal/registry 包零生产 importer,基础设施死代码 — internal/registry/registry.go:1
+- [R202606e-CR-008] TurnCostDelta raw<0 且 prev==0 首轮负读测试缺口 — internal/session/runhistory/cost_test.go:23
+- [R202606f-PERF-004] shim readStderr scanner.Text() 每行 3 分配,应仿 MarshalStdoutLine 加 MarshalStderrLine — internal/shim/server.go:759
+- [R202606f-PERF-009] dispatchProtocolEvent 每 passthrough 事件 make+copy slot 快照无 pool — internal/cli/process_readloop.go:714
+- [R202606f-PERF-010] shim handleClientCommand write 用 []byte(msg.Line+"\n") 双分配 — internal/shim/server.go:1202
+- [R202606f-PERF-012] shim WriteStateFile 用 json.MarshalIndent,生产无人读应 json.Marshal — internal/shim/state.go:83
+- [R202606f-PERF-013] reverseconn.rpc 每请求 make(chan,1),高频 FetchEvents 可池化 — internal/node/reverseconn.go:187
+- [R202606f-GO-007] wsRelay.reconnect 重订阅快照后并发 Unsubscribe 致 stale subscribe — internal/node/relay.go:508
+- [R202606f-ARCH-7] shim.ParseServerMsg 零 in-tree 消费者,cli 自己手 Unmarshal — internal/shim/protocol.go:166
+- [R202606f-ARCH-8] reverseserver host:port 剥离逻辑在 isPrivateHost/isLoopbackHost 重复 — internal/node/reverseserver.go:175
+- [R202606f-SEC-006] dashboard style-src unsafe-inline(CSS 注入 exfil 向,与已关 #2177 script-src 同源) — internal/server/routes.go:535
+- [R202606g-GO-005] BroadcastSessionsUpdate 内联 time.AfterFunc fallback 仅影响 test hub(生产用预分配 timer) — internal/server/wshub_broadcast.go:295
+- [R202606g-PERF-002] ratelimit.Allow TTL 过期时锁内 rate.NewLimiter 分配,可锁外预分配再换 — internal/ratelimit/limiter.go:106
+- [R202606g-ARCH-3] naozhilog.LoadLatest 是 off-interface 方法,router 经具体类型调,弱化 history.Source 抽象 — internal/history/naozhilog/source.go:98
+- [R202606g-ARCH-4] sysession 称 cli-free 但 VisitSessions 传 SessionSnapshot 带 []cli.SubagentInfo/[]cli.MeteringEntry — internal/sysession/router.go:44
+- [R202606g-SEC-6] HandleLogin 缺 XFF 返回 400 而 HandleUpgrade/handleDashboard 返回 429,不一致 — internal/dashboard/auth/handlers.go:556
+- [R202606h-GO-001] tracker.Stats LastDrainMs int64 下溢(仅测试 step-back clock 触发,生产 time.Now 单调) — internal/attachment/tracker/tracker.go:343
+- [R202606h-PERF-008] agentcore holdStream var env Envelope 在循环内,RawMessage 字段致 sink(&env) 每帧逃逸堆 — internal/agentcore/client.go:222
+- [R202606h-ARCH-3] agentcore RunResult.ExitCode 无 omitempty,transport-failed 的 exit_status:0 与"干净退出0"不可区分 — internal/cron/sandbox.go:110
+- [R202606h-SEC-12-dup] ServerConfig.DashboardToken 仅警告空 token 无最小长度(已 CLOSED #1047) — internal/config/config.go:1076
+- [R202606h-PERF-007] attachment GCWithRefs MetaGrace os.Stat 与 shouldKeepAttachment 的 ReadFile 重复 stat — internal/attachment/store.go:501
+- [R202606j-PERF-012] snapshot 每 poll 调 costUnitForBackend(map+once),backend/cost 一旦定不变,可缓存于 ManagedSession — internal/session/managed_query.go:1064
+- [R202606j-PERF-005] formatToolUse 对 Bash/Grep/Glob/Agent 各 json.Unmarshal,单字段可手解析 — internal/dispatch/status.go:82
+- [R202606j-PERF-002] mergeStopAndValues 返回 mergedCtx 接口装箱致每 passthrough 消息逃逸堆 — internal/dispatch/passthrough_stopctx.go:35
+- [R202606j-GO-003] ManagedState 无锁读 s.exempt(write-once-at-construction 实际安全),宜 atomic.Bool 或文档化 — internal/session/managed_state.go:82
+- [R202606j-CR-005] i18n.compile 畸形占位符守卫查 { 不查 },{a}} 静默丢第二个 } — internal/i18n/printer.go:50
+- [R202606j-PERF-007] apierr.Localize 每 reply strings.ToLower(prefix) 分配,可 EqualFold 免分配 — internal/apierr/apierr.go:71
+- [R202606i-PERF-004] shim WriteStateFile 用 json.MarshalIndent,生产无人读应 json.Marshal(重复发现,见 R202606f-PERF-012) — internal/shim/state.go:83
+- [R202606i-CR-003] R202606-CORR-002 测试锚点无对应 tracking issue,traceability 缺失 — internal/server/unauth_unknownip_failclosed_test.go:124
+- [R202606i-SEC-2] stopOneSandboxPendingFile 重读 pending 文件(需 operator 写权限的 TOCTOU,低危) — internal/cron/sandbox_pending.go:562
+- [R202606i-ARCH-2] runtelemetry.RunEndedEvent 无 SandboxMeta/cost 字段,cost 受据无法经统一 telemetry 到 WS(已 #2286 覆盖) — internal/runtelemetry/event.go:65

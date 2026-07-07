@@ -302,6 +302,44 @@ func TestResolveDashboard(t *testing.T) {
 	}
 }
 
+// TestLanguageMatcher_CachedAndStable verifies R202606j-CR-002: languageMatcher
+// builds the x/text Matcher once and reuses the same instance, and repeated
+// Accept-Language resolution returns identical results.
+func TestLanguageMatcher_CachedAndStable(t *testing.T) {
+	b := testBundle()
+
+	m1 := b.languageMatcher()
+	m2 := b.languageMatcher()
+	if m1 != m2 {
+		t.Fatalf("languageMatcher returned different instances: %p vs %p", m1, m2)
+	}
+
+	const header = "en-GB,en;q=0.9,zh;q=0.5"
+	want := b.ResolveDashboard("", "", header)
+	for i := 0; i < 100; i++ {
+		if got := b.ResolveDashboard("", "", header); got != want {
+			t.Fatalf("ResolveDashboard iteration %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestLanguageMatcher_ConcurrentInit exercises the sync.Once lazy init under
+// -race: concurrent first-use must not race on cachedMatcher.
+func TestLanguageMatcher_ConcurrentInit(t *testing.T) {
+	b := testBundle()
+	var wg sync.WaitGroup
+	const goroutines = 16
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = b.languageMatcher()
+			_ = b.ResolveDashboard("", "", "en-US,zh;q=0.5")
+		}()
+	}
+	wg.Wait()
+}
+
 // TestConcurrent_T exercises the immutable-Bundle concurrency guarantee. Run
 // under -race; a data race here would mean the Bundle is being mutated through
 // a Printer, violating NNH1.

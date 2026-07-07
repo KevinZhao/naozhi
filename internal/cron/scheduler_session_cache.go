@@ -50,8 +50,16 @@ type knownSessionsCache struct {
 // cache own its own mutex instead of exposing c.mu to every Scheduler caller.
 func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
 	c.mu.RLock()
+	// Cold cache: no set to hand out and no timestamp comparison can change
+	// that, so skip the time.Now() read on this hot path. containsSessionID
+	// (spawn-time gate) and KnownSessionIDs (1Hz dashboard poll) both call
+	// lookupFresh under the RLock on every invocation. R202606h-PERF-004.
+	if c.set == nil {
+		c.mu.RUnlock()
+		return nil, false
+	}
 	now := time.Now()
-	if c.set != nil && now.Sub(c.generatedAt) < knownSessionsCacheTTL {
+	if now.Sub(c.generatedAt) < knownSessionsCacheTTL {
 		// A coalesced invalidate (dirty) is honoured only once
 		// minInvalidateInterval has elapsed since the last real drop, so a
 		// burst of Appends does not force a rebuild on every probe.

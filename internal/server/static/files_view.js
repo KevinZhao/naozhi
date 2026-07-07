@@ -21,8 +21,40 @@
   function toast(m) { if (U.showToast) U.showToast(m); }
   function $(id) { return document.getElementById(id); }
 
-  // state.project: selected root name. state.dir: workspace-relative dir ("" = root).
-  var state = { roots: [], project: '', dir: '', loaded: false, wired: false };
+  // state.project: the current browse root's project name. Initialised to the
+  // workspace root (is_root) so the operator lands at the top of the tree and
+  // navigates DOWN into subdirectories — no project dropdown. A quick-jump
+  // chip reassigns it to that project (the chosen project then BECOMES the
+  // browse root, and the breadcrumb's leading segment shows its name — so the
+  // breadcrumb is project-relative, not always workspace-relative). state.dir:
+  // dir relative to state.project ("" = its root). state.rootName: cached name
+  // of the is_root project, used to exclude the root from the quick-jump chips.
+  var state = { roots: [], project: '', rootName: '', dir: '', loaded: false, wired: false };
+
+  // Recent browse roots (favorite/recent quick-jump panel). master had no
+  // recent-projects store, so this view owns its own localStorage key. Each
+  // entry is a project name; most-recent first, capped.
+  var RECENT_KEY = 'nz_files_recent';
+  var RECENT_MAX = 8;
+
+  function loadRecent() {
+    try {
+      var raw = window.localStorage.getItem(RECENT_KEY);
+      var arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter(function (n) { return typeof n === 'string'; }) : [];
+    } catch (e) { return []; }
+  }
+  function saveRecent(arr) {
+    try {
+      window.localStorage.setItem(RECENT_KEY, JSON.stringify(arr.slice(0, RECENT_MAX)));
+    } catch (e) { /* storage unavailable — quick-jump just won't persist */ }
+  }
+  function pushRecent(name) {
+    if (!name) return;
+    var arr = loadRecent().filter(function (n) { return n !== name; });
+    arr.unshift(name);
+    saveRecent(arr);
+  }
 
   function fetchJSON(url) {
     if (U.fetchJSON) return U.fetchJSON(url);
@@ -34,29 +66,87 @@
   function loadRoots() {
     return fetchJSON('/api/projects').then(function (list) {
       // Local, path-bearing projects only — remote nodes have no readable FS.
-      state.roots = (list || []).filter(function (p) {
+      // Array.isArray guards against a non-array error body ({error:…}) which
+      // would otherwise throw on .filter and surface a confusing message.
+      state.roots = (Array.isArray(list) ? list : []).filter(function (p) {
         return p && p.path && (!p.node || p.node === 'local');
       });
-      if (!state.project && state.roots.length) state.project = state.roots[0].name;
-      buildRootSelect();
+      // Find the workspace root (include_root). When present, default the
+      // browse root to it so the operator starts at the workspace top and
+      // navigates down. Without include_root there is no real workspace
+      // root, so fall back to roots[0] — the operator's first-configured
+      // project — rather than a shortest-path heuristic. The old heuristic
+      // (shortest .path wins) could pick an unrelated short-path project
+      // (e.g. "/x" beating "/home/user/workspace"), landing the operator in
+      // the wrong tree on multi-project deployments (#2282).
+      var root = null;
+      state.roots.forEach(function (p) {
+        if (p.is_root) root = p;
+      });
+      if (!root && state.roots.length) {
+        root = state.roots[0];
+      }
+      state.rootName = root ? root.name : '';
+      if (!state.project) state.project = state.rootName || (state.roots[0] && state.roots[0].name) || '';
+      buildQuickJump();
     });
   }
 
-  function buildRootSelect() {
-    var sel = $('files-root');
-    if (!sel) return;
-    if (!state.roots.length) {
-      sel.innerHTML = '<option value="">（无可浏览的项目）</option>';
-      return;
-    }
-    sel.innerHTML = state.roots.map(function (p) {
-      return '<option value="' + esc(p.name) + '"' + (p.name === state.project ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+  // buildQuickJump renders the favorite + recent quick-jump chips. Replaces
+  // the old project <select>: the primary flow is navigate-down from the
+  // workspace root, with these chips as a shortcut to a known project.
+  function buildQuickJump() {
+    var wrap = $('files-quickjump');
+    if (!wrap) return;
+    var byName = {};
+    state.roots.forEach(function (p) { byName[p.name] = p; });
+    // Favorites (from /api/projects), then recent names that still exist and
+    // aren't already shown as favorites. Exclude the workspace root itself —
+    // jumping there is redundant when it's already the default browse root.
+    var seen = {};
+    var chips = [];
+    state.roots.forEach(function (p) {
+      if (p.favorite && p.name !== state.rootName && !seen[p.name]) {
+        seen[p.name] = 1; chips.push({ name: p.name, fav: true });
+      }
+    });
+    // Prune recents that no longer resolve to a known project (deleted /
+    // renamed) so stale names don't accumulate in localStorage indefinitely.
+    var recent = loadRecent();
+    var live = recent.filter(function (n) { return byName[n]; });
+    if (live.length !== recent.length) saveRecent(live);
+    live.forEach(function (n) {
+      if (n !== state.rootName && !seen[n]) {
+        seen[n] = 1; chips.push({ name: n, fav: false });
+      }
+    });
+    if (!chips.length) { wrap.innerHTML = ''; wrap.hidden = true; return; }
+    wrap.hidden = false;
+    wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + chips.map(function (c) {
+      return '<button type="button" class="files-qj" data-project="' + esc(c.name) + '" title="' +
+        esc(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
     }).join('');
+  }
+
+  // jumpToProject switches the browse root to a named project (quick-jump
+  // chip) and resets to its root dir. Only accepts a name that resolves to a
+  // known local project — chips are built from state.roots, but validate here
+  // too so a stale chip (roots refreshed since render) can't drive a request
+  // for a vanished project.
+  function jumpToProject(name) {
+    if (!name) return;
+    var known = state.roots.some(function (p) { return p.name === name; });
+    if (!known) { buildQuickJump(); return; }
+    if (name === state.project) { loadDir(''); return; }
+    state.project = name;
+    pushRecent(name);
+    buildQuickJump();
+    loadDir('');
   }
 
   // ---- directory listing ----
   function loadDir(dir) {
-    if (!state.project) { renderEmpty('请选择一个项目'); return; }
+    if (!state.project) { renderEmpty('没有可浏览的工作区'); return; }
     state.dir = dir || '';
     var box = $('files-list');
     if (box) box.innerHTML = '<div class="files-empty">加载中…</div>';
@@ -183,6 +273,13 @@
     if (ext === 'pdf') {
       body.innerHTML = '';
       var frame = document.createElement('iframe');
+      // Defense-in-depth: serveRaw redirects application/pdf to a forced
+      // attachment download today, so this iframe never inline-renders. But
+      // if a proxy strips Content-Disposition (or serveRaw later renders PDF
+      // inline) an un-sandboxed frame would let the PDF plugin execute embedded
+      // JS same-origin. sandbox="" grants zero capabilities — no scripts, no
+      // plugins — while still allowing the browser's native PDF viewer.
+      frame.setAttribute('sandbox', '');
       frame.src = fileApiUrl(state.project, 'local', rel, 'raw');
       frame.title = name;
       body.appendChild(frame);
@@ -208,7 +305,7 @@
 
   // ---- upload (XHR for progress) ----
   function uploadFiles(fileList) {
-    if (!state.project) { toast('请先选择项目'); return; }
+    if (!state.project) { toast('没有可浏览的工作区'); return; }
     var files = Array.prototype.slice.call(fileList || []);
     if (!files.length) return;
     var i = 0;
@@ -282,10 +379,11 @@
   function wire() {
     if (state.wired) return; state.wired = true;
 
-    var sel = $('files-root');
-    if (sel) sel.addEventListener('change', function () {
-      state.project = sel.value; state.dir = '';
-      loadDir('');
+    // Quick-jump chips (favorite + recent) replace the old project <select>.
+    var qj = $('files-quickjump');
+    if (qj) qj.addEventListener('click', function (e) {
+      var b = e.target.closest('.files-qj'); if (!b) return;
+      jumpToProject(b.dataset.project || '');
     });
 
     var crumbs = $('files-crumbs');

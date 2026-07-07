@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ConfirmSandboxRun resolves a §7.4 queue entry as "operator confirmed the run
@@ -98,6 +99,17 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if prompt == "" {
 		return "", ErrNoSnapshot
 	}
+	// R202606h-SEC-2 (#2319): the snapshot prompt blob was written by a PRIOR
+	// naozhi version, before the current containsCronUnsafe / validateCronPrompt
+	// allowlist (C0 / C1 / bidi / LS-PS) existed or with a looser version of it.
+	// The write-edge validation does not re-run on this read path, so a legacy
+	// snapshot can carry control / reordering runes straight into the microVM
+	// prompt. scheduler_finish.go's persistedPrompt scrub only cleans the
+	// on-disk run record, not the in-memory prompt that flows into the next
+	// executeSandbox. Scrub here so the replayed payload is sanitised before it
+	// is injected — same osutil.SanitizeForLog(MaxPromptBytes) call, idempotent
+	// on already-clean prompts.
+	prompt = osutil.SanitizeForLog(prompt, MaxPromptBytes)
 
 	// §6.2 rule 1: if the original is in the attention queue, the microVM may
 	// still be alive. StopSession FIRST; only a confirmed Stop unlocks replay.

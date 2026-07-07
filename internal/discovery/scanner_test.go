@@ -6,16 +6,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// newGen returns a *atomic.Uint64 initialised to v, matching promptCacheEntry.gen.
-func newGen(v uint64) *atomic.Uint64 {
-	g := new(atomic.Uint64)
-	g.Store(v)
-	return g
+// newPromptEntry builds a *promptCacheEntry with gen initialised to v.
+// The map stores *promptCacheEntry (#2322), so tests construct entries this way
+// instead of fabricating a standalone *atomic.Uint64.
+func newPromptEntry(mtime int64, prompt string, gen uint64) *promptCacheEntry {
+	e := &promptCacheEntry{mtime: mtime, prompt: prompt}
+	e.gen.Store(gen)
+	return e
+}
+
+// newSummaryEntry builds a *summaryCacheEntry with gen initialised to v. The
+// map stores *summaryCacheEntry (#2330) with an inline atomic gen.
+func newSummaryEntry(mtime int64, idx sessionsIndex, gen uint64) *summaryCacheEntry {
+	e := &summaryCacheEntry{mtime: mtime, index: idx}
+	e.gen.Store(gen)
+	return e
 }
 
 // ---------------------------------------------------------------------------
@@ -30,25 +39,25 @@ func resetCaches(t *testing.T) {
 	t.Helper()
 	sc := DefaultScanner()
 	sc.promptCache.Lock()
-	sc.promptCache.entries = make(map[string]promptCacheEntry)
+	sc.promptCache.entries = make(map[string]*promptCacheEntry)
 	sc.promptCache.generation.Store(0)
 	sc.promptCache.Unlock()
 
 	sc.summaryCache.Lock()
-	sc.summaryCache.entries = make(map[string]summaryCacheEntry)
-	sc.summaryCache.generation = 0
+	sc.summaryCache.entries = make(map[string]*summaryCacheEntry)
+	sc.summaryCache.generation.Store(0)
 	sc.summaryCache.Unlock()
 
 	t.Cleanup(func() {
 		sc := DefaultScanner()
 		sc.promptCache.Lock()
-		sc.promptCache.entries = make(map[string]promptCacheEntry)
+		sc.promptCache.entries = make(map[string]*promptCacheEntry)
 		sc.promptCache.generation.Store(0)
 		sc.promptCache.Unlock()
 
 		sc.summaryCache.Lock()
-		sc.summaryCache.entries = make(map[string]summaryCacheEntry)
-		sc.summaryCache.generation = 0
+		sc.summaryCache.entries = make(map[string]*summaryCacheEntry)
+		sc.summaryCache.generation.Store(0)
 		sc.summaryCache.Unlock()
 	})
 }
@@ -662,7 +671,7 @@ func TestEvictPromptCache_UnderThreshold(t *testing.T) {
 	// Fill with 10 entries — well under the 500 threshold
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
+		sc.promptCache.entries[key] = newPromptEntry(1, "x", 0)
 	}
 	sc.promptCache.generation.Store(5)
 	beforeLen := len(sc.promptCache.entries)
@@ -682,10 +691,10 @@ func TestEvictPromptCache_OverThreshold(t *testing.T) {
 	// Fill with 501 entries with old generation
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("path%d", i)
-		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: newGen(0)}
+		sc.promptCache.entries[key] = newPromptEntry(1, "x", 0)
 	}
 	// Add one entry with current generation
-	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: newGen(3)}
+	sc.promptCache.entries["current"] = newPromptEntry(1, "y", 3)
 	sc.promptCache.generation.Store(3)
 	sc.evictPromptCache()
 	afterLen := len(sc.promptCache.entries)
@@ -706,10 +715,10 @@ func TestEvictSummaryCache_OverThreshold(t *testing.T) {
 	sc.summaryCache.Lock()
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("idx%d", i)
-		sc.summaryCache.entries[key] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 0}
+		sc.summaryCache.entries[key] = newSummaryEntry(1, sessionsIndex{}, 0)
 	}
-	sc.summaryCache.entries["current"] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 3}
-	sc.summaryCache.generation = 3
+	sc.summaryCache.entries["current"] = newSummaryEntry(1, sessionsIndex{}, 3)
+	sc.summaryCache.generation.Store(3)
 	sc.evictSummaryCache()
 	afterLen := len(sc.summaryCache.entries)
 	_, hasCurrent := sc.summaryCache.entries["current"]

@@ -85,6 +85,14 @@ type ReverseConn struct {
 	subMu sync.Mutex
 	subs  map[string][]EventSink // session key → local browser clients
 
+	// subWG tracks the detached Subscribe history-fetch goroutines (the
+	// first-subscriber and additional-subscriber paths). They are bounded by
+	// baseCtx (5s) and unwind on baseCancel(), but Close() previously returned
+	// while one was still mid-FetchEvents and could call cl.SendJSON after the
+	// connection was torn down. Close() now waits on subWG so no history write
+	// races a teardown. Mirrors wsRelay.wg. R202606f-GO-010 (#2294).
+	subWG sync.WaitGroup
+
 	statusMu sync.RWMutex
 	status   string // "ok" | "connecting" | "error"
 
@@ -166,6 +174,13 @@ func (c *ReverseConn) Close() {
 	// call multiple times; markDisconnected may also fire it.
 	c.baseCancel()
 	conn.Close()
+
+	// Wait for in-flight Subscribe history-fetch goroutines to finish so none
+	// calls cl.SendJSON after Close() returns. baseCancel() above unwinds the
+	// 5s FetchEvents timeout and conn.Close() stops readLoop, so this Wait
+	// returns promptly rather than blocking the full timeout. Mirrors the
+	// wsRelay.wg.Wait() teardown. R202606f-GO-010 (#2294).
+	c.subWG.Wait()
 }
 
 func (c *ReverseConn) writeJSON(v any) error {
@@ -401,6 +416,9 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
 	c.subs[key] = append(c.subs[key], cl)
+	// Add under subMu (mirroring the spawn) so Close()'s subWG.Wait() never
+	// races an Add. R202606f-GO-010 (#2294).
+	c.subWG.Add(1)
 	c.subMu.Unlock()
 
 	if alreadySub {
@@ -409,6 +427,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 		// cancels the RPC through ctx cancellation — no auxiliary
 		// watcher goroutine needed. H7 (Round 163).
 		go func() {
+			defer c.subWG.Done()
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
 
@@ -430,6 +449,8 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			c.subMu.Lock()
 			removeSub(c.subs, key, cl)
 			c.subMu.Unlock()
+			// No history goroutine spawned on this path; release the token. (#2294)
+			c.subWG.Done()
 			return
 		}
 		// Also fetch persisted history synchronously so that ready sessions
@@ -449,6 +470,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 		// RPC through ctx cancellation — no auxiliary watcher goroutine
 		// needed. H7 (Round 163).
 		go func() {
+			defer c.subWG.Done()
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
 
@@ -588,7 +610,15 @@ func (c *ReverseConn) readLoop() {
 
 	for {
 		var msg ReverseMsg
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		// Mirror wsRelay.readLoop: ReadMessage + Unmarshal avoids the
+		// per-frame json.Decoder + intermediate buffer alloc that
+		// ReadJSON incurs on every message. [R202606f-PERF-001]
+		_, data, err := c.conn.ReadMessage()
+		if err != nil {
+			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
+			return
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
 		}

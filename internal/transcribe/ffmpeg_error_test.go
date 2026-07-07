@@ -185,6 +185,47 @@ func TestStreamFromFFmpeg_PartialResultPreferred(t *testing.T) {
 	}
 }
 
+// TestStreamFromFFmpeg_StreamErrorSurfacesFFmpegExit pins R202606j-CR-003: when
+// the transcript collection itself fails (Reader.Err) AND ffmpeg also exits
+// non-zero, both errors must surface. Previously pumpPCMToTranscribe returned
+// the stream-read error immediately and discarded the ffmpeg exit error, hiding
+// the underlying conversion failure (e.g. an unsupported codec) from operators.
+func TestStreamFromFFmpeg_StreamErrorSurfacesFFmpegExit(t *testing.T) {
+	fakeFFmpeg(t, "", "Invalid data found when processing input", 1)
+
+	pcm, err := startPCMStream(context.Background(), []byte("not-real-audio"))
+	if err != nil {
+		t.Fatalf("startPCMStream: %v", err)
+	}
+
+	stream := transcribestreaming.NewStartStreamTranscriptionEventStream(
+		func(es *transcribestreaming.StartStreamTranscriptionEventStream) {
+			es.Writer = &fakeAudioWriter{}
+			es.Reader = &errReader{err: errors.New("boom")}
+		},
+	)
+
+	got, err := pumpPCMToTranscribe(context.Background(), pcm, stream)
+	if err == nil {
+		t.Fatalf("expected non-nil error, got (%q, nil)", got)
+	}
+	if got != "" {
+		t.Errorf("transcript = %q, want empty", got)
+	}
+	// The Transcribe stream-read error must still be present...
+	if !strings.Contains(err.Error(), "stream read") {
+		t.Errorf("error = %v, want it to retain the %q context", err, "stream read")
+	}
+	// ...and the underlying ffmpeg exit error must no longer be swallowed.
+	if !strings.Contains(err.Error(), "audio convert") {
+		t.Errorf("error = %v, want the ffmpeg %q error joined in", err, "audio convert")
+	}
+	var exitErr interface{ ExitCode() int }
+	if !errors.As(err, &exitErr) {
+		t.Errorf("error = %v, want the *exec.ExitError preserved in the chain", err)
+	}
+}
+
 // TestCollectTranscripts_ReaderErr keeps the reader-error path covered: a reader
 // that reports Err() must surface a "stream read" error regardless of ffmpeg.
 func TestCollectTranscripts_ReaderErr(t *testing.T) {

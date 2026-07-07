@@ -225,6 +225,65 @@ func TestShimWriter_SlowPath_TooLarge(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// shimWriter.Write — slow path: oversized line preceded by a valid line in the
+// SAME Write must reject atomically — the valid line must NOT be sent first.
+// Pins R202606f-GO-009 (#2293).
+// ---------------------------------------------------------------------------
+
+func TestShimWriter_SlowPath_OversizedLineDoesNotPartialSend(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+
+	// Collect everything the client sends so we can assert the small line
+	// never reached the wire when a later line in the same Write is oversized.
+	var mu sync.Mutex
+	var collected bytes.Buffer
+	go func() {
+		buf := make([]byte, 64*1024)
+		for {
+			n, err := srv.conn.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				collected.Write(buf[:n])
+				mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go p.readLoop()
+	defer p.Kill()
+
+	w := p.shimStdinWriter()
+	// One small valid line, then an oversized line, in a single Write. The
+	// embedded mid-content newline forces the slow path.
+	var payload bytes.Buffer
+	smallLine := `{"type":"small"}`
+	payload.WriteString(smallLine)
+	payload.WriteByte('\n')
+	payload.Write(make([]byte, maxStdinLineBytes+1)) // oversized line body
+	payload.WriteByte('\n')
+
+	n, err := w.Write(payload.Bytes())
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("Write() error = %v, want ErrMessageTooLarge", err)
+	}
+	if n != 0 {
+		t.Errorf("Write() n = %d, want 0 (nothing accepted: rejection is atomic)", n)
+	}
+
+	// Give any (erroneously) sent frame time to land on the wire.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	got := collected.String()
+	mu.Unlock()
+	if strings.Contains(got, "small") {
+		t.Fatalf("small line was sent to CLI stdin before the oversized line was rejected; "+
+			"protocol framing corrupted (got %q)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Send — normal flow: result event received
 // ---------------------------------------------------------------------------
 
