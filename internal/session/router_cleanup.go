@@ -613,16 +613,35 @@ func (r *Router) Cleanup() {
 }
 
 // shouldPrune returns true if a non-exempt session should be removed from the map.
-// Covers: nil-process stubs, dead processes past pruneTTL. Caller must hold r.mu.
+// Caller must hold r.mu.
+//
+// Product policy (#2278): a session the user actually conversed in — one that
+// owns a Claude SessionID, and therefore has a resumable JSONL on disk — is
+// NEVER auto-pruned. It stays in the sidebar until the user manually closes it
+// (dashboard delete → Remove, or /new → Reset). Only orphans that never held a
+// conversation are reaped by TTL:
+//
+//   - nil-process stubs without a SessionID (RegisterForResume entries whose
+//     resume never fired, spawn failures) — no underlying conversation.
+//   - dead-but-attached processes that likewise never produced a SessionID.
+//
+// Pruning these has no user-visible cost (nothing to resume), while keeping
+// SessionID-bearing sessions honours "don't close what I didn't ask you to
+// close." The 30-minute idle TTL still reclaims the CLI *process* (memory);
+// only the resumable card survives, not the running process.
 func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
 	if now.Sub(s.LastActive()) <= r.pruneTTL {
 		return false
 	}
+	// A real, resumable conversation: keep it until the user closes it.
+	if s.getSessionID() != "" {
+		return false
+	}
 	proc := s.loadProcess()
 	if proc == nil {
-		return true // nil-process stub (with or without session ID)
+		return true // nil-process stub that never got a SessionID
 	}
-	return !proc.Alive() // exited process past pruneTTL
+	return !proc.Alive() // exited process past pruneTTL, no SessionID
 }
 
 // cleanupLoopMaxRestarts caps how many times the cleanup loop may be

@@ -642,11 +642,10 @@ func (h *Handlers) sessionsListETag(version uint64) string {
 
 // filterAndCountSnapshots walks the router snapshot exactly once to:
 //
-//  1. evict dead sessions whose LastActive is older than 24h (sidebar TTL),
-//  2. count running / ready sessions across ALL surviving entries (so the
+//  1. count running / ready sessions across ALL surviving entries (so the
 //     maxProcs pressure indicator stays correct even for scratch / cron /
 //     sys sessions that don't show up in the sidebar),
-//  3. drop scratch / cron / sys keys from the returned slice — those
+//  2. drop scratch / cron / sys keys from the returned slice — those
 //     surfaces own dedicated dashboard panels (drawer / 「定时任务」 /
 //     System) and must not duplicate-render in the sidebar.
 //
@@ -654,17 +653,23 @@ func (h *Handlers) sessionsListETag(version uint64) string {
 // header but with len shrunk to the number of sidebar-eligible entries,
 // so callers must not retain the original header after this call.
 //
+// #2278: this no longer applies a 24h "dead session" cutoff. Sessions the
+// user opened stay in the sidebar until manually closed (dashboard delete →
+// Remove, or /new → Reset); an idle-expired session (process reaped for
+// memory, DeathReason set) remains as a resumable card. The `now` parameter
+// is retained for the count-time contract and signature stability even
+// though no time-based drop happens here anymore. Terminal removal of
+// SessionID-bearing sessions is driven solely by explicit user action, and
+// orphan cleanup by Router.shouldPrune (which keeps resumable sessions).
+//
 // R246-CR-002 split (#736): previously inlined into HandleList; the merged
 // filter+count pass (rather than two walks) was deliberate for hot-path
 // alloc reasons and the performance contract is preserved here.
 func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Time) ([]sessionpkg.SessionSnapshot, int, int) {
-	cutoff24h := now.Add(-24 * time.Hour).UnixMilli()
+	_ = now // retained for signature stability; no time-based cutoff (#2278)
 	var running, ready int
 	n := 0
 	for _, snap := range snapshots {
-		if snap.DeathReason != "" && snap.LastActive < cutoff24h {
-			continue
-		}
 		// Always count running/ready first so maxProcs pressure stays visible
 		// in stats regardless of whether the session is sidebar-eligible.
 		switch snap.State {
@@ -1634,8 +1639,8 @@ type projectListSnapshot struct {
 
 // uptimeStringAt returns time.Since(startedAt).Round(time.Second).String()
 // with a 1-second resolution memoisation. HandleList captures time.Now()
-// once at the top of the request so cutoff24h and the per-session uptime
-// share a single vDSO call. Concurrent misses may all format the same
+// once at the top of the request so the filter pass and the per-session
+// uptime share a single vDSO call. Concurrent misses may all format the same
 // value; last-writer-wins via unconditional Store is intentional — losers
 // drop their locally formatted copy (the formatted string still escapes
 // to the response regardless, so no leak). R67-PERF-4.
