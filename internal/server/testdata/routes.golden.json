@@ -6,6 +6,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/access-profiles",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "POST",
     "path": "/api/auth/login",
     "handler_type": "*auth.Handlers"
   },

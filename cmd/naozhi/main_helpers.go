@@ -452,6 +452,21 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	return mgr, resolvedWorkDir, nil
 }
 
+// absConfigPath resolves the -config flag value to an absolute path so the
+// access-profile create endpoint writes to a stable target even if the process
+// cwd differs from the invocation dir. Falls back to the original value if
+// resolution fails so behaviour never regresses to empty (which would disable
+// the endpoint). RFC project-access-profile P1-d.
+func absConfigPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(osutil.ExpandHome(p)); err == nil {
+		return abs
+	}
+	return p
+}
+
 // buildAccessProfiles translates the config.AccessProfile registry into the
 // session-layer view (RFC project-access-profile). The session package must not
 // import config, so the cmd wiring owns this translation. Returns nil for an

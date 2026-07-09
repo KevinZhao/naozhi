@@ -134,6 +134,18 @@ type Server struct {
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
 	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
 	uiPrefs        *uiprefs.Store       // 读: dashboard_uiprefs.go (instance-wide dashboard theme/prefs; in-memory when StateDir unset)
+	// configPath / accessProfileSecretsDir enable the POST /api/access-profiles
+	// create endpoint (RFC project-access-profile P1-d). Empty configPath keeps
+	// the endpoint disabled (400). 读: routes.go (handleCreateAccessProfile).
+	configPath              string
+	accessProfileSecretsDir string
+	// accessProfileWriteMu serializes the read-modify-write of config.yaml in
+	// handleCreateAccessProfile. AppendAccessProfile snapshots the file, inserts,
+	// and atomically rewrites; two concurrent creates would otherwise interleave
+	// (both read the same snapshot, second write drops the first profile from
+	// config.yaml while the live registry kept both — a silent disk/memory
+	// divergence surfacing only on restart). 读写: routes.go.
+	accessProfileWriteMu sync.Mutex
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -381,26 +393,28 @@ func buildServer(opts ServerOptions) *Server {
 			opts.QueueCollectDelay,
 			dispatch.ParseQueueMode(opts.QueueMode),
 		),
-		startedAt:       time.Now(),
-		logger:          opts.Logger,
-		agents:          agents,
-		agentCommands:   agentCommands,
-		scheduler:       scheduler,
-		claudeDir:       claudeDir,
-		workspaceName:   opts.WorkspaceName,
-		allowedRoot:     opts.AllowedRoot,
-		noOutputTimeout: opts.NoOutputTimeout,
-		totalTimeout:    opts.TotalTimeout,
-		dashboardToken:  opts.DashboardToken,
-		debugMode:       opts.DebugMode,
-		headless:        opts.Headless,
-		onReady:         opts.OnReady,
-		projectMgr:      opts.ProjectManager,
-		resolver:        resolver,
-		nodes:           nodes,
-		knownNodes:      knownNodes,
-		sysessionMgr:    opts.SysessionManager,
-		orient:          buildOrientConfig(opts),
+		startedAt:               time.Now(),
+		logger:                  opts.Logger,
+		agents:                  agents,
+		agentCommands:           agentCommands,
+		scheduler:               scheduler,
+		claudeDir:               claudeDir,
+		workspaceName:           opts.WorkspaceName,
+		allowedRoot:             opts.AllowedRoot,
+		noOutputTimeout:         opts.NoOutputTimeout,
+		totalTimeout:            opts.TotalTimeout,
+		dashboardToken:          opts.DashboardToken,
+		debugMode:               opts.DebugMode,
+		headless:                opts.Headless,
+		onReady:                 opts.OnReady,
+		projectMgr:              opts.ProjectManager,
+		configPath:              opts.ConfigPath,
+		accessProfileSecretsDir: opts.AccessProfileSecretsDir,
+		resolver:                resolver,
+		nodes:                   nodes,
+		knownNodes:              knownNodes,
+		sysessionMgr:            opts.SysessionManager,
+		orient:                  buildOrientConfig(opts),
 		// Instance-wide dashboard prefs (theme). Reuses opts.StateDir — the
 		// same data root the session/cron stores live under — so no new
 		// ServerOptions field or main.go wiring is needed. Empty StateDir

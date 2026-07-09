@@ -195,4 +195,16 @@ type ServerOptions struct {
 	// sysession.VisionRunner). nil disables the feature regardless of the
 	// Enabled flag — the endpoint stays a no-op.
 	ImageOrientRunner VisionOrienter
+	// ConfigPath is the resolved path to config.yaml. When non-empty it
+	// enables the POST /api/access-profiles create endpoint (RFC
+	// project-access-profile P1-d), which appends a new profile to the file via
+	// yaml.Node surgery. Empty disables creation (the endpoint returns 400),
+	// keeping test harnesses and read-only deployments unaffected.
+	ConfigPath string
+	// AccessProfileSecretsDir is the trusted directory under which the create
+	// endpoint writes *_FILE token files (0600). Client-supplied token content
+	// is written to <dir>/<profileID>.token — the id is charset-validated, so
+	// the path can never escape this dir. Empty disables secret-file creation
+	// (the endpoint accepts only profiles that reference no secret file).
+	AccessProfileSecretsDir string
 }
