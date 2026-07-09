@@ -52,6 +52,17 @@ type SpawnOptions struct {
 	// translates into a per-session path under <dataDir>/cli-debug. Only
 	// ClaudeProtocol consumes this; ACP backends ignore it.
 	DebugFile string
+
+	// EnvOverlay is the per-spawn access-profile env overlay (RFC
+	// project-access-profile §4): already-resolved "KEY"→"value" pairs
+	// (secrets from *_FILE expanded upstream by the session layer) that
+	// override the shim's process baseline for THIS session only. Nil/empty
+	// leaves the spawn on the global baseline (byte-identical to legacy). The
+	// shim re-gates every entry through filterShimEnv, so this is not a
+	// whitelist bypass — only a per-spawn value override on already-allowed
+	// keys. Protocol-agnostic: it selects the auth/upstream chain the CLI
+	// subprocess talks to, independent of which backend wrapper is used.
+	EnvOverlay map[string]string
 }
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
@@ -629,7 +640,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// path + backend ID so multi-backend deployments launch each shim
 	// against the correct binary and record its backend in state for
 	// post-restart reconnect routing.
-	handle, err := w.ShimManager.StartShimWithBackend(ctx, opts.Key, w.CLIPath, w.BackendID, cliArgs, cwd)
+	handle, err := w.ShimManager.StartShimWithBackend(ctx, opts.Key, w.CLIPath, w.BackendID, cliArgs, cwd, opts.EnvOverlay)
 	if err != nil {
 		return nil, fmt.Errorf("start shim: %w", err)
 	}

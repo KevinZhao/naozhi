@@ -133,6 +133,14 @@ func (a cronRouterAdapter) GetOrCreate(ctx context.Context, key string, opts cro
 // ExtraArgs as owned exclusively by them — do NOT keep aliases to slices held
 // by other goroutines (R215-ARCH-P2-8 / R37-CONCUR1)".
 func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
+	// AccessProfile is intentionally NOT propagated here. Cron jobs run in the
+	// cron: exempt namespace and do NOT carry an access profile in this
+	// release — they spawn on the global settings.json baseline. Per RFC
+	// project-access-profile P1-b, cron × access-profile is out of scope for
+	// PR-B: cron.Job has no AccessProfile field, and resume-lock would freeze
+	// a first-run profile permanently with no cron-side UI to change it. A
+	// personal-account cron running on the company Bedrock default is the
+	// mis-charge this omission avoids until cron gets an explicit profile field.
 	out := session.AgentOpts{
 		Model:     o.Model,
 		Workspace: o.Workspace,

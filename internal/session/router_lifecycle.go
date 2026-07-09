@@ -307,7 +307,14 @@ type AgentOpts struct {
 	ExtraArgs []string
 	Workspace string // override workspace (empty = use default/chat override)
 	Backend   string // backend ID ("claude" / "kiro" / …); empty = router default
-	Exempt    bool   // exempt from TTL, eviction, and activeCount (planner sessions)
+	// AccessProfile names the access profile (auth/upstream env overlay +
+	// default model) to spawn under. Empty = global default (settings.json
+	// baseline, no overlay). Resolved in resolveSpawnParamsLocked with resume
+	// continuity taking precedence over the caller's value (RFC
+	// project-access-profile §7 — a dead session must resume on the SAME
+	// auth chain it was created on). RFC PR-B.
+	AccessProfile string
+	Exempt        bool // exempt from TTL, eviction, and activeCount (planner sessions)
 }
 
 // SessionStatus indicates how a session was obtained.
@@ -448,6 +455,17 @@ type spawnParams struct {
 	Workspace string
 	// ResumeID after workspace/jsonl guard. Empty means "spawn fresh".
 	ResumeID string
+	// AccessProfileID is the resolved access-profile name ("" = global
+	// default). Recorded on the fresh session for resume continuity (§7) and
+	// persisted to the store so a post-restart resume relocks the same auth
+	// chain. RFC project-access-profile PR-B.
+	AccessProfileID string
+	// AccessProfileEnv is the RAW profile env map (still holding *_FILE
+	// references). Nil when AccessProfileID is "". spawnSession expands the
+	// *_FILE references into the concrete overlay AFTER releasing r.mu (file
+	// reads must not happen under the lock). Kept raw here because
+	// resolveSpawnParamsLocked runs under r.mu.
+	AccessProfileEnv map[string]string
 }
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
@@ -505,6 +523,39 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
+	// Access-profile resolution (RFC project-access-profile §2/§7). Precedence:
+	//  1. existing session's recorded profile — RESUME LOCK. A dead session
+	//     must resume on the SAME auth chain it was created on; the CLI
+	//     session_id / resume history is auth-specific, and re-resolving from a
+	//     since-changed project binding would cross accounts. This wins over the
+	//     caller's opts precisely because it is a continuity invariant, not a
+	//     preference (mirrors backend's existing-session fallback above).
+	//  2. opts.AccessProfile — the per-request / project-binding choice for a
+	//     genuinely fresh session.
+	//  3. "" — global default (settings.json baseline, no overlay).
+	//
+	// An unknown ID (typo, deleted profile) resolves to "" with a warning
+	// rather than a hard spawn failure so a project whose profile was removed
+	// still starts — but on the SAFE global default, never a wrong account.
+	accessProfileID := opts.AccessProfile
+	if old := r.ss.sessions[key]; old != nil {
+		if ap := old.AccessProfile(); ap != "" {
+			accessProfileID = ap
+		}
+	}
+	var accessProfileEnv map[string]string
+	var profileDefaultModel string
+	if accessProfileID != "" {
+		if ap, ok := r.accessProfiles[accessProfileID]; ok {
+			accessProfileEnv = ap.Env
+			profileDefaultModel = ap.DefaultModel
+		} else {
+			slog.Warn("access profile not found; falling back to global default",
+				"key", key, "access_profile", accessProfileID)
+			accessProfileID = ""
+		}
+	}
+
 	// Model merge: router default ← backend override ← per-request opts.
 	// Args: backend-scoped replacement wins over router-wide extraArgs, then
 	// per-request ExtraArgs is appended. REPLACE (not append) semantics for
@@ -513,6 +564,12 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// previously sat inline here and in router_shim drift detection
 	// (R222-ARCH-14, #739).
 	model, baseArgs := r.backendDefaultsFor(backendID)
+	// Access-profile default_model layers above the backend default but below
+	// any explicit per-request / PlannerModel choice (which arrives in
+	// opts.Model). RFC §2 model chain.
+	if profileDefaultModel != "" {
+		model = profileDefaultModel
+	}
 	if opts.Model != "" {
 		model = opts.Model
 	}
@@ -559,12 +616,14 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	resumeID = resolveResumeID(r.claudeDir, workspace, key, resumeID)
 
 	return spawnParams{
-		BackendID: backendID,
-		Wrapper:   wrapper,
-		Model:     model,
-		Args:      args,
-		Workspace: workspace,
-		ResumeID:  resumeID,
+		BackendID:        backendID,
+		Wrapper:          wrapper,
+		Model:            model,
+		Args:             args,
+		Workspace:        workspace,
+		ResumeID:         resumeID,
+		AccessProfileID:  accessProfileID,
+		AccessProfileEnv: accessProfileEnv,
 	}
 }
 
@@ -871,6 +930,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	backendID := sp.BackendID
 	workspace := sp.Workspace
 	resumeID = sp.ResumeID
+	accessProfileID := sp.AccessProfileID
+	accessProfileEnv := sp.AccessProfileEnv
 
 	spawnOpts := cli.SpawnOptions{
 		Key:             key,
@@ -902,6 +963,18 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	if wrapper == nil {
 		// slot.release() in defer will reacquire r.mu and decrement.
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
+	}
+	// Expand the access-profile env overlay OUTSIDE r.mu: resolveEnvOverlay
+	// reads *_FILE secrets from disk (I/O forbidden under the lock). FAIL-LOUD
+	// on a missing/unreadable secret — we must NOT silently spawn on the global
+	// default, which would run this session on the wrong account. slot.release()
+	// in the defer reacquires r.mu and frees the reserved pending slot.
+	if len(accessProfileEnv) > 0 {
+		overlay, err := resolveEnvOverlay(accessProfileEnv)
+		if err != nil {
+			return nil, fmt.Errorf("access profile %q: %w", accessProfileID, err)
+		}
+		spawnOpts.EnvOverlay = overlay
 	}
 	// Panic-safe Spawn: if the spawn path panics (shim exec failure, protocol
 	// Init crash, etc.) pendingSpawns must still be decremented or this
@@ -969,7 +1042,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	s := r.installFreshSessionLocked(
-		key, proc, workspace, backendID, wrapper, resumeID,
+		key, proc, workspace, backendID, accessProfileID, wrapper, resumeID,
 		oldHistory, prevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, opts.Exempt, oldSID,
 		oldUserTurns,
 	)
@@ -1026,6 +1099,7 @@ func (r *Router) installFreshSessionLocked(
 	proc *cli.Process,
 	workspace string,
 	backendID string,
+	accessProfileID string,
 	wrapper *cli.Wrapper,
 	resumeID string,
 	oldHistory []cli.EventEntry,
@@ -1080,6 +1154,9 @@ func (r *Router) installFreshSessionLocked(
 	}
 	s.setWorkspace(workspace)
 	s.SetBackend(backendID)
+	// Record the resolved access profile so a later resume relocks the same
+	// auth chain (§7) and the store persists it. RFC project-access-profile.
+	s.SetAccessProfile(accessProfileID)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
 	// attachProcessAndSnapshotPersisted: serialises storeProcess + seededLen

@@ -53,6 +53,8 @@ func (d *dataSource) ProjectBinding(platform, chatType, chatID string) projectap
 		WorkspaceDir:  p.Path,
 		PlannerModel:  d.m.EffectivePlannerModel(p),
 		PlannerPrompt: d.m.EffectivePlannerPrompt(p),
+		Backend:       p.Config.Backend,
+		AccessProfile: p.Config.AccessProfile,
 	}
 }
 
@@ -70,5 +72,7 @@ func (d *dataSource) ProjectByName(name string) (projectapi.ProjectBinding, bool
 		WorkspaceDir:  p.Path,
 		PlannerModel:  d.m.EffectivePlannerModel(p),
 		PlannerPrompt: d.m.EffectivePlannerPrompt(p),
+		Backend:       p.Config.Backend,
+		AccessProfile: p.Config.AccessProfile,
 	}, true
 }

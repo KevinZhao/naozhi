@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/sessionconst"
@@ -52,6 +53,11 @@ type Config struct {
 	Platforms     PlatformConfigs        `yaml:"platforms"`
 	Agents        map[string]AgentConfig `yaml:"agents"`
 	AgentCommands map[string]string      `yaml:"agent_commands"`
+	// AccessProfiles are the named auth/upstream overlays a project or agent
+	// may reference by name (see AccessProfile). Empty in single-backend /
+	// single-auth deployments — those keep running on the global settings.json
+	// baseline unchanged. RFC project-access-profile.
+	AccessProfiles map[string]AccessProfile `yaml:"access_profiles,omitempty"`
 	// Nodes and Workspaces are two accepted YAML spellings for the same
 	// concept — the set of remote naozhi instances this node polls. Nodes is
 	// the legacy key; Workspaces is the preferred name. Consumers read from
@@ -178,6 +184,41 @@ func redactSecret(s string) string {
 type AgentConfig struct {
 	Model string   `yaml:"model"`
 	Args  []string `yaml:"args"`
+	// Backend pins the default CLI backend ("claude" | "kiro" | …) for
+	// sessions of this agent. Empty = router default. RFC
+	// project-access-profile PR-A.
+	Backend string `yaml:"backend,omitempty"`
+	// AccessProfile names the default access profile (auth/upstream env
+	// overlay + default model) for sessions of this agent. Empty = global
+	// default (settings.json baseline). RFC project-access-profile PR-B.
+	AccessProfile string `yaml:"access_profile,omitempty"`
+}
+
+// AccessProfile is a NAMED bundle of "how to reach the model" for a session:
+// a whitelisted env overlay (which auth chain / upstream), a default backend,
+// and a default model. It is ORTHOGONAL to backend — the same backend (claude)
+// can run on two auth chains (1P direct vs Bedrock proxy). Referenced by
+// projects/agents by name; the env values live only here (a trusted,
+// operator-authored file), while project.yaml (which may sync from git) only
+// carries the NAME. RFC project-access-profile §2/§6.1.
+type AccessProfile struct {
+	// DisplayName is the operator-facing label (dashboard chip / picker).
+	DisplayName string `yaml:"display_name,omitempty"`
+	// ChipColor is a CSS colour for the dashboard chip (e.g. "#d97757").
+	ChipColor string `yaml:"chip_color,omitempty"`
+	// Env is the whitelisted env overlay. Keys must pass
+	// envpolicy.ValidateOverlayEntry (a strict subset of the shim allowlist);
+	// *_FILE keys carry a host path whose contents are injected as the
+	// concrete secret at spawn time (never stored inline). The overlay is
+	// merged onto the shim baseline and STILL re-filtered by the shim — it is
+	// not a whitelist bypass.
+	Env map[string]string `yaml:"env,omitempty"`
+	// DefaultModel participates in model resolution below an explicit
+	// per-request / PlannerModel choice and above backend.DefaultModel.
+	DefaultModel string `yaml:"default_model,omitempty"`
+	// DefaultBackend optionally pins a backend inside the profile. A project's
+	// top-level `backend` still wins over this. RFC §13 D4.
+	DefaultBackend string `yaml:"default_backend,omitempty"`
 }
 
 type ServerConfig struct {
@@ -1167,6 +1208,60 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
+	if err := validateAccessProfiles(cfg); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// knownBackendIDs returns the set of backend IDs this config enables, used to
+// referentially validate `backend` fields on agents / access profiles. Empty
+// map is never returned — EnabledBackends always yields at least the default.
+func (c *Config) knownBackendIDs() map[string]bool {
+	ids := make(map[string]bool)
+	for _, b := range c.EnabledBackends() {
+		ids[b.ID] = true
+	}
+	return ids
+}
+
+// validateAccessProfiles enforces the access-profile contract (RFC
+// project-access-profile §6.2):
+//   - each profile's env overlay passes envpolicy.ValidateOverlayEntry (key in
+//     the overlay allowlist, value SSRF/region/path-safe);
+//   - a profile's default_backend, and any agent's backend, names an enabled
+//     backend;
+//   - an agent's access_profile names a defined profile.
+//
+// Unknown names are ERRORS, not silent fallbacks — a typo that silently ran a
+// personal project on a company Bedrock account is exactly the mis-charge this
+// feature exists to prevent.
+func validateAccessProfiles(cfg *Config) error {
+	backends := cfg.knownBackendIDs()
+	for name, ap := range cfg.AccessProfiles {
+		for k, v := range ap.Env {
+			if err := envpolicy.ValidateOverlayEntry(k, v); err != nil {
+				return fmt.Errorf("access_profiles[%s].env: %w", name, err)
+			}
+		}
+		if ap.DefaultBackend != "" && !backends[ap.DefaultBackend] {
+			return fmt.Errorf("access_profiles[%s].default_backend %q is not an enabled backend", name, ap.DefaultBackend)
+		}
+		if err := validateModelString(fmt.Sprintf("access_profiles[%s].default_model", name), ap.DefaultModel); err != nil {
+			return err
+		}
+	}
+	for id, a := range cfg.Agents {
+		if a.Backend != "" && !backends[a.Backend] {
+			return fmt.Errorf("agents[%s].backend %q is not an enabled backend", id, a.Backend)
+		}
+		if a.AccessProfile != "" {
+			if _, ok := cfg.AccessProfiles[a.AccessProfile]; !ok {
+				return fmt.Errorf("agents[%s].access_profile %q is not defined in access_profiles", id, a.AccessProfile)
+			}
+		}
+	}
 	return nil
 }
 

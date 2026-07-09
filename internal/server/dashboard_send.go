@@ -538,6 +538,17 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// unknown-backend / missing-cap. For claude / unset backend,
 		// RequiredNodeCaps is nil so the cap loop is a no-op.
 		// PR #119 review fix.
+		// RFC project-access-profile P1-a: refuse remote dispatch for a
+		// non-default access-profile session — the env overlay is host-local
+		// and never crosses the wire. h.hub may be nil in test harnesses; the
+		// gate no-ops on a nil resolver.
+		if h.hub != nil {
+			if err := gateRemoteAccessProfile(h.hub.resolver, node, key); err != nil {
+				cleanup()
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		nc, err := selectNodeForBackend(h.nodeAccess, node, backend)
 		if err != nil {
 			cleanup()

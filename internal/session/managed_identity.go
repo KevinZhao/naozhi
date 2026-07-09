@@ -73,6 +73,12 @@ type cliIdentityBox struct {
 	backend    string // "" = router default
 	cliName    string // e.g. "claude-code", "kiro"
 	cliVersion string // semver from --version
+	// accessProfile is the resolved access-profile ID this session spawned
+	// under ("" = global default). Packed here (rather than a separate atomic)
+	// so resume-lock reads observe backend+profile as one consistent snapshot —
+	// the two are jointly the "auth identity" a dead session must resume on.
+	// RFC project-access-profile §7.
+	accessProfile string
 }
 
 // loadCLIIdentity returns a copy of the current backend/cliName/cliVersion
@@ -121,6 +127,20 @@ func (s *ManagedSession) Backend() string { return s.loadCLIIdentity().backend }
 func (s *ManagedSession) SetBackend(id string) {
 	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
 		cur.backend = id
+		return cur
+	})
+}
+
+// AccessProfile returns the access-profile ID this session spawned under
+// ("" = global default). Used by resolveSpawnParamsLocked for resume-lock and
+// by the store persister. RFC project-access-profile §7.
+func (s *ManagedSession) AccessProfile() string { return s.loadCLIIdentity().accessProfile }
+
+// SetAccessProfile records the resolved access-profile ID. Called at spawn
+// time and by the store-restore path in NewRouter.
+func (s *ManagedSession) SetAccessProfile(id string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.accessProfile = id
 		return cur
 	})
 }

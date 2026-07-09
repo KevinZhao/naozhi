@@ -248,6 +248,13 @@ type Router struct {
 	// backendStore.
 	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs/BackendWrapper/DefaultBackend/CLIName/CLIVersion/CLIPath/backendDefaultsFor/Set/GetSessionBackend), lifecycle (spawn/resolveSpawnParams/unregisterSessionLocked/RenameSession), shim (shimManagers)
 	bkStore backendStore
+	// accessProfiles is the named auth/upstream overlay registry (RFC
+	// project-access-profile). Read-only after NewRouter; resolveSpawnParamsLocked
+	// looks up a profile by ID and hands its raw Env to spawnSession, which
+	// expands *_FILE references (I/O) after releasing r.mu. Nil/empty ⇒ every
+	// session runs on the global baseline (legacy behaviour).
+	// 读写: core (init), lifecycle (resolveSpawnParamsLocked read-only)
+	accessProfiles map[string]AccessProfile
 	// 读写: core (init), lifecycle (countActive/evictOldest)
 	maxProcs int
 	// 读写: core (init), cleanup (shouldPrune)
@@ -709,11 +716,16 @@ type RouterConfig struct {
 	// drop a default flag for a specific backend. R53-ARCH-002.
 	BackendModels    map[string]string
 	BackendExtraArgs map[string][]string
-	Workspace        string
-	StorePath        string
-	NoOutputTimeout  time.Duration
-	TotalTimeout     time.Duration
-	ClaudeDir        string
+	// AccessProfiles is the named auth/upstream overlay registry (RFC
+	// project-access-profile). Keyed by profile ID. Nil/empty means no profiles
+	// configured — every session runs on the global settings.json baseline
+	// (legacy behaviour). Populated by the cmd wiring from config.AccessProfiles.
+	AccessProfiles  map[string]AccessProfile
+	Workspace       string
+	StorePath       string
+	NoOutputTimeout time.Duration
+	TotalTimeout    time.Duration
+	ClaudeDir       string
 	// KiroSessionsDir is the kiro CLI's session-state root, typically
 	// ~/.kiro/sessions/cli. Empty disables kiro history fallback; non-
 	// empty enables the kirojsonl factory (registered via blank import
@@ -880,6 +892,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
 	r.bkStore.backendOverrides = make(map[string]string)
+	r.accessProfiles = cfg.AccessProfiles
 	// Session run-history store. Rooted next to the session store file (its
 	// own config, NOT cron's), so operators who split the two dirs keep them
 	// independent. Empty StorePath disables persistence (NewStore returns a
@@ -1058,6 +1071,10 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	storeTotalCost(&s.lastCumulativeCost, entry.LastCumulativeCost)
 	s.setWorkspace(entry.Workspace)
 	s.SetBackend(restoreBackendID)
+	// Restore the recorded access profile so a resume of this session relocks
+	// the same auth chain rather than re-resolving from a since-changed project
+	// binding. RFC project-access-profile §7.
+	s.SetAccessProfile(entry.AccessProfile)
 	s.SetCLIName(cliName)
 	s.SetCLIVersion(cliVersion)
 	if entry.UserLabel != "" {

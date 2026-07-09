@@ -370,6 +370,15 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// backend deployments and existing claude sessions both land
 	// here). Errors flow into a "send rejected" send_ack and bypass
 	// the goroutine launch / RPC entirely.
+	// RFC project-access-profile P1-a: a session bound to a non-default access
+	// profile must not be dispatched remotely — the env overlay is host-local
+	// and never crosses the wire, so the remote would spawn on the wrong
+	// account. Fail loud before the RPC.
+	if err := gateRemoteAccessProfile(h.resolver, nodeID, msg.Key); err != nil {
+		slog.Debug("ws send: access-profile remote-dispatch rejected", "node", nodeID, "key", msg.Key, "err", err)
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
+		return
+	}
 	nc, err := selectNodeForBackend(hubNodeLookup{h}, nodeID, msg.Backend)
 	if err != nil {
 		slog.Debug("ws send: backend route rejected", "node", nodeID, "backend", msg.Backend, "err", err)
