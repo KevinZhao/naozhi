@@ -139,6 +139,13 @@ type Server struct {
 	// the endpoint disabled (400). 读: routes.go (handleCreateAccessProfile).
 	configPath              string
 	accessProfileSecretsDir string
+	// accessProfileWriteMu serializes the read-modify-write of config.yaml in
+	// handleCreateAccessProfile. AppendAccessProfile snapshots the file, inserts,
+	// and atomically rewrites; two concurrent creates would otherwise interleave
+	// (both read the same snapshot, second write drops the first profile from
+	// config.yaml while the live registry kept both — a silent disk/memory
+	// divergence surfacing only on restart). 读写: routes.go.
+	accessProfileWriteMu sync.Mutex
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)

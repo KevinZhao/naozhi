@@ -117,13 +117,19 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 		return fmt.Errorf("close encoder: %w", err)
 	}
 
-	// Re-parse the produced bytes back into a Config and re-run the full
-	// validator: a belt-and-braces guard that the surgery produced a document
-	// the load path accepts (catches, e.g., a future schema field the yaml.Node
-	// path forgot). Fail BEFORE writing to disk.
+	// Re-parse the produced bytes and re-run the access-profile validator on the
+	// result — a belt-and-braces guard that the node surgery produced a document
+	// the load path accepts. yaml.Unmarshal catches structural corruption;
+	// validateAccessProfiles re-checks every profile's env keys/values, default
+	// model, and backend references (the same leaf the load path runs), so a
+	// surgery bug that emitted, e.g., a malformed env value cannot reach disk.
+	// Fail BEFORE writing.
 	var check Config
 	if err := yaml.Unmarshal(buf.Bytes(), &check); err != nil {
 		return fmt.Errorf("re-parse produced config: %w", err)
+	}
+	if err := validateAccessProfiles(&check); err != nil {
+		return fmt.Errorf("produced config failed access-profile validation: %w", err)
 	}
 
 	if err := osutil.WriteFileAtomic(configPath, buf.Bytes(), 0o600); err != nil {

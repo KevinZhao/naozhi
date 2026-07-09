@@ -3,6 +3,7 @@ package server
 import (
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -62,6 +63,17 @@ func (s *Server) handleCreateAccessProfile(w http.ResponseWriter, r *http.Reques
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid profile id"})
 		return
 	}
+
+	// Serialize the whole read-modify-write of config.yaml + live registry.
+	// AppendAccessProfile snapshots the file, inserts, and atomically rewrites;
+	// without this lock two concurrent creates interleave — both read the same
+	// snapshot and the second write drops the first profile from config.yaml
+	// (while the live registry kept both), a silent divergence that only
+	// surfaces on restart. The HasAccessProfile→append→AddAccessProfile trio
+	// must be one critical section. [PR#2360 review HIGH]
+	s.accessProfileWriteMu.Lock()
+	defer s.accessProfileWriteMu.Unlock()
+
 	if s.router.HasAccessProfile(req.ID) {
 		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "profile id already exists"})
 		return
@@ -73,6 +85,9 @@ func (s *Server) handleCreateAccessProfile(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Secret file: write token content to a 0600 file the profile references.
+	// secretWritten tracks the path so it can be removed if a later step fails,
+	// leaving no orphaned credential file behind. [PR#2360 review MEDIUM]
+	secretWritten := ""
 	if req.TokenContent != "" {
 		if s.accessProfileSecretsDir == "" {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "secret storage is not configured on this server"})
@@ -90,6 +105,7 @@ func (s *Server) handleCreateAccessProfile(w http.ResponseWriter, r *http.Reques
 			writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to write secret file"})
 			return
 		}
+		secretWritten = secretPath
 		env[req.TokenEnvKey] = secretPath
 	}
 
@@ -101,14 +117,17 @@ func (s *Server) handleCreateAccessProfile(w http.ResponseWriter, r *http.Reques
 		Env:            env,
 	}
 	if ap.DefaultBackend != "" && !s.backendEnabled(ap.DefaultBackend) {
+		s.cleanupOrphanSecret(secretWritten)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "default_backend is not an enabled backend"})
 		return
 	}
 
 	// Persist to config.yaml FIRST (validates env + id, atomic write). If this
-	// fails the live registry is untouched, so disk and memory stay in sync.
+	// fails the live registry is untouched, so disk and memory stay in sync;
+	// the just-written secret file is orphaned, so remove it best-effort.
 	if err := config.AppendAccessProfile(s.configPath, req.ID, ap); err != nil {
 		slog.Warn("access profile: append to config failed", "id", req.ID, "err", err)
+		s.cleanupOrphanSecret(secretWritten)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid profile: " + err.Error()})
 		return
 	}
@@ -132,6 +151,21 @@ func (s *Server) handleCreateAccessProfile(w http.ResponseWriter, r *http.Reques
 
 	slog.Info("access profile created", "id", req.ID, "has_secret", req.TokenContent != "")
 	writeJSON(w, map[string]any{"ok": true, "id": req.ID})
+}
+
+// cleanupOrphanSecret best-effort removes a token file that was written before
+// a later create step failed, so a credential-bearing file is never left on
+// disk with no profile referencing it. Empty path is a no-op (no secret was
+// written). Removal errors are logged, not surfaced — the operator-facing
+// error is the original failure, and a stray 0600 file is not a security
+// exposure. [PR#2360 review MEDIUM]
+func (s *Server) cleanupOrphanSecret(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("access profile: failed to clean up orphaned secret file after create error", "err", err)
+	}
 }
 
 // backendEnabled reports whether id is one of the router's enabled backends.

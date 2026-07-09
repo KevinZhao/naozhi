@@ -5,9 +5,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -134,5 +137,64 @@ func TestCreateAccessProfile_DisabledWithoutConfigPath(t *testing.T) {
 	w := postCreateProfile(t, srv, `{"id":"x","env":{}}`)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (disabled)", w.Code)
+	}
+}
+
+// TestCreateAccessProfile_ConcurrentWritesAllPersist locks the [PR#2360 review
+// HIGH] fix: N simultaneous creates with distinct ids must ALL survive in
+// config.yaml (the read-modify-write is serialized by accessProfileWriteMu).
+// Without the mutex, interleaved snapshots drop all but the last writer from
+// disk while the live registry kept them — a divergence surfacing on restart.
+func TestCreateAccessProfile_ConcurrentWritesAllPersist(t *testing.T) {
+	srv, cfgPath, _ := newCreateProfileServer(t)
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := "p" + strconv.Itoa(i)
+			body := `{"id":"` + id + `","display_name":"P` + strconv.Itoa(i) + `","env":{}}`
+			w := postCreateProfile(t, srv, body)
+			if w.Code != http.StatusOK {
+				t.Errorf("create %s: status %d, body %s", id, w.Code, w.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Reload config.yaml and confirm every profile persisted to disk.
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(cfg.AccessProfiles) != n {
+		t.Errorf("config.yaml has %d profiles, want %d (concurrent writes lost some)", len(cfg.AccessProfiles), n)
+	}
+	for i := 0; i < n; i++ {
+		id := "p" + strconv.Itoa(i)
+		if _, ok := cfg.AccessProfiles[id]; !ok {
+			t.Errorf("profile %s missing from config.yaml after concurrent create", id)
+		}
+		if !srv.router.HasAccessProfile(id) {
+			t.Errorf("profile %s missing from live registry", id)
+		}
+	}
+}
+
+// TestCreateAccessProfile_OrphanSecretCleanedOnFailure locks the [PR#2360
+// review MEDIUM] fix: when a token is written but a later step fails, the
+// 0600 secret file must NOT be left orphaned on disk. We force the failure by
+// supplying an unknown default_backend (rejected after the secret write).
+func TestCreateAccessProfile_OrphanSecretCleanedOnFailure(t *testing.T) {
+	srv, _, secretsDir := newCreateProfileServer(t)
+	body := `{"id":"orphan","default_backend":"ghost","env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"},"token_env_key":"ANTHROPIC_AUTH_TOKEN_FILE","token_content":"sk-should-be-cleaned"}`
+	w := postCreateProfile(t, srv, body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	secretPath := filepath.Join(secretsDir, "orphan.token")
+	if _, err := os.Stat(secretPath); !os.IsNotExist(err) {
+		t.Errorf("orphaned secret file was not cleaned up: stat err = %v", err)
 	}
 }
