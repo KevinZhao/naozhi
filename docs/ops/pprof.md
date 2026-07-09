@@ -162,6 +162,9 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_watchdog_interrupt_timeout_total` | cron deadline-watchdog 触发后 `InterruptViaControl` 在 `watchdogInterruptTimeoutDefault`（3s）内未返回的累计次数（R20260527122801-SEC-3 / #1327） | 非零 = stdin 写入 wedged，inner goroutine 卡到下次 `session.Reset` 才放行；和 `naozhi_shim_restart_total` 对照判断 reconcile 是否清理；持续涨需要排查 shim 健康 |
 | `naozhi_auto_chain_origins_length_mismatch_total` | `prev_session_origins` 与 `prev_session_ids` 长度漂移检测命中（自动兜底重建） | **必须稳态 0**；非零 = 某写路径违反 prev_session_ids append-only 不变量（RFC §4.6） |
 | `naozhi_auto_chain_retired_on_startup_total` | 启动时一次性剥离 auto-spawn / auto-backfill 脏 chain 段的 session 数（RFC docs/rfc/project-stable-session-key.md §9.2，替代旧 backfill） | 首次升级到本版本后会一次性上涨（清理历史脏数据）；之后**稳态 0**，重启幂等不再涨。持续非零 = 仍有路径写入 auto-* origin（不应发生，auto-chain 已下线） |
+| `naozhi_session_toolcall_leak_detected_total` | 一轮 result 文本命中"泄漏工具调用"检测（模型把 `<invoke>` XML 当正文输出、未真正执行、turn 停顿）的累计次数。无论是否开启自动恢复都计（`internal/leakguard`） | 量化底层模型回归率；模型默认切换后（如 PR#2050 sonnet→settings.json）需重点观察；持续升高 = 当前模型/上下文更易泄漏 |
+| `naozhi_session_toolcall_leak_recovered_total` | 泄漏轮经自动续跑（注入 `<system-reminder>` 提示 + 重发一次）得到干净后续结果的累计次数——用户无需手动"继续" | 始终 ≤ `naozhi_session_toolcall_leak_detected_total`；差额 = 恢复失败 + kill switch 关闭时的跳过 |
+| `naozhi_session_toolcall_leak_recovery_failed_total` | 泄漏轮执行了恢复但未得到干净结果的累计次数：进程恢复中途死亡，或模型在唯一一次重试（cap=1）里再次泄漏（返回文本已 Strip 掉 XML） | 持续升高 = continue-prompt 未能把模型从泄漏状态拉回；结合 detected/recovered 三者比值评估 prompt 有效性 |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 

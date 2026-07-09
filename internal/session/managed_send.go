@@ -80,6 +80,21 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		}
 		s.sendMu.Unlock()
 	}
+
+	// Auto-continue a stalled leaked-tool-call turn (no-op unless enabled and
+	// the text actually leaks). SendPassthrough does NOT hold sendMu across the
+	// round-trip, so the re-send uses priority="next" to enqueue the nudge
+	// immediately after the leaked turn — a racing user message cannot jump the
+	// FIFO ahead of the continue. Recovery runs synchronously before this
+	// method returns, i.e. strictly upstream of any channel flush, so
+	// feishu/weixin never see the leaked XML (onEvent fires only on
+	// thinking/tool_use blocks, never on the leaked plain-text block).
+	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*cli.SendResult, error) {
+		rrt, revCb := s.instrumentRun(onEvent)
+		rr, rerr := proc.SendPassthrough(rctx, nudge, nil, revCb, "next")
+		s.finishRun(rrt, rr, rerr)
+		return rr, rerr
+	})
 	return result, nil
 }
 
@@ -191,6 +206,19 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 			s.onSessionID(result.SessionID)
 		}
 	}
+
+	// Auto-continue a turn that stalled because the model leaked a tool call
+	// into prose instead of a structured tool_use (no-op unless enabled and the
+	// text actually leaks). Runs while sendMu is held, so the re-send is serial
+	// with any other turn on this session. The re-send re-enters the same live
+	// process's legacy Send path; its <system-reminder> nudge is appended to
+	// EventLog by proc.Send but hidden by dashboard.js's system-reminder filter.
+	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*cli.SendResult, error) {
+		rrt, revCb := s.instrumentRun(onEvent)
+		rr, rerr := proc.Send(rctx, nudge, nil, revCb)
+		s.finishRun(rrt, rr, rerr)
+		return rr, rerr
+	})
 	return result, nil
 }
 

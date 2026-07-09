@@ -471,4 +471,25 @@ var (
 	// touched; idempotent across restarts (a cleaned chain has no auto-*
 	// origins left, so a second startup is a no-op and does not increment).
 	AutoChainRetiredOnStartup = expvar.NewInt("naozhi_auto_chain_retired_on_startup_total")
+
+	// ToolCallLeakDetectedTotal counts turns whose result text tripped the
+	// leaked-tool-call detector (the model wrote <invoke> XML as prose instead
+	// of a structured tool_use, so nothing executed and the turn stalled). A
+	// rising delta quantifies the underlying model regression rate — watch it
+	// after a model-default change (e.g. the PR#2050 sonnet→settings.json
+	// switch). Incremented regardless of whether auto-recovery is enabled.
+	ToolCallLeakDetectedTotal = expvar.NewInt("naozhi_session_toolcall_leak_detected_total")
+
+	// ToolCallLeakRecoveredTotal counts leaked turns where the auto-continue
+	// re-send produced a clean (non-leaking) follow-up result. This is the
+	// success path: the operator never had to type "continue". Always ≤
+	// ToolCallLeakDetectedTotal; the gap is failures plus the flag-off skips.
+	ToolCallLeakRecoveredTotal = expvar.NewInt("naozhi_session_toolcall_leak_recovered_total")
+
+	// ToolCallLeakRecoveryFailedTotal counts leaked turns where recovery ran
+	// but did not yield a clean result — the process died mid-recovery, or the
+	// model leaked again on the single retry (cap=1). The returned text has the
+	// leaked XML stripped so no-fold channels stay readable. A sustained delta
+	// here means the continue-prompt is not steering the model off the leak.
+	ToolCallLeakRecoveryFailedTotal = expvar.NewInt("naozhi_session_toolcall_leak_recovery_failed_total")
 )
