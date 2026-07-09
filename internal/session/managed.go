@@ -616,6 +616,12 @@ type SessionSnapshot struct {
 	Backend    string `json:"backend,omitempty"`     // "claude", "kiro", ...
 	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro"
 	CLIVersion string `json:"cli_version,omitempty"` // e.g. "2.1.92"
+	// AccessProfile is the access-profile ID this session spawned under
+	// ("" = global default). The dashboard renders a chip from the id via
+	// the /api/access-profiles registry (label/colour live there, NOT here —
+	// the snapshot never carries env values or secrets). RFC
+	// project-access-profile §8.3.
+	AccessProfile string `json:"access_profile,omitempty"`
 	// Model is the spawn-time CLI model identifier resolved from
 	// cli.backends[].model → SpawnOptions.Model → Process.Model. Empty
 	// when the operator did not configure one. The dashboard renders

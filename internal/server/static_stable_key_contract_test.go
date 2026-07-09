@@ -30,7 +30,7 @@ func TestDashboardJS_ResolveSessionKeyWiring(t *testing.T) {
 		// Continue path reconstructs the pj key from the backend hash segment.
 		"'dashboard:pj:' + parts[2] + ':' + agent",
 		// Palette project open continues with the backend-supplied stableKey.
-		"{ mode: 'continue', stableKey: p.stableKey || '' }",
+		"{ mode: 'continue', stableKey: p.stableKey || '', accessProfile: accessProfile }",
 		// Quick session is explicitly one-off.
 		"{ mode: 'new' }",
 	} {

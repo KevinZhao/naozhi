@@ -2356,6 +2356,7 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		r.bkStore.defaultBackend = "claude"
 		r.bkStore.model = "sonnet-default"
 		r.bkStore.backendOverrides = make(map[string]string)
+		r.bkStore.accessProfileOverrides = make(map[string]string)
 		r.wsStore.overrides = make(map[string]string)
 		r.accessProfiles = map[string]AccessProfile{
 			"1p-fable": {
@@ -2430,6 +2431,32 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		}
 		if sp.Model != "sonnet-default" {
 			t.Errorf("Model = %q, want sonnet-default", sp.Model)
+		}
+	})
+
+	t.Run("one-shot dashboard override beats opts and is consumed", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		r.bkStore.accessProfileOverrides[key] = "bedrock-opus"
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (override wins over opts)", sp.AccessProfileID)
+		}
+		if _, still := r.bkStore.accessProfileOverrides[key]; still {
+			t.Error("one-shot override was not consumed")
+		}
+	})
+
+	t.Run("resume lock beats one-shot override", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetAccessProfile("bedrock-opus")
+		r.ss.sessions[key] = old
+		r.bkStore.accessProfileOverrides[key] = "1p-fable"
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
 		}
 	})
 }

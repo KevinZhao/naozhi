@@ -155,12 +155,13 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 
 	capturedID, capturedKey := msg.ID, key
 	reset, status, err := h.sessionSend(sendParams{
-		Key:       key,
-		Text:      msg.Text,
-		Images:    images,
-		Workspace: msg.Workspace,
-		ResumeID:  msg.ResumeID,
-		Backend:   msg.Backend,
+		Key:           key,
+		Text:          msg.Text,
+		Images:        images,
+		Workspace:     msg.Workspace,
+		ResumeID:      msg.ResumeID,
+		Backend:       msg.Backend,
+		AccessProfile: msg.AccessProfile,
 	}, func(errMsg string) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
 	})

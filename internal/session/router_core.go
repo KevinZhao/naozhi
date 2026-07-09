@@ -892,6 +892,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
 	r.bkStore.backendOverrides = make(map[string]string)
+	r.bkStore.accessProfileOverrides = make(map[string]string)
 	r.accessProfiles = cfg.AccessProfiles
 	// Session run-history store. Rooted next to the session store file (its
 	// own config, NOT cron's), so operators who split the two dirs keep them

@@ -52,6 +52,7 @@ type HubRouter interface {
 	Workspace(chatKey string) string
 	SetWorkspace(chatKey, path string)
 	SetSessionBackend(key, backend string)
+	SetSessionAccessProfile(key, profile string)
 	DefaultWorkspace() string
 	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
 	InterruptSession(key string) bool

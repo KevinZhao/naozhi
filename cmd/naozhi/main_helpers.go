@@ -467,6 +467,8 @@ func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.
 	out := make(map[string]session.AccessProfile, len(in))
 	for id, ap := range in {
 		out[id] = session.AccessProfile{
+			DisplayName:    ap.DisplayName,
+			ChipColor:      ap.ChipColor,
 			Env:            ap.Env,
 			DefaultModel:   ap.DefaultModel,
 			DefaultBackend: ap.DefaultBackend,

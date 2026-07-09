@@ -523,21 +523,32 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
-	// Access-profile resolution (RFC project-access-profile §2/§7). Precedence:
+	// Access-profile resolution (RFC project-access-profile §2/§7). Precedence
+	// (highest to lowest):
 	//  1. existing session's recorded profile — RESUME LOCK. A dead session
 	//     must resume on the SAME auth chain it was created on; the CLI
 	//     session_id / resume history is auth-specific, and re-resolving from a
-	//     since-changed project binding would cross accounts. This wins over the
-	//     caller's opts precisely because it is a continuity invariant, not a
-	//     preference (mirrors backend's existing-session fallback above).
-	//  2. opts.AccessProfile — the per-request / project-binding choice for a
-	//     genuinely fresh session.
-	//  3. "" — global default (settings.json baseline, no overlay).
+	//     since-changed project binding would cross accounts. This wins over
+	//     every fresh-pick source precisely because it is a continuity
+	//     invariant, not a preference (mirrors backend's existing-session
+	//     fallback above).
+	//  2. one-shot dashboard override (SetSessionAccessProfile) — an explicit
+	//     new-session pick, consumed here so a later Reset→spawn does not
+	//     silently carry it. Beats opts (the project-binding default) because
+	//     the user explicitly chose it in the new-session picker.
+	//  3. opts.AccessProfile — the per-request / project-binding default.
+	//  4. "" — global default (settings.json baseline, no overlay).
 	//
 	// An unknown ID (typo, deleted profile) resolves to "" with a warning
 	// rather than a hard spawn failure so a project whose profile was removed
 	// still starts — but on the SAFE global default, never a wrong account.
 	accessProfileID := opts.AccessProfile
+	if len(r.bkStore.accessProfileOverrides) > 0 {
+		if ov, ok := r.bkStore.accessProfileOverrides[key]; ok {
+			accessProfileID = ov
+			delete(r.bkStore.accessProfileOverrides, key)
+		}
+	}
 	if old := r.ss.sessions[key]; old != nil {
 		if ap := old.AccessProfile(); ap != "" {
 			accessProfileID = ap
@@ -1378,6 +1389,11 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	delete(r.ss.sessions, key)
 	if !keepBackendOverride {
 		delete(r.bkStore.backendOverrides, key)
+		// Access-profile override is a one-shot dashboard pick with the same
+		// lifecycle as backendOverrides — a terminal removal must clear it so
+		// an abandoned pick (chosen, never spawned) does not leak. RFC
+		// project-access-profile §8.2.
+		delete(r.bkStore.accessProfileOverrides, key)
 		// R090031-CR-5: shimStuckOnReset is only consumed by GetOrCreate, so
 		// terminal removals (keepBackendOverride=false) must also clear it.
 		// Sessions that are deleted and never reopened would otherwise leave
@@ -1806,6 +1822,10 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if b, ok := r.bkStore.backendOverrides[oldKey]; ok {
 		r.bkStore.backendOverrides[newKey] = b
 		delete(r.bkStore.backendOverrides, oldKey)
+	}
+	if ap, ok := r.bkStore.accessProfileOverrides[oldKey]; ok {
+		r.bkStore.accessProfileOverrides[newKey] = ap
+		delete(r.bkStore.accessProfileOverrides, oldKey)
 	}
 	r.ss.dirty = true
 	r.ss.gen.Add(1)

@@ -307,7 +307,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var key, text, node, workspace, resumeID, backend string
+	var key, text, node, workspace, resumeID, backend, accessProfile string
 	var images []cli.ImageData
 	var fileIDs []string
 
@@ -341,6 +341,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		workspace = r.FormValue("workspace")
 		resumeID = r.FormValue("resume_id")
 		backend = r.FormValue("backend")
+		accessProfile = r.FormValue("access_profile")
 		fileIDs = r.MultipartForm.Value["file_ids"]
 
 		files := r.MultipartForm.File["files"]
@@ -363,13 +364,14 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	} else {
 		r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // 2 MB — leaves headroom over the 1 MB text field cap
 		var req struct {
-			Key       string   `json:"key"`
-			Text      string   `json:"text"`
-			Node      string   `json:"node"`
-			Workspace string   `json:"workspace"`
-			ResumeID  string   `json:"resume_id"`
-			Backend   string   `json:"backend"`
-			FileIDs   []string `json:"file_ids"`
+			Key           string   `json:"key"`
+			Text          string   `json:"text"`
+			Node          string   `json:"node"`
+			Workspace     string   `json:"workspace"`
+			ResumeID      string   `json:"resume_id"`
+			Backend       string   `json:"backend"`
+			AccessProfile string   `json:"access_profile"`
+			FileIDs       []string `json:"file_ids"`
 		}
 		if err := decodeJSONBody(r, &req); err != nil {
 			slog.Debug("dashboard send: invalid JSON", "err", err)
@@ -382,6 +384,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		workspace = req.Workspace
 		resumeID = req.ResumeID
 		backend = req.Backend
+		accessProfile = req.AccessProfile
 		fileIDs = req.FileIDs
 	}
 
@@ -625,6 +628,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	reset, status, err := h.hub.sessionSend(sendParams{
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
+		AccessProfile: accessProfile,
 	}, nil)
 	if err != nil {
 		cleanup()

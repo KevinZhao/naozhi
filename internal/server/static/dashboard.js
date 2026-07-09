@@ -102,8 +102,11 @@ let lastStatsSnapshot = null;
 const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
+const sessionAccessProfiles = {}; // per-session access profile picked at creation ("" = global default)
 let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
+let accessProfiles = null; // cached /api/access-profiles response: {profiles, default}
+let accessProfilesFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
 // sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
 // 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
@@ -186,6 +189,7 @@ function persistPending() {
     const entry = { ws: sessionWorkspaces[k] };
     if (sessionNodes[k] && sessionNodes[k] !== 'local') entry.node = sessionNodes[k];
     if (sessionBackends[k]) entry.backend = sessionBackends[k];
+    if (sessionAccessProfiles[k]) entry.access_profile = sessionAccessProfiles[k];
     obj[k] = entry;
   }
   lsSet(PENDING_LS_KEY, obj);
@@ -208,6 +212,7 @@ function restorePending() {
     sessionWorkspaces[k] = v.ws;
     if (v.node && v.node !== 'local') sessionNodes[k] = v.node;
     if (v.backend) sessionBackends[k] = v.backend;
+    if (typeof v.access_profile === 'string' && v.access_profile) sessionAccessProfiles[k] = v.access_profile;
   }
 }
 
@@ -444,6 +449,7 @@ function removePendingSession(key) {
   delete sessionWorkspaces[key];
   delete sessionNodes[key];
   delete sessionBackends[key];
+  delete sessionAccessProfiles[key];
   persistPending();
 }
 
@@ -524,6 +530,7 @@ async function fetchSessions() {
         delete sessionWorkspaces[key];
         delete sessionNodes[key];
         delete sessionBackends[key];
+        delete sessionAccessProfiles[key];
         reconciledAny = true;
       }
     }
@@ -590,6 +597,7 @@ async function fetchSessions() {
             node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
             backend: pendingBackend,
+            access_profile: sessionAccessProfiles[key] || '',
             cli_name: pendingCLIName,
             cli_version: pendingCLIVersion,
           });
@@ -1701,10 +1709,18 @@ function sessionCardHtml(s) {
   // (cliIcon, kiro-ghost vs claude-logomark) already disambiguates backend
   // visually, so the chip was redundant. backendChipHtml() helper kept for
   // doctor panel where listing backends needs an explicit text label.
+  //
+  // Access-profile chip IS shown (RFC project-access-profile §8.3): unlike
+  // backend it has no icon, and it carries a billing/account dimension an
+  // operator must be able to eyeball ("is this card on the personal 1P or the
+  // company Bedrock account?"). Empty for single-auth mode / global default so
+  // deployments that don't use profiles see no change.
+  const accessProfileChip = accessProfileChipHtml(s.access_profile);
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
     originBadge +
+    accessProfileChip +
     typeTag +
     agentBadge;
 
@@ -2336,6 +2352,7 @@ async function dismissSession(key, node, opts) {
   // ms timestamp collides on rapid double-create) doesn't inherit a
   // stale backend pick.
   delete sessionBackends[key];
+  delete sessionAccessProfiles[key];
 
   // cron-panel-consolidation RFC §4.2: defensive guard. Cron stubs are
   // filtered server-side so this branch should never run in production —
@@ -4098,6 +4115,11 @@ async function sendMessage() {
       // later re-send doesn't try to retrofit onto an existing session.
       delete sessionBackends[selectedKey];
     }
+    if (sessionAccessProfiles[selectedKey]) {
+      // Access profile, like backend, is consumed once on session spawn.
+      sendMsg.access_profile = sessionAccessProfiles[selectedKey];
+      delete sessionAccessProfiles[selectedKey];
+    }
     if (wsm.send(sendMsg)) {
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
@@ -4155,6 +4177,10 @@ async function sendMessage() {
     if (sessionBackends[selectedKey]) {
       payload.backend = sessionBackends[selectedKey];
       delete sessionBackends[selectedKey];
+    }
+    if (sessionAccessProfiles[selectedKey]) {
+      payload.access_profile = sessionAccessProfiles[selectedKey];
+      delete sessionAccessProfiles[selectedKey];
     }
 
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
@@ -6139,6 +6165,99 @@ async function fetchCLIBackends() {
   }
 }
 
+// fetchAccessProfiles caches /api/access-profiles for 60s (same policy as
+// fetchCLIBackends). Returns {profiles:[...], default} or null on error / when
+// no profiles are configured (single-auth deployments — the picker/chip then
+// stay hidden). RFC project-access-profile §8.
+async function fetchAccessProfiles() {
+  if (accessProfiles && Date.now() - accessProfilesFetchedAt < 60000) {
+    return accessProfiles;
+  }
+  try {
+    const data = await fetchJSON('/api/access-profiles', {credentials: 'same-origin'});
+    accessProfiles = data && Array.isArray(data.profiles) ? data : null;
+    accessProfilesFetchedAt = Date.now();
+    return accessProfiles;
+  } catch (e) {
+    return null;
+  }
+}
+
+// renderAccessProfilePicker returns an HTML fragment for an access-profile
+// <select>, or empty string when 0/1 profiles are configured (nothing to
+// choose — single-auth deployments see no extra control, mirroring
+// renderBackendPicker's ≤1 rule). A profile whose secret_ok is false (a
+// referenced *_FILE is missing) is shown disabled with a "⚠ 凭证缺失" suffix so
+// the user can't pick a broken profile before sending (RFC P1-f). The picker
+// NEVER shows env values — only display_name/id.
+//
+// opts (all optional):
+//   - selectId: element id (default 'new-access-profile').
+//   - selectedId: pre-selected profile id; falls back to "(全局默认)" empty option.
+function renderAccessProfilePicker(profilesData, opts) {
+  if (!profilesData || !Array.isArray(profilesData.profiles)) return '';
+  const list = profilesData.profiles;
+  if (list.length <= 1) return '';
+  const o = opts || {};
+  const selectId = o.selectId || 'new-access-profile';
+  // Empty option = global default (no overlay). Always offered so a project
+  // pinned to a profile can still be overridden back to the default per-session.
+  let options = '<option value="">（全局默认）</option>';
+  options += list.map(p => {
+    const id = p.id || '';
+    const selected = (o.selectedId && id === o.selectedId) ? ' selected' : '';
+    const broken = p.secret_ok === false;
+    const disabled = broken ? ' disabled' : '';
+    const label = (p.display_name || id) + (broken ? ' ⚠ 凭证缺失' : '');
+    return '<option value="' + escAttr(id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
+  }).join('');
+  return '<div style="margin-bottom:12px">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">访问档</label>' +
+    '<select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_STYLE + '">' +
+    options +
+    '</select>' +
+    '</div>';
+}
+
+// getSelectedAccessProfile reads the modal's access-profile <select>. Empty
+// string ("" = global default) when the picker isn't rendered or the default
+// option is chosen.
+function getSelectedAccessProfile() {
+  const el = document.getElementById('new-access-profile');
+  return el && el.value ? el.value : '';
+}
+
+// accessProfileChipInfo resolves an access-profile id to {label,color,tooltip}
+// for the session card chip, or null when single-auth mode (≤1 profile) or the
+// id is empty. An id not in the registry (deleted profile) renders a neutral
+// chip with the raw id so the orphan state is visible. NEVER surfaces env/token.
+function accessProfileChipInfo(profileID) {
+  if (!accessProfiles || !Array.isArray(accessProfiles.profiles)) return null;
+  if (accessProfiles.profiles.length <= 1) return null; // single-auth mode
+  if (!profileID) return null; // global default → no chip (matches "no overlay")
+  const entry = accessProfiles.profiles.find(p => p && p.id === profileID);
+  if (!entry) {
+    return { label: profileID, color: 'var(--nz-text-mute)', tooltip: '访问档未配置: ' + profileID };
+  }
+  return {
+    label: entry.display_name || entry.id,
+    color: entry.chip_color || 'var(--nz-accent)',
+    tooltip: (entry.display_name || entry.id) + (entry.default_model ? ' · ' + entry.default_model : ''),
+  };
+}
+
+// accessProfileChipHtml renders the per-session access-profile chip next to the
+// backend chip. Empty string when single-auth mode or global default (layout
+// unchanged for deployments that don't use profiles). Shows ONLY the display
+// label — never auth details (RFC §8.3 / §8.4).
+function accessProfileChipHtml(profileID) {
+  const info = accessProfileChipInfo(profileID);
+  if (!info) return '';
+  return '<span class="sc-access-profile-chip" data-access-profile="' + escAttr(profileID || '') +
+    '" style="background-color:' + escAttr(info.color) + '" title="' + escAttr(info.tooltip) +
+    '">' + esc(info.label) + '</span>';
+}
+
 // renderBackendPicker returns an HTML fragment for a backend <select>, or
 // an empty string when only one backend is enabled. The selected value is
 // surfaced via document.getElementById(opts.selectId).value at submit time.
@@ -6435,12 +6554,13 @@ function createNewSession() {
   // Fetch backends upfront so the picker (if any) is ready when the modal
   // renders. Failure falls back to the single-backend UI — cli.backends
   // returns {} on older naozhi which fetchCLIBackends maps to null.
-  fetchCLIBackends().then(backendsData => {
+  Promise.all([fetchCLIBackends(), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
     // defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
     // 因此选中 remote 时不预填路径，让用户显式输入远程上的工作目录。
     const isLocal = (selectedNode || 'local') === 'local';
     const ws = isLocal ? (defaultWorkspace || '') : '';
     const backendPicker = renderBackendPicker(backendsData);
+    const accessProfilePicker = renderAccessProfilePicker(profilesData);
 
     if (!nodeFilteredProjects().length) {
       const overlay = document.createElement('div');
@@ -6448,6 +6568,7 @@ function createNewSession() {
       overlay.innerHTML =
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
+          accessProfilePicker +
           backendPicker +
           renderNodePicker() +
           '<div style="margin-bottom:12px">' +
@@ -6476,19 +6597,22 @@ function createNewSession() {
       return;
     }
 
-    openProjectPalette(backendsData);
+    openProjectPalette(backendsData, profilesData);
   });
 }
 
-function openProjectPalette(backendsData) {
+function openProjectPalette(backendsData, profilesData) {
   const backendPicker = renderBackendPicker(backendsData);
+  const accessProfilePicker = renderAccessProfilePicker(profilesData || accessProfiles);
   const nodePicker = renderNodePicker();
-  // The backend + connection pickers sit inline above the search box so the
-  // operator can pick both before choosing a project. The connection picker
-  // replaced the agent picker that used to live here; switching it re-filters
-  // the project list to that node's projects (see nodeFilteredProjects).
-  const pickerSlot = (backendPicker || nodePicker)
-    ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px">' +
+  // The access-profile + backend + connection pickers sit inline above the
+  // search box so the operator can pick them before choosing a project. The
+  // connection picker replaced the agent picker that used to live here;
+  // switching it re-filters the project list to that node's projects (see
+  // nodeFilteredProjects).
+  const pickerSlot = (accessProfilePicker || backendPicker || nodePicker)
+    ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px;flex-wrap:wrap">' +
+        (accessProfilePicker ? '<div style="flex:1;min-width:0">' + accessProfilePicker + '</div>' : '') +
         (backendPicker ? '<div style="flex:1;min-width:0">' + backendPicker + '</div>' : '') +
         (nodePicker ? '<div style="flex:1;min-width:0">' + nodePicker + '</div>' : '') +
       '</div>'
@@ -6787,12 +6911,13 @@ function handlePaletteKey(e, state, input) {
 
 function pickPaletteProject(p) {
   const backend = getSelectedBackend();
+  const accessProfile = getSelectedAccessProfile();
   const agent = getSelectedAgent();
   // Default project open = continue the project-stable conversation. p.stableKey
   // is supplied by /api/projects when the feature is enabled (empty otherwise,
   // in which case resolveSessionKey falls back to a timestamp key).
   doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
-    { mode: 'continue', stableKey: p.stableKey || '' });
+    { mode: 'continue', stableKey: p.stableKey || '', accessProfile: accessProfile });
 }
 
 function pickPaletteCustom(initialValue) {
@@ -6803,14 +6928,17 @@ function pickPaletteCustom(initialValue) {
   // selectedNode (wireNodePicker keeps it current), so renderNodePicker below
   // pre-selects it without an explicit hand-off.
   const preselectedBackend = getSelectedBackend();
+  const preselectedProfile = getSelectedAccessProfile();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
   // 选中 remote 节点时不用 local 的 defaultWorkspace 占位符，避免误导用户。
   const isLocal = (selectedNode || 'local') === 'local';
   const ws = isLocal ? (defaultWorkspace || '') : '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
-  // Re-render the backend + connection pickers inside the modal and pre-select
-  // the palette's choice, so switching to Custom Workspace doesn't drop either.
+  // Re-render the access-profile + backend + connection pickers inside the
+  // modal and pre-select the palette's choices, so switching to Custom
+  // Workspace doesn't drop any of them.
+  const accessProfilePicker = renderAccessProfilePicker(accessProfiles, { selectedId: preselectedProfile });
   const picker = renderBackendPicker(cliBackends);
   const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
@@ -6818,6 +6946,7 @@ function pickPaletteCustom(initialValue) {
   modal.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
       '<h3>自定义工作目录</h3>' +
+      accessProfilePicker +
       picker +
       nodePicker +
       '<div style="margin-bottom:12px">' +
@@ -6855,11 +6984,15 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   // so callers that omit the explicit argument still get the user's pick.
   if (backend === undefined) backend = getSelectedBackend();
   if (agent === undefined) agent = getSelectedAgent();
+  opts = opts || {};
+  // Access profile: prefer the explicit opts value; else read the overlay
+  // picker before it is torn down (mirrors backend). "" = global default /
+  // inherit project binding.
+  const accessProfile = (opts.accessProfile !== undefined) ? opts.accessProfile : getSelectedAccessProfile();
   // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'continue'
   // so a plain project click resumes the project-stable conversation
   // (RFC docs/rfc/project-stable-session-key.md §4.4). The "+ 新会话" entry
   // passes mode:'new' for an independent parallel session.
-  opts = opts || {};
   const mode = opts.mode || 'continue';
   const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
@@ -6876,6 +7009,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
   if (backend) sessionBackends[key] = backend;
+  if (accessProfile) sessionAccessProfiles[key] = accessProfile;
   // Durably persist the pending workspace and eagerly bind it server-side so a
   // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
   // the workspace. This is the primary fix path (project palette open).
@@ -6900,6 +7034,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
 function doCreateSession() {
   const workspace = document.getElementById('new-workspace').value.trim();
   const backend = getSelectedBackend();
+  const accessProfile = getSelectedAccessProfile();
   const agent = getSelectedAgent();
   // Read the connection picker directly so the choice lands even if the
   // change listener never fired (e.g. the operator never re-opened the
@@ -6919,6 +7054,7 @@ function doCreateSession() {
 
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
+  if (accessProfile) sessionAccessProfiles[key] = accessProfile;
   if (targetNode !== 'local') sessionNodes[key] = targetNode;
   // Persist + eager-bind so the custom workspace survives a reload-before-send.
   persistPending();
@@ -12202,6 +12338,11 @@ function showOnboarding() {
 // renderHeader call. Failure / single-backend deployments still work — the
 // chip-render helpers return '' when cliBackends is null.
 fetchCLIBackends();
+// RFC project-access-profile §8.3: fire at boot so the session-card chip has
+// profile metadata (label/colour) on the first renderSidebar. Failure /
+// single-auth deployments still work — the chip helpers return '' when
+// accessProfiles is null.
+fetchAccessProfiles();
 fetchSessions().then(maybeShowOnboarding);
 sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
