@@ -114,3 +114,35 @@ func TestStrip_NoLeak(t *testing.T) {
 		t.Error("Strip found=true on clean prose, want false")
 	}
 }
+
+// TestStrayClosingTagBeforeAnchor_NoPanic locks the #2355 review HIGH fix: a
+// stray paired </invoke> in prose BEFORE the anchor, with the real leaked
+// block truncated (unclosed) after it, must NOT panic and must NOT be treated
+// as a leak. Pre-fix, Detect passed on the whole-text Contains("</invoke>")
+// and Strip computed start > end → slice-bounds panic.
+func TestStrayClosingTagBeforeAnchor_NoPanic(t *testing.T) {
+	t.Parallel()
+	// Prose quotes a complete <invoke>…</invoke> in backticks, THEN the model
+	// leaks a real (but stream-truncated, unclosed) tool call below it.
+	text := "compare `<invoke name=\"a\">x</invoke>` first.\ncall\n<invoke name=\"Bash\">\n<parameter name=\"command\">echo hi"
+
+	// Must not panic and must report "not a leak" (the leaked block is unclosed,
+	// so there is no </invoke> at/after the anchor).
+	if Detect(text) {
+		t.Error("Detect=true for a truncated leak whose only </invoke> precedes the anchor; want false")
+	}
+	prose, leaked, found := Strip(text) // must not panic
+	if found {
+		t.Errorf("Strip found=true, want false; prose=%q leaked=%q", prose, leaked)
+	}
+
+	// Positive control: a genuine leak (closing tag AFTER the anchor) still
+	// detects and strips.
+	good := "先跑一下。\ncall\n<invoke name=\"Bash\">\n<parameter name=\"command\">echo hi</parameter>\n</invoke>"
+	if !Detect(good) {
+		t.Error("Detect=false on a genuine leak, want true")
+	}
+	if _, _, ok := Strip(good); !ok {
+		t.Error("Strip found=false on a genuine leak, want true")
+	}
+}

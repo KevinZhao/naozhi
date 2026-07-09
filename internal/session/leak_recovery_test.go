@@ -52,8 +52,13 @@ func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 
 	var calls int
 	var nudge string
+	// CostUSD is the CLI's CUMULATIVE total_cost_usd for the process. The
+	// recovery re-send runs on the same process, so its result already carries
+	// the running total (0.15 = leaked turn's 0.10 + recovery turn's 0.05), not
+	// a per-turn delta. recoverLeakedToolcall must return this cumulative value
+	// as-is, NOT sum it with orig again. (#2355 review MEDIUM)
 	resend := resendOnce(&calls, &nudge,
-		[]*cli.SendResult{{Text: "已执行完成。", SessionID: "sess-1", CostUSD: 0.05}}, nil)
+		[]*cli.SendResult{{Text: "已执行完成。", SessionID: "sess-1", CostUSD: 0.15}}, nil)
 
 	got := s.recoverLeakedToolcall(context.Background(), proc, orig, resend)
 	if calls != 1 {
@@ -63,7 +68,7 @@ func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 		t.Errorf("Text = %q, want recovered text", got.Text)
 	}
 	if !approxEq(got.CostUSD, 0.15) {
-		t.Errorf("CostUSD = %v, want 0.15 (summed)", got.CostUSD)
+		t.Errorf("CostUSD = %v, want 0.15 (recovered cumulative, not summed)", got.CostUSD)
 	}
 	if got.SessionID != "sess-1" {
 		t.Errorf("SessionID = %q, want sess-1", got.SessionID)
@@ -77,9 +82,10 @@ func TestRecover_LeakThenLeak_NoLoop(t *testing.T) {
 
 	var calls int
 	var nudge string
-	// The retry ALSO leaks — cap=1 must stop, not retry again.
+	// The retry ALSO leaks — cap=1 must stop, not retry again. Its CostUSD is
+	// the cumulative total after the recovery turn (0.15), same process.
 	resend := resendOnce(&calls, &nudge,
-		[]*cli.SendResult{{Text: leakSample, CostUSD: 0.05}}, nil)
+		[]*cli.SendResult{{Text: leakSample, CostUSD: 0.15}}, nil)
 
 	got := s.recoverLeakedToolcall(context.Background(), proc, orig, resend)
 	if calls != 1 {
@@ -89,8 +95,10 @@ func TestRecover_LeakThenLeak_NoLoop(t *testing.T) {
 	if got.Text == "" || got.Text != "先跑一下。" {
 		t.Errorf("Text = %q, want stripped prose %q", got.Text, "先跑一下。")
 	}
+	// Failure path returns the recovered turn's stripped body; its cumulative
+	// CostUSD (0.15) is the correct total — not summed with orig again.
 	if !approxEq(got.CostUSD, 0.15) {
-		t.Errorf("CostUSD = %v, want 0.15 (summed even on failure)", got.CostUSD)
+		t.Errorf("CostUSD = %v, want 0.15 (recovered cumulative, not summed)", got.CostUSD)
 	}
 }
 
@@ -243,7 +251,8 @@ func TestSend_LeakRecovery_EndToEnd(t *testing.T) {
 		if text != leakContinuePrompt {
 			t.Errorf("turn 2 got text %q, want the continue nudge", text)
 		}
-		return &cli.SendResult{Text: "工具已执行，任务完成。", CostUSD: 0.05}, nil
+		// Cumulative total after turn 2 (same process): 0.10 + 0.05 = 0.15.
+		return &cli.SendResult{Text: "工具已执行，任务完成。", CostUSD: 0.15}, nil
 	})
 
 	got, err := s.Send(context.Background(), "do the thing", nil, nil)
@@ -257,6 +266,6 @@ func TestSend_LeakRecovery_EndToEnd(t *testing.T) {
 		t.Errorf("Send returned %q, want recovered text", got.Text)
 	}
 	if !approxEq(got.CostUSD, 0.15) {
-		t.Errorf("CostUSD = %v, want 0.15 summed", got.CostUSD)
+		t.Errorf("CostUSD = %v, want 0.15 (recovered cumulative)", got.CostUSD)
 	}
 }

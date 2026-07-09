@@ -35,15 +35,28 @@ const Anchor = `(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke nam
 
 var re = regexp.MustCompile(Anchor)
 
-// Detect reports whether text contains a leaked tool-call block: a paired
-// </invoke> AND the own-line `call` / `<function_calls>` anchor. Both are
-// required — the closing-tag check is the cheap fast-path and the anchor is
-// the false-positive guard.
+// Detect reports whether text contains a leaked tool-call block: the own-line
+// `call` / `<function_calls>` anchor followed (later in the text) by a paired
+// </invoke>. Both are required, AND the </invoke> must appear AFTER the anchor.
+//
+// The "after" ordering matters: a stray </invoke> that appears only in prose
+// BEFORE the anchor (e.g. the user's turn quoted `<invoke name="a">x</invoke>`
+// in backticks while discussing tool syntax, and the real leaked block below it
+// was truncated mid-stream with no closing tag) must NOT count as a leak. Prior
+// to this guard, Detect used a whole-text Contains("</invoke>") which such a
+// stray tag satisfied, and Strip's LastIndex-based region then computed
+// start > end and panicked on the slice. Requiring the closing tag after the
+// anchor keeps Detect and Strip consistent. (#2355 review HIGH)
 func Detect(text string) bool {
-	if !strings.Contains(text, "</invoke>") {
+	loc := re.FindStringIndex(text)
+	if loc == nil {
 		return false
 	}
-	return re.MatchString(text)
+	// The closing tag must exist somewhere at/after the anchor match. Using the
+	// match start (loc[0]) is deliberately lenient — the anchor itself sits just
+	// before the first <invoke, so any </invoke> that closes it is necessarily
+	// past loc[0].
+	return strings.Contains(text[loc[0]:], "</invoke>")
 }
 
 // Strip splits a leaked assistant body into the real prose that precedes the
@@ -56,9 +69,6 @@ func Detect(text string) bool {
 // This mirrors stripLeakedToolCalls in dashboard.js and is used to hand a
 // no-fold channel (feishu / weixin) a clean body when recovery cannot complete.
 func Strip(text string) (prose, leaked string, found bool) {
-	if !strings.Contains(text, "</invoke>") {
-		return "", "", false
-	}
 	loc := re.FindStringIndex(text)
 	if loc == nil {
 		return "", "", false
@@ -70,6 +80,15 @@ func Strip(text string) (prose, leaked string, found bool) {
 		start++
 	}
 	end := strings.LastIndex(text, "</invoke>") + len("</invoke>")
+	// Defence-in-depth against a slice-bounds panic: Detect now requires the
+	// </invoke> to sit at/after the anchor, so end > start on every Detect-true
+	// input. But Strip is exported and callable independently, and a stray
+	// </invoke> BEFORE the anchor (with a truncated, unclosed leaked block)
+	// would put LastIndex before `start`. Bail out as "no leak" rather than
+	// panic on text[start:end]. (#2355 review HIGH)
+	if end <= start {
+		return "", "", false
+	}
 	if tail := text[end:]; len(tail) > 0 {
 		if m := regexp.MustCompile(`^\s*</function_calls>`).FindString(tail); m != "" {
 			end += len(m)

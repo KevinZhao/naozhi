@@ -59,8 +59,19 @@ func leakRecoveryEnabled() bool {
 //   - On a genuine leak with recovery enabled, re-sends exactly ONCE (cap=1,
 //     structural: the recovered result is never re-inspected, so a
 //     leak-on-every-turn model cannot loop). Returns the clean follow-up result
-//     with SessionID = recovered-or-original and CostUSD summed across both
-//     turns, so /health billing stays accurate.
+//     with SessionID = recovered-or-original and CostUSD = the recovered turn's
+//     value (NOT summed — see note below).
+//
+// COST SEMANTICS (#2355 review MEDIUM): SendResult.CostUSD is the CLI's
+// cumulative total_cost_usd for the process incarnation, NOT a per-turn delta.
+// The recovery re-send runs on the SAME live process, so rec.CostUSD already
+// INCLUDES result.CostUSD. Summing them would double-count turn 1. We therefore
+// return rec.CostUSD as-is. Session /health billing is unaffected either way —
+// it is driven by finishRun/TurnCostDelta, which is called once per turn (both
+// the leaked turn and the recovery turn) and computes deltas independently of
+// this return value. The consumer that DID care is cron (CronRun.CostUSD
+// persists this field verbatim), which previously over-reported on recovered
+// runs.
 //   - When the re-send errors (process died) or leaks again, returns the
 //     original/recovered text with the leaked XML stripped so no-fold channels
 //     (feishu / weixin) stay readable, and records a recovery_failed.
@@ -114,24 +125,31 @@ func (s *ManagedSession) recoverLeakedToolcall(
 	}
 	if rec == nil || rec.Text == "" || leakguard.Detect(rec.Text) {
 		// Second-order leak (or empty). cap=1: do NOT retry — the recovered
-		// result is never re-inspected for a further re-send. Return the
-		// stripped follow-up (or the original if the follow-up was empty),
-		// with cost summed so the turn is billed correctly.
+		// result is never re-inspected for a further re-send.
 		metrics.ToolCallLeakRecoveryFailedTotal.Add(1)
 		slog.Warn("leak-recovery: model leaked again on retry (cap=1, giving up)",
 			"key", s.key)
 		if rec == nil || rec.Text == "" {
-			return sumCost(strippedResult(result), rec)
+			// Recovery produced nothing usable — fall back to the original
+			// turn's stripped body. result.CostUSD is that turn's cumulative
+			// value; the recovery re-send (if it ran) added its own finishRun
+			// delta already, so no summing here.
+			return strippedResult(result)
 		}
-		return sumCost(strippedResult(rec), result)
+		// The recovered turn leaked again; hand back its stripped body. Its
+		// CostUSD is the cumulative-so-far value (already includes turn 1), so
+		// it is the correct total — do NOT add result.CostUSD on top.
+		return strippedResult(rec)
 	}
 
 	metrics.ToolCallLeakRecoveredTotal.Add(1)
 	slog.Info("leak-recovery: recovered", "key", s.key)
 	return &cli.SendResult{
-		Text:        rec.Text,
-		SessionID:   firstNonEmpty(rec.SessionID, result.SessionID),
-		CostUSD:     result.CostUSD + rec.CostUSD,
+		Text:      rec.Text,
+		SessionID: firstNonEmpty(rec.SessionID, result.SessionID),
+		// rec.CostUSD is the process's cumulative total (already includes the
+		// leaked turn's cost); return it as-is rather than summing. (#2355 MEDIUM)
+		CostUSD:     rec.CostUSD,
 		MergedCount: rec.MergedCount,
 	}
 }
@@ -150,15 +168,6 @@ func strippedResult(r *cli.SendResult) *cli.SendResult {
 	out := *r
 	out.Text = prose
 	return &out
-}
-
-// sumCost folds the CostUSD of add into base (base is returned). Nil-safe on
-// add so the caller can pass a nil recovered result. base must be non-nil.
-func sumCost(base, add *cli.SendResult) *cli.SendResult {
-	if base != nil && add != nil {
-		base.CostUSD += add.CostUSD
-	}
-	return base
 }
 
 // firstNonEmpty returns a if non-empty, else b.
