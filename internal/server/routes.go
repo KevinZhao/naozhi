@@ -190,6 +190,10 @@ func (s *Server) registerDashboard() {
 	// + chip consume. Returns only non-sensitive fields (id / display / colour /
 	// default model+backend / secret_ok preflight) — NEVER env values or tokens.
 	s.mux.HandleFunc("GET /api/access-profiles", auth(s.handleAccessProfiles))
+	// RFC project-access-profile P1-d: create a new access profile from the
+	// dashboard (writes config.yaml + optional 0600 secret file + live
+	// registry). Disabled (400) when ConfigPath is unset.
+	s.mux.HandleFunc("POST /api/access-profiles", auth(s.handleCreateAccessProfile))
 	// R237-ARCH-2 (#573) / R260528-ARCH-6 (#1367) incremental slice: the
 	// cohesive session-CRUD route group is extracted into its own helper so
 	// registerDashboard shrinks toward the routes.go split the issues call

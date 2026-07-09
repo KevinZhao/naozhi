@@ -56,17 +56,24 @@ type AccessProfileInfo struct {
 // *_FILE reference — cheap (a handful of profiles × ≤2 files) and only called
 // at picker-open time, mirroring /api/cli/backends.
 func (r *Router) AccessProfileInfos() []AccessProfileInfo {
-	if len(r.accessProfiles) == 0 {
+	// RLock: the registry is copy-on-write (AddAccessProfile swaps the whole
+	// map pointer under the write lock), so a reader either sees the old map or
+	// the new one whole — never a half-inserted entry. resolveSpawnParamsLocked
+	// reads it under the write lock, so it needs no extra guard.
+	r.mu.RLock()
+	profiles := r.accessProfiles
+	r.mu.RUnlock()
+	if len(profiles) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(r.accessProfiles))
-	for id := range r.accessProfiles {
+	ids := make([]string, 0, len(profiles))
+	for id := range profiles {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	out := make([]AccessProfileInfo, 0, len(ids))
 	for _, id := range ids {
-		ap := r.accessProfiles[id]
+		ap := profiles[id]
 		out = append(out, AccessProfileInfo{
 			ID:             id,
 			DisplayName:    ap.DisplayName,
@@ -77,6 +84,45 @@ func (r *Router) AccessProfileInfos() []AccessProfileInfo {
 		})
 	}
 	return out
+}
+
+// HasAccessProfile reports whether an access profile with the given id is
+// registered. RLock, copy-on-write safe (see AccessProfileInfos).
+func (r *Router) HasAccessProfile(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.accessProfiles[id]
+	return ok
+}
+
+// AddAccessProfile registers a new access profile at runtime (RFC
+// project-access-profile P1-d — dashboard "create profile" flow) so a
+// just-created profile works WITHOUT a naozhi restart. Copy-on-write: it builds
+// a fresh map from the current one plus the new entry and swaps the pointer
+// under the write lock, so concurrent lock-free-ish readers (AccessProfileInfos
+// under RLock) always observe a consistent whole map. Returns an error if the
+// id already exists — the caller (create endpoint) must reject duplicates
+// rather than silently overwrite an operator's existing profile.
+//
+// The persisted config.yaml write is the caller's responsibility and happens
+// FIRST (fail the request if the file write fails, before touching the live
+// registry) so disk and memory can't diverge on a partial success.
+func (r *Router) AddAccessProfile(id string, ap AccessProfile) error {
+	if id == "" {
+		return fmt.Errorf("access profile id is empty")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.accessProfiles[id]; exists {
+		return fmt.Errorf("access profile %q already exists", id)
+	}
+	next := make(map[string]AccessProfile, len(r.accessProfiles)+1)
+	for k, v := range r.accessProfiles {
+		next[k] = v
+	}
+	next[id] = ap
+	r.accessProfiles = next
+	return nil
 }
 
 // accessProfileSecretsOK reports whether every *_FILE reference in the overlay
