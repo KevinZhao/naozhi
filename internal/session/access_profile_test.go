@@ -115,3 +115,43 @@ func TestAccessProfileInfos_EmptyRegistry(t *testing.T) {
 		t.Errorf("empty registry should return nil, got %v", got)
 	}
 }
+
+func TestAddAccessProfile(t *testing.T) {
+	r := &Router{accessProfiles: map[string]AccessProfile{
+		"existing": {DisplayName: "Existing"},
+	}}
+	if !r.HasAccessProfile("existing") {
+		t.Fatal("existing profile should be present")
+	}
+	if r.HasAccessProfile("new") {
+		t.Fatal("new profile should be absent before add")
+	}
+	if err := r.AddAccessProfile("new", AccessProfile{DisplayName: "New", DefaultModel: "m"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if !r.HasAccessProfile("new") {
+		t.Error("new profile should be present after add")
+	}
+	// Existing untouched (copy-on-write preserves prior entries).
+	if !r.HasAccessProfile("existing") {
+		t.Error("existing profile lost after add")
+	}
+	// Duplicate rejected.
+	if err := r.AddAccessProfile("new", AccessProfile{}); err == nil {
+		t.Error("duplicate add should be rejected")
+	}
+	// Empty id rejected.
+	if err := r.AddAccessProfile("", AccessProfile{}); err == nil {
+		t.Error("empty id should be rejected")
+	}
+}
+
+func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
+	r := &Router{} // nil accessProfiles
+	if err := r.AddAccessProfile("first", AccessProfile{DisplayName: "First"}); err != nil {
+		t.Fatalf("add to nil map: %v", err)
+	}
+	if !r.HasAccessProfile("first") {
+		t.Error("profile not registered into freshly-bootstrapped map")
+	}
+}

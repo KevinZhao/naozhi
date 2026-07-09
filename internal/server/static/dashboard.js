@@ -1068,6 +1068,16 @@ function sectionHeaderHtml(p) {
   // redundant or wrong-polarity toggle.
   const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
 
+  // Project settings gear (RFC project-access-profile §8.1). Opens the
+  // right-side settings drawer for this project. Remote projects are edited on
+  // their own node's dashboard, so the gear is local-only (the PUT
+  // /api/projects/config remote proxy exists but the drawer's live pickers read
+  // the LOCAL backend/access-profile registries).
+  let gearBtn = '';
+  if (node === 'local') {
+    gearBtn = '<button type="button" class="sh-btn" data-action="project-settings" data-name="' + escAttr(p.name) + '" title="项目设置：' + escAttr(p.name) + '" aria-label="项目设置 ' + escAttr(p.name) + '">' + ICONS.gear + '</button>';
+  }
+
   let ghBtn = '';
   if (p.github) {
     const url = p.git_remote_url || '';
@@ -1096,6 +1106,7 @@ function sectionHeaderHtml(p) {
     '</span>' +
     countBadge +
     ghBtn +
+    gearBtn +
     '</div>';
 }
 
@@ -1111,6 +1122,7 @@ const SIDEBAR_PROJECT_ACTIONS = {
   'project-collapse': (btn) => toggleProjectCollapsed(btn.dataset.key),
   'project-favorite': (btn) => toggleFavorite(btn.dataset.name, btn.dataset.node),
   'project-github': (btn) => showGitRemote(btn.dataset.url),
+  'project-settings': (btn) => openProjectSettings(btn.dataset.name),
 };
 
 // initSidebarProjectActions attaches ONE delegated click listener to the
@@ -1193,6 +1205,304 @@ async function toggleFavorite(name, node) {
   } finally {
     _favInFlight.delete(key);
   }
+}
+
+// openProjectSettings opens the per-project settings modal (RFC
+// project-access-profile §8.1). It reads GET /api/projects/config for the
+// current values, renders editable fields (display name / emoji / access
+// profile / backend / planner model + prompt), and writes back via PUT. The
+// access-profile + backend pickers reuse the same registries the new-session
+// modal consumes, so a project can be pinned to an auth chain / backend without
+// hand-editing project.yaml. Local projects only (see gear-button gating).
+async function openProjectSettings(name) {
+  if (!name) return;
+  // Load the three inputs in parallel: current config + the two registries the
+  // pickers render from. Config failure is fatal (nothing to edit); registry
+  // failures degrade to hidden pickers (same as new-session modal).
+  let cfg;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const [c] = await Promise.all([
+      fetchJSON('/api/projects/config?name=' + encodeURIComponent(name), { timeoutMs: 10000, headers, credentials: 'same-origin' }),
+      fetchCLIBackends(),
+      fetchAccessProfiles(),
+    ]);
+    cfg = c || {};
+  } catch (err) {
+    if (err && err.status) showAPIError('加载项目设置', err.status, '');
+    else showNetworkError('加载项目设置', err);
+    return;
+  }
+
+  const accessProfilePicker = renderAccessProfilePicker(accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
+  const backendPicker = renderBackendPicker(cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="项目设置：' + escAttr(name) + '">' +
+      '<h3>项目设置 · ' + esc(name) + '</h3>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-display-name">显示名称</label>' +
+        '<input id="ps-display-name" style="' + PICKER_SELECT_STYLE + '" maxlength="200" value="' + escAttr(cfg.display_name || '') + '" placeholder="' + escAttr(name) + '">' +
+      '</div>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-emoji">Emoji</label>' +
+        '<input id="ps-emoji" style="' + PICKER_SELECT_STYLE + '" maxlength="16" value="' + escAttr(cfg.emoji || '') + '" placeholder="🗂">' +
+      '</div>' +
+      accessProfilePicker +
+      '<div style="margin:-6px 0 12px"><button type="button" class="linklike" data-action="ps-new-profile" style="background:none;border:none;color:var(--nz-accent);font-size:12px;cursor:pointer;padding:0">+ 新建访问档…</button></div>' +
+      backendPicker +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-model">Planner model（留空则继承）</label>' +
+        '<input id="ps-planner-model" style="' + PICKER_SELECT_STYLE + '" maxlength="256" value="' + escAttr(cfg.planner_model || '') + '" placeholder="' + escAttr(accessProfileDefaultModel(cfg.access_profile) || '（继承默认）') + '">' +
+      '</div>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="ps-planner-prompt">Planner prompt（可选，单行）</label>' +
+        '<textarea id="ps-planner-prompt" rows="3" style="' + PICKER_SELECT_STYLE + ';resize:vertical" maxlength="8192" placeholder="附加系统提示…">' + esc(cfg.planner_prompt || '') + '</textarea>' +
+      '</div>' +
+      '<div id="ps-preview" style="font-size:12px;color:var(--nz-text-mute);margin-bottom:12px;padding:8px;background:var(--nz-bg-0);border-radius:4px"></div>' +
+      '<div id="ps-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
+      '<div class="modal-btns">' +
+        '<button type="button" data-action="modal-close">取消</button>' +
+        '<button type="button" class="primary" data-action="ps-save" data-name="' + escAttr(name) + '">保存</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+
+  // Live "effective link" preview: shows how the next session under this
+  // project will resolve (profile → resolved model). Non-sensitive only — no
+  // base-URL/token, just the profile label + model (§8.1 联动预览 / §8.4).
+  const updatePreview = () => {
+    const apEl = document.getElementById('ps-access-profile');
+    const apID = apEl ? apEl.value : (cfg.access_profile || '');
+    const pmEl = document.getElementById('ps-planner-model');
+    const model = (pmEl && pmEl.value.trim()) || accessProfileDefaultModel(apID) || '（继承默认）';
+    const info = accessProfileChipInfo(apID);
+    const label = info ? info.label : '全局默认';
+    const box = document.getElementById('ps-preview');
+    if (box) box.textContent = '生效链路：' + label + ' → ' + model;
+  };
+  const apSel = document.getElementById('ps-access-profile');
+  if (apSel) apSel.addEventListener('change', updatePreview);
+  const pmInput = document.getElementById('ps-planner-model');
+  if (pmInput) pmInput.addEventListener('input', updatePreview);
+  updatePreview();
+
+  const psCancel = overlay.querySelector('[data-action="modal-close"]');
+  if (psCancel) psCancel.addEventListener('click', () => overlay.remove());
+  const saveBtn = overlay.querySelector('[data-action="ps-save"]');
+  if (saveBtn) saveBtn.addEventListener('click', () => saveProjectSettings(name, cfg, overlay));
+
+  // "+ 新建访问档" opens the create form; on success it refreshes the registry
+  // and re-selects the new profile in this drawer's picker.
+  const newBtn = overlay.querySelector('[data-action="ps-new-profile"]');
+  if (newBtn) newBtn.addEventListener('click', () => {
+    openCreateAccessProfile((newID) => {
+      const sel = document.getElementById('ps-access-profile');
+      if (sel) {
+        // The picker was rendered before the new profile existed; add + select
+        // it so the drawer immediately reflects the creation without a reopen.
+        if (![...sel.options].some(o => o.value === newID)) {
+          const opt = document.createElement('option');
+          opt.value = newID;
+          opt.textContent = accessProfileChipInfo(newID)?.label || newID;
+          sel.appendChild(opt);
+        }
+        sel.value = newID;
+        updatePreview();
+      }
+    });
+  });
+}
+
+// ACCESS_PROFILE_TEMPLATES pre-fill the create form for the two common cases so
+// the operator doesn't have to know env-var names (RFC P1-d). Values are the
+// literal overlay keys the server accepts; the token goes to a *_FILE.
+const ACCESS_PROFILE_TEMPLATES = {
+  '1p': {
+    label: '个人 Anthropic（1P 直连）',
+    display_name: '个人 Anthropic',
+    // Reference a design token rather than an inline hex literal (RNEW-UX-015
+    // ratchet). The operator can edit the colour later by hand-editing config.
+    chip_color: 'var(--nz-accent)',
+    env: { CLAUDE_CODE_USE_BEDROCK: '0', ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+    token_env_key: 'ANTHROPIC_AUTH_TOKEN_FILE',
+    token_hint: '粘贴 1P Anthropic 的 auth token（写入 0600 文件，不进 config）',
+    default_model: 'claude-fable-5',
+  },
+  'bedrock': {
+    label: '公司 Bedrock（经本机 proxy）',
+    display_name: '公司 Bedrock',
+    chip_color: 'var(--nz-purple)',
+    env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '1', ANTHROPIC_BEDROCK_BASE_URL: 'http://127.0.0.1:8889', AWS_REGION: 'us-west-2' },
+    token_env_key: '',
+    token_hint: '',
+    default_model: 'claude-opus-4-8',
+  },
+};
+
+// openCreateAccessProfile renders the guided create-profile form (RFC P1-d).
+// A template pre-fills env keys + colour so the operator only supplies an id,
+// a display name, and (for 1P) a token. On submit it POSTs /api/access-profiles;
+// on success it refreshes the cached registry and calls onCreated(id). The
+// token textarea value is sent once and never read back (write-only secret).
+function openCreateAccessProfile(onCreated) {
+  const tplOptions = Object.keys(ACCESS_PROFILE_TEMPLATES)
+    .map(k => '<option value="' + escAttr(k) + '">' + esc(ACCESS_PROFILE_TEMPLATES[k].label) + '</option>').join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="新建访问档">' +
+      '<h3>新建访问档</h3>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-template">模板</label>' +
+        '<select id="cap-template" style="' + PICKER_SELECT_STYLE + '">' + tplOptions + '</select>' +
+      '</div>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-id">档 ID（英数字 . _ -，唯一）</label>' +
+        '<input id="cap-id" style="' + PICKER_SELECT_STYLE + '" maxlength="64" placeholder="1p-fable">' +
+      '</div>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-display">显示名称</label>' +
+        '<input id="cap-display" style="' + PICKER_SELECT_STYLE + '" maxlength="200">' +
+      '</div>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-model">默认 model（可选）</label>' +
+        '<input id="cap-model" style="' + PICKER_SELECT_STYLE + '" maxlength="256">' +
+      '</div>' +
+      '<div id="cap-token-wrap" style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-token">Token（写入 0600 文件，仅此一次可见）</label>' +
+        '<textarea id="cap-token" rows="2" style="' + PICKER_SELECT_STYLE + ';resize:vertical" placeholder="" autocomplete="off"></textarea>' +
+        '<div id="cap-token-hint" style="font-size:11px;color:var(--nz-text-mute);margin-top:4px"></div>' +
+      '</div>' +
+      '<div id="cap-error" style="display:none;color:var(--nz-danger,#e5484d);font-size:12px;margin-bottom:8px"></div>' +
+      '<div class="modal-btns">' +
+        '<button type="button" data-action="modal-close">取消</button>' +
+        '<button type="button" class="primary" data-action="cap-create">创建</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+
+  const tplSel = overlay.querySelector('#cap-template');
+  const applyTemplate = () => {
+    const tpl = ACCESS_PROFILE_TEMPLATES[tplSel.value];
+    if (!tpl) return;
+    const dEl = overlay.querySelector('#cap-display');
+    if (dEl && !dEl.value) dEl.value = tpl.display_name || '';
+    const mEl = overlay.querySelector('#cap-model');
+    if (mEl && !mEl.value) mEl.value = tpl.default_model || '';
+    // Token field only relevant when the template references a *_FILE key.
+    const wrap = overlay.querySelector('#cap-token-wrap');
+    const hint = overlay.querySelector('#cap-token-hint');
+    if (wrap) wrap.style.display = tpl.token_env_key ? '' : 'none';
+    if (hint) hint.textContent = tpl.token_hint || '';
+  };
+  tplSel.addEventListener('change', applyTemplate);
+  applyTemplate();
+
+  const capCancel = overlay.querySelector('[data-action="modal-close"]');
+  if (capCancel) capCancel.addEventListener('click', () => overlay.remove());
+
+  overlay.querySelector('[data-action="cap-create"]').addEventListener('click', async () => {
+    const tpl = ACCESS_PROFILE_TEMPLATES[tplSel.value] || {};
+    const id = (overlay.querySelector('#cap-id').value || '').trim();
+    const errBox = overlay.querySelector('#cap-error');
+    const showErr = (m) => { if (errBox) { errBox.textContent = m; errBox.style.display = 'block'; } };
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) {
+      showErr('档 ID 无效（英数字 . _ -，1-64 位，不能以 - 开头）');
+      return;
+    }
+    const body = {
+      id: id,
+      display_name: (overlay.querySelector('#cap-display').value || '').trim(),
+      chip_color: tpl.chip_color || '',
+      default_model: (overlay.querySelector('#cap-model').value || '').trim(),
+      env: Object.assign({}, tpl.env || {}),
+    };
+    if (tpl.token_env_key) {
+      const tok = (overlay.querySelector('#cap-token').value || '').trim();
+      if (!tok) { showErr('该模板需要 token'); return; }
+      body.token_env_key = tpl.token_env_key;
+      body.token_content = tok;
+    }
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const t = getToken();
+      if (t) headers['Authorization'] = 'Bearer ' + t;
+      await fetchJSON('/api/access-profiles', {
+        timeoutMs: 10000, method: 'POST', headers, credentials: 'same-origin',
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      if (err && err.status === 409) showErr('该档 ID 已存在');
+      else if (err && err.status === 400) showErr('配置无效：请检查各字段');
+      else if (err && err.status) showAPIError('创建访问档', err.status, '');
+      else showNetworkError('创建访问档', err);
+      return;
+    }
+    overlay.remove();
+    showToast('访问档已创建 · ' + id, 'success');
+    // Force a registry refresh (bypass the 60s cache) so the new profile is
+    // visible immediately to pickers/chips.
+    accessProfilesFetchedAt = 0;
+    await fetchAccessProfiles();
+    if (typeof onCreated === 'function') onCreated(id);
+  });
+}
+
+// accessProfileDefaultModel resolves a profile id to its default_model from the
+// cached registry, or "" when unknown / global default. Used only for the
+// planner-model placeholder + preview — never a value the form submits.
+function accessProfileDefaultModel(profileID) {
+  if (!profileID || !accessProfiles || !Array.isArray(accessProfiles.profiles)) return '';
+  const e = accessProfiles.profiles.find(p => p && p.id === profileID);
+  return (e && e.default_model) ? e.default_model : '';
+}
+
+// saveProjectSettings collects the settings-modal fields, merges them onto the
+// loaded config (preserving fields the drawer doesn't edit — chat_bindings,
+// git_sync, created_at, …), and PUTs. On success it refreshes the sidebar +
+// the access-profile chip source; on validation failure it shows the server's
+// generic reason inline.
+async function saveProjectSettings(name, baseCfg, overlay) {
+  const val = (id) => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  // Start from the loaded config so unedited fields (chat_bindings, git_sync,
+  // memory_file, created_at) round-trip untouched.
+  const cfg = Object.assign({}, baseCfg);
+  cfg.display_name = (val('ps-display-name') || '').trim();
+  cfg.emoji = (val('ps-emoji') || '').trim();
+  cfg.access_profile = val('ps-access-profile') || '';
+  cfg.backend = val('ps-backend') || '';
+  cfg.planner_model = (val('ps-planner-model') || '').trim();
+  cfg.planner_prompt = (val('ps-planner-prompt') || '').trim();
+
+  const errBox = overlay.querySelector('#ps-error');
+  const showErr = (msg) => { if (errBox) { errBox.textContent = msg; errBox.style.display = 'block'; } };
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    await fetchJSON('/api/projects/config?name=' + encodeURIComponent(name), {
+      timeoutMs: 10000, method: 'PUT', headers, credentials: 'same-origin',
+      body: JSON.stringify(cfg),
+    });
+  } catch (err) {
+    if (err && err.status === 400) showErr('配置无效：请检查各字段（未知 backend / 访问档、超长 prompt 等）');
+    else if (err && err.status) showAPIError('保存项目设置', err.status, '');
+    else showNetworkError('保存项目设置', err);
+    return;
+  }
+  overlay.remove();
+  showToast('项目设置已保存 · ' + name, 'success');
+  // Access-profile binding change affects the next session's chip; refresh both
+  // the profile registry and the sidebar so chips repaint.
+  fetchSessions();
 }
 
 function showGitRemote(url) {
