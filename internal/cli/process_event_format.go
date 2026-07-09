@@ -81,7 +81,17 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				entry.Tokens = ev.Usage.TotalTokens
 				entry.DurationMS = ev.Usage.DurationMS
 			}
-		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response":
+		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response",
+			// 1p Anthropic auth (e.g. fable-5) streams per-turn telemetry
+			// system events the dashboard has no use for: "thinking_tokens"
+			// (extended-thinking token accounting) and "background_tasks_changed"
+			// (background-task list churn). Unlike Bedrock, these arrive many
+			// times per turn and, left un-skipped, fall through to the default
+			// `entry.Summary = ev.SubType` path and render as a run of bare
+			// ⚙ "thinking_tokens" / "background_tasks_changed" rows in the
+			// transcript. Drop them at the source so they never enter the
+			// EventLog ring / JSONL fan-out.
+			"thinking_tokens", "background_tasks_changed":
 			return nil
 		}
 		return []EventEntry{entry}

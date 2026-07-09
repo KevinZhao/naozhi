@@ -1456,6 +1456,19 @@ func TestEventEntryFromEvent(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// 1p Anthropic auth (fable-5) telemetry noise — must not render
+			// as a bare ⚙ transcript row. Regression guard for the
+			// dashboard thinking_tokens spam fix.
+			name:   "system thinking_tokens skipped",
+			event:  Event{Type: "system", SubType: "thinking_tokens"},
+			wantOK: false,
+		},
+		{
+			name:   "system background_tasks_changed skipped",
+			event:  Event{Type: "system", SubType: "background_tasks_changed"},
+			wantOK: false,
+		},
+		{
 			name: "assistant thinking",
 			event: Event{Type: "assistant", Message: &AssistantMessage{
 				Content: []ContentBlock{{Type: "thinking", Text: "analyzing"}},
