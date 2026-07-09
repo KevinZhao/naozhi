@@ -197,6 +197,12 @@ func main() {
 	if storePath != "" {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
+	// Access-profile registry (RFC project-access-profile): translate the
+	// config.AccessProfile map (which the session package must not import) into
+	// the session-layer view. Nil when no profiles configured — every session
+	// then runs on the global settings.json baseline (legacy behaviour).
+	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
+
 	// (auto-workspace-chain policy removed — RFC
 	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
 	// now carried by the project-stable session key; the old
@@ -212,6 +218,7 @@ func main() {
 		ExtraArgs:        cfg.CLI.Args,
 		BackendModels:    backendModels,
 		BackendExtraArgs: backendExtraArgs,
+		AccessProfiles:   accessProfiles,
 		Workspace:        workspace,
 		StorePath:        storePath,
 		NoOutputTimeout:  noOutputTimeout,

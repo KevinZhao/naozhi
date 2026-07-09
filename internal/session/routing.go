@@ -192,12 +192,31 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 		// session to exempt.
 		base.Workspace = b.WorkspaceDir
 		base.Exempt = false
+		// Backend + access profile ARE inherited even for non-general
+		// agents (unlike planner model/prompt). Auth chain is a
+		// CORRECTNESS invariant, not a preference: a project pinned to a
+		// personal 1P account must not silently run its non-general agents
+		// on the company Bedrock default. RFC project-access-profile P2-2.
+		// Only override when the project actually pins a value, so a bare
+		// binding preserves the agent default (mirrors PlannerModel).
+		if b.Backend != "" {
+			base.Backend = b.Backend
+		}
+		if b.AccessProfile != "" {
+			base.AccessProfile = b.AccessProfile
+		}
 		return SessionKey(platform, chatType, chatID, agentID), base
 	}
 
 	// general agent + bound project ⇒ planner (chat-view).
 	base.Exempt = true
 	base.Workspace = b.WorkspaceDir
+	if b.Backend != "" {
+		base.Backend = b.Backend
+	}
+	if b.AccessProfile != "" {
+		base.AccessProfile = b.AccessProfile
+	}
 	if b.PlannerModel != "" {
 		base.Model = b.PlannerModel
 	}
@@ -240,9 +259,11 @@ func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts
 		return "", AgentOpts{}, false
 	}
 	opts = AgentOpts{
-		Exempt:    true,
-		Workspace: b.WorkspaceDir,
-		Model:     b.PlannerModel,
+		Exempt:        true,
+		Workspace:     b.WorkspaceDir,
+		Model:         b.PlannerModel,
+		Backend:       b.Backend,
+		AccessProfile: b.AccessProfile,
 	}
 	// R215-SEC-P1-2: same defense-in-depth as ResolveForChat. The
 	// planner-restart RPC paths (administrative HTTP / reverse-RPC) can
@@ -290,6 +311,38 @@ func (r *KeyResolver) ResolveForKey(key string) (opts AgentOpts, ok bool) {
 		return AgentOpts{}, false
 	}
 	return r.defaults[parts[3]], true
+}
+
+// AccessProfileForKey returns the access-profile ID a key resolves to
+// ("" = global default). Used by the remote-dispatch gate: a session bound to
+// a non-default access profile MUST NOT be dispatched to a remote node, because
+// the env overlay (and any *_FILE secret) is host-local and never crosses the
+// reverse-RPC wire — the remote would silently spawn on ITS baseline, running
+// the session on the wrong account (RFC project-access-profile §4.5 / P1-a).
+// Returns "" for reserved namespaces / malformed keys / no data source, which
+// the gate treats as "no profile, remote OK".
+func (r *KeyResolver) AccessProfileForKey(key string) string {
+	if r == nil {
+		return ""
+	}
+	// Planner key: the profile rides in ResolveForPlannerKey's opts.
+	if isPlannerKey(key) {
+		if _, opts, ok := r.ResolveForPlannerKey(plannerNameFromKey(key)); ok {
+			return opts.AccessProfile
+		}
+		return ""
+	}
+	// IM 4-segment key: ResolveForKey deliberately does NOT re-consult the
+	// project binding (§4.5), so read the binding directly for the gate — a
+	// non-general project-bound session still carries the project's profile.
+	if r.data != nil {
+		if parts := strings.SplitN(key, ":", 4); len(parts) == 4 {
+			if b := r.data.ProjectBinding(parts[0], parts[1], parts[2]); b.Bound {
+				return b.AccessProfile
+			}
+		}
+	}
+	return ""
 }
 
 // KeyForChat is the lightweight key-only variant for callers that do

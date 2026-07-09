@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -313,7 +314,7 @@ func (m *Manager) reconnectKey(key string) *sync.Mutex {
 // Kept as a wrapper around StartShimWithBackend for callers that don't need
 // multi-backend routing.
 func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, cwd string) (*ShimHandle, error) {
-	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd)
+	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd, nil)
 }
 
 // buildShimArgs assembles the argv for the shim subprocess. Extracted from
@@ -424,7 +425,13 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 // naozhi reconnects post-restart can route back to the matching wrapper.
 // Pass cliPath == "" to fall back to the manager's default, and backend ==
 // "" when the caller is a legacy single-backend user.
-func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string) (*ShimHandle, error) {
+//
+// envOverlay is the per-spawn access-profile env overlay (RFC
+// project-access-profile §4). Nil/empty leaves the spawn on the process-wide
+// baseline (m.shimEnv), byte-identical to legacy behaviour. Non-empty entries
+// override baseline values for THIS shim only and are re-gated through
+// filterShimEnv by mergeShimEnv — never a whitelist bypass.
+func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string, envOverlay map[string]string) (*ShimHandle, error) {
 	// Defence-in-depth: the key flows into the shim argv as `--key <key>`.
 	// Upstream callers (HTTP / WS / reverse-RPC) already run
 	// session.ValidateSessionKey, but the shim manager must not trust
@@ -476,7 +483,9 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// Context is only used for the startup handshake timeout below.
 	cmd := exec.Command(m.naozhiBin, args...)
 	setSetsid(cmd)
-	cmd.Env = m.shimEnv
+	// Per-spawn access-profile overlay layered onto the process baseline and
+	// re-gated by filterShimEnv (see mergeShimEnv). Empty overlay → baseline.
+	cmd.Env = mergeShimEnv(m.shimEnv, envOverlay)
 
 	// Remove stale socket from a previous shim that didn't clean up
 	// (e.g., killed during post-CLI-exit wait period). Before we rm, verify
@@ -1490,6 +1499,63 @@ func filterShimEnv(environ []string) []string {
 		}
 	}
 	return filtered
+}
+
+// mergeShimEnv layers a per-spawn env overlay onto the process-wide shim
+// baseline and returns the effective env for one CLI subprocess. The overlay is
+// the materialised access profile (RFC project-access-profile §4): a small set
+// of already-resolved "KEY=value" pairs (secrets from *_FILE already expanded
+// by the session layer) that override the baseline for THIS session only.
+//
+// CRITICAL INVARIANT — the overlay is NOT a whitelist bypass. After the merge,
+// the combined slice is re-run through filterShimEnv, so every overlay entry
+// faces the SAME exact-key allowlist + SSRF/profile/cred-path guards as the
+// baseline. The only extra capability the overlay grants is overriding the
+// VALUE of an already-allowlisted key, per-spawn instead of per-process. An
+// overlay entry whose key is outside the allowlist, or whose value fails a
+// guard, is silently dropped by filterShimEnv (with its existing slog.Warn) —
+// it can never reach cmd.Env.
+//
+// A nil/empty overlay returns the baseline unchanged (byte-identical to the
+// pre-overlay behaviour), so single-auth deployments see zero change.
+//
+// Precedence: for a key present in both, the overlay value wins. Baseline-only
+// keys are preserved. Ordering is deterministic (baseline order first, then any
+// overlay-introduced keys sorted) so the argv-shape regression tests stay
+// stable.
+func mergeShimEnv(baseline []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return baseline
+	}
+	merged := make([]string, 0, len(baseline)+len(overlay))
+	usedOverlay := make(map[string]bool, len(overlay))
+	for _, kv := range baseline {
+		key := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			key = kv[:i]
+		}
+		if v, ok := overlay[key]; ok {
+			merged = append(merged, key+"="+v)
+			usedOverlay[key] = true
+			continue
+		}
+		merged = append(merged, kv)
+	}
+	// Append overlay keys that had no baseline counterpart, in sorted order for
+	// determinism. These still face filterShimEnv below.
+	extra := make([]string, 0, len(overlay))
+	for k := range overlay {
+		if !usedOverlay[k] {
+			extra = append(extra, k)
+		}
+	}
+	sort.Strings(extra)
+	for _, k := range extra {
+		merged = append(merged, k+"="+overlay[k])
+	}
+	// Re-gate the whole thing: overlay values get the identical allowlist +
+	// value-guard treatment as the baseline. Zero bypass.
+	return filterShimEnv(merged)
 }
 
 // shimProfileEnvKeys is the set of allowlisted env keys whose value is an AWS

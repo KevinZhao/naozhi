@@ -451,3 +451,28 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	}
 	return mgr, resolvedWorkDir, nil
 }
+
+// buildAccessProfiles translates the config.AccessProfile registry into the
+// session-layer view (RFC project-access-profile). The session package must not
+// import config, so the cmd wiring owns this translation. Returns nil for an
+// empty/absent map so the router keeps every session on the global baseline
+// (legacy behaviour). The env map is copied verbatim — *_FILE references are
+// expanded lazily at spawn time by the session layer, and every entry is
+// re-gated by the shim's filterShimEnv, so no validation is duplicated here
+// (validateConfig already rejected malformed profiles at load).
+func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.AccessProfile {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]session.AccessProfile, len(in))
+	for id, ap := range in {
+		out[id] = session.AccessProfile{
+			DisplayName:    ap.DisplayName,
+			ChipColor:      ap.ChipColor,
+			Env:            ap.Env,
+			DefaultModel:   ap.DefaultModel,
+			DefaultBackend: ap.DefaultBackend,
+		}
+	}
+	return out
+}

@@ -114,7 +114,7 @@ func TestStartShimWithBackend_QuotaErrorBeforeReservation(t *testing.T) {
 		StateDirQuotaBytes: 1024,
 	})
 
-	_, err := m.StartShimWithBackend(context.Background(), "k:p:1", "/bin/true", "", nil, dir)
+	_, err := m.StartShimWithBackend(context.Background(), "k:p:1", "/bin/true", "", nil, dir, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

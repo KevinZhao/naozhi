@@ -93,8 +93,14 @@ type storeEntry struct {
 	CostSpent          float64 `json:"cost_spent,omitempty"`
 	LastCumulativeCost float64 `json:"last_cumulative_cost,omitempty"`
 	Workspace          string  `json:"workspace,omitempty"`
-	Backend            string  `json:"backend,omitempty"`     // "claude" | "kiro" | ...
-	LastActive         int64   `json:"last_active,omitempty"` // unix nano
+	Backend            string  `json:"backend,omitempty"` // "claude" | "kiro" | ...
+	// AccessProfile is the access-profile ID this session spawned under
+	// ("" = global default). Persisted so a post-restart resume relocks the
+	// same auth chain — resuming a Bedrock conversation against a 1P endpoint
+	// would cross-charge and fail. Forward-compatible: pre-feature stores lack
+	// it, restoring to "" (global default). RFC project-access-profile §7.
+	AccessProfile string `json:"access_profile,omitempty"`
+	LastActive    int64  `json:"last_active,omitempty"` // unix nano
 	// CreatedAt anchors the session's sidebar position; written once at
 	// creation and persisted across restarts. unix nano. Pre-feature stores
 	// have CreatedAt==0, in which case the router restore copies LastActive
@@ -255,6 +261,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
 		Workspace:          s.Workspace(),
 		Backend:            s.Backend(),
+		AccessProfile:      s.AccessProfile(),
 		LastActive:         s.lastActive.Load(),
 		CreatedAt:          s.createdAt.Load(),
 		UserLabel:          s.UserLabel(),
@@ -282,6 +289,7 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.LastCumulativeCost == b.LastCumulativeCost &&
 		a.Workspace == b.Workspace &&
 		a.Backend == b.Backend &&
+		a.AccessProfile == b.AccessProfile &&
 		a.LastActive == b.LastActive &&
 		a.CreatedAt == b.CreatedAt &&
 		a.UserLabel == b.UserLabel &&

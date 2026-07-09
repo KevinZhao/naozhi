@@ -30,6 +30,13 @@ type ProjectBinding struct {
 	WorkspaceDir  string
 	PlannerModel  string // "" = inherit router / AgentDefaults
 	PlannerPrompt string // "" = no --append-system-prompt
+	// Backend is the project's default CLI backend ("" = router default).
+	// RFC project-access-profile PR-A.
+	Backend string
+	// AccessProfile is the project's default access-profile ID ("" = global
+	// default). Carries only the name; the env values live in the trusted
+	// config. RFC project-access-profile PR-B.
+	AccessProfile string
 }
 
 // DataSource abstracts the project-layer reads the session KeyResolver needs.

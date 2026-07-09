@@ -66,19 +66,25 @@ type AgentMetaPatch struct {
 
 // ClientMsg is a message sent from the WebSocket client.
 type ClientMsg struct {
-	Type      string   `json:"type"`                // auth, subscribe, unsubscribe, send, interrupt, ping, agent_subscribe, agent_unsubscribe
-	Token     string   `json:"token,omitempty"`     // auth token
-	Key       string   `json:"key,omitempty"`       // session key
-	Text      string   `json:"text,omitempty"`      // message text (send)
-	ID        string   `json:"id,omitempty"`        // client-generated correlation ID
-	After     int64    `json:"after,omitempty"`     // unix ms timestamp for subscribe history
-	Before    int64    `json:"before,omitempty"`    // unix ms timestamp; history page < Before (pagination)
-	Limit     int      `json:"limit,omitempty"`     // max events to return from initial / paginated history
-	Node      string   `json:"node,omitempty"`      // target node (empty = local)
-	Workspace string   `json:"workspace,omitempty"` // workspace override for new sessions
-	ResumeID  string   `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
-	Backend   string   `json:"backend,omitempty"`   // backend ID picked by dashboard for new sessions
-	FileIDs   []string `json:"file_ids,omitempty"`  // pre-uploaded image IDs from /api/sessions/upload
+	Type      string `json:"type"`                // auth, subscribe, unsubscribe, send, interrupt, ping, agent_subscribe, agent_unsubscribe
+	Token     string `json:"token,omitempty"`     // auth token
+	Key       string `json:"key,omitempty"`       // session key
+	Text      string `json:"text,omitempty"`      // message text (send)
+	ID        string `json:"id,omitempty"`        // client-generated correlation ID
+	After     int64  `json:"after,omitempty"`     // unix ms timestamp for subscribe history
+	Before    int64  `json:"before,omitempty"`    // unix ms timestamp; history page < Before (pagination)
+	Limit     int    `json:"limit,omitempty"`     // max events to return from initial / paginated history
+	Node      string `json:"node,omitempty"`      // target node (empty = local)
+	Workspace string `json:"workspace,omitempty"` // workspace override for new sessions
+	ResumeID  string `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
+	Backend   string `json:"backend,omitempty"`   // backend ID picked by dashboard for new sessions
+	// AccessProfile is the access-profile ID picked by the dashboard for new
+	// LOCAL sessions (RFC project-access-profile §8.2). Only meaningful for
+	// local dispatch — remote dispatch of a non-default profile is refused at
+	// the primary by gateRemoteAccessProfile (the overlay is host-local), so
+	// this field is not consumed on the remote-forward path.
+	AccessProfile string   `json:"access_profile,omitempty"`
+	FileIDs       []string `json:"file_ids,omitempty"` // pre-uploaded image IDs from /api/sessions/upload
 	// Agent-team subscribe target (RFC v4 agent-team-ui §3.5.2). Set on
 	// agent_subscribe / agent_unsubscribe only; unused by legacy message
 	// types which ignore the extra field.

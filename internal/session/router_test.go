@@ -2341,6 +2341,127 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// resolveSpawnParamsLocked — access profile (RFC project-access-profile)
+// ---------------------------------------------------------------------------
+
+func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
+	mkRouter := func() *Router {
+		r := &Router{
+			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+			defaultCWD: "/default/ws",
+		}
+		r.bkStore.wrappers = map[string]*cli.Wrapper{
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		}
+		r.bkStore.defaultBackend = "claude"
+		r.bkStore.model = "sonnet-default"
+		r.bkStore.backendOverrides = make(map[string]string)
+		r.bkStore.accessProfileOverrides = make(map[string]string)
+		r.wsStore.overrides = make(map[string]string)
+		r.accessProfiles = map[string]AccessProfile{
+			"1p-fable": {
+				Env:          map[string]string{"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+				DefaultModel: "claude-fable-5",
+			},
+			"bedrock-opus": {
+				Env:          map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
+				DefaultModel: "claude-opus-4-8",
+			},
+		}
+		return r
+	}
+
+	t.Run("opts profile resolves env + default model", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+			AgentOpts{AccessProfile: "1p-fable"})
+		if sp.AccessProfileID != "1p-fable" {
+			t.Errorf("AccessProfileID = %q, want 1p-fable", sp.AccessProfileID)
+		}
+		if sp.AccessProfileEnv["ANTHROPIC_BASE_URL"] != "https://api.anthropic.com" {
+			t.Errorf("env not carried: %v", sp.AccessProfileEnv)
+		}
+		if sp.Model != "claude-fable-5" {
+			t.Errorf("Model = %q, want profile default claude-fable-5", sp.Model)
+		}
+	})
+
+	t.Run("explicit opts.Model beats profile default_model", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+			AgentOpts{AccessProfile: "1p-fable", Model: "planner-pinned"})
+		if sp.Model != "planner-pinned" {
+			t.Errorf("Model = %q, want planner-pinned (opts wins)", sp.Model)
+		}
+	})
+
+	t.Run("resume locks existing session profile over opts", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetAccessProfile("bedrock-opus")
+		r.ss.sessions[key] = old
+		// Project since re-bound to 1p-fable, but resume must relock bedrock.
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock)", sp.AccessProfileID)
+		}
+		if sp.AccessProfileEnv["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+			t.Errorf("resume env not bedrock: %v", sp.AccessProfileEnv)
+		}
+	})
+
+	t.Run("unknown profile falls back to global default", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+			AgentOpts{AccessProfile: "deleted-profile"})
+		if sp.AccessProfileID != "" {
+			t.Errorf("AccessProfileID = %q, want \"\" (fallback)", sp.AccessProfileID)
+		}
+		if sp.AccessProfileEnv != nil {
+			t.Errorf("AccessProfileEnv = %v, want nil", sp.AccessProfileEnv)
+		}
+	})
+
+	t.Run("no profile leaves baseline untouched", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		if sp.AccessProfileID != "" || sp.AccessProfileEnv != nil {
+			t.Errorf("expected empty profile, got id=%q env=%v", sp.AccessProfileID, sp.AccessProfileEnv)
+		}
+		if sp.Model != "sonnet-default" {
+			t.Errorf("Model = %q, want sonnet-default", sp.Model)
+		}
+	})
+
+	t.Run("one-shot dashboard override beats opts and is consumed", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		r.bkStore.accessProfileOverrides[key] = "bedrock-opus"
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{AccessProfile: "1p-fable"})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (override wins over opts)", sp.AccessProfileID)
+		}
+		if _, still := r.bkStore.accessProfileOverrides[key]; still {
+			t.Error("one-shot override was not consumed")
+		}
+	})
+
+	t.Run("resume lock beats one-shot override", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetAccessProfile("bedrock-opus")
+		r.ss.sessions[key] = old
+		r.bkStore.accessProfileOverrides[key] = "1p-fable"
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // classifyShimState — R70-ARCH-H4
 // ---------------------------------------------------------------------------
 
@@ -2553,6 +2674,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		proc *cli.Process,
 		workspace string,
 		backendID string,
+		accessProfileID string,
 		wrapper *cli.Wrapper,
 		resumeID string,
 		oldHistory []cli.EventEntry,

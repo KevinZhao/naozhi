@@ -156,6 +156,20 @@ func ValidateConfig(cfg ProjectConfig) error {
 	if err := validateOpaqueField("memory_file", cfg.MemoryFile, maxMemoryFileBytes); err != nil {
 		return err
 	}
+	// Backend / AccessProfile are identifier-shaped tokens that flow into CLI
+	// argv (--backend) and, for the profile name, into slog attrs / session
+	// records. They arrive via the same untrusted ingress as GitRemote
+	// (dashboard PUT + reverse-RPC update_config). Referential validity — "is
+	// this an enabled backend / a defined access profile?" — is enforced at the
+	// config layer, which owns the registry; here we only bound length and
+	// charset so a tampered project.yaml can't smuggle a flag-shaped or
+	// control-byte value into argv. Empty means "router / global default".
+	if err := validateIdentToken("backend", cfg.Backend); err != nil {
+		return err
+	}
+	if err := validateIdentToken("access_profile", cfg.AccessProfile); err != nil {
+		return err
+	}
 	// R184-SEC-M1: reject ChatBindings fields that would break the
 	// bindingIndex key invariant "platform:chatType:chatID". A colon in any
 	// component would collide with an entirely different (platform,chatType,
@@ -200,6 +214,25 @@ func validateOpaqueField(field, value string, maxBytes int) error {
 		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("%w: %s contains invalid unicode control characters", ErrInvalidConfig, field)
 		}
+	}
+	return nil
+}
+
+// identTokenRe matches backend IDs and access-profile names: alphanumerics
+// plus underscore/hyphen/dot, 1-64 chars. Rejects flag-shaped (leading '-'),
+// path-separator, whitespace, and control-byte values before they reach CLI
+// argv (--backend) or session records. Matches the backendid charset contract.
+var identTokenRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validateIdentToken bounds an identifier-shaped config field (backend ID /
+// access-profile name). Empty is allowed (means "default"). field is the YAML
+// key, used only for the error message.
+func validateIdentToken(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !identTokenRe.MatchString(value) {
+		return fmt.Errorf("%w: %s contains invalid characters or is too long", ErrInvalidConfig, field)
 	}
 	return nil
 }

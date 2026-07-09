@@ -64,6 +64,14 @@ type backendStore struct {
 	// against different backends.
 	// 读写: backend (Set/GetSessionBackend), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume / RenameSession)
 	backendOverrides map[string]string
+	// accessProfileOverrides stores per-session access-profile picks made by
+	// the dashboard at session-creation time (RFC project-access-profile §8.2).
+	// Same one-shot semantics as backendOverrides: keyed by full session key,
+	// consumed on first spawnSession, cleared on Reset/Remove. Empty value =
+	// "global default" (explicit clear). Mirrors backendOverrides so the two
+	// stay structurally identical.
+	// 读写: backend (Set/GetSessionAccessProfile), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume)
+	accessProfileOverrides map[string]string
 }
 
 // R188-SEC-M2: model identifiers flow into the `--model` argv of the CLI child
@@ -316,6 +324,35 @@ func (r *Router) SessionBackend(key string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.bkStore.backendOverrides[key]
+}
+
+// SetSessionAccessProfile remembers the access profile the dashboard picked
+// for a new session (RFC project-access-profile §8.2). One-shot: applied the
+// next time spawnSession runs, then consumed. Empty clears the override.
+// Mirrors SetSessionBackend including the capacity guard.
+func (r *Router) SetSessionAccessProfile(key, profile string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bkStore.accessProfileOverrides == nil {
+		r.bkStore.accessProfileOverrides = make(map[string]string)
+	}
+	if profile == "" {
+		delete(r.bkStore.accessProfileOverrides, key)
+		return
+	}
+	if _, existing := r.bkStore.accessProfileOverrides[key]; !existing && len(r.bkStore.accessProfileOverrides) >= maxBackendOverrides {
+		slog.Warn("accessProfileOverrides at capacity; dropping override",
+			"key", key, "cap", maxBackendOverrides)
+		return
+	}
+	r.bkStore.accessProfileOverrides[key] = profile
+}
+
+// SessionAccessProfile returns the access-profile override for key, or "".
+func (r *Router) SessionAccessProfile(key string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.bkStore.accessProfileOverrides[key]
 }
 
 // CLIPath returns the CLI binary path for health checks.

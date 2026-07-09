@@ -62,6 +62,17 @@ func TestValidateConfig(t *testing.T) {
 		{"memory_file NUL rejected", ProjectConfig{MemoryFile: "docs/\x00MEM.md"}, false},
 		{"memory_file LF rejected", ProjectConfig{MemoryFile: "docs/\nMEM.md"}, false},
 		{"memory_file RLO rejected", ProjectConfig{MemoryFile: "docs/‮MEM.md"}, false},
+
+		// RFC project-access-profile: backend / access_profile are
+		// identifier-shaped tokens (referential validity checked at config
+		// layer; here only byte-hygiene).
+		{"backend plain passes", ProjectConfig{Backend: "kiro"}, true},
+		{"access_profile plain passes", ProjectConfig{AccessProfile: "1p-fable"}, true},
+		{"access_profile dotted passes", ProjectConfig{AccessProfile: "co.bedrock"}, true},
+		{"backend leading dash rejected", ProjectConfig{Backend: "-flag"}, false},
+		{"backend with space rejected", ProjectConfig{Backend: "kiro evil"}, false},
+		{"access_profile NUL rejected", ProjectConfig{AccessProfile: "p\x00"}, false},
+		{"access_profile over cap rejected", ProjectConfig{AccessProfile: strings.Repeat("a", 65)}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

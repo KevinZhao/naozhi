@@ -170,20 +170,21 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	// adds up at scale.
 	id := s.loadCLIIdentity()
 	snap := SessionSnapshot{
-		Key:         s.key,
-		Platform:    s.keyPlatform,
-		ChatType:    s.keyChatType,
-		ChatID:      s.keyChatID,
-		Agent:       s.keyAgentID,
-		SessionID:   s.getSessionID(),
-		LastActive:  s.LastActive().UnixMilli(),
-		CreatedAt:   s.createdAtMillis(),
-		Workspace:   s.Workspace(),
-		Backend:     id.backend,
-		CLIName:     id.cliName,
-		CLIVersion:  id.cliVersion,
-		UserLabel:   s.UserLabel(),
-		LabelOrigin: s.LabelOrigin(),
+		Key:           s.key,
+		Platform:      s.keyPlatform,
+		ChatType:      s.keyChatType,
+		ChatID:        s.keyChatID,
+		Agent:         s.keyAgentID,
+		SessionID:     s.getSessionID(),
+		LastActive:    s.LastActive().UnixMilli(),
+		CreatedAt:     s.createdAtMillis(),
+		Workspace:     s.Workspace(),
+		Backend:       id.backend,
+		AccessProfile: id.accessProfile,
+		CLIName:       id.cliName,
+		CLIVersion:    id.cliVersion,
+		UserLabel:     s.UserLabel(),
+		LabelOrigin:   s.LabelOrigin(),
 		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the
 		// proc-bearing branch below will overwrite if live proc has a
 		// fresher value. No-proc snapshots (evicted / pre-spawn) keep

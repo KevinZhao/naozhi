@@ -152,6 +152,10 @@ type sendParams struct {
 	Workspace string
 	ResumeID  string
 	Backend   string // optional backend ID picked by the dashboard ("" = router default)
+	// AccessProfile is the optional access-profile ID picked by the dashboard
+	// new-session picker ("" = global default). One-shot: recorded per key and
+	// consumed by spawnSession. RFC project-access-profile §8.2.
+	AccessProfile string
 }
 
 // sendAckStatus describes the immediate ack status for a queued send.
@@ -290,6 +294,19 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 			return false, "", fmt.Errorf("invalid backend identifier")
 		}
 		h.router.SetSessionBackend(key, p.Backend)
+	}
+
+	// Dashboard-picked access-profile override (RFC project-access-profile
+	// §8.2). Same one-shot semantics as Backend: recorded per key, consumed by
+	// spawnSession. Charset/length gated with the shared identifier rule so a
+	// hostile 4 KB / control-char value cannot land in logs or argv. Unknown
+	// IDs resolve to the global default inside resolveSpawnParamsLocked (safe
+	// fallback), so we only reject syntactically hostile input here.
+	if p.AccessProfile != "" {
+		if len(p.AccessProfile) > maxBackendIDLen || !isValidBackendID(p.AccessProfile) {
+			return false, "", fmt.Errorf("invalid access_profile identifier")
+		}
+		h.router.SetSessionAccessProfile(key, p.AccessProfile)
 	}
 
 	// Resume registration — bound length before regex scan to limit cost

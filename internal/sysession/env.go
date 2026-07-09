@@ -44,6 +44,14 @@ func isSafeProfileValue(v string) bool {
 	return envpolicy.IsSafeProfileValue(v)
 }
 
+// SCOPE NOTE (RFC project-access-profile P1-c): sysession Runners do NOT
+// participate in access-profile overlays. They build their own cmd.Env here
+// (independent of the shim path that mergeShimEnv touches), so a sys: daemon
+// such as AutoTitler always runs on the global settings.json baseline, never a
+// per-project profile. Access profiles are user IM/dashboard sessions only in
+// this release; wiring sysession to inherit a profile is a separate overlay
+// path + PR.
+//
 // envAlwaysPassthrough is the small set of NON-SECRET variables every
 // Runner subprocess gets, regardless of the daemon-side EnvAllowlist:
 //

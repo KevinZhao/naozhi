@@ -59,6 +59,19 @@ type ProjectConfig struct {
 	PlannerModel  string `yaml:"planner_model,omitempty" json:"planner_model,omitempty"`
 	PlannerPrompt string `yaml:"planner_prompt,omitempty" json:"planner_prompt,omitempty"`
 
+	// Backend pins the default CLI backend ("claude" | "kiro" | …) for this
+	// project's sessions. Empty = router default. Referential validity (is it
+	// an enabled backend?) is checked at the config layer, which knows the
+	// backend registry; here ValidateConfig only enforces byte-hygiene. RFC
+	// project-access-profile PR-A.
+	Backend string `yaml:"backend,omitempty" json:"backend,omitempty"`
+	// AccessProfile names the default access profile (auth/upstream overlay)
+	// for this project's sessions. This carries only the NAME — the env values
+	// live in the trusted config.yaml, so a project.yaml synced from git can at
+	// most point at an operator-defined profile, never inject env. Empty =
+	// global default. RFC project-access-profile PR-B / §5.
+	AccessProfile string `yaml:"access_profile,omitempty" json:"access_profile,omitempty"`
+
 	// DisplayName is the operator-facing label that overrides the directory
 	// name in dashboard rendering. Empty means "use directory name".
 	// R110-P2 foundation: schema only, not yet wired through to UI.
