@@ -6510,12 +6510,20 @@ function renderAccessProfilePicker(profilesData, opts) {
   if (list.length <= 1) return '';
   const o = opts || {};
   const selectId = o.selectId || 'new-access-profile';
+  // Which option starts selected. When the caller passes selectedId (even ""),
+  // honour it verbatim — the project-settings panel uses "" to mean an explicit
+  // "(global default)". When the caller omits selectedId entirely (new-session
+  // flows), fall back to the server-configured default_access_profile so a
+  // deployment that sets one gets it pre-selected instead of the bare empty
+  // option. `default` may name a profile that isn't in `list` (e.g. deleted) —
+  // harmless, no option matches and the empty option stays selected.
+  const effectiveSelected = ('selectedId' in o) ? o.selectedId : (profilesData.default || '');
   // Empty option = global default (no overlay). Always offered so a project
   // pinned to a profile can still be overridden back to the default per-session.
   let options = '<option value="">（全局默认）</option>';
   options += list.map(p => {
     const id = p.id || '';
-    const selected = (o.selectedId && id === o.selectedId) ? ' selected' : '';
+    const selected = (effectiveSelected && id === effectiveSelected) ? ' selected' : '';
     const broken = p.secret_ok === false;
     const disabled = broken ? ' disabled' : '';
     const label = (p.display_name || id) + (broken ? ' ⚠ 凭证缺失' : '');

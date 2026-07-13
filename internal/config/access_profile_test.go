@@ -80,6 +80,28 @@ func TestValidateAccessProfiles(t *testing.T) {
 				c.Agents = map[string]AgentConfig{"x": {AccessProfile: "p"}}
 			},
 		},
+		{
+			name: "default_access_profile defined ok",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"bedrock": {}}
+				c.DefaultAccessProfile = "bedrock"
+			},
+		},
+		{
+			name: "default_access_profile undefined",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"1p": {}}
+				c.DefaultAccessProfile = "bedrock"
+			},
+			wantErr: true,
+		},
+		{
+			name: "default_access_profile empty ok (legacy fallthrough)",
+			mut: func(c *Config) {
+				c.AccessProfiles = map[string]AccessProfile{"1p": {}}
+				c.DefaultAccessProfile = ""
+			},
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
