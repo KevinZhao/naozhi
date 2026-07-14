@@ -554,6 +554,16 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 			accessProfileID = ap
 		}
 	}
+	//  5. defaultAccessProfile — lowest precedence. Applies ONLY when every
+	//     source above left the ID empty, so an explicit pick / override / a
+	//     resume-locked prior profile always wins. This moves provider
+	//     selection into the profile layer: a deployment can drop auth/upstream
+	//     env from ~/.claude/settings.json and let every otherwise-unprofiled
+	//     session (ad-hoc dashboard chats, cron) land on a named default
+	//     instead of the bare global baseline. RFC project-access-profile.
+	if accessProfileID == "" && r.defaultAccessProfile != "" {
+		accessProfileID = r.defaultAccessProfile
+	}
 	var accessProfileEnv map[string]string
 	var profileDefaultModel string
 	if accessProfileID != "" {

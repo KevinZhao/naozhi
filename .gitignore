@@ -40,9 +40,17 @@ test/e2e/.multibackend-storage.json
 # committed template; copy it to config.yaml and fill in real values locally.
 config.yaml
 config-local.yaml
+# Local config backups (config.yaml.bak-*) produced by ad-hoc edits/migrations.
+config.yaml.bak-*
+# Runtime-generated cookie signing secret; losing/rotating it invalidates all
+# dashboard sessions. Machine-local, never commit.
+cookie_secret
 preview-start.sh
 .mcp.json
 *.tar.gz
+
+# Codegraph MCP index (large local SQLite db; also self-ignored via .codegraph/.gitignore)
+.codegraph/
 
 # Python bytecode cache (test/e2e/passthrough/*.py harness)
 __pycache__/
