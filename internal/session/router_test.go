@@ -2135,30 +2135,148 @@ func TestResolveResumeID(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Scratch kiroSessionsDir with a single UUID-keyed session state file
+	// (kiro layout: <dir>/<sid>.json, no workspace slug component).
+	kiroDir := t.TempDir()
+	kiroOkID := "d4fedd9d-0e56-40c3-9871-0e44513b2219"
+	kiroMissingID := "00000000-0000-0000-0000-000000000000"
+	if err := os.WriteFile(filepath.Join(kiroDir, kiroOkID+".json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	cases := []struct {
 		name      string
+		backendID string
 		claudeDir string
+		kiroDir   string
 		workspace string
 		resumeID  string
 		want      string // "" means downgraded to fresh
 	}{
-		{"empty resumeID unchanged", claudeDir, workspaceA, "", ""},
-		{"empty claudeDir skipped", "", workspaceA, okID, okID},
-		{"empty workspace skipped", claudeDir, "", okID, okID},
-		{"jsonl exists keeps resumeID", claudeDir, workspaceA, okID, okID},
-		{"jsonl missing in same workspace downgrades", claudeDir, workspaceA, missingID, ""},
+		{"empty resumeID unchanged", "claude", claudeDir, kiroDir, workspaceA, "", ""},
+		{"empty claudeDir skipped", "claude", "", kiroDir, workspaceA, okID, okID},
+		{"empty workspace skipped", "claude", claudeDir, kiroDir, "", okID, okID},
+		{"jsonl exists keeps resumeID", "claude", claudeDir, kiroDir, workspaceA, okID, okID},
+		{"jsonl missing in same workspace downgrades", "claude", claudeDir, kiroDir, workspaceA, missingID, ""},
 		{"jsonl in wrong workspace downgrades (work_dir edit regression)",
-			claudeDir, workspaceB, okID, ""},
+			"claude", claudeDir, kiroDir, workspaceB, okID, ""},
+		{"legacy empty backend uses claude layout", "", claudeDir, kiroDir, workspaceA, okID, okID},
+
+		// kiro branch (incident 2026-07-14): probe <kiroSessionsDir>/<sid>.json,
+		// never the claude projects slug — workspace must not participate.
+		{"kiro state exists keeps resumeID", "kiro", claudeDir, kiroDir, workspaceA, kiroOkID, kiroOkID},
+		{"kiro state exists regardless of workspace", "kiro", claudeDir, kiroDir, "", kiroOkID, kiroOkID},
+		{"kiro state missing downgrades", "kiro", claudeDir, kiroDir, workspaceA, kiroMissingID, ""},
+		{"kiro empty kiroSessionsDir skipped", "kiro", claudeDir, "", workspaceA, kiroMissingID, kiroMissingID},
+		{"kiro id never probes claude layout", "kiro", claudeDir, kiroDir, workspaceA, okID, ""},
+
+		// unknown backends (codex thread/resume, future): no pre-check.
+		{"unknown backend skips probe", "codex", claudeDir, kiroDir, workspaceA, missingID, missingID},
+
+		// path-traversal guard applies to every branch.
+		{"separator in resumeID rejected", "claude", claudeDir, kiroDir, workspaceA, "a/b", ""},
+		{"dotdot in resumeID rejected", "kiro", claudeDir, kiroDir, workspaceA, "..evil", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveResumeID(tc.claudeDir, tc.workspace, "cron:test", tc.resumeID)
+			got := resolveResumeID(tc.backendID, tc.claudeDir, tc.kiroDir, tc.workspace, "cron:test", tc.resumeID)
 			if got != tc.want {
-				t.Errorf("resolveResumeID(cd=%q, ws=%q, id=%q) = %q, want %q",
-					tc.claudeDir, tc.workspace, tc.resumeID, got, tc.want)
+				t.Errorf("resolveResumeID(be=%q, cd=%q, kd=%q, ws=%q, id=%q) = %q, want %q",
+					tc.backendID, tc.claudeDir, tc.kiroDir, tc.workspace, tc.resumeID, got, tc.want)
 			}
 		})
 	}
+}
+
+// TestResolveSpawnParamsLocked_KiroResumeAndCase pins the two fixes from
+// incident 2026-07-14 at the resolveSpawnParamsLocked level:
+//
+//  1. a kiro-backend resume whose state file exists under kiroSessionsDir
+//     survives the guard (previously the claude-only probe downgraded every
+//     kiro resume to a fresh session);
+//  2. workspace on-disk case: fresh spawns get the canonical spelling, while
+//     a surviving resume keeps the stored spelling so claude slug lookups
+//     stay consistent with what the previous incarnation wrote.
+func TestResolveSpawnParamsLocked_KiroResumeAndCase(t *testing.T) {
+	kiroSID := "d4fedd9d-0e56-40c3-9871-0e44513b2219"
+
+	mkRouter := func(t *testing.T) *Router {
+		t.Helper()
+		r := &Router{
+			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+			defaultCWD: "/default/ws",
+		}
+		r.bkStore.wrappers = map[string]*cli.Wrapper{
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		}
+		r.bkStore.defaultBackend = "claude"
+		r.bkStore.backendOverrides = make(map[string]string)
+		r.wsStore.overrides = make(map[string]string)
+		r.claudeDir = t.TempDir() // empty: no claude jsonl exists anywhere
+		kiroDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(kiroDir, kiroSID+".json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.kiroSessionsDir = kiroDir
+		return r
+	}
+
+	t.Run("kiro resume survives guard", func(t *testing.T) {
+		r := mkRouter(t)
+		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", kiroSID,
+			AgentOpts{Backend: "kiro", Workspace: "/some/ws"})
+		if sp.ResumeID != kiroSID {
+			t.Errorf("ResumeID = %q, want %q (kiro state exists — must not downgrade)",
+				sp.ResumeID, kiroSID)
+		}
+	})
+
+	t.Run("claude resume still downgrades when jsonl missing", func(t *testing.T) {
+		r := mkRouter(t)
+		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", kiroSID,
+			AgentOpts{Backend: "claude", Workspace: "/some/ws"})
+		if sp.ResumeID != "" {
+			t.Errorf("ResumeID = %q, want \"\" (no claude jsonl for this id)", sp.ResumeID)
+		}
+	})
+
+	t.Run("fresh spawn canonicalizes workspace case", func(t *testing.T) {
+		r := mkRouter(t)
+		base := t.TempDir()
+		onDisk := filepath.Join(base, "workspace", "proj")
+		if err := os.MkdirAll(onDisk, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		wrongCase := filepath.Join(base, "Workspace", "Proj")
+		sp := r.resolveSpawnParamsLocked("dash:direct:c2:general", "",
+			AgentOpts{Workspace: wrongCase})
+		if sp.Workspace != onDisk {
+			t.Errorf("Workspace = %q, want canonical %q", sp.Workspace, onDisk)
+		}
+	})
+
+	t.Run("surviving kiro resume keeps stored workspace spelling", func(t *testing.T) {
+		r := mkRouter(t)
+		base := t.TempDir()
+		onDisk := filepath.Join(base, "workspace")
+		if err := os.MkdirAll(onDisk, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stored := filepath.Join(base, "Workspace") // pre-fix spelling persisted by old session
+		old := &ManagedSession{key: "dash:direct:c3:general"}
+		old.setWorkspace(stored)
+		r.ss.sessions["dash:direct:c3:general"] = old
+		sp := r.resolveSpawnParamsLocked("dash:direct:c3:general", kiroSID,
+			AgentOpts{Backend: "kiro"})
+		if sp.ResumeID != kiroSID {
+			t.Fatalf("ResumeID = %q, want %q", sp.ResumeID, kiroSID)
+		}
+		if sp.Workspace != stored {
+			t.Errorf("Workspace = %q, want stored spelling %q (resume must not re-case)",
+				sp.Workspace, stored)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

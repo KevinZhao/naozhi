@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -12,10 +13,10 @@ import (
 
 // File: claudeproject.go
 //
-// Stateless Claude-CLI project-directory + resume-id helpers relocated from
-// router_core.go (R20260607-ARCH-4 / #1907). These touch no Router state —
-// they map a CWD to Claude's ~/.claude/projects/<slug>/ layout and validate
-// a resume target on disk. Pure code-relocation — no behaviour change.
+// Stateless resume-target validation + Claude-CLI project-directory helpers
+// relocated from router_core.go (R20260607-ARCH-4 / #1907). These touch no
+// Router state — they map a CWD to Claude's ~/.claude/projects/ layout and
+// validate a resume target on disk for whichever backend will consume it.
 
 // isENOENTErr reports whether err (or any error it wraps) ultimately
 // carries syscall.ENOENT. The helper exists primarily to make the intent
@@ -39,9 +40,53 @@ func claudeProjectSlug(cwd string) string {
 	return discovery.ClaudeProjectSlug(cwd)
 }
 
-// resolveResumeID returns resumeID if the corresponding jsonl conversation
-// file exists under claudeDir (i.e. Claude CLI's --resume will actually find
-// it), or "" to downgrade the spawn to a fresh session.
+// resolveResumeID validates that resumeID's on-disk session state still
+// exists for the backend that will consume it, returning "" to downgrade the
+// spawn to a fresh session when it does not.
+//
+// Backend dispatch (incident 2026-07-14, kiro "blank start"): the pre-check
+// was previously claude-only in shape but ran unconditionally for every
+// backend, so a kiro resume — whose state lives at
+// ~/.kiro/sessions/cli/<sid>.json, NOT under ~/.claude/projects/<slug>/ —
+// ENOENT'd 100% of the time and silently downgraded to a fresh session,
+// losing the whole conversation context even though session/load would have
+// restored it (multi-backend-validation.md V2). Each backend now probes its
+// own layout:
+//
+//   - "claude" / "" (legacy default): <claudeDir>/projects/<slug(workspace)>/<id>.jsonl
+//     — what `claude --resume` reads (workspace-slug-keyed).
+//   - "kiro": <kiroSessionsDir>/<id>.json — kiro's UUID-keyed session state
+//     consumed by ACP `session/load` (workspace-independent).
+//   - anything else (codex thread/resume, future backends): no pre-check.
+//     codex rollouts are date-bucketed (~/.codex/sessions/YYYY/MM/DD/…) with
+//     no cheap existence probe; a missing target surfaces as a protocol
+//     Init error instead of a silent context loss.
+//
+// A resumeID containing path separators or ".." is rejected outright (all
+// branches): it flows into filepath.Join against a trusted root, and while
+// every current producer is UUID-shaped, defense-in-depth here is one line.
+func resolveResumeID(backendID, claudeDir, kiroSessionsDir, workspace, key, resumeID string) string {
+	if resumeID == "" {
+		return resumeID
+	}
+	if strings.ContainsAny(resumeID, `/\`) || strings.Contains(resumeID, "..") {
+		slog.Warn("resume id malformed, starting fresh session",
+			"key", key, "resume_id_len", len(resumeID))
+		return ""
+	}
+	switch backendID {
+	case "kiro":
+		return resolveKiroResumeID(kiroSessionsDir, key, resumeID)
+	case "claude", "":
+		return resolveClaudeResumeID(claudeDir, workspace, key, resumeID)
+	default:
+		return resumeID
+	}
+}
+
+// resolveClaudeResumeID returns resumeID if the corresponding jsonl
+// conversation file exists under claudeDir (i.e. Claude CLI's --resume will
+// actually find it), or "" to downgrade the spawn to a fresh session.
 //
 // Motivating failure: a cron job whose work_dir is edited after first run
 // stores its jsonl under the original workspace's slug; subsequent ticks
@@ -59,8 +104,8 @@ func claudeProjectSlug(cwd string) string {
 // On stat errors other than ErrNotExist (permission denied, I/O failure)
 // we also downgrade — a broken claudeDir would otherwise manifest as the
 // same silent exit-1 loop the primary fix targets.
-func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
-	if resumeID == "" || claudeDir == "" || workspace == "" {
+func resolveClaudeResumeID(claudeDir, workspace, key, resumeID string) string {
+	if claudeDir == "" || workspace == "" {
 		return resumeID
 	}
 	jsonlPath := filepath.Join(claudeDir, "projects",
@@ -77,6 +122,44 @@ func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
 				"key", key,
 				"resume_id", resumeID,
 				"expected_path", jsonlPath,
+				"err", err)
+		}
+		return ""
+	}
+	return resumeID
+}
+
+// resolveKiroResumeID returns resumeID if kiro's session-state file exists
+// under kiroSessionsDir (i.e. ACP `session/load` will actually find it), or
+// "" to downgrade the spawn to a fresh session.
+//
+// kiro persists exactly one <sid>.json metadata file per session (plus a
+// <sid>.jsonl transcript that may legitimately be empty for a session with
+// no completed turn), keyed by the session UUID with no workspace-slug
+// component — so unlike the claude probe, workspace never participates.
+// A stale .lock does not block resume: kiro performs stale-PID lock
+// auto-recovery on load (multi-backend-validation.md V2).
+//
+// Skipped when kiroSessionsDir is empty (test harness / misconfig), matching
+// resolveClaudeResumeID's empty-claudeDir behaviour.
+func resolveKiroResumeID(kiroSessionsDir, key, resumeID string) string {
+	if kiroSessionsDir == "" {
+		return resumeID
+	}
+	statePath := filepath.Join(kiroSessionsDir, resumeID+".json")
+	if _, err := os.Stat(statePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("resume target missing, starting fresh session",
+				"key", key,
+				"resume_id", resumeID,
+				"backend", "kiro",
+				"expected_path", statePath)
+		} else {
+			slog.Warn("resume target stat failed, starting fresh session",
+				"key", key,
+				"resume_id", resumeID,
+				"backend", "kiro",
+				"expected_path", statePath,
 				"err", err)
 		}
 		return ""

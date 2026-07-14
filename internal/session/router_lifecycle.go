@@ -26,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // publishSessionLocked is the single funnel for installing a freshly-built
@@ -473,9 +474,11 @@ type spawnParams struct {
 // r.bkStore.backendOverrides, r.wsStore.overrides, r.ss.sessions and mutates
 // r.bkStore.backendOverrides (consuming the one-shot dashboard pick).
 //
-// Pure-ish: no I/O except resolveResumeID's jsonl stat. No log output, no
-// process spawn — a test can exercise the merge rules without standing up
-// wrappers or filesystems beyond what resolveResumeID already needs.
+// Pure-ish: no I/O except resolveResumeID's resume-target stat and
+// osutil.CanonicalCase's per-component ReadDir walk (both bounded, once per
+// spawn). No log output beyond downgrade warnings, no process spawn — a test
+// can exercise the merge rules without standing up wrappers or filesystems
+// beyond what those probes already need.
 //
 // CONTRACT (R222-ARCH-12 / #735): this function is the SINGLE source of
 // truth for workspace + backend + model + args + resumeID resolution.
@@ -631,10 +634,29 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		}
 	}
 
-	// ResumeID guard: drop when the jsonl Claude CLI would read is missing so
-	// the spawn falls through to a fresh session instead of exit-1'ing on
-	// "No conversation found". See resolveResumeID for rationale.
-	resumeID = resolveResumeID(r.claudeDir, workspace, key, resumeID)
+	// ResumeID guard: drop when the backend's on-disk resume target is missing
+	// so the spawn falls through to a fresh session instead of exit-1'ing on
+	// "No conversation found" (claude) or failing session/load (kiro). The
+	// probe is backend-aware — see resolveResumeID for the per-layout rules
+	// (incident 2026-07-14: the previously claude-only probe downgraded every
+	// kiro resume to a fresh session, losing the conversation context).
+	resumeID = resolveResumeID(backendID, r.claudeDir, r.kiroSessionsDir, workspace, key, resumeID)
+
+	// Canonicalize on-disk case for fresh spawns (incident 2026-07-14): on
+	// macOS's case-insensitive APFS a config/API spelling of
+	// /Users/x/Workspace with an on-disk /Users/x/workspace forks two
+	// parallel identities for the same tree — distinct Claude project slugs,
+	// distinct kiro session cwd strings, failed workspace-equality checks —
+	// even though every file operation succeeds. Ordering contract: this runs
+	// AFTER the resume guard so a surviving resume keeps the spelling its
+	// previous incarnation stored (claude's --resume looks up the jsonl under
+	// the slug derived from that exact spelling; re-casing would orphan the
+	// transcript the guard just verified). Once the guard downgrades to
+	// fresh — or the session was fresh to begin with — the canonical spelling
+	// is safe and stops the fork from propagating further.
+	if resumeID == "" {
+		workspace = osutil.CanonicalCase(workspace)
+	}
 
 	return spawnParams{
 		BackendID:        backendID,
