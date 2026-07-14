@@ -189,11 +189,11 @@ func (s *Server) registerDashboard() {
 	// RFC project-access-profile §8.1: read-only registry the dashboard picker
 	// + chip consume. Returns only non-sensitive fields (id / display / colour /
 	// default model+backend / secret_ok preflight) — NEVER env values or tokens.
-	s.mux.HandleFunc("GET /api/access-profiles", auth(s.handleAccessProfiles))
+	s.mux.HandleFunc("GET /api/access-profiles", auth(s.accessProfilesH.HandleList))
 	// RFC project-access-profile P1-d: create a new access profile from the
 	// dashboard (writes config.yaml + optional 0600 secret file + live
 	// registry). Disabled (400) when ConfigPath is unset.
-	s.mux.HandleFunc("POST /api/access-profiles", auth(s.handleCreateAccessProfile))
+	s.mux.HandleFunc("POST /api/access-profiles", auth(s.accessProfilesH.HandleCreate))
 	// R237-ARCH-2 (#573) / R260528-ARCH-6 (#1367) incremental slice: the
 	// cohesive session-CRUD route group is extracted into its own helper so
 	// registerDashboard shrinks toward the routes.go split the issues call
@@ -226,9 +226,10 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
 	// instance-wide UI preferences (theme); persisted server-side so the
-	// choice survives a browser/device change or cache clear (dashboard_uiprefs.go)
-	s.mux.HandleFunc("GET /api/settings", auth(s.handleUISettingsGet))
-	s.mux.HandleFunc("PUT /api/settings", auth(s.handleUISettingsPut))
+	// choice survives a browser/device change or cache clear
+	// (dashboard/ext/uisettings)
+	s.mux.HandleFunc("GET /api/settings", auth(s.uiSettingsH.HandleGet))
+	s.mux.HandleFunc("PUT /api/settings", auth(s.uiSettingsH.HandlePut))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
 	// pprof / expvar debug endpoints: auth-gated + loopback-only AND
 	// gated behind server.debug_mode (default false) so a leaked dashboard
@@ -404,33 +405,6 @@ func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc
 	s.mux.HandleFunc("GET /api/cron/attention", auth(s.cronH.HandleAttentionList))
 	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/confirm", auth(s.cronH.HandleRunConfirm))
 	s.mux.HandleFunc("POST /api/cron/runs/{run_id}/replay", auth(s.cronH.HandleRunReplay))
-}
-
-// handleAccessProfiles serves the read-only access-profile registry
-// (RFC project-access-profile §8.1). Response shape mirrors /api/cli/backends:
-//
-//	{"profiles":[{id,display_name,chip_color,default_model,default_backend,secret_ok}], "default":""}
-//
-// SECURITY: the payload carries ONLY non-sensitive metadata. Env values and
-// *_FILE contents never leave the server — AccessProfileInfos projects the
-// registry down to display fields + a secret_ok preflight bit. `default` is
-// always "" (the global/no-overlay default has no profile id); the field is
-// present for symmetry with the backends endpoint and future use.
-func (s *Server) handleAccessProfiles(w http.ResponseWriter, r *http.Request) {
-	profiles := s.router.AccessProfileInfos()
-	if profiles == nil {
-		profiles = []session.AccessProfileInfo{}
-	}
-	// `default` carries the configured default_access_profile so the
-	// new-session picker can pre-select it (instead of the bare "(global
-	// default)" empty option). Empty when no default is configured — the
-	// picker then falls back to the empty option as before. Only a
-	// non-sensitive profile ID leaves the server here; env/token stay behind
-	// AccessProfileInfos' projection.
-	writeJSON(w, map[string]any{
-		"profiles": profiles,
-		"default":  s.router.DefaultAccessProfile(),
-	})
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
