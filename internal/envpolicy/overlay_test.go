@@ -19,6 +19,9 @@ func TestValidateOverlayEntry(t *testing.T) {
 		{"default region ok", "AWS_DEFAULT_REGION", "us-east-1", false},
 		{"token file abs", "ANTHROPIC_AUTH_TOKEN_FILE", "/home/ec2-user/.secrets/t.token", false},
 		{"api key file abs", "ANTHROPIC_API_KEY_FILE", "/etc/naozhi/key", false},
+		{"oauth token direct", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-xxxx", false},
+		{"oauth token file abs", "CLAUDE_CODE_OAUTH_TOKEN_FILE", "/home/ec2-user/.naozhi/access-profile-secrets/1p.token", false},
+		{"oauth token file traversal", "CLAUDE_CODE_OAUTH_TOKEN_FILE", "/home/../etc/shadow", true},
 
 		// rejections
 		{"empty key", "", "x", true},
@@ -51,6 +54,9 @@ func TestResolvedFileKey(t *testing.T) {
 	}
 	if k, ok := ResolvedFileKey("ANTHROPIC_API_KEY_FILE"); !ok || k != "ANTHROPIC_API_KEY" {
 		t.Errorf("ResolvedFileKey(api key file) = %q, %v", k, ok)
+	}
+	if k, ok := ResolvedFileKey("CLAUDE_CODE_OAUTH_TOKEN_FILE"); !ok || k != "CLAUDE_CODE_OAUTH_TOKEN" {
+		t.Errorf("ResolvedFileKey(oauth token file) = %q, %v", k, ok)
 	}
 	if _, ok := ResolvedFileKey("ANTHROPIC_BASE_URL"); ok {
 		t.Errorf("ResolvedFileKey(non-file key) should be false")

@@ -51,6 +51,13 @@ func TestFilterShimEnv_PlumbingStillForwarded(t *testing.T) {
 		"CLAUDE_CODE_USE_BEDROCK=1",
 		"CLAUDE_CODE_SKIP_BEDROCK_AUTH=1",
 		"ANTHROPIC_BEDROCK_BASE_URL=http://127.0.0.1:8889",
+		// Subscription (Pro/Max) OAuth token from `claude setup-token`. Like
+		// ANTHROPIC_AUTH_TOKEN / AWS creds it is a credential the CLI cannot
+		// obtain headlessly on its own — NOT a settings.json-owned knob — so a
+		// secret must never be written to the plaintext settings.json env block.
+		// It is injected via an access profile's *_FILE reference and MUST flow
+		// through the shim allowlist to reach the CLI.
+		"CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxx",
 	}
 
 	for _, kv := range mustForward {

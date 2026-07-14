@@ -37,6 +37,7 @@ var OverlayAllowedKeys = map[string]bool{
 	"ANTHROPIC_MODEL":               true,
 	"ANTHROPIC_AUTH_TOKEN":          true,
 	"ANTHROPIC_API_KEY":             true,
+	"CLAUDE_CODE_OAUTH_TOKEN":       true,
 	"CLAUDE_CODE_USE_BEDROCK":       true,
 	"CLAUDE_CODE_SKIP_BEDROCK_AUTH": true,
 	"AWS_REGION":                    true,
@@ -49,8 +50,9 @@ var OverlayAllowedKeys = map[string]bool{
 // session layer reads the file and injects the resolved key at spawn time.
 // R project-access-profile §4.3.
 var overlayFileKeys = map[string]string{
-	"ANTHROPIC_AUTH_TOKEN_FILE": "ANTHROPIC_AUTH_TOKEN",
-	"ANTHROPIC_API_KEY_FILE":    "ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN_FILE":    "ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_API_KEY_FILE":       "ANTHROPIC_API_KEY",
+	"CLAUDE_CODE_OAUTH_TOKEN_FILE": "CLAUDE_CODE_OAUTH_TOKEN",
 }
 
 // ResolvedFileKey returns the concrete secret key a "*_FILE" overlay key
