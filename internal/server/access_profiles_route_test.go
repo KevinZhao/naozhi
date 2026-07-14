@@ -33,7 +33,7 @@ func TestHandleAccessProfiles_ShapeAndNoLeak(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.handleAccessProfiles(w, req)
+	srv.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -93,7 +93,7 @@ func TestHandleAccessProfiles_DefaultSurfaced(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.handleAccessProfiles(w, req)
+	srv.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -124,7 +124,7 @@ func TestHandleAccessProfiles_EmptyRegistry(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
 	w := httptest.NewRecorder()
-	srv.handleAccessProfiles(w, req)
+	srv.accessProfilesH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
