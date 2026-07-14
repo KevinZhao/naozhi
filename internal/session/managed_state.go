@@ -66,8 +66,9 @@ func (m ManagedState) String() string {
 // Locking: this method is NOT lock-free. The final fallback branch calls
 // hasInjectedHistory(), which acquires s.historyMu.RLock(). Callers must
 // not hold a higher-layer lock (e.g. router.mu) when invoking this method;
-// doing so would invert the established r.mu → historyMu lock order and
-// cause a deadlock.
+// the documented contract (router_core.go) is that historyMu is never held
+// together with r.mu — nesting them here would silently create one half of
+// a potential AB-BA deadlock against any future historyMu → r.mu path.
 //
 // Precedence:
 //  1. exempt wins (planner/scratch are badged distinctly regardless of proc),

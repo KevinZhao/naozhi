@@ -1115,7 +1115,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 // cannot be reordered or interleaved by accident.
 //
 // LOCK: must NOT be called with r.mu held — loadResumeHistoryOnSpawn injects
-// history under historyMu and the lock order is r.mu → historyMu.
+// history under historyMu, and the documented contract (router_core.go) is
+// that historyMu is never held together with r.mu.
 func (r *Router) bindNewSessionHistory(
 	ctx context.Context,
 	s *ManagedSession,
