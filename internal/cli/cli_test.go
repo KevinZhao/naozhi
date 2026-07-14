@@ -1419,6 +1419,41 @@ func TestACPProtocol_Init_ResumeSession(t *testing.T) {
 	if sessionID != "sess_existing_456" {
 		t.Errorf("sessionID = %q, want sess_existing_456", sessionID)
 	}
+
+	// Wire-shape pin (incident 2026-07-14): the ACP schema marks mcpServers
+	// REQUIRED on session/load, exactly like session/new. kiro-cli 2.12.1
+	// hard-fails deserialization without it ("missing field `mcpServers`"),
+	// drops the connection and exits 0, so every kiro resume died with
+	// "cli exited during init". Assert the field is always serialized.
+	var loadReq struct {
+		Method string `json:"method"`
+		Params struct {
+			SessionID  string `json:"sessionId"`
+			Cwd        string `json:"cwd"`
+			McpServers *[]any `json:"mcpServers"`
+		} `json:"params"`
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(written.String()), "\n") {
+		if !strings.Contains(line, `"session/load"`) {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &loadReq); err != nil {
+			t.Fatalf("unmarshal session/load request: %v", err)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no session/load request written")
+	}
+	if loadReq.Params.SessionID != "sess_existing_456" {
+		t.Errorf("session/load sessionId = %q, want sess_existing_456", loadReq.Params.SessionID)
+	}
+	if loadReq.Params.McpServers == nil {
+		t.Error("session/load params missing required mcpServers field (kiro-cli rejects the request and exits)")
+	} else if len(*loadReq.Params.McpServers) != 0 {
+		t.Errorf("session/load mcpServers = %v, want empty array", *loadReq.Params.McpServers)
+	}
 }
 
 func TestACPProtocol_Init_RPCError(t *testing.T) {

@@ -295,9 +295,18 @@ type acpClientInfo struct {
 
 // acpSessionLoadParams matches the parameters of the ACP "session/load" RPC.
 // R230-PERF-1.
+//
+// McpServers is REQUIRED by the ACP schema (same as session/new) and must be
+// at least an empty array. Incident 2026-07-14: naozhi omitted the field and
+// kiro-cli 2.12.1's serde rejected the request at the deserialization phase
+// ("missing field `mcpServers`"), then dropped the connection and exited 0 —
+// surfacing in naozhi as "acp session/load: read ACP response: cli exited
+// during init" and breaking every kiro resume even after the resume-target
+// pre-check was fixed (#2364).
 type acpSessionLoadParams struct {
-	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd"`
+	SessionID  string `json:"sessionId"`
+	Cwd        string `json:"cwd"`
+	McpServers []any  `json:"mcpServers"`
 }
 
 // acpSessionNewParams matches the parameters of the ACP "session/new" RPC.
@@ -339,7 +348,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		loadID := p.allocID()
 		loadReq := RPCRequest{
 			JSONRPC: "2.0", ID: loadID, Method: "session/load",
-			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd},
+			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd, McpServers: []any{}},
 		}
 		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
