@@ -28,6 +28,7 @@
 | V1 | ACP `session/cancel` 行为 | ✅ 过且优于预期 | cancel 是 notification（无 id）；原 prompt 立即收 `stopReason:"cancelled"`；同 sessionId 立即可继续 |
 | V2 | `session/load` 持久性 | ✅ 过 | kiro 自动写 `~/.kiro/sessions/cli/<sid>.{json,jsonl}`；新进程 load 同 sid 上下文完整恢复 |
 | V2.1 | Stale lock 自动恢复 | ✅ 过 | SIGKILL 后留 lock；下一进程检测 stale PID 自动接管 |
+| V2.2 | `session/load` 必须带 `mcpServers` | ❗事故复盘 2026-07-14 | 字段为 serde REQUIRED（同 session/new）；缺失时 kiro 2.12.1 反序列化失败 `missing field 'mcpServers'`，断连并 exit 0，naozhi 侧表现为 "cli exited during init"。本文件 V2 的 PoC 脚本一直带着该字段，是 naozhi `acpSessionLoadParams` 实现时漏掉 —— PoC 与实现的字段差异要逐一对照 |
 | V5 | Chunk 回放粒度 | ⚠️ 细但可处理 | 平均 2.2 字符/chunk，15 chunks/sec；建议历史用 kiro 自带 jsonl |
 | V6 | reverse-node cap 路由 | ❌ 实质未实现 | `Capabilities` 字段定义了，仅 `logUnknownCaps` 打 warn，无路由决策 |
 | V7 | tool_use 事件结构 | ⚠️ 暴露 bug | permission_request 暴露 `RPCMessage.ID` 类型与 optionId 硬编码错误 |
