@@ -86,6 +86,16 @@ func (r *Router) AccessProfileInfos() []AccessProfileInfo {
 	return out
 }
 
+// DefaultAccessProfile returns the profile ID applied to a session that
+// resolves to no explicit profile (RouterConfig.DefaultAccessProfile). Empty
+// means the legacy global-baseline fallthrough (no overlay). Read-only after
+// NewRouter, so no lock is taken. The dashboard surfaces this via
+// /api/access-profiles so the new-session picker can pre-select it instead of
+// the bare "(global default)" option.
+func (r *Router) DefaultAccessProfile() string {
+	return r.defaultAccessProfile
+}
+
 // HasAccessProfile reports whether an access profile with the given id is
 // registered. RLock, copy-on-write safe (see AccessProfileInfos).
 func (r *Router) HasAccessProfile(id string) bool {

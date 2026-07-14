@@ -2577,6 +2577,54 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock wins)", sp.AccessProfileID)
 		}
 	})
+
+	t.Run("default profile applies when nothing else picks one", func(t *testing.T) {
+		r := mkRouter()
+		r.defaultAccessProfile = "bedrock-opus"
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (default applied)", sp.AccessProfileID)
+		}
+		if sp.AccessProfileEnv["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+			t.Errorf("default env not carried: %v", sp.AccessProfileEnv)
+		}
+		if sp.Model != "claude-opus-4-8" {
+			t.Errorf("Model = %q, want profile default claude-opus-4-8", sp.Model)
+		}
+	})
+
+	t.Run("explicit opts profile beats default", func(t *testing.T) {
+		r := mkRouter()
+		r.defaultAccessProfile = "bedrock-opus"
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+			AgentOpts{AccessProfile: "1p-fable"})
+		if sp.AccessProfileID != "1p-fable" {
+			t.Errorf("AccessProfileID = %q, want 1p-fable (explicit beats default)", sp.AccessProfileID)
+		}
+	})
+
+	t.Run("resume lock beats default", func(t *testing.T) {
+		r := mkRouter()
+		r.defaultAccessProfile = "1p-fable"
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetAccessProfile("bedrock-opus")
+		r.ss.sessions[key] = old
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		if sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock beats default)", sp.AccessProfileID)
+		}
+	})
+
+	t.Run("unknown default profile falls back to global baseline", func(t *testing.T) {
+		r := mkRouter()
+		r.defaultAccessProfile = "ghost-profile"
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		if sp.AccessProfileID != "" || sp.AccessProfileEnv != nil {
+			t.Errorf("expected empty profile (unknown default → baseline), got id=%q env=%v",
+				sp.AccessProfileID, sp.AccessProfileEnv)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

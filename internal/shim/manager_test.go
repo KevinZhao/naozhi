@@ -522,6 +522,7 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.example.com", true},
 		{"CLAUDE_CODE_USE_BEDROCK=1", true},
 		{"CLAUDE_CODE_SKIP_BEDROCK_AUTH=1", true},
+		{"CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxx", true},
 		{"CLAUDE_BIN=/usr/bin/claude", true},
 		{"CLAUDE_MODEL=claude-opus", true},
 		{"AWS_REGION=us-east-1", true},

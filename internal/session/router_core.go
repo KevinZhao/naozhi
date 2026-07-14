@@ -255,6 +255,11 @@ type Router struct {
 	// session runs on the global baseline (legacy behaviour).
 	// 读写: core (init), lifecycle (resolveSpawnParamsLocked read-only)
 	accessProfiles map[string]AccessProfile
+	// defaultAccessProfile is the profile ID applied when a session resolves to
+	// no explicit profile (lowest precedence). "" = legacy global-baseline
+	// fallthrough. Read-only after NewRouter.
+	// 读写: core (init), lifecycle (resolveSpawnParamsLocked read-only)
+	defaultAccessProfile string
 	// 读写: core (init), lifecycle (countActive/evictOldest)
 	maxProcs int
 	// 读写: core (init), cleanup (shouldPrune)
@@ -720,12 +725,17 @@ type RouterConfig struct {
 	// project-access-profile). Keyed by profile ID. Nil/empty means no profiles
 	// configured — every session runs on the global settings.json baseline
 	// (legacy behaviour). Populated by the cmd wiring from config.AccessProfiles.
-	AccessProfiles  map[string]AccessProfile
-	Workspace       string
-	StorePath       string
-	NoOutputTimeout time.Duration
-	TotalTimeout    time.Duration
-	ClaudeDir       string
+	AccessProfiles map[string]AccessProfile
+	// DefaultAccessProfile is the profile ID applied to a session that resolves
+	// to no explicit profile (lowest precedence, below opts / override / resume
+	// lock). "" = legacy global-baseline fallthrough. Must be a key in
+	// AccessProfiles (validated at config load). RFC project-access-profile.
+	DefaultAccessProfile string
+	Workspace            string
+	StorePath            string
+	NoOutputTimeout      time.Duration
+	TotalTimeout         time.Duration
+	ClaudeDir            string
 	// KiroSessionsDir is the kiro CLI's session-state root, typically
 	// ~/.kiro/sessions/cli. Empty disables kiro history fallback; non-
 	// empty enables the kirojsonl factory (registered via blank import
@@ -894,6 +904,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.accessProfileOverrides = make(map[string]string)
 	r.accessProfiles = cfg.AccessProfiles
+	r.defaultAccessProfile = cfg.DefaultAccessProfile
 	// Session run-history store. Rooted next to the session store file (its
 	// own config, NOT cron's), so operators who split the two dirs keep them
 	// independent. Empty StorePath disables persistence (NewStore returns a

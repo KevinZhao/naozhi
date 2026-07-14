@@ -69,6 +69,51 @@ func TestHandleAccessProfiles_ShapeAndNoLeak(t *testing.T) {
 	}
 }
 
+// TestHandleAccessProfiles_DefaultSurfaced: the configured
+// default_access_profile is echoed in the `default` field so the new-session
+// picker can pre-select it. Also asserts no env leak on this path.
+func TestHandleAccessProfiles_DefaultSurfaced(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{
+		Workspace:            t.TempDir(),
+		DefaultAccessProfile: "1p",
+		AccessProfiles: map[string]session.AccessProfile{
+			"1p": {
+				DisplayName:  "个人 Anthropic",
+				DefaultModel: "claude-opus-4-8",
+				Env:          map[string]string{"CLAUDE_CODE_USE_BEDROCK": "0"},
+			},
+			"bedrock": {
+				DisplayName: "公司 Bedrock",
+				Env:         map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
+			},
+		},
+	})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	srv.registerDashboard()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/access-profiles", nil)
+	w := httptest.NewRecorder()
+	srv.handleAccessProfiles(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Profiles []session.AccessProfileInfo `json:"profiles"`
+		Default  string                      `json:"default"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Default != "1p" {
+		t.Errorf("default = %q, want %q", resp.Default, "1p")
+	}
+	// The default profile id is a non-sensitive value, but env must still not leak.
+	if strings.Contains(w.Body.String(), "CLAUDE_CODE_USE_BEDROCK") {
+		t.Errorf("response leaked env: %s", w.Body.String())
+	}
+}
+
 // TestHandleAccessProfiles_EmptyRegistry: single-auth deployments return an
 // empty (non-null) profiles array so the dashboard JS Array.isArray check
 // passes and the picker/chip simply stay hidden.

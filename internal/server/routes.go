@@ -421,9 +421,15 @@ func (s *Server) handleAccessProfiles(w http.ResponseWriter, r *http.Request) {
 	if profiles == nil {
 		profiles = []session.AccessProfileInfo{}
 	}
+	// `default` carries the configured default_access_profile so the
+	// new-session picker can pre-select it (instead of the bare "(global
+	// default)" empty option). Empty when no default is configured — the
+	// picker then falls back to the empty option as before. Only a
+	// non-sensitive profile ID leaves the server here; env/token stay behind
+	// AccessProfileInfos' projection.
 	writeJSON(w, map[string]any{
 		"profiles": profiles,
-		"default":  "",
+		"default":  s.router.DefaultAccessProfile(),
 	})
 }
 

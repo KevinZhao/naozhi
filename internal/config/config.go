@@ -58,6 +58,14 @@ type Config struct {
 	// single-auth deployments — those keep running on the global settings.json
 	// baseline unchanged. RFC project-access-profile.
 	AccessProfiles map[string]AccessProfile `yaml:"access_profiles,omitempty"`
+	// DefaultAccessProfile names the access profile applied to any session that
+	// resolves to NO explicit profile (no per-request pick, no dashboard
+	// override, no project binding, no resume-locked prior profile). Empty =
+	// legacy behaviour (fall through to the global settings.json baseline). Set
+	// it to move provider selection entirely into the profile layer so
+	// ~/.claude/settings.json need not carry auth/upstream env. Must name a key
+	// present in AccessProfiles (validated at load). RFC project-access-profile.
+	DefaultAccessProfile string `yaml:"default_access_profile,omitempty"`
 	// Nodes and Workspaces are two accepted YAML spellings for the same
 	// concept — the set of remote naozhi instances this node polls. Nodes is
 	// the legacy key; Workspaces is the preferred name. Consumers read from
@@ -1260,6 +1268,11 @@ func validateAccessProfiles(cfg *Config) error {
 			if _, ok := cfg.AccessProfiles[a.AccessProfile]; !ok {
 				return fmt.Errorf("agents[%s].access_profile %q is not defined in access_profiles", id, a.AccessProfile)
 			}
+		}
+	}
+	if cfg.DefaultAccessProfile != "" {
+		if _, ok := cfg.AccessProfiles[cfg.DefaultAccessProfile]; !ok {
+			return fmt.Errorf("default_access_profile %q is not defined in access_profiles", cfg.DefaultAccessProfile)
 		}
 	}
 	return nil

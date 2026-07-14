@@ -1310,6 +1310,11 @@ var shimEnvAllowedPrefixes = []string{
 	// Variables retained:
 	//   - ANTHROPIC_API_KEY      — direct Anthropic auth (non-Bedrock)
 	//   - ANTHROPIC_AUTH_TOKEN   — alternate auth for forks / proxies
+	//   - CLAUDE_CODE_OAUTH_TOKEN — subscription (Pro/Max) OAuth token from
+	//                              `claude setup-token`; a credential the CLI
+	//                              cannot otherwise obtain headlessly, NOT a
+	//                              settings.json-owned functional knob, so it
+	//                              belongs here (mirrors ANTHROPIC_AUTH_TOKEN).
 	//   - ANTHROPIC_MODEL        — pin Claude model selection
 	//   - ANTHROPIC_BASE_URL     — proxy / staging endpoint
 	//   - ANTHROPIC_BEDROCK_BASE_URL — Bedrock proxy endpoint
@@ -1318,6 +1323,7 @@ var shimEnvAllowedPrefixes = []string{
 	//   - CLAUDE_BIN             — pin to a specific claude binary path
 	//   - CLAUDE_MODEL           — alias for ANTHROPIC_MODEL on some forks
 	"ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=",
+	"CLAUDE_CODE_OAUTH_TOKEN=",
 	"ANTHROPIC_MODEL=", "ANTHROPIC_BASE_URL=",
 	"ANTHROPIC_BEDROCK_BASE_URL=",
 	"CLAUDE_CODE_USE_BEDROCK=", "CLAUDE_CODE_SKIP_BEDROCK_AUTH=",
