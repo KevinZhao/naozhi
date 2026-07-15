@@ -104,6 +104,18 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		return marshalResult(sess.EventEntriesSince(p.After))
 
+	case "fetch_backends":
+		// No params. Return THIS node's backend manifest so the primary's
+		// node-aware picker renders our backends + default (picker
+		// node-aware fix). detected is nil here: it exists only to show
+		// "installed but unconfigured" backends in a LOCAL dashboard's
+		// doctor panel, and a remote picker only reads backends+default —
+		// probing --version per binary on every picker open would also add
+		// a fork-storm to the reverse-RPC hot path. BackendsManifest
+		// coerces nil to an empty JSON array so the frontend's
+		// Array.isArray(detected) guard still holds.
+		return marshalResult(c.router.BackendsManifest(nil))
+
 	case "send":
 		var p struct {
 			Key       string `json:"key"`

@@ -48,6 +48,9 @@ func (s *stubConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]cli.Ev
 func (s *stubConn) FetchEvents(_ context.Context, _ string, _ int64) ([]cli.EventEntry, error) {
 	return nil, nil
 }
+func (s *stubConn) FetchBackends(_ context.Context) (json.RawMessage, error) {
+	return nil, nil
+}
 func (s *stubConn) Send(_ context.Context, _, _, _ string) error { return nil }
 func (s *stubConn) ProxyTakeover(_ context.Context, _ int, _, _ string, _ uint64) (string, error) {
 	return "", nil

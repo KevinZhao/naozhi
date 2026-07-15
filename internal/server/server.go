@@ -555,6 +555,10 @@ func buildServer(opts ServerOptions) *Server {
 	} else {
 		s.cliH = cli.NewCLIBackendsHandler(router)
 	}
+	// Wire node routing so /api/cli/backends?node=<id> proxies the manifest
+	// to a remote node — the picker node-aware fix. nodeAccess is already
+	// constructed above; *nodeAccessor satisfies cli.NodeAccessor.
+	s.cliH.SetNodeAccess(s.nodeAccess)
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,

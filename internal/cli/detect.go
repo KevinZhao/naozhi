@@ -12,7 +12,8 @@ import (
 //
 // ReplyTag / ChipColor are the dashboard-facing fields populated from the
 // matching backend.Profile (and optional CLIBackendConfig.ChipColor override)
-// at /api/cli/backends serialization time — see internal/server/dashboard_cli.go.
+// at /api/cli/backends serialization time — see
+// session.Router.BackendsList (internal/session/router_backend_manifest.go).
 // They live here rather than on backend.Profile so the JSON shape that the
 // dashboard.js frontend consumes is one struct, not a join. Multi-backend RFC §8.2.
 type BackendInfo struct {
@@ -38,12 +39,11 @@ type BackendInfo struct {
 	//
 	// IMPORTANT: dashboard-only field. DetectBackendsCtx leaves this nil
 	// (the cli package cannot import internal/cli/backend without forming
-	// an import cycle). It is filled by the dashboard handler at
-	// /api/cli/backends serialisation time — see
-	// internal/server/dashboard_cli.go where backend.Get(id).Features
-	// is copied into each entry. Callers reading BackendInfo from
-	// DetectBackendsCtx directly will observe nil and must treat every
-	// feature as false (the safest degrade). R225-CR-7.
+	// an import cycle). It is filled when the manifest is assembled — see
+	// session.Router.BackendsList (internal/session/router_backend_manifest.go)
+	// where backend.Get(id).Features is copied into each entry. Callers
+	// reading BackendInfo from DetectBackendsCtx directly will observe nil
+	// and must treat every feature as false (the safest degrade). R225-CR-7.
 	Features map[string]bool `json:"features,omitempty"`
 
 	// defaultBinary is the executable name detectCLI probes when callers

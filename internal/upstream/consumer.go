@@ -51,6 +51,7 @@ package upstream
 import (
 	"context"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -87,14 +88,24 @@ type SessionMutator interface {
 	SetUserLabel(key, label string) bool
 }
 
+// SessionBackends is the read-only backend-manifest sub-capability used by
+// the "fetch_backends" reverse-RPC branch so a primary's node-aware picker
+// can render THIS node's backend list + default (the picker node-aware
+// fix). Pure read access — assembles the same {backends, default, detected}
+// payload GET /api/cli/backends serves locally.
+type SessionBackends interface {
+	BackendsManifest(detected []cli.BackendInfo) session.BackendManifest
+}
+
 // SessionRouter is the *Connector-only subset of *session.Router. It
-// composes the three narrow sub-interfaces above; equivalent to the
-// flat 9-method form previously declared inline. Existing callers
-// (and contract_test.go's compile-time assertion) continue to work
-// unchanged because Go embedded-interface composition produces the
-// same method set.
+// composes the four narrow sub-interfaces above; equivalent to the flat
+// method form previously declared inline. Existing callers (and
+// contract_test.go's compile-time assertion) continue to work unchanged
+// because Go embedded-interface composition produces the same method set,
+// and *session.Router already implements BackendsManifest.
 type SessionRouter interface {
 	SessionLookup
 	SessionLifecycle
 	SessionMutator
+	SessionBackends
 }
