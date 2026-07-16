@@ -26,6 +26,7 @@ test/e2e/.multibackend-storage.json
 *.prof
 *.test
 *.log
+logs/
 
 # Playwright MCP cache
 .playwright-mcp/

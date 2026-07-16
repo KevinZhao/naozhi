@@ -183,8 +183,9 @@ func storeMetaPath(storePath string) string {
 // takes ManagedSession.historyMu RLock for the prevSession* read (race-safe
 // with SetPrevSessionOrigins) and reads all other fields via accessor methods
 // (Workspace / UserLabel / etc.) which each take their own per-field atomic
-// or mutex. Holding r.mu during this call would invert the documented
-// (r.mu → s.historyMu) order from router_lifecycle.go.
+// or mutex. Holding r.mu during this call would violate the documented
+// contract (Router doc, router_core.go) that historyMu is never held
+// together with r.mu.
 func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// Scratch (ephemeral aside) sessions are deliberately volatile: they
 	// must not persist across restarts, or loadStore would resurrect a
