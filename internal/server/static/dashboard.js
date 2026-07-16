@@ -6970,9 +6970,19 @@ function refreshBackendPicker(slotId) {
   if (!slot) return;
   const prev = document.getElementById('new-backend');
   const prevChoice = prev ? prev.value : '';
-  fetchCLIBackends(selectedNode).then(backendsData => {
+  // Capture the target node at dispatch time. A remote fetch proxies through
+  // the primary and can take seconds, during which the operator may switch the
+  // connection picker back to a cached node whose fetch resolves first. Without
+  // this guard the slower remote response repaints the slot with the WRONG
+  // node's manifest + default — reopening the very "backend selected for the
+  // wrong node" bug this file fixes, just as a race. Mirrors the events path's
+  // dispatchNode guard (fetchSessionEvents).
+  const reqNode = selectedNode;
+  fetchCLIBackends(reqNode).then(backendsData => {
     // The modal may have closed while the fetch was in flight.
     if (!document.getElementById(slotId)) return;
+    // Drop a stale response whose node no longer matches the selection.
+    if (selectedNode !== reqNode) return;
     slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
   });
 }
