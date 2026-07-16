@@ -39,7 +39,7 @@ func postCreateProfile(t *testing.T, srv *Server, body string) *httptest.Respons
 	req := httptest.NewRequest(http.MethodPost, "/api/access-profiles", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleCreateAccessProfile(w, req)
+	srv.accessProfilesH.HandleCreate(w, req)
 	return w
 }
 
@@ -142,7 +142,7 @@ func TestCreateAccessProfile_DisabledWithoutConfigPath(t *testing.T) {
 
 // TestCreateAccessProfile_ConcurrentWritesAllPersist locks the [PR#2360 review
 // HIGH] fix: N simultaneous creates with distinct ids must ALL survive in
-// config.yaml (the read-modify-write is serialized by accessProfileWriteMu).
+// config.yaml (the read-modify-write is serialized by the handler's writeMu).
 // Without the mutex, interleaved snapshots drop all but the last writer from
 // disk while the live registry kept them — a divergence surfacing on restart.
 func TestCreateAccessProfile_ConcurrentWritesAllPersist(t *testing.T) {

@@ -15,12 +15,14 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
@@ -133,19 +135,12 @@ type Server struct {
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
 	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
-	uiPrefs        *uiprefs.Store       // 读: dashboard_uiprefs.go (instance-wide dashboard theme/prefs; in-memory when StateDir unset)
-	// configPath / accessProfileSecretsDir enable the POST /api/access-profiles
-	// create endpoint (RFC project-access-profile P1-d). Empty configPath keeps
-	// the endpoint disabled (400). 读: routes.go (handleCreateAccessProfile).
-	configPath              string
-	accessProfileSecretsDir string
-	// accessProfileWriteMu serializes the read-modify-write of config.yaml in
-	// handleCreateAccessProfile. AppendAccessProfile snapshots the file, inserts,
-	// and atomically rewrites; two concurrent creates would otherwise interleave
-	// (both read the same snapshot, second write drops the first profile from
-	// config.yaml while the live registry kept both — a silent disk/memory
-	// divergence surfacing only on restart). 读写: routes.go.
-	accessProfileWriteMu sync.Mutex
+	uiSettingsH    *uisettings.Handler  // 读: routes.go (GET/PUT /api/settings; dashboard/ext/uisettings)
+	// accessProfilesH serves GET+POST /api/access-profiles (RFC
+	// project-access-profile §8.1 + P1-d). Construction wires ConfigPath +
+	// AccessProfileSecretsDir; empty ConfigPath keeps create disabled (400).
+	// 读: routes.go.
+	accessProfilesH *accessprofile.Handler
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -408,8 +403,6 @@ func buildServer(opts ServerOptions) *Server {
 		headless:                opts.Headless,
 		onReady:                 opts.OnReady,
 		projectMgr:              opts.ProjectManager,
-		configPath:              opts.ConfigPath,
-		accessProfileSecretsDir: opts.AccessProfileSecretsDir,
 		resolver:                resolver,
 		nodes:                   nodes,
 		knownNodes:              knownNodes,
@@ -419,7 +412,10 @@ func buildServer(opts ServerOptions) *Server {
 		// same data root the session/cron stores live under — so no new
 		// ServerOptions field or main.go wiring is needed. Empty StateDir
 		// yields an in-memory store (no persistence), matching retiredStore.
-		uiPrefs: uiprefs.New(opts.StateDir),
+		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
+		// Access-profile registry endpoints (dashboard/ext/accessprofile).
+		// Empty ConfigPath keeps the create endpoint disabled (400).
+		accessProfilesH: accessprofile.New(router, opts.ConfigPath, opts.AccessProfileSecretsDir),
 
 		// Extracted handler groups (literals factored to build_handlers.go;
 		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale
