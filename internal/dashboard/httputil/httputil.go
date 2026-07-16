@@ -132,6 +132,24 @@ func WriteJSON(w http.ResponseWriter, v any) {
 	}
 }
 
+// WriteJSONRaw writes a pre-serialised JSON body with the same headers as
+// WriteJSON, skipping the encoder entirely. Use it to transparently relay a
+// JSON payload already produced elsewhere (e.g. a remote node's
+// /api/cli/backends response proxied through the primary) without a
+// decode→re-encode round trip that could reshape the bytes. An empty body is
+// coerced to `null` so the response is always valid JSON.
+func WriteJSONRaw(w http.ResponseWriter, raw []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	if len(raw) == 0 {
+		raw = []byte("null")
+	}
+	if _, err := w.Write(raw); err != nil {
+		slog.Debug("write json raw response", "err", err)
+	}
+}
+
 // jsonOKBody is the pre-marshaled body for the common `{"status":"ok"}`
 // acknowledgement reply. 20+ dashboard endpoints used to allocate a
 // `map[string]string{"status":"ok"}` + run it through the JSON encoder on every

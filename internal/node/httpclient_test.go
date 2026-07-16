@@ -74,6 +74,61 @@ func TestHTTPClient_FetchSessions_errorStatus(t *testing.T) {
 	}
 }
 
+// ---- FetchBackends ----
+
+func TestHTTPClient_FetchBackends_relaysVerbatim(t *testing.T) {
+	// The manifest is relayed as opaque bytes; assert the exact body is
+	// passed through untouched (no decode→re-encode reshaping).
+	want := `{"backends":[{"id":"kiro","available":true}],"default":"kiro","detected":[]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/cli/backends" {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(want))
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "tok")
+	got, err := c.FetchBackends(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("relayed body = %q, want verbatim %q", string(got), want)
+	}
+}
+
+func TestHTTPClient_FetchBackends_errorStatus(t *testing.T) {
+	// A peer predating the endpoint 404s; the caller must see an error so it
+	// degrades to the local manifest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	if _, err := c.FetchBackends(context.Background()); err == nil {
+		t.Fatal("expected error on 404 status")
+	}
+}
+
+func TestHTTPClient_FetchBackends_malformedJSON(t *testing.T) {
+	// A compromised/buggy peer must not let us relay non-JSON bytes under an
+	// application/json content type.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	if _, err := c.FetchBackends(context.Background()); err == nil {
+		t.Fatal("expected error on malformed JSON body")
+	}
+}
+
 func TestHTTPClient_FetchSessions_badJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

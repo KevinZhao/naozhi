@@ -47,6 +47,9 @@ func (f *fakeCapNode) FetchDiscoveredPreview(_ context.Context, _ string) ([]cli
 func (f *fakeCapNode) FetchEvents(_ context.Context, _ string, _ int64) ([]cli.EventEntry, error) {
 	return nil, nil
 }
+func (f *fakeCapNode) FetchBackends(_ context.Context) (json.RawMessage, error) {
+	return nil, nil
+}
 func (f *fakeCapNode) Send(_ context.Context, _, _, _ string) error { return nil }
 func (f *fakeCapNode) ProxyTakeover(_ context.Context, _ int, _, _ string, _ uint64) (string, error) {
 	return "", nil

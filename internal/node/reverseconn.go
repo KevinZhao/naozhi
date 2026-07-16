@@ -315,6 +315,16 @@ func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) 
 	return result, json.Unmarshal(raw, &result)
 }
 
+// FetchBackends relays the remote node's CLI backend manifest. The
+// "fetch_backends" reverse-RPC branch returns the {backends, default,
+// detected} object as raw JSON; we pass it through untouched (see the
+// NodeFetcher.FetchBackends contract). A peer binary predating this method
+// replies with an "unknown method" error, which the caller degrades to the
+// local manifest.
+func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error) {
+	return c.rpc(ctx, "fetch_backends", nil)
+}
+
 func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) error {
 	params := map[string]string{"key": key, "text": text}
 	if workspace != "" {

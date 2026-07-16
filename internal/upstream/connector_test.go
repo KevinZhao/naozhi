@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -396,6 +397,46 @@ func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for missing session, got nil")
+	}
+}
+
+// ---- handleRequest: fetch_backends ----
+
+// TestHandleRequest_FetchBackends pins the reverse-RPC side of the picker
+// node-aware fix: a "fetch_backends" request returns THIS node's manifest
+// ({backends, default, detected}) so the primary's picker can render the
+// remote node's backends + default. Uses a claude-wrapper router so the
+// manifest carries a real backend + default to assert on.
+func TestHandleRequest_FetchBackends(t *testing.T) {
+	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
+	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w.CLIVersion = "2.1.100"
+	router := session.NewRouter(session.RouterConfig{Wrapper: w})
+	c := New(cfg, router, nil, nil)
+
+	req := node.ReverseMsg{Type: "request", Method: "fetch_backends"}
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err != nil {
+		t.Fatalf("fetch_backends = %v", err)
+	}
+	var manifest struct {
+		Default  string           `json:"default"`
+		Backends []map[string]any `json:"backends"`
+		Detected []map[string]any `json:"detected"`
+	}
+	if err := json.Unmarshal(result, &manifest); err != nil {
+		t.Fatalf("fetch_backends result not a manifest object: %v", err)
+	}
+	if manifest.Default != "claude" {
+		t.Errorf("default = %q, want claude", manifest.Default)
+	}
+	if len(manifest.Backends) != 1 || manifest.Backends[0]["id"] != "claude" {
+		t.Errorf("backends = %+v, want [claude]", manifest.Backends)
+	}
+	// detected is coerced to a non-nil empty array so the frontend's
+	// Array.isArray(detected) guard holds.
+	if manifest.Detected == nil {
+		t.Error("detected = nil, want non-null empty array for frontend guard")
 	}
 }
 

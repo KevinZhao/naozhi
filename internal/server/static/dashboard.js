@@ -103,8 +103,15 @@ const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
 const sessionAccessProfiles = {}; // per-session access profile picked at creation ("" = global default)
-let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
+let cliBackends = null; // cached LOCAL /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
+// Per-node backend manifest cache for the node-aware new-session picker.
+// Keyed by node id ('local' or a remote node id). Values: {data, at}. The
+// global cliBackends above stays LOCAL-only — every chip / feature-gate /
+// cost-unit consumer reads the local manifest — while the picker resolves
+// the manifest for whichever node the "New Session" modal targets, so a
+// remote node's backends + default drive the picker (picker node-aware fix).
+const cliBackendsByNode = {};
 let accessProfiles = null; // cached /api/access-profiles response: {profiles, default}
 let accessProfilesFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
@@ -6453,23 +6460,48 @@ function startWSAuthRetryCountdown(seconds) {
 // Cached for 60 seconds — the set only changes across naozhi restarts.
 // Resolves to null on network/auth failure so the caller can fall back to
 // the no-picker flow (single-backend mode).
-async function fetchCLIBackends() {
-  if (cliBackends && Date.now() - cliBackendsFetchedAt < 60000) {
-    return cliBackends;
+//
+// node (optional) selects which node's manifest to fetch for the node-aware
+// new-session picker. Omitted / 'local' returns the local manifest and keeps
+// the global cliBackends cache (which every chip / feature-gate consumer
+// reads) warm. A remote node id appends ?node=<id> so the primary proxies to
+// that node (picker node-aware fix); the remote result is cached per node in
+// cliBackendsByNode and does NOT touch the global cliBackends / feature gates.
+async function fetchCLIBackends(node) {
+  const isLocal = !node || node === 'local';
+  if (isLocal) {
+    if (cliBackends && Date.now() - cliBackendsFetchedAt < 60000) {
+      return cliBackends;
+    }
+  } else {
+    const hit = cliBackendsByNode[node];
+    if (hit && Date.now() - hit.at < 60000) {
+      return hit.data;
+    }
   }
   try {
     // RNEW-UX-003: default 10s timeout is fine here — this fetch is cached
     // for 60s and only fires at modal-open time, not on a poll.
-    const data = await fetchJSON('/api/cli/backends', {credentials: 'same-origin'});
-    cliBackends = data && Array.isArray(data.backends) ? data : null;
-    cliBackendsFetchedAt = Date.now();
-    // Multi-Backend RFC §8.3 D9-D15: re-apply feature gates whenever the
-    // backends manifest lands. The boot path fires fetchCLIBackends() in
-    // parallel with fetchSessions, so the very first renderMainShell may
-    // have run with cliBackends==null — call gates here so the input
-    // controls update once the manifest is available.
-    if (typeof applyFeatureGates === 'function') applyFeatureGates();
-    return cliBackends;
+    const url = isLocal
+      ? '/api/cli/backends'
+      : '/api/cli/backends?node=' + encodeURIComponent(node);
+    const data = await fetchJSON(url, {credentials: 'same-origin'});
+    const manifest = data && Array.isArray(data.backends) ? data : null;
+    if (isLocal) {
+      cliBackends = manifest;
+      cliBackendsFetchedAt = Date.now();
+      // Multi-Backend RFC §8.3 D9-D15: re-apply feature gates whenever the
+      // LOCAL backends manifest lands. The boot path fires fetchCLIBackends()
+      // in parallel with fetchSessions, so the very first renderMainShell may
+      // have run with cliBackends==null — call gates here so the input
+      // controls update once the manifest is available. Remote-node fetches
+      // must NOT drive feature gates (the input controls operate on the
+      // locally-selected session), so this stays inside the isLocal branch.
+      if (typeof applyFeatureGates === 'function') applyFeatureGates();
+    } else {
+      cliBackendsByNode[node] = { data: manifest, at: Date.now() };
+    }
+    return manifest;
   } catch (e) {
     return null;
   }
@@ -6872,7 +6904,12 @@ function createNewSession() {
   // Fetch backends upfront so the picker (if any) is ready when the modal
   // renders. Failure falls back to the single-backend UI — cli.backends
   // returns {} on older naozhi which fetchCLIBackends maps to null.
-  Promise.all([fetchCLIBackends(), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
+  //
+  // Fetch the backend manifest for the CURRENTLY-SELECTED node so the picker
+  // pre-selects that node's default backend, not the primary's (picker
+  // node-aware fix). A node switch inside the modal re-fetches + repaints the
+  // picker via refreshBackendPicker below.
+  Promise.all([fetchCLIBackends(selectedNode), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
     // defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
     // 因此选中 remote 时不预填路径，让用户显式输入远程上的工作目录。
     const isLocal = (selectedNode || 'local') === 'local';
@@ -6887,7 +6924,7 @@ function createNewSession() {
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
           accessProfilePicker +
-          backendPicker +
+          '<div id="new-backend-slot">' + backendPicker + '</div>' +
           renderNodePicker() +
           '<div style="margin-bottom:12px">' +
             '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
@@ -6902,20 +6939,51 @@ function createNewSession() {
       trapFocus(overlay);
       // Switching connection retargets where this custom-workspace session
       // lands; the workspace placeholder follows (local prefills the default
-      // workspace, remotes clear it since we have no per-node default).
+      // workspace, remotes clear it since we have no per-node default) and the
+      // backend picker repaints against the newly-selected node's manifest.
       wireNodePicker(function () {
         const wsEl = document.getElementById('new-workspace');
-        if (!wsEl) return;
-        const nowLocal = (selectedNode || 'local') === 'local';
-        const ph = nowLocal ? (defaultWorkspace || '') : '';
-        wsEl.placeholder = ph;
-        if (!wsEl.value) wsEl.value = ph;
+        if (wsEl) {
+          const nowLocal = (selectedNode || 'local') === 'local';
+          const ph = nowLocal ? (defaultWorkspace || '') : '';
+          wsEl.placeholder = ph;
+          if (!wsEl.value) wsEl.value = ph;
+        }
+        refreshBackendPicker('new-backend-slot');
       });
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
 
     openProjectPalette(backendsData, profilesData);
+  });
+}
+
+// refreshBackendPicker re-fetches the backend manifest for the currently
+// selected node and repaints the picker inside the given slot element. Used
+// by the new-session flows when the connection picker changes node — without
+// this the picker keeps showing (and pre-selecting the default of) whichever
+// node was selected when the modal opened. Preserves the user's explicit
+// choice when that backend id still exists on the newly-selected node.
+function refreshBackendPicker(slotId) {
+  const slot = document.getElementById(slotId);
+  if (!slot) return;
+  const prev = document.getElementById('new-backend');
+  const prevChoice = prev ? prev.value : '';
+  // Capture the target node at dispatch time. A remote fetch proxies through
+  // the primary and can take seconds, during which the operator may switch the
+  // connection picker back to a cached node whose fetch resolves first. Without
+  // this guard the slower remote response repaints the slot with the WRONG
+  // node's manifest + default — reopening the very "backend selected for the
+  // wrong node" bug this file fixes, just as a race. Mirrors the events path's
+  // dispatchNode guard (fetchSessionEvents).
+  const reqNode = selectedNode;
+  fetchCLIBackends(reqNode).then(backendsData => {
+    // The modal may have closed while the fetch was in flight.
+    if (!document.getElementById(slotId)) return;
+    // Drop a stale response whose node no longer matches the selection.
+    if (selectedNode !== reqNode) return;
+    slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
   });
 }
 
@@ -6928,10 +6996,14 @@ function openProjectPalette(backendsData, profilesData) {
   // connection picker replaced the agent picker that used to live here;
   // switching it re-filters the project list to that node's projects (see
   // nodeFilteredProjects).
+  // The backend slot is always emitted (even empty) so a node switch that
+  // moves from a single-backend node to a multi-backend one can inject the
+  // picker in-place via refreshBackendPicker. min-width:0 keeps it collapsed
+  // when empty so the flex row layout is unchanged for single-backend nodes.
   const pickerSlot = (accessProfilePicker || backendPicker || nodePicker)
     ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px;flex-wrap:wrap">' +
         (accessProfilePicker ? '<div style="flex:1;min-width:0">' + accessProfilePicker + '</div>' : '') +
-        (backendPicker ? '<div style="flex:1;min-width:0">' + backendPicker + '</div>' : '') +
+        '<div id="cp-backend-slot" style="flex:1;min-width:0">' + backendPicker + '</div>' +
         (nodePicker ? '<div style="flex:1;min-width:0">' + nodePicker + '</div>' : '') +
       '</div>'
     : '';
@@ -6962,8 +7034,12 @@ function openProjectPalette(backendsData, profilesData) {
   input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
   // Re-filter the project list when the connection changes — the list is
   // scoped to selectedNode (nodeFilteredProjects), so a node switch must
-  // repaint it against the current query.
-  wireNodePicker(function () { renderPaletteList(state, input.value); });
+  // repaint it against the current query. The backend picker also repaints
+  // against the newly-selected node's manifest (picker node-aware fix).
+  wireNodePicker(function () {
+    renderPaletteList(state, input.value);
+    refreshBackendPicker('cp-backend-slot');
+  });
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -7255,9 +7331,17 @@ function pickPaletteCustom(initialValue) {
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
   // Re-render the access-profile + backend + connection pickers inside the
   // modal and pre-select the palette's choices, so switching to Custom
-  // Workspace doesn't drop any of them.
+  // Workspace doesn't drop any of them. The backend picker is emitted from
+  // the per-node cache (cliBackendsByNode) for the currently-selected node,
+  // falling back to the local cliBackends for the boot window before the
+  // per-node fetch resolves; refreshBackendPicker below repaints it against
+  // the authoritative manifest and on every node switch (picker node-aware
+  // fix).
   const accessProfilePicker = renderAccessProfilePicker(accessProfiles, { selectedId: preselectedProfile });
-  const picker = renderBackendPicker(cliBackends);
+  const seedBackends = (selectedNode && selectedNode !== 'local' && cliBackendsByNode[selectedNode])
+    ? cliBackendsByNode[selectedNode].data
+    : cliBackends;
+  const picker = renderBackendPicker(seedBackends, { selectedId: preselectedBackend });
   const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
@@ -7265,7 +7349,7 @@ function pickPaletteCustom(initialValue) {
     '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
       '<h3>自定义工作目录</h3>' +
       accessProfilePicker +
-      picker +
+      '<div id="cw-backend-slot">' + picker + '</div>' +
       nodePicker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
@@ -7278,18 +7362,20 @@ function pickPaletteCustom(initialValue) {
     '</div>';
   document.body.appendChild(modal);
   trapFocus(modal);
-  if (preselectedBackend) {
-    const sel = document.getElementById('new-backend');
-    if (sel) sel.value = preselectedBackend;
-  }
+  // Repaint the picker against the selected node's authoritative manifest
+  // (the seed above may be stale/local); preserves preselectedBackend when it
+  // still exists on that node.
+  refreshBackendPicker('cw-backend-slot');
   // Switching connection here clears/prefills the workspace placeholder the
   // same way the no-projects modal does, so a remote pick doesn't dangle the
-  // local default path.
+  // local default path, and repaints the backend picker for the new node.
   wireNodePicker(function () {
     const wsEl = document.getElementById('new-workspace');
-    if (!wsEl) return;
-    const nowLocal = (selectedNode || 'local') === 'local';
-    wsEl.placeholder = nowLocal ? (defaultWorkspace || '') : '';
+    if (wsEl) {
+      const nowLocal = (selectedNode || 'local') === 'local';
+      wsEl.placeholder = nowLocal ? (defaultWorkspace || '') : '';
+    }
+    refreshBackendPicker('cw-backend-slot');
   });
   setTimeout(() => {
     const el = document.getElementById('new-workspace');

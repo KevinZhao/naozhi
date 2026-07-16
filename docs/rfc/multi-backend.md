@@ -831,6 +831,39 @@ session 切 backend → 不允许，UI 层就拒绝
 naozhi 重启 → fetchCLIBackends 自动失败 → fallback 到上次缓存（standby 模式横幅）
 ```
 
+### 8.5.1 node-aware picker（多节点聚合修复）
+
+聚合 dashboard 上给**远程节点**新建会话时，picker 必须渲染该远程节点的 backend
+清单 + default，而不是主节点自己的——否则用户在主节点面板上给 macbook 建会话，
+picker 默认选中的是主节点的 default backend，导致 backend 选错（实测：远程会话全
+被建成主节点 default 而非目标节点的 default）。
+
+数据流（照搬既有 `?node=` 代理模式，如 `HandleEvents`）：
+
+```
+picker 打开/切 node → fetchCLIBackends(selectedNode)
+  ├─ selectedNode == 'local' → GET /api/cli/backends（本地 manifest，更新全局 cliBackends + feature gates）
+  └─ 远程 node    → GET /api/cli/backends?node=<id>
+                      → 主节点 cli.Handler 经 nodeAccess.LookupNode → node.Conn.FetchBackends
+                        ├─ HTTPClient  → GET /api/cli/backends（远程），验 json.Valid 后 raw 透传
+                        └─ ReverseConn → reverse-RPC "fetch_backends"（无参）→ 远程 connector 侧
+                                          c.router.BackendsManifest(nil) 返回 {backends, default, detected}
+                      → 前端按 node 分桶缓存到 cliBackendsByNode（不污染全局 cliBackends）
+```
+
+关键不变量：
+
+- **单一真相源**：backend 清单组装（backends 排序、Path 抹除、Available=ver≠""、
+  ReplyTag/ChipColor/Features）集中在 `session.Router.BackendsList/BackendsManifest`
+  （`internal/session/router_backend_manifest.go`）。dashboard HTTP handler 和 reverse-RPC
+  `fetch_backends` 分支都调它，保证本地与远程渲染同一 shape。
+- **全局 `cliBackends` 仍是本地语义**：chip / feature-gate / cost-unit / doctor panel 只读本地
+  manifest；只有 new-session picker 按目标 node 解析清单。远程 fetch 不触发 feature gates。
+- **向后兼容**：旧 reverse node 不认 `fetch_backends` → RPC 返回 unknown-method 错误 →
+  主节点 handler 返回 502 → 前端 fetch 失败 → picker 降级（回退渲染，不阻断新建）。
+- **已知局限**：reverse node 的 register 帧只上报 capability 标签（`derivedCaps()`），不含完整
+  backend 清单，故清单只能实时代理拉取（本 RFC §Sprint 6b 的 capability 上报无法替代）。
+
 ### 8.6 测试矩阵
 
 | 场景 | 期望行为 |

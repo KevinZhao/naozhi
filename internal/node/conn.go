@@ -41,13 +41,22 @@ type NodeInfo interface {
 }
 
 // NodeFetcher pulls read-only snapshots (sessions / projects / discovered /
-// events) plus the fire-once Send from a remote node.
+// events / backends) plus the fire-once Send from a remote node.
 type NodeFetcher interface {
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
 	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
+	// FetchBackends returns the remote node's /api/cli/backends payload
+	// ({backends, default, detected}) verbatim as raw JSON, so the dashboard
+	// node-aware picker renders the remote node's backend list + default.
+	// Relayed opaquely (json.RawMessage) rather than decoded into a typed
+	// struct so the primary need not stay in lockstep with a newer peer's
+	// manifest shape. Peers predating this RPC return an error (reverse) or
+	// a non-200 (HTTP); the dashboard handler surfaces that as a 502 and the
+	// frontend picker collapses to the single-backend UI.
+	FetchBackends(ctx context.Context) (json.RawMessage, error)
 	Send(ctx context.Context, key, text, workspace string) error
 }
 

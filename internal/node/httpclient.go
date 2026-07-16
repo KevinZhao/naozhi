@@ -267,6 +267,38 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 	return result, nil
 }
 
+// FetchBackends fetches the remote node's CLI backend manifest via
+// GET /api/cli/backends and relays it verbatim as raw JSON (see the
+// NodeFetcher.FetchBackends contract). A non-200 (including 404 from a peer
+// that predates the endpoint) surfaces as an error so the caller degrades
+// to the local manifest.
+func (n *HTTPClient) FetchBackends(ctx context.Context) (json.RawMessage, error) {
+	resp, err := n.doRequest(ctx, http.MethodGet, "/api/cli/backends", nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch backends from %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return nil, fmt.Errorf("fetch backends from %s: status %d", n.ID, resp.StatusCode)
+	}
+
+	// Bound the relayed body: the manifest is a handful of backends, well
+	// under 1 MiB. Cap matches the other Fetch* helpers.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read backends from %s: %w", n.ID, err)
+	}
+	// Validate it is well-formed JSON before relaying — a compromised or
+	// buggy peer must not let us stream arbitrary bytes to the dashboard
+	// under an application/json content type.
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("fetch backends from %s: malformed JSON body", n.ID)
+	}
+	return json.RawMessage(raw), nil
+}
+
 // ProxyTakeover forwards a takeover request to the remote node.
 func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) (string, error) {
 	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
