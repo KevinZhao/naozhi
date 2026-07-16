@@ -47,7 +47,6 @@ func TestReqSem_InflightGaugeBalanced(t *testing.T) {
 		}
 		gotResp <- struct{}{}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -142,7 +141,6 @@ func TestReqSem_WaitCounterOnSaturation(t *testing.T) {
 			}
 		}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)

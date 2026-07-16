@@ -26,7 +26,24 @@ type connHandler func(conn *websocket.Conn)
 
 func newFakeServer(t *testing.T, handler connHandler) *httptest.Server {
 	t.Helper()
+	// Track every connection-handler goroutine so the test does not finish
+	// while one is still running. A WebSocket connection is hijacked out of
+	// net/http on Upgrade, so httptest.Server.Close() closes the listener but
+	// does NOT wait for these goroutines — leaving a handler free to call
+	// t.Logf (error-path diagnostics) after the test function returns, which
+	// races tRunner's `t.done = true` write (testing.go:2023) and trips the
+	// race detector. The t.Cleanup barrier below runs inside tRunner's defer
+	// BEFORE t.done is set, so any handler t.Logf lands in the still-legal
+	// cleanup window rather than racing completion.
+	var wg sync.WaitGroup
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Count the goroutine from the FIRST line of ServeHTTP, before the
+		// Upgrade — the failure branch's t.Logf must be inside the barrier
+		// too, and ServeHTTP itself touches t via t.Helper/t.Logf. Adding
+		// after Upgrade would leave the ServeHTTP→Upgrade window (and the
+		// upgrade-error log) unsynchronized, which still races t.done.
+		wg.Add(1)
+		defer wg.Done()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Logf("upgrade: %v", err)
@@ -34,8 +51,30 @@ func newFakeServer(t *testing.T, handler connHandler) *httptest.Server {
 		}
 		handler(conn)
 	}))
+	// Close (unblocks any read on a still-open hijacked conn — every handler
+	// caps its reads with a deadline or exits on conn close, so none parks
+	// forever) then wait for the handlers to drain. Registered here rather
+	// than left to each caller's `defer srv.Close()` so the wg.Wait() barrier
+	// is guaranteed to run; callers therefore drop their own defer srv.Close().
+	t.Cleanup(func() {
+		srv.Close()
+		wg.Wait()
+	})
 	return srv
 }
+
+// Regression evidence for the newFakeServer goroutine-leak DATA RACE lives in
+// the real reverse-node tests, not a synthetic probe. The race is a scheduler
+// overlap (a handler goroutine's t.Logf racing tRunner's `t.done = true` write,
+// testing.go:2023) and is therefore only probabilistically reproducible — a
+// deterministic single-run reproduction is not achievable without brittle
+// sleeps. The authoritative gate is TestReqSem_WaitCounterOnSaturation below:
+//
+//	# On the pre-fix helper (no wg.Wait barrier) this trips -race within a few
+//	# hundred iterations; with the barrier it is clean over 800+ runs:
+//	go test -race -short -count=200 -run TestReqSem_WaitCounterOnSaturation ./internal/upstream/
+//
+// See the PR description for the full before/after measurements.
 
 // wsURL converts an http:// test server URL to ws://.
 func wsURL(srv *httptest.Server) string {
@@ -209,7 +248,6 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 		conn.ReadJSON(&reg)                                                          //nolint:errcheck
 		conn.WriteJSON(node.ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint:errcheck
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "badtoken"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -730,7 +768,6 @@ func TestHandleConn_PingPong(t *testing.T) {
 			pingReceived <- struct{}{}
 		}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -781,7 +818,6 @@ func TestHandleConn_RequestFetchSessions(t *testing.T) {
 		}
 		responded <- resp
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -818,7 +854,6 @@ func TestRun_CancelContext(t *testing.T) {
 	srv := newFakeServer(t, func(conn *websocket.Conn) {
 		conn.Close()
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -854,7 +889,6 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 		// Do NOT send "registered" — connector will error and return.
 		conn.WriteJSON(node.ReverseMsg{Type: "register_fail"}) //nolint:errcheck
 	})
-	defer srv.Close()
 
 	cfg := &Config{
 		URL:         wsURL(srv),
@@ -904,7 +938,6 @@ func TestHandleConn_Subscribe_SessionNotFound(t *testing.T) {
 			errorReceived <- resp
 		}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -952,7 +985,6 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 		}
 		// Don't read — close immediately to trigger dial error on next attempt.
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -992,7 +1024,6 @@ func TestRun_BackoffGauge_TracksReconnectState(t *testing.T) {
 		}
 		// Close immediately to force the next attempt onto the backoff path.
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -1216,7 +1247,6 @@ func TestHandleConn_Unsubscribe(t *testing.T) {
 			messages <- resp
 		}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -1291,7 +1321,6 @@ func TestHandleConn_RequestErrorResponse(t *testing.T) {
 			responses <- resp
 		}
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
@@ -1339,7 +1368,6 @@ func TestHandleConn_WSPingPong(t *testing.T) {
 		// Keep conn open briefly
 		time.Sleep(200 * time.Millisecond)
 	})
-	defer srv.Close()
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
