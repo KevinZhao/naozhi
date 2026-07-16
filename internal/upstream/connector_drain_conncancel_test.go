@@ -67,7 +67,6 @@ func TestHandleConn_ReadErrorCancelsConnCtxBeforeDrain(t *testing.T) {
 		conn.Close()
 		close(closed)
 	})
-	defer srv.Close()
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(srv), nil)
 	if err != nil {

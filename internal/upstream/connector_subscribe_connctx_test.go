@@ -73,7 +73,6 @@ func TestSubscribe_AfterConnCtxCancel_NoStreamGoroutine(t *testing.T) {
 			unexpectedAck <- resp.Type
 		}
 	})
-	defer srv.Close()
 
 	// Dial the fake server directly from the connector side and drive handleConn
 	// with an already-cancelled context.
