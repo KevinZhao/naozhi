@@ -10,8 +10,10 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -610,6 +612,13 @@ func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
 }
 
+// claudeSlugMaxLen mirrors the Claude CLI's own length cap on an encoded
+// project directory name. Beyond it the CLI truncates to exactly this many
+// bytes and appends "-" + a base36 hash of the *original* (pre-substitution)
+// path, keeping deep paths collision-free while staying inside filesystem
+// NAME_MAX. Verified against the CLI bundle (2.1.219, `x0`/`axt`).
+const claudeSlugMaxLen = 200
+
 // ClaudeProjectSlug converts a CWD path to the Claude project directory name.
 // e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo".
 //
@@ -619,21 +628,113 @@ func processAlive(pid int) bool {
 // call sites together so a future change to Claude's scheme cannot be
 // applied to only one side (RNEW-002).
 //
-// R241-SEC-4 (#465): control bytes (< 0x20) in cwd are rejected by
-// stripping them before the '/' → '-' substitution. Hand-edited
-// persisted state (cron_jobs.json, sessions-index.json) can carry
-// embedded \t / \n / \r values that would otherwise leak into the
-// resulting filesystem path component, where downstream Stat/Open
-// calls produce confusingly-quoted error messages or — worse — succeed
-// on an attacker-prepared dir whose name happens to share the encoded
-// prefix. The encoding is lossy by design; an operator who legitimately
-// runs CWD with a literal newline in the path is not on the supported
-// matrix.
+// The scheme replaces every character outside [A-Za-z0-9] with '-', not just
+// '/'. The distinction matters for any path with a dot or underscore segment:
+// a git worktree under "<repo>/.claude/worktrees/<name>" encodes to
+// "…-repo--claude-worktrees-<name>" (the "/." pair collapsing into "--"),
+// which the previous '/'-only substitution mis-encoded as "…-repo-.claude-…"
+// so every O(1) JSONL lookup missed and silently degraded to a full
+// projects/ scan. Non-ASCII bytes are likewise mapped to '-' per character,
+// matching the CLI's per-UTF-16-code-unit replacement for the BMP.
+//
+// R241-SEC-4 (#465): control bytes (< 0x20) in cwd are stripped before the
+// substitution. Hand-edited persisted state (cron_jobs.json,
+// sessions-index.json) can carry embedded \t / \n / \r values that would
+// otherwise leak into the resulting filesystem path component, where
+// downstream Stat/Open calls produce confusingly-quoted error messages or —
+// worse — succeed on an attacker-prepared dir whose name happens to share
+// the encoded prefix. Stripping (rather than substituting) them keeps that
+// guarantee: a control byte contributes no character at all, so it cannot be
+// used to steer the encoded name. The encoding is lossy by design; an
+// operator who legitimately runs CWD with a literal newline in the path is
+// not on the supported matrix.
 func ClaudeProjectSlug(cwd string) string {
 	if hasControlByte(cwd) {
 		cwd = stripControlBytes(cwd)
 	}
-	return strings.ReplaceAll(cwd, "/", "-")
+	slug := substituteNonAlnum(cwd)
+	if len(slug) <= claudeSlugMaxLen {
+		return slug
+	}
+	return slug[:claudeSlugMaxLen] + "-" + claudeSlugHash(cwd)
+}
+
+// substituteNonAlnum replaces every byte outside [A-Za-z0-9] with '-',
+// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")`. Operating per byte
+// rather than per rune is deliberate: the CLI substitutes per UTF-16 code
+// unit, so a 3-byte BMP rune becomes 1 '-' there but 3 here. Callers that
+// need byte-exact parity on non-ASCII paths are out of scope — the encoding
+// is lossy either way and no naozhi path depends on it. ASCII (every path on
+// the supported matrix) is exact.
+func substituteNonAlnum(s string) string {
+	// Scan first so a clean all-alnum string (never true for an absolute
+	// path, but cheap to check) skips the copy.
+	needs := false
+	for i := 0; i < len(s); i++ {
+		if !isASCIIAlnum(s[i]) {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
+	// strings.Builder rather than []byte+string(): Builder.String() hands out
+	// the buffer without copying, keeping this at one allocation per call.
+	// ClaudeProjectSlug runs on every dashboard sidebar fetch and every cron
+	// transcript URL resolution, so a second copy would compound under load.
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if isASCIIAlnum(s[i]) {
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte('-')
+	}
+	return b.String()
+}
+
+func isASCIIAlnum(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// claudeSlugHash reproduces the CLI's overflow suffix: a Java-style
+// 32-bit string hash of the original path, absolute-valued and rendered
+// base36. The CLI computes it as
+//
+//	let t = 0; for (c of s) t = (t << 5) - t + c.charCodeAt(i) | 0
+//	Math.abs(t).toString(36)
+//
+// so the arithmetic must wrap at 32 bits signed and iterate UTF-16 code
+// units. We iterate runes and fold non-BMP runes into their surrogate pair
+// to match; int32 arithmetic gives the same wraparound as JS's `| 0`.
+//
+// Math.abs(-2^31) is 2^31 in JS (it leaves the int32 domain), which int32
+// negation cannot represent — that single input is special-cased so the
+// suffix still matches instead of silently wrapping back to -2^31.
+func claudeSlugHash(s string) string {
+	var h int32
+	for _, r := range s {
+		if r > 0xFFFF {
+			// Non-BMP: JS sees a surrogate pair, two code units.
+			r -= 0x10000
+			hi := int32(0xD800 + (r >> 10))
+			lo := int32(0xDC00 + (r & 0x3FF))
+			h = (h << 5) - h + hi
+			h = (h << 5) - h + lo
+			continue
+		}
+		h = (h << 5) - h + int32(r)
+	}
+	if h == math.MinInt32 {
+		// JS: Math.abs(-2147483648) === 2147483648.
+		return strconv.FormatUint(1<<31, 36)
+	}
+	if h < 0 {
+		h = -h
+	}
+	return strconv.FormatInt(int64(h), 36)
 }
 
 // hasControlByte returns true when s contains any byte < 0x20. Single

@@ -72,10 +72,12 @@ func (noopRecentFilter) SkipSessionID(string) bool { return false }
 // If limit <= 0, all sessions within the time window are returned.
 //
 // Filtering layers (in order):
-//  1. Directory-level: skip encoded hidden paths ("--" pattern from "/." in original path),
-//     which belong to automated tools like claude-mem observer.
-//  2. Workspace resolution: skip directories that can't be mapped back to a real
+//  1. Workspace resolution: skip directories that can't be mapped back to a real
 //     directory on disk (session can't be resumed without the correct CWD).
+//  2. Hidden-path: skip workspaces with a dot-prefixed path component, which
+//     belong to automated tools (claude-mem observer et al) rather than to a
+//     user-visible project — except git worktrees under ".claude/worktrees",
+//     which are ordinary user sessions.
 //  3. filter.SkipWorkspace: caller-supplied workspace blacklist (e.g. sys-sessions).
 //  4. excludeSessionIDs / filter.SkipSessionID: per-session-ID filtering.
 //
@@ -142,16 +144,20 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 		}
 		dirName := e.Name()
 
-		// Layer 1: skip encoded hidden paths.
-		if strings.Contains(dirName, "--") {
-			continue
-		}
-
 		projDir := filepath.Join(projectsDir, dirName)
 		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName)
 
-		// Layer 2: skip unresolvable workspaces.
+		// Layer 1: skip unresolvable workspaces.
 		if workspace == "" {
+			continue
+		}
+
+		// Layer 2: skip tool-owned hidden paths, now that we hold the
+		// decoded workspace and can tell ".claude/worktrees/x" (a user's
+		// git worktree — keep) from ".claude-mem/..." (an observer's
+		// scratch dir — drop). The old pre-decode `strings.Contains(dirName,
+		// "--")` heuristic could not, and hid every worktree session (#2370).
+		if isHiddenToolWorkspace(workspace) {
 			continue
 		}
 
@@ -396,6 +402,47 @@ func extractFirstPrompt(path string) string {
 	}
 }
 
+// worktreesMarker is the path fragment Claude Code uses for git worktrees it
+// creates on a user's behalf. Sessions there are ordinary user work and must
+// stay visible in the history panel even though the path is dot-hidden.
+const worktreesMarker = ".claude" + string(filepath.Separator) + "worktrees" + string(filepath.Separator)
+
+// isHiddenToolWorkspace reports whether a resolved workspace path belongs to
+// an automated tool rather than a user project. The rule: any dot-prefixed
+// path component makes it tool-owned — except the ".claude/worktrees/<name>"
+// prefix, which is where Claude Code puts user git worktrees.
+//
+// Operating on the decoded path (not the encoded directory name) is what lets
+// this distinguish the two: both collapse to a "--" in the encoded form.
+func isHiddenToolWorkspace(workspace string) bool {
+	if !strings.Contains(workspace, string(filepath.Separator)+".") {
+		return false
+	}
+	sep := string(filepath.Separator)
+	// The marker is matched with a leading separator so ".claude" must be a
+	// whole component (not the tail of e.g. "my.claude"). len(sep) accounts
+	// for that prefix when slicing past the match; worktreesMarker already
+	// ends in a separator, so the slice starts exactly at the worktree name.
+	i := strings.Index(workspace, sep+worktreesMarker)
+	if i < 0 {
+		return true
+	}
+	// Everything before the marker must itself be dot-free, otherwise a tool
+	// dir that happens to nest a worktree (".cache/x/.claude/worktrees/y")
+	// would be whitelisted by association.
+	if strings.Contains(workspace[:i], sep+".") {
+		return true
+	}
+	name := workspace[i+len(sep)+len(worktreesMarker):]
+	// An empty remainder means the path IS ".claude/worktrees" itself — a
+	// container directory, not a worktree, so it stays hidden.
+	if name == "" {
+		return true
+	}
+	// The worktree name must not re-introduce a dot component.
+	return strings.HasPrefix(name, ".") || strings.Contains(name, sep+".")
+}
+
 // ---------------------------------------------------------------------------
 // Workspace resolution
 // ---------------------------------------------------------------------------
@@ -461,27 +508,40 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 // resolveWorkspaceByParts reconstructs a workspace path from an encoded project
 // directory name by testing segments against the filesystem.
 //
-// Claude Code encodes workspace paths by replacing "/" with "-", so
+// Claude Code encodes workspace paths by replacing every character outside
+// [A-Za-z0-9] with "-" (see ClaudeProjectSlug), so
 // "-home-ec2-user-workspace-foo" originated from "/home/ec2-user/workspace/foo".
-// Since the encoding is lossy (directory names may contain literal hyphens), a
-// simple reverse replacement fails for paths like "/home/ec2-user/..." where
-// "ec2-user" contains a hyphen.
+// The encoding is lossy in two directions: a "-" in the encoded name may have
+// been a "/", a literal "-", a ".", a "_", a space, … and directory names may
+// themselves contain literal hyphens.
 //
-// The algorithm splits the encoded name by "-" and uses DFS: at each filesystem
-// level, it tries consuming 1, 2, 3, ... consecutive parts as a single directory
-// name, verifying each candidate with os.Stat. Invalid branches are pruned
-// immediately, keeping the total stat calls manageable (~10-20 for typical paths).
-// dfsPathCache caches successful (non-empty) results of
-// resolveWorkspaceByParts. Encoded directory names never change, so a
-// resolved mapping is stable and safe to cache for the process lifetime.
+// Two passes, cheapest first:
+//
+//  1. tryResolveParts — splits on "-" and DFS-joins consecutive parts,
+//     verifying each candidate with os.Stat. Resolves any path whose only
+//     encoded characters were "/" and literal "-", which is every ordinary
+//     workspace. ~10-20 stats.
+//  2. resolveByDirScan — for names pass 1 cannot explain (a "." / "_" / space
+//     in some segment), ReadDir each level and re-encode the real child names
+//     to find which one the encoded remainder started with. Deterministic
+//     where pass 1 can only guess, at the cost of a ReadDir per level.
+//
+// Pass 2 is what makes git worktrees visible: a session run in
+// "<repo>/.claude/worktrees/<name>" encodes to "…-repo--claude-worktrees-…"
+// (the "/." collapsing into "--"), and no amount of hyphen-splitting can
+// recover the leading dot of ".claude" (#2370).
+//
+// dfsPathCache caches successful (non-empty) results. Encoded directory names
+// never change, so a resolved mapping is stable and safe to cache for the
+// process lifetime.
 //
 // Negative results ("") are deliberately NOT cached: the empty string is an
 // "unresolvable right now" sentinel, not a stable fact. A workspace directory
 // may be temporarily absent during the scan (unmounted network/removable
 // drive, git worktree mid-rebuild/checkout) and reappear later. Caching the
 // negative result would permanently drop that project from the history
-// sidebar until the process restarts (#1994). Re-running the bounded DFS on a
-// cache miss is cheap (≤200 stats).
+// sidebar until the process restarts (#1994). Re-running both bounded passes
+// on a cache miss is cheap.
 var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 
 func resolveWorkspaceByParts(dirName string) string {
@@ -497,10 +557,137 @@ func resolveWorkspaceByParts(dirName string) string {
 	}
 	statCount := 0
 	result := tryResolveParts(parts, "/", &statCount)
+	if result == "" {
+		// Pass 1 exhausted: some segment holds a character the "-" split
+		// cannot recover (".", "_", space). Re-encode real directory names
+		// instead of guessing at the decoding.
+		budget := dirScanBudget
+		result = resolveByDirScan(dirName[1:], "/", &budget)
+	}
 	if result != "" {
 		dfsPathCache.Store(dirName, result)
 	}
 	return result
+}
+
+// dirScanBudget caps how many directory entries resolveByDirScan may re-encode
+// across the whole walk. Two encoded children can share a prefix (".claude"
+// and "-claude" both encode to "-claude"), so the walk backtracks and is
+// worst-case exponential without a ceiling. A real path costs one ReadDir per
+// level and a handful of comparisons; the cap only trips on adversarial or
+// pathologically wide trees, where returning "" degrades to the pre-fix
+// behaviour (project hidden) rather than stalling the history scan.
+const dirScanBudget = 10000
+
+// resolveByDirScan walks down from base, consuming the encoded remainder by
+// matching it against the *re-encoded* names of base's real subdirectories.
+// Returns the absolute path whose ClaudeProjectSlug-encoding is
+// "-"+originalRemainder, or "" when no such directory exists.
+//
+// remainder is the encoded name with the leading "-" already stripped, i.e.
+// for "-home-user-x" the initial call passes "home-user-x" with base "/".
+//
+// The encoding is not injective — ".claude", "-claude" and "_claude" all
+// encode to "-claude" — so several real children can match one encoded
+// segment. Two properties keep that safe:
+//
+//   - Every returned path re-encodes to the input by construction (each level
+//     is matched against its own re-encoding), so a caller can never receive a
+//     path belonging to a *different* encoded name. Ambiguity picks a
+//     different valid pre-image, it does not fabricate one.
+//   - The choice is deterministic: os.ReadDir sorts by name, and
+//     dotPreferredOrder then hoists dot-prefixed candidates so the ".claude"
+//     form Claude itself uses wins over an exotic "-claude"/"_claude"
+//     sibling. (A path resolvable without a dot is handled by pass 1 and
+//     never reaches here at all.)
+func resolveByDirScan(remainder, base string, budget *int) string {
+	if remainder == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return ""
+	}
+	entries = dotPreferredOrder(entries)
+	for _, e := range entries {
+		if *budget <= 0 {
+			return ""
+		}
+		*budget--
+		if !e.IsDir() {
+			// A symlink to a directory reports mode Symlink here, not Dir;
+			// Stat it so a symlinked workspace component still resolves
+			// (matches tryResolveParts, which Stats and thus follows links).
+			if e.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			if info, serr := os.Stat(filepath.Join(base, e.Name())); serr != nil || !info.IsDir() {
+				continue
+			}
+		}
+		name := e.Name()
+		// "." / ".." would make filepath.Join walk in place or upwards and
+		// recurse without consuming the remainder. os.ReadDir does not list
+		// them, but guard anyway so a future switch to a different directory
+		// reader cannot introduce an unbounded walk.
+		if name == "." || name == ".." {
+			continue
+		}
+		enc := substituteNonAlnum(name)
+		if enc == "" {
+			continue
+		}
+		candidate := filepath.Join(base, name)
+		if remainder == enc {
+			return candidate
+		}
+		// The separator "/" encodes to "-" like everything else, so a
+		// non-leaf match consumes enc plus exactly one "-".
+		if !strings.HasPrefix(remainder, enc) || len(remainder) <= len(enc) || remainder[len(enc)] != '-' {
+			continue
+		}
+		if result := resolveByDirScan(remainder[len(enc)+1:], candidate, budget); result != "" {
+			return result
+		}
+	}
+	return ""
+}
+
+// dotPreferredOrder returns entries with dot-prefixed names first, preserving
+// os.ReadDir's lexical order within each group. Only allocates when the
+// directory actually mixes dot and non-dot entries AND a non-dot entry
+// precedes a dot one — the common case (no dotfiles, or dotfiles already
+// sorted first) returns the input slice untouched.
+//
+// Rationale: the slug encoding maps ".claude", "-claude" and "_claude" onto
+// the same "-claude", and lexical order puts "-claude" first. The ambiguity
+// that occurs in practice is Claude's own ".claude/worktrees" layout, so the
+// dot form is the better guess.
+func dotPreferredOrder(entries []os.DirEntry) []os.DirEntry {
+	firstDot := -1
+	for i, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			firstDot = i
+			break
+		}
+	}
+	// No dot entries, or the very first entry is already a dot entry: the
+	// existing order needs no adjustment.
+	if firstDot <= 0 {
+		return entries
+	}
+	out := make([]os.DirEntry, 0, len(entries))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			out = append(out, e)
+		}
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // tryResolveParts recursively resolves path parts against the filesystem.
