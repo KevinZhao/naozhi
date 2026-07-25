@@ -210,7 +210,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				}
 			}
 			envelope = inner
-			body = plain
+			// `body` is deliberately NOT updated to `plain`: the only later
+			// reader was verifySignature above, which must hash the raw
+			// ciphertext (Feishu computes the v2 signature over the encrypted
+			// push body). Assigning the plaintext here was dead — and a trap,
+			// since a future read of `body` past this point would silently
+			// start depending on the decrypted form. Everything downstream
+			// reads `envelope` instead.
 		}
 
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.

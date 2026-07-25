@@ -1,12 +1,13 @@
 # golangci-lint configuration.
 #
-# Status: not yet wired into CI (no lint job in .github/workflows/ci.yml as
-# of 2026-05-26). This file exists as the canonical home for project lint
-# rules; the per-package _test.go guards (e.g. internal/sessionkey/imports_test.go)
-# enforce the same invariants today via go test, which IS in CI.
+# Status: golangci-lint itself is still not run in CI — the depguard rules
+# below are enforced today by the per-package _test.go guards (e.g.
+# internal/sessionkey/imports_test.go), which DO run in CI via go test.
 #
-# Adding a CI lint job is tracked separately — when that lands, the rules
-# below take effect.
+# staticcheck, however, is now wired: `make lint-staticcheck` runs as a
+# warn-mode CI job (continue-on-error) — see .github/workflows/ci.yml. It is
+# invoked directly rather than through golangci-lint, so the linters block
+# below does not gate it.
 
 version: "2"
 

@@ -150,7 +150,7 @@ func lintFile(path string) ([]Violation, error) {
 		return []Violation{{
 			Rule:    "missing_table",
 			File:    path,
-			Message: fmt.Sprintf("no fact-table:start/end markers found; design doc missing single-truth-source table (RFC docs/rfc/lint-fact-table.md §3.1)"),
+			Message: "no fact-table:start/end markers found; design doc missing single-truth-source table (RFC docs/rfc/lint-fact-table.md §3.1)",
 		}}, nil
 	}
 
@@ -428,14 +428,14 @@ func keyScoreDetail(context, key string) (int, int) {
 }
 
 // tokenizeKey splits "Server struct 字段" → ["Server", "struct", "字段"].
+//
+// Whitespace-only splitting: the caller (scoreKeyMatch) does substring
+// containment per token, so CJK chunks match as whole words. A previous
+// version carried a "also split CJK at character level" comment over a loop
+// that only copied the fields verbatim — the character-level split was never
+// implemented, so the comment is dropped rather than the behaviour changed.
 func tokenizeKey(key string) []string {
-	parts := strings.Fields(key)
-	// Also split CJK chunks at character level for substring match.
-	var out []string
-	for _, p := range parts {
-		out = append(out, p)
-	}
-	return out
+	return strings.Fields(key)
 }
 
 // normalizeKey lowers + trims for case-insensitive matching.
