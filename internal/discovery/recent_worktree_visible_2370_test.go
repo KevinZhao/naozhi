@@ -3,6 +3,7 @@ package discovery
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -203,6 +204,17 @@ func TestIsHiddenToolWorkspace(t *testing.T) {
 		// contains a dot), so nothing is hidden in the first place and the
 		// worktrees marker never comes into play.
 		{"/home/u/my.claude/worktrees/x", false},
+		// Relative paths: workspace is NOT guaranteed absolute, because
+		// resolveWorkspaceWithIndex passes sessions-index.json's originalPath
+		// through verbatim. A leading dot component must still count as
+		// hidden, or a relative tool dir bypasses the filter entirely.
+		{".relhidden-tool/observer", true},
+		{".claude/statsig", true},
+		{".cache", true},
+		// …and a relative worktree path must still be visible.
+		{".claude/worktrees/x", false},
+		// Relative non-hidden paths stay visible.
+		{"workspace/polyquant", false},
 		// A path with no separator-dot at all is never hidden, even if a
 		// component merely contains a dot.
 		{"/home/u/workspace/site.com", false},
@@ -210,6 +222,51 @@ func TestIsHiddenToolWorkspace(t *testing.T) {
 	for _, tc := range cases {
 		if got := isHiddenToolWorkspace(tc.in); got != tc.want {
 			t.Errorf("isHiddenToolWorkspace(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRecentSessions_RelativeHiddenWorkspaceStillSkipped is the end-to-end
+// guard for a regression this fix introduced and then closed: moving the
+// hidden-path check from the encoded directory name to the decoded workspace
+// made it dependent on the workspace being absolute — which it is not.
+// resolveWorkspaceWithIndex returns sessions-index.json's originalPath
+// verbatim once os.Stat confirms it is a directory, and that field is file
+// content, so a relative ".tool/observer" resolving against the process CWD
+// reached the history panel with the tool's prompts attached.
+func TestRecentSessions_RelativeHiddenWorkspaceStillSkipped(t *testing.T) {
+	claudeDir := makeClaudeDir(t)
+
+	// A relative hidden directory under the process CWD, which is what
+	// os.Stat resolves originalPath against.
+	const rel = ".relhidden-tool-2370/observer"
+	if err := os.MkdirAll(rel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(".relhidden-tool-2370") })
+
+	// The encoded name is deliberately unresolvable so the index's
+	// originalPath is the only thing that can supply a workspace.
+	projDir := filepath.Join(claudeDir, "projects", "-nonresolvable-relhidden-2370")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sid := "33333333-0003-0003-0003-000000000003"
+	line := `{"type":"user","message":{"role":"user","content":"tool internal prompt"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionsIndex(t, projDir, sessionsIndex{
+		OriginalPath: rel,
+		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "tool internal"}},
+	})
+	dirFilesCache.Delete(projDir)
+	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
+
+	for _, s := range RecentSessions(claudeDir, 50, 365*24*time.Hour, nil, nil) {
+		if s.SessionID == sid {
+			t.Errorf("relative hidden workspace leaked into history: ws=%q prompt=%q",
+				s.Workspace, s.LastPrompt)
 		}
 	}
 }
@@ -324,6 +381,32 @@ func TestClaudeProjectSlug_LengthCapHash(t *testing.T) {
 	other := long + "/different"
 	if a, b := ClaudeProjectSlug(long), ClaudeProjectSlug(other); a == b {
 		t.Errorf("distinct deep paths collided onto %q", a)
+	}
+
+	// Exactly at the cap: no suffix. One past it: truncate + suffix. Both
+	// sides of the boundary were confirmed against the real CLI (a 201-char
+	// CWD produced a 207-char directory name).
+	at := "/" + strings.Repeat("a", claudeSlugMaxLen-1)
+	if got := ClaudeProjectSlug(at); len(got) != claudeSlugMaxLen || strings.Contains(got[1:], "-") {
+		t.Errorf("at cap: ClaudeProjectSlug len = %d, want exactly %d with no suffix", len(got), claudeSlugMaxLen)
+	}
+	if got := ClaudeProjectSlug(at + "a"); len(got) <= claudeSlugMaxLen {
+		t.Errorf("one past cap: len = %d, want > %d", len(got), claudeSlugMaxLen)
+	}
+}
+
+// TestClaudeProjectSlug_CapBoundaryLiveCLI is the captured fixture for the
+// truncate+hash boundary: a 201-character CWD created on disk, a session run
+// in it, and the resulting directory name recorded verbatim from claude CLI
+// 2.1.219. Pairs with TestClaudeProjectSlug_LiveCLIParity (240 chars) so both
+// a just-over-the-cap and a well-over-the-cap path are pinned.
+func TestClaudeProjectSlug_CapBoundaryLiveCLI(t *testing.T) {
+	cwd := "/tmp/sl/" + strings.Repeat("a", 193) // 201 chars
+	want := "-tmp-sl-" + strings.Repeat("a", 192) + "-eo33o2"
+	got := ClaudeProjectSlug(cwd)
+	if got != want {
+		t.Errorf("ClaudeProjectSlug(201-char cwd) len=%d, want len=%d\n got=%q\nwant=%q",
+			len(got), len(want), got, want)
 	}
 }
 

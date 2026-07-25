@@ -407,6 +407,19 @@ func extractFirstPrompt(path string) string {
 // stay visible in the history panel even though the path is dot-hidden.
 const worktreesMarker = ".claude" + string(filepath.Separator) + "worktrees" + string(filepath.Separator)
 
+// hasDotComponent reports whether any component of p is dot-prefixed, i.e.
+// p is "." something or contains a "<sep>." pair.
+//
+// Checking the leading position separately matters because workspace paths are
+// not guaranteed absolute: resolveWorkspaceWithIndex returns
+// sessions-index.json's originalPath verbatim once os.Stat says it is a
+// directory, and that field is file content. A relative ".tool/observer" that
+// resolves against the process CWD would otherwise pass for non-hidden and
+// leak the tool's prompts into the user history panel.
+func hasDotComponent(p string) bool {
+	return strings.HasPrefix(p, ".") || strings.Contains(p, string(filepath.Separator)+".")
+}
+
 // isHiddenToolWorkspace reports whether a resolved workspace path belongs to
 // an automated tool rather than a user project. The rule: any dot-prefixed
 // path component makes it tool-owned — except the ".claude/worktrees/<name>"
@@ -415,32 +428,44 @@ const worktreesMarker = ".claude" + string(filepath.Separator) + "worktrees" + s
 // Operating on the decoded path (not the encoded directory name) is what lets
 // this distinguish the two: both collapse to a "--" in the encoded form.
 func isHiddenToolWorkspace(workspace string) bool {
-	if !strings.Contains(workspace, string(filepath.Separator)+".") {
+	if !hasDotComponent(workspace) {
 		return false
 	}
-	sep := string(filepath.Separator)
-	// The marker is matched with a leading separator so ".claude" must be a
-	// whole component (not the tail of e.g. "my.claude"). len(sep) accounts
-	// for that prefix when slicing past the match; worktreesMarker already
-	// ends in a separator, so the slice starts exactly at the worktree name.
-	i := strings.Index(workspace, sep+worktreesMarker)
-	if i < 0 {
+	// Locate ".claude/worktrees/" as a whole component, so the tail of e.g.
+	// "my.claude/worktrees/" does not match. It qualifies either at the very
+	// start of a relative path or immediately after a separator.
+	prefix, rest, ok := cutWorktreesMarker(workspace)
+	if !ok {
 		return true
 	}
 	// Everything before the marker must itself be dot-free, otherwise a tool
 	// dir that happens to nest a worktree (".cache/x/.claude/worktrees/y")
 	// would be whitelisted by association.
-	if strings.Contains(workspace[:i], sep+".") {
+	if hasDotComponent(prefix) {
 		return true
 	}
-	name := workspace[i+len(sep)+len(worktreesMarker):]
 	// An empty remainder means the path IS ".claude/worktrees" itself — a
 	// container directory, not a worktree, so it stays hidden.
-	if name == "" {
+	if rest == "" {
 		return true
 	}
 	// The worktree name must not re-introduce a dot component.
-	return strings.HasPrefix(name, ".") || strings.Contains(name, sep+".")
+	return hasDotComponent(rest)
+}
+
+// cutWorktreesMarker splits p around a whole-component ".claude/worktrees/"
+// occurrence, returning the part before the marker, the part after it, and
+// whether the marker was found. The marker matches at the start of p (relative
+// path) or directly after a separator (absolute path).
+func cutWorktreesMarker(p string) (prefix, rest string, ok bool) {
+	if strings.HasPrefix(p, worktreesMarker) {
+		return "", p[len(worktreesMarker):], true
+	}
+	sep := string(filepath.Separator)
+	if i := strings.Index(p, sep+worktreesMarker); i >= 0 {
+		return p[:i], p[i+len(sep)+len(worktreesMarker):], true
+	}
+	return "", "", false
 }
 
 // ---------------------------------------------------------------------------
