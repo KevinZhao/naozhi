@@ -49,7 +49,7 @@ func newSlotUUID() string {
 // the slot.
 //
 // priority: "" | "now" | "next" | "later". "now" aborts the in-flight turn.
-func (p *Process) SendPassthrough(ctx context.Context, text string, images []ImageData,
+func (p *Process) SendPassthrough(ctx context.Context, text string, images []Attachment,
 	onEvent EventCallback, priority string) (*SendResult, error) {
 
 	if !p.caps.Replay {
@@ -175,7 +175,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
 // to the shim, bypassing shimWriter's fast-path that would re-acquire
 // shimWMu. Caller MUST hold shimWMu.
-func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []ImageData, priority string) error {
+func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []Attachment, priority string) error {
 	// We can't feed through stdinWriter (shimWriter) because its Write path
 	// calls p.shimSend which takes shimWMu. Build the payload ourselves via
 	// the protocol and push via shimSendLocked.

@@ -308,7 +308,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var key, text, node, workspace, resumeID, backend, accessProfile string
-	var images []cli.ImageData
+	var images []cli.Attachment
 	var fileIDs []string
 
 	ct := r.Header.Get("Content-Type")

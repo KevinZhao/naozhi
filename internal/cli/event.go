@@ -330,15 +330,6 @@ type Attachment struct {
 	Size int64
 }
 
-// ImageData is retained as a type alias for the pre-PDF call sites. New code
-// uses Attachment directly with an explicit Kind. The alias keeps legacy
-// constructors (many tests, dispatch/coalesce, platform adapters) compiling
-// without edits; migrations that promote Kind/WorkspacePath fields happen on
-// a case-by-case basis. Final removal is tracked in docs/TODO.md.
-//
-// Deprecated: Use Attachment directly with an explicit Kind field.
-type ImageData = Attachment
-
 // InputMessage is what we write to claude CLI stdin.
 //
 // UUID: naozhi-assigned message id, round-tripped back on the matching replay

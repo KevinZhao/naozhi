@@ -18,7 +18,7 @@ func TestCoalesceMessages_Empty(t *testing.T) {
 
 func TestCoalesceMessages_Single(t *testing.T) {
 	t.Parallel()
-	imgs := []cli.ImageData{{Data: []byte("img"), MimeType: "image/png"}}
+	imgs := []cli.Attachment{{Data: []byte("img"), MimeType: "image/png"}}
 	text, images := CoalesceMessages([]QueuedMsg{
 		{Text: "hello", Images: imgs, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
 	})
@@ -34,7 +34,7 @@ func TestCoalesceMessages_Multiple(t *testing.T) {
 	t.Parallel()
 	msgs := []QueuedMsg{
 		{Text: "帮我写个函数", EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
-		{Text: "要用Go", Images: []cli.ImageData{{Data: []byte("a"), MimeType: "image/png"}}, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 30, 0, time.UTC)},
+		{Text: "要用Go", Images: []cli.Attachment{{Data: []byte("a"), MimeType: "image/png"}}, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 30, 0, time.UTC)},
 		{Text: "还有记得加测试", EnqueueAt: time.Date(2026, 4, 16, 14, 3, 0, 0, time.UTC)},
 	}
 	text, images := CoalesceMessages(msgs)
@@ -59,8 +59,8 @@ func TestCoalesceMessages_Multiple(t *testing.T) {
 func TestCoalesceMessages_ImagesConcat(t *testing.T) {
 	t.Parallel()
 	msgs := []QueuedMsg{
-		{Text: "A", Images: []cli.ImageData{{Data: []byte("1")}}, EnqueueAt: time.Now()},
-		{Text: "B", Images: []cli.ImageData{{Data: []byte("2")}, {Data: []byte("3")}}, EnqueueAt: time.Now()},
+		{Text: "A", Images: []cli.Attachment{{Data: []byte("1")}}, EnqueueAt: time.Now()},
+		{Text: "B", Images: []cli.Attachment{{Data: []byte("2")}, {Data: []byte("3")}}, EnqueueAt: time.Now()},
 	}
 	_, images := CoalesceMessages(msgs)
 	if len(images) != 3 {
@@ -84,7 +84,7 @@ func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, QueuedMsg{
 			Text:      big,
-			Images:    []cli.ImageData{{Data: []byte("i"), MimeType: "image/png"}},
+			Images:    []cli.Attachment{{Data: []byte("i"), MimeType: "image/png"}},
 			EnqueueAt: time.Date(2026, 4, 16, 14, 0, i, 0, time.UTC),
 		})
 	}

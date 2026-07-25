@@ -339,7 +339,7 @@ type DispatcherConfig struct {
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
 	// for the consolidated removal trigger (#374).
-	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
@@ -611,7 +611,7 @@ type preparedInbound struct {
 	cleanText string
 	key       string
 	opts      session.AgentOpts
-	images    []cli.ImageData
+	images    []cli.Attachment
 }
 
 // prepareInbound runs the message front-matter common to every dispatch
@@ -753,11 +753,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
 	// Convert platform images to CLI image data
-	var images []cli.ImageData
+	var images []cli.Attachment
 	if len(msg.Images) > 0 {
-		images = make([]cli.ImageData, 0, len(msg.Images))
+		images = make([]cli.Attachment, 0, len(msg.Images))
 		for _, img := range msg.Images {
-			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+			images = append(images, cli.Attachment{Data: img.Data, MimeType: img.MimeType})
 		}
 	}
 
@@ -1132,7 +1132,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 func (d *Dispatcher) goSendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
@@ -1315,7 +1315,7 @@ func (d *Dispatcher) handleSendError(
 func (d *Dispatcher) sendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,

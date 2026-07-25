@@ -304,7 +304,7 @@ func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {
 	return "", nil
 }
 
-func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
+func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
 	return p.WriteUserMessageLocked(w, "", text, images, "")
 }
 
@@ -352,7 +352,7 @@ func putUserMsgEnc(e *userMsgEnc) {
 // Empty uuid / priority are omitted from the JSON (omitempty), so the payload
 // is byte-identical to the legacy WriteMessage path when both are empty —
 // safe for tests and ACP-backed stream-json paths that never set them.
-func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error {
+func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error {
 	msg := NewUserMessageWithMeta(text, images, uuid, priority)
 	// R20260606-PERF-2 (#1826): encode through a pooled json.Encoder +
 	// bytes.Buffer instead of json.Marshal, dropping the per-send encodeState

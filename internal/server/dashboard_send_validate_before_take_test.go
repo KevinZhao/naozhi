@@ -35,7 +35,7 @@ func TestHandleSend_ValidatesBeforeTakingAttachments(t *testing.T) {
 	owner := bearerOwner(token)
 
 	store := newUploadStore()
-	fid, err := store.Put(owner, cli.ImageData{
+	fid, err := store.Put(owner, cli.Attachment{
 		Kind:     cli.KindImageInline,
 		Data:     []byte("png-bytes"),
 		MimeType: "image/png",

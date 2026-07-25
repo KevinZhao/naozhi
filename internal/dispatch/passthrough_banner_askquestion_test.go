@@ -194,7 +194,7 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 		_ string,
 		_ *session.ManagedSession,
 		_ string,
-		_ []cli.ImageData,
+		_ []cli.Attachment,
 		onEvent cli.EventCallback,
 	) (*cli.SendResult, error) {
 		// Fire AskQuestion via onEvent so askQuestionFired is set before

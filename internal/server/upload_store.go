@@ -55,7 +55,7 @@ const (
 var _ = [1]struct{}{}[20-maxFilesPerSend]
 
 type uploadEntry struct {
-	Image   cli.ImageData
+	Image   cli.Attachment
 	Owner   string
 	Created time.Time
 }
@@ -124,7 +124,7 @@ const unknownOwner = "__unknown__"
 // with a "try again later" prompt) plus a slog.Error so operators can
 // page on the underlying RNG outage rather than discover it via a process
 // crash.
-func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
+func (s *uploadStore) Put(owner string, img cli.Attachment) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		slog.Error("uploadStore Put: crypto/rand unavailable", "err", err)
@@ -168,7 +168,7 @@ func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 // overhead is comfortably absorbed by the per-entry budget. Counting
 // everything would make the caps less predictable without meaningful
 // defence benefit.
-func entrySize(img cli.ImageData) int64 {
+func entrySize(img cli.Attachment) int64 {
 	return int64(len(img.Data))
 }
 
@@ -221,7 +221,7 @@ func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 // Returns nil if not found, expired, or owner does not match — callers
 // receive the same "not found" response regardless of the failure reason
 // to avoid leaking the existence of another user's upload.
-func (s *uploadStore) Take(id, owner string) *cli.ImageData {
+func (s *uploadStore) Take(id, owner string) *cli.Attachment {
 	// Mirror Put's empty-owner fold so Take can match entries stored
 	// under the shared unknownOwner bucket.
 	if owner == "" {
@@ -263,7 +263,7 @@ func (s *uploadStore) Take(id, owner string) *cli.ImageData {
 // TakeAll the invariant is "all-or-nothing", so a partial-expiry burst
 // surfaces as a single error and the caller can prompt the user to
 // re-upload all images in one shot.
-func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, error) {
+func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.Attachment, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -302,7 +302,7 @@ func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, erro
 	}
 
 	// All ids validated — now consume them in the same lock.
-	out := make([]cli.ImageData, len(ids))
+	out := make([]cli.Attachment, len(ids))
 	for i, id := range ids {
 		out[i] = resolved[i].Image
 		s.removeEntryLocked(id, resolved[i])
@@ -317,10 +317,10 @@ func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, erro
 // endpoint, which needs to read the bytes, decide a rotation, and write the
 // corrected bytes back via Replace while the user keeps the file pending.
 //
-// The returned ImageData carries a fresh copy of the Data slice so a caller
+// The returned Attachment carries a fresh copy of the Data slice so a caller
 // mutating it can't corrupt the stored entry under the lock-free window
 // between Peek and Replace.
-func (s *uploadStore) Peek(id, owner string) *cli.ImageData {
+func (s *uploadStore) Peek(id, owner string) *cli.Attachment {
 	if owner == "" {
 		owner = unknownOwner
 	}
@@ -350,7 +350,7 @@ func (s *uploadStore) Peek(id, owner string) *cli.ImageData {
 // modestly, but we never let it push an owner over quota. Returns false on
 // not-found / expired / wrong-owner / would-exceed-cap; the caller then
 // keeps the original (unrotated) bytes, which is the correct fail-safe.
-func (s *uploadStore) Replace(id, owner string, img cli.ImageData) bool {
+func (s *uploadStore) Replace(id, owner string, img cli.Attachment) bool {
 	if owner == "" {
 		owner = unknownOwner
 	}

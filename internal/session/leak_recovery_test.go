@@ -19,7 +19,7 @@ const leakSample = "先跑一下。\n\ncall\n<invoke name=\"Bash\">\n<parameter 
 // newLeakSession builds a bare ManagedSession bound to a TestProcess whose Send
 // is scripted by sendFunc. No run-history store, so finishRun is a no-op and
 // the tests isolate the recovery behaviour.
-func newLeakSession(sendFunc func(context.Context, string, []cli.ImageData, cli.EventCallback) (*cli.SendResult, error)) (*ManagedSession, *TestProcess) {
+func newLeakSession(sendFunc func(context.Context, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error)) (*ManagedSession, *TestProcess) {
 	proc := &TestProcess{AliveVal: true, SendFunc: sendFunc}
 	s := &ManagedSession{key: "feishu:p2p:leak"}
 	s.storeProcess(proc)
@@ -243,7 +243,7 @@ func TestRecover_PromptStringExact(t *testing.T) {
 func TestSend_LeakRecovery_EndToEnd(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	var turn int
-	s, _ := newLeakSession(func(_ context.Context, text string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+	s, _ := newLeakSession(func(_ context.Context, text string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 		turn++
 		if turn == 1 {
 			return &cli.SendResult{Text: leakSample, CostUSD: 0.10}, nil

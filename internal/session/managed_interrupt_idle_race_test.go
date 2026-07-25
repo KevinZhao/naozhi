@@ -45,7 +45,7 @@ func TestInterrupt_IdleBranch_CancelsInFlightSend(t *testing.T) {
 	// Gate the Send() call so we can assert ordering: Send must store
 	// sendCancel BEFORE Interrupt runs. The SendFunc blocks on ctx.Done().
 	sendEntered := make(chan struct{})
-	proc.SendFunc = func(ctx context.Context, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+	proc.SendFunc = func(ctx context.Context, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 		close(sendEntered)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -107,7 +107,7 @@ func TestInterrupt_ConcurrentSendRace(t *testing.T) {
 	// original bug described: Send() enters, Store(sendCancel); Interrupt
 	// observes proc != nil && !proc.Alive() and must still cancel.
 	proc.AliveVal = false
-	proc.SendFunc = func(ctx context.Context, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+	proc.SendFunc = func(ctx context.Context, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
