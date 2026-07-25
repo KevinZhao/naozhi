@@ -1390,6 +1390,13 @@ func (d *Dispatcher) sendAndReply(
 		// for any pending banner Reply to land, then collapse it into the
 		// same merge hint the follower surfaces on the user's message.
 		tracker.waitReady(ctx)
+		// #2338: mark the turn finalized before the banner edit so a late
+		// editLoop redraw (a residual buffered editCh signal firing after this
+		// EditMessage but before the deferred stop()) skips the repaint instead
+		// of overwriting the merge hint with the stale "💭思考中…" banner. This
+		// is the same guard the success path applies at #2291; this early-return
+		// follower path was the one delivery path left without it.
+		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
 				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
