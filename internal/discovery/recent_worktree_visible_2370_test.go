@@ -348,6 +348,47 @@ func TestClaudeProjectSlug_LiveCLIParity(t *testing.T) {
 	}
 }
 
+// TestClaudeProjectSlug_NonASCIIUTF16Parity pins the substitution unit as one
+// UTF-16 code unit, not one byte. Both fixtures were captured by actually
+// running claude CLI 2.1.219 in the given directory and reading back the
+// created ~/.claude/projects/ entry:
+//
+//	/tmp/slugtest2/中文目录  ->  -tmp-slugtest2-----     (1 sep + 4 ideographs)
+//	/tmp/slugtest3/😀x       ->  -tmp-slugtest3---x      (1 sep + surrogate pair)
+//
+// A per-byte walk would emit 3 dashes per ideograph and 4 for the emoji,
+// yielding a directory name that does not exist on disk — so history lookups
+// for any non-ASCII workspace would silently miss.
+func TestClaudeProjectSlug_NonASCIIUTF16Parity(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/tmp/slugtest2/中文目录", "-tmp-slugtest2-----"},
+		{"/tmp/slugtest3/😀x", "-tmp-slugtest3---x"},
+		// Mixed: alnum survives, everything else collapses per code unit —
+		// 2 separators + 3 ideographs = 5 dashes between "a" and "b".
+		{"/a/日本語/b", "-a-----b"},
+		// An emoji is one code POINT but two code UNITS, so the same shape
+		// with a single emoji yields 4 dashes, not 3.
+		{"/a/😀/b", "-a----b"},
+	}
+	for _, tc := range cases {
+		if got := ClaudeProjectSlug(tc.in); got != tc.want {
+			t.Errorf("ClaudeProjectSlug(%q) = %q (len %d), want %q (len %d)",
+				tc.in, got, len(got), tc.want, len(tc.want))
+		}
+	}
+}
+
+// TestSubstituteNonAlnum_InvalidUTF8 guards totality: an arbitrary byte
+// sequence (a path from a filesystem with a different encoding) must still
+// produce a usable slug rather than panicking or dropping bytes. Each invalid
+// byte decodes to RuneError with size 1 and contributes exactly one '-'.
+func TestSubstituteNonAlnum_InvalidUTF8(t *testing.T) {
+	got := substituteNonAlnum("a\xff\xfeb")
+	if want := "a--b"; got != want {
+		t.Errorf("substituteNonAlnum(invalid utf-8) = %q, want %q", got, want)
+	}
+}
+
 // TestClaudeSlugHash_MatchesJS pins claudeSlugHash against values computed
 // with the CLI's own expression, so a future refactor cannot silently drift
 // from the JS semantics (int32 wraparound, base36, Math.abs):

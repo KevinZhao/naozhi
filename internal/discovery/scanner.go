@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sync/singleflight"
 
@@ -614,9 +615,10 @@ func processAlive(pid int) bool {
 
 // claudeSlugMaxLen mirrors the Claude CLI's own length cap on an encoded
 // project directory name. Beyond it the CLI truncates to exactly this many
-// bytes and appends "-" + a base36 hash of the *original* (pre-substitution)
-// path, keeping deep paths collision-free while staying inside filesystem
-// NAME_MAX. Verified against the CLI bundle (2.1.219, `x0`/`axt`).
+// characters and appends "-" + a base36 hash of the *original*
+// (pre-substitution) path, keeping deep paths collision-free while staying
+// inside filesystem NAME_MAX. Verified against the CLI bundle (2.1.219,
+// `x0`/`axt`) and end-to-end against a 40-segment CWD.
 const claudeSlugMaxLen = 200
 
 // ClaudeProjectSlug converts a CWD path to the Claude project directory name.
@@ -634,8 +636,12 @@ const claudeSlugMaxLen = 200
 // "…-repo--claude-worktrees-<name>" (the "/." pair collapsing into "--"),
 // which the previous '/'-only substitution mis-encoded as "…-repo-.claude-…"
 // so every O(1) JSONL lookup missed and silently degraded to a full
-// projects/ scan. Non-ASCII bytes are likewise mapped to '-' per character,
-// matching the CLI's per-UTF-16-code-unit replacement for the BMP.
+// projects/ scan. Non-ASCII input is substituted per UTF-16 code unit, so a
+// CJK ideograph becomes one '-' and an emoji (surrogate pair) becomes two —
+// see substituteNonAlnum for the observed CLI behaviour this matches.
+//
+// The length cap is applied to the substituted form, which is pure ASCII, so
+// its byte length already equals the UTF-16 length the CLI measures.
 //
 // R241-SEC-4 (#465): control bytes (< 0x20) in cwd are stripped before the
 // substitution. Hand-edited persisted state (cron_jobs.json,
@@ -659,13 +665,19 @@ func ClaudeProjectSlug(cwd string) string {
 	return slug[:claudeSlugMaxLen] + "-" + claudeSlugHash(cwd)
 }
 
-// substituteNonAlnum replaces every byte outside [A-Za-z0-9] with '-',
-// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")`. Operating per byte
-// rather than per rune is deliberate: the CLI substitutes per UTF-16 code
-// unit, so a 3-byte BMP rune becomes 1 '-' there but 3 here. Callers that
-// need byte-exact parity on non-ASCII paths are out of scope — the encoding
-// is lossy either way and no naozhi path depends on it. ASCII (every path on
-// the supported matrix) is exact.
+// substituteNonAlnum replaces everything outside [A-Za-z0-9] with '-',
+// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")`.
+//
+// The unit of replacement is one UTF-16 code unit, because that is what a JS
+// regex iterates: a BMP rune (e.g. a CJK ideograph) yields ONE '-', and a
+// non-BMP rune (emoji, encoded as a surrogate pair) yields TWO. Substituting
+// per byte instead would emit three '-' per CJK character and produce a name
+// that does not exist on disk — verified against claude CLI 2.1.219, where
+// cwd "/tmp/slugtest2/中文目录" creates "-tmp-slugtest2-----" (5 dashes: one
+// separator + one per ideograph), not the 13 a per-byte walk yields.
+//
+// Invalid UTF-8 bytes decode to utf8.RuneError with size 1 and so contribute
+// one '-' each, which keeps the function total on arbitrary byte sequences.
 func substituteNonAlnum(s string) string {
 	// Scan first so a clean all-alnum string (never true for an absolute
 	// path, but cheap to check) skips the copy.
@@ -684,13 +696,27 @@ func substituteNonAlnum(s string) string {
 	// ClaudeProjectSlug runs on every dashboard sidebar fetch and every cron
 	// transcript URL resolution, so a second copy would compound under load.
 	var b strings.Builder
+	// The output is never longer than the input: every ASCII-alnum byte maps
+	// to itself, and any multi-byte rune shrinks to at most two dashes.
 	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if isASCIIAlnum(s[i]) {
-			b.WriteByte(s[i])
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			if isASCIIAlnum(c) {
+				b.WriteByte(c)
+			} else {
+				b.WriteByte('-')
+			}
+			i++
 			continue
 		}
-		b.WriteByte('-')
+		r, size := utf8.DecodeRuneInString(s[i:])
+		// One dash per UTF-16 code unit: non-BMP runes are a surrogate pair.
+		if r > 0xFFFF {
+			b.WriteString("--")
+		} else {
+			b.WriteByte('-')
+		}
+		i += size
 	}
 	return b.String()
 }
