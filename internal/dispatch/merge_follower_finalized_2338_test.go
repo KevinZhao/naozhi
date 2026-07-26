@@ -25,6 +25,30 @@ import (
 
 const mergeHintText = "已合并到上一条回复。"
 
+// waitForEdit blocks until fp has recorded at least one edit to msgID, so a
+// test can synchronise on editLoop's asynchronous repaint instead of sleeping.
+// Fails the test rather than hanging if the repaint never arrives.
+func waitForEdit(t *testing.T, fp *fakePlatform, msgID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fp.mu.Lock()
+		seen := false
+		for _, e := range fp.edits {
+			if e.msgID == msgID {
+				seen = true
+				break
+			}
+		}
+		fp.mu.Unlock()
+		if seen {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for an edit to %q", msgID)
+}
+
 // residualEditPlatform intercepts EditMessage so the test can inject a residual
 // interim event at the exact moment dispatch.go collapses the follower banner
 // into the merge hint — i.e. inside the #2338 race window, after the hint edit
@@ -216,36 +240,66 @@ func TestMergeFollower_FinalizedBlocksResidualRepaint(t *testing.T) {
 	})
 
 	tracker.waitReady(ctx)
-	tracker.markFinalized()
 	msgID := tracker.getThinkingMsgID()
 	if msgID == "" {
 		t.Fatal("#2338 setup: interim event did not post a banner (no thinkingMsgID)")
 	}
+
+	// waitReady only guarantees the banner was POSTED (msgIDReady closed); the
+	// status repaint editLoop performs for that first interim event may still
+	// be in flight. That repaint is legitimate — it precedes finalize — but it
+	// lands in fp.edits, and the original assertion scanned ALL edits, so a
+	// slow scheduler let it arrive after markFinalized and be misread as a
+	// residual repaint (~10% on Linux, worse on the macOS runners).
+	//
+	// Wait for it here so the pre-finalize state is settled, then take a
+	// baseline index below and assert only over edits recorded after it.
+	// Sleeping instead would reintroduce the same race.
+	waitForEdit(t, fp, msgID)
+
+	tracker.markFinalized()
+
+	// Baseline: everything already recorded is pre-finalize and out of scope.
+	// Keep the slice intact (rather than nil-ing it) so the failure message can
+	// still show the full edit history for diagnosis.
+	fp.mu.Lock()
+	baseline := len(fp.edits)
+	fp.mu.Unlock()
+
 	if err := fp.EditMessage(ctx, msgID, mergeHintText); err != nil {
 		t.Fatalf("edit banner: %v", err)
 	}
+
+	// editLoop throttles for 1s after every repaint, so the residual signal
+	// must be injected once that window has elapsed — otherwise editLoop is
+	// still parked in rateTimer and would not consume the signal at all,
+	// making the test pass whether or not the finalized guard exists (it did
+	// exactly that with the original 120ms sleep).
+	time.Sleep(1100 * time.Millisecond)
 
 	// A residual buffered editCh signal fires after the merge-hint edit but
 	// before the deferred stop() — exactly the #2338 race window.
 	select {
 	case tracker.editCh <- struct{}{}:
 	default:
+		t.Fatal("#2338 setup: editCh already full; residual signal not injected")
 	}
 
 	// Give editLoop time to wake on the residual signal and (correctly) skip.
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	tracker.stop()
 
 	fp.mu.Lock()
-	edits := append([]fakeEdit(nil), fp.edits...)
+	all := append([]fakeEdit(nil), fp.edits...)
 	fp.mu.Unlock()
 
-	if len(edits) == 0 {
-		t.Fatal("#2338: expected at least the merge-hint edit; got none")
+	if len(all) <= baseline {
+		t.Fatalf("#2338: expected the merge-hint edit after finalize; edits=%+v", all)
 	}
-	for _, e := range edits {
+	// Only post-finalize edits are in scope — see the baseline comment above.
+	for _, e := range all[baseline:] {
 		if e.text != mergeHintText {
-			t.Errorf("#2338: stray non-merge-hint edit %q after finalize; edits=%+v", e.text, edits)
+			t.Errorf("#2338: stray non-merge-hint edit %q after finalize; edits=%+v", e.text, all)
 		}
 	}
 }
