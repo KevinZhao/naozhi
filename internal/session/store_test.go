@@ -505,3 +505,46 @@ func TestWorkspaceOverrides_SaveLoadClear(t *testing.T) {
 		t.Fatalf("saveWorkspaceOverrides(nil) on absent file: %v", err)
 	}
 }
+
+// TestWorkspaceOverrides_ClearRemoveFailurePropagates is the regression guard
+// for #2337: when clearing the last override and os.Remove fails with a
+// non-ENOENT error (here EACCES, forced via a read-only parent directory), the
+// empty-map branch must PROPAGATE the error rather than swallowing it (return
+// nil). Returning nil makes the caller clear its dirty flag and never retry,
+// leaving the stale file on disk to resurrect the cleared override on the next
+// restart via loadWorkspaceOverrides.
+func TestWorkspaceOverrides_ClearRemoveFailurePropagates(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root bypasses directory write permissions")
+	}
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	ovPath := workspaceOverridesPath(storePath)
+
+	// Seed a real overrides file so the clear has something to remove.
+	if err := saveWorkspaceOverrides(storePath, map[string]string{
+		"feishu:direct:alice:general": "/home/alice/proj",
+	}); err != nil {
+		t.Fatalf("seed saveWorkspaceOverrides: %v", err)
+	}
+
+	// Make the parent directory read-only so os.Remove(ovPath) fails with
+	// EACCES (a non-ENOENT error). Restore perms in cleanup so t.TempDir can
+	// be removed.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := saveWorkspaceOverrides(storePath, map[string]string{})
+	if err == nil {
+		t.Fatalf("saveWorkspaceOverrides(empty) swallowed a non-ENOENT remove failure; want error so caller keeps dirty and retries")
+	}
+
+	// The stale file must still be on disk — confirming the override would
+	// resurrect on restart if the caller had treated the save as successful.
+	os.Chmod(dir, 0o700) // re-grant so Stat can traverse
+	if _, statErr := os.Stat(ovPath); statErr != nil {
+		t.Fatalf("overrides file unexpectedly gone (stat err = %v); test did not exercise the failure path", statErr)
+	}
+}

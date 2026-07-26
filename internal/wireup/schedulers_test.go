@@ -132,3 +132,35 @@ func TestWireSchedulers_NilRouter(t *testing.T) {
 		t.Errorf("error message is empty, want %q substring", want)
 	}
 }
+
+// TestWireSchedulers_RecordsSchedulersBootStep pins #2314: WireSchedulers
+// must record the "schedulers" boot step so the bootRegistry audit surface
+// reflects the cron+sysession wireup. The package godoc and boot.go both
+// document "schedulers" as one of the three inspectable boot steps, but the
+// helper historically never recorded it — a dropped cron wireup would then
+// slip past BootSteps()/the startup audit silently. A fresh registry is
+// swapped in (and restored) so the assertion does not depend on what other
+// tests recorded into the global registry.
+func TestWireSchedulers_RecordsSchedulersBootStep(t *testing.T) {
+	orig := getBootRegistry()
+	t.Cleanup(func() { setBootRegistry(orig) })
+	setBootRegistry(NewRegistry[BootStep]("boot-step-test-schedulers"))
+
+	deps := baseDeps(t)
+	out, err := WireSchedulers(deps)
+	if err != nil {
+		t.Fatalf("WireSchedulers returned terminal error: %v", err)
+	}
+	t.Cleanup(func() {
+		if out.Cron != nil {
+			out.Cron.Stop()
+		}
+		if out.Sysession != nil {
+			out.Sysession.Stop(context.Background())
+		}
+	})
+
+	if _, ok := getBootRegistry().Get("schedulers"); !ok {
+		t.Errorf("WireSchedulers did not record the schedulers boot step; got %v", BootSteps())
+	}
+}
