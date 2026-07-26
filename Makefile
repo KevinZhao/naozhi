@@ -20,6 +20,13 @@ vet:
 lint:
 	staticcheck ./...
 
+# CI entry point for staticcheck. Pinned version so a new staticcheck release
+# cannot turn a green PR red without a deliberate bump here. Wired into
+# .github/workflows/ci.yml as a warn-mode job (continue-on-error) while the
+# SA1019 ImageData-deprecation backlog is worked down — see .golangci.yml.
+lint-staticcheck:
+	go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
 # CVE scan against the Go vulnerability DB. Install:
 # go install golang.org/x/vuln/cmd/govulncheck@latest
 vuln:
