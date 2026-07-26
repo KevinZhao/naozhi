@@ -38,7 +38,7 @@ type EventCallback func(ev Event)
 // because the CLI echoes a replay event, but readLoop filters replays out
 // of EventLog (see process.go ~755), so without an explicit append the
 // user's typed message disappears on the next session re-subscribe.
-func buildUserEntry(text string, images []ImageData) EventEntry {
+func buildUserEntry(text string, images []Attachment) EventEntry {
 	entry := EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
@@ -141,7 +141,7 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 // Subscribers that need the full event stream should attach via EventLog.Subscribe
 // instead — Send writes every event to the log under the same lock that this
 // callback fires from, so no events are lost.
-func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
+func (p *Process) Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
 	if p.state == StateRunning {
 		p.mu.Unlock()

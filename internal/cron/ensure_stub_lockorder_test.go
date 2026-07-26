@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestEnsureStub_DoesNotHoldOrRequireWriteLock 给 R246-GO-8 (#692) 留的契约测试。
@@ -41,7 +42,7 @@ func TestEnsureStub_DoesNotHoldOrRequireWriteLock(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	key := session.CronKey(job.ID)
+	key := sessionkey.CronKey(job.ID)
 
 	// 步骤 1：持 RLock 时 EnsureStub 必须能并发完成。
 	done := make(chan bool, 1)
@@ -112,7 +113,7 @@ func TestEnsureStub_ConcurrentReadersDoNotSerialise(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	key := session.CronKey(job.ID)
+	key := sessionkey.CronKey(job.ID)
 
 	const N = 16
 	var wg sync.WaitGroup

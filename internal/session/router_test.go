@@ -85,7 +85,7 @@ func (f *fakeProcess) Kill() {
 	f.mu.Unlock()
 }
 
-func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 	return &cli.SendResult{Text: "fake"}, nil
 }
 
@@ -256,7 +256,7 @@ func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 
 // Passthrough mocks — default to "not supported" so legacy-path tests are
 // unchanged. Passthrough-specific tests inject a real *cli.Process.
-func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
 	return f.Send(ctx, text, images, onEvent)
 }
 func (f *fakeProcess) DiscardPassthroughPending(_ error) {}

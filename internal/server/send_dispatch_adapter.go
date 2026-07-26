@@ -48,7 +48,7 @@ type serverCaps struct{ s *Server }
 // The 1-line forward is intentional — see serverCaps godoc for why we
 // did not use a method-value (`Send: s.sendWithBroadcast`) closure on
 // DispatcherConfig instead. R248-CR-8.
-func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	return c.s.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 

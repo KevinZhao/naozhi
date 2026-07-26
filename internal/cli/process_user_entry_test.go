@@ -19,7 +19,7 @@ func TestBuildUserEntry_PopulatesImagePaths(t *testing.T) {
 		t.Fatalf("png encode: %v", err)
 	}
 	pngBytes := buf.Bytes()
-	imgs := []ImageData{
+	imgs := []Attachment{
 		{
 			Data:          pngBytes,
 			MimeType:      "image/png",
@@ -62,7 +62,7 @@ func TestBuildUserEntry_NoPathsWhenUnpersisted(t *testing.T) {
 	if err := png.Encode(&buf, newSolidImage(8, 8, color.RGBA{0, 255, 0, 255})); err != nil {
 		t.Fatalf("png encode: %v", err)
 	}
-	imgs := []ImageData{{Data: buf.Bytes(), MimeType: "image/png"}}
+	imgs := []Attachment{{Data: buf.Bytes(), MimeType: "image/png"}}
 	entry := buildUserEntry("hi", imgs)
 	if len(entry.Images) != 1 {
 		t.Fatalf("Images len=%d want 1", len(entry.Images))
@@ -81,7 +81,7 @@ func TestBuildUserEntry_AlignmentSurvivesDrop(t *testing.T) {
 	if err := png.Encode(&ok, newSolidImage(8, 8, color.RGBA{0, 0, 255, 255})); err != nil {
 		t.Fatalf("png encode: %v", err)
 	}
-	imgs := []ImageData{
+	imgs := []Attachment{
 		{Data: []byte("not-an-image"), MimeType: "image/png",
 			WorkspacePath: ".naozhi/attachments/x/undecodable.png"},
 		{Data: ok.Bytes(), MimeType: "image/png",

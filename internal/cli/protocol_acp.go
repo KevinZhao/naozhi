@@ -413,7 +413,7 @@ type acpPromptParams struct {
 	Prompt    []acpPromptBlock `json:"prompt"`
 }
 
-func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
+func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
 	// sessionID lives on its own atomic.Pointer so this read does not
 	// contend with per-chunk textBuf writes happening on readLoop.
 	// R226-PERF-11.
@@ -529,7 +529,7 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 // WriteUserMessageLocked ignores uuid and priority — ACP has neither concept.
 // Sessions whose protocol has SupportsReplay()==false fall back to Collect
 // mode regardless of queue.mode config (see dispatcher selection logic).
-func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []ImageData, _ string) error {
+func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
 

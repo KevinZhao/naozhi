@@ -41,9 +41,9 @@ func makeTestPNG(t *testing.T) []byte {
 func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
 	pngData := makeTestPNG(t)
 	const N = 16
-	images := make([]ImageData, N)
+	images := make([]Attachment, N)
 	for i := range images {
-		images[i] = ImageData{Data: pngData}
+		images[i] = Attachment{Data: pngData}
 	}
 
 	beforeGo := runtime.NumGoroutine()
@@ -75,9 +75,9 @@ func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
 func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 	pngData := makeTestPNG(t)
 	const N = thumbnailWorkerCap*2 + 1 // cross the cap boundary
-	images := make([]ImageData, N)
+	images := make([]Attachment, N)
 	for i := range images {
-		images[i] = ImageData{
+		images[i] = Attachment{
 			Data:          pngData,
 			WorkspacePath: "/path/" + strconv.Itoa(i),
 		}
@@ -103,7 +103,7 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 // to produce a thumbnail without going through the worker pool.
 func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 	pngData := makeTestPNG(t)
-	entry := buildUserEntry("hello", []ImageData{{Data: pngData}})
+	entry := buildUserEntry("hello", []Attachment{{Data: pngData}})
 	if len(entry.Images) != 1 {
 		t.Fatalf("expected 1 thumbnail, got %d", len(entry.Images))
 	}
@@ -118,9 +118,9 @@ func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 // than catch a regression.
 func TestBuildUserEntry_ExactlyCapImages(t *testing.T) {
 	pngData := makeTestPNG(t)
-	images := make([]ImageData, thumbnailWorkerCap)
+	images := make([]Attachment, thumbnailWorkerCap)
 	for i := range images {
-		images[i] = ImageData{Data: pngData}
+		images[i] = Attachment{Data: pngData}
 	}
 	entry := buildUserEntry("", images)
 	if len(entry.Images) != thumbnailWorkerCap {

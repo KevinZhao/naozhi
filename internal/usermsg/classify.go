@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Code is a stable, package-neutral classification of a send-path error.
@@ -57,7 +58,7 @@ func classify(err error, key string) Code {
 	case errors.Is(err, session.ErrNoCLIWrapper):
 		return CodeNoCLIWrapper
 	case errors.Is(err, session.ErrNoActiveProcess):
-		if session.IsCronKey(key) {
+		if sessionkey.IsCronKey(key) {
 			return CodeCronAsleep
 		}
 		return CodeSessionAsleep

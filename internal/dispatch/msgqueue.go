@@ -13,7 +13,7 @@ import (
 // QueuedMsg holds a single message waiting to be processed.
 type QueuedMsg struct {
 	Text   string
-	Images []cli.ImageData
+	Images []cli.Attachment
 	// MessageID is the platform-native inbound message ID (optional).
 	// Dispatch uses it to add/remove a reaction on the user's original
 	// message as a non-intrusive "queued" acknowledgement. Empty when the

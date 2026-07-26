@@ -17,10 +17,10 @@ func (s *stubProto) Name() string                                 { return s.nam
 func (s *stubProto) Clone() Protocol                              { return s }
 func (s *stubProto) BuildArgs(SpawnOptions) []string              { return nil }
 func (s *stubProto) Init(*JSONRW, string, string) (string, error) { return "", nil }
-func (s *stubProto) WriteMessage(io.Writer, string, []ImageData) error {
+func (s *stubProto) WriteMessage(io.Writer, string, []Attachment) error {
 	return nil
 }
-func (s *stubProto) WriteUserMessageLocked(io.Writer, string, string, []ImageData, string) error {
+func (s *stubProto) WriteUserMessageLocked(io.Writer, string, string, []Attachment, string) error {
 	return nil
 }
 func (s *stubProto) SupportsPriority() bool                  { return s.priority }

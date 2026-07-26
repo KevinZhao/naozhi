@@ -339,7 +339,7 @@ type DispatcherConfig struct {
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
 	// for the consolidated removal trigger (#374).
-	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
@@ -611,7 +611,7 @@ type preparedInbound struct {
 	cleanText string
 	key       string
 	opts      session.AgentOpts
-	images    []cli.ImageData
+	images    []cli.Attachment
 }
 
 // prepareInbound runs the message front-matter common to every dispatch
@@ -753,11 +753,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
 	// Convert platform images to CLI image data
-	var images []cli.ImageData
+	var images []cli.Attachment
 	if len(msg.Images) > 0 {
-		images = make([]cli.ImageData, 0, len(msg.Images))
+		images = make([]cli.Attachment, 0, len(msg.Images))
 		for _, img := range msg.Images {
-			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+			images = append(images, cli.Attachment{Data: img.Data, MimeType: img.MimeType})
 		}
 	}
 
@@ -1132,7 +1132,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 func (d *Dispatcher) goSendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
@@ -1315,7 +1315,7 @@ func (d *Dispatcher) handleSendError(
 func (d *Dispatcher) sendAndReply(
 	ctx context.Context,
 	key, text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
@@ -1390,6 +1390,13 @@ func (d *Dispatcher) sendAndReply(
 		// for any pending banner Reply to land, then collapse it into the
 		// same merge hint the follower surfaces on the user's message.
 		tracker.waitReady(ctx)
+		// #2338: mark the turn finalized before the banner edit so a late
+		// editLoop redraw (a residual buffered editCh signal firing after this
+		// EditMessage but before the deferred stop()) skips the repaint instead
+		// of overwriting the merge hint with the stale "💭思考中…" banner. This
+		// is the same guard the success path applies at #2291; this early-return
+		// follower path was the one delivery path left without it.
+		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
 				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)

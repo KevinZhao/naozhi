@@ -195,7 +195,7 @@ func (p *CodexProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, e
 	return result.Thread.ID, nil
 }
 
-func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
+func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
 	tid := p.loadThreadID()
 	p.mu.Lock()
 	p.textBuf.Reset()
@@ -259,7 +259,7 @@ func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 
 // WriteUserMessageLocked ignores uuid/priority — codex has no replay/priority
 // concept in phase1 (turn/steer is a phase2 optimisation, RFC §3).
-func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []ImageData, _ string) error {
+func (p *CodexProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
 

@@ -87,7 +87,7 @@ type Protocol interface {
 	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
 
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
-	WriteMessage(w io.Writer, text string, images []ImageData) error
+	WriteMessage(w io.Writer, text string, images []Attachment) error
 
 	// WriteUserMessageLocked is the passthrough-aware writer. The caller MUST
 	// already hold the per-process stdin write lock (Process.shimWMu). For
@@ -96,7 +96,7 @@ type Protocol interface {
 	// the sendSlot and write the NDJSON line under a single mutex — without
 	// this, concurrent Send calls can interleave slot-append vs stdin-write
 	// and break FIFO matching (see docs/rfc/passthrough-mode.md §5.2.2).
-	WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error
+	WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
 
 	// SupportsPriority reports whether this protocol forwards a top-level
 	// "priority" field to the backing agent. Callers gate /urgent behavior on
@@ -205,7 +205,7 @@ type ProtocolCore interface {
 	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
 
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
-	WriteMessage(w io.Writer, text string, images []ImageData) error
+	WriteMessage(w io.Writer, text string, images []Attachment) error
 
 	// ReadEvent parses a single NDJSON line from stdout into zero or more
 	// unified Events. The done return is advisory and discarded by all
@@ -232,7 +232,7 @@ type ProtocolPassthroughExt interface {
 	// WriteUserMessageLocked is the passthrough-aware writer (caller holds
 	// the per-process stdin write lock). ACP ignores the extras and
 	// degrades to WriteMessage.
-	WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error
+	WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
 
 	// SupportsPriority reports whether this protocol forwards a top-level
 	// "priority" field to the backing agent.

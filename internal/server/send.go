@@ -35,7 +35,7 @@ func (h *Hub) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	onEvent cli.EventCallback,
 ) (*cli.SendResult, error) {
 	return h.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
@@ -57,7 +57,7 @@ func (h *Hub) sendWithBroadcastPriority(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	onEvent cli.EventCallback,
 	priority string,
 ) (*cli.SendResult, error) {
@@ -121,7 +121,7 @@ func (s *Server) sendWithBroadcast(
 	key string,
 	sess *session.ManagedSession,
 	text string,
-	images []cli.ImageData,
+	images []cli.Attachment,
 	onEvent cli.EventCallback,
 ) (*cli.SendResult, error) {
 	if sess == nil {
@@ -148,7 +148,7 @@ func (s *Server) sendWithBroadcast(
 type sendParams struct {
 	Key       string
 	Text      string
-	Images    []cli.ImageData
+	Images    []cli.Attachment
 	Workspace string
 	ResumeID  string
 	Backend   string // optional backend ID picked by the dashboard ("" = router default)
@@ -440,7 +440,7 @@ func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
 }
 
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
-func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError func(string)) {
+func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError func(string)) {
 	sendStart := time.Now()
 	opts := h.sessionOptsFor(key)
 	sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
@@ -477,7 +477,7 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 //
 // `priority` is forwarded as-is to SendPassthrough: "" for normal messages,
 // "now" for /urgent preemption.
-func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, priority string, onAsyncError func(string)) {
+func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError func(string)) {
 	sendStart := time.Now()
 	opts := h.sessionOptsFor(key)
 	sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)

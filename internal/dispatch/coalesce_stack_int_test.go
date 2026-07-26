@@ -39,7 +39,7 @@ func TestCoalesceMessages_TruncationTail_ZeroAlloc(t *testing.T) {
 		msgs[i] = QueuedMsg{
 			Text:      big,
 			EnqueueAt: time.Date(2026, 6, 3, 12, 0, i, 0, time.UTC),
-			Images:    []cli.ImageData{},
+			Images:    []cli.Attachment{},
 		}
 	}
 

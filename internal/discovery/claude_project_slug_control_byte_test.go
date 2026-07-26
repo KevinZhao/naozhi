@@ -13,9 +13,11 @@ import "testing"
 // Coverage:
 //   - clean input: no allocation, identical encoding to legacy contract
 //   - tab / newline / carriage return: stripped before encoding
-//   - DEL (0x7F): NOT stripped — only bytes < 0x20 are control bytes
-//     under POSIX, and the existing scanner contract treats higher
-//     bytes (including UTF-8 multi-byte sequences) as opaque.
+//   - DEL (0x7F) and space: not *stripped* (only bytes < 0x20 are), but
+//     substituted to "-" like every other non-alphanumeric character.
+//     Verified against claude CLI 2.1.219: cwd "/tmp/slugtest/a b_c.d"
+//     produces the project dir "-tmp-slugtest-a-b-c-d", and a DEL in the
+//     path likewise lands as "-".
 //   - empty: identity
 func TestClaudeProjectSlug_ControlByteFilter(t *testing.T) {
 	cases := []struct {
@@ -30,13 +32,16 @@ func TestClaudeProjectSlug_ControlByteFilter(t *testing.T) {
 		{"carriage return", "/home/user\r/foo", "-home-user-foo"},
 		{"null byte", "/home/u\x00ser/foo", "-home-user-foo"},
 		{"all control", "\x00\x01\x02\x03", ""},
-		// DEL is >= 0x20, so it survives — this matches the contract
-		// "control bytes are < 0x20".
-		{"del survives", "/foo\x7Fbar", "-foo\x7Fbar"},
-		// Trailing/leading whitespace that's NOT a control byte (>=0x20)
-		// survives — Space (0x20) is allowed because it's a legitimate
-		// (though atypical) directory name character.
-		{"space survives", "/foo bar/baz", "-foo bar-baz"},
+		// DEL is >= 0x20 so it is not *stripped*, but like every
+		// non-alphanumeric byte the CLI substitutes it with "-".
+		{"del substituted", "/foo\x7Fbar", "-foo-bar"},
+		// Space is a legitimate directory-name character; it survives the
+		// control-byte strip and is then substituted, not dropped, so the
+		// segment keeps its length (one "-" per space).
+		{"space substituted", "/foo bar/baz", "-foo-bar-baz"},
+		// Dot and underscore are substituted too — this is what makes a
+		// git worktree path encode "/.claude/" as "--claude-" (#2370).
+		{"dot and underscore", "/home/u/.claude/a_b", "-home-u--claude-a-b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,10 +63,10 @@ func TestClaudeProjectSlug_NoAllocOnCleanPath(t *testing.T) {
 	allocs := testing.AllocsPerRun(100, func() {
 		_ = ClaudeProjectSlug(clean)
 	})
-	// One alloc is unavoidable: strings.ReplaceAll always returns a
-	// fresh string when at least one substitution happens (every '/' is
-	// replaced). What we want to verify is that the new control-byte
-	// filter does NOT add a SECOND allocation on the clean path.
+	// One alloc is unavoidable: substituteNonAlnum must build a fresh string
+	// when at least one substitution happens (every '/' is replaced). What we
+	// want to verify is that neither the control-byte filter nor the
+	// length-cap branch adds a SECOND allocation on the clean path.
 	if allocs > 1 {
 		t.Errorf("clean-path ClaudeProjectSlug allocs/run = %.1f, want ≤ 1 (control-byte filter must short-circuit when input is clean)", allocs)
 	}

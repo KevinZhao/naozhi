@@ -123,7 +123,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 			// resolve the tag the same way production does.
 			return replyTagForBackend(backendID)
 		},
-		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)
 		},
 		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {

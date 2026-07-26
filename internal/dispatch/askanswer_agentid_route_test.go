@@ -26,7 +26,7 @@ func newAgentRouteDispatcher(t *testing.T) *Dispatcher {
 		AgentCommands: map[string]string{"review": "code-reviewer"},
 		Guard:         newFakeGuard(),
 		Dedup:         platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 			return &cli.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
@@ -79,7 +79,7 @@ func TestIsKnownAgent_MultipleCommands(t *testing.T) {
 		},
 		Guard: newFakeGuard(),
 		Dedup: platform.NewDedup(100),
-		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+		SendFn: func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.Attachment, _ cli.EventCallback) (*cli.SendResult, error) {
 			return &cli.SendResult{Text: "ok"}, nil
 		},
 		TakeoverFn:            func(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false },
