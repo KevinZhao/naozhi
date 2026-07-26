@@ -531,7 +531,7 @@ func TestProcess_Send_WithImages(t *testing.T) {
 	startServerDrain(srv)
 	p.startReadLoop()
 
-	images := []ImageData{{Data: []byte("fake-png"), MimeType: "image/png"}}
+	images := []Attachment{{Data: []byte("fake-png"), MimeType: "image/png"}}
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.Send(context.Background(), "describe", images, nil)

@@ -134,7 +134,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 // applied clockwise degrees and the rotated JPEG bytes on success; on every
 // failure/no-op path it returns (0, nil) and the original stored bytes stay
 // put.
-func (h *SendHandler) orientImage(parent context.Context, id, owner string, img cli.ImageData) (int, []byte) {
+func (h *SendHandler) orientImage(parent context.Context, id, owner string, img cli.Attachment) (int, []byte) {
 	line, err := cli.BuildOrientMessage(img.Data, img.MimeType)
 	if err != nil {
 		slog.Warn("orient: build message failed", "err", err)
@@ -168,7 +168,7 @@ func (h *SendHandler) orientImage(parent context.Context, id, owner string, img 
 
 	// Re-encode always produces JPEG; reflect that in the stored mime so a
 	// PNG-in/JPEG-out doesn't desync the content type sent to Claude.
-	rotImg := cli.ImageData{Kind: cli.KindImageInline, Data: out, MimeType: "image/jpeg"}
+	rotImg := cli.Attachment{Kind: cli.KindImageInline, Data: out, MimeType: "image/jpeg"}
 	if !h.uploadStore.Replace(id, owner, rotImg) {
 		// The entry expired or was consumed between Peek and Replace, or the
 		// rotated payload would exceed quota. Keep the original (already

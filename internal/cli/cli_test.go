@@ -1514,7 +1514,7 @@ func TestNewUserMessage(t *testing.T) {
 
 func TestNewUserMessage_WithImages(t *testing.T) {
 	t.Parallel()
-	images := []ImageData{
+	images := []Attachment{
 		{Data: []byte("fake-png-data"), MimeType: "image/png"},
 		{Data: []byte("fake-jpeg-data"), MimeType: "image/jpeg"},
 	}
@@ -1584,7 +1584,7 @@ func TestNewUserMessage_WithImages(t *testing.T) {
 
 func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 	t.Parallel()
-	images := []ImageData{{Data: []byte("img"), MimeType: "image/png"}}
+	images := []Attachment{{Data: []byte("img"), MimeType: "image/png"}}
 	msg := NewUserMessageWithMeta("", images, "", "")
 
 	blocks, ok := msg.Message.Content.([]any)
@@ -1733,7 +1733,7 @@ func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
-	images := []ImageData{
+	images := []Attachment{
 		{Data: []byte("png-bytes"), MimeType: "image/png"},
 	}
 	if err := p.WriteMessage(&buf, "what is this?", images); err != nil {
@@ -1769,7 +1769,7 @@ func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
 	p := &ACPProtocol{}
 	p.storeSessionID("sess_img")
 	var buf bytes.Buffer
-	images := []ImageData{
+	images := []Attachment{
 		{Data: []byte("jpeg-bytes"), MimeType: "image/jpeg"},
 	}
 	if err := p.WriteMessage(&buf, "analyze", images); err != nil {

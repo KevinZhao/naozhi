@@ -26,7 +26,7 @@ func newRunsHandler(t *testing.T, n int) *Handlers {
 
 	sess := r.InjectSession(runsTestKey, &sessionpkg.TestProcess{
 		AliveVal: true,
-		SendFunc: func(ctx context.Context, text string, imgs []cli.ImageData, on cli.EventCallback) (*cli.SendResult, error) {
+		SendFunc: func(ctx context.Context, text string, imgs []cli.Attachment, on cli.EventCallback) (*cli.SendResult, error) {
 			return &cli.SendResult{Text: "ok", CostUSD: 0.01}, nil
 		},
 	})

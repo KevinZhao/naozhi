@@ -64,14 +64,14 @@ type ProcessSender interface {
 	// Send delivers a user turn and streams events through onEvent
 	// until the result entry arrives. Single-shot; serialised by
 	// caller-side mutex (sendMu in ManagedSession).
-	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// SendPassthrough is the passthrough-mode Send. Callers must
 	// ensure the underlying protocol reports SupportsReplay()==true;
 	// otherwise this returns an error. Unlike Send, multiple
 	// goroutines may call this concurrently on the same process —
 	// ordering is handled by the CLI's internal commandQueue plus a
 	// naozhi-side sendSlot FIFO.
-	SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
+	SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
 	// SupportsPassthrough reports whether this process's protocol
 	// can operate in passthrough mode (i.e. Protocol.SupportsReplay()).
 	// Dispatch uses this to fall back to legacy Send when the protocol

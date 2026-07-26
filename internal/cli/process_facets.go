@@ -48,10 +48,10 @@ type ProcessLifecycle interface {
 // rather than the whole struct.
 type ProcessTurnIO interface {
 	// Send writes a user message and collects the resulting turn.
-	Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error)
+	Send(ctx context.Context, text string, images []Attachment, onEvent EventCallback) (*SendResult, error)
 	// SendPassthrough writes a user message in passthrough mode with an
 	// optional top-level priority channel.
-	SendPassthrough(ctx context.Context, text string, images []ImageData, onEvent EventCallback, priority string) (*SendResult, error)
+	SendPassthrough(ctx context.Context, text string, images []Attachment, onEvent EventCallback, priority string) (*SendResult, error)
 	// Interrupt requests cancellation of the active turn (SIGINT path).
 	Interrupt()
 	// InterruptViaControl requests cancellation over the stdin control

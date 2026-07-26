@@ -22,11 +22,11 @@ func (writeMessageFailingProtocol) Init(_ *JSONRW, _, _ string) (string, error) 
 
 var errFakeWriteMessage = errors.New("fake protocol: write rejected")
 
-func (writeMessageFailingProtocol) WriteMessage(_ io.Writer, _ string, _ []ImageData) error {
+func (writeMessageFailingProtocol) WriteMessage(_ io.Writer, _ string, _ []Attachment) error {
 	return errFakeWriteMessage
 }
 
-func (writeMessageFailingProtocol) WriteUserMessageLocked(_ io.Writer, _, _ string, _ []ImageData, _ string) error {
+func (writeMessageFailingProtocol) WriteUserMessageLocked(_ io.Writer, _, _ string, _ []Attachment, _ string) error {
 	return errFakeWriteMessage
 }
 

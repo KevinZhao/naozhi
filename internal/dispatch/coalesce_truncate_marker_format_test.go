@@ -32,7 +32,7 @@ func TestCoalesceMessages_TruncateMarker_FormatLock(t *testing.T) {
 	for i := 0; i < overflow; i++ {
 		msgs = append(msgs, QueuedMsg{
 			Text:      big,
-			Images:    []cli.ImageData{{Data: []byte{byte(i)}, MimeType: "image/png"}},
+			Images:    []cli.Attachment{{Data: []byte{byte(i)}, MimeType: "image/png"}},
 			EnqueueAt: time.Date(2026, 4, 16, 14, 0, i, 0, time.UTC),
 		})
 	}

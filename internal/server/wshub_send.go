@@ -108,7 +108,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// Atomic TakeAll: partial failure leaves the store untouched so the user
 	// can retry with a fresh upload batch rather than silently losing the
 	// earlier images. R37-CONCUR4.
-	var images []cli.ImageData
+	var images []cli.Attachment
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})

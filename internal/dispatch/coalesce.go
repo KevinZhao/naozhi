@@ -47,7 +47,7 @@ const maxCoalescedTextBytes = limits.MaxCoalescedText
 // preserved so attached screenshots are not silently lost.
 //
 // Images from all messages are concatenated in order.
-func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
+func CoalesceMessages(msgs []QueuedMsg) (string, []cli.Attachment) {
 	if len(msgs) == 0 {
 		return "", nil
 	}
@@ -92,7 +92,7 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 	// append-realloc (log₂N growth) didn't justify. The common multi-msg
 	// burst is ≤10 messages; append growth is 1→2→4→8→16 = 5 reallocs
 	// worst case which is negligible on this infrequent path. R61-PERF-5.
-	var allImages []cli.ImageData
+	var allImages []cli.Attachment
 
 	truncated := 0
 	for _, m := range msgs {

@@ -19,7 +19,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 	cases := []struct {
 		name   string
 		text   string
-		images []ImageData
+		images []Attachment
 		// expectPromptBlocks lists the EXACT content blocks the wire frame
 		// must carry, in order. Each block is the JSON that should land
 		// inside the "prompt" array.
@@ -47,7 +47,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 		{
 			name: "single_image_no_text",
 			text: "",
-			images: []ImageData{
+			images: []Attachment{
 				{MimeType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}},
 			},
 			expectPromptBlocks: []string{
@@ -58,7 +58,7 @@ func TestACPProtocol_WriteMessage_TypedParamsByteEqual(t *testing.T) {
 		{
 			name: "single_image_with_text",
 			text: "describe",
-			images: []ImageData{
+			images: []Attachment{
 				{MimeType: "image/jpeg", Data: []byte("AB")},
 			},
 			expectPromptBlocks: []string{

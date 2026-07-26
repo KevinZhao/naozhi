@@ -57,7 +57,7 @@ type TestProcess struct {
 	// LiveVersionVal lets snapshot tests drive proc.LiveVersion() — the
 	// CLI binary version self-reported in system/init. R20260612-live-version.
 	LiveVersionVal string
-	SendFunc       func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	SendFunc       func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -76,7 +76,7 @@ func (p *TestProcess) Kill()                      { p.AliveVal = false; p.StateV
 func (p *TestProcess) Interrupt()                 {}
 func (p *TestProcess) InterruptViaControl() error { return nil }
 
-func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (p *TestProcess) Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	if p.SendFunc != nil {
 		return p.SendFunc(ctx, text, images, onEvent)
 	}
@@ -85,7 +85,7 @@ func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageD
 
 // SendPassthrough mirrors Send for tests that don't care about passthrough
 // semantics. Ignores priority; returns the same mock result as Send.
-func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
 	return p.Send(ctx, text, images, onEvent)
 }
 

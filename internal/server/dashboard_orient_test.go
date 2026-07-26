@@ -83,7 +83,7 @@ func putOwnedImage(t *testing.T, h *SendHandler, data []byte) string {
 	if !ok {
 		t.Fatal("could not derive owner from bearer token")
 	}
-	id, err := h.uploadStore.Put(owner, cli.ImageData{Kind: cli.KindImageInline, Data: data, MimeType: "image/jpeg"})
+	id, err := h.uploadStore.Put(owner, cli.Attachment{Kind: cli.KindImageInline, Data: data, MimeType: "image/jpeg"})
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestHandleOrient_PNGInputBecomesJPEG(t *testing.T) {
 	r := httptest.NewRequest("POST", "/x", nil)
 	r.Header.Set("Authorization", "Bearer "+orientTestToken)
 	owner, _ := uploadOwner(nil, r, nil, false)
-	id, _ := h.uploadStore.Put(owner, cli.ImageData{Kind: cli.KindImageInline, Data: pngBuf.Bytes(), MimeType: "image/png"})
+	id, _ := h.uploadStore.Put(owner, cli.Attachment{Kind: cli.KindImageInline, Data: pngBuf.Bytes(), MimeType: "image/png"})
 
 	w := httptest.NewRecorder()
 	h.handleOrient(w, orientReq(id))
@@ -260,7 +260,7 @@ func TestHandleOrient_OwnerIsolation(t *testing.T) {
 	r := httptest.NewRequest("POST", "/x", nil)
 	r.Header.Set("Authorization", "Bearer alice-token")
 	aliceOwner, _ := uploadOwner(nil, r, nil, false)
-	id, _ := h.uploadStore.Put(aliceOwner, cli.ImageData{Kind: cli.KindImageInline, Data: orientTestJPEG(t, 8, 4), MimeType: "image/jpeg"})
+	id, _ := h.uploadStore.Put(aliceOwner, cli.Attachment{Kind: cli.KindImageInline, Data: orientTestJPEG(t, 8, 4), MimeType: "image/jpeg"})
 
 	w := httptest.NewRecorder()
 	h.handleOrient(w, orientReq(id)) // orientReq uses orientTestToken (bob)
