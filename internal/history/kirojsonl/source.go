@@ -254,10 +254,24 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	// reading from offset 0 would surface only the oldest prompts and the
 	// newest messages would never be parsed. Seek to the tail window and drop
 	// the first (likely partial) line so the cap covers recent bytes.
+	//
+	// Only drop the first line when it is genuinely a half-record straddling
+	// the seek boundary. Probe the byte immediately before the window start:
+	// if it is '\n', the window begins exactly on a record boundary and the
+	// first line is a complete, valid JSONL record — dropping it would lose
+	// the oldest in-window turn (kirojsonl is that turn's only source).
 	skipPartialFirstLine := false
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
-		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
-			skipPartialFirstLine = true
+		off := fi.Size() - maxFileBytes
+		// off > 0 here because Size() > maxFileBytes. Read the boundary byte
+		// at off-1; if it is not a newline the first line is a partial.
+		var b [1]byte
+		atBoundary := false
+		if _, err := f.ReadAt(b[:], off-1); err == nil {
+			atBoundary = b[0] == '\n'
+		}
+		if _, err := f.Seek(off, io.SeekStart); err == nil {
+			skipPartialFirstLine = !atBoundary
 		}
 	}
 	limited := io.LimitReader(f, maxFileBytes)
@@ -425,11 +439,14 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 	// merged.Source bypasses entirely (see internal/history/merged/source.go)
 	// — so on LoadBefore overlap windows the same kiro line would surface
 	// twice at the merge boundary. The Claude JSONL reader does the same via
-	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). kiro
-	// EventEntries only ever populate Time/Type/Summary, so detail is "" to
-	// match the fields actually present.
+	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). Fold the
+	// real detail (not "") into the hash so two turns sharing the same
+	// wall-clock second and same 120-rune summary but differing only in the
+	// detail tail (runes 120..16000) derive distinct UUIDs; otherwise the
+	// second turn collides and MergedSource's UUID-first dedup silently drops
+	// it before the detail-aware contentKey check.
 	return cli.EventEntry{
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
 		Time:    timeMS,
 		Type:    entryType,
 		Summary: summary,
