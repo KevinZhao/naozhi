@@ -97,7 +97,7 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 		_ string,
 		_ *session.ManagedSession,
 		_ string,
-		_ []cli.ImageData,
+		_ []cli.Attachment,
 		cb cli.EventCallback,
 	) (*cli.SendResult, error) {
 		cbMu.Lock()

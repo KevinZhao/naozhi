@@ -231,9 +231,9 @@ func TestUploadStoreBytesReleasedOnTake(t *testing.T) {
 func TestUploadStoreTakeAll_DuplicateIDQuotaDoubleDeduct(t *testing.T) {
 	s := newUploadStore()
 	// alice keeps extra live entries so the ≤0 clamp cannot mask drift.
-	keepA, _ := s.Put("alice", cli.ImageData{Data: []byte("keepA"), MimeType: "image/png"})
-	keepB, _ := s.Put("alice", cli.ImageData{Data: []byte("keepB"), MimeType: "image/png"})
-	dup, _ := s.Put("alice", cli.ImageData{Data: []byte("dup"), MimeType: "image/png"})
+	keepA, _ := s.Put("alice", cli.Attachment{Data: []byte("keepA"), MimeType: "image/png"})
+	keepB, _ := s.Put("alice", cli.Attachment{Data: []byte("keepB"), MimeType: "image/png"})
+	dup, _ := s.Put("alice", cli.Attachment{Data: []byte("dup"), MimeType: "image/png"})
 	if keepA == "" || keepB == "" || dup == "" {
 		t.Fatal("Put returned empty id")
 	}
