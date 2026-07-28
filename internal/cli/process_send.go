@@ -169,6 +169,13 @@ func (p *Process) Send(ctx context.Context, text string, images []Attachment, on
 		return nil, err
 	}
 
+	// Shrink oversized inline images to the vision backend's resize limits
+	// once, before the write, so both the CLI payload and the dashboard
+	// bubble (buildUserEntry) reference the same smaller bytes and every
+	// transcript replay this session reuses them. Best-effort / fail-safe:
+	// undecodable or already-small images pass through unchanged.
+	images = downscaleImagesForVision(images)
+
 	// Record turn start time so we can check EventLog as fallback if eventCh
 	// drops events (non-blocking send when buffer is full).
 	turnStartMS := time.Now().UnixMilli()

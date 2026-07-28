@@ -61,6 +61,12 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		return nil, ErrProcessExited
 	}
 
+	// Shrink oversized inline images to the vision backend's resize limits
+	// once, before the write. Mirrors Send (process_send.go): both the CLI
+	// payload and the dashboard bubble (buildUserEntry below) reference the
+	// same smaller bytes, and every transcript replay reuses them.
+	images = downscaleImagesForVision(images)
+
 	slot := &sendSlot{
 		id:        p.slotIDGen.Add(1),
 		uuid:      newSlotUUID(),
