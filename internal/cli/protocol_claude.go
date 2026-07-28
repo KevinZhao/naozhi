@@ -98,12 +98,26 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		// Safe to always enable: replay events are filtered out of EventLog
 		// (see filterReplayEvent).
 		"--replay-user-messages",
-		// Load the user's ~/.claude/settings.json directly so naozhi-spawned
-		// cc matches command-line cc (single config source, no override copy).
-		// docs/rfc/direct-user-settings.md PR1. Note: sysession Runner keeps
-		// `--setting-sources ""` (it has no entry-auth and AutoTitler could
-		// dead-loop on host hooks — see runner.go).
-		"--setting-sources", "user",
+	}
+	// Settings source. Two paths (RFC naozhi-owned-settings-v3):
+	//   - default (opts.SettingsFile == ""): `--setting-sources user` loads the
+	//     operator's ~/.claude/settings.json directly, so naozhi-spawned cc
+	//     matches command-line cc (single config source, no override copy).
+	//     docs/rfc/direct-user-settings.md PR1. Every existing spawn stays
+	//     bit-identical.
+	//   - naozhi-owned (opts.SettingsFile set): `--setting-sources "" --settings
+	//     <file>` points cc at a naozhi-owned settings file that is deliberately
+	//     isolated from the local one. The path is validated absolute + no
+	//     leading '-' (argv-injection guard, mirrors --debug-file below); a
+	//     value that fails validation falls back to the safe `user` path rather
+	//     than silently spawning with no settings.
+	// Note: sysession Runner keeps its own `--setting-sources ""` (it has no
+	// entry-auth and AutoTitler could dead-loop on host hooks — see runner.go);
+	// this branch does not touch that path.
+	if opts.SettingsFile != "" && filepath.IsAbs(opts.SettingsFile) && !strings.HasPrefix(opts.SettingsFile, "-") {
+		args = append(args, "--setting-sources", "", "--settings", opts.SettingsFile)
+	} else {
+		args = append(args, "--setting-sources", "user")
 	}
 	// R215-SEC-P1-1 / #531: --dangerously-skip-permissions used to be
 	// hard-coded above. It is required by naozhi's `-p` long-lived process

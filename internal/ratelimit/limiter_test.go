@@ -70,16 +70,58 @@ func TestLRUEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+// TestTTLLazyReset drives the lazy-expiry path with an injected clock.
+//
+// It used to use a 10ms TTL plus a real time.Sleep: any scheduling delay
+// longer than 10ms between the first two Allow calls expired the entry, reset
+// its bucket, and made the "second Allow within TTL should block" assertion
+// fail even though the limiter was correct. That was ~flaky on Linux CI and
+// worse on the macOS runners. Stepping a fake clock removes the timing
+// dependency entirely while testing the same three transitions.
 func TestTTLLazyReset(t *testing.T) {
 	t.Parallel()
-	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, TTL: 10 * time.Millisecond})
+	const ttl = time.Minute
+	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, TTL: ttl})
+
+	// Fake clock: only this test's own steps advance it, so "within TTL"
+	// and "past TTL" are exact rather than best-effort.
+	var mu sync.Mutex
+	nowVal := time.Now()
+	l.nowFn = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return nowVal
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		nowVal = nowVal.Add(d)
+		mu.Unlock()
+	}
+
 	if !l.Allow("a") {
 		t.Fatal("initial Allow should pass")
 	}
+	// No time has passed: the entry is fresh and its single burst token spent.
 	if l.Allow("a") {
 		t.Fatal("second Allow within TTL should block")
 	}
-	time.Sleep(20 * time.Millisecond)
+	// TTL is IDLE time, not absolute age: every Allow refreshes lastSeen, so
+	// each step below is measured from the previous call. Walk three ttl/2
+	// steps — total age passes ttl twice over, but the gaps never do, so a
+	// correct limiter stays blocked the whole way. This is what separates
+	// "idle window" from "absolute age": under the latter, a continuously
+	// active key would get a fresh burst every ttl, which is a rate-limit
+	// bypass rather than a cosmetic difference.
+	for i := 0; i < 3; i++ {
+		advance(ttl / 2)
+		if l.Allow("a") {
+			t.Fatalf("Allow still within idle TTL should block (step %d, total age %s)",
+				i+1, time.Duration(i+1)*(ttl/2))
+		}
+	}
+	// Past the TTL: lazy expiry resets the bucket, so a fresh burst is
+	// granted. The comparison is strictly `>`, hence ttl+1 rather than ttl.
+	advance(ttl + 1)
 	if !l.Allow("a") {
 		t.Fatal("Allow after TTL should reset and pass")
 	}

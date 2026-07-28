@@ -213,6 +213,91 @@ func TestClaudeProtocol_BuildArgs_DebugFileAbsolutePathKept(t *testing.T) {
 	}
 }
 
+// settingsArgs extracts the (setting-sources value, settings-file value) pair
+// from a BuildArgs result. Missing --settings yields "" for the second value.
+// Fails the test if --setting-sources is absent (it is always emitted).
+func settingsArgs(t *testing.T, args []string) (source, file string) {
+	t.Helper()
+	sawSource := false
+	for i, a := range args {
+		switch a {
+		case "--setting-sources":
+			if i+1 < len(args) {
+				source = args[i+1]
+				sawSource = true
+			}
+		case "--settings":
+			if i+1 < len(args) {
+				file = args[i+1]
+			}
+		}
+	}
+	if !sawSource {
+		t.Fatalf("BuildArgs emitted no --setting-sources, got %v", args)
+	}
+	return source, file
+}
+
+// TestClaudeProtocol_BuildArgs_DefaultSettingsSource locks the legacy path:
+// an empty SettingsFile keeps `--setting-sources user` and emits NO --settings
+// flag, so naozhi-spawned cc stays bit-identical to command-line cc
+// (docs/rfc/naozhi-owned-settings-v3 §6 backward compat).
+func TestClaudeProtocol_BuildArgs_DefaultSettingsSource(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "opus"}) // SettingsFile zero value
+	source, file := settingsArgs(t, args)
+	if source != "user" {
+		t.Errorf("default: --setting-sources = %q, want \"user\"; args=%v", source, args)
+	}
+	if file != "" {
+		t.Errorf("default: unexpected --settings %q; args=%v", file, args)
+	}
+}
+
+// TestClaudeProtocol_BuildArgs_NaozhiOwnedSettings locks the naozhi-owned path:
+// an absolute SettingsFile flips to `--setting-sources "" --settings <file>`,
+// isolating cc from ~/.claude/settings.json (RFC naozhi-owned-settings-v3 §2).
+func TestClaudeProtocol_BuildArgs_NaozhiOwnedSettings(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	path := "/data/naozhi/naozhi-settings.json"
+	args := p.BuildArgs(SpawnOptions{Model: "opus", SettingsFile: path})
+	source, file := settingsArgs(t, args)
+	if source != "" {
+		t.Errorf("naozhi-owned: --setting-sources = %q, want \"\"; args=%v", source, args)
+	}
+	if file != path {
+		t.Errorf("naozhi-owned: --settings = %q, want %q; args=%v", file, path, args)
+	}
+}
+
+// TestClaudeProtocol_BuildArgs_SettingsFileGuards locks the argv-injection /
+// path-safety guards (mirrors the --debug-file guards): a non-absolute path or
+// one starting with '-' must fall back to the safe `--setting-sources user`
+// path and never emit --settings, rather than spawning cc pointed at a bad or
+// flag-shaped settings path.
+func TestClaudeProtocol_BuildArgs_SettingsFileGuards(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	for _, bad := range []string{
+		"naozhi-settings.json",   // bare filename (relative)
+		"./naozhi-settings.json", // cwd-relative
+		"../x/naozhi.json",       // parent-relative
+		"-rf",                    // leading dash (flag injection)
+		"-/abs/looking",          // leading dash even if slashy
+	} {
+		args := p.BuildArgs(SpawnOptions{Model: "opus", SettingsFile: bad})
+		source, file := settingsArgs(t, args)
+		if source != "user" {
+			t.Errorf("bad SettingsFile %q: --setting-sources = %q, want fallback \"user\"; args=%v", bad, source, args)
+		}
+		if file != "" {
+			t.Errorf("bad SettingsFile %q: must not emit --settings, got %q; args=%v", bad, file, args)
+		}
+	}
+}
+
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}

@@ -71,7 +71,7 @@ R215-R247 dump 区里:
 - 不重写 issue tracker（用 GitHub 原生）
 - 不引入 issue body schema 之外的元数据存储
 - 不改造现有 review skill（只改 dev-workflow + 加 triage skill）
-- 不替代 `docs/cosmetic-backlog.md`（继续作 readability 类草稿）
+- 不替代 `docs/review/cosmetic-backlog.md`（继续作 readability 类草稿）
 - 不删除代码里历史 `Removal tracked in docs/TODO.md R-XXX` 注释（保留作 anchor 历史）
 
 ## 3. Alternatives considered
@@ -127,7 +127,7 @@ PR commit message 只打 `[R247-CR-11]` anchor，TODO.md 由 master 上的定期
 | Bucket | 去向 | 判定 |
 |---|---|---|
 | **A** | `gh issue create` | grep verify 还在 + 非 dup + 真功能影响（含 P3 correctness） |
-| **B** | `docs/cosmetic-backlog.md` append | 零运行时影响（纯 godoc / 命名 / 注释 / file-move） |
+| **B** | `docs/review/cosmetic-backlog.md` append | 零运行时影响（纯 godoc / 命名 / 注释 / file-move） |
 | **C** | raw 文件 `## Discarded` 区 | 已修 / 误报 / 已 dup / 不可行 |
 
 **关键：每条强制 grep verify**。stale review 直接进 C，不浪费 issue tracker。
@@ -142,7 +142,7 @@ append docs/TODO.md (raw, no dedup)  write docs/review/R{N}-raw.md (staging)
    ↓                                   ↓
 fix PR 改 [x] 或 [~]                 triage-findings skill
    ↓                                   ├─ A → gh issue create + label 全套
-PR conflict (TODO.md 是热点)          ├─ B → docs/cosmetic-backlog.md
+PR conflict (TODO.md 是热点)          ├─ B → docs/review/cosmetic-backlog.md
                                       └─ C → raw ## Discarded (audit trail)
                                         ↓
                                       cron-Hourly Fix: gh issue list 选题 → fix → PR Closes #N
@@ -343,7 +343,7 @@ cron 自产 issue (#465-#915) 不在 581 内（那是 cron-Hourly Fix 自循环�
 | PR Merge cron 单 run duration | 2-10 min | > 20 min = 撞 lock 或 CI 慢 |
 | 每周 cron 自产 PR 自动合数 | 5-15 | < 3 = cron 不工作 |
 | `cron_jobs.json` `last_result` `[OK]` | 100% | 任何 `[FAILED]` 立查 |
-| `docs/cosmetic-backlog.md` 行数 | 增 50/月 OK | 增 200/月 = review skill 太松 |
+| `docs/review/cosmetic-backlog.md` 行数 | 增 50/月 OK | 增 200/月 = review skill 太松 |
 
 ### 7.2 Dashboard cron run history
 
@@ -435,6 +435,6 @@ Day 2 (2026-05-26):
 - `.claude/skills/triage-findings/SKILL.md`
 - `.claude/skills/dev-workflow/SKILL.md`
 - `.github/ISSUE_TEMPLATE/finding.yml`
-- `docs/cosmetic-backlog.md`
+- `docs/review/cosmetic-backlog.md`
 - `docs/review/R{248,batch1,batch2,batch3-{A,B,C,D,E,F}}-raw.md` (audit trail)
 - 历史 reference: `docs/TODO_ARCHIVE.md` / `docs/TODO_CHANGELOG.md` / `docs/TODO-changelog.md`（2026-05-30 已删，内容存于 git 历史）

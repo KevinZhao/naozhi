@@ -32,7 +32,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/envpolicy"
+	"github.com/naozhi/naozhi/internal/naozhisettings"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // claudeEnvAllowedPrefixes restricts which env vars from
@@ -281,6 +284,76 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// resolveNaozhiSettingsFile implements the opt-in gate for the naozhi-owned
+// isolated Claude settings file (RFC naozhi-owned-settings-v3). It returns the
+// absolute path the router should hand to every ClaudeProtocol spawn via
+// SpawnOptions.SettingsFile, or "" to keep the legacy `--setting-sources user`
+// path.
+//
+//   - Disabled (default) → "" (legacy: cc reads ~/.claude/settings.json).
+//   - Enabled → resolve the path (config override or a default under the data
+//     root), ensure it is bootstrapped ONCE from the local settings (hooks+env
+//     stripped), and return it. A bootstrap failure is logged but non-fatal:
+//     EnsureBootstrapped still writes a usable (possibly empty) file, so naozhi
+//     runs on an isolated baseline rather than falling back to the shared local
+//     file the operator explicitly opted out of.
+func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) string {
+	if !cfg.NaozhiSettings.Enabled {
+		return ""
+	}
+	path := osutil.ExpandHome(cfg.NaozhiSettings.Path)
+	if path == "" {
+		// Default next to the session store (data root), mirroring how the
+		// event log dir is derived. Fall back to the CWD only if storePath is
+		// unset (test harnesses).
+		base := "."
+		if storePath != "" {
+			base = filepath.Dir(storePath)
+		}
+		path = filepath.Join(base, "naozhi-settings.json")
+	}
+	// The path MUST be absolute: BuildArgs silently falls back to
+	// `--setting-sources user` for a non-absolute --settings value, which would
+	// re-read the local file the operator explicitly opted OUT of. If we cannot
+	// make it absolute, refuse to enable rather than misleadingly appear enabled
+	// while actually using local settings (F2).
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			slog.Error("naozhi settings: cannot resolve absolute path; staying on local settings",
+				"path", path, "err", err)
+			return ""
+		}
+		path = abs
+	}
+	localPath := ""
+	if claudeDir != "" {
+		localPath = filepath.Join(claudeDir, "settings.json")
+	}
+	existed, seeded, err := naozhisettings.EnsureBootstrapped(path, localPath)
+	if err != nil {
+		// err may be advisory (file written, e.g. local unreadable) or fatal
+		// (mkdir/write failed, no file). Probe the file: if it is absent we must
+		// NOT hand the router a --settings path to a missing file (cc would read
+		// no settings). Fall back to the safe local path instead.
+		if _, statErr := os.Stat(path); statErr != nil {
+			slog.Error("naozhi settings: could not create isolated file; staying on local settings",
+				"path", path, "err", err)
+			return ""
+		}
+		slog.Warn("naozhi settings: bootstrapped isolated file with a warning",
+			"path", path, "seeded_from_local", seeded, "warn", err)
+		return path
+	}
+	if existed {
+		slog.Info("naozhi settings: using existing isolated settings file", "path", path)
+	} else {
+		slog.Info("naozhi settings: bootstrapped isolated settings file",
+			"path", path, "seeded_from_local", seeded)
+	}
+	return path
 }
 
 // matchesAnyPrefix reports whether s starts with any of the given prefixes.

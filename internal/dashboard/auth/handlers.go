@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -126,7 +125,7 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 	// of replaying a fixed value. Callers that supply a gen (production seeds
 	// one from server.go) keep their explicit value.
 	if cookieGen == "" {
-		cookieGen = cryptoutil.RandomCookieGen()
+		cookieGen = RandomCookieGen()
 	}
 	return &Handlers{
 		DashboardToken:    dashboardToken,
