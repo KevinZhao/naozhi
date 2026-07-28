@@ -105,12 +105,19 @@ func TestTTLLazyReset(t *testing.T) {
 	if l.Allow("a") {
 		t.Fatal("second Allow within TTL should block")
 	}
-	// Still inside the TTL window — must stay blocked, no lazy reset yet.
-	// Note every Allow refreshes lastSeen, so each step below is measured
-	// from the previous call, not from the start.
-	advance(ttl / 2)
-	if l.Allow("a") {
-		t.Fatal("Allow still within TTL should block")
+	// TTL is IDLE time, not absolute age: every Allow refreshes lastSeen, so
+	// each step below is measured from the previous call. Walk three ttl/2
+	// steps — total age passes ttl twice over, but the gaps never do, so a
+	// correct limiter stays blocked the whole way. This is what separates
+	// "idle window" from "absolute age": under the latter, a continuously
+	// active key would get a fresh burst every ttl, which is a rate-limit
+	// bypass rather than a cosmetic difference.
+	for i := 0; i < 3; i++ {
+		advance(ttl / 2)
+		if l.Allow("a") {
+			t.Fatalf("Allow still within idle TTL should block (step %d, total age %s)",
+				i+1, time.Duration(i+1)*(ttl/2))
+		}
 	}
 	// Past the TTL: lazy expiry resets the bucket, so a fresh burst is
 	// granted. The comparison is strictly `>`, hence ttl+1 rather than ttl.
