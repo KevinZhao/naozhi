@@ -66,6 +66,15 @@ type Config struct {
 	// ~/.claude/settings.json need not carry auth/upstream env. Must name a key
 	// present in AccessProfiles (validated at load). RFC project-access-profile.
 	DefaultAccessProfile string `yaml:"default_access_profile,omitempty"`
+	// NaozhiSettings configures naozhi's own isolated Claude settings file (RFC
+	// naozhi-owned-settings-v3). Opt-in: when disabled (the default), naozhi
+	// keeps loading the operator's ~/.claude/settings.json via
+	// `--setting-sources user`, bit-identical to today. When enabled, naozhi
+	// spawns cc against a settings file it owns (seeded once from the local
+	// file, then decoupled) so it can be configured differently and survive a
+	// broken local file.
+	NaozhiSettings NaozhiSettingsConfig `yaml:"naozhi_settings,omitempty"`
+
 	// Nodes and Workspaces are two accepted YAML spellings for the same
 	// concept — the set of remote naozhi instances this node polls. Nodes is
 	// the legacy key; Workspaces is the preferred name. Consumers read from
@@ -233,6 +242,18 @@ type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	DashboardToken string `yaml:"dashboard_token,omitempty"`
 	TrustedProxy   bool   `yaml:"trusted_proxy,omitempty"` // trust X-Forwarded-For for client IP (enable behind ALB/CloudFront)
+}
+
+// NaozhiSettingsConfig configures the naozhi-owned isolated Claude settings
+// file (RFC naozhi-owned-settings-v3). Zero value = disabled = legacy
+// `--setting-sources user` behaviour.
+type NaozhiSettingsConfig struct {
+	// Enabled turns on the naozhi-owned settings file. Default false keeps the
+	// legacy shared-with-local behaviour so existing deployments are unaffected.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Path overrides where the naozhi-owned settings file lives. Empty resolves
+	// to a default under the data root (see cmd wiring). Expanded via ExpandHome.
+	Path string `yaml:"path,omitempty"`
 }
 
 type CLIConfig struct {

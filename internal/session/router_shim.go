@@ -282,6 +282,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			currentArgs = recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
 				Model:     driftModel,
 				ExtraArgs: driftArgs,
+				// Must mirror the real spawn (lifecycle) so a session started
+				// with `--settings <naozhi file>` is not misread as arg-drift
+				// (which would trigger an unnecessary restart). RFC
+				// naozhi-owned-settings-v3.
+				SettingsFile: r.naozhiSettingsFile,
 			})
 			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
 		}

@@ -453,6 +453,14 @@ type Router struct {
 	// 读写: core (init only — immutable after NewRouter), lifecycle (spawn read)
 	cliDebugDir string
 
+	// naozhiSettingsFile mirrors RouterConfig.NaozhiSettingsFile: the absolute
+	// path to the naozhi-owned Claude settings file, or "" for the legacy
+	// `--setting-sources user` path. Immutable after NewRouter; read at spawn
+	// time and by the router_shim arg-drift check (which must pass the SAME
+	// value so a session started with --settings is not seen as drifted).
+	// 读写: core (init only), lifecycle (spawn read), router_shim (drift read)
+	naozhiSettingsFile string
+
 	// attachmentTracker is the refcount tracker that bridges
 	// event-log persist events to .meta sidecar updates. nil when
 	// eventLogDir is unset (refcount tracking has no source of
@@ -736,6 +744,13 @@ type RouterConfig struct {
 	NoOutputTimeout      time.Duration
 	TotalTimeout         time.Duration
 	ClaudeDir            string
+	// NaozhiSettingsFile, when non-empty, is the absolute path to the
+	// naozhi-owned Claude settings file (RFC naozhi-owned-settings-v3). Set by
+	// cmd wiring only when the operator opts into isolated settings; every
+	// ClaudeProtocol spawn then runs `--setting-sources "" --settings <file>`
+	// instead of the legacy `--setting-sources user`. Empty keeps the legacy
+	// path (bit-identical to today). ACP backends ignore it.
+	NaozhiSettingsFile string
 	// KiroSessionsDir is the kiro CLI's session-state root, typically
 	// ~/.kiro/sessions/cli. Empty disables kiro history fallback; non-
 	// empty enables the kirojsonl factory (registered via blank import
@@ -955,6 +970,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// + hardens the directory; on any failure it logs and returns "" so a
 	// debug-dir problem never blocks session spawning.
 	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
+	r.naozhiSettingsFile = cfg.NaozhiSettingsFile
 	r.shutdownCond = sync.NewCond(&r.mu)
 	// historyCtx is cancelled by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.

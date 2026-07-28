@@ -36,6 +36,7 @@
 | [message-queue.md](message-queue.md) | 设计提案（未实现） | 2026-04-14 | 替代 sessionGuard 丢消息的 per-session 消息队列策略 |
 | [multi-backend.md](multi-backend.md) | 设计提案 v2（基于实测修订） | 2026-05-18 | Claude + Kiro 多 backend 切换/并存：backend.Profile 抽象、kirojsonl 历史、ACP cancel notification、reverse cap 路由、per-session ReplyTag、Dashboard §8 26 项 UI 差异化规约 |
 | [multi-backend-validation.md](multi-backend-validation.md) | Phase 0 实测报告 | 2026-05-18 | V1-V12 验证点的脚本、原始输出与 2 个真 bug 复现（multi-backend.md 的支撑材料） |
+| [naozhi-owned-settings-v3.md](naozhi-owned-settings-v3.md) | **PR-1+PR-2 已交付**（opt-in 默认关闭）；PR-3/PR-4 未开始 | 2026-07-11 | naozhi 拥有一份与本地 ~/.claude/settings.json 彻底隔离的 settings：`--setting-sources "" --settings <file>` 双路径 + 一次性 bootstrap（剥 hooks/env）+ config 开关。反转 direct-user-settings.md 的共享决策，使 naozhi 可配成与本地不同档位且本地配错不波及。thinking 旋钮与 dashboard UI 待 PR-3/PR-4 |
 | [passthrough-mode.md](passthrough-mode.md) | v2.2 设计文档 | 2026-05-09 | 直通 CC CLI 原生 command queue，不做合并/节流 |
 | [passthrough-mode-cc-tui-analysis.md](passthrough-mode-cc-tui-analysis.md) | 分析报告 | 2026-05-09 | CC TUI mid-turn 机制的源码级分析，交叉验证实测数据 |
 | [passthrough-mode-validation.md](passthrough-mode-validation.md) | Phase 0 实测报告 | 2026-05-09 | V1-V9 验证点的脚本与原始日志汇总 |

@@ -203,6 +203,13 @@ func main() {
 	// then runs on the global settings.json baseline (legacy behaviour).
 	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
 
+	// naozhi-owned isolated Claude settings (RFC naozhi-owned-settings-v3).
+	// Opt-in: when enabled, seed a settings file naozhi owns (once, from the
+	// local ~/.claude/settings.json with hooks+env stripped) and point every
+	// ClaudeProtocol spawn at it. Disabled (default) leaves naozhiSettingsFile
+	// "" so the router keeps the legacy `--setting-sources user` path.
+	naozhiSettingsFile := resolveNaozhiSettingsFile(cfg, storePath, claudeDir)
+
 	// (auto-workspace-chain policy removed — RFC
 	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
 	// now carried by the project-stable session key; the old
@@ -220,6 +227,7 @@ func main() {
 		BackendExtraArgs:     backendExtraArgs,
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
+		NaozhiSettingsFile:   naozhiSettingsFile,
 		Workspace:            workspace,
 		StorePath:            storePath,
 		NoOutputTimeout:      noOutputTimeout,

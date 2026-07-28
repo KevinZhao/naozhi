@@ -63,6 +63,20 @@ type SpawnOptions struct {
 	// keys. Protocol-agnostic: it selects the auth/upstream chain the CLI
 	// subprocess talks to, independent of which backend wrapper is used.
 	EnvOverlay map[string]string
+
+	// SettingsFile, when non-empty, points the Claude CLI at a naozhi-owned
+	// settings file instead of the operator's ~/.claude/settings.json (RFC
+	// naozhi-owned-settings-v3). Empty (the zero value) keeps the legacy
+	// `--setting-sources user` path, so naozhi-spawned cc reads the same
+	// settings as command-line cc and every existing spawn stays
+	// bit-identical. Non-empty switches BuildArgs to
+	// `--setting-sources "" --settings <file>`, giving naozhi a config that is
+	// deliberately isolated from the local one (e.g. a deeper thinking budget
+	// than the operator's interactive claude). Only ClaudeProtocol consumes
+	// this; ACP backends ignore it. The path must be absolute (BuildArgs drops
+	// a non-absolute / leading-dash value as an argv-injection guard, mirroring
+	// --debug-file).
+	SettingsFile string
 }
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
