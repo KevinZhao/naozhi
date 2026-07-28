@@ -57,9 +57,23 @@ const (
 type Limiter struct {
 	cfg Config
 
+	// nowFn is injected in tests; nil → time.Now. Lets the lazy-TTL tests
+	// step time explicitly instead of sleeping past a short TTL — with a
+	// real clock, any scheduling delay longer than the TTL under test makes
+	// the "still within TTL" assertion flip (the entry expires and its
+	// bucket resets), which was flaky on loaded CI runners.
+	nowFn func() time.Time
+
 	mu      sync.Mutex
 	entries map[string]*list.Element
 	lru     *list.List // front = most recently used, back = least
+}
+
+func (l *Limiter) now() time.Time {
+	if l.nowFn != nil {
+		return l.nowFn()
+	}
+	return time.Now()
 }
 
 type entry struct {
@@ -93,7 +107,7 @@ func (l *Limiter) Allow(key string) bool {
 	if key == "" {
 		return false
 	}
-	now := time.Now()
+	now := l.now()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
