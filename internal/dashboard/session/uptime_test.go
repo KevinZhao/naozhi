@@ -44,4 +44,3 @@ func TestUptimeString_RotatesAcrossBuckets(t *testing.T) {
 		t.Errorf("expected uptime to advance after bucket rotation, both = %q", first)
 	}
 }
-

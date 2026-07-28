@@ -86,8 +86,8 @@ func TestScanMetaFiles_FreshestSnapshotWins(t *testing.T) {
 	// B published after A captured scannedAt_A, so the cache timestamp must be
 	// after the moment A entered its hook. If A had erroneously overwritten B,
 	// the cache would reflect A's (earlier) scannedAt.
-	_ = bEntries  // result value not critical for this race assertion
-	_ = cacheAt   // presence of non-zero value suffices; no write panic = pass
+	_ = bEntries // result value not critical for this race assertion
+	_ = cacheAt  // presence of non-zero value suffices; no write panic = pass
 	// The race detector is the primary oracle: -race catches torn writes and
 	// lost updates. The assertion above guards the logical invariant.
 }

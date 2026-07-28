@@ -154,12 +154,12 @@ func TestIsDashboardProjectKey(t *testing.T) {
 	}{
 		{"dashboard:pj:abc123:general", true},
 		{"dashboard:pj:deadbeefdeadbeef:sonnet", true},
-		{"dashboard:pj:x", true},          // minimal non-empty id, no agent segment
-		{"dashboard:pj:", false},          // empty id segment
-		{"dashboard:pj", false},           // missing trailing colon
+		{"dashboard:pj:x", true},                    // minimal non-empty id, no agent segment
+		{"dashboard:pj:", false},                    // empty id segment
+		{"dashboard:pj", false},                     // missing trailing colon
 		{"dashboard:direct:ts-slug:general", false}, // legacy timestamp key
-		{"project:foo:planner", false},    // planner namespace (platform=project)
-		{"dashboard:project:abc:general", false}, // chatType "project" is NOT "pj"
+		{"project:foo:planner", false},              // planner namespace (platform=project)
+		{"dashboard:project:abc:general", false},    // chatType "project" is NOT "pj"
 		{"scratch:abc:general:sonnet", false},
 		{"cron:abc123", false},
 		{"sys:daemon", false},

@@ -32,4 +32,3 @@ func TestProjectHandlers_FilesExistsLimiter_Wired(t *testing.T) {
 			"a nil limiter leaves /api/projects/files/exists unprotected against DoS")
 	}
 }
-

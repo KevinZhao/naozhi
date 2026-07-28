@@ -10,7 +10,7 @@ import (
 // onWriteCapture records every n argument passed to OnWrite so tests can
 // assert batch vs. per-record invocation patterns.
 type onWriteCapture struct {
-	mu   sync.Mutex
+	mu    sync.Mutex
 	calls []int // each element is the n arg from one OnWrite invocation
 }
 
@@ -19,10 +19,10 @@ func (c *onWriteCapture) OnWrite(n int) {
 	c.calls = append(c.calls, n)
 	c.mu.Unlock()
 }
-func (c *onWriteCapture) OnDrop(int)         {}
-func (c *onWriteCapture) OnFsync()           {}
-func (c *onWriteCapture) OnMalformed()       {}
-func (c *onWriteCapture) OnReplayLeak(int)   {}
+func (c *onWriteCapture) OnDrop(int)       {}
+func (c *onWriteCapture) OnFsync()         {}
+func (c *onWriteCapture) OnMalformed()     {}
+func (c *onWriteCapture) OnReplayLeak(int) {}
 
 func (c *onWriteCapture) snapshot() []int {
 	c.mu.Lock()
