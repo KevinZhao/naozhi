@@ -1,7 +1,4 @@
-// Package cryptoutil holds small, dependency-free crypto helpers shared
-// across packages so that a single hardening change propagates everywhere
-// instead of drifting between near-identical copies.
-package cryptoutil
+package auth
 
 import (
 	"crypto/rand"
