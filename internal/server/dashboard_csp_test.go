@@ -502,7 +502,15 @@ var generatedOnclickBundle = []string{
 // regression that pushes the script-src 'unsafe-inline' removal backwards and
 // must be rejected — add a data-action dispatch entry instead. (Pure file
 // splits that move handlers between bundle files leave the total unchanged.)
-const generatedOnclickCap = 86
+//
+// 83 = dashboard.js 42 + cron_view.js 41; every other bundle file is at 0.
+// It was 86 while two comments (dashboard.js, nz_util.js) still spelled out the
+// counted token — the count is textual, so prose inflated it by 2 and made
+// nz_util.js look like it had a handler when it had none. Both were reworded,
+// and TestDashboardCSP_RatchetCountsNoCommentTokens now fails if prose
+// reintroduces one, which would otherwise let this cap drift upward while the
+// real handler surface stood still.
+const generatedOnclickCap = 83
 
 // TestDashboardCSP_GeneratedHandlerSurfaceRatchet pins the JS-generated inline
 // `onclick=` surface across the whole dashboard JS bundle as a downward-only
@@ -519,7 +527,8 @@ const generatedOnclickCap = 86
 // NOTE: the regexp counts every `onclick=` token in the file text, including
 // any that appear in comments. Keep comment prose free of the literal
 // `onclick=` token (write "inline click attributes" instead) so the ratchet
-// tracks real emitted handlers, not documentation.
+// tracks real emitted handlers, not documentation. That rule is enforced by
+// TestDashboardCSP_RatchetCountsNoCommentTokens rather than left to reviewers.
 func TestDashboardCSP_GeneratedHandlerSurfaceRatchet(t *testing.T) {
 	t.Parallel()
 
@@ -549,5 +558,45 @@ func TestDashboardCSP_GeneratedHandlerSurfaceRatchet(t *testing.T) {
 			"(SIDEBAR_PROJECT_ACTIONS / CRON_MENU_ACTIONS) and LOWER the cap in the same "+
 			"change. Goal: drive the count to 0 so script-src 'unsafe-inline' can be dropped.",
 			total, perFile, generatedOnclickCap)
+	}
+}
+
+// TestDashboardCSP_RatchetCountsNoCommentTokens keeps generatedOnclickCap
+// honest. The ratchet above counts the `onclick=` token by TEXT, so a comment
+// that merely talks about inline handlers is counted as if it were one. That is
+// not cosmetic: it inflates the cap, and a file whose real handler surface is
+// already 0 can never be shown to have reached 0 — nz_util.js sat at a phantom
+// 1 for exactly this reason, and dashboard.js at 43 instead of 42.
+//
+// Enforcing it here (rather than in a NOTE asking reviewers to remember) means
+// the failure lands on whoever writes the prose, with the fix in the message.
+// Line-oriented: it flags the token appearing on a `//`-comment line, which is
+// how every occurrence so far has been written.
+func TestDashboardCSP_RatchetCountsNoCommentTokens(t *testing.T) {
+	t.Parallel()
+
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	staticDir := filepath.Join(filepath.Dir(self), "static")
+
+	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
+	lineCommentRe := regexp.MustCompile(`^\s*(//|\*|/\*)`)
+
+	for _, name := range generatedOnclickBundle {
+		body, err := os.ReadFile(filepath.Join(staticDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			if lineCommentRe.MatchString(line) && onclickRe.MatchString(line) {
+				t.Errorf("%s:%d: comment prose contains the literal `onclick=` token, "+
+					"which the generatedOnclickCap ratchet counts as a real inline handler "+
+					"(inflating the cap and hiding genuine progress toward 0). Reword to "+
+					"\"inline click attribute\" or similar:\n\t%s",
+					name, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

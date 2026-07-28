@@ -364,9 +364,10 @@ document.addEventListener('DOMContentLoaded', function () {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
-  // Header/sidebar controls (#922 / #479 / #441): migrated from inline
-  // `onclick=`/`onsubmit=` attributes to addEventListener so the dashboard's
-  // script-src no longer needs `'unsafe-inline'` on account of these handlers.
+  // Header/sidebar controls (#922 / #479 / #441): migrated from inline click /
+  // submit attributes to addEventListener so the dashboard's script-src no
+  // longer needs `'unsafe-inline'` on account of these handlers. (Prose avoids
+  // the literal token the CSP ratchet counts — see generatedOnclickCap.)
   // Each bind is guarded so a missing element is a no-op (defensive parity
   // with the theme/nav binds above). Keeps R236-SEC-02 inline-handler count
   // trending to 0.
