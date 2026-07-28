@@ -53,16 +53,16 @@ const (
 
 // downscaleImagesForVision returns a new slice in which every inline raster
 // image larger than the vision backend's resize thresholds has been shrunk to
-// fit. It is immutable (never mutates the input slice or its ImageData values)
+// fit. It is immutable (never mutates the input slice or its Attachment values)
 // and best-effort: any image that cannot be decoded, is a non-image
 // attachment (file_ref), or fails to re-encode is passed through byte-for-byte.
 // Callers apply this at the CLI write boundary so the shrink happens once and
 // every subsequent transcript replay reuses the smaller bytes.
-func downscaleImagesForVision(images []ImageData) []ImageData {
+func downscaleImagesForVision(images []Attachment) []Attachment {
 	if len(images) == 0 {
 		return images
 	}
-	out := make([]ImageData, len(images))
+	out := make([]Attachment, len(images))
 	copy(out, images)
 	for i := range out {
 		img := out[i]

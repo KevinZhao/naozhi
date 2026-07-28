@@ -120,7 +120,7 @@ func TestDownscaleForVision_PassthroughWhenUndecodable(t *testing.T) {
 
 func TestDownscaleImagesForVision_Immutable(t *testing.T) {
 	src := solidJPEG(t, 1200, 1600)
-	in := []ImageData{
+	in := []Attachment{
 		{Kind: KindImageInline, Data: src, MimeType: "image/jpeg"},
 	}
 	origData := in[0].Data
@@ -128,7 +128,7 @@ func TestDownscaleImagesForVision_Immutable(t *testing.T) {
 
 	// Input slice element must be untouched (immutability contract).
 	if !bytes.Equal(in[0].Data, origData) {
-		t.Fatal("input ImageData.Data was mutated")
+		t.Fatal("input Attachment.Data was mutated")
 	}
 	if len(out) != 1 {
 		t.Fatalf("len(out)=%d, want 1", len(out))
@@ -142,16 +142,31 @@ func TestDownscaleImagesForVision_Immutable(t *testing.T) {
 }
 
 func TestDownscaleImagesForVision_SkipsFileRef(t *testing.T) {
-	in := []ImageData{
-		{Kind: KindFileRef, WorkspacePath: "docs/x.pdf", MimeType: "application/pdf"},
+	// A file_ref carrying oversized raster bytes in Data is the only case that
+	// actually exercises the Kind guard: with nil/empty Data the decode fails
+	// anyway and every attachment takes the same pass-through path, so the
+	// guard could be deleted without the test noticing. Here the bytes WOULD
+	// be downscaled if Kind were ignored, so removing
+	// `img.Kind == KindFileRef` makes this fail.
+	oversized := solidJPEG(t, 1200, 1600)
+	in := []Attachment{
+		{Kind: KindFileRef, WorkspacePath: "docs/x.pdf", MimeType: "application/pdf", Data: oversized},
+		{Kind: KindFileRef, WorkspacePath: "docs/y.pdf", MimeType: "application/pdf"},
 		{Kind: KindImageInline, Data: nil, MimeType: "image/png"}, // empty inline
 	}
 	out := downscaleImagesForVision(in)
-	if out[0].Kind != KindFileRef || out[0].WorkspacePath != "docs/x.pdf" {
-		t.Fatal("file_ref attachment was altered")
+	if !bytes.Equal(out[0].Data, oversized) {
+		t.Errorf("file_ref bytes were downscaled: in=%d out=%d — the Kind guard is not being applied",
+			len(oversized), len(out[0].Data))
 	}
-	if out[1].Data != nil {
-		t.Fatal("empty inline attachment was altered")
+	if out[0].MimeType != "application/pdf" {
+		t.Errorf("file_ref MimeType rewritten to %q", out[0].MimeType)
+	}
+	if out[1].Kind != KindFileRef || out[1].WorkspacePath != "docs/y.pdf" {
+		t.Error("data-less file_ref attachment was altered")
+	}
+	if out[2].Data != nil {
+		t.Error("empty inline attachment was altered")
 	}
 }
 
@@ -189,7 +204,7 @@ func TestDownscaleImagesForVision_Empty(t *testing.T) {
 	if out := downscaleImagesForVision(nil); out != nil {
 		t.Fatal("nil input should return nil")
 	}
-	if out := downscaleImagesForVision([]ImageData{}); len(out) != 0 {
+	if out := downscaleImagesForVision([]Attachment{}); len(out) != 0 {
 		t.Fatal("empty input should return empty")
 	}
 }
