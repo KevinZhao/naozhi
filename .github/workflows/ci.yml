@@ -86,23 +86,23 @@ jobs:
       - name: Run check-router-fields (fail mode)
         run: make lint-router-fail
 
-  # staticcheck (make lint-staticcheck). .golangci.yml has carried project lint
-  # rules since 2026-05-26 with a "not yet wired into CI" note; this is that
-  # wiring. warn mode (continue-on-error) because the existing backlog is ~212
-  # findings, dominated by SA1019 on the half-finished cli.ImageData →
-  # Attachment migration (110 hits across 9 packages). Switch to fail mode once
-  # that migration is finished and the ST1018 test-payload noise is escaped.
+  # staticcheck (make lint-staticcheck). Ran in warn mode (continue-on-error)
+  # while a backlog was worked down; both preconditions the old note listed are
+  # now met — the SA1019 ImageData deprecation is gone and the ST1018
+  # test-payload noise is escaped — so the backlog is at 0 and this is fail
+  # mode. Sites where the flagged pattern IS the behaviour under test (nil-ctx
+  # guards, empty-critical-section lock probes) carry `//lint:ignore <CHECK>
+  # <reason>`; note staticcheck does NOT honour `//nolint`.
   lint-staticcheck:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run staticcheck (warn mode)
+      - name: Run staticcheck (fail mode)
         run: make lint-staticcheck
 
   vuln:

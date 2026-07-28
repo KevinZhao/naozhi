@@ -75,6 +75,7 @@ func TestNotifyCtx_NilParentSafe(t *testing.T) {
 		}
 	}()
 
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	notify, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, 100*time.Millisecond)
 	defer cancel()
 	if notify == nil {

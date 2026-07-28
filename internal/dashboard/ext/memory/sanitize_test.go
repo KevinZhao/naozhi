@@ -20,13 +20,13 @@ func TestSanitizeWireText_R103901_SEC_4(t *testing.T) {
 		{"unicode text unchanged", "café 日本語 ✓", "café 日本語 ✓"},
 		{"strip esc", "before\x1b[31mred\x1b[0mafter", "before[31mred[0mafter"},
 		{"strip nul and bell", "a\x00b\x07c", "abc"},
-		{"strip bidi override RLO U+202E", "user‮gnp.exe", "usergnp.exe"},
+		{"strip bidi override RLO U+202E", "user\u202egnp.exe", "usergnp.exe"},
 		// Bidi isolates U+2066 (LRI) and U+2069 (PDI) are stripped; LRM/RLM
 		// (U+200E/200F) are intentionally NOT covered — this mirrors the
 		// osutil.IsLogInjectionRune policy shared with the cron transcript
 		// sanitizer.
-		{"strip bidi isolates U+2066/U+2069", "a⁦b⁩c", "abc"},
-		{"strip c1 control NEL U+0085", "ab", "ab"},
+		{"strip bidi isolates U+2066/U+2069", "a\u2066b\u2069c", "abc"},
+		{"strip c1 control NEL U+0085", "a\u0085b", "ab"},
 		{"strip line separator U+2028", "a b", "ab"},
 		{"strip paragraph separator U+2029", "a b", "ab"},
 	}

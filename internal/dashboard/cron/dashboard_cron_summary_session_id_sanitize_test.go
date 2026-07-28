@@ -52,7 +52,7 @@ func TestHandleRunsList_SummarySessionID_Sanitized(t *testing.T) {
 
 	// Craft a SessionID with a bidi override character (U+202E RIGHT-TO-LEFT
 	// OVERRIDE) that SanitizeForLog must strip.
-	taintedSessionID := "bbbbbbbb-1234-1234-1234-000000000001‮"
+	taintedSessionID := "bbbbbbbb-1234-1234-1234-000000000001\u202e"
 
 	runsDir := filepath.Join(tmp, "runs", jobID)
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {
@@ -205,7 +205,7 @@ func TestHandleRunsList_SummarySessionID_Clean(t *testing.T) {
 func TestCronSummaryToView_SessionID_Sanitized(t *testing.T) {
 	t.Parallel()
 
-	taintedSessionID := "dddddddd-1234-1234-1234-000000000003‮"
+	taintedSessionID := "dddddddd-1234-1234-1234-000000000003\u202e"
 	summary := cronpkg.CronRunSummary{
 		RunID:     strings.Repeat("e", 16),
 		JobID:     strings.Repeat("f", 16),

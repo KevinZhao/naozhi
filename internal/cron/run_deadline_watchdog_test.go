@@ -79,7 +79,8 @@ func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
 	t.Run("nil ctx", func(t *testing.T) {
 		t.Parallel()
 		ci := &countingInterrupter{outcome: InterruptSent}
-		ch, stop := runDeadlineWatchdog(nil, ci, watchdogInterruptTimeoutDefault) //nolint:staticcheck // intentional nil for guard test
+		//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
+		ch, stop := runDeadlineWatchdog(nil, ci, watchdogInterruptTimeoutDefault)
 		if stop() {
 			t.Fatalf("nil-guard stop() = true; want false (result already on channel)")
 		}

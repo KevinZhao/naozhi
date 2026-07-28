@@ -832,9 +832,9 @@ func TestEffectivePlannerPrompt_RejectsInjectionRunes(t *testing.T) {
 		{"NUL", "ok\x00bar"},
 		{"ESC", "ok\x1bbar"},
 		{"DEL", "ok\x7fbar"},
-		{"C1_NEL", "okbar"},
-		{"BidiOverride_RLO", "ok‮bar"},
-		{"BidiIsolate_RLI", "ok⁧bar"},
+		{"C1_NEL", "ok\u0085bar"},
+		{"BidiOverride_RLO", "ok\u202ebar"},
+		{"BidiIsolate_RLI", "ok\u2067bar"},
 		{"LineSeparator", "ok bar"},
 		{"InvalidUTF8", "ok\xffbar"},
 	}

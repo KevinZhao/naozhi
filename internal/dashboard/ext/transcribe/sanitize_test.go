@@ -73,7 +73,7 @@ func TestHandleTranscribe_SanitisesLogInjectionRunes(t *testing.T) {
 	// Use \u escapes so Go source stays ASCII-clean — embedding LS/PS
 	// literally would put a real line separator inside the source file
 	// which is awkward for editors and diff tools.
-	dirty := "hello‮world⁨x yz"
+	dirty := "hello\u202eworld\u2068x y\u0085z"
 	h := &Handler{
 		transcriber: stubTranscriberSanitize{out: dirty},
 		sem:         make(chan struct{}, 1),

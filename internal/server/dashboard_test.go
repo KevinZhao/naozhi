@@ -69,7 +69,7 @@ func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
 		"embedded_LF":  "test:direct:abc\ndef:general",
 		"embedded_NUL": "test:direct:abc\x00def:general",
 		"too_long":     tooLong,
-		"bidi_RLO":     "test:direct:abc‮def:general",
+		"bidi_RLO":     "test:direct:abc\u202edef:general",
 	}
 	for name, key := range cases {
 		key := key
@@ -108,7 +108,7 @@ func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T
 		"embedded_LF":  "test:direct:abc\ndef:general",
 		"embedded_NUL": "test:direct:abc\x00def:general",
 		"too_long":     tooLong,
-		"bidi_RLO":     "test:direct:abc‮def:general",
+		"bidi_RLO":     "test:direct:abc\u202edef:general",
 	}
 	for name, key := range cases {
 		key := key

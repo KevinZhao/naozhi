@@ -53,7 +53,7 @@ func TestHandleRunDetail_SessionID_Sanitized(t *testing.T) {
 
 	// Craft a SessionID with a bidi override character (U+202E RIGHT-TO-LEFT
 	// OVERRIDE) that SanitizeForLog must strip.
-	taintedSessionID := "aaaaaaaa-1234-1234-1234-000000000001‮"
+	taintedSessionID := "aaaaaaaa-1234-1234-1234-000000000001\u202e"
 
 	runsDir := filepath.Join(tmp, "runs", jobID)
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {

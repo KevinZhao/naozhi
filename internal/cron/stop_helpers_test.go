@@ -65,6 +65,7 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 
 	// stopStart=now means the helper has the full stopBudget remaining.
 	start := time.Now()
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
@@ -83,6 +84,7 @@ func TestDrainTriggerWG_FastDrain(t *testing.T) {
 	withShortStopBudget(t, s, 5*time.Second)
 
 	start := time.Now()
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
@@ -98,6 +100,7 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5}, SchedulerDeps{})
 
 	start := time.Now()
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
@@ -127,6 +130,7 @@ func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 	}
 
 	start := time.Now()
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 

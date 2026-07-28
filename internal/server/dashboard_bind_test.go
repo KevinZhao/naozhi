@@ -98,7 +98,7 @@ func TestHandleBind_InvalidKeyRejected(t *testing.T) {
 	srv, _, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
 	// U+202E (RIGHT-TO-LEFT OVERRIDE) embedded in the key.
-	key := "dashboard:pj:abc‮0123:general"
+	key := "dashboard:pj:abc\u202e0123:general"
 	w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for control-char key (body=%s)", w.Code, w.Body.String())

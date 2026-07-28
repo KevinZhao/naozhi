@@ -565,14 +565,15 @@ func buildServer(opts ServerOptions) *Server {
 	// leak the ticker goroutine.
 	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	// Thread StartupCtx into the --version probe so SIGTERM during
-	// startup aborts promptly (R55-QUAL-004). Nil ctx falls back to
-	// cli.NewCLIBackendsHandler's Background-derived path via the delegating
-	// public ctor (keeps test/headless callers working).
-	if opts.StartupCtx != nil {
-		s.cliH = cli.NewCLIBackendsHandlerCtx(opts.StartupCtx, router)
-	} else {
-		s.cliH = cli.NewCLIBackendsHandler(router)
+	// startup aborts promptly (R55-QUAL-004). Unset ctx falls back to
+	// context.Background(), which is exactly what the deprecated
+	// cli.NewCLIBackendsHandler wrapper did (keeps test/headless callers
+	// working) — call the Ctx ctor directly so we don't depend on it.
+	startupCtx := opts.StartupCtx
+	if startupCtx == nil {
+		startupCtx = context.Background()
 	}
+	s.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router)
 	// Wire node routing so /api/cli/backends?node=<id> proxies the manifest
 	// to a remote node — the picker node-aware fix. nodeAccess is already
 	// constructed above; *nodeAccessor satisfies cli.NodeAccessor.

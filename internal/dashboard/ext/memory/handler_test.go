@@ -327,8 +327,7 @@ func TestEncodeCurrentProjectDir_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded := "-" + filepath.Clean(pwd)
-	encoded = "-" + filepath.ToSlash(pwd)[1:] // mirror the encoder
+	encoded := "-" + filepath.ToSlash(pwd)[1:] // mirror the encoder
 	// strip slashes
 	for i := 0; i < len(encoded); i++ {
 		if encoded[i] == '/' {

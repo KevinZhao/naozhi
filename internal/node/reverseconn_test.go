@@ -1016,7 +1016,7 @@ func TestReverseConn_RPCError_Sanitized(t *testing.T) {
 			return
 		}
 		// Embed bidi-override in the error string.
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Error: "remote error: ‮injected"}) //nolint:errcheck
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Error: "remote error: \u202einjected"}) //nolint:errcheck
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

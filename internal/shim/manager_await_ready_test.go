@@ -129,7 +129,7 @@ func TestAwaitReady_ShimErrorSanitized(t *testing.T) {
 	t.Parallel()
 	r, w := makePipe(t)
 	// Embed a bidi-override (U+202E) and a C1 control (U+0080) in the message.
-	injected := "bad‮injectedend"
+	injected := "bad\u202einjected\u0080end"
 	go func() {
 		line := `{"status":"error","error":"` + injected + `"}` + "\n"
 		_, _ = w.Write([]byte(line))
@@ -141,7 +141,7 @@ func TestAwaitReady_ShimErrorSanitized(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 	msg := err.Error()
-	if strings.ContainsAny(msg, "‮") {
+	if strings.ContainsAny(msg, "\u202e\u0080") {
 		t.Errorf("sanitized error still contains injection runes: %q", msg)
 	}
 	if !strings.Contains(msg, "shim startup failed") {

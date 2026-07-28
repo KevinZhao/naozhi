@@ -63,7 +63,7 @@ func TestReadStderr_BidiInjection_NotOversized(t *testing.T) {
 	}()
 
 	// Write a short line with a bidi-override rune (U+202E RIGHT-TO-LEFT OVERRIDE).
-	line := "stderr: ‮injected text"
+	line := "stderr: \u202einjected text"
 	_, err := pw.Write([]byte(line + "\n"))
 	if err != nil {
 		t.Fatalf("pipe write: %v", err)

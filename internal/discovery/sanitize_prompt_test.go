@@ -79,8 +79,8 @@ func TestSanitizePromptForTransport_LogInjectionRuneReplaced(t *testing.T) {
 		name string
 		in   string
 	}{
-		{"NEL U+0085", "foobar"},
-		{"bidi override U+202E", "foo‮bar"},
+		{"NEL U+0085", "foo\u0085bar"},
+		{"bidi override U+202E", "foo\u202ebar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

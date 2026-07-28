@@ -49,9 +49,9 @@ func TestSanitizeStderrLine_TableDriven(t *testing.T) {
 		// C1 / bidi / LS-PS via IsLogInjectionRune. Each encodes as
 		// multi-byte UTF-8 so the byte-level loop can't catch them; the
 		// rune-decode arm is the one under test here.
-		{"C1 NEL", "okbar", "okbar"},
-		{"bidi RLO", "ok‮bar", "okbar"},
-		{"bidi RLI", "ok⁧bar", "okbar"},
+		{"C1 NEL", "ok\u0085bar", "okbar"},
+		{"bidi RLO", "ok\u202ebar", "okbar"},
+		{"bidi RLI", "ok\u2067bar", "okbar"},
 		{"line separator", "ok bar", "okbar"},
 		{"para separator", "ok bar", "okbar"},
 
@@ -61,7 +61,7 @@ func TestSanitizeStderrLine_TableDriven(t *testing.T) {
 		{"emoji passthrough", "deploy ✅ done", "deploy ✅ done"},
 
 		// Mixed ANSI + bidi: ANSI strip first, bidi rune drop second.
-		{"ANSI + bidi", "\x1b[31m错‮误\x1b[0m", "错误"},
+		{"ANSI + bidi", "\x1b[31m错\u202e误\x1b[0m", "错误"},
 	}
 
 	for _, tc := range cases {

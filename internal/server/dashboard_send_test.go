@@ -23,7 +23,7 @@ import (
 func TestDashboardSend_LogKeySanitized(t *testing.T) {
 	t.Parallel()
 
-	const malicious = "feishu:group:abc\n\rFAKE level=ERROR‮msg=spoof​\x07"
+	const malicious = "feishu:group:abc\n\rFAKE level=ERROR\u202emsg=spoof\u200b\x07"
 
 	// The sanitized value is what the handler hands to slog; inspect it
 	// directly so we don't trip over slog's own trailing newline.

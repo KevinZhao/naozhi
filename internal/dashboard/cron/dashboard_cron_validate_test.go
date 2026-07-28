@@ -52,18 +52,18 @@ func TestValidateCronWorkDir_RejectsUnicodeBidi(t *testing.T) {
 		name string
 		s    string
 	}{
-		{"RLO U+202E", "/tmp/safe‮/etc"},
-		{"LRO U+202D", "/tmp/‭maybe"},
-		{"LRE U+202A", "/tmp/‪maybe"},
-		{"PDF U+202C", "/tmp/‬maybe"},
-		{"LRI U+2066", "/tmp/⁦maybe"},
-		{"RLI U+2067", "/tmp/⁧maybe"},
-		{"FSI U+2068", "/tmp/⁨maybe"},
-		{"PDI U+2069", "/tmp/⁩maybe"},
+		{"RLO U+202E", "/tmp/safe\u202e/etc"},
+		{"LRO U+202D", "/tmp/\u202dmaybe"},
+		{"LRE U+202A", "/tmp/\u202amaybe"},
+		{"PDF U+202C", "/tmp/\u202cmaybe"},
+		{"LRI U+2066", "/tmp/\u2066maybe"},
+		{"RLI U+2067", "/tmp/\u2067maybe"},
+		{"FSI U+2068", "/tmp/\u2068maybe"},
+		{"PDI U+2069", "/tmp/\u2069maybe"},
 		{"LS U+2028", "/tmp/ok bad"},
 		{"PS U+2029", "/tmp/ok bad"},
-		{"C1_0x80", "/tmp/bad"},
-		{"C1_0x9F", "/tmp/bad"},
+		{"C1_0x80", "/tmp/\u0080bad"},
+		{"C1_0x9F", "/tmp/\u009fbad"},
 	}
 	for _, tc := range bad {
 		tc := tc
@@ -101,9 +101,9 @@ func TestValidateCronPrompt_RejectsUnicodeBidi(t *testing.T) {
 		name string
 		s    string
 	}{
-		{"RLO", "do the task‮ please"},
-		{"LRI", "do the⁦task"},
-		{"C1", "do  tricks"},
+		{"RLO", "do the task\u202e please"},
+		{"LRI", "do the\u2066task"},
+		{"C1", "do \u0085 tricks"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,13 +226,13 @@ func TestValidateStringField_ASCIIFastPath(t *testing.T) {
 	}
 	// High-bit inputs must still reject — exercises the post-fast-path
 	// rune loop. RLO (U+202E) is the canonical bidi-class hit.
-	rlo := "good‮bad"
+	rlo := "good\u202ebad"
 	if err := validateStringField(rlo, stringFieldPolicy{name: "f"}); err == nil {
 		t.Errorf("validateStringField(%q) = nil, want bidi rejection", rlo)
 	}
 	// C1 (0x80..0x9F) encodes as two-byte UTF-8 with first byte 0xC2 —
 	// non-ASCII so it goes through the rune loop.
-	c1 := "okbad"
+	c1 := "ok\u0085bad"
 	if err := validateStringField(c1, stringFieldPolicy{name: "f"}); err == nil {
 		t.Errorf("validateStringField(%q) = nil, want C1 rejection", c1)
 	}

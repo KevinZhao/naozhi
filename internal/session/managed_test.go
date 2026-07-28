@@ -32,7 +32,7 @@ func TestSanitizeKeyComponent_StripsTab(t *testing.T) {
 // Unicode bidi/zero-width. R60-GO-H1.
 func TestSanitizeLogAttr_NoLogFragmentation(t *testing.T) {
 	t.Parallel()
-	bad := "user\nadmin=1\tpassword\x1b[31mevil‮reverse​hidden"
+	bad := "user\nadmin=1\tpassword\x1b[31mevil\u202ereverse\u200bhidden"
 	got := SanitizeLogAttr(bad)
 	for _, r := range []rune{'\n', '\t', 0x1b, 0x202E, 0x200B} {
 		if strings.ContainsRune(got, r) {
@@ -49,7 +49,7 @@ func TestSanitizeLogAttr_NoLogFragmentation(t *testing.T) {
 func TestSanitizeLogAttr_StripsC1Controls(t *testing.T) {
 	t.Parallel()
 	// U+0085 NEL (Next Line) and U+0088 HTS are terminal control functions.
-	in := "useridok"
+	in := "user\u0085id\u0088ok"
 	got := SanitizeLogAttr(in)
 	for _, r := range []rune{0x85, 0x88} {
 		if strings.ContainsRune(got, r) {

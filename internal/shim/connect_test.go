@@ -190,7 +190,7 @@ func TestConnect_AuthFailed_SanitizesMsg(t *testing.T) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
 		// Embed bidi-override U+202E in Msg.
-		raw := []byte("{\"type\":\"auth_failed\",\"msg\":\"bad‮creds\"}\n")
+		raw := []byte("{\"type\":\"auth_failed\",\"msg\":\"bad\u202ecreds\"}\n")
 		conn.Write(raw) //nolint:errcheck
 	})
 
@@ -215,7 +215,7 @@ func TestConnect_UnexpectedType_SanitizesType(t *testing.T) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
 		// Type contains a C1 control byte (0x80) after UTF-8 encode.
-		raw := []byte("{\"type\":\"badtype\"}\n")
+		raw := []byte("{\"type\":\"bad\u0080type\"}\n")
 		conn.Write(raw) //nolint:errcheck
 	})
 

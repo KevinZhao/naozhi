@@ -48,7 +48,7 @@ func (r samplingRouter) RegisterCronStubWithChain(key, workspace, lastPrompt str
 func (r samplingRouter) Reset(key string) {}
 func (r samplingRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
 	r.sampler.sample()
-	return samplingSession{sampler: r.sampler}, SessionExisting, nil
+	return samplingSession(r), SessionExisting, nil
 }
 
 // samplingSession samples the inflight phase at Send entry (PhaseSending by

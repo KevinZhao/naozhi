@@ -342,7 +342,7 @@ func TestFilterEnv_AWSProfileValidation(t *testing.T) {
 	// must still be rejected, and the warn-then-reject path must not panic
 	// when sanitizing the value for the log.
 	t.Run("control-char profile stripped without panic", func(t *testing.T) {
-		t.Setenv("AWS_PROFILE", "evil‮\r\nname")
+		t.Setenv("AWS_PROFILE", "evil\u202e\r\nname")
 		env := filterEnv(nil)
 		if envHasKey(env, "AWS_PROFILE") {
 			t.Error("unsafe AWS_PROFILE with control chars must be stripped")

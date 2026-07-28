@@ -31,7 +31,7 @@ func TestSanitisePlannerPromptForSpawn_ServerCanReachIt(t *testing.T) {
 		{"NUL rejected", "evil\x00prompt", ""},
 		{"escape rejected", "evil\x1bprompt", ""},
 		{"DEL rejected", "evil\x7fprompt", ""},
-		{"C1 NEL rejected (injection rune)", "evilprompt", ""},
+		{"C1 NEL rejected (injection rune)", "evil\u0085prompt", ""},
 		{"oversize rejected (> 8 KB)", strings.Repeat("a", 8*1024+1), ""},
 		{"invalid UTF-8 rejected", "\xc3\x28suffix", ""},
 	}
