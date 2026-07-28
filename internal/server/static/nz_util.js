@@ -40,7 +40,11 @@
   function escAttr(s) {
     return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  // Escape for embedding inside a JS string literal (e.g. inline onclick="f('…')").
+  // Escape for embedding inside a JS string literal (e.g. an inline click
+  // attribute of the form f('…')). Prose here deliberately avoids the literal
+  // `onclick` + `=` token: the CSP ratchet in dashboard_csp_test.go counts that
+  // token by text, so a mention in a comment would inflate this file's count
+  // and keep it from ever reaching 0.
   function escJs(s) {
     if (!s) return '';
     // R202606j-SEC-9 (#2344): besides the obvious string-breakers, escape
