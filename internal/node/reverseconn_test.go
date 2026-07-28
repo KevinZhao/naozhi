@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -847,15 +848,21 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 
 	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "badkey", Error: "session not found"})
 
+	// Poll on delivery, NOT on the key disappearing. broadcastToSubs deletes
+	// the key while holding subMu but calls SendRaw *after* releasing it, so
+	// "key gone" is observable while RawMsgCount() is still 0 — polling the
+	// key raced the assertion below and made this test flaky. Delivery is the
+	// strictly later signal, so waiting for it settles both observations.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		rc.subMu.Lock()
-		_, exists := rc.subs["badkey"]
-		rc.subMu.Unlock()
-		if !exists {
+		if sink.RawMsgCount() > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+
+	if sink.RawMsgCount() == 0 {
+		t.Error("expected error event delivered to sink")
 	}
 
 	rc.subMu.Lock()
@@ -864,9 +871,84 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 	if exists {
 		t.Error("subscribe_error should have removed 'badkey' from subs")
 	}
+}
 
+// rawGateSink blocks inside SendRaw until released, so a test can park the
+// readLoop in the window between broadcastToSubs deleting the sub key (under
+// subMu) and the actual fan-out to sinks (after subMu is released).
+type rawGateSink struct {
+	mockSink
+	gate    chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func newRawGateSink() *rawGateSink {
+	return &rawGateSink{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+}
+
+func (s *rawGateSink) SendRaw(data []byte) {
+	s.once.Do(func() {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+	})
+	<-s.gate
+	s.mockSink.SendRaw(data)
+}
+
+// TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery pins the ordering
+// that made TestReverseConn_ReadLoop_subscribeError flaky: broadcastToSubs
+// deletes the key while holding subMu but delivers to sinks only after
+// releasing it. A test that polls "key gone" as a proxy for "event delivered"
+// can therefore break out of its wait loop and assert delivery too early.
+//
+// Parking inside SendRaw makes that window deterministic instead of a
+// microsecond race, so a future refactor that reintroduces the key-polling
+// pattern (or moves delivery back under the lock) gets a red test here rather
+// than a rare CI flake.
+func TestReverseConn_SubscribeError_KeyRemovalPrecedesDelivery(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	sink := newRawGateSink()
+	rc.subMu.Lock()
+	rc.subs["badkey"] = []EventSink{sink}
+	rc.subMu.Unlock()
+
+	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "badkey", Error: "session not found"})
+
+	select {
+	case <-sink.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SendRaw never reached; subscribe_error was not broadcast")
+	}
+
+	// Parked inside SendRaw: the key is already gone, but nothing has been
+	// delivered yet. This is exactly the state the old poll loop could
+	// observe before asserting RawMsgCount() != 0.
+	rc.subMu.Lock()
+	_, exists := rc.subs["badkey"]
+	rc.subMu.Unlock()
+	if exists {
+		t.Error("key should already be removed once SendRaw is reached")
+	}
+	if n := sink.RawMsgCount(); n != 0 {
+		t.Errorf("delivery recorded before SendRaw completed: RawMsgCount = %d, want 0", n)
+	}
+
+	close(sink.gate)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.RawMsgCount() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if sink.RawMsgCount() == 0 {
-		t.Error("expected error event delivered to sink")
+		t.Error("expected error event delivered to sink after gate release")
 	}
 }
 
