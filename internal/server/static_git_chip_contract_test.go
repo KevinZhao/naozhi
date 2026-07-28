@@ -40,6 +40,14 @@ func TestDashboardJS_GitChipWiring(t *testing.T) {
 		`repaintGitChip()`,
 		// Workspace moves (/cd) invalidate the cached state.
 		`function invalidateGitState(`,
+		// A branch switch inside a turn changes the branch WITHOUT changing the
+		// workspace path, so the workspace-diff invalidation never fires and the
+		// chip would stay pinned to whatever branch was current when the session
+		// was selected. Re-resolve on the running→ready/dead edge.
+		`if (turnCompleted) invalidateGitState(msg.key, msgNode);`,
+		// An operator switching branches in their own terminal produces no turn
+		// at all; refresh when the tab regains focus to cover that.
+		`if (selectedKey) invalidateGitState(selectedKey, selectedNode);`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("dashboard.js missing git-chip wiring: %q", want)
