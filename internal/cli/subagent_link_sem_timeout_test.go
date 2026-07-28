@@ -10,25 +10,23 @@ import (
 // when the semaphore is full and the timeout elapses (not ctx cancel),
 // Resolve must return (LinkInfo{}, false) promptly without deadlocking.
 //
-// The property under test is "bounded by the semaphore budget, not blocked
-// forever". Expressing that as an absolute millisecond ceiling made this test
-// flaky on slow runners: with a 60ms budget the old assertion allowed 280ms
-// total, but a loaded macOS CI runner needed ~363ms just for the scheduling
-// around it, so the test failed while the code under test was correct.
+// The property is "bounded by the semaphore budget, not blocked forever", and
+// it has two halves that need different mechanisms:
 //
-// Two changes make the bound meaningful instead of tight:
-//   - A deliberately LARGE retry budget (1s), so real scheduling slack is a
-//     small fraction of it rather than a multiple.
-//   - The ceiling is expressed relative to that budget, and the "did not
-//     deadlock" half is enforced by running Resolve in a goroutine with a
-//     hard timeout — which is the actual regression this pins.
+//   - Does not block forever — enforced by running Resolve in a goroutine
+//     with a hard timeout. That is the regression this test exists for, and a
+//     wall-clock assertion is the wrong tool for it.
+//   - Actually waits the budget — enforced by a lower bound. Without it the
+//     test was half vacuous: setting semTimeout to 0 (i.e. giving up on the
+//     semaphore without waiting at all, a real behaviour regression) left the
+//     old assertions passing.
 func TestResolve_SemaphoreTimeout_ContextWithTimeout(t *testing.T) {
 	t.Parallel()
 	const sessionID = "sem-timeout-test-uuid-cccccccccc"
 	l, _ := newLinkerForTest(t, sessionID)
-	// Budget large enough that scheduler jitter cannot rival it, yet small
-	// enough to keep the test fast: (0+1)*1s = 1s.
-	l.retryInterval = time.Second
+	// Budget = (0+1)*50ms. Kept small because the ceiling below is relative
+	// to it, so precision does not come from a long wait.
+	l.retryInterval = 50 * time.Millisecond
 	l.retryLimit = 0
 	semBudget := time.Duration(l.retryLimit+1) * l.retryInterval
 
@@ -64,18 +62,19 @@ func TestResolve_SemaphoreTimeout_ContextWithTimeout(t *testing.T) {
 			30*time.Second, semBudget)
 	}
 
-	// Upper bound relative to the budget: the semaphore wait must not be
-	// retried or compounded. 4x absorbs any realistic CI scheduling slack
-	// while still catching a regression that, say, waits the full retry loop
-	// per attempt.
+	// Upper bound: the wait must not overrun its own timeout by a wide
+	// margin. Expressed relative to the budget (not as absolute ms) so it
+	// scales with the constants above; the old absolute 280ms ceiling was
+	// the kind of bound that fails on a loaded runner while the code is fine.
+	// 4x leaves room for scheduling slack on the shared CI runners.
 	if maxBudget := semBudget * 4; res.elapsed > maxBudget {
 		t.Errorf("semaphore timeout must abort within %s (4x the %s budget), elapsed=%s",
 			maxBudget, semBudget, res.elapsed)
 	}
-	// Lower bound: it must actually have waited for the budget rather than
-	// bailing immediately for some unrelated reason, which would make the
-	// upper bound vacuous. Allow a small timer-granularity shortfall.
-	if minBudget := semBudget - 50*time.Millisecond; res.elapsed < minBudget {
+	// Lower bound: Resolve must actually have waited out the budget, not
+	// bailed early — see the doc comment. Go timers never fire early, so a
+	// small tolerance is enough and this cannot flake on a slow machine.
+	if minBudget := semBudget - 10*time.Millisecond; res.elapsed < minBudget {
 		t.Errorf("Resolve returned after %s, before the %s semaphore budget elapsed — "+
 			"the timeout path may not be what aborted it", res.elapsed, semBudget)
 	}
