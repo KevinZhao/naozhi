@@ -133,6 +133,21 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 		if cb != nil {
 			cb(interim)
 		}
+		// Let editLoop's repaint for THAT interim event land before returning.
+		//
+		// Without this the test was flaky (7/40 locally, and it red-lit
+		// test-macos on unrelated PRs): the follower branch only calls
+		// tracker.waitReady, which merely guarantees the banner was POSTED —
+		// verified by instrumenting it, waitReady returns with zero edits
+		// recorded. The first repaint could therefore arrive AFTER the
+		// merge-hint edit and be indistinguishable, to the assertion below,
+		// from the illegal residual repaint this test exists to catch. Both
+		// show up as a "💭思考中…" edit following the hint.
+		//
+		// Draining it here keeps the scenario honest: everything after the
+		// merge hint is then genuinely attributable to the residual signal.
+		waitForEdit(t, fp, fp.replyMsgID)
+
 		// The merge then collapses the turn: the follower result carries
 		// MergedCount>1 with an empty Text — the early-return branch under test.
 		return &cli.SendResult{Text: "", MergedCount: 2}, nil
