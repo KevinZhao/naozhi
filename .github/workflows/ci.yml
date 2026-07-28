@@ -34,6 +34,22 @@ jobs:
         # Separate Build and Vet steps are redundant and have been removed.
         run: go test -race -timeout 300s ./...
 
+  # gofmt (make lint-gofmt). fail mode from the start: the backlog this job was
+  # added alongside is at 0, and formatting has an unambiguous fix (gofmt -w)
+  # with no judgement call, so there is nothing to warn-mode down. Go version
+  # comes from go.mod via go-version-file, matching local runs.
+  lint-gofmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run gofmt (fail mode)
+        run: make lint-gofmt
+
   # server-package contracts (lint-server-handlers).
   # warn mode during Phase 0-4 of server-split: violations print to logs
   # but exit 0 (continue-on-error). Switch to fail mode after Phase 5

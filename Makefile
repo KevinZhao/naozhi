@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail lint-router lint-router-fail release-gate release-gate-live
+.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail lint-router lint-router-fail release-gate release-gate-live
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -27,6 +27,20 @@ lint:
 # under test, with `//lint:ignore <CHECK> <reason>` (`//nolint` does NOT work).
 lint-staticcheck:
 	go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
+# gofmt gate. `gofmt -l` exits 0 even when it lists unformatted files, so the
+# file list has to be turned into the failure signal explicitly. Uses the
+# toolchain's own gofmt (go.mod pins the version, and CI resolves Go via
+# go-version-file) so local and CI agree on the formatting rules.
+lint-gofmt:
+	@out="$$(gofmt -l . 2>/dev/null)"; \
+	if [ -n "$$out" ]; then \
+		echo "gofmt found unformatted files:"; \
+		echo "$$out"; \
+		echo "run: gofmt -w $$(echo $$out | tr '\n' ' ')"; \
+		exit 1; \
+	fi; \
+	echo "gofmt: clean"
 
 # CVE scan against the Go vulnerability DB. Install:
 # go install golang.org/x/vuln/cmd/govulncheck@latest

@@ -56,4 +56,3 @@ func TestSendHandler_RouterFieldIsSendRouter(t *testing.T) {
 	}
 	var _ SendRouter = (*session.Router)(nil)
 }
-

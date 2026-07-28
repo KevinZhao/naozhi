@@ -28,10 +28,10 @@ import (
 // passes hub.router; tests can inject a stub satisfying ScratchRouter.
 type Handler struct {
 	broadcaster Broadcaster
-	router    ScratchRouter
-	pool      *session.ScratchPool
-	openLimit IPLimiter
-	agents    map[string]session.AgentOpts
+	router      ScratchRouter
+	pool        *session.ScratchPool
+	openLimit   IPLimiter
+	agents      map[string]session.AgentOpts
 }
 
 // openRequest is the POST /api/scratch/open body.

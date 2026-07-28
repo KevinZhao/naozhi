@@ -19,4 +19,3 @@ type RuntimeAPI interface {
 func NewWithAPIForTest(api RuntimeAPI, cfg Config) *Client {
 	return newWithAPI(api, cfg)
 }
-
