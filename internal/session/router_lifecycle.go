@@ -987,6 +987,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// "" unless the operator opted into CLI debug capture via
 		// NAOZHI_CLI_DEBUG; only ClaudeProtocol acts on it (ACP ignores).
 		DebugFile: r.cliDebugFileFor(key),
+		// "" unless the operator opted into naozhi-owned isolated settings
+		// (RFC naozhi-owned-settings-v3); only ClaudeProtocol acts on it.
+		SettingsFile: r.naozhiSettingsFile,
 	}
 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
