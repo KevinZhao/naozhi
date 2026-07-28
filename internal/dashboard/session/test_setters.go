@@ -23,6 +23,11 @@ func (h *Handlers) SetClaudeDirForTest(dir string) { h.claudeDir = dir }
 // SetSysWorkDirForTest swaps the sysWorkDir.
 func (h *Handlers) SetSysWorkDirForTest(dir string) { h.sysWorkDir = dir }
 
+// SetAllowedRootForTest swaps the allowedRoot the workspace validator gates
+// against. internal/server's route-level tests point it at a temp dir so
+// validateWorkspace admits a fixture workspace.
+func (h *Handlers) SetAllowedRootForTest(root string) { h.allowedRoot = root }
+
 // SetCronSessionsForTest swaps the cronSessions view.
 func (h *Handlers) SetCronSessionsForTest(c CronView) { h.cronSessions = c }
 

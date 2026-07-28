@@ -159,6 +159,28 @@ function defaultProjects() {
   ];
 }
 
+// defaultGitStates maps a session key → GET /api/sessions/git payload, one per
+// chip shape: main-tree branch, linked worktree, and (by omission) non-repo.
+function defaultGitStates() {
+  return {
+    'dashboard:direct:2026-01-01-120000-1:myproject': {
+      is_repo: true,
+      workspace: '/home/user/workspace/myproject',
+      root: '/home/user/workspace/myproject',
+      repo: 'myproject',
+      branch: 'master',
+    },
+    'dashboard:direct:2026-01-01-120001-2:otherproject': {
+      is_repo: true,
+      workspace: '/home/user/workspace/otherproject/.claude/worktrees/feat-x',
+      root: '/home/user/workspace/otherproject/.claude/worktrees/feat-x',
+      repo: 'otherproject',
+      branch: 'worktree-feat-x',
+      worktree: 'feat-x',
+    },
+  };
+}
+
 /**
  * Start a mock HTTP server.
  * @param {object} [overrides] - Override specific route handlers.
@@ -179,6 +201,7 @@ function startMockServer(overrides = {}) {
   const sessionsData = overrides.sessions || defaultSessions();
   const eventsData = overrides.events || defaultEvents();
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
+  const gitStates = overrides.gitStates || defaultGitStates();
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
 
@@ -286,6 +309,19 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(eventsData));
+      return;
+    }
+
+    // Git branch / worktree chip. Keyed by session key so a test can give
+    // different sessions different checkouts (main tree vs linked worktree vs
+    // non-repo). Unknown keys fall through to the is_repo:false shape, which
+    // is what the real handler returns for a plain folder.
+    if (pathname === '/api/sessions/git' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key') || '';
+      const state = gitStates[key] || { is_repo: false };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(state));
       return;
     }
 
@@ -541,6 +577,17 @@ function startMockServer(overrides = {}) {
         get cronCreateCalls() { return cronCreateCalls; },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
+        // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
+        // /cd that moves a session's workspace). Bumping stats.version is what
+        // makes the dashboard's version short-circuit re-render.
+        setSessionWorkspace(key, workspace) {
+          const s = (sessionsData.sessions || []).find(x => x.key === key);
+          if (s) s.workspace = workspace;
+          if (sessionsData.stats && typeof sessionsData.stats.version === 'number') {
+            sessionsData.stats.version++;
+          }
+        },
+        setGitState(key, state) { gitStates[key] = state; },
         resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     });
