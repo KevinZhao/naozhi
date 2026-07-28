@@ -1,6 +1,6 @@
 # RFC: naozhi 独立 settings（彻底隔离本地 ~/.claude/settings.json）
 
-> **状态**: Draft v1（待评审）
+> **状态**: PR-1 + PR-2 已交付（隔离骨架可用，opt-in 默认关闭）· PR-3/PR-4（thinking 旋钮 + UI）未开始
 > **作者**: naozhi team
 > **创建**: 2026-07-11
 > **前身讨论**: `docs/rfc/project-access-profile.md`（v1 auth overlay，已落地）· `docs/rfc/profile-config-v2.md`（v2 配置分层探讨，本 RFC 取代其 thinking/settings 部分）
