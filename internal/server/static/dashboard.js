@@ -11610,6 +11610,12 @@ const wsm = {
     // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
     // interruptSession 会先消费 lastSent 再发中断。
     if (turnCompleted) delete sessionLastSent[sKey];
+    // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
+    // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
+    // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
+    // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
+    // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
+    if (turnCompleted) invalidateGitState(msg.key, msgNode);
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) {
@@ -12905,6 +12911,11 @@ wsm.connect();
       fetchSessions(); // immediate refresh on resume so UI is not stale
       sessionPollTimer = setInterval(fetchSessions, 5000);
     }
+    // Same rationale as the turn-boundary refresh in onSessionState: the branch
+    // can change without the workspace path changing, and an operator switching
+    // branches in their own terminal produces no turn at all. Re-resolving when
+    // the tab regains focus catches that case without a dedicated poller.
+    if (selectedKey) invalidateGitState(selectedKey, selectedNode);
     if (!discoveredPollTimer) {
       discoveredPollTimer = setInterval(scanDiscovered, 30000);
     }

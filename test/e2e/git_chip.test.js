@@ -104,6 +104,35 @@ test('a workspace change (/cd) re-resolves the chip', async ({ page }) => {
   mock.setSessionWorkspace(MAIN_TREE_KEY, '/home/user/workspace/myproject');
 });
 
+test('a branch switch inside a turn re-resolves the chip (workspace unchanged)', async ({ page }) => {
+  await card(page, MAIN_TREE_KEY).click();
+  await expect(page.locator('#header-git .git-chip-text')).toHaveText('master');
+
+  // The agent runs `git checkout` mid-turn: the branch changes but the
+  // workspace PATH does not, so the /cd-oriented invalidation above never
+  // fires. Only the turn-boundary refresh can catch this.
+  mock.setGitState(MAIN_TREE_KEY, {
+    is_repo: true, repo: 'myproject', branch: 'feat/mid-turn',
+    root: '/home/user/workspace/myproject', workspace: '/home/user/workspace/myproject',
+  });
+
+  // Drive the real running→ready edge through the WS message handler.
+  await page.evaluate((key) => {
+    // eslint-disable-next-line no-undef
+    sessionsData[sid(key, 'local')].state = 'running';
+    // eslint-disable-next-line no-undef
+    wsm.onSessionState({ type: 'session_state', key, node: 'local', state: 'ready' });
+  }, MAIN_TREE_KEY);
+
+  await expect(page.locator('#header-git .git-chip-text')).toHaveText('feat/mid-turn', { timeout: 10000 });
+
+  // The mock server is shared across this file's tests, so put it back.
+  mock.setGitState(MAIN_TREE_KEY, {
+    is_repo: true, repo: 'myproject', branch: 'master',
+    root: '/home/user/workspace/myproject', workspace: '/home/user/workspace/myproject',
+  });
+});
+
 test('detached HEAD shows the abbreviated sha with the detached tint', async ({ page }) => {
   await page.route('**/api/sessions/git**', route => route.fulfill({
     status: 200,
