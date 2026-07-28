@@ -77,7 +77,7 @@ func TestReplay_SanitizesLegacySnapshotPrompt(t *testing.T) {
 
 	// U+202E (RLO) bidi override + a raw NUL (C0): both are in the
 	// containsCronUnsafe / SanitizeForLog deny set.
-	dirty := "do safe‮rm -rf\x00 thing"
+	dirty := "do safe\u202erm -rf\x00 thing"
 	s.writeSandboxSnapshot(j.ID, origRunID, dirty, "haiku", "img-v1", nil, slog.Default())
 
 	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {

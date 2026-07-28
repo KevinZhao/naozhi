@@ -72,6 +72,7 @@ func TestSubagentLinker_ResolveClearsInflight_R260528_PERF_7(t *testing.T) {
 	}
 	// Resolve bails early because SetContext was never called; the
 	// deferred clear must still fire.
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	_, ok := l.Resolve(nil, "task-no-ctx", "tu1", "name", "desc", 0)
 	if ok {
 		t.Fatal("Resolve should return false on missing context")

@@ -126,7 +126,7 @@ func TestSanitisePlannerPrompt_DropsInvalidUTF8(t *testing.T) {
 func TestSanitisePlannerPrompt_DropsBidiOverride(t *testing.T) {
 	t.Parallel()
 
-	opts := makeResolverWithBoundProject(t, "innocuous ‮ suffix-flipped")
+	opts := makeResolverWithBoundProject(t, "innocuous \u202e suffix-flipped")
 	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
 		t.Fatalf("bidi-override PlannerPrompt reached argv: %q", got)
 	}
@@ -209,7 +209,7 @@ func TestSanitisePlannerPromptForSpawn_DirectFunction(t *testing.T) {
 		{"BEL", "x\x07y", ""},
 		{"DEL", "x\x7fy", ""},
 		{"invalid utf8", "\xc0", ""},
-		{"bidi override", "x‮y", ""},
+		{"bidi override", "x\u202ey", ""},
 		{"tab + LF + CR allowed", "a\tb\nc\rd", "a\tb\nc\rd"},
 		{"CJK allowed", "你好", "你好"},
 	}

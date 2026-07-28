@@ -48,7 +48,7 @@ func TestSanitizeWireText_DropsC0Control_ExceptTabNewlineCR(t *testing.T) {
 // guarantee intact alongside the new C0 filtering.
 func TestSanitizeWireText_StillDropsBidi(t *testing.T) {
 	// U+202E RIGHT-TO-LEFT OVERRIDE
-	in := "safe‮evil"
+	in := "safe\u202eevil"
 	got := sanitizeWireText(in)
 	if strings.ContainsRune(got, '‮') {
 		t.Fatalf("sanitizeWireText kept bidi override: %q", got)

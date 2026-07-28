@@ -101,23 +101,19 @@ func TestReadShimLine_EOFNoTrailingNewline(t *testing.T) {
 	}
 }
 
+// TestReadShimLine_CapExceeded_DrainsToNextLine would assert that an oversize
+// line is drained so the *second* readShimLine call returns the next line
+// cleanly. readShimLine reads the maxScannerBufBytes (10 MiB) constant
+// directly, so there is no way to shrink the cap for the test and the payload
+// would have to exceed 10 MiB — too expensive here. The behaviour is covered
+// by the integration tests in process_test.go, so this skips unconditionally.
+//
+// The skip is the first statement: the previous version built a 264-byte
+// payload against a local `cap = 64` that readShimLine never consulted, then
+// skipped anyway and discarded the values via `_ =` (flagged SA4006). That
+// setup only looked like coverage.
 func TestReadShimLine_CapExceeded_DrainsToNextLine(t *testing.T) {
-	// Build a payload: oversize line (cap+1 bytes of 'x' + '\n')
-	// followed by a normal line. The helper must drain the oversize
-	// so the *second* call returns the second line cleanly.
-	const cap = 64
-	oversize := strings.Repeat("x", cap+200) + "\n"
-	normal := "next\n"
-	r := readerWithSize(oversize+normal, 64)
-
-	// Override the package-level cap for this test by providing a
-	// smaller line buffer. Wait — readShimLine reads maxScannerBufBytes
-	// constant directly. Use the real constant: emit > 10 MiB. That's
-	// expensive in a test, so we accept the realistic bound here.
 	t.Skip("maxScannerBufBytes is 10 MiB; covered by integration tests in process_test.go")
-	_ = oversize
-	_ = normal
-	_ = r
 }
 
 // TestReadShimLine_CapExceededTerminatedDoesNotEatNext covers R234-PERF-13

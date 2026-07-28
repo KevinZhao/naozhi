@@ -177,7 +177,7 @@ func TestParseCronAdd(t *testing.T) {
 		// ParseCronAdd so the IM edge cannot drift from the dashboard edge.
 		{"schedule control char", "\"@every \x0030m\" check", "", "", true},
 		{"prompt control char", "\"@every 30m\" che\x00ck", "", "", true},
-		{"prompt bidi override", "\"@every 30m\" che‮ck", "", "", true},
+		{"prompt bidi override", "\"@every 30m\" che\u202eck", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

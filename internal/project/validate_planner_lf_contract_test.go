@@ -46,7 +46,7 @@ func TestValidateConfig_PlannerPromptRejectsLF(t *testing.T) {
 		{"LF with surrounding whitespace", "  \n  "},
 		{"LF after long prefix", strings.Repeat("a", 4000) + "\n"},
 		{"NEL (U+0085) — should also fail via IsLogInjectionRune slow scan",
-			"foobar"},
+			"foo\u0085bar"},
 		{"LS (U+2028) — should fail via IsLogInjectionRune",
 			"foo bar"},
 		{"PS (U+2029) — should fail via IsLogInjectionRune",

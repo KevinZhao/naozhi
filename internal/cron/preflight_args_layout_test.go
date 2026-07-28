@@ -17,7 +17,7 @@ import (
 // sizes plus a one-word padding tolerance — anything bigger means a
 // future field reorder slipped padding back in.
 func TestPreflightArgs_FieldOrderingPaddingFloor(t *testing.T) {
-	a := preflightArgs{}
+	var a preflightArgs
 	got := unsafe.Sizeof(a)
 
 	want := unsafe.Sizeof(a.snap) +

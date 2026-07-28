@@ -85,7 +85,7 @@ func TestValidateJobFields_RejectsControlBytes(t *testing.T) {
 	}{
 		{"WorkDir NUL", func(j *Job) { j.WorkDir = "/tmp/a\x00b" }},
 		{"Backend DEL", func(j *Job) { j.Backend = "claude\x7f" }},
-		{"NotifyPlatform bidi", func(j *Job) { j.NotifyPlatform = "feishu‮" }},
+		{"NotifyPlatform bidi", func(j *Job) { j.NotifyPlatform = "feishu\u202e" }},
 		{"NotifyChatID C0", func(j *Job) { j.NotifyChatID = "oc_\x01abc" }},
 	}
 	for _, tc := range tests {

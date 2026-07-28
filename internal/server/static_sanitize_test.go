@@ -50,9 +50,9 @@ func TestDashboardJS_SanitizeKeySlug_UnicodeColons(t *testing.T) {
 	// any of the visible characters in the class is sufficient to confirm
 	// the intent — if Prettier rewrites to ‪–‮ notation a future
 	// review will recognize the range.
-	hasBidi := strings.ContainsAny(body, "‪‫‬‭‮") ||
+	hasBidi := strings.ContainsAny(body, "\u202a\u202b\u202c\u202d\u202e") ||
 		strings.Contains(body, `\u202`) ||
-		strings.Contains(body, `⁦`)
+		strings.Contains(body, "\u2066")
 	if !hasBidi {
 		t.Error("sanitizeKeySlug must strip bidi override / embedding characters (U+202A–U+202E, U+2066–U+2069) — RLO etc. would otherwise corrupt sidebar and log rendering")
 	}

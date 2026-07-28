@@ -206,7 +206,7 @@ func TestManager_StartNilCtxFallsBack(t *testing.T) {
 			t.Fatalf("Start(nil) panicked: %v (must fall back to Background)", r)
 		}
 	}()
-	//nolint:staticcheck // SA1012 intentional: pin nil-ctx defensive fallback.
+	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	m.Start(nil)
 	// Stop must still drain cleanly via the internal cancelP — proves the
 	// goroutines are tied to a real ctx (not the nil parent).

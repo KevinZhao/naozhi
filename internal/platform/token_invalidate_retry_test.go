@@ -50,8 +50,9 @@ func TestIsTokenInvalidated(t *testing.T) {
 
 // scriptedPlat returns a configurable sequence of (msgID, err) pairs from
 // successive Reply calls. attempt counter is exposed for assertions.
+// scriptedPlat implements all five Platform methods itself, so it does not
+// embed fakePlat (the embedded value was unused — U1000).
 type scriptedPlat struct {
-	fakePlat
 	results []scriptedResult
 	calls   int
 }

@@ -1116,7 +1116,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 		}()
 		// R247-ARCH-10 (#632): NotifyCtx centralises the "detach from
 		// parent because the turn ctx is already Done" pattern.
-		notifyCtx, cancel := NotifyCtx(nil, NotifyKindOwnerLoopPanic, platformReplyTimeout)
+		notifyCtx, cancel := NotifyCtx(context.Background(), NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
@@ -1179,8 +1179,10 @@ func (d *Dispatcher) goSendAndReply(
 func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
 	if ctx == nil {
 		// nil parent: caller already lost its turn ctx. Mint a fresh
-		// shutdown-budget ctx so the reply can still land.
-		return NotifyCtx(nil, NotifyKindShutdown, shutdownReplyTimeout)
+		// shutdown-budget ctx so the reply can still land. NotifyCtx
+		// detaches from the parent regardless, so Background is
+		// equivalent to the nil we used to forward here.
+		return NotifyCtx(context.Background(), NotifyKindShutdown, shutdownReplyTimeout)
 	}
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		// Happy path: cleanup is nil so callers using the

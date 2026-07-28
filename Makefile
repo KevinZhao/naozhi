@@ -22,8 +22,9 @@ lint:
 
 # CI entry point for staticcheck. Pinned version so a new staticcheck release
 # cannot turn a green PR red without a deliberate bump here. Wired into
-# .github/workflows/ci.yml as a warn-mode job (continue-on-error) while the
-# SA1019 ImageData-deprecation backlog is worked down — see .golangci.yml.
+# .github/workflows/ci.yml as a fail-mode job — the backlog is at 0, so keep it
+# there. Suppress a finding only where the flagged pattern IS the behaviour
+# under test, with `//lint:ignore <CHECK> <reason>` (`//nolint` does NOT work).
 lint-staticcheck:
 	go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
 

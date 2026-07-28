@@ -24,7 +24,7 @@ func TestValidateScheduleChars(t *testing.T) {
 		{"newline", "0 9 * *\n1-5", true},
 		{"tab rejected", "0 9\t* * *", true},
 		{"del", "0 9 * * *\x7f", true},
-		{"bidi override", "0 9 * * *‮", true},
+		{"bidi override", "0 9 * * *\u202e", true},
 		{"line separator", "0 9 * * * ", true},
 		{"invalid utf8", "0 9 * * *\xff", true},
 	}

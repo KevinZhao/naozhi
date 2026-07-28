@@ -163,10 +163,10 @@ func TestValidateRemoteWorkspace(t *testing.T) {
 		// R176-SEC-M: C1 / bidi / LS / PS runes are >= 0x20 at the byte
 		// level and slipped past the old ASCII-only loop. isLogInjectionRune
 		// now rejects all four classes so they cannot reach slog attrs.
-		{"C1 NEL rejected", "/home/user/proj", true},
-		{"C1 DCS rejected", "/home/user/proj", true},
-		{"bidi RLO rejected", "/home/user/‮proj", true},
-		{"bidi LRI rejected", "/home/user/⁦proj", true},
+		{"C1 NEL rejected", "/home/user/\u0085proj", true},
+		{"C1 DCS rejected", "/home/user/\u0090proj", true},
+		{"bidi RLO rejected", "/home/user/\u202eproj", true},
+		{"bidi LRI rejected", "/home/user/\u2066proj", true},
 		{"line separator rejected", "/home/user/ proj", true},
 		{"paragraph separator rejected", "/home/user/ proj", true},
 	}

@@ -71,7 +71,7 @@ func TestSanitizeCronDisplay_StripNewlines(t *testing.T) {
 // TestSanitizeCronDisplay_BidiStripped verifies bidi override runes are removed.
 func TestSanitizeCronDisplay_BidiStripped(t *testing.T) {
 	// U+202E RIGHT-TO-LEFT OVERRIDE
-	got := sanitizeCronDisplay("safe‮text", 60)
+	got := sanitizeCronDisplay("safe\u202etext", 60)
 	if strings.ContainsRune(got, '‮') {
 		t.Errorf("sanitizeCronDisplay did not strip RLO rune: %q", got)
 	}

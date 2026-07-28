@@ -20,16 +20,6 @@ func writeSkill(t *testing.T, root, name, content string) {
 	}
 }
 
-const skillFM = `---
-name: %s
-description: %s
----
-
-# %s
-
-body text
-`
-
 // TestScan_UserAndProjectSkills is the P0 vertical slice: only user-level and
 // project-level skills, no plugins, no cache.
 func TestScan_UserAndProjectSkills(t *testing.T) {

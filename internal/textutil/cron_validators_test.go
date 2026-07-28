@@ -23,7 +23,7 @@ func TestValidateCronPromptStrict(t *testing.T) {
 		{name: "C0 control rejected", in: "bad\x01ctl", wantErr: true},
 		{name: "DEL rejected", in: "bad\x7fctl", wantErr: true},
 		{name: "invalid utf8 rejected", in: "bad\xffutf8", wantErr: true},
-		{name: "bidi override rejected", in: "ok‮evil", wantErr: true},
+		{name: "bidi override rejected", in: "ok\u202eevil", wantErr: true},
 		// R202606e-PERF-005: large pure-ASCII prompt must still pass after the
 		// anyHighBit fast-path skips the rune scan (no false reject).
 		{name: "large pure ascii ok", in: strings.Repeat("status check ", 600), wantErr: false},
@@ -65,7 +65,7 @@ func TestValidateCronScheduleChars(t *testing.T) {
 		{name: "C0 control rejected", in: "0 9\x01* * *", wantErr: true},
 		{name: "DEL rejected", in: "0 9\x7f* * *", wantErr: true},
 		{name: "invalid utf8 rejected", in: "0 9\xff* * *", wantErr: true},
-		{name: "bidi override rejected", in: "@every‮ 30m", wantErr: true},
+		{name: "bidi override rejected", in: "@every\u202e 30m", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

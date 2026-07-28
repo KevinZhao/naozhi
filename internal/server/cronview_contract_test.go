@@ -74,8 +74,14 @@ func TestCronScheduler_NilPointerBoxesToNilInterface(t *testing.T) {
 	var concrete *cron.Scheduler // typed nil, as opts.Scheduler is when unset
 
 	// WRONG (documented anti-pattern): direct box produces a non-nil interface.
-	var boxedDirect cronScheduler = concrete
-	if boxedDirect == nil {
+	//
+	// The box goes through a function boundary so the comparison below is a
+	// real runtime check. Assigning to a local and comparing that directly
+	// gave the lhs a concrete type, letting the compiler fold `== nil` to a
+	// constant false — the t.Fatal was unreachable and this half of the test
+	// asserted nothing (staticcheck SA4023).
+	boxDirect := func(s *cron.Scheduler) cronScheduler { return s }
+	if boxDirect(concrete) == nil {
 		t.Fatal("sanity: a typed-nil pointer boxed directly is NOT a nil interface")
 	}
 

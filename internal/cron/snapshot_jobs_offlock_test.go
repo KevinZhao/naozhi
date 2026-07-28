@@ -242,6 +242,7 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 	lockAcquired := make(chan struct{})
 	go func() {
 		s.mu.Lock()
+		//lint:ignore SA2001 intentional empty critical section: probes that the lock is acquirable
 		s.mu.Unlock()
 		close(lockAcquired)
 	}()

@@ -41,6 +41,7 @@ func TestScanMetaFiles_IOOutsideWriteLock(t *testing.T) {
 	gotLock := make(chan struct{})
 	go func() {
 		l.mu.RLock()
+		//lint:ignore SA2001 intentional empty critical section: probes that the lock is acquirable
 		l.mu.RUnlock()
 		close(gotLock)
 	}()

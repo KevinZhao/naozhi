@@ -257,7 +257,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 		// alongside the other dispatch sites. The card must outlive the
 		// originating turn so a near-deadline /new doesn't drop it
 		// mid-flight (R218-GO-1).
-		rctx, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, platformReplyTimeout)
+		rctx, cancel := NotifyCtx(context.Background(), NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsCapability[platform.QuestionCardSender](p); ok {

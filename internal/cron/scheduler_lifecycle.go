@@ -67,7 +67,12 @@ import (
 // MUST also be migrated under triggerWG so its lifetime is bounded by
 // the same stopBudget the Send-spawning code is.
 func (s *Scheduler) Stop() {
-	s.stopWithCtx(nil)
+	// context.Background() rather than nil: ctxDone(nil) and
+	// context.Background().Done() both yield a nil channel, so the drain
+	// helpers' optional ctx-cancel select arm stays equally inert. The
+	// nil-ctx path itself remains supported (and covered by
+	// TestStopContext_NilCtxBehavesLikeStop) for external callers.
+	s.stopWithCtx(context.Background())
 }
 
 // StopContext is the idiomatic Stop(ctx) entry point (golang/go#36363):

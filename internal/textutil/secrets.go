@@ -240,10 +240,10 @@ func isSecretTokenByte(b byte) bool {
 // First-byte set: 's' (sk-…/sk_live_/sk_test_), 'g' (ghp_/gho_/…/glpat-),
 // 'A' (AKIA/ASIA), 'x' (xoxb-/…), 'h' (hf_/hvs.), 'n' (npm_), 'y' (ya29.),
 // 'd' (dapi), 'r' (rk_live_/rk_test_), '-' (-----BEGIN). Keep in sync with
-// secretPrefixes. strings.IndexAny uses a SIMD-backed byteset scan on
+// secretPrefixes. strings.ContainsAny uses a SIMD-backed byteset scan on
 // amd64/arm64.
 func mayContainSecretPrefix(s string) bool {
-	return strings.IndexAny(s, "sgAxhnydr-") >= 0
+	return strings.ContainsAny(s, "sgAxhnydr-")
 }
 
 // redactEnvAssignments masks the value of any `KEY=value` assignment whose KEY

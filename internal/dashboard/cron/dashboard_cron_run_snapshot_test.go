@@ -95,7 +95,7 @@ func TestHandleRunSnapshot_SecretRefs_Sanitized(t *testing.T) {
 
 	jobID, runID := strings.Repeat("a", 16), strings.Repeat("b", 16)
 	// U+202E RIGHT-TO-LEFT OVERRIDE embedded in a ref name.
-	taintedRef := "github‮token"
+	taintedRef := "github\u202etoken"
 	sched.WriteSandboxSnapshotForTest(jobID, runID, "p", "haiku", "phase2", []string{taintedRef})
 
 	h := &Handlers{scheduler: sched}
@@ -208,7 +208,7 @@ func TestHandleRunSnapshot_PromptHashSanitized(t *testing.T) {
 	// Write a manifest with a bidi-injected PromptHash. A real hash is 64 hex
 	// chars; here we embed a RIGHT-TO-LEFT OVERRIDE (U+202E) to test sanitisation.
 	// The hash must still look like valid JSON but carry the injected rune.
-	taintedHash := strings.Repeat("a", 31) + "‮" + strings.Repeat("f", 32)
+	taintedHash := strings.Repeat("a", 31) + "\u202e" + strings.Repeat("f", 32)
 
 	snapDir := filepath.Join(tmp, "runsnapshots", jobID)
 	if err := os.MkdirAll(snapDir, 0o700); err != nil {

@@ -55,13 +55,13 @@ func TestValidateConfig(t *testing.T) {
 		{"git_remote DEL rejected", ProjectConfig{GitRemote: "https://x\x7f/r"}, false},
 		{"git_remote ESC rejected", ProjectConfig{GitRemote: "https://x\x1b/r"}, false},
 		{"git_remote TAB rejected", ProjectConfig{GitRemote: "https://x\t/r"}, false},
-		{"git_remote C1 rejected", ProjectConfig{GitRemote: "https://x/r"}, false},
-		{"git_remote RLO rejected", ProjectConfig{GitRemote: "https://x‮/r"}, false},
+		{"git_remote C1 rejected", ProjectConfig{GitRemote: "https://x\u0085/r"}, false},
+		{"git_remote RLO rejected", ProjectConfig{GitRemote: "https://x\u202e/r"}, false},
 		{"git_remote LS rejected", ProjectConfig{GitRemote: "https://x /r"}, false},
 		{"memory_file over cap rejected", ProjectConfig{MemoryFile: strings.Repeat("a", 2049)}, false},
 		{"memory_file NUL rejected", ProjectConfig{MemoryFile: "docs/\x00MEM.md"}, false},
 		{"memory_file LF rejected", ProjectConfig{MemoryFile: "docs/\nMEM.md"}, false},
-		{"memory_file RLO rejected", ProjectConfig{MemoryFile: "docs/‮MEM.md"}, false},
+		{"memory_file RLO rejected", ProjectConfig{MemoryFile: "docs/\u202eMEM.md"}, false},
 
 		// RFC project-access-profile: backend / access_profile are
 		// identifier-shaped tokens (referential validity checked at config

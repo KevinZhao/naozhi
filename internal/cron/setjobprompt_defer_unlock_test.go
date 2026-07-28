@@ -145,6 +145,7 @@ func assertMuUnlocked(t *testing.T, s *Scheduler, context string) {
 	done := make(chan struct{})
 	go func() {
 		s.mu.RLock()
+		//lint:ignore SA2001 intentional empty critical section: probes that the lock is acquirable
 		s.mu.RUnlock()
 		close(done)
 	}()
