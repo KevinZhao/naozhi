@@ -1373,6 +1373,24 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    "(模型未配置)" reads as a hint, not an error. */
 .main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
 .main-header .model-label-unset{color:var(--nz-text-faint);font-style:italic}
+/* Git branch / worktree chip in the session-detail header. Filled async by
+   renderGitChip; :empty collapses it so a non-repo workspace leaves no gap.
+   The chip is the operator's "which checkout am I editing" signal, so a
+   linked worktree gets the accent tint (the case worth noticing) while a
+   plain main-tree branch stays neutral. */
+/* margin-right:auto keeps the chip anchored next to the cli/model group.
+   Without it, .detail's `justify-content:space-between` flings the chip to the
+   far right while no runstats exist, then snaps it back to the left once
+   #header-runstats (which carries margin-left:auto) fills in — the chip would
+   visibly jump position a beat after the session opens. */
+.main-header .detail-git{display:inline-flex;align-items:center;min-width:0;flex-shrink:1;margin-right:auto}
+.main-header .detail-git:empty{display:none}
+.git-chip{display:inline-flex;align-items:center;gap:3px;max-width:220px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);cursor:default}
+.git-chip-icon{font-weight:400;opacity:.75}
+.git-chip-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.git-chip-sep{margin:0 3px;opacity:.45}
+.git-chip-worktree{color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-color:rgba(0,122,255,.35)}
+.git-chip-detached{color:var(--nz-amber);background:rgba(255,159,10,.12);border-color:rgba(255,159,10,.35);font-variant-numeric:tabular-nums}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 .sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
 /* R110-P1 Home panel (idle main area): "最近会话" compact list that appears

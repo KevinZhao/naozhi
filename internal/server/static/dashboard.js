@@ -521,6 +521,13 @@ async function fetchSessions() {
       if (sessionOptimisticRunning[sKey] && s.state !== 'running') {
         s = Object.assign({}, s, { state: 'running' });
       }
+      // A workspace change (/cd, or the first snapshot after spawn resolved
+      // the real cwd) invalidates the cached git state — the new directory can
+      // be a different repo, a different worktree, or no repo at all.
+      const prevWS = sessionsData[sKey] && sessionsData[sKey].workspace;
+      if (prevWS !== undefined && prevWS !== s.workspace) {
+        invalidateGitState(s.key, n);
+      }
       sessionsData[sKey] = s;
       backendKeys.add(s.key);
     });
@@ -2473,6 +2480,7 @@ function selectSession(key, node) {
   if (activeCard) updateCardUnreadChip(activeCard, 0);
   renderMainShell();
   fetchSessionRuns(key, node); // populate the run-history timeline (best-effort)
+  fetchGitState(key, node); // populate the branch / worktree chip (best-effort)
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
   if (draftInput && sessionDrafts[key]) {
@@ -2655,6 +2663,106 @@ async function fetchSessionRuns(key, node) {
   }
 }
 
+// ---- Git branch / worktree chip ----
+//
+// Tells the operator which checkout the selected session is editing, so a
+// conversation running in `.claude/worktrees/feat-x` is never mistaken for one
+// on master. Best-effort in exactly the same way as the run-history block: a
+// fetch failure, a non-repo workspace, or a remote-node session just leaves
+// the chip empty and the conversation surface is never blocked on it.
+
+// gitChipHtml renders the chip for a /api/sessions/git payload, or '' when
+// there is nothing to show. Two shapes:
+//   - worktree present → "⑂ <worktree> · <branch>" (the worktree name is the
+//     stronger signal, so it leads)
+//   - main tree        → "⑂ <branch>"
+// A detached HEAD shows the abbreviated sha with a warning tint, because
+// "which branch am I on" has no answer there and silently showing nothing
+// would read as "not a repo".
+function gitChipHtml(g) {
+  if (!g || !g.is_repo) return '';
+  const branch = g.detached
+    ? (g.head_sha || '')
+    : (g.branch || '');
+  if (!branch && !g.worktree) return '';
+
+  // Tooltip carries the full picture; the chip itself stays short so it can't
+  // crowd out the model / run-stats cells on a narrow header.
+  const tipParts = [];
+  if (g.repo) tipParts.push('仓库: ' + g.repo);
+  if (g.worktree) tipParts.push('worktree: ' + g.worktree);
+  tipParts.push(g.detached ? '分离 HEAD: ' + branch : '分支: ' + branch);
+  if (g.root) tipParts.push('根目录: ' + g.root);
+  if (g.workspace && g.workspace !== g.root) tipParts.push('工作目录: ' + g.workspace);
+
+  const cls = 'git-chip' +
+    (g.worktree ? ' git-chip-worktree' : '') +
+    (g.detached ? ' git-chip-detached' : '');
+  const label = g.worktree
+    ? esc(g.worktree) + '<span class="git-chip-sep">·</span>' + esc(branch)
+    : esc(branch);
+  return '<span class="' + cls + '" title="' + escAttr(tipParts.join('\n')) + '">' +
+      '<span class="git-chip-icon" aria-hidden="true">⑂</span>' +
+      '<span class="git-chip-text">' + label + '</span>' +
+    '</span>';
+}
+
+// gitStateCache holds the last resolved payload per sid(key, node). The header
+// is rebuilt from scratch by renderMainShell on every rename / re-select, which
+// wipes the chip node; repainting from cache keeps the chip from flickering
+// out and back on each rebuild, and avoids a redundant fetch per repaint.
+const gitStateCache = {};
+
+// setHeaderGitChip writes (or clears) the header chip node. The node is built
+// empty by renderMainShell, so absence = no-op rather than throw (mirrors
+// setHeaderRunStats).
+function setHeaderGitChip(html) {
+  const el = document.getElementById('header-git');
+  if (el) el.innerHTML = html || '';
+}
+
+// repaintGitChip re-renders the chip for the currently selected session from
+// cache. Called at the end of renderMainShell so a header rebuild triggered by
+// something unrelated (rename, model update) doesn't drop the chip.
+function repaintGitChip() {
+  if (!selectedKey) { setHeaderGitChip(''); return; }
+  setHeaderGitChip(gitChipHtml(gitStateCache[sid(selectedKey, selectedNode)]));
+}
+
+async function fetchGitState(key, node) {
+  node = node || 'local';
+  // Git state is a local-node concern: a remote session's workspace lives on
+  // that node's filesystem, so resolving it here would describe the wrong
+  // tree. Clear the chip so a remote session doesn't inherit the previously
+  // selected local session's branch.
+  if (!key || node !== 'local') { setHeaderGitChip(''); return; }
+  const cacheKey = sid(key, node);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const resp = await fetch('/api/sessions/git?key=' + encodeURIComponent(key), { headers });
+    if (!resp.ok) { delete gitStateCache[cacheKey]; setHeaderGitChip(''); return; }
+    const data = await resp.json();
+    gitStateCache[cacheKey] = data;
+    // Guard against a stale response landing after the user switched sessions.
+    if (selectedKey !== key || selectedNode !== node) return;
+    setHeaderGitChip(gitChipHtml(data));
+  } catch (_) {
+    delete gitStateCache[cacheKey];
+    setHeaderGitChip('');
+  }
+}
+
+// invalidateGitState drops the cached payload for a session and re-resolves it.
+// Called after /cd (the session's workspace moved, so the branch may differ)
+// and on session dismissal so a recycled key cannot inherit a stale branch.
+function invalidateGitState(key, node) {
+  if (!key) return;
+  delete gitStateCache[sid(key, node || 'local')];
+  if (key === selectedKey) fetchGitState(key, node || 'local');
+}
+
 // dismissSession removes a session from the sidebar. The × button deletes
 // immediately with no confirmation — per operator preference, the friction
 // isn't worth it. Accidental deletes are recoverable by re-entering the
@@ -2663,6 +2771,9 @@ async function dismissSession(key, node, opts) {
   node = node || 'local';
   delete sessionDrafts[key];
   delete sessionScrollPos[sid(key, node)];
+  // Drop the cached git state so a later key reuse can't inherit this
+  // session's branch chip before its own fetch resolves.
+  delete gitStateCache[sid(key, node)];
   // sessionBackends is normally consumed on first sendMessage. A dismiss
   // before any send leaves the entry behind; clear it defensively so a
   // subsequent re-create with the same key (unlikely but possible if the
@@ -3079,6 +3190,11 @@ function renderMainShell() {
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerBackendChip +
         headerOriginBadge +
+        // Git branch / worktree chip. Built empty here and filled
+        // asynchronously by renderGitChip once /api/sessions/git resolves;
+        // stays empty (collapses via :empty) for non-repo workspaces and
+        // remote-node sessions.
+        '<span class="detail-git" id="header-git"></span>' +
         ctxBarHtml +
         turnTimerHtml +
         // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
@@ -3163,6 +3279,10 @@ function renderMainShell() {
   // active session's backend doesn't support. Single-backend deployments
   // short-circuit inside applyFeatureGates so this is a no-op there.
   applyFeatureGates();
+  // The header was just rebuilt from scratch, which emptied #header-git.
+  // Repaint from cache so a rebuild driven by something unrelated (rename,
+  // model arriving) doesn't blank the branch chip until the next fetch.
+  repaintGitChip();
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.

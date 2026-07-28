@@ -162,3 +162,9 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	r.ss.activeCount.Add(1)
 	return s
 }
+
+// SetWorkspaceForTest stamps the session-level workspace (the cwd a live CLI
+// process runs in) on an injected session. Production sets this through the
+// spawn / takeover paths; tests that assert workspace-precedence behaviour
+// need it without a real process.
+func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }
