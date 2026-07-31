@@ -100,7 +100,7 @@ graph LR
 - **Watchdog 双超时**: 无输出超时 (默认 2min) + 总耗时超时 (默认 5min)，防止进程挂起
 - **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
 - **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
-- **会话自动串联 (auto-chain)**: 同一 workspace 的多个 session 自动接成一条链，Dashboard "load earlier" 可跨 session 边界回溯（默认 7d 窗口 / 32 链长）
+- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启）。早期基于 "同 workspace + 时间窗" 猜测的 `session.auto_chain` 已下线 —— 它会把主题无关的 one-off 会话误串成历史上下文，详见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
 
 ### 消息队列与抢占
 
@@ -167,7 +167,7 @@ cli:
 /project off             → 解绑
 ```
 
-- 自动发现 `projects_root` 下含 `CLAUDE.md` 的目录
+- 自动发现 `projects_root` 下的子目录（跳过隐藏目录，无需 marker 文件）
 - planner session 免驱逐、免 TTL，保持长期对话上下文
 - 每个项目可配置独立的模型和 system prompt
 
@@ -394,10 +394,10 @@ session:
     mode: "collect"                       # collect | interrupt | passthrough
     max_depth: 20
     collect_delay: "500ms"
-  # auto_chain:                           # 同 workspace 会话自动串联（默认开启）
+  # project_stable_key:                   # 项目级稳定 session key（默认开启）
   #   enabled: true
-  #   window_hours: 168                   # 仅串联 7d 内修改过的 JSONL
-  #   cap: 32
+  # auto_chain 已废弃：配置仍被解析以兼容旧文件，但没有任何效果，
+  # 显式设置会在启动时打一条 deprecation warn。请从配置中删除。
 
 agents:                                   # 自定义 agent
   code-reviewer:
@@ -551,7 +551,7 @@ internal/
   transcribe/            语音转文字 (Amazon Transcribe Streaming)
   attachment/            附件存储 + 引用计数 GC
   eventlog/ history/     事件日志持久化 + 历史回放
-  node/ upstream/ wshub/ 多节点协议 + 反向连接 + WebSocket hub
+  node/ upstream/        多节点协议 + 反向连接（WebSocket hub 在 server/ 内）
   selfupdate/            自动更新 (GitHub Releases 轮询 + 校验)
   shim/                  零停机重启 sidecar 进程
   i18n/                  多语言文案解析（纯逻辑内核，运行时未接线 · 规划中）

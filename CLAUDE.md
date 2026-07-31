@@ -200,7 +200,7 @@ Naozhi supports aggregating sessions from multiple machines into a single dashbo
 
 ### Project Management
 
-When `projects.root` is configured, the `project.Manager` scans subdirectories containing `CLAUDE.md`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings).
+When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.`). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults.
 
 Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
 
@@ -300,10 +300,10 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
 - **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
 - **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
-- **transcribe**: `enabled`, `provider` (`aws`), `region`, `language` (voice message STT)
+- **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (workspaces is preferred name; nodes takes precedence if both present).
+Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (`workspaces` is the preferred name; **`workspaces` takes precedence if both are present** and `nodes` is overwritten with a `slog.Warn` — see `Config.Normalize`, R71-ARCH-L1).
 
 ## Concurrency Patterns
 
