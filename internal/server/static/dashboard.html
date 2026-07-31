@@ -128,6 +128,16 @@
   --nz-dur-loop:1.5s;
   --nz-dur-spin:.75s;
   --nz-selection-bar:3px; /* single source for the selected-row left edge */
+  /* ---------- Selection accent (ui-polish-light-theme D1) ----------
+     "Selected / active" rows previously spoke two colour languages: the
+     session card used brand rust while palette / cron / agent rows used a
+     blue wash + accent inset bar. One semantic, one colour: selection is
+     BRAND (rust). Blue stays for links, info text, running indicators and
+     the keyboard :focus-visible ring (a11y convention, distinct from
+     selection). Values reference the rust ramp, so the light theme follows
+     automatically. New selected/active states MUST use these tokens. */
+  --nz-selected-bg:var(--nz-rust-subtle);
+  --nz-selected-bar:var(--nz-rust);
   /* ---------- Overlay z-index scale (R20260610-UI-2) ----------
      Overlays previously each picked an ad-hoc z-index (lightbox shipped a
      wild 9999), so multi-layer stacking order was unpredictable. These tokens
@@ -339,7 +349,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .ab-nav-label{font-size:9px;line-height:1}
 .ab-nav:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .ab-nav.active{color:var(--nz-text-strong);background:var(--nz-bg-2)}
-.ab-nav.active::before{content:"";position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:3px;height:24px;background:var(--nz-accent);border-radius:0 2px 2px 0}
+.ab-nav.active::before{content:"";position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:3px;height:24px;background:var(--nz-selected-bar);border-radius:0 2px 2px 0}
 /* Rail attention badge (e.g. cron jobs needing attention) — small red dot
    pinned to the icon's top-right. */
 .ab-badge{position:absolute;top:6px;right:6px;min-width:8px;height:8px;border-radius:var(--nz-radius-sm);background:var(--nz-red)}
@@ -575,7 +585,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* Selected session: rust-subtle weak fill (token, theme-adaptive — was the
    hardcoded dark-blue #1f2937 that looked alien in light theme) + rust left
    edge as the brand selection marker. R20260606. */
-.session-card.active{background:var(--nz-rust-subtle);border-left-color:var(--nz-rust)}
+.session-card.active{background:var(--nz-selected-bg);border-left-color:var(--nz-selected-bar)}
 .session-card.dead-card{opacity:.6}
 /* .btn-close — canonical close/dismiss affordance class (#2027). One marker
    for every "close this surface" button so the family is greppable and shares
@@ -753,7 +763,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    font-weight:700 + slight negative letter-spacing keeps the two glyphs
    reading as a compact bracket-mark inside the 36px round slot — the mark
    steps up to --nz-fs-md so it stays proportionate in the enlarged avatar. */
-.event.user .event-icon{background:var(--nz-rust-subtle);color:var(--nz-rust);font-family:var(--nz-font-mono);font-size:var(--nz-fs-md);font-weight:700;letter-spacing:-.04em}
+/* Neutral chrome for the user avatar: the rust mark sat right next to the
+   blue-tinted user bubble — the two saturated accents fought in every turn.
+   Brand rust lives in the logo / CTA / selection; the avatar goes quiet. */
+.event.user .event-icon{background:var(--nz-bg-2);color:var(--nz-text-mute);font-family:var(--nz-font-mono);font-size:var(--nz-fs-md);font-weight:700;letter-spacing:-.04em}
 .event.user .event-content{flex:0 1 auto;max-width:80%;color:var(--nz-event-user-fg);background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
 /* Queued-send indicator: inline chip on the optimistic user bubble when
    send_ack returns status=queued. Replaces the previous top-of-screen
@@ -840,7 +853,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* Quick-ask 空态输入框：默认目录 + general agent 的"问一下"入口 */
 .quick-ask-form{display:flex;gap:8px;width:min(560px,92%);align-items:flex-end}
 .quick-ask-input{flex:1;min-height:44px;max-height:200px;padding:12px 14px;background:var(--nz-bg-1);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:10px;font:inherit;font-size:var(--nz-fs-base);line-height:1.5;resize:none;outline:none;transition:border-color .15s,box-shadow .15s;box-shadow:var(--nz-shadow-1)}
-.quick-ask-input:focus{border-color:var(--nz-blue);box-shadow:0 0 0 2px rgba(31,111,235,.18)}
+.quick-ask-input:focus{border-color:var(--nz-rust);box-shadow:0 0 0 2px var(--nz-rust-subtle)}
 .quick-ask-input::placeholder{color:var(--nz-text-placeholder)}
 .quick-ask-send{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--nz-rust);color:#fff;border:none;border-radius:var(--nz-radius-lg);cursor:pointer;transition:filter var(--nz-dur) var(--nz-ease),opacity var(--nz-dur) var(--nz-ease)}
 .quick-ask-send:hover{filter:brightness(1.15)}
@@ -897,7 +910,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .lightbox-overlay.lb-single .lb-nav,.lightbox-overlay.lb-single .lb-counter{display:none}
 .input-row{display:flex;gap:8px;align-items:flex-end}
 .input-row #msg-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:120px;outline:none;line-height:1.4;overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
-.input-row #msg-input:focus{border-color:var(--nz-accent)}
+.input-row #msg-input:focus{border-color:var(--nz-rust)}
 .input-row #msg-input:empty::before{content:attr(data-placeholder);color:var(--nz-text-placeholder);pointer-events:none}
 .btn-icon{width:36px;height:36px;border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);background:var(--nz-bg-1);color:var(--nz-text-mute);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .15s}
 .btn-icon:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
@@ -1054,7 +1067,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .rb-agent-row[role="button"]{cursor:pointer;border-radius:var(--nz-radius-sm);transition:background-color .15s}
 .rb-agent-row[role="button"]:hover{background:var(--nz-bg-2)}
 .rb-agent-row[role="button"]:focus{outline:2px solid var(--nz-accent);outline-offset:-1px}
-.rb-agent-row.active{background:var(--nz-bg-2);box-shadow:inset 2px 0 0 var(--nz-accent)}
+.rb-agent-row.active{background:var(--nz-bg-2);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .rb-agent-row.active .sa-name{color:var(--nz-accent)}
 
 .agent-breadcrumb{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);font-size:var(--nz-fs-sm);flex-wrap:wrap}
@@ -1106,7 +1119,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .modal{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);padding:24px;width:360px}
 .modal h3{font-size:15px;color:var(--nz-text-strong);margin-bottom:12px}
 .modal input{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
-.modal input:focus{border-color:var(--nz-accent)}
+.modal input:focus{border-color:var(--nz-rust)}
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .modal .modal-btns button{padding:6px 16px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:var(--nz-fs-base)}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
@@ -1138,7 +1151,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .modal.prompt-dialog .prompt-message{margin:8px 0 10px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.5}
 .modal.prompt-dialog .prompt-input{margin-top:4px}
 .modal textarea{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);font-family:inherit;outline:none;resize:vertical}
-.modal textarea:focus{border-color:var(--nz-accent)}
+.modal textarea:focus{border-color:var(--nz-rust)}
 .modal-section-label{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:6px}
 /* Auth modal hint: tells first-time operators where the token lives so the
    dashboard isn't a dead-end for someone with the URL but no prior context.
@@ -1177,7 +1190,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .proj-pick li{padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--nz-bg-2);transition:background .12s;min-height:44px;display:flex;flex-direction:column;justify-content:center;-webkit-tap-highlight-color:transparent}
 .proj-pick li:last-child{border-bottom:none}
 .proj-pick li:hover{background:var(--nz-bg-1)}
-.proj-pick li.selected,.proj-pick li[aria-selected="true"]{background:rgba(31,111,235,.2);box-shadow:inset 2px 0 0 var(--nz-accent)}
+.proj-pick li.selected,.proj-pick li[aria-selected="true"]{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .proj-pick .pp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proj-pick .pp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .proj-pick .pp-custom{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:6px}
@@ -1187,11 +1200,11 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--nz-shadow-3)}
 .cmd-palette-header{padding:14px 16px;border-bottom:1px solid var(--nz-bg-2);flex-shrink:0}
 .cmd-palette-header input{width:100%;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
-.cmd-palette-header input:focus{border-color:var(--nz-accent)}
+.cmd-palette-header input:focus{border-color:var(--nz-rust)}
 .cmd-palette-list{flex:1;overflow-y:auto;padding:6px;min-height:0}
 .cmd-palette-item{padding:8px 10px;border-radius:var(--nz-radius-ms);cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .1s}
 .cmd-palette-item:hover{background:var(--nz-hover-bg)}
-.cmd-palette-item.active{background:rgba(31,111,235,.2);box-shadow:inset 2px 0 0 var(--nz-accent)}
+.cmd-palette-item.active{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .cmd-palette-item .cp-main{flex:1;min-width:0}
 .cmd-palette-item .cp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmd-palette-item .cp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
@@ -1245,7 +1258,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    day-anchor; the search stays where they typed. */
 .history-popover-search{padding:6px 12px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2)}
 .hp-search-input{width:100%;padding:5px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text);font-size:var(--nz-fs-sm);font-family:inherit;outline:none;transition:border-color .1s}
-.hp-search-input:focus{border-color:var(--nz-accent)}
+.hp-search-input:focus{border-color:var(--nz-rust)}
 .hp-search-input::placeholder{color:var(--nz-text-placeholder)}
 .history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid var(--nz-bg-2);position:relative}
 .history-popover-item:last-child{border-bottom:none}
@@ -1676,7 +1689,7 @@ body.kbd-open .input-hints{display:none}
 .cron-filter-bar{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .cron-search-row{display:flex;gap:6px;align-items:center}
 .cron-search-input{flex:1;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm2);font-family:inherit;outline:none;transition:border-color .1s}
-.cron-search-input:focus{border-color:var(--nz-accent)}
+.cron-search-input:focus{border-color:var(--nz-rust)}
 .cron-search-input::placeholder{color:var(--nz-text-placeholder)}
 .cron-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:var(--nz-fs-md);line-height:1;padding:4px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;transition:all .1s}
 .cron-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
@@ -1687,7 +1700,7 @@ body.kbd-open .input-hints{display:none}
 /* Increment D: 排序 select —— 和 status chip 同一行末尾，风格对齐 */
 .cron-sort-select{margin-left:auto;padding:4px 22px 4px 10px;border-radius:var(--nz-radius-lg);border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-family:inherit;cursor:pointer;transition:all .15s;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='%23848d97'><path d='M6 8L0 0h12z'/></svg>");background-repeat:no-repeat;background-position:right 6px center;background-size:8px 6px}
 .cron-sort-select:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
-.cron-sort-select:focus{outline:none;border-color:var(--nz-blue);color:var(--nz-accent)}
+.cron-sort-select:focus{outline:none;border-color:var(--nz-rust);color:var(--nz-text)}
 .cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
 .cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
 .cron-preview-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px;min-height:16px}
@@ -2025,10 +2038,10 @@ body.kbd-open .input-hints{display:none}
 /* timeline 行选中态 — sheet 打开后该行高亮，提示用户当前看的是哪一条 run */
 /* PR-1 followup #3: 选中态视觉加强。色条 3→4px (与 cj-row.is-active 同级)
  * + 背景蓝调更明显 + 状态文字 strong + dot 描边 outline 标记被选中。 */
-.cron-timeline-panel .ctr.is-selected{background:rgba(31,111,235,.12);box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cron-timeline-panel .ctr.is-selected{background:var(--nz-selected-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
 .cron-timeline-panel .ctr.is-selected .ctr-state{color:var(--nz-text-strong);font-weight:600}
 .cron-timeline-panel .ctr.is-selected .ctr-time{color:var(--nz-text-strong)}
-.cron-timeline-panel .ctr.is-selected .ctr-dot{box-shadow:0 0 0 2px var(--nz-bg-1),0 0 0 3px var(--nz-accent)}
+.cron-timeline-panel .ctr.is-selected .ctr-dot{box-shadow:0 0 0 2px var(--nz-bg-1),0 0 0 3px var(--nz-selected-bar)}
 
 /* ===== §16 inline-expand 回归: 行内展开详情块 =====
  * 选中行下方就地嵌入 .ctr-detail（cronTimelineDetailHtml 渲染）。
@@ -2334,11 +2347,11 @@ body.kbd-open .input-hints{display:none}
 /* Drawer empty state (jobId set but job not in cronJobs) */
 .cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);text-align:center;line-height:1.6}
 /* List row selection (cj-row.is-active) */
-.cj-row.is-active{background:var(--nz-bg-2);box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cj-row.is-active{background:var(--nz-bg-2);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
 .cj-row.is-active .cj-title{color:var(--nz-text-strong)}
-.cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
-.cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}
-.cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(218,54,51,.45)}
+.cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(210,153,34,.45)}
+.cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
 /* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
  * gated on the *main column width* rather than the viewport width. The
  * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
@@ -2379,7 +2392,7 @@ body.kbd-open .input-hints{display:none}
 .freq-row-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .freq-mode-select{min-width:140px;padding:8px 28px 8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%238b949e' stroke-width='1.5'><path d='M2 4 L5 7 L8 4'/></svg>");background-repeat:no-repeat;background-position:right 10px center;min-height:38px}
 .freq-mode-select:hover,.freq-extra:hover{border-color:var(--nz-text-faint)}
-.freq-mode-select:focus,.freq-extra:focus{border-color:var(--nz-accent)}
+.freq-mode-select:focus,.freq-extra:focus{border-color:var(--nz-rust)}
 .freq-extra{min-width:100px;padding:8px 28px 8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%238b949e' stroke-width='1.5'><path d='M2 4 L5 7 L8 4'/></svg>");background-repeat:no-repeat;background-position:right 10px center;min-height:38px}
 .freq-hint{margin-top:8px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);line-height:1.5}
 /* v2 polish: 编辑老任务（v1 schedule 无法 round-trip 到新 picker）时
@@ -2390,7 +2403,7 @@ body.kbd-open .input-hints{display:none}
 .freq-legacy-hint .freq-legacy-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
 .freq-time{padding:8px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text-strong);font-size:var(--nz-fs-base);font-family:inherit;outline:none;min-height:38px}
 .freq-time:hover{border-color:var(--nz-text-faint)}
-.freq-time:focus{border-color:var(--nz-accent)}
+.freq-time:focus{border-color:var(--nz-rust)}
 /* ===== Cron editor — single-column modal (both PC and mobile) =====
  * v2 polish: 从双列 grid 改成单列 flex，对齐 Claude Scheduled Tasks 的
  * modal 布局。保留 cf-label 文案（做什么 / 什么时候 / 在哪里 / 其他设置）
@@ -2427,7 +2440,7 @@ body.kbd-open .input-hints{display:none}
 .cron-notify-target{margin-top:6px;margin-left:24px;display:none;gap:6px}
 .cron-notify-target.show{display:flex}
 .cron-notify-target input{flex:1;padding:6px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm);outline:none;min-width:0}
-.cron-notify-target input:focus{border-color:var(--nz-accent)}
+.cron-notify-target input:focus{border-color:var(--nz-rust)}
 .cron-notify-target input:first-child{flex:0 0 90px}
 /* Tighten freq preview in the new grid */
 .cron-modal .freq-preview{margin-top:12px}
@@ -2664,7 +2677,7 @@ body.kbd-open .sidebar-footer{display:none}
 /* Input shares #msg-input's box model exactly: same bg, radius, padding,
    min-height 38px, font-size 16px (iOS-zoom safe), max-height 120px. */
 .aside-drawer .ad-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:var(--nz-fs-md);min-height:38px;max-height:120px;outline:none;line-height:1.4;resize:none;overflow-y:auto;-webkit-user-select:text;user-select:text}
-.aside-drawer .ad-input:focus{border-color:var(--nz-accent)}
+.aside-drawer .ad-input:focus{border-color:var(--nz-rust)}
 .aside-drawer .ad-input::placeholder{color:var(--nz-text-placeholder)}
 /* Send button IS .btn-icon + .btn-send in visual terms — copy their tokens
    so the hover colour, green fill, border-radius, and 36×36 size match
