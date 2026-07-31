@@ -8,6 +8,25 @@
 # warn-mode CI job (continue-on-error) — see .github/workflows/ci.yml. It is
 # invoked directly rather than through golangci-lint, so the linters block
 # below does not gate it.
+#
+# SCHEMA NOTE: this file is v2. Linter settings MUST be nested under
+# `linters.settings`, NOT a top-level `linters-settings` block (that is the
+# v1 spelling). v2 rejects unknown top-level keys, so the v1 spelling made
+# `golangci-lint config verify` fail AND silently dropped every rule below —
+# depguard then fell back to its default deny-all "Main" list and reported 50
+# bogus errors. Run `golangci-lint config verify` after editing this file.
+#
+# GLOB NOTE: depguard matches `files:` patterns against the ABSOLUTE path of
+# each file, so a repo-relative pattern like "internal/sessionkey/**" never
+# matches and the rule silently applies to nothing. Keep the leading "**/".
+# To verify a rule actually fires (rather than being silently inert), plant a
+# forbidden import and confirm golangci-lint reports it against the expected
+# rule name:
+#
+#   printf 'package sessionkey\n\nimport _ "github.com/naozhi/naozhi/internal/textutil"\n' \
+#     > internal/sessionkey/zz_probe.go
+#   golangci-lint run ./internal/sessionkey/...   # expect: list 'sessionkey-isolated'
+#   rm internal/sessionkey/zz_probe.go
 
 version: "2"
 
@@ -16,31 +35,31 @@ linters:
   enable:
     - depguard
 
-linters-settings:
-  depguard:
-    rules:
-      # internal/sessionkey is a leaf vocabulary package shared by cron /
-      # session / sysession / scratch. Adding a deeper internal/* import
-      # here creates a cycle (cron → session ← sessionkey ← cron) and
-      # defeats the whole point of the package. The matching go-test
-      # guard lives in internal/sessionkey/imports_test.go.
-      sessionkey-isolated:
-        list-mode: lax
-        files:
-          - "internal/sessionkey/**"
-        deny:
-          - pkg: github.com/naozhi/naozhi/internal
-            desc: "internal/sessionkey must remain a leaf package — adding a deeper internal/* import creates a cycle with cron/session"
+  settings:
+    depguard:
+      rules:
+        # internal/sessionkey is a leaf vocabulary package shared by cron /
+        # session / sysession / scratch. Adding a deeper internal/* import
+        # here creates a cycle (cron → session ← sessionkey ← cron) and
+        # defeats the whole point of the package. The matching go-test
+        # guard lives in internal/sessionkey/imports_test.go.
+        sessionkey-isolated:
+          list-mode: lax
+          files:
+            - "**/internal/sessionkey/**"
+          deny:
+            - pkg: github.com/naozhi/naozhi/internal
+              desc: "internal/sessionkey must remain a leaf package — adding a deeper internal/* import creates a cycle with cron/session"
 
-      # internal/runtelemetry is a leaf event-shape package. It is
-      # imported by both producers (cron / sysession) and the broadcaster
-      # implementation in server. Importing any internal/* back into
-      # runtelemetry would tangle the dependency graph it is meant to
-      # straighten.
-      runtelemetry-isolated:
-        list-mode: lax
-        files:
-          - "internal/runtelemetry/**"
-        deny:
-          - pkg: github.com/naozhi/naozhi/internal
-            desc: "internal/runtelemetry must remain a leaf package — see docs/rfc/cron-sysession-merge.md §3.1"
+        # internal/runtelemetry is a leaf event-shape package. It is
+        # imported by both producers (cron / sysession) and the broadcaster
+        # implementation in server. Importing any internal/* back into
+        # runtelemetry would tangle the dependency graph it is meant to
+        # straighten.
+        runtelemetry-isolated:
+          list-mode: lax
+          files:
+            - "**/internal/runtelemetry/**"
+          deny:
+            - pkg: github.com/naozhi/naozhi/internal
+              desc: "internal/runtelemetry must remain a leaf package — see docs/rfc/cron-sysession-merge.md §3.1"

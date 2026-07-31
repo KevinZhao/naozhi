@@ -320,13 +320,25 @@ func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
 	return *c.Enabled
 }
 
-// AutoChainYAMLConfig represents the auto-workspace-chain feature
-// settings (docs/rfc/auto-workspace-chain.md). Default-on with
-// 7-day window / 32-cap; only operators who want to opt out or
-// shrink the window need to set this block.
+// AutoChainYAMLConfig represents the settings of the RETIRED
+// auto-workspace-chain feature (docs/rfc/auto-workspace-chain.md,
+// superseded by docs/rfc/project-stable-session-key.md §9).
 //
-// Enabled is *bool so an absent key falls back to def-true while
-// preserving the ability to explicitly write enabled: false.
+// DEPRECATED / NO EFFECT: these fields are still parsed so that older
+// config files continue to load, but nothing consumes them — the
+// Resolved* accessors below have no production callers, and
+// Router.retireAutoChainOnce actively strips the chains the feature
+// produced. Normalize logs a one-line deprecation warning when an
+// operator has explicitly set any field. Precise continuation is now
+// carried by ProjectStableKeyYAMLConfig.
+//
+// Do NOT wire these back up without re-reading why the feature was
+// retired: "same workspace slug + time window" is a semantic guess that
+// chained topically unrelated one-off sessions together as each other's
+// history.
+//
+// Enabled stays *bool so the deprecation warn can distinguish an absent
+// key from an explicit `enabled: false`.
 type AutoChainYAMLConfig struct {
 	Enabled     *bool `yaml:"enabled,omitempty"`
 	WindowHours int   `yaml:"window_hours,omitempty"` // 0 → 168 (7d)
