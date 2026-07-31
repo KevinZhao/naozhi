@@ -194,7 +194,6 @@
      through a token like this, never a bare hex in a rule. */
   --nz-event-agent-fg:#a5d6ff;          /* thinking / agent prose */
   --nz-event-user-fg:#e6edf3;           /* user bubble text + icon */
-  --nz-banner-bg:#1a2332;               /* running-banner strip */
   --nz-code-fg:#e6edf3;                 /* inline + block code text */
   --nz-chip-info-fg:#a5d6ff;            /* sc-agents / ts-subagent / feishu chip */
   --nz-chip-info-bg:rgba(56,139,253,.12);
@@ -254,7 +253,6 @@
      :root above to values that clear AA on a white/near-white surface. */
   --nz-event-agent-fg:#0a3069;          /* deep blue, ~9:1 on white */
   --nz-event-user-fg:#0d1117;           /* user bubble sits on pale blue tint */
-  --nz-banner-bg:#ddf4ff;               /* pale blue strip, accent text stays readable */
   --nz-code-fg:#1f2328;                 /* code text on --nz-bg-1 */
   --nz-chip-info-fg:#0550ae;            /* darker blue chip text */
   --nz-chip-info-bg:rgba(9,105,218,.1);
@@ -293,7 +291,6 @@
     /* Light-theme parity (R20260608) — mirror of the explicit light block. */
     --nz-event-agent-fg:#0a3069;
     --nz-event-user-fg:#0d1117;
-    --nz-banner-bg:#ddf4ff;
     --nz-code-fg:#1f2328;
     --nz-chip-info-fg:#0550ae;
     --nz-chip-info-bg:rgba(9,105,218,.1);
@@ -784,8 +781,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    the SVG fills the full 36px icon-slot to give it visual presence next to
    the assistant text and stay balanced against the user's >_ avatar.
    Color flows from --nz-clawd-rust via currentColor on the SVG path. */
-.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:36px;height:36px;overflow:visible}
-.event.text .event-icon .cc-clawd{width:36px;height:36px;display:block;color:var(--nz-clawd-rust)}
+.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:28px;height:28px;overflow:visible}
+.event.text .event-icon .cc-clawd{width:28px;height:28px;display:block;color:var(--nz-clawd-rust)}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
 /* Copy button: permanent for long AI messages; hover-revealed via
    .hover-only for short bubbles so every text/user message stays
@@ -1039,8 +1036,16 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .voice-overlay.transcribing .vo-wave span{animation:none;height:4px;background:var(--nz-accent)}
 .voice-overlay.transcribing .vo-hint{color:var(--nz-accent)}
 
-.input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none}
-.running-banner{background:var(--nz-banner-bg);border-bottom:1px solid rgba(31,111,235,.27);font-size:var(--nz-fs-sm2);color:var(--nz-accent);flex-shrink:0;animation:rb-appear .18s ease-out}
+/* ui-polish-light-theme D5: the keyboard cheat line only matters while
+   composing — fade it in on focus instead of narrating full-time. Reserved
+   height stays (opacity, not display) so the input area doesn't jump. */
+.input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none;opacity:0;transition:opacity var(--nz-dur) var(--nz-ease)}
+.input-area:focus-within .input-hints{opacity:1}
+/* ui-polish-light-theme D5: the banner is a high-frequency companion, not an
+   alert — full-width tinted strip + accent text shouted. Quiet chrome: plain
+   border, muted text; the pulsing dot alone signals "running". Click-to-
+   scroll behaviour unchanged. */
+.running-banner{border-bottom:1px solid var(--nz-border);font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);flex-shrink:0;animation:rb-appear .18s ease-out}
 @keyframes rb-appear{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .rb-tool-row{display:flex;align-items:center;padding:6px 12px;gap:8px}
 .rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}

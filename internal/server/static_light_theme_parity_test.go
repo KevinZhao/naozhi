@@ -29,7 +29,8 @@ import (
 var lightParityTokens = []string{
 	"--nz-event-agent-fg",
 	"--nz-event-user-fg",
-	"--nz-banner-bg",
+	// --nz-banner-bg retired (ui-polish-light-theme D5): the running banner
+	// dropped its tinted strip for quiet chrome, leaving the token unused.
 	"--nz-code-fg",
 	"--nz-chip-info-fg",
 	"--nz-chip-info-bg",
