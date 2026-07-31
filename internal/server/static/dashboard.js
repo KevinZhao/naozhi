@@ -3120,7 +3120,12 @@ function renderMainShell() {
   // session/deployment doesn't warrant a chip so the layout stays clean.
   const effCLIName = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
   const effCLIVersion = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
-  const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
+  // ui-polish-light-theme D5: the version string is debug info an operator
+  // needs rarely — keep it in the hover title, show just the backend name.
+  // (The settings 关于 section lists versions permanently.)
+  const cliLabel = effCLIName
+    ? '<span' + (effCLIVersion ? ' title="' + escAttr(effCLIName + ' v' + effCLIVersion) + '"' : '') + '>' + esc(effCLIName) + '</span>'
+    : '';
   // UI Round 5 R5-3: model display for all backends.
   //   - claude path: SessionView.model is auto-populated from the
   //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
