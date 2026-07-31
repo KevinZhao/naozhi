@@ -584,7 +584,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .sidebar-status .status-reconnect{flex-shrink:0;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:var(--nz-fs-xs);padding:2px 8px;border-radius:var(--nz-radius-sm);cursor:pointer;line-height:1.4;min-height:22px}
 .sidebar-status .status-reconnect:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
 
-.session-card{position:relative;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;transition:background .15s;border-left:3px solid transparent}
+.session-card{position:relative;display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:var(--nz-bg-1)}
 /* Selected session: rust-subtle weak fill (token, theme-adaptive — was the
    hardcoded dark-blue #1f2937 that looked alien in light theme) + rust left
@@ -1381,7 +1381,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .section-header-fallback{background:transparent;color:var(--nz-text-faint)}
 .section-header-fallback .sh-name{font-style:italic;font-weight:500}
 /* Session card v2 (two-line flat, IM-style) */
-.sc-cli-icon{width:36px;height:36px;flex-shrink:0;border-radius:var(--nz-radius-md)}
+/* ui-polish-light-theme D4: 18px inline mark inside .sc-meta (was a 36px
+   dedicated column that out-shouted the card title). */
+.sc-cli-icon{width:18px;height:18px;flex-shrink:0;border-radius:var(--nz-radius-xs)}
 .sc-body{flex:1;min-width:0}
 .session-card .sc-header{display:flex;align-items:baseline;gap:8px}
 /* Title uses --nz-text-strong (theme-adaptive) — was hardcoded near-white
@@ -1590,7 +1592,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
   .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px;gap:10px}
   .session-card .sc-meta{font-size:var(--nz-fs-xs);gap:3px}
   .session-card .sc-prompt{font-size:var(--nz-fs-base)}
-  .sc-cli-icon{width:32px;height:32px;border-radius:var(--nz-radius-ms)}
+  /* Touch devices keep the dismiss × visible (no hover), absolutely
+     positioned over the header's right edge — reserve room so the
+     timestamp doesn't slide underneath it (ui-polish-light-theme D4). */
+  .session-card .sc-header{padding-right:30px}
   .section-header{padding:5px 12px;font-size:var(--nz-fs-2xs)}
   /* Compact "no sessions" on mobile */
   .no-sessions{padding:4px 16px!important;font-size:var(--nz-fs-sm)}
