@@ -1,6 +1,6 @@
 # RFC: eventlog 子系统统一——消解三层影子与 5 包散落
 
-> **状态**: Draft v1（待评审）
+> **状态**: Draft v1.1（§8 Phase 1 已实施 2026-07-31：api_assert_test.go 编译期断言 + round-trip 契约测试 + ring LoadBefore thin adapter，实测缺口恰为 §8 预判的 ring 一处；Phase 2-6 待评审后推进）
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
 > **范围**: 收敛 cli ring / persist spool / naozhilog replay 三层"影子"事件存储到单一 `EventStore` 契约，并把散落在 5 个包的 eventlog 状态聚合到一个 `internal/session/eventlogpipeline` 装配点
@@ -213,6 +213,8 @@ eventlog 的**运行态与装配逻辑**横跨 5 个包，且会话层（`intern
 **为何 low 风险**：纯 additive 测试代码，零生产行为改动，不碰任何 §5.2 不变量；编译失败即立即暴露走偏。落地后立即获得 CI 闸门，防 #1369 影子再生。唯一需核实点是断言测试放置位置不引入 import 环（§4.1 已给出 fallback 到独立测试包的预案）。
 
 > **注**：triage 已定调本轮为纯 RFC 产出，**不**落地 phase-1 代码。上表 Phase 1 描述的是"若落地，第一步确切做什么"及其风险评估，待评审通过后另起实施轮次。
+>
+> **Phase 1 实施记录（2026-07-31）**：按上表预案落地——`internal/eventlog/api/api_assert_test.go`（ring 三分面 + EventStore、naozhilog/merged Reader 编译期断言 + round-trip 四态契约测试）；唯一方法缺口与预判一致（ring 缺 LoadBefore），以 `internal/cli/eventlog_loadbefore.go` thin adapter 补齐（EntriesBefore 零逻辑封装，边界语义与 naozhilog 对齐），配 `eventlog_loadbefore_test.go` 逐字节等价 pin。既有 `api_test.go` 的 fullStore 组合演示因 ring 自带读侧后 selector 歧义，改为显式选择 durable 读 tier（语义即 merged-source 形态）。Phase 2-6 不随本轮，仍待评审。
 
 ---
 
