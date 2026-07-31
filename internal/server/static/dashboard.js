@@ -2040,7 +2040,12 @@ function sessionCardHtml(s) {
   // company Bedrock account?"). Empty for single-auth mode / global default so
   // deployments that don't use profiles see no change.
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
-  const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
+  // ui-polish-light-theme D4: the cli icon rides inside the meta line at
+  // 18px instead of a dedicated 36px column — at 36px every card led with
+  // a saturated brand mark that outweighed its own title, while the icon
+  // only carries one low-entropy bit (which backend). Title owns line 1.
+  const metaHtml = icon +
+    '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
     originBadge +
@@ -2063,7 +2068,6 @@ function sessionCardHtml(s) {
 
   return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
     dismissBtn +
-    icon +
     '<div class="sc-body">' +
       '<div class="sc-header">' +
         '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
