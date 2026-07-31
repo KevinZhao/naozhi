@@ -915,14 +915,13 @@ function renderSidebar(data) {
     });
   }
 
-  // Update history badge (filesystem history sessions, deduplicated against workspace)
+  // History badge (ui-polish-light-theme D10): the always-on total count
+  // ("84") had no action value — it's an archive size, not an unread count —
+  // and pulled the eye on every load. The count still shows inside the
+  // popover header ("历史（84）"); the button badge stays hidden unless a
+  // future alert-grade state (.is-alert/.is-warn) needs it.
   const hBadge = document.getElementById('history-badge');
-  if (hBadge) {
-    const workspaceIDs = collectWorkspaceSessionIDs(allSessionsCache);
-    const historyCount = historySessionsData.filter(r => !workspaceIDs.has(r.session_id)).length;
-    hBadge.textContent = historyCount > 0 ? historyCount : '';
-    hBadge.style.display = historyCount > 0 ? '' : 'none';
-  }
+  if (hBadge) hBadge.style.display = 'none';
 
   // R110-P1 Home panel: refresh after every sidebar repaint so the
   // "最近会话" list mirrors the authoritative snapshot. Gated by selectedKey
@@ -7941,13 +7940,19 @@ function buildHomeHealthLines(stats) {
   return lines;
 }
 
-// renderRecentSessionsPanel populates the R110-P1 Home-panel slot inside
-// the main empty-state body. Reads allSessionsCache (written by renderSidebar
-// after each fetchSessions → so reflects the same authoritative snapshot the
+// renderRecentSessionsPanel populates the Home-panel slot inside the main
+// empty-state body. Reads allSessionsCache (written by renderSidebar after
+// each fetchSessions → so reflects the same authoritative snapshot the
 // sidebar shows), picks the 5 most recently active sessions, and renders a
 // compact clickable list. When there are zero sessions, returns an empty
 // innerHTML so the cold-start minimal CTA stays unchanged. Callers must
 // guard by selectedKey == null (active-session main shell wins).
+//
+// ui-polish-light-theme D3: the R110-P1 stats strip / health strip / doctor
+// panel used to render here too — version tags and subprocess counts are ops
+// info, not "ask something" material, and they buried the one clickable
+// affordance. They now live in the 系统 view (renderServiceOverviewHtml) and
+// the settings 关于 section; Home keeps only the recent-session list.
 //
 // Pure-rendering: writes to the DOM by id rather than returning HTML, because
 // the cold-start HTML already carries the placeholder div and we don't want
@@ -7975,51 +7980,54 @@ function renderRecentSessionsPanel() {
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
-  // R110-P1 Home stats strip (Round 147 + #445): today-active + processed
-  // prompts + total cost. Rendered above the list so operators see a
-  // cumulative signal before scanning the session rows. The prompt count
-  // sums per-session message_count (already in the snapshot); cumulative
-  // tokens still need the deferred /api/stats/aggregate backend scan.
-  const stats = computeHomeStats(items, Date.now());
-  const statsHtml =
-    '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
-      '<div class="recent-stat">' +
-        '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
-        '<div class="recent-stat-label">今日活跃会话</div>' +
-      '</div>' +
-      '<div class="recent-stat">' +
-        '<div class="recent-stat-value">' + stats.totalPrompts + '</div>' +
-        '<div class="recent-stat-label">已处理 prompt</div>' +
-      '</div>' +
-      '<div class="recent-stat">' +
-        '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
-        '<div class="recent-stat-label">累计花费</div>' +
-      '</div>' +
-    '</div>';
-  // R110-P1 Home health strip (Round 148): bottom meta row sourced from
-  // /api/sessions stats (cached in lastStatsSnapshot). Suppressed when no
-  // stats snapshot has landed yet so cold-start doesn't render a bare div.
-  const healthLines = buildHomeHealthLines(lastStatsSnapshot);
-  const healthHtml = healthLines.length === 0
-    ? ''
-    : '<div class="recent-panel-health" role="status" aria-label="服务健康">' +
-        healthLines.map(l =>
-          '<div class="recent-health-line ' + esc(l.kind || 'info') + '">' + esc(l.text) + '</div>'
-        ).join('') +
-      '</div>';
-  // Multi-Backend RFC §8.3 D22: doctor status panel — clickable details
-  // block under the health strip listing each enabled backend's caps +
-  // features. Single-backend mode skips it (the home page would be cluttered
-  // by a redundant "claude only" table).
-  const doctorHtml = renderBackendsDoctorPanel();
   host.innerHTML =
     '<div class="recent-panel">' +
       '<div class="recent-panel-title">最近会话</div>' +
-      statsHtml +
       '<div class="recent-panel-list" role="list">' + rows + '</div>' +
-      healthHtml +
-      doctorHtml +
     '</div>';
+}
+
+// renderServiceOverviewHtml builds the 服务概览 section for the 系统 view:
+// the aggregate stats (today active / prompts / cost), the health strip
+// derived from the /api/sessions stats snapshot, and the multi-backend
+// doctor panel. Moved here from the Home panel (ui-polish-light-theme D3)
+// — the pure helpers stayed put, only the call site and CSS classes
+// (svc-*) changed. Version identity lines also render in the settings
+// 关于 section (renderSettingsView) for discoverability.
+function renderServiceOverviewHtml() {
+  const items = Array.isArray(allSessionsCache) ? allSessionsCache : [];
+  const stats = computeHomeStats(items, Date.now());
+  const statsHtml =
+    '<div class="svc-stats" role="group" aria-label="今日概览">' +
+      '<div class="svc-stat">' +
+        '<div class="svc-stat-value">' + stats.todayActive + '</div>' +
+        '<div class="svc-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="svc-stat">' +
+        '<div class="svc-stat-value">' + stats.totalPrompts + '</div>' +
+        '<div class="svc-stat-label">已处理 prompt</div>' +
+      '</div>' +
+      '<div class="svc-stat">' +
+        '<div class="svc-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
+        '<div class="svc-stat-label">累计花费</div>' +
+      '</div>' +
+    '</div>';
+  const healthLines = buildHomeHealthLines(lastStatsSnapshot);
+  const healthHtml = healthLines.length === 0
+    ? ''
+    : '<div class="svc-health" role="status" aria-label="服务健康">' +
+        healthLines.map(l =>
+          '<div class="svc-health-line ' + esc(l.kind || 'info') + '">' + esc(l.text) + '</div>'
+        ).join('') +
+      '</div>';
+  // Multi-Backend RFC §8.3 D22: doctor status panel — clickable details
+  // block listing each enabled backend's caps + features. Single-backend
+  // mode skips it (renderBackendsDoctorPanel returns '').
+  const doctorHtml = renderBackendsDoctorPanel();
+  return '<section class="svc-overview" aria-label="服务概览">' +
+      '<h2 class="svc-overview-title">服务概览</h2>' +
+      statsHtml + healthHtml + doctorHtml +
+    '</section>';
 }
 
 // renderBackendsDoctorPanel builds a foldable <details> panel listing each
@@ -10575,12 +10583,33 @@ function renderSettingsView() {
       '" data-theme="' + esc(t) + '" aria-pressed="' + (t === cur ? 'true' : 'false') + '">' +
       esc(THEME_LABELS[t]) + '</button>';
   }).join('');
+  // 关于 section (ui-polish-light-theme D3/D8): build identity moved here
+  // from the Home health strip — version tags answer "what am I running",
+  // a settings question, not a "问点什么" one. Sourced from the same
+  // /api/sessions stats snapshot; rows render only when the field is
+  // present so a cold view before the first poll stays clean.
+  const s = lastStatsSnapshot || {};
+  const aboutRows = [];
+  if (s.version_tag) aboutRows.push(['naozhi', s.version_tag]);
+  if (s.cli_name) aboutRows.push([s.cli_name, s.cli_version || '—']);
+  if (cliBackends && Array.isArray(cliBackends.backends) && cliBackends.backends.length > 0) {
+    aboutRows.push(['Backends', cliBackends.backends.map(function (b) {
+      return (b && b.id) || '?';
+    }).join(' · ')]);
+  }
+  const aboutHtml = aboutRows.length === 0 ? '' :
+    '<section class="settings-sec"><h2>关于</h2>' +
+      aboutRows.map(function (r) {
+        return '<div class="settings-about-line"><span class="settings-about-key">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
+      }).join('') +
+    '</section>';
   root.innerHTML =
     '<div class="settings-head"><h1>设置</h1></div>' +
     '<div class="settings-body">' +
       '<section class="settings-sec"><h2>主题</h2>' +
         '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
       '</section>' +
+      aboutHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
   if (grp) grp.addEventListener('click', function (e) {
@@ -10766,6 +10795,7 @@ function renderSystemView() {
   root.innerHTML =
     '<div class="system-head"><h1>系统任务</h1></div>' +
     '<div class="system-body">' +
+      renderServiceOverviewHtml() +
       '<div class="system-intro">naozhi 内置的后台守护进程。它们由系统自动调度，只读展示运行状态，配置通过 YAML 调整后重启生效。</div>' +
       body +
     '</div>';

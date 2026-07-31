@@ -304,12 +304,14 @@ test.describe('Round 4 — stale state / restart resilience', () => {
     await req.dispose();
   });
 
-  test('home health strip shows correct backend version + count', async ({ browser }) => {
+  test('service overview health strip shows correct backend version + count', async ({ browser }) => {
     const ctx = await loginContext(browser);
     const page = await ctx.newPage();
     await page.goto('/dashboard');
     await page.waitForSelector('.recent-panel-title', { timeout: 8000 });
-    const txt = await page.locator('.recent-panel-health').textContent({ timeout: 4000 }).catch(() => '');
+    // ui-polish-light-theme D3: the health strip moved to the 系统 view.
+    await page.click('#abnav-system');
+    const txt = await page.locator('.svc-health').textContent({ timeout: 4000 }).catch(() => '');
     expect(txt, `health strip text: ${txt}`).toMatch(/2\/2/);
     expect(txt).toMatch(/claude/);
     expect(txt).toMatch(/kiro/);
