@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
@@ -53,6 +54,46 @@ type RecoverResult struct {
 	LastTimeMS  int64  // timestamp of the last persisted entry (0 if none)
 	HeaderValid bool   // true when the file already has a committed header
 	Repaired    bool   // true when Recover made any truncation
+}
+
+// maxIdxEntryLen is the largest framed-record length an IdxEntry.Len
+// may legitimately carry. A frame is `<digits>\n<body>\n`, so the
+// upper bound is the body cap plus the longest tolerated length prefix
+// plus the two newlines. Anything beyond this is corruption, not a
+// large record.
+const maxIdxEntryLen = int64(schema.MaxRecordBytes) + maxLengthDigits + 2
+
+// idxEntrySane reports whether e's offset/length fields are within the
+// ranges a writer could actually have produced.
+//
+// WHY this exists: schema.UnmarshalIdxEntry decodes Len with a bare
+// uint32->int32 cast and ByteOff with a bare uint64->int64 cast
+// (schema/idx.go), so a single bit flip in the .idx sidecar that sets
+// the high bit yields a NEGATIVE Len or ByteOff. Recovery uses
+// ByteOff+Len as the log truncation edge, so an unvalidated negative
+// value is actively destructive:
+//
+//   - Len=-1 makes the edge one byte BELOW ByteOff, which is still a
+//     plausible-looking offset inside the log. Recovery then truncates
+//     the log there, slicing a committed record in half, and reports
+//     success — silent data loss.
+//   - Len=math.MinInt32 makes the edge negative, so ftruncate(2) fails
+//     EINVAL and the whole session's Persister refuses to start with an
+//     error that never names the real cause.
+//
+// rotate.go's chooseCutIndex already guards the header entry against
+// exactly this hazard (R20260605B-CORR-13 / #1817); recovery is the
+// remaining unguarded consumer of the same field.
+func idxEntrySane(e schema.IdxEntry) bool {
+	if e.ByteOff < 0 || e.Len < 0 {
+		return false
+	}
+	if int64(e.Len) > maxIdxEntryLen {
+		return false
+	}
+	// Guard the addition itself so a huge ByteOff cannot overflow into
+	// a negative edge.
+	return e.ByteOff <= math.MaxInt64-int64(e.Len)
 }
 
 // Recover opens log + idx at the given paths, aligns them, and
@@ -118,6 +159,23 @@ func Recover(logPath, idxPath string) (*RecoverResult, error) {
 	}
 
 	// Both exist, both have data.
+	//
+	// A corrupt last entry cannot be used to derive a truncation edge.
+	// Fall through to the backwards reconcile walk, which skips insane
+	// entries and lands on the newest trustworthy one — that preserves
+	// every record up to that point rather than guessing an edge from
+	// garbage.
+	if !idxEntrySane(last) {
+		slog.Warn("event log recovery: last idx entry is corrupt; backing off to newest sane entry",
+			"log", logPath, "idx", idxPath,
+			"byte_off", last.ByteOff, "len", last.Len)
+		res, err := reconcileIdxAheadOfLog(logPath, idxPath, logSize)
+		if err != nil {
+			return nil, err
+		}
+		return mergeRepaired(res), nil
+	}
+
 	edge := last.ByteOff + int64(last.Len)
 
 	switch {
@@ -204,6 +262,13 @@ func reconcileIdxAheadOfLog(logPath, idxPath string, logSize int64) (*RecoverRes
 	safeIdx := -1
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
+		// idxEntrySane must be checked FIRST: a negative Len makes
+		// ByteOff+Len smaller than ByteOff, so the <= logSize test
+		// below would happily accept a corrupt entry as "safe" and
+		// truncate the log to a mid-record offset.
+		if !idxEntrySane(e) {
+			continue
+		}
 		if e.ByteOff+int64(e.Len) <= logSize {
 			safeIdx = i
 			break
