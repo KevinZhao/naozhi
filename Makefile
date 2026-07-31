@@ -51,8 +51,9 @@ test:
 	go test -race ./...
 
 # server-package contracts (server-split-phase4-design.md §六.2 / §九.2).
-# warn mode: prints violations to stderr but exits 0; CI default during
-# Phase 0-4. Switch to lint-server-fail after Phase 5 completes.
+# 原计划 Phase 5 完工后切 fail，但 ADR-001 判定 4b 暂缓（Phase 5 依赖 4b），
+# 触发条件不再会到来。2026-07-31 清零存量后 CI 已切 lint-server-fail；
+# warn 模式保留供本地快速扫描。
 lint-server:
 	go run ./tools/lint-server-handlers -mode warn
 
@@ -61,7 +62,8 @@ lint-server-fail:
 
 # fact-table drift detection (server-split-phase4-design.md v0.6.1 §0 纪律 5).
 # 扫 design / RFC markdown 中的关键数字 token 与 speech 表对账，漂移即报。
-# warn mode: 不卡 PR；Phase 5 完工后切 lint-fact-table-fail。
+# 2026-07-31 清零存量后 CI 已切 lint-fact-table-fail（同 lint-server，
+# ADR-001 后"Phase 5 完工"不再是可等待的触发条件）；warn 模式保留本地用。
 lint-fact-table:
 	go run ./tools/lint-fact-table -mode warn \
 		docs/design/server-split-phase4-design.md \
