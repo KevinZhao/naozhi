@@ -256,16 +256,29 @@ Watchdog 机制：
 
 ```go
 type Protocol interface {
-    Name() string                                                  // "stream-json" | "acp"
+    Name() string                                                  // "stream-json" | "acp" | "codex-app-server"
     Clone() Protocol                                               // 新进程的副本（stateless 可返回 receiver）
     BuildArgs(opts SpawnOptions) []string                          // 构建 CLI 启动参数
     Init(rw *JSONRW, resumeID string, cwd string) (string, error)  // 协议握手 (ACP: initialize + session/new)
-    WriteMessage(w io.Writer, text string, images []ImageData) error // 写入用户消息（含可选图片）
+    WriteMessage(w io.Writer, text string, images []Attachment) error // 写入用户消息（含可选附件）
+    WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
+                                                                   // passthrough 感知写入（调用方须持 stdin 写锁）
+    SupportsPriority() bool                                        // 是否透传顶层 priority 字段（/urgent 依赖）
+    SupportsReplay() bool                                          // 后端是否回显 stdin user 消息（passthrough slot 匹配依赖）
     WriteInterrupt(w io.Writer, requestID string) error            // 中断当前轮次（ACP 返回 ErrInterruptUnsupported）
-    ReadEvent(line string) (Event, bool, error)                    // 解析 NDJSON 行 (bool=轮次完成)
+    ReadEvent(line string) ([]Event, bool, error)                  // 解析 NDJSON 行 → 0..n 个事件；bool 仅 advisory，
+                                                                   // 轮次结束以 result/turn-end Event 为准
     HandleEvent(w io.Writer, ev Event) bool                        // 处理内部事件 (如 ACP 权限自动授权)
 }
 ```
+
+接口是两个 facet 的严格划分（编译期 pin）：`ProtocolCore`
+（Name/Clone/BuildArgs/Init/WriteMessage/ReadEvent/HandleEvent，所有后端
+均有实义实现）+ `ProtocolPassthroughExt`（WriteUserMessageLocked/
+WriteInterrupt/SupportsPriority/SupportsReplay，stream-json 专属能力面，
+ACP 降级实现）。热路径分配优化走可选的 `eventReaderInto` facet
+（`ReadEventInto(line, buf)`，type assertion 探测），不改 `ReadEvent` 本身。
+本签名与 CLAUDE.md、`internal/cli/protocol.go` 三处 lockstep 同步。
 
 **Capabilities 聚合** (Round 209 / RNEW-ARCH-404)：
 
@@ -278,7 +291,7 @@ Protocol 实现应直接提供 `Capabilities() Caps`，调用方也应优先读
 `ProtocolCaps(p).X` 而非散落的 `p.SupportsX()`。这样后续新增能力位
 （例如 `StreamJSON`、`SoftInterrupt`）不再需要同步扩展 Protocol 接口。
 
-**两种实现**:
+**协议实现对比**（第三个实现 `CodexProtocol`（codex app-server JSON-RPC 2.0）未列入下表，见 `docs/rfc/codex-backend.md`）:
 
 | 维度 | ClaudeProtocol (stream-json) | ACPProtocol (JSON-RPC 2.0) |
 |------|------------------------------|---------------------------|
