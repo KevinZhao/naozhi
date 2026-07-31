@@ -155,6 +155,21 @@
      darker theatre) or the mobile history sheet (.4 — a transient popover, not
      a blocking modal); those keep their intentional values. */
   --nz-scrim:rgba(0,0,0,.75);
+  /* ---------- Elevation shadows (ui-polish-light-theme D2) ----------
+     Floating surfaces each hand-tuned a black shadow for the dark theme
+     (alpha .4–.6); on the light theme those never got an override, so every
+     popover/menu/drawer cast a heavy black halo on white. Four tiers replace
+     the literals — dark defaults preserve the strongest original per tier
+     (near-identical values converge, an imperceptible step), and the light
+     blocks below remap them to soft low-alpha values. The lightbox keeps its
+     own literal on purpose: image viewing is a dark theatre in BOTH themes.
+     Semantic box-shadows (focus ring, inset selection bars, pulse keyframes)
+     are not shadows and stay literal. New floating surfaces MUST use a tier,
+     never a fresh rgba(0,0,0,…) literal (ratchet: TestDashboardHTML_StyleLiteralRatchet). */
+  --nz-shadow-1:0 1px 2px rgba(0,0,0,.2);        /* input / small control */
+  --nz-shadow-2:0 8px 24px rgba(0,0,0,.5);       /* popover / menu / tooltip-pop */
+  --nz-shadow-3:0 16px 48px rgba(0,0,0,.5);      /* modal / command palette */
+  --nz-shadow-drawer:-2px 0 12px rgba(0,0,0,.4); /* right-hand drawer */
   /* ---------- Light-theme parity tokens (R20260608) ----------
      #453 shipped light theme as a "minimal scaffold": many component rules
      still hard-coded GitHub-Dark hex (near-white text, dark-blue fills) that
@@ -243,6 +258,13 @@
   --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
   --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
   --nz-project-label-fg:#7a5800;        /* deeper gold, clears AA on white */
+  /* Elevation on white: low-alpha near-black (GitHub-light convention) so
+     floating surfaces read as gentle lift, not a black halo. The 1px border
+     every surface already carries does the edge-definition work. */
+  --nz-shadow-1:0 1px 2px rgba(31,35,40,.06);
+  --nz-shadow-2:0 4px 16px rgba(31,35,40,.12);
+  --nz-shadow-3:0 12px 32px rgba(31,35,40,.14);
+  --nz-shadow-drawer:-2px 0 12px rgba(31,35,40,.08);
 }
 @media (prefers-color-scheme: light){
   :root[data-theme="auto"]{
@@ -273,6 +295,11 @@
     --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
     --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
     --nz-project-label-fg:#7a5800;
+    /* Elevation on white — mirror of the explicit light block. */
+    --nz-shadow-1:0 1px 2px rgba(31,35,40,.06);
+    --nz-shadow-2:0 4px 16px rgba(31,35,40,.12);
+    --nz-shadow-3:0 12px 32px rgba(31,35,40,.14);
+    --nz-shadow-drawer:-2px 0 12px rgba(31,35,40,.08);
   }
 }
 /* Global focus-visible: keyboard users get a clear ring, mouse users don't. */
@@ -812,7 +839,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .no-sessions-cta:hover{background:rgba(31,111,235,.2)}
 /* Quick-ask 空态输入框：默认目录 + general agent 的"问一下"入口 */
 .quick-ask-form{display:flex;gap:8px;width:min(560px,92%);align-items:flex-end}
-.quick-ask-input{flex:1;min-height:44px;max-height:200px;padding:12px 14px;background:var(--nz-bg-1);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:10px;font:inherit;font-size:var(--nz-fs-base);line-height:1.5;resize:none;outline:none;transition:border-color .15s,box-shadow .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.quick-ask-input{flex:1;min-height:44px;max-height:200px;padding:12px 14px;background:var(--nz-bg-1);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:10px;font:inherit;font-size:var(--nz-fs-base);line-height:1.5;resize:none;outline:none;transition:border-color .15s,box-shadow .15s;box-shadow:var(--nz-shadow-1)}
 .quick-ask-input:focus{border-color:var(--nz-blue);box-shadow:0 0 0 2px rgba(31,111,235,.18)}
 .quick-ask-input::placeholder{color:var(--nz-text-placeholder)}
 .quick-ask-send{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--nz-rust);color:#fff;border:none;border-radius:var(--nz-radius-lg);cursor:pointer;transition:filter var(--nz-dur) var(--nz-ease),opacity var(--nz-dur) var(--nz-ease)}
@@ -908,7 +935,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .fr-slot.fr-missing{display:none}
 
 /* File viewer drawer — side panel for previewing workspace files */
-.fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
+.fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:var(--nz-shadow-drawer)}
 .fv-drawer.fv-open{transform:translateX(0)}
 .fv-drawer.hidden{pointer-events:none;visibility:hidden}
 .fv-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);flex-shrink:0;min-height:48px}
@@ -966,7 +993,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
      on top; the other stays at its base z-index 200. The JS controller moves
      the class on each open. A subtle shadow on the front pane hints depth. */
   body.nz-split-open .fv-drawer.nz-split-front,
-  body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:-4px 0 16px rgba(0,0,0,.45)}
+  body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:var(--nz-shadow-drawer)}
   /* Draggable seam. Sits exactly on the left edge of the reserved strip,
      above the drawer (z-index 200) so the hit area is never occluded. */
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}
@@ -1138,7 +1165,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    perceived latency on the long-press target state that already takes 500ms
    to trigger. */
 .ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}
-.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:0 12px 32px rgba(0,0,0,.5);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
+.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:var(--nz-shadow-2);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
 .ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--nz-radius-ms);cursor:pointer;color:var(--nz-text);font-size:var(--nz-fs-base);min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
 .ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
 .ctx-menu-item.danger{color:var(--nz-red)}
@@ -1157,7 +1184,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .proj-pick .pp-custom-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:var(--nz-radius-sm);background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:var(--nz-fs-sm);line-height:1;flex-shrink:0}
 /* New session command palette */
 .cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--nz-scrim);display:flex;align-items:flex-start;justify-content:center;z-index:var(--nz-z-drawer);padding-top:12vh}
-.cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.cmd-palette{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-lg);width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--nz-shadow-3)}
 .cmd-palette-header{padding:14px 16px;border-bottom:1px solid var(--nz-bg-2);flex-shrink:0}
 .cmd-palette-header input{width:100%;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);outline:none}
 .cmd-palette-header input:focus{border-color:var(--nz-accent)}
@@ -1205,7 +1232,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .history-backdrop{position:fixed;inset:0;z-index:99;background:transparent;animation:fade-in .15s ease}
 .history-backdrop.is-sheet{z-index:199;background:rgba(0,0,0,.4)}
 @keyframes fade-in{from{opacity:0}to{opacity:1}}
-.history-popover{position:absolute;top:100%;left:0;z-index:var(--nz-z-popover);min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
+.history-popover{position:absolute;top:100%;left:0;z-index:var(--nz-z-popover);min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .history-popover-header{padding:8px 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:var(--nz-radius-md) 8px 0 0}
 .history-popover-header .hp-count{color:var(--nz-text-dim);font-weight:500;margin-left:4px}
@@ -1736,7 +1763,7 @@ body.kbd-open .input-hints{display:none}
 /* ⋯ popover menu —— 用 position:fixed 加 JS 定位，避免 .cron-detail-body
  * 的 overflow:auto 把行底部的菜单剪掉。JS 负责 top/left 计算 + 空间不够
  * 时向上翻转。 */
-.cj-menu{position:fixed;z-index:var(--nz-z-drawer);min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
+.cj-menu{position:fixed;z-index:var(--nz-z-drawer);min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);padding:4px;display:none}
 .cj-menu.open{display:block}
 .cj-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:none;border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm2);font-family:inherit;cursor:pointer;text-align:left;min-height:34px}
 .cj-menu-item:hover{background:var(--nz-bg-2)}
@@ -1834,7 +1861,7 @@ body.kbd-open .input-hints{display:none}
 .cj-stats.mid{color:var(--nz-text);border-color:var(--nz-border)}
 .cj-stats.bad{color:var(--nz-red);border-color:rgba(218,54,51,.4);background:rgba(218,54,51,.1);font-weight:600}
 .cj-stats-label{white-space:nowrap}
-.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.45);z-index:50;cursor:default;white-space:normal}
+.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2);z-index:50;cursor:default;white-space:normal}
 .cj-stats:hover .cj-stats-pop,.cj-stats:focus-within .cj-stats-pop{display:block}
 .cj-stats-pop-row{display:flex;gap:6px;margin-bottom:6px}
 .cj-stats-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0;display:inline-block}
@@ -2387,7 +2414,7 @@ body.kbd-open .input-hints{display:none}
 .ws-dropdown-btn .ws-dropdown-icon{flex-shrink:0;opacity:.7}
 .ws-dropdown-btn .ws-dropdown-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
 .ws-dropdown-btn .ws-dropdown-caret{flex-shrink:0;color:var(--nz-text-mute);font-size:var(--nz-fs-2xs)}
-.ws-dropdown-popover{display:none;position:absolute;top:calc(100% + 4px);left:0;min-width:320px;max-width:calc(100vw - 64px);z-index:10;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.ws-dropdown-popover{display:none;position:absolute;top:calc(100% + 4px);left:0;min-width:320px;max-width:calc(100vw - 64px);z-index:10;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);box-shadow:var(--nz-shadow-2)}
 .ws-dropdown-popover.open{display:block}
 .ws-dropdown-popover .proj-pick{border:none;border-radius:var(--nz-radius-md) 8px 0 0;max-height:260px}
 .cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:120px;max-height:360px;resize:vertical}
@@ -2601,7 +2628,7 @@ body.kbd-open .sidebar-footer{display:none}
    box-shadow, z-index, slide transition) so the dashboard has a single
    "drawer" visual vocabulary, and reuses .main-header + .input-area token
    spacing so the input/header feel matches the main transcript. */
-.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:-2px 0 12px rgba(0,0,0,.4)}
+.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:var(--nz-z-drawer);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s var(--nz-ease-out);box-shadow:var(--nz-shadow-drawer)}
 .aside-drawer.visible{transform:translateX(0)}
 /* Header shares .fv-header's proportions (10px 14px padding, min-height 48px,
    13px title). Background inherits .aside-drawer bg-1; no separate color so
@@ -2759,10 +2786,10 @@ body.kbd-open .sidebar-footer{display:none}
 #mem-popover{position:fixed;z-index:var(--nz-z-overlay);max-width:560px;min-width:320px;
   max-height:60vh;overflow:auto;background:var(--nz-bg-1);
   border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);
-  box-shadow:0 8px 32px rgba(0,0,0,.6);padding:14px 16px;
+  box-shadow:var(--nz-shadow-2);padding:14px 16px;
   font-size:var(--nz-fs-sm2);line-height:1.55;color:var(--nz-text);display:none}
 #mem-popover.show{display:block}
-#mem-popover.pinned{box-shadow:0 8px 32px rgba(0,0,0,.7),
+#mem-popover.pinned{box-shadow:var(--nz-shadow-2),
   0 0 0 1px var(--nz-accent)}
 .mem-pop-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;
   padding-bottom:8px;border-bottom:1px solid var(--nz-bg-2);

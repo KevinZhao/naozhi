@@ -23,11 +23,17 @@ import (
 const (
 	maxFontSizeLiterals     = 30
 	maxBorderRadiusLiterals = 24
+	// ui-polish-light-theme D2: floating-surface shadows moved to the
+	// --nz-shadow-* tiers (with light-theme overrides). The one survivor is
+	// the lightbox — image viewing stays a dark theatre in both themes.
+	// A new floating surface must reference a tier, not a fresh black literal.
+	maxBlackShadowLiterals = 1
 )
 
 var (
 	reFontSizeLiteral     = regexp.MustCompile(`font-size:\d+px`)
 	reBorderRadiusLiteral = regexp.MustCompile(`border-radius:\d+px`)
+	reBlackShadowLiteral  = regexp.MustCompile(`box-shadow:[^;}]*rgba\(0,0,0`)
 )
 
 func TestDashboardHTML_StyleLiteralRatchet(t *testing.T) {
@@ -48,5 +54,11 @@ func TestDashboardHTML_StyleLiteralRatchet(t *testing.T) {
 		t.Errorf("raw border-radius:Npx literals = %d, exceeds ratchet %d — use a --nz-radius-* token instead of a px literal", got, maxBorderRadiusLiterals)
 	} else if got < maxBorderRadiusLiterals {
 		t.Logf("border-radius literals dropped to %d (< baseline %d) — lower maxBorderRadiusLiterals to %d to lock the gain", got, maxBorderRadiusLiterals, got)
+	}
+
+	if got := len(reBlackShadowLiteral.FindAllString(html, -1)); got > maxBlackShadowLiterals {
+		t.Errorf("black box-shadow literals = %d, exceeds ratchet %d — use a --nz-shadow-* tier (light theme overrides them) instead of rgba(0,0,0,…)", got, maxBlackShadowLiterals)
+	} else if got < maxBlackShadowLiterals {
+		t.Logf("black box-shadow literals dropped to %d (< baseline %d) — lower maxBlackShadowLiterals to %d to lock the gain", got, maxBlackShadowLiterals, got)
 	}
 }
