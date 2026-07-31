@@ -3968,11 +3968,11 @@ func TestDashboardJS_R149_HistoryPopoverHeaderLocalized(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R110P1_HomePanelHealth pins the Round 148 contract for
-// the Home-panel health strip — the bottom meta row that surfaces service
-// health sourced from /api/sessions `stats` (active/running/ready/uptime/
-// cli/watchdog). Round 146 landed the panel, Round 147 added the top stats
-// condensed into 2 headline metrics; this round fills the bottom strip.
+// TestDashboardJS_R110P1_HomePanelHealth pins the health-strip contract.
+// R110 Round 148 landed the strip on the Home panel; ui-polish-light-theme
+// D3 moved it into the 系统 view's 服务概览 section (renderServiceOverviewHtml)
+// — ops meta was crowding the "问点什么" empty state. The pure helper and
+// its data path are unchanged; only the render host moved.
 //
 // Three structural invariants:
 //
@@ -3982,11 +3982,10 @@ func TestDashboardJS_R149_HistoryPopoverHeaderLocalized(t *testing.T) {
 //     watchdog line only when total_kills > 0 and is tagged kind='warn'.
 //  2. lastStatsSnapshot module field exists and is written by fetchSessions
 //     so the render hook has a cache to read without a second HTTP call.
-//  3. renderRecentSessionsPanel renders the health strip AFTER the session
-//     list (below-the-fold for brevity) and gates on non-empty helper
-//     output so cold-start (no snapshot yet) stays clean. Chinese copy
-//     "服务健康" aria-label + "运行" / "就绪" / "总" / "运行" prefixes must
-//     appear.
+//  3. renderServiceOverviewHtml derives the strip from the helper, gates on
+//     non-empty output so a cold view (no snapshot yet) stays clean, and
+//     renderSystemView actually embeds the section. Chinese copy
+//     "服务健康" aria-label must appear.
 func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -4028,11 +4027,11 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 		t.Error("fetchSessions must write `lastStatsSnapshot = data.stats` so the Home panel's health strip stays in sync with each poll")
 	}
 
-	// Invariant 3: renderRecentSessionsPanel wires the health strip.
-	// Scan within the helper body for positional ordering (strip AFTER list).
-	rpIdx := strings.Index(js, "function renderRecentSessionsPanel()")
+	// Invariant 3: renderServiceOverviewHtml wires the health strip and the
+	// 系统 view embeds it.
+	rpIdx := strings.Index(js, "function renderServiceOverviewHtml()")
 	if rpIdx < 0 {
-		t.Fatal("dashboard.js missing renderRecentSessionsPanel()")
+		t.Fatal("dashboard.js missing renderServiceOverviewHtml()")
 	}
 	bodyEnd := rpIdx + 8000
 	if bodyEnd > len(js) {
@@ -4040,32 +4039,47 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 	}
 	body := js[rpIdx:bodyEnd]
 	if !strings.Contains(body, "const healthLines = buildHomeHealthLines(lastStatsSnapshot);") {
-		t.Error("renderRecentSessionsPanel must derive healthLines from buildHomeHealthLines(lastStatsSnapshot)")
+		t.Error("renderServiceOverviewHtml must derive healthLines from buildHomeHealthLines(lastStatsSnapshot)")
 	}
 	if !strings.Contains(body, "healthLines.length === 0") {
-		t.Error("renderRecentSessionsPanel must gate the health strip on healthLines.length so cold-start without stats stays clean")
+		t.Error("renderServiceOverviewHtml must gate the health strip on healthLines.length so a cold view without stats stays clean")
 	}
 	if !strings.Contains(body, `aria-label="服务健康"`) {
 		t.Error("health strip must carry aria-label=\"服务健康\" for screen readers")
 	}
-	// Positional check: health strip HTML must be emitted AFTER list HTML.
-	listHtmlIdx := strings.Index(body, `'<div class="recent-panel-list"`)
-	healthIdx := strings.Index(body, "healthHtml +")
-	if listHtmlIdx < 0 {
-		t.Error("renderRecentSessionsPanel must still emit <div class=\"recent-panel-list\">")
+	// The Home panel must NOT render the strip anymore (D3 declutter) and
+	// the 系统 view must embed the overview section. Delimit the function
+	// body by the next "\nfunction " declaration (self-adjusting pattern
+	// used elsewhere in this file) — a byte budget would leak into the
+	// renderServiceOverviewHtml definition right below.
+	hpIdx := strings.Index(js, "function renderRecentSessionsPanel()")
+	if hpIdx >= 0 {
+		hpBody := js[hpIdx:]
+		if nextFn := strings.Index(js[hpIdx+1:], "\nfunction "); nextFn >= 0 {
+			hpBody = js[hpIdx : hpIdx+1+nextFn]
+		}
+		if strings.Contains(hpBody, "buildHomeHealthLines") {
+			t.Error("renderRecentSessionsPanel must not render the health strip — it moved to the 系统 view (ui-polish-light-theme D3)")
+		}
 	}
-	if healthIdx < 0 {
-		t.Error("renderRecentSessionsPanel must concat healthHtml into the final innerHTML")
+	svIdx := strings.Index(js, "function renderSystemView()")
+	if svIdx < 0 {
+		t.Fatal("dashboard.js missing renderSystemView()")
 	}
-	if listHtmlIdx > 0 && healthIdx > 0 && healthIdx < listHtmlIdx {
-		t.Error("health strip must render AFTER the session list, not before — operators scan the list first, health is a below-the-fold meta row")
+	svEnd := svIdx + 6000
+	if svEnd > len(js) {
+		svEnd = len(js)
+	}
+	if !strings.Contains(js[svIdx:svEnd], "renderServiceOverviewHtml()") {
+		t.Error("renderSystemView must embed renderServiceOverviewHtml() so the ops meta stays reachable after leaving the Home panel")
 	}
 }
 
 // TestDashboardHTML_R110P1_HomePanelHealthStyles pins the CSS hooks for
-// the health strip. Warn kind must use --nz-amber so watchdog incidents
-// visually align with the sidebar .connecting-dot pulse (both are
-// "something isn't quite right" signals).
+// the health strip (now .svc-* inside the 系统 view's 服务概览 section —
+// ui-polish-light-theme D3). Warn kind must use --nz-amber so watchdog
+// incidents visually align with the sidebar .connecting-dot pulse (both
+// are "something isn't quite right" signals).
 func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
@@ -4075,25 +4089,26 @@ func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 	css := string(data)
 
 	for _, rule := range []string{
-		".recent-panel-health",
-		".recent-health-line",
-		".recent-health-line.warn",
+		".svc-overview",
+		".svc-health",
+		".svc-health-line",
+		".svc-health-line.warn",
 	} {
 		if !strings.Contains(css, rule) {
-			t.Errorf("dashboard.html missing CSS rule %q used by R110-P1 home panel health strip", rule)
+			t.Errorf("dashboard.html missing CSS rule %q used by the 服务概览 health strip", rule)
 		}
 	}
 
 	// .warn must reference --nz-amber so watchdog alerts reuse the
 	// same hue as the WS-outage hint (Round 142) and the .connecting
 	// dot pulse — one palette, three surfaces.
-	if ok, _ := regexp.MatchString(`\.recent-health-line\.warn\{[^}]*--nz-amber`, css); !ok {
-		t.Error(".recent-health-line.warn must reference --nz-amber so the watchdog alert matches the existing amber-warn palette")
+	if ok, _ := regexp.MatchString(`\.svc-health-line\.warn\{[^}]*--nz-amber`, css); !ok {
+		t.Error(".svc-health-line.warn must reference --nz-amber so the watchdog alert matches the existing amber-warn palette")
 	}
-	// The strip gets a border-top separator so it reads as a distinct
-	// meta region below the list — otherwise it blends with the last row.
-	if ok, _ := regexp.MatchString(`\.recent-panel-health\{[^}]*border-top:1px solid var\(--nz-border\)`, css); !ok {
-		t.Error(".recent-panel-health must declare `border-top:1px solid var(--nz-border)` to visually separate health meta from the session list")
+	// The overview section separates from the daemon list below with a
+	// border-bottom so the two regions don't blend.
+	if ok, _ := regexp.MatchString(`\.svc-overview\{[^}]*border-bottom:1px solid var\(--nz-border\)`, css); !ok {
+		t.Error(".svc-overview must declare `border-bottom:1px solid var(--nz-border)` to separate the overview from the daemon cards")
 	}
 }
 
@@ -4114,10 +4129,11 @@ func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 //     values, 2 decimals once cost is measurable. (The per-session header
 //     cost chip was later removed — Bedrock pricing made it misleading —
 //     but the Home-panel aggregate retains this formatter.)
-//  3. renderRecentSessionsPanel emits the stats strip above the session
-//     list AND passes Date.now() into computeHomeStats (not a hardcoded
-//     constant — obvious bug bait if a future refactor captures a stale
-//     timestamp at page-load and never refreshes).
+//  3. renderServiceOverviewHtml (系统 view 服务概览 — the strip moved off
+//     the Home panel in ui-polish-light-theme D3) emits the stats strip
+//     above the health strip AND passes Date.now() into computeHomeStats
+//     (not a hardcoded constant — obvious bug bait if a future refactor
+//     captures a stale timestamp at page-load and never refreshes).
 func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -4161,12 +4177,13 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		}
 	}
 
-	// Invariant 3: renderRecentSessionsPanel wires the stats strip in
+	// Invariant 3: renderServiceOverviewHtml wires the stats strip in
 	// correctly. Must call computeHomeStats with Date.now() (not a
-	// captured constant) and emit the stats container BEFORE the list.
-	rpIdx := strings.Index(js, "function renderRecentSessionsPanel()")
+	// captured constant) and emit the stats container BEFORE the health
+	// strip (headline figures first, meta rows after).
+	rpIdx := strings.Index(js, "function renderServiceOverviewHtml()")
 	if rpIdx < 0 {
-		t.Fatal("dashboard.js missing renderRecentSessionsPanel()")
+		t.Fatal("dashboard.js missing renderServiceOverviewHtml()")
 	}
 	bodyEnd := rpIdx + 6000
 	if bodyEnd > len(js) {
@@ -4174,33 +4191,31 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	}
 	body := js[rpIdx:bodyEnd]
 	if !strings.Contains(body, "const stats = computeHomeStats(items, Date.now());") {
-		t.Error("renderRecentSessionsPanel must compute stats via computeHomeStats(items, Date.now()) — a hardcoded timestamp would make the 'today active' count stale")
+		t.Error("renderServiceOverviewHtml must compute stats via computeHomeStats(items, Date.now()) — a hardcoded timestamp would make the 'today active' count stale")
 	}
-	// stats must render before the list — scan positions inside the
-	// body slice.
-	statsHtmlIdx := strings.Index(body, `'<div class="recent-panel-stats"`)
-	listHtmlIdx := strings.Index(body, `'<div class="recent-panel-list"`)
+	statsHtmlIdx := strings.Index(body, `'<div class="svc-stats"`)
+	healthHtmlIdx := strings.Index(body, `'<div class="svc-health"`)
 	if statsHtmlIdx < 0 {
-		t.Error("renderRecentSessionsPanel must emit <div class=\"recent-panel-stats\">")
+		t.Error("renderServiceOverviewHtml must emit <div class=\"svc-stats\">")
 	}
-	if listHtmlIdx < 0 {
-		t.Error("renderRecentSessionsPanel must emit <div class=\"recent-panel-list\">")
+	if healthHtmlIdx < 0 {
+		t.Error("renderServiceOverviewHtml must emit <div class=\"svc-health\">")
 	}
-	if statsHtmlIdx > 0 && listHtmlIdx > 0 && statsHtmlIdx > listHtmlIdx {
-		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
+	if statsHtmlIdx > 0 && healthHtmlIdx > 0 && statsHtmlIdx > healthHtmlIdx {
+		t.Error("stats strip must render BEFORE the health strip — headline figures first, meta rows after")
 	}
 	// Chinese labels — operators should see Chinese copy. "已处理 prompt"
 	// is the #445 third card sourced from aggregated message_count.
 	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
+			t.Errorf("renderServiceOverviewHtml stats strip missing Chinese label %q", want)
 		}
 	}
 	// #445: the prompt-count card must read stats.totalPrompts (the new
 	// aggregate) rather than re-deriving a constant — a regression that
 	// dropped the field would render `undefined`.
 	if !strings.Contains(body, "stats.totalPrompts") {
-		t.Error("renderRecentSessionsPanel must render stats.totalPrompts in the 已处理 prompt card")
+		t.Error("renderServiceOverviewHtml must render stats.totalPrompts in the 已处理 prompt card")
 	}
 }
 
@@ -4217,26 +4232,26 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 	css := string(data)
 
 	for _, rule := range []string{
-		".recent-panel-stats",
-		".recent-stat",
-		".recent-stat-value",
-		".recent-stat-label",
+		".svc-stats",
+		".svc-stat",
+		".svc-stat-value",
+		".svc-stat-label",
 	} {
 		if !strings.Contains(css, rule) {
-			t.Errorf("dashboard.html missing CSS rule %q used by R110-P1 home panel stats strip", rule)
+			t.Errorf("dashboard.html missing CSS rule %q used by the 服务概览 stats strip", rule)
 		}
 	}
 
-	// 3-column grid is the intended layout (today active + prompt count +
-	// total cost). Anchor the declaration inside the .recent-panel-stats
-	// rule so a future single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:repeat\(3,1fr\)`, css); !ok {
-		t.Error(".recent-panel-stats must be a 3-column grid (today active + prompt count + total cost)")
+	// Stats render as bare figures in a flex row (ui-polish-light-theme D3
+	// dropped the per-stat card border — boxes-in-boxes read heavy inside
+	// the system-body flow).
+	if ok, _ := regexp.MatchString(`\.svc-stats\{[^}]*display:flex`, css); !ok {
+		t.Error(".svc-stats must lay the three figures out as a flex row")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).
-	if ok, _ := regexp.MatchString(`\.recent-stat-value\{[^}]*font-variant-numeric:tabular-nums`, css); !ok {
-		t.Error(".recent-stat-value must set font-variant-numeric:tabular-nums so digit widths line up")
+	if ok, _ := regexp.MatchString(`\.svc-stat-value\{[^}]*font-variant-numeric:tabular-nums`, css); !ok {
+		t.Error(".svc-stat-value must set font-variant-numeric:tabular-nums so digit widths line up")
 	}
 }
 

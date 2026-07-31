@@ -109,7 +109,11 @@ test.describe('Dashboard load w/ multi-backend', () => {
     await page.goto('/dashboard');
     await page.waitForSelector('.recent-panel-title');
 
-    const healthLines = await page.$$eval('.recent-health-line', els =>
+    // ui-polish-light-theme D3: the health strip moved from the Home panel
+    // to the 系统 view's 服务概览 section — switch views before asserting.
+    await page.click('#abnav-system');
+    await page.waitForSelector('.svc-health-line', { timeout: 8000 });
+    const healthLines = await page.$$eval('.svc-health-line', els =>
       els.map(e => e.textContent || '')
     );
     const backendsLine = healthLines.find(t => t.includes('Backends:'));
@@ -125,6 +129,10 @@ test.describe('Dashboard load w/ multi-backend', () => {
     const ctx = await loginContext(browser);
     const page = await ctx.newPage();
     await page.goto('/dashboard');
+    // ui-polish-light-theme D3: the doctor panel lives in the 系统 view's
+    // 服务概览 section now, not on the Home panel.
+    await page.waitForSelector('.recent-panel-title', { timeout: 8000 });
+    await page.click('#abnav-system');
     await page.waitForSelector('.doctor-panel', { timeout: 8000 });
 
     // Folded by default
