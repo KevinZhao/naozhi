@@ -1,3 +1,10 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     none (pure function over []cli.EventEntry; no Hub field access)
+//	READS:      none
+//
+// 与 wshub_types.go 同类——rule 3a/3b 的字段块对账对纯 helper 不适用，
+// 但 marker 仍需声明以满足 Phase 0b 的 marker-existence gate。
 package server
 
 import (
