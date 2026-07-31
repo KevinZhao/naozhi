@@ -51,38 +51,37 @@ jobs:
         run: make lint-gofmt
 
   # server-package contracts (lint-server-handlers).
-  # warn mode during Phase 0-4 of server-split: violations print to logs
-  # but exit 0 (continue-on-error). Switch to fail mode after Phase 5
-  # — see docs/design/server-split-phase4-design.md §九.2.
+  # fail mode since 2026-07-31: 原计划"Phase 5 完工后切 fail"，但 ADR-001
+  # 判定 4b 暂缓后该触发条件不再会到来，warn 模式事实上被永久化。存量已
+  # 清零（exemptions.yaml baseline 重采 + 补录），漂移即 exit 1 卡 PR
+  # — see docs/design/server-split-phase4-design.md §九.2 / §十五 ADR-001.
   lint-server:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run lint-server-handlers (warn mode)
-        run: make lint-server
+      - name: Run lint-server-handlers (fail mode)
+        run: make lint-server-fail
 
   # design doc fact-table drift (lint-fact-table).
-  # Phase 0 起 warn mode 监控 server-split-phase4-design v0.6.1 §0 速查表
-  # 与正文粗体 token 漂移；Phase 5 完工后切 fail mode。
-  # See docs/rfc/lint-fact-table.md.
+  # fail mode since 2026-07-31（同 lint-server：ADR-001 后"Phase 5 完工"
+  # 不再是可等待的触发条件）。design + baseline 两文档 token 对账已清零，
+  # 漂移即 exit 1 卡 PR。See docs/rfc/lint-fact-table.md.
   lint-fact-table:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run lint-fact-table (warn mode)
-        run: make lint-fact-table
+      - name: Run lint-fact-table (fail mode)
+        run: make lint-fact-table-fail
 
   # Router field `// 读写:` annotation drift (check-router-fields).
   # router-split P0 safety net (RFC router-god-object-split): every later
