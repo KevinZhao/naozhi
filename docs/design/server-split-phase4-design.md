@@ -1,6 +1,8 @@
 # server 包拆分 Phase 4 设计稿
 
-> **状态**：设计稿 v0.6.3（2026-05-29）。**Phase 4b 经两轮实地实现尝试后判定为"当前结构下负 ROI，暂缓"——见 §十五 ADR-001。server-split 在已完成的物理切分 + lint 防膨胀闭环处正式收束。** v0.6.2 及以前历史见下方版本表。
+> **状态**：设计稿 v0.6.4（2026-07-31）。**Phase 4b 经两轮实地实现尝试后判定为"当前结构下负 ROI，暂缓"——见 §十五 ADR-001。server-split 在已完成的物理切分 + lint 防膨胀闭环处正式收束。** v0.6.2 及以前历史见下方版本表。
+>
+> **v0.6.4 摘要**：lint-server / lint-fact-table 切 fail 模式前的对账整改。ADR-001 暂缓 4b 后，"Phase 5 完工后切 fail"的触发条件不再会到来，warn 模式事实上被永久化——本次清零两 linter 存量后直接上膛：exemptions.yaml baseline 按 2026-07-31 实测重采（8 处）+ 补录 wshub_broadcast/subscribe（R243-ARCH-2 拆分产物）+ 删 agent_tailer.go 已达标条目；本文 7 处 token 锚定修正（历史 changelog 加 lint:allow、复合 bold 拆分、2 处措辞对齐键名）；§0 fact-table 新增"server 包文件硬上限 500 行 / internal/dashboard 子包文件硬上限 800 行"两行（v0.6.1 N4 曾因此矛盾）；baseline.md 补 fact-table 标记。
 >
 > **⚠️ Phase 4b/3f/4c/5 暂缓**：不是"卡住"，是经实证判断"此刻不该做"。防膨胀根本目标已由 lint gate（rules 1-5 + lint-fact-table + handle_baseline）达成；4b 的纯代码搬家会把 Hub god-struct 的内部纠缠固化成跨包导出契约，让未来真正的解纠缠更贵。详见 §十五。
 >
@@ -15,7 +17,7 @@
 >
 > **本会话另外完成的物理切分（15 个独立 PR，#1444-#1458）**：dashboard.go / server.go / dashboard_send.go / agent_tailer.go / send.go 内部 helper 抽到独立文件。**累计 server 包减小 1937 行**，agent_tailer.go 永久退出超 500 行硬上限名单。详 [4b hand-off](../ops/phase4b-handoff-2026-05-28.md) 附录 B。
 >
-> **v0.6 摘要**：v0.5 自身 9 项不一致整改（Hub 字段在 §一/§二/§五/§九.1/§7.3 多处不同步、PR 数 11 vs 13 在 4 处不一致、§7.3 观察期算式仍用 11 phase 等）+ 同步 origin/master 实测数据（server 包从 17156→**21313** 行 / Hub 字段从 37→**47** / 超线文件从 6→**9** 个 / Phase 4 范围从 3550→**5198** 行不含测试）+ **§0 新增事实速查表**（防多处数字漂移的根治）。
+> **v0.6 摘要**：v0.5 自身 9 项不一致整改（Hub 字段在 §一/§二/§五/§九.1/§7.3 多处不同步、PR 数 11 vs 13 在 4 处不一致、§7.3 观察期算式仍用 11 phase 等）+ 同步 origin/master 实测数据（server 包从 17156→**21313** 行 / Hub 字段从 37→**47** / 超线文件从 6→**9** 个 / Phase 4 范围从 3550→**5198** 行不含测试）+ **§0 新增事实速查表**（防多处数字漂移的根治）。 <!-- lint:allow:historical-changelog-v0.6-时点值 -->
 >
 > **v0.6.1 摘要**：v0.6 第 7 轮 review 9 项整改 — N1 baseline §3 笔误"8 块"→"7 块"；N2 §五"v0.5 新增块"误标删除；N3 §十一收益表加 800+/1000+ 行同步；**N4 exemptions.yaml limit 字段全部 800→500（critical：v0.6 模板 limit=800 与 §9.2 server 包 500 硬上限矛盾，会让 linter 误豁免）**；N5 §6.2.0.1 字段数措辞校准；N6 §7.3 加 Phase 5 → final 14 天观察期；N7 §6.0 行数例外改为 4b/4c（4a 不超线无例外）；N8 §9.1 引用 §6.5 减少重复；N9 §0 加 lint rule 6 备做承诺（Phase 0 跟随 RFC）。详见 §十三 v0.6.1 整改追溯。
 >
@@ -56,6 +58,8 @@
 | ROI gate 实测结果 | **6/6 文件超线（17-32 PRs/90d）→ gate 通过** | — | 同 v0.6 | v0.5 起 |
 | 观察期总长（不含重叠）| **12 phase × 7 + Phase 5→final × 14 = 98 自然日** | — | 11×7=77 (§7.3) / 13×7=91 (§6.1) | v0.5 §7.3 错算；v0.6 修为 91（含 13 phase × 7）；v0.6.1 加 Phase 5 → final 14 天双倍观察期（mutex pprof 数据），共 98 天 |
 | 实施起点 | **Phase 0 merge + ROI gate 当场通过** | T+14d 决策 | 同 v0.6 | v0.5 起 |
+| server 包文件硬上限 | **500 行** | 800 | 800 | v0.6.1 N4 整改钉死（yaml limit 曾与 §9.2 矛盾）；v0.6.4 入表 |
+| internal/dashboard 子包文件硬上限 | **800 行** | — | — | v0.6.4 入表；exemptions.yaml dashboard 条目 limit 同步 |
 | Server.handle* 方法基线数 | **4** | — | — | v0.6 实测 8 → 2026-05-28 PR #1444 静态 handler 包级化后 4；exemptions.yaml `handle_baseline` 钉死 |
 
 <!-- fact-table:end -->
@@ -115,8 +119,8 @@ handler-group 化第一轮（`auth/cronH/sessionH/projectH/discoveryH/transcribe
 | # | 目标 | 量化指标 | 验证方法 |
 |---|---|---|---|
 | 1 | server 包瘦身 | ≤ 5000 行（不含测试）/ ≤ 15 个非测试文件 | `wc -l $(ls internal/server/*.go \| grep -v _test.go)` |
-| 2 | Server struct 字段瘦身 | **47 → ≤ 12** 字段（减 74%） | `awk '/^type Server struct/,/^}$/' internal/server/server.go \| grep -E '^\s+[a-zA-Z_]+ ' \| wc -l` |
-| 3 | Hub 字段整理 | **49 字段维持不变**（Phase 4b-hub-sync 校准；v0.6 47 / Phase 4b-hub-sync 加 authClients/enforceCaps + userSendLimiters 类型 → *sync.Map；按 §五 7 块分组组织；本次不删字段，仅整理） | 同上脚本针对 wshub.go |
+| 2 | Server struct 字段瘦身 | **47** → **≤ 12** 字段（减 74%） | `awk '/^type Server struct/,/^}$/' internal/server/server.go \| grep -E '^\s+[a-zA-Z_]+ ' \| wc -l` |
+| 3 | Hub 字段整理 | **49** 字段维持不变（Phase 4b-hub-sync 校准；v0.6 47 / Phase 4b-hub-sync 加 authClients/enforceCaps + userSendLimiters 类型 → *sync.Map；按 §五 7 块分组组织；本次不删字段，仅整理） | 同上脚本针对 wshub.go |
 | 4 | 跨包依赖减耦合 | 每个 PR 减少 `s.X` 跨包字段引用数 ≥ 5 | `grep -c "deps.\|s\." per-PR diff 报告` |
 | 5 | Hub.queue 接口化 | 关闭 R242-GO-10；MessageEnqueuer 单接口（5 方法）+ var _ 编译期 gate | `var _ wshub.MessageEnqueuer = (*MessageQueue)(nil)` |
 | 6 | 零行为变更 | 51 路由路径不变；WS 协议字段不变 | `routes_snapshot_test.go` golden 对齐 |
@@ -462,7 +466,7 @@ type Hub struct {
 >
 > 与 baseline §3 对齐：lifecycle 3 + subscriber 10 + broadcast 6 + send 6 + shared 14 + tailer 3 + rate-limit/cache 5 = **47**。本块表是 Phase 4 实施的字段归属契约——linter rule 3 据此对账，缺一字段都会让 Phase 4 PR 走 godoc 注释时分类不明。
 >
-> Phase 5 字段瘦身验收 gate（§九.1）从 v0.5 写的"≤ 35"调整为 **≤ 40**——cookieMAC ↔ dashTokenHash 合并、connCount ↔ subscriberCount ↔ connCountByOwner 三选一、debounceClosed ↔ debounceClosedFast 合并是潜在收敛路径，但保守地把 ctx/cancel/lifecycle 块 3 字段视作不可压。
+> Phase 5 字段瘦身验收 gate（§九.1）——Hub 字段验收目标从 v0.5 写的"≤ 35"调整为 **≤ 40**——cookieMAC ↔ dashTokenHash 合并、connCount ↔ subscriberCount ↔ connCountByOwner 三选一、debounceClosed ↔ debounceClosedFast 合并是潜在收敛路径，但保守地把 ctx/cancel/lifecycle 块 3 字段视作不可压。
 
 2. **方法严格按文件分组**：
 
@@ -656,7 +660,7 @@ exemptions.yaml          Phase 0 baseline 冻结的超线文件清单（每个�
 
 `exemptions.yaml` 模板（**v0.6 按 master 实测重写：11 个超线文件；limit 字段全部按 server 包 500 硬上限**）：
 
-> **v0.6 修订（重要）**：limit 字段必须与 §9.2 的硬上限阈值匹配——`internal/server/` 包内文件硬上限 **500 行**（不是 800），`internal/dashboard/<domain>/` 子包硬上限 **800 行**。v0.5 的 yaml 模板把 limit 全写 800 是错的：CI 用 500 阈值扫 server 包文件，会把 server.go(1334) / dashboard.go(852) 等列为超线，但豁免里的 `limit=800` 让 linter 误以为"豁免到 800 即可"——实际超 500 就该报。改：本期所有条目都在 server 包内，全部 `limit: 500`；dashboard 子包尚未存在，无需豁免。
+> **v0.6 修订（重要）**：limit 字段必须与 §9.2 的硬上限阈值匹配——`internal/server/` 包文件硬上限 **500 行**（不是 800），`internal/dashboard/<domain>/` 子包文件硬上限 **800 行**。v0.5 的 yaml 模板把 limit 全写 800 是错的：CI 用 500 阈值扫 server 包文件，会把 server.go(1334) / dashboard.go(852) 等列为超线，但豁免里的 `limit=800` 让 linter 误以为"豁免到 800 即可"——实际超 500 就该报。改：本期所有条目都在 server 包内，全部 `limit: 500`；dashboard 子包尚未存在，无需豁免。
 
 ```yaml
 file_size:
@@ -1103,7 +1107,7 @@ git reset --hard server-split-phase{N-1}     # 仅在紧急 incident 用
 
 ### 7.3 7 天观察期 SLA（**v0.3 新增 / v0.6 重叠规则同步 13 phase**）
 
-每个 Phase merge 到 master + 部署到生产后，**默认 7 天观察期**：
+每个 Phase merge 到 master + 部署到生产后，**默认 7 天观察期**： <!-- lint:allow:per-phase-周期与观察期总长一致 -->
 
 - 期间不接下个 Phase 的 PR merge（PR 可以提、可以 review，但不合）
 - 7 天内发现问题 → 单 phase revert 不冲突（因为下个 phase 还没合）
