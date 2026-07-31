@@ -6,6 +6,23 @@
 >
 > 目的：为 design v0.6 提供真实数据，关闭 v0.1/v0.2 reviewer 提到的"先承诺数字再采 baseline"流程倒装问题。
 
+
+<!-- fact-table:start name="server-split-phase4-baseline" -->
+
+| 维度 | 采集值（2026-05-28）| 备注 |
+|---|---|---|
+| Server struct 字段 | **47** | 与 v0.4 一致 |
+| Hub struct 字段 | **47** | 采集时点值；4b-hub-sync (2026-05-28) 后校准为 49，见 design §0 |
+| server 包行数（不含测试）| **21313** | |
+| server 包行数（含测试）| **53487** | |
+| server 包文件数（不含测试）| **58** | |
+| server 包文件数（含测试）| **206** | |
+| 超 800 行文件数 | **9** | |
+| 路由数（dashboard.go 内）| **51** | |
+| Phase 5 后 Hub 字段验收目标 | **≤ 40** | v0.6 校准 |
+
+<!-- fact-table:end -->
+
 ---
 
 ## 1. server 包体量真实数据
@@ -95,7 +112,7 @@ session 周边 (4)        sessionGuard / scratchPool /
 
 ---
 
-## 3. Hub struct 真实字段（**47 个，v0.6 实测**）
+## 3. Hub struct 真实字段（**47** 个，v0.6 实测）
 
 > **v0.4 baseline 写 37**——3 个月内 Hub 新增 **10 个字段**：
 > - `auth`（auth handler 引用）

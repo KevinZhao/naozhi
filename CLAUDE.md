@@ -35,25 +35,72 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-li
 
 ### Module Dependency
 
+`internal/` 每个顶层包一行、按层分组。本清单与磁盘目录的同步由
+`cmd/naozhi/claude_md_modules_test.go::TestClaudeMDModuleList_MatchesInternalPackages`
+把关——新增/删除顶层包必须同步更新这里，否则 CI fail。
+
 ```
 cmd/naozhi/main.go
-  -> config       YAML loading, env var expansion, validation
-  -> cli          Protocol interface + spawn/manage CLI processes with watchdog
-  -> session      Session router, concurrency control, TTL, persistence
-  -> dispatch     Message handler + slash commands + per-session queue
-  -> platform     Platform interface + feishu/slack/discord/weixin implementations
-  -> server       HTTP server, dashboard, WebSocket hub, REST API
-  -> cron         Scheduled task execution (robfig/cron)
-  -> project      Project discovery, chat binding, planner routing
-  -> node         WebSocket protocol types + HTTP/reverse node clients
-  -> upstream     Reverse-connect client (NAT traversal; dials primary naozhi)
-  -> discovery    Scan ~/.claude/sessions for external Claude CLI processes
-  -> shim         Zero-downtime restart: sidecar process that outlives naozhi
-  -> transcribe   Voice message transcription (Amazon Transcribe Streaming)
-  -> netutil      Client-IP extraction with trusted-proxy handling
-  -> osutil       Home/path expansion, process helpers, sd_notify
-  -> ratelimit    Per-key LRU rate limiter (used by login/WS/upload)
-  -> textutil     Zero-dependency leaf: rune-bounded truncation + legacy UUID derivation
+  组合根
+  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配
+  -> config       YAML 加载、${ENV_VAR} 展开、校验
+
+  核心链路（IM 消息 → CLI 进程）
+  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend
+  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/runhistory
+  -> dispatch     消息处理 + slash 命令 + per-session 队列
+  -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
+  -> server       HTTP server、路由注册、WebSocket hub、REST API
+  -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
+  -> cron         定时任务调度（robfig/cron）+ 运行历史
+  -> sysession    内建后台 daemon 框架（system sessions）
+  -> project      项目发现、chat 绑定、planner 路由
+  -> projectapi   project 的零依赖契约类型
+
+  多节点
+  -> node         WebSocket 协议类型 + HTTP/reverse node 客户端
+  -> upstream     Reverse-connect 客户端（NAT 穿透；拨号 primary naozhi）
+
+  持久化 / 历史
+  -> eventlog     Event log 子系统（persist/schema/api 子包；append-only + crash recovery）
+  -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
+  -> attachment   附件持久化 + refcount tracker 子包
+  -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
+
+  辅助域
+  -> agentcore    AgentCore 云沙箱 control-plane 客户端
+  -> agentroute   "/command agentId" 解析的单一真相源
+  -> assets       Dashboard "installed assets" 零依赖叶子
+  -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
+  -> transcribe   语音转写（Amazon Transcribe Streaming）
+  -> selfupdate   GitHub Releases 自升级 + 校验
+  -> shim         零停机重启：outlive naozhi 的 sidecar 进程
+  -> usermsg      用户消息分类
+  -> gitinfo      读取目录的 git branch / worktree 状态
+  -> i18n         Locale 解析与消息渲染
+  -> metrics      进程级计数器（expvar）
+  -> runtelemetry 跨子系统 run 生命周期事件类型
+  -> naozhisettings  naozhi 托管的 Claude settings 文件
+  -> uiprefs      Dashboard 展示偏好持久化
+  -> registry     插件 / 扩展注册表的 canonical home
+  -> envpolicy    共享 env 过滤原语
+  -> datadir      数据根目录磁盘布局策略
+
+  叶子工具
+  -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护
+  -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
+  -> netutil      Client-IP 提取（trusted-proxy 处理）
+  -> ratelimit    Per-key token-bucket 限流（login/WS/upload 用）
+  -> limits       跨包大小/数量上限常量
+  -> timeouts     超时 / deadline 常量的 canonical home
+  -> sessionconst Session 调优常量
+  -> sessionkey   Session key 前缀规范（router 命名空间）
+  -> backendid    Backend-ID 长度/格式校验
+  -> apierr       Claude API 错误检测与本地化
+  -> ctxutil      context.Context helpers
+  -> leakguard    "leaked tool" 检测的单一真相源
+  -> leakcheck    测试用泄漏断言 helper
+  -> testhelper   共享测试工具
 ```
 
 ### CLI Process Lifecycle
