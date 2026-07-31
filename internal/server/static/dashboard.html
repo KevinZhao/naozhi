@@ -350,6 +350,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 /* Rail attention badge (e.g. cron jobs needing attention) — small red dot
    pinned to the icon's top-right. */
 .ab-badge{position:absolute;top:6px;right:6px;min-width:8px;height:8px;border-radius:var(--nz-radius-sm);background:var(--nz-red)}
+/* Desktop keeps the 系统 rail tab, so its mirror badge on 设置 stays off
+   (the ≤768px block re-enables it when the 系统 tab is hidden). */
+#abnav-settings-badge{display:none}
 .ab-badge[hidden]{display:none}
 
 /* ===== Top-level views (asset / cron / settings) =====
@@ -386,6 +389,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .settings-sec h2{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);font-weight:600;text-transform:none;letter-spacing:.3px;margin-bottom:10px}
 .settings-about-line{display:flex;gap:var(--nz-space-2);font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.9}
 .settings-about-key{color:var(--nz-text-mute);min-width:110px;flex-shrink:0}
+/* 系统任务 entry row — mobile replacement for the dropped rail tab
+   (ui-polish-light-theme D9); desktop keeps the rail tab so hide it there. */
+.settings-syslink{display:none}
+.settings-syslink-btn{background:none;border:none;padding:0;color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
+/* Custom arrow for appearance:none selects (picker-select-wrap wraps every
+   <select> using PICKER_SELECT_ONLY_STYLE — see dashboard.js). */
+.picker-select-wrap{position:relative;display:block}
+.picker-select-wrap::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--nz-text-mute);pointer-events:none;font-size:var(--nz-fs-xs)}
 .settings-theme{display:flex;gap:8px;flex-wrap:wrap}
 .settings-theme-opt{padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:1px solid var(--nz-border);background:var(--nz-bg-1);font-family:inherit;transition:background .15s,color .15s,border-color .15s}
 .settings-theme-opt:hover{background:var(--nz-bg-2);color:var(--nz-text)}
@@ -421,7 +432,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .asset-sb-head{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:14px 16px 8px}
 .asset-sb-head h1{font-size:19px;color:var(--nz-text-strong);font-weight:600;flex:1}
 .asset-scope{flex-shrink:0;margin:0 16px 8px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:2px 9px;align-self:flex-start}
-.asset-kindtabs{flex-shrink:0;display:flex;gap:3px;padding:0 10px 8px;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--nz-border);-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent)}
+/* ui-polish-light-theme D7: tabs wrap to a second row instead of clipping —
+   the横向滚动 + edge-fade mask hid the last tab's count on narrow panes. */
+.asset-kindtabs{flex-shrink:0;display:flex;flex-wrap:wrap;gap:3px;padding:0 10px 8px;border-bottom:1px solid var(--nz-border)}
 .asset-kindtabs::-webkit-scrollbar{display:none}
 .asset-kt{flex-shrink:0;padding:5px 9px;border-radius:7px;font-size:var(--nz-fs-sm2);color:var(--nz-text-mute);cursor:pointer;border:1px solid transparent;white-space:nowrap;background:none;display:flex;align-items:center;gap:5px}
 .asset-kt:hover{background:var(--nz-bg-1);color:var(--nz-text)}
@@ -461,6 +474,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .asset-card .acc b{color:var(--nz-accent)}.asset-card .acc-dim{color:var(--nz-text-dim)}
 .asset-main{flex:1;flex-direction:column;min-width:0;background:var(--nz-bg-0)}
 .asset-main-head{flex-shrink:0;padding:12px 20px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
+/* display:flex above beats the [hidden] UA default (display:none), so the
+   pre-selection "—" placeholder head leaked into the empty state
+   (ui-polish-light-theme D7). Same guard for the files twin below. */
+.asset-main-head[hidden],.files-main-head[hidden]{display:none}
 .asset-main-title-wrap{min-width:0;display:flex;flex-direction:column;gap:2px}
 .asset-main-title{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .asset-main-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -1514,6 +1531,14 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
      become direct flex children of the horizontal bar (margin-top:auto is a
      no-op once the wrapper is display:contents). */
   .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
+  /* ui-polish-light-theme D9: 6 tabs over-crowd a 390px bar. 系统 is the
+     lowest-frequency, read-only view — its entry moves into 设置 (the
+     .settings-syslink row + mirrored attention badge on the 设置 tab). */
+  #abnav-system{display:none}
+  .settings-syslink{display:block}
+  /* :not([hidden]) keeps the JS-driven hidden attribute authoritative —
+     a bare display:block would override the UA's [hidden]{display:none}. */
+  #abnav-settings-badge:not([hidden]){display:block}
   .ab-top,.ab-bottom{display:contents}
   /* In an open conversation, hide the bottom tab bar and reclaim its space so
      the chat history gets full height. The ← back button in the main header
@@ -2896,6 +2921,9 @@ body.kbd-open .sidebar-footer{display:none}
       <button type="button" class="ab-nav" id="abnav-settings" data-view="settings" title="设置" aria-label="设置视图" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span class="ab-nav-label">设置</span>
+        <!-- Mirrors the 系统 attention badge on mobile where the 系统 tab is
+             hidden (ui-polish-light-theme D9); desktop hides it via CSS. -->
+        <span class="ab-badge" id="abnav-settings-badge" hidden aria-label="需关注的系统任务数"></span>
       </button>
     </div>
   </nav>

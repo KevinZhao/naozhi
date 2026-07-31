@@ -1374,7 +1374,7 @@ function openCreateAccessProfile(onCreated) {
       '<h3>新建访问档</h3>' +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-template">模板</label>' +
-        '<select id="cap-template" style="' + PICKER_SELECT_STYLE + '">' + tplOptions + '</select>' +
+        '<span class="picker-select-wrap"><select id="cap-template" style="' + PICKER_SELECT_ONLY_STYLE + '">' + tplOptions + '</select></span>' +
       '</div>' +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="cap-id">档 ID（英数字 . _ -，唯一）</label>' +
@@ -6758,6 +6758,12 @@ function accessProfileChipHtml(profileID) {
 // <select> controls (full-width, design-token surface). Defined once so the
 // backend and agent pickers can't drift apart (R20260610-UI-5).
 const PICKER_SELECT_STYLE = 'width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px';
+// Selects opt out of the native OS chrome (ui-polish-light-theme D6): the
+// system-drawn control clashed with the tokenised palette/modal surfaces.
+// appearance:none removes the native arrow too, so every <select> using this
+// style MUST be wrapped in <span class="picker-select-wrap"> which paints a
+// CSS arrow (pointer-events:none, keyboard/AT behaviour untouched).
+const PICKER_SELECT_ONLY_STYLE = PICKER_SELECT_STYLE + ';appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer;font:inherit;font-size:var(--nz-fs-sm2)';
 
 function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
@@ -6782,9 +6788,9 @@ function renderBackendPicker(backendsData, opts) {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">CLI backend</label>' +
-    '<select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_STYLE + '">' +
+    '<span class="picker-select-wrap"><select id="' + escAttr(selectId) + '" style="' + PICKER_SELECT_ONLY_STYLE + '">' +
     options +
-    '</select>' +
+    '</select></span>' +
     '</div>';
 }
 
@@ -6862,9 +6868,9 @@ function renderNodePicker() {
   }).join('');
   return '<div style="margin-bottom:12px">' +
     '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-node">连接</label>' +
-    '<select id="new-node" style="' + PICKER_SELECT_STYLE + '">' +
+    '<span class="picker-select-wrap"><select id="new-node" style="' + PICKER_SELECT_ONLY_STYLE + '">' +
     options +
-    '</select>' +
+    '</select></span>' +
     '</div>';
 }
 
@@ -8363,12 +8369,17 @@ function copyEventContent(btn) {
 }
 
 function shortPath(p) {
-  const home = '/home/';
-  const i = p.indexOf(home);
-  if (i >= 0) {
-    const rest = p.substring(i + home.length);
-    const slash = rest.indexOf('/');
-    if (slash >= 0) return '~' + rest.substring(slash);
+  // Collapse the OS home prefix to ~. Previously only Linux (/home/<user>/)
+  // matched, so on macOS every palette row repeated the full
+  // /Users/<user>/… prefix and the project name drowned in boilerplate
+  // (ui-polish-light-theme D6).
+  for (const home of ['/home/', '/Users/']) {
+    const i = p.indexOf(home);
+    if (i >= 0) {
+      const rest = p.substring(i + home.length);
+      const slash = rest.indexOf('/');
+      if (slash >= 0) return '~' + rest.substring(slash);
+    }
   }
   return p.length > 40 ? '...' + p.substring(p.length - 37) : p;
 }
@@ -10612,6 +10623,14 @@ function renderSettingsView() {
         return '<div class="settings-about-line"><span class="settings-about-key">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
       }).join('') +
     '</section>';
+  // 系统任务 entry (ui-polish-light-theme D9): the mobile tab bar drops the
+  // 系统 tab (6 tabs was over budget for 390px) — this row is its replacement
+  // entry point. Hidden on desktop via CSS (.settings-syslink) where the rail
+  // tab remains.
+  const sysLinkHtml =
+    '<section class="settings-sec settings-syslink"><h2>系统任务</h2>' +
+      '<button type="button" class="settings-syslink-btn" id="settings-open-system">查看内置后台守护运行状态 ›</button>' +
+    '</section>';
   root.innerHTML =
     '<div class="settings-head"><h1>设置</h1></div>' +
     '<div class="settings-body">' +
@@ -10619,6 +10638,7 @@ function renderSettingsView() {
         '<div class="settings-theme" id="settings-theme-group" role="group" aria-label="主题">' + themeBtns + '</div>' +
       '</section>' +
       aboutHtml +
+      sysLinkHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
   if (grp) grp.addEventListener('click', function (e) {
@@ -10627,6 +10647,8 @@ function renderSettingsView() {
     applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
   });
+  const sysBtn = document.getElementById('settings-open-system');
+  if (sysBtn) sysBtn.addEventListener('click', function () { setActivityView('system'); });
 }
 
 // ===== System view (sysession daemons) =====
@@ -10688,10 +10710,15 @@ function daemonNeedsAttention(d) {
 }
 
 function updateSystemBadge() {
-  const badge = document.getElementById('abnav-system-badge');
-  if (!badge) return;
   const n = systemDaemons.filter(daemonNeedsAttention).length;
-  badge.hidden = n === 0;
+  const badge = document.getElementById('abnav-system-badge');
+  if (badge) badge.hidden = n === 0;
+  // ui-polish-light-theme D9: on mobile the 系统 tab is hidden (6 tabs → 5)
+  // and its entry point lives inside 设置 — mirror the attention badge onto
+  // the 设置 tab so daemon trouble still pings through the rail. Desktop
+  // keeps this badge hidden via CSS (the 系统 tab is visible there).
+  const sBadge = document.getElementById('abnav-settings-badge');
+  if (sBadge) sBadge.hidden = n === 0;
 }
 
 // systemStateMeta maps a last-run state into (dot class, Chinese label).
