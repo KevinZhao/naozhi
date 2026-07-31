@@ -29,9 +29,19 @@ func (stubReader) LoadBefore(context.Context, int64, int) ([]cli.EventEntry, err
 // fullStore composes the ring's write+subscribe behaviour with a durable
 // reader to demonstrate that EventStore is satisfiable by a registry-injected
 // composite — the end state #1570 targets.
+//
+// eventlog-subsystem-unify.md Phase 1 起 *cli.EventLog 自带 LoadBefore
+// （api_assert_test.go 断言 ring 单独满足 EventStore），两个嵌入侧都有
+// 读方法，selector 歧义；composite 必须显式声明用哪个 tier 的读侧——
+// 这里选 durable reader，正是 merged-source"ring 写 + durable 读"的
+// 组合形态。
 type fullStore struct {
 	*cli.EventLog
 	stubReader
+}
+
+func (f fullStore) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+	return f.stubReader.LoadBefore(ctx, beforeMS, limit)
 }
 
 // TestEventStoreComposable_R20260602_091302_ARCH_2 anchors that EventStore is
