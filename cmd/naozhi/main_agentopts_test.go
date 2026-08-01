@@ -18,7 +18,10 @@ func TestBuildAgentOpts(t *testing.T) {
 	cfg := &config.Config{
 		Agents: map[string]config.AgentConfig{
 			"general": {Model: "sonnet", Args: []string{"--foo"}},
-			"planner": {Model: "opus"},
+			// Effort here also exercises the cron round-trip below via the
+			// DeepEqual projection check: dropping it from either adapter
+			// direction breaks that comparison.
+			"planner": {Model: "opus", Effort: "max"},
 		},
 	}
 	agents, cronAgents := buildAgentOpts(cfg)
@@ -28,6 +31,20 @@ func TestBuildAgentOpts(t *testing.T) {
 	}
 	if got := agents["general"]; got.Model != "sonnet" || len(got.ExtraArgs) != 1 || got.ExtraArgs[0] != "--foo" {
 		t.Errorf("agents[general] = %+v, want model=sonnet args=[--foo]", got)
+	}
+	// agents[].effort must survive the config → session.AgentOpts hop; without
+	// it the per-agent tier silently never reaches spawn.
+	if got := agents["planner"].Effort; got != "max" {
+		t.Errorf("agents[planner].Effort = %q, want max", got)
+	}
+	if got := agents["general"].Effort; got != "" {
+		t.Errorf("agents[general].Effort = %q, want empty (unset in config)", got)
+	}
+	// The cron projection must carry it too, so a job scheduled for that agent
+	// inherits the tier. (The cron → session half lives in
+	// internal/wireup/cron_router_adapter_test.go, which owns that function.)
+	if got := cronAgents["planner"].Effort; got != "max" {
+		t.Errorf("cronAgents[planner].Effort = %q, want max", got)
 	}
 	if agents["planner"].Model != "opus" {
 		t.Errorf("agents[planner].Model = %q, want opus", agents["planner"].Model)

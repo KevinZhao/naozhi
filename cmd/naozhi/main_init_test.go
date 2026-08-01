@@ -81,6 +81,40 @@ func TestLogConfigValidationDiagnostics_RoutesByLevel(t *testing.T) {
 	}
 }
 
+// TestInitBackendWrappers_EffortCapabilityFilter pins the warn-and-drop gate.
+//
+// cfg.EnabledBackends() propagates cli.effort to EVERY backend entry, so this
+// filter is what keeps a tier from being recorded for a backend whose CLI has
+// no such flag. Removing it compiles and changes no argv (BuildArgs ignores the
+// field for those protocols), so without this test the gate could be deleted
+// unnoticed — and the router's "filtered single source of truth" comment would
+// quietly become false. docs/rfc/kiro-effort-control.md §4.3
+func TestInitBackendWrappers_EffortCapabilityFilter(t *testing.T) {
+	t.Parallel()
+	backend.EnsureDefaults()
+	cfg := &config.Config{
+		CLI: config.CLIConfig{
+			// Mirrors the mixed deployment the RFC uses to argue against
+			// failing hard: a top-level default lands on both backends.
+			Effort: "high",
+			Backends: []config.CLIBackendConfig{
+				{ID: "kiro", Path: "/tmp/never-kiro"},
+				{ID: "claude", Path: "/tmp/never-claude"},
+			},
+			Backend: "kiro",
+		},
+	}
+	bws, _ := initBackendWrappers(context.Background(), cfg, nil)
+
+	if got := bws.Efforts["kiro"]; got != "high" {
+		t.Errorf("Efforts[kiro] = %q, want high (ACP accepts --effort)", got)
+	}
+	if got, ok := bws.Efforts["claude"]; ok {
+		t.Errorf("Efforts[claude] = %q, want absent — claude has no tier flag, "+
+			"so recording one would put an unusable value in the router map", got)
+	}
+}
+
 // TestInitBackendWrappers_NoUsableBackend verifies that the helper signals
 // "no usable backend" when every configured ID is unknown. Pre-CQ1 main()
 // inlined this check; the regression risk after extraction is the helper

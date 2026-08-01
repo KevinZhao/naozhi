@@ -110,7 +110,7 @@ Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrappe
 - `kiro`: `ACPProtocol` -- JSON-RPC 2.0 Agent Client Protocol, session ID from `session/new` response
 - `codex`: `CodexProtocol` -- codex app-server JSON-RPC 2.0 over stdio (see `docs/rfc/codex-backend.md`)
 
-Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
+Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. `effort` is the kiro thinking-effort tier (`low`/`medium`/`high`/`xhigh`/`max`), forwarded as `acp --effort` and overriding kiro's own configured default — see `docs/rfc/kiro-effort-control.md`. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
 - ACP `session/cancel` is a **notification** (no id), not a request
 - ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
 - ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
@@ -289,7 +289,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 `config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
 - **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`. Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example
+- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`. Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
 - **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)

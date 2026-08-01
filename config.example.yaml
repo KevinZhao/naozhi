@@ -176,9 +176,14 @@ agents:
     model: "opus"
     args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
     # Optional, kiro-backed sessions only: overrides the backend's
-    # thinking-effort tier for this agent. The per-agent layer is what lets a
-    # background sweeper run cheap while a planner runs at "max".
+    # thinking-effort tier for this agent — e.g. run a cheap tier for a
+    # frequently-scheduled cron agent while the default stays higher.
     # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
+    #
+    # Applies to sessions routed to THIS agent id. Project planner sessions are
+    # not one of them: planner restart builds its opts from project config only
+    # and never reads agents[*] (see ResolveForPlannerKey), so set the tier on
+    # the backend if you want planners covered.
     #
     # Caveat: naozhi's shim config-drift check only compares BACKEND-level
     # args, so a session using this per-agent override is re-detected as

@@ -37,9 +37,17 @@ import (
 func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	t.Parallel()
 
-	// Every field the drift check must forward, i.e. every field of
-	// SpawnOptions that BuildArgs can turn into argv. Extend this when a new
-	// argv-bearing field is added.
+	// The backend-decidable argv fields — those the drift check CAN know,
+	// because backendDefaultsFor resolves them from backend-level config alone.
+	//
+	// Deliberately not "every argv-bearing field": DebugFile also reaches argv
+	// but is a per-session path the drift side cannot reconstruct, so with
+	// NAOZHI_CLI_DEBUG enabled every claude shim already reads as drifted.
+	// That is a pre-existing gap of the same family as the per-agent overrides
+	// documented in §4.5.1, and out of scope here — listing it would assert a
+	// mirror that does not and cannot exist today.
+	//
+	// Extend this when a field is added that backend-level config CAN resolve.
 	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile"}
 
 	fset := token.NewFileSet()
@@ -104,6 +112,125 @@ func TestEffortAffectsArgv(t *testing.T) {
 	}
 	if !slices.Contains(withTier, "--effort") {
 		t.Errorf("expected --effort in argv, got %v", withTier)
+	}
+}
+
+// TestResolveSpawnParams_EffortPrecedence covers the MAIN chain: does a
+// configured tier actually become a spawn parameter?
+//
+// This exists because the first cut of these tests guarded the wrong thing.
+// Mutation-testing the implementation found that deleting the agent-override
+// branch in resolveSpawnParamsLocked, or `Effort: sp.Effort` from the
+// SpawnOptions literal, left the entire suite green — every "effort works"
+// test built its own SpawnOptions or called backendDefaultsFor directly, so
+// nothing asserted the resolver's output. The elaborate AST guard sat on the
+// drift mirror while the load-bearing path had none.
+// docs/rfc/kiro-effort-control.md §4.2
+func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
+	mkRouter := func(t *testing.T, backendEfforts map[string]string) *Router {
+		t.Helper()
+		r := &Router{
+			ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
+			defaultCWD: "/default/ws",
+		}
+		r.bkStore.wrappers = map[string]*cli.Wrapper{
+			"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		}
+		r.bkStore.defaultBackend = "kiro"
+		r.bkStore.backendOverrides = make(map[string]string)
+		r.bkStore.backendEfforts = backendEfforts
+		r.wsStore.overrides = make(map[string]string)
+		r.claudeDir = t.TempDir()
+		r.kiroSessionsDir = t.TempDir()
+		return r
+	}
+
+	t.Run("backend tier applies when the agent sets none", func(t *testing.T) {
+		r := mkRouter(t, map[string]string{"kiro": "high"})
+		sp := r.resolveSpawnParamsLocked("dash:direct:c1:general", "",
+			AgentOpts{Backend: "kiro", Workspace: "/ws"})
+		if sp.Effort != "high" {
+			t.Errorf("Effort = %q, want high (backend default)", sp.Effort)
+		}
+	})
+
+	t.Run("agent tier overrides the backend tier", func(t *testing.T) {
+		r := mkRouter(t, map[string]string{"kiro": "high"})
+		sp := r.resolveSpawnParamsLocked("dash:direct:c2:reviewer", "",
+			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "max"})
+		if sp.Effort != "max" {
+			t.Errorf("Effort = %q, want max (agents[].effort wins)", sp.Effort)
+		}
+	})
+
+	t.Run("agent tier applies with no backend tier configured", func(t *testing.T) {
+		r := mkRouter(t, nil)
+		sp := r.resolveSpawnParamsLocked("dash:direct:c3:reviewer", "",
+			AgentOpts{Backend: "kiro", Workspace: "/ws", Effort: "low"})
+		if sp.Effort != "low" {
+			t.Errorf("Effort = %q, want low", sp.Effort)
+		}
+	})
+
+	t.Run("nothing configured yields no tier", func(t *testing.T) {
+		r := mkRouter(t, nil)
+		sp := r.resolveSpawnParamsLocked("dash:direct:c4:general", "",
+			AgentOpts{Backend: "kiro", Workspace: "/ws"})
+		if sp.Effort != "" {
+			t.Errorf("Effort = %q, want empty so BuildArgs emits no flag", sp.Effort)
+		}
+	})
+
+	t.Run("an unconfigured backend gets no tier from another backend", func(t *testing.T) {
+		r := mkRouter(t, map[string]string{"kiro": "max"})
+		sp := r.resolveSpawnParamsLocked("dash:direct:c5:general", "",
+			AgentOpts{Backend: "claude", Workspace: "/ws"})
+		if sp.Effort != "" {
+			t.Errorf("Effort = %q, want empty — kiro's tier must not leak to claude", sp.Effort)
+		}
+	})
+}
+
+// TestSpawnOptionsLiteral_CarriesEffort is the mirror of the drift-side AST
+// assertion, pointed at the real spawn. Deleting `Effort: sp.Effort` from the
+// SpawnOptions literal in router_lifecycle.go compiles and passes every
+// behavioural test — the tier just silently stops reaching the CLI — so the
+// production literal itself has to be asserted.
+func TestSpawnOptionsLiteral_CarriesEffort(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "router_lifecycle.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse router_lifecycle.go: %v", err)
+	}
+
+	var found bool
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "SpawnOptions" {
+			return true
+		}
+		found = true
+		for _, elt := range lit.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Effort" {
+					return false
+				}
+			}
+		}
+		t.Error("the cli.SpawnOptions literal in router_lifecycle.go does not set " +
+			"Effort — the configured tier would never reach the CLI, and no " +
+			"behavioural test would notice")
+		return false
+	})
+	if !found {
+		t.Fatal("no cli.SpawnOptions literal found in router_lifecycle.go — " +
+			"if spawn assembly moved, move this test with it")
 	}
 }
 

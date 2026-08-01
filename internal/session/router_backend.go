@@ -61,7 +61,10 @@ type backendStore struct {
 	// backendEfforts holds the thinking-effort tier per backend ID. No
 	// router-wide base field on purpose: the composition root already folded
 	// cli.effort in and filtered out backends whose protocol ignores the tier,
-	// so this map is the whole truth. Read-only after NewRouter.
+	// so for the BACKEND layer this map is the whole truth. AgentOpts.Effort
+	// layers above it in resolveSpawnParamsLocked and is NOT capability-
+	// filtered — harmless, since BuildArgs ignores the field on protocols that
+	// take no tier. Read-only after NewRouter.
 	// docs/rfc/kiro-effort-control.md
 	// 读写: backend (backendDefaultsFor), core (init)
 	backendEfforts map[string]string

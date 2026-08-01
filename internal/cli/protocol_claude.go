@@ -245,6 +245,7 @@ var deniedExtraFlags = map[string]struct{}{
 	"--allowed-tools":                {}, // permission allowlist override
 	"--disallowed-tools":             {}, // permission allowlist override
 	"--model":                        {}, // SpawnOptions.Model owns model selection
+	"--effort":                       {}, // SpawnOptions.Effort owns the tier; config validates a closed set
 	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
 	"--permission-prompt-tool":       {}, // permission gate plumbing
 	"--output-format":                {}, // BuildArgs pins stream-json; operator override breaks the NDJSON parser

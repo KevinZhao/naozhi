@@ -216,8 +216,8 @@ type backendWrappers struct {
 	Models    map[string]string
 	ExtraArgs map[string][]string
 	// Efforts holds the per-backend thinking-effort tier. Only populated for
-	// backends whose Protocol accepts one (ACP / kiro); see initBackendWrappers
-	// for the fail-loud path when it is configured elsewhere.
+	// backends whose Protocol accepts one (ACP / kiro); initBackendWrappers
+	// warns and drops the setting for any other backend.
 	// docs/rfc/kiro-effort-control.md
 	Efforts   map[string]string
 	Default   *cli.Wrapper
