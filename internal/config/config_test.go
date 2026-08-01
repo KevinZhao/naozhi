@@ -493,6 +493,113 @@ func TestValidateModelString(t *testing.T) {
 	}
 }
 
+// TestValidateEffortString pins the closed set of thinking-effort tiers.
+// Unlike model (a regex allowlist over an open vocabulary), effort is a fixed
+// enum, so anything outside it is a config error rather than a value we
+// forward and let kiro reject on the first turn.
+// docs/rfc/kiro-effort-control.md §4.3
+func TestValidateEffortString(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		// The five tiers kiro-cli 2.16.0 accepts for `acp --effort`.
+		{"empty_means_pass_no_flag", "", false},
+		{"low", "low", false},
+		{"medium", "medium", false},
+		{"high", "high", false},
+		{"xhigh", "xhigh", false},
+		{"max", "max", false},
+		// Typos and case variants must fail loudly at startup.
+		{"unknown_tier_rejected", "ultra", true},
+		{"uppercase_rejected", "MAX", true},
+		{"titlecase_rejected", "High", true},
+		{"whitespace_rejected", " max", true},
+		// Same flag-injection posture as validateModelString.
+		{"leading_dash_rejected", "-injected", true},
+		{"flag_pair_rejected", "--effort=max", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateEffortString("test.effort", tc.value)
+			if tc.wantErr && err == nil {
+				t.Errorf("validateEffortString(%q) = nil, want error", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateEffortString(%q) = %v, want nil", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestEnabledBackends_EffortFallback pins that cli.effort seeds every backend
+// that doesn't set its own, and that a per-backend value wins — the same
+// inheritance model / args already have.
+func TestEnabledBackends_EffortFallback(t *testing.T) {
+	t.Parallel()
+	t.Run("legacy single backend inherits cli.effort", func(t *testing.T) {
+		t.Parallel()
+		c := &Config{}
+		c.CLI.Backend = "kiro"
+		c.CLI.Effort = "xhigh"
+		got := c.EnabledBackends()
+		if len(got) != 1 || got[0].Effort != "xhigh" {
+			t.Fatalf("EnabledBackends() = %+v, want one entry with effort xhigh", got)
+		}
+	})
+	t.Run("per-backend effort wins, others inherit", func(t *testing.T) {
+		t.Parallel()
+		c := &Config{}
+		c.CLI.Effort = "low"
+		c.CLI.Backends = []CLIBackendConfig{
+			{ID: "kiro", Effort: "max"},
+			{ID: "kiro-cheap"},
+		}
+		byID := map[string]string{}
+		for _, b := range c.EnabledBackends() {
+			byID[b.ID] = b.Effort
+		}
+		if byID["kiro"] != "max" {
+			t.Errorf("kiro effort = %q, want max (per-backend override)", byID["kiro"])
+		}
+		if byID["kiro-cheap"] != "low" {
+			t.Errorf("kiro-cheap effort = %q, want low (inherited from cli.effort)", byID["kiro-cheap"])
+		}
+	})
+}
+
+// TestValidateConfig_EffortRejected asserts validateConfig propagates the
+// tier refusal from every field that feeds SpawnOptions.Effort. Dropping one
+// branch would let that field smuggle an unvalidated value into argv.
+func TestValidateConfig_EffortRejected(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mut  func(*Config)
+	}{
+		{"cli.effort", func(c *Config) { c.CLI.Effort = "ultra" }},
+		{"cli.backends[].effort", func(c *Config) {
+			c.CLI.Backends = []CLIBackendConfig{{ID: "kiro", Effort: "ultra"}}
+		}},
+		{"agents[].effort", func(c *Config) {
+			c.Agents = map[string]AgentConfig{"reviewer": {Effort: "ultra"}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{}
+			tc.mut(cfg)
+			if err := validateConfig(cfg); err == nil {
+				t.Errorf("validateConfig with bad %s = nil, want error", tc.name)
+			}
+		})
+	}
+}
+
 // TestValidateConfig_ModelInjection asserts validateConfig propagates the
 // model allowlist refusal from each known model field — cli.model,
 // cli.backends[*].model, agents[*].model, projects.planner_defaults.model.

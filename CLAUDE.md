@@ -27,7 +27,7 @@ Deploy: `cmd/naozhi/service.go::generateSystemdUnit` is authoritative for `sudo 
 
 ## Architecture
 
-Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-lived subprocesses. Communication uses a pluggable Protocol interface: `ClaudeProtocol` (stream-json NDJSON over stdin/stdout) or `ACPProtocol` (JSON-RPC 2.0 Agent Client Protocol). The entire agent loop (tools, context, reasoning) is delegated to the CLI -- Naozhi is just the routing layer.
+Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as long-lived subprocesses. Communication uses a pluggable Protocol interface: `ClaudeProtocol` (stream-json NDJSON over stdin/stdout), `ACPProtocol` (JSON-RPC 2.0 Agent Client Protocol), or `CodexProtocol` (codex app-server JSON-RPC 2.0 over stdio). The entire agent loop (tools, context, reasoning) is delegated to the CLI -- Naozhi is just the routing layer.
 
 **Request flow**: IM platform -> message handler -> async goroutine -> session router -> CLI stdin -> read stdout until turn complete -> platform reply API.
 
@@ -105,11 +105,12 @@ cmd/naozhi/main.go
 
 ### CLI Process Lifecycle
 
-Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrapper selects a Protocol based on `cli.backend` config:
+Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrapper selects a Protocol via the `backend.Profile` registry (`internal/cli/backend/profile.go`, canonical list of registered backends) keyed by `cli.backend` config:
 - `claude` (default): `ClaudeProtocol` -- stream-json, session ID from init event
-- `kiro`: `ACPProtocol` -- JSON-RPC 2.0, session ID from `session/new` response
+- `kiro`: `ACPProtocol` -- JSON-RPC 2.0 Agent Client Protocol, session ID from `session/new` response
+- `codex`: `CodexProtocol` -- codex app-server JSON-RPC 2.0 over stdio (see `docs/rfc/codex-backend.md`)
 
-Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
+Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. `effort` is the kiro thinking-effort tier (`low`/`medium`/`high`/`xhigh`/`max`), forwarded as `acp --effort` and overriding kiro's own configured default — see `docs/rfc/kiro-effort-control.md`. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
 - ACP `session/cancel` is a **notification** (no id), not a request
 - ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
 - ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
@@ -131,24 +132,36 @@ type Protocol interface {
     Clone() Protocol
     BuildArgs(opts SpawnOptions) []string
     Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
-    WriteMessage(w io.Writer, text string, images []ImageData) error
+    WriteMessage(w io.Writer, text string, images []Attachment) error
+    WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
+    SupportsPriority() bool
+    SupportsReplay() bool
     WriteInterrupt(w io.Writer, requestID string) error
-    ReadEvent(line string) (ev Event, done bool, err error)
+    ReadEvent(line string) (events []Event, done bool, err error)
     HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 ```
 
 > Notes:
+> - The interface is a strict partition of two facets (compile-time pinned):
+>   `ProtocolCore` (Name/Clone/BuildArgs/Init/WriteMessage/ReadEvent/HandleEvent
+>   -- what every backend implements meaningfully) and
+>   `ProtocolPassthroughExt` (WriteUserMessageLocked/WriteInterrupt/
+>   SupportsPriority/SupportsReplay -- stream-json-only surface; ACP degrades).
 > - `Init` takes the workspace `cwd` so ACP can pass it in `session/new`;
 >   `ClaudeProtocol` ignores the argument because stream-json inherits the
 >   shim's `os.Chdir`.
 > - `WriteInterrupt` emits a mid-turn interrupt; ACP returns
 >   `ErrInterruptUnsupported` so callers fall back to SIGINT.
-> - `ReadEvent` takes a single NDJSON line as `string`. A prior proposal
->   (R67-PERF-1) considered migrating to `[]byte` to skip a per-event heap
->   copy on the shim stdout hot path, but the current signature is shared
->   by DESIGN.md, this file, and `internal/cli/protocol.go`; any change
->   must update all three in lockstep.
+> - `ReadEvent` returns a **slice** (one wire frame can surface multiple
+>   semantic events, e.g. ACP turn-end = assistant text + result). The `done`
+>   flag is advisory and discarded by all production callers -- turn-end is
+>   detected from a `result`/turn-end Event, never from `done`.
+> - Hot-path allocation is handled by the optional `eventReaderInto` facet
+>   (`ReadEventInto(line, buf)`), surfaced via type assertion, not by changing
+>   `ReadEvent` itself.
+> - This signature is shared by DESIGN.md, this file, and
+>   `internal/cli/protocol.go`; any change must update all three in lockstep.
 
 ### Platform Adapter Pattern
 
@@ -166,7 +179,10 @@ Platforms needing background goroutines implement `RunnablePlatform` with `Start
 ### Session Management & Agent Routing
 
 Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
-Project planner sessions use: `project:{name}:planner` (exempt from TTL and max_procs).
+Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
+- `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
+- `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
+- `dashboard:pj:<workspace-hash>:<agent>` -- project-stable dashboard keys (chatType `pj`, deliberately not `project`, to stay unambiguous vs the planner namespace)
 
 Each session is independent: owns one long-lived CLI process, maintains separate context and session ID, uses per-session model/args from agent config.
 
@@ -178,13 +194,13 @@ Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `res
 
 Naozhi supports aggregating sessions from multiple machines into a single dashboard:
 
-- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results (`nodeSessions`, `nodeProjects`, `nodeDiscovered`). Never blocks dashboard API on unreachable nodes.
-- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `connector` package handles reconnection with exponential backoff (1s -> 30s). The `ReverseNodeServer` validates tokens with constant-time comparison.
-- **Protocol** (`reverse.ReverseMsg`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`.
+- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). Never blocks dashboard API on unreachable nodes.
+- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). The `node.ReverseServer` validates tokens with constant-time comparison.
+- **Protocol** (`node.ReverseMsg`, `internal/node/protocol.go`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`.
 
 ### Project Management
 
-When `projects.root` is configured, the `project.Manager` scans subdirectories containing `CLAUDE.md`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings).
+When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.`). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults.
 
 Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
 
@@ -192,17 +208,17 @@ The project list is rescanned every 60s. Orphaned planner sessions for removed p
 
 ### Dashboard & WebSocket
 
-The dashboard is an embedded single-page HTML (`server/static/dashboard.html`) served at `/dashboard`. Real-time updates use a WebSocket hub (`/ws`) with:
+The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`), `sw.js`, and `manifest.json`. Real-time updates use a WebSocket hub (`/ws`) with:
 
-- **Client messages**: `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`
-- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`
+- **Client messages** (dispatch switch: `internal/server/wsclient.go`): `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`, `agent_subscribe`, `agent_unsubscribe`
+- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, plus agent/team streaming types -- see `internal/server/wshub_types.go`
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
-REST API endpoints: `/api/sessions` (GET/DELETE), `/api/sessions/events`, `/api/sessions/send`, `/api/discovered`, `/api/discovered/preview`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config` (GET/PUT), `/api/projects/planner/restart`, `/api/transcribe`, `/api/cron` (GET/POST/PATCH/DELETE), `/api/cron/pause`, `/api/cron/resume`, `/api/cron/trigger` (manual run-now), `/api/cron/preview` (schedule validation). WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes).
+REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
 
 ### Session Discovery & Takeover
 
-The `discovery` package scans `~/.claude/sessions/*.json` to find external (non-naozhi-managed) Claude CLI processes. It cross-references PIDs, upgrades stale session IDs from JSONL mtimes, and extracts summaries from `sessions-index.json`. The dashboard can "takeover" a discovered process: kill the original PID (verified via `/proc/PID/stat` start time to prevent PID reuse attacks), then `--resume` under naozhi management.
+The `discovery` package scans `~/.claude/projects/<slug>/<sessionId>.jsonl` (Claude CLI's on-disk artifacts, which naozhi reads but does NOT own) to find external (non-naozhi-managed) CLI processes. It cross-references PIDs, upgrades stale session IDs from JSONL mtimes, and extracts summaries from each project dir's `sessions-index.json`. The dashboard can "takeover" a discovered process: kill the original PID (verified via `/proc/PID/stat` start time to prevent PID reuse attacks), then `--resume` under naozhi management.
 
 ### Session Persistence
 
@@ -255,24 +271,25 @@ Defaults: `uploadTTL=7d` (operator-tunable), `refTTL=30d` (via `DefaultRefTTL`).
 
 `/health.attachment_tracker` exposes `writer_alive` (same formula as eventlog's), `channel_depth`, `channel_cap`, `last_drain_ms`, `pending`, `written_total`, `cleared_total`, `dropped_total`, `meta_error_total`. `/debug/vars` adds `naozhi_attachment_ref_{bump,clear,meta_error,drop}_total` counters.
 
-GC caller wiring in `cmd/naozhi` is pending operator work — `GCWithRefs` is ready to call from a cron job, but the historic `cmd/naozhi/main.go` never registered an `attachment-gc` job. Until it does, tracker data accumulates but never drives reclamation (attachments only grow). This is a documented follow-up, not a blocker for the refcount MVP.
+GC is wired as the sysession `attachment-gc` daemon (`internal/sysession/attachment_gc.go`, design: `docs/rfc/attachment-gc-daemon.md`), which sweeps the union of the router default workspace, every per-chat workspace override, and every bound project path. It ships default `enabled: false` + `dry_run` — reclamation starts only after an operator enables it in config; until then tracker data accumulates without driving deletion.
 
 ### Graceful Shutdown
 
-On SIGTERM/SIGINT:
-1. Cancel context (stops connector, cleanup loop, node cache loop, project scan loop)
-2. Stop cron scheduler
-3. Wait for running sessions to complete (timeout 30s via shutdownCond)
-4. Save session store
-5. Close all processes concurrently (via stdin close)
-6. Shutdown WebSocket hub and platform connections
+On SIGTERM/SIGINT: `sd_notify STOPPING=1`, cancel the root context (stops connector, node cache loop, project scan loop), then run the ordered teardown in `cmd/naozhi/runshutdown.go`. The order is a hard correctness contract, pinned by `runshutdown_order_test.go`:
+
+1. **sysMgr.Stop** first -- daemon Tick paths call into the router; leaving them running while downstream state tears down would race
+2. **scheduler.Stop** (cron) -- in-flight cron jobs still call GetOrCreate/Send on the router
+3. **HTTP drain barrier** -- no handler may observe a half-cleaned session map
+4. **router.Shutdown** last -- waits for running sessions (30s via shutdownCond), saves the session store, closes all processes concurrently (via stdin close)
+
+Each phase emits a `phase=` timing log line so a hung subsystem is attributable from journalctl alone. A new subsystem MUST be inserted at the correct slot -- the order test breaks otherwise.
 
 ## Config
 
 `config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
 - **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`), `path`, `model`, `args`. Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example
+- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`. Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
 - **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
@@ -283,10 +300,10 @@ On SIGTERM/SIGINT:
 - **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
 - **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
 - **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
-- **transcribe**: `enabled`, `provider` (`aws`), `region`, `language` (voice message STT)
+- **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (workspaces is preferred name; nodes takes precedence if both present).
+Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (`workspaces` is the preferred name; **`workspaces` takes precedence if both are present** and `nodes` is overwritten with a `slog.Warn` — see `Config.Normalize`, R71-ARCH-L1).
 
 ## Concurrency Patterns
 
@@ -305,21 +322,17 @@ Production: CloudFront -> ALB (SG: CloudFront-only) -> EC2 t4g.small :8180 -> sy
 
 ```
 docs/
-├── TODO.md                       # 待办事项（只含 open 项，本地 gitignored）
 ├── design/                       # 架构与已实现功能设计
-│   ├── DESIGN.md                 # 主设计文档（架构、选型、已实现功能设计）
+│   ├── DESIGN.md                 # 主设计文档 —— 架构层面事实以此为准
 │   ├── architecture.html         # 架构可视化
-│   ├── multi-node-design.md      # 多节点聚合设计（已实现）
-│   ├── shim-design.md            # Shim 进程设计（已实现）
-│   ├── server-split-design.md    # Server 包拆分设计（Phase 1-2 已完成）
-│   └── voice-transcription.md    # 语音转写设计（已实现）
-├── ops/                          # 部署与运维
-│   ├── deployment-strategy.md    # 部署策略设计（部分实现）
-│   └── naozhi-deploy-skill.md    # 部署 skill playbook
-├── rfc/                          # 未实现的设计提案
-│   ├── message-queue.md          # 消息队列策略
-│   └── learning-system.md        # 自学习系统
-└── guides/                       # 操作手册
-    ├── weixin-test.md            # 微信渠道测试
-    └── shim-testing.md           # Shim 调试指南
+│   └── ...                       # 各子系统设计（multi-node / shim / server-split / i18n / ...）
+├── adr/                          # Architecture Decision Records
+├── rfc/                          # RFC 工作文档（proposal / 验证报告 / phase 报告）
+│   └── README.md                 # 索引 + 状态表（Draft / 已实装 / 已废弃）——先看这里
+├── ops/                          # 部署与运维 playbook（deployment / release-gate / pprof / ...）
+├── review/                       # 代码评审批次原始记录（batch*-raw.md / cosmetic-backlog.md）
+└── guides/                       # 操作手册（weixin-test / shim-testing）
 ```
+
+待办事项不再放 `docs/TODO.md`，已迁移 GitHub Issues（见 `docs/rfc/todo-to-issues-migration.md`）。
+RFC 不是最终规范——其中很多已实装或已废弃，状态以 `docs/rfc/README.md` 的表格为准。

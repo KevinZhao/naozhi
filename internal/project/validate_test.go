@@ -119,6 +119,12 @@ func TestValidateProjectName(t *testing.T) {
 		{"bidi isolate rejected", "foo\u2068bar", false},
 		{"LS rejected", "foo\u2028bar", false},
 		{"invalid utf-8 rejected", string([]byte{'f', 'o', 0xC3, 'o'}), false},
+		// ':' is the session-key delimiter; a name containing one makes
+		// planner keys ambiguous (see the guard comment in validate.go).
+		{"colon rejected", "foo:bar", false},
+		{"planner-suffix collision rejected", "foo:planner", false},
+		{"leading colon rejected", ":foo", false},
+		{"trailing colon rejected", "foo:", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

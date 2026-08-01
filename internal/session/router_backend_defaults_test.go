@@ -15,12 +15,12 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		r.bkStore.extraArgs = []string{"--router-flag"}
 		r.bkStore.backendModels = map[string]string{}
 		r.bkStore.backendExtraArgs = map[string][]string{}
-		gotModel, gotArgs := r.backendDefaultsFor("kiro")
-		if gotModel != "router-default" {
-			t.Errorf("model = %q, want router default", gotModel)
+		bd := r.backendDefaultsFor("kiro")
+		if bd.Model != "router-default" {
+			t.Errorf("model = %q, want router default", bd.Model)
 		}
-		if !slices.Equal(gotArgs, []string{"--router-flag"}) {
-			t.Errorf("args = %v, want router default", gotArgs)
+		if !slices.Equal(bd.Args, []string{"--router-flag"}) {
+			t.Errorf("args = %v, want router default", bd.Args)
 		}
 	})
 
@@ -34,12 +34,12 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		r.bkStore.backendExtraArgs = map[string][]string{
 			"kiro": {"--kiro-flag"},
 		}
-		gotModel, gotArgs := r.backendDefaultsFor("kiro")
-		if gotModel != "kiro-model" {
-			t.Errorf("model = %q, want kiro override", gotModel)
+		bd := r.backendDefaultsFor("kiro")
+		if bd.Model != "kiro-model" {
+			t.Errorf("model = %q, want kiro override", bd.Model)
 		}
-		if !slices.Equal(gotArgs, []string{"--kiro-flag"}) {
-			t.Errorf("args = %v, want kiro override", gotArgs)
+		if !slices.Equal(bd.Args, []string{"--kiro-flag"}) {
+			t.Errorf("args = %v, want kiro override", bd.Args)
 		}
 	})
 
@@ -56,12 +56,35 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		r.bkStore.backendExtraArgs = map[string][]string{
 			"kiro": nil,
 		}
-		gotModel, gotArgs := r.backendDefaultsFor("kiro")
-		if gotModel != "router-default" {
-			t.Errorf("empty backend model collapsed to %q, want router default", gotModel)
+		bd := r.backendDefaultsFor("kiro")
+		if bd.Model != "router-default" {
+			t.Errorf("empty backend model collapsed to %q, want router default", bd.Model)
 		}
-		if !slices.Equal(gotArgs, []string{"--router-flag"}) {
-			t.Errorf("nil backend args collapsed to %v, want router default", gotArgs)
+		if !slices.Equal(bd.Args, []string{"--router-flag"}) {
+			t.Errorf("nil backend args collapsed to %v, want router default", bd.Args)
+		}
+	})
+
+	// Effort has no router-level base (the composition root already folded
+	// cli.effort into the per-backend map and dropped it for backends whose
+	// protocol ignores it), so the only question is per-backend lookup.
+	// docs/rfc/kiro-effort-control.md §4.2
+	t.Run("effort comes from the per-backend map only", func(t *testing.T) {
+		r := &Router{}
+		r.bkStore.backendEfforts = map[string]string{"kiro": "xhigh"}
+
+		if got := r.backendDefaultsFor("kiro").Effort; got != "xhigh" {
+			t.Errorf("effort = %q, want xhigh", got)
+		}
+		// A backend with no entry must get "" — passing a tier to a backend
+		// the operator didn't configure would silently change its behaviour.
+		if got := r.backendDefaultsFor("claude").Effort; got != "" {
+			t.Errorf("effort for unconfigured backend = %q, want empty", got)
+		}
+		// Nil map (no effort configured anywhere) must not panic.
+		r2 := &Router{}
+		if got := r2.backendDefaultsFor("kiro").Effort; got != "" {
+			t.Errorf("effort with nil map = %q, want empty", got)
 		}
 	})
 
@@ -72,12 +95,12 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		r.bkStore.backendModels = map[string]string{
 			"kiro": "kiro-model",
 		}
-		gotModel, gotArgs := r.backendDefaultsFor("nonexistent")
-		if gotModel != "router-default" {
-			t.Errorf("model = %q, want router default for unknown backend", gotModel)
+		bd := r.backendDefaultsFor("nonexistent")
+		if bd.Model != "router-default" {
+			t.Errorf("model = %q, want router default for unknown backend", bd.Model)
 		}
-		if !slices.Equal(gotArgs, []string{"--router-flag"}) {
-			t.Errorf("args = %v, want router default for unknown backend", gotArgs)
+		if !slices.Equal(bd.Args, []string{"--router-flag"}) {
+			t.Errorf("args = %v, want router default for unknown backend", bd.Args)
 		}
 	})
 }

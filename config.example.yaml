@@ -90,7 +90,32 @@ cli:
   #    # claude-haiku-4.5, deepseek-3.2, glm-5, qwen3-coder-next.
   #    # Omit / leave empty => kiro picks its own default ("auto").
   #    model: "claude-sonnet-4.6"
+  #    # Thinking-effort tier, forwarded as `kiro-cli acp --effort <tier>`.
+  #    # One of: low | medium | high | xhigh | max.
+  #    #
+  #    # Omit / leave empty => kiro applies its OWN configured default, i.e.
+  #    # chat.modelDefaults[<model>].output_config.effort in
+  #    # ~/.kiro/settings/cli.json. Setting it here makes naozhi authoritative
+  #    # instead, so the gateway and your interactive kiro can differ.
+  #    #
+  #    # Applies from the next spawn onward — it is a process start flag, so
+  #    # already-running sessions keep the tier they started with. Concretely:
+  #    # edit this, restart naozhi, and each surviving session is detected as
+  #    # config-drifted, shut down, and re-spawned on the new tier when its
+  #    # next message arrives. Restarting naozhi alone does NOT re-tier a
+  #    # session (it normally just reconnects to the running process).
+  #    #
+  #    # In a multi-node deployment this is per-node: the primary's setting does
+  #    # not reach remote nodes, so configure each node that runs kiro.
+  #    #
+  #    # Only ACP-protocol backends (kiro) accept a tier; configuring one on
+  #    # claude/codex logs a warning and is ignored.
+  #    effort: "xhigh"
   #    args: []
+  #
+  # A top-level cli.effort works as an inheritable default for every backend
+  # that supports one, exactly like cli.model:
+  #effort: "high"
 
 session:
   max_procs: 20
@@ -101,20 +126,31 @@ session:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
   store_path: "~/.naozhi/sessions.json"
-  # auto_chain — automatically join multiple naozhi sessions in the same
-  # workspace as one continuous chain, so dashboard "load earlier" can
-  # walk back across session boundaries. Default-on with 7d window /
-  # 32-cap. See docs/rfc/auto-workspace-chain.md.
-  #   enabled: false        — opt out entirely (no spawn-time attach,
-  #                           no startup backfill)
-  #   window_hours: 24      — only consider JSONL files modified in the
-  #                           last 24h (default 168 = 7d)
-  #   cap: 16               — chain max length (default 32, hard ceiling
-  #                           is maxPrevSessionIDs = 32)
+  # auto_chain — DEPRECATED / NO EFFECT.
+  #
+  # This block used to join multiple sessions in the same workspace into
+  # one chain by guessing that "same workspace slug + 7d window" meant
+  # "semantically continuous conversation". That guess was wrong often
+  # enough to be harmful — unrelated one-off conversations sharing a
+  # default workspace got stitched together as each other's history — so
+  # the feature was retired (docs/rfc/project-stable-session-key.md §9).
+  #
+  # The keys are still PARSED so existing config files don't fail to
+  # load, but they change nothing; setting any of them logs a
+  # deprecation warning at startup. Delete the block.
+  #
+  # Precise continuation is now carried by the project-level stable
+  # session key below, which is default-on.
   # auto_chain:
   #   enabled: true
   #   window_hours: 168
   #   cap: 32
+  #
+  # project_stable_key — project-level stable session key. Default-on;
+  # set enabled: false to fall back to the legacy timestamp-key path for
+  # dashboard "continue".
+  # project_stable_key:
+  #   enabled: true
   shim:
     idle_timeout: "8h"
   queue:
@@ -139,6 +175,23 @@ agents:
   researcher:
     model: "opus"
     args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
+    # Optional, kiro-backed sessions only: overrides the backend's
+    # thinking-effort tier for this agent — e.g. run a cheap tier for a
+    # frequently-scheduled cron agent while the default stays higher.
+    # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
+    #
+    # Applies to sessions routed to THIS agent id. Project planner sessions are
+    # not one of them: planner restart builds its opts from project config only
+    # and never reads agents[*] (see ResolveForPlannerKey), so set the tier on
+    # the backend if you want planners covered.
+    #
+    # Caveat: naozhi's shim config-drift check only compares BACKEND-level
+    # args, so a session using this per-agent override is re-detected as
+    # drifted on every restart and re-spawned on its next message. Sessions
+    # are not lost, but their sidebar history starts empty. The same already
+    # applies to agents[].model. Set the tier on the backend instead if you
+    # need long-lived sessions to survive restarts untouched.
+    #effort: "max"
 
 agent_commands:
   review: "code-reviewer"

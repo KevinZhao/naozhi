@@ -79,7 +79,9 @@ func TestProtocolCaps_Claude(t *testing.T) {
 func TestProtocolCaps_ACP(t *testing.T) {
 	t.Parallel()
 	got := ProtocolCaps(&ACPProtocol{})
-	want := Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
+	// EffortTier: kiro-cli acp takes --effort; see kiro-effort-control.md.
+	want := Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
+		EffortTier: true}
 	if got != want {
 		t.Fatalf("acp caps: got %+v want %+v", got, want)
 	}

@@ -310,6 +310,14 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		snap.ContextUsagePercent = proc.ContextUsagePercent()
 		snap.TurnDurationMs = proc.TurnDurationMs()
 		snap.MeteringUsage = proc.MeteringUsage()
+		// Effort stays inside the proc != nil branch (unlike CostUnit below):
+		// it is a runtime observation, not a static label derived from
+		// Backend, so an evicted session has no "current effort" to show.
+		// The dashboard tag then hides, matching TurnDurationMs. Deliberately
+		// NOT seeded from persisted state the way Model is — effort is never
+		// written to sessions.json, so there is no stored value to fall back
+		// on. docs/rfc/kiro-effort-visibility.md §9
+		snap.Effort = proc.Effort()
 	}
 
 	// CostUnit is derived from backend even when proc is nil so an evicted

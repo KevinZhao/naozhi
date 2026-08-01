@@ -588,6 +588,14 @@ function startMockServer(overrides = {}) {
           }
         },
         setGitState(key, state) { gitStates[key] = state; },
+        // Deliberately does NOT bump stats.version — that is exactly what the
+        // real server does when a turn completes: the effort tier changes on
+        // the Process, but storeGen only advances on session add/remove/
+        // rename/reset. Tests use this to prove the dashboard still repaints.
+        setSessionEffortWithoutVersionBump(key, effort) {
+          const s = (sessionsData.sessions || []).find(x => x.key === key);
+          if (s) s.effort = effort;
+        },
         resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     });

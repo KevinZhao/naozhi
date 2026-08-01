@@ -41,6 +41,26 @@ func ValidateProjectName(name string) error {
 			return errors.New("project name contains invalid characters")
 		}
 	}
+	// ':' is the session-key field delimiter, so a name containing one
+	// makes planner keys ambiguous. sessionkey.PlannerKeyFor builds
+	// `project:{name}:planner` and explicitly delegates validation here
+	// ("callers must have validated name"), while readers split on ':'
+	// — session.chatKeyFor strips the last segment. A directory named
+	// `foo:planner` under projects_root therefore yields
+	//
+	//	PlannerKeyFor("foo:planner")            == "project:foo:planner:planner"
+	//	chatKeyFor(that)                        == "project:foo:planner"
+	//	PlannerKeyFor("foo")                    == "project:foo:planner"
+	//
+	// i.e. project `foo:planner` collides with project `foo`'s planner
+	// session in the chat→sessions index and the workspace-override
+	// store, so messages can route to the wrong project's planner.
+	// Rejecting the delimiter outright is safe: ':' is already stripped
+	// from IM session-key components by sanitizeKeyComponent, so it has
+	// no legitimate meaning in this namespace.
+	if strings.ContainsRune(name, ':') {
+		return errors.New("project name must not contain ':'")
+	}
 	return nil
 }
 
