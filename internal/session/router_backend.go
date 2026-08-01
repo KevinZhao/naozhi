@@ -58,6 +58,13 @@ type backendStore struct {
 	backendModels map[string]string
 	// 读写: backend (backendDefaultsFor override), core (init)
 	backendExtraArgs map[string][]string
+	// backendEfforts holds the thinking-effort tier per backend ID. No
+	// router-wide base field on purpose: the composition root already folded
+	// cli.effort in and filtered out backends whose protocol ignores the tier,
+	// so this map is the whole truth. Read-only after NewRouter.
+	// docs/rfc/kiro-effort-control.md
+	// 读写: backend (backendDefaultsFor), core (init)
+	backendEfforts map[string]string
 	// backendOverrides stores per-session backend preferences picked by
 	// the dashboard at session-creation time. Keyed by full session key
 	// (including agent suffix) so two sessions on the same chat can run
@@ -363,23 +370,40 @@ func (r *Router) CLIPath() string {
 	return r.bkStore.wrapper.CLIPath
 }
 
-// backendDefaultsFor returns the merged (model, extraArgs) the router uses
+// backendDefaults is the merged per-backend spawn configuration returned by
+// backendDefaultsFor. Grouped into a struct rather than a widening tuple so
+// adding a field does not churn every call site — the migration the
+// R222-ARCH-14 note below anticipated.
+type backendDefaults struct {
+	Model string
+	// Args is returned WITHOUT copying — callers that mutate (append per-
+	// request flags) must copy first; callers that only forward may use it
+	// directly.
+	Args []string
+	// Effort is "" for backends that report no tier support, since the
+	// composition root drops the setting before it reaches the router.
+	Effort string
+}
+
+// backendDefaultsFor returns the merged spawn configuration the router uses
 // when spawning under backendID. Precedence:
 //
-//	router-level r.bkStore.model / r.bkStore.extraArgs (base)
-//	← r.bkStore.backendModels[backendID]   (replace, when non-empty)
+//	router-level r.bkStore.model / .extraArgs (base)
+//	← r.bkStore.backendModels[backendID]    (replace, when non-empty)
 //	← r.bkStore.backendExtraArgs[backendID] (replace, when non-empty)
 //
-// extraArgs is returned without copying — callers that mutate (append per-
-// request flags) must copy first; callers that only forward the slice may
-// use it directly.
+// Effort has no router-level base — see the backendEfforts field comment.
 //
 // R222-ARCH-14 (#739): the same lookup pattern previously appeared inline
 // in resolveSpawnParamsLocked AND router_shim.classifyShimState (drift
 // detection). Centralising the merge here means a future migration to a
 // single Backend struct can change one helper instead of grep-replacing
 // across two hot paths.
-func (r *Router) backendDefaultsFor(backendID string) (string, []string) {
+//
+// Both callers matter for effort: the drift path feeds BuildArgs too, so
+// omitting the tier there would make every restart read the surviving kiro
+// shims as arg-drift and needlessly restart them.
+func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 	model := r.bkStore.model
 	if bm, ok := r.bkStore.backendModels[backendID]; ok && bm != "" {
 		model = bm
@@ -388,5 +412,8 @@ func (r *Router) backendDefaultsFor(backendID string) (string, []string) {
 	if ba, ok := r.bkStore.backendExtraArgs[backendID]; ok && len(ba) > 0 {
 		args = ba
 	}
-	return model, args
+	return backendDefaults{
+		Model: model, Args: args,
+		Effort: r.bkStore.backendEfforts[backendID],
+	}
 }

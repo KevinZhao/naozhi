@@ -209,6 +209,12 @@ type AgentConfig struct {
 	// overlay + default model) for sessions of this agent. Empty = global
 	// default (settings.json baseline). RFC project-access-profile PR-B.
 	AccessProfile string `yaml:"access_profile,omitempty"`
+	// Effort overrides the backend's thinking-effort tier for sessions of
+	// this agent — the point of the per-agent layer is that a background
+	// sweeper and a planner want opposite ends of the scale. Empty = inherit
+	// cli.backends[].effort, then cli.effort.
+	// docs/rfc/kiro-effort-control.md
+	Effort string `yaml:"effort,omitempty"`
 }
 
 // AccessProfile is a NAMED bundle of "how to reach the model" for a session:
@@ -268,15 +274,29 @@ type CLIConfig struct {
 	Backends []CLIBackendConfig `yaml:"backends,omitempty"`
 	Model    string             `yaml:"model"`
 	Args     []string           `yaml:"args"`
+	// Effort is the default thinking-effort tier for backends that support
+	// one (kiro today: low/medium/high/xhigh/max). Empty — the default —
+	// passes no flag, leaving the backend to apply its own configured
+	// default; for kiro that is chat.modelDefaults[<model>].output_config
+	// .effort in ~/.kiro/settings/cli.json. Setting it here makes naozhi
+	// authoritative instead, without touching the operator's interactive kiro.
+	// docs/rfc/kiro-effort-control.md
+	Effort string `yaml:"effort,omitempty"`
 }
 
 // CLIBackendConfig configures one backend in a multi-backend deployment.
-// ID is required; Path/Model/Args fall back to the top-level cli.* values.
+// ID is required; Path/Model/Args/Effort fall back to the top-level cli.*
+// values.
 type CLIBackendConfig struct {
 	ID    string   `yaml:"id"`              // "claude" | "kiro"
 	Path  string   `yaml:"path,omitempty"`  // overrides cli.path for this backend
 	Model string   `yaml:"model,omitempty"` // overrides cli.model for this backend
 	Args  []string `yaml:"args,omitempty"`  // overrides cli.args for this backend
+	// Effort overrides cli.effort for this backend. Only meaningful for
+	// backends whose CLI accepts a tier flag (kiro); configuring it on one
+	// that does not is a config error rather than a silent no-op, so an
+	// operator never believes a tier is in force when it is not.
+	Effort string `yaml:"effort,omitempty"`
 }
 
 type SessionConfig struct {
@@ -1199,11 +1219,20 @@ func validateConfig(cfg *Config) error {
 	if err := validateModelString("cli.model", cfg.CLI.Model); err != nil {
 		return err
 	}
+	// cli.effort / cli.backends[].effort / agents[].effort all reach
+	// SpawnOptions.Effort and then BuildArgs, so they get the same
+	// closed-set treatment as model. docs/rfc/kiro-effort-control.md §4.3
+	if err := validateEffortString("cli.effort", cfg.CLI.Effort); err != nil {
+		return err
+	}
 	for _, b := range cfg.CLI.Backends {
 		if err := validateArgvStrings(fmt.Sprintf("cli.backends[%s].args", b.ID), b.Args); err != nil {
 			return err
 		}
 		if err := validateModelString(fmt.Sprintf("cli.backends[%s].model", b.ID), b.Model); err != nil {
+			return err
+		}
+		if err := validateEffortString(fmt.Sprintf("cli.backends[%s].effort", b.ID), b.Effort); err != nil {
 			return err
 		}
 	}
@@ -1216,6 +1245,9 @@ func validateConfig(cfg *Config) error {
 			return err
 		}
 		if err := validateModelString(fmt.Sprintf("agents[%s].model", id), a.Model); err != nil {
+			return err
+		}
+		if err := validateEffortString(fmt.Sprintf("agents[%s].effort", id), a.Effort); err != nil {
 			return err
 		}
 	}
@@ -1376,6 +1408,36 @@ func validateArgvStrings(field string, args []string) error {
 // to stay correct forever.
 var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+// validEffortTiers is the closed set of thinking-effort tiers naozhi will
+// forward, matching `kiro-cli acp --effort` on kiro 2.16.0.
+//
+// Why an allowlist here when the read path deliberately avoids one: the
+// dashboard displays a tier kiro has ALREADY chosen, so refusing to render an
+// unfamiliar one would lose real information (see kiro-effort-visibility.md
+// §5 R4). Here naozhi is constructing argv, so the same flag-injection
+// argument that pins modelNameRe applies — and a typo'd tier should fail at
+// startup rather than being silently rejected by kiro on the first turn.
+// A future kiro tier requires updating this set; the error message says so.
+var validEffortTiers = map[string]struct{}{
+	"low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
+}
+
+// validateEffortString gates a configured thinking-effort tier. Empty is
+// allowed and means "pass no flag" (backend keeps its own default), matching
+// the fallback semantics of validateModelString.
+// docs/rfc/kiro-effort-control.md §4.3
+func validateEffortString(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if _, ok := validEffortTiers[value]; !ok {
+		return fmt.Errorf("%s %q is not a known thinking-effort tier "+
+			"(want one of: low, medium, high, xhigh, max) — if a newer kiro "+
+			"added a tier, extend validEffortTiers", field, value)
+	}
+	return nil
+}
+
 // validateModelString gates a configured model identifier. Empty is allowed
 // (caller-defined fallback semantics: cli.model empty → backend default,
 // agent.model empty → cli.model). Non-empty values must match modelNameRe.
@@ -1499,10 +1561,11 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 
 	if len(c.CLI.Backends) == 0 {
 		return []CLIBackendConfig{{
-			ID:    defaultID,
-			Path:  c.CLI.Path,
-			Model: c.CLI.Model,
-			Args:  c.CLI.Args,
+			ID:     defaultID,
+			Path:   c.CLI.Path,
+			Model:  c.CLI.Model,
+			Args:   c.CLI.Args,
+			Effort: c.CLI.Effort,
 		}}
 	}
 
@@ -1521,6 +1584,9 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 		if len(b.Args) == 0 {
 			b.Args = c.CLI.Args
 		}
+		if b.Effort == "" {
+			b.Effort = c.CLI.Effort
+		}
 		out = append(out, b)
 	}
 
@@ -1528,10 +1594,11 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 	// server doesn't refuse to start with a confusing "no usable cli backend".
 	if len(out) == 0 {
 		return []CLIBackendConfig{{
-			ID:    defaultID,
-			Path:  c.CLI.Path,
-			Model: c.CLI.Model,
-			Args:  c.CLI.Args,
+			ID:     defaultID,
+			Path:   c.CLI.Path,
+			Model:  c.CLI.Model,
+			Args:   c.CLI.Args,
+			Effort: c.CLI.Effort,
 		}}
 	}
 

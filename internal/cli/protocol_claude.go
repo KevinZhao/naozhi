@@ -393,7 +393,10 @@ func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 // See RNEW-ARCH-404: opt-in accessor for consumers migrating off
 // individual SupportsX() methods.
 func (p *ClaudeProtocol) Capabilities() Caps {
-	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
+	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true,
+		// The Claude CLI has no thinking-effort flag; SpawnOptions.Effort is
+		// ignored here, and the composition root rejects configuring it.
+		EffortTier: false}
 }
 
 // The NDJSON payload for an in-band "abort this turn" signal sent via stdin

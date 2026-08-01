@@ -258,6 +258,18 @@ func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	// `--effort <tier>` overrides kiro's own configured default
+	// (chat.modelDefaults[<model>].output_config.effort), letting naozhi own
+	// the tier without touching the operator's interactive kiro. Verified on
+	// 2.16.0 for BOTH session/new and session/load, so resume keeps the tier
+	// as long as the flag is passed again — a resume spawned without it
+	// silently reverts to kiro's global default.
+	//
+	// The value is a closed set validated at config load; empty means "pass
+	// no flag". docs/rfc/kiro-effort-control.md
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
+	}
 	// Mirror ClaudeProtocol's ExtraArgs guard (capExtraArgsBytes lives in
 	// protocol_claude.go) so an ACP backend cannot bypass the ARG_MAX
 	// defense merely by routing the same user-supplied args through here.
@@ -544,8 +556,11 @@ func (p *ACPProtocol) SupportsReplay() bool   { return false }
 // there is no session to cancel; callers fall back to SIGINT. The
 // SoftInterrupt bit advertises the post-handshake capability — its
 // godoc on Caps.SoftInterrupt reflects this. See RNEW-ARCH-404.
+// EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort <tier>`,
+// which kiro honours for both session/new and session/load (verified on 2.16.0).
 func (p *ACPProtocol) Capabilities() Caps {
-	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
+	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
+		EffortTier: true}
 }
 
 // ReadEventInto is the allocation-aware variant of ReadEvent

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -695,6 +696,74 @@ func TestACPProtocol_BuildArgs_NoModel(t *testing.T) {
 		if a == "--model" {
 			t.Errorf("BuildArgs should not emit --model when Model empty, got %v", args)
 		}
+	}
+}
+
+// TestACPProtocol_BuildArgs_Effort verifies opts.Effort reaches kiro as
+// `--effort <tier>`. This flag is what makes cli.backends[].effort authoritative
+// over kiro's own chat.modelDefaults default (verified on kiro 2.16.0 for both
+// session/new and session/load). docs/rfc/kiro-effort-control.md
+func TestACPProtocol_BuildArgs_Effort(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "claude-fable-5", Effort: "xhigh"})
+	var ok bool
+	for i, a := range args {
+		if a == "--effort" && i+1 < len(args) && args[i+1] == "xhigh" {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		t.Errorf("BuildArgs missing --effort xhigh, got %v", args)
+	}
+	// The two flags must coexist — a session picks both a model and a tier.
+	if !slices.Contains(args, "--model") {
+		t.Errorf("BuildArgs dropped --model when Effort was set, got %v", args)
+	}
+}
+
+// TestACPProtocol_BuildArgs_NoEffort pins that an absent tier emits no flag:
+// `--effort ""` would make kiro reject the argv, and the empty value is the
+// documented way to say "leave the backend's own default alone".
+func TestACPProtocol_BuildArgs_NoEffort(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	for _, a := range p.BuildArgs(SpawnOptions{Model: "claude-fable-5"}) {
+		if a == "--effort" {
+			t.Error("BuildArgs must not emit --effort when Effort is empty")
+		}
+	}
+}
+
+// TestBuildArgs_EffortIgnoredByNonACP pins that the tier is inert on backends
+// whose CLI has no such flag, so a stray SpawnOptions.Effort cannot corrupt
+// their argv. The composition root also refuses to configure it there; this is
+// the defence one layer down.
+func TestBuildArgs_EffortIgnoredByNonACP(t *testing.T) {
+	t.Parallel()
+	for _, p := range []Protocol{&ClaudeProtocol{}, &CodexProtocol{}} {
+		args := p.BuildArgs(SpawnOptions{Effort: "max"})
+		if slices.Contains(args, "--effort") || slices.Contains(args, "max") {
+			t.Errorf("%s.BuildArgs leaked the effort tier: %v", p.Name(), args)
+		}
+	}
+}
+
+// TestProtocolCaps_EffortTier pins which protocols advertise tier support.
+// initBackendWrappers reads this to decide whether to honour or warn about a
+// configured tier, so a wrong answer here silently drops the operator's
+// setting (or forwards it to a CLI that will reject the argv).
+func TestProtocolCaps_EffortTier(t *testing.T) {
+	t.Parallel()
+	if !ProtocolCaps(&ACPProtocol{}).EffortTier {
+		t.Error("ACP must advertise EffortTier — kiro-cli acp takes --effort")
+	}
+	if ProtocolCaps(&ClaudeProtocol{}).EffortTier {
+		t.Error("Claude must not advertise EffortTier — no such flag")
+	}
+	if ProtocolCaps(&CodexProtocol{}).EffortTier {
+		t.Error("Codex must not advertise EffortTier — its reasoning knob is a different axis")
 	}
 }
 

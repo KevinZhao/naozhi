@@ -90,7 +90,25 @@ cli:
   #    # claude-haiku-4.5, deepseek-3.2, glm-5, qwen3-coder-next.
   #    # Omit / leave empty => kiro picks its own default ("auto").
   #    model: "claude-sonnet-4.6"
+  #    # Thinking-effort tier, forwarded as `kiro-cli acp --effort <tier>`.
+  #    # One of: low | medium | high | xhigh | max.
+  #    #
+  #    # Omit / leave empty => kiro applies its OWN configured default, i.e.
+  #    # chat.modelDefaults[<model>].output_config.effort in
+  #    # ~/.kiro/settings/cli.json. Setting it here makes naozhi authoritative
+  #    # instead, so the gateway and your interactive kiro can differ.
+  #    #
+  #    # Applies from the next spawn onward — it is a process start flag, so
+  #    # already-running sessions keep the tier they started with.
+  #    #
+  #    # Only ACP-protocol backends (kiro) accept a tier; configuring one on
+  #    # claude/codex logs a warning and is ignored.
+  #    effort: "xhigh"
   #    args: []
+  #
+  # A top-level cli.effort works as an inheritable default for every backend
+  # that supports one, exactly like cli.model:
+  #effort: "high"
 
 session:
   max_procs: 20
@@ -150,6 +168,11 @@ agents:
   researcher:
     model: "opus"
     args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
+    # Optional, kiro-backed sessions only: overrides the backend's
+    # thinking-effort tier for this agent. The per-agent layer is what lets a
+    # background sweeper run cheap while a planner runs at "max".
+    # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
+    #effort: "max"
 
 agent_commands:
   review: "code-reviewer"

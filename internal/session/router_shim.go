@@ -278,10 +278,16 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// backendDefaultsFor centralises the model/extraArgs lookup that
 			// otherwise duplicated the resolveSpawnParamsLocked logic
 			// (R222-ARCH-14, #739).
-			driftModel, driftArgs := r.backendDefaultsFor(recBackendID)
+			driftDefaults := r.backendDefaultsFor(recBackendID)
 			currentArgs = recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
-				Model:     driftModel,
-				ExtraArgs: driftArgs,
+				Model:     driftDefaults.Model,
+				ExtraArgs: driftDefaults.Args,
+				// Effort must be mirrored here for the same reason SettingsFile
+				// is: BuildArgs now emits `--effort` for ACP backends, so
+				// omitting it would make every restart read the surviving kiro
+				// shims as arg-drift and restart sessions that were fine.
+				// docs/rfc/kiro-effort-control.md §4.5
+				Effort: driftDefaults.Effort,
 				// Must mirror the real spawn (lifecycle) so a session started
 				// with `--settings <naozhi file>` is not misread as arg-drift
 				// (which would trigger an unnecessary restart). RFC

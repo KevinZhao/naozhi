@@ -269,8 +269,12 @@ func (p *CodexProtocol) SupportsReplay() bool   { return false }
 // Capabilities: codex has a clean soft-interrupt (turn/interrupt request) once
 // a thread is established; pre-handshake WriteInterrupt still returns
 // ErrInterruptUnsupported. Not stream-json. RFC §6.
+// EffortTier=false: codex exposes no equivalent tier flag (its own reasoning
+// controls ride on `-c model_reasoning_effort=`, a different axis this RFC does
+// not model), so it cannot be derived from StreamJSON like ACP's can.
 func (p *CodexProtocol) Capabilities() Caps {
-	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
+	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
+		EffortTier: false}
 }
 
 // --- notification decode shapes ---

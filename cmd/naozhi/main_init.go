@@ -153,6 +153,7 @@ func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[strin
 		agents[id] = session.AgentOpts{
 			Model:     ac.Model,
 			ExtraArgs: ac.Args,
+			Effort:    ac.Effort,
 		}
 	}
 	cronAgents := make(map[string]cron.AgentOpts, len(agents))
@@ -214,6 +215,11 @@ type backendWrappers struct {
 	Wrappers  map[string]*cli.Wrapper
 	Models    map[string]string
 	ExtraArgs map[string][]string
+	// Efforts holds the per-backend thinking-effort tier. Only populated for
+	// backends whose Protocol accepts one (ACP / kiro); see initBackendWrappers
+	// for the fail-loud path when it is configured elsewhere.
+	// docs/rfc/kiro-effort-control.md
+	Efforts   map[string]string
 	Default   *cli.Wrapper
 	DefaultID string
 }
@@ -244,6 +250,7 @@ func initBackendWrappers(
 		Wrappers:  make(map[string]*cli.Wrapper, len(backendsCfg)),
 		Models:    make(map[string]string, len(backendsCfg)),
 		ExtraArgs: make(map[string][]string, len(backendsCfg)),
+		Efforts:   make(map[string]string, len(backendsCfg)),
 		DefaultID: defaultBackend,
 	}
 
@@ -276,6 +283,26 @@ func initBackendWrappers(
 		}
 		if len(b.Args) > 0 {
 			out.ExtraArgs[w.BackendID] = b.Args
+		}
+		// A tier configured on a backend whose CLI has no flag for it would be
+		// a silent no-op, leaving the operator to believe it is in force. The
+		// capability check lives here rather than in config validation because
+		// this is where the Protocol — the thing that actually consumes
+		// SpawnOptions.Effort — is constructed. Warn rather than refuse to
+		// start: dropping one setting is recoverable, an unbootable gateway is
+		// not, and cfg.EnabledBackends() propagates cli.effort to EVERY
+		// backend, so a mixed claude+kiro deployment that sets the top-level
+		// default would otherwise be unstartable.
+		// docs/rfc/kiro-effort-control.md §4.3
+		if b.Effort != "" {
+			if cli.ProtocolCaps(proto).EffortTier {
+				out.Efforts[w.BackendID] = b.Effort
+			} else {
+				slog.Warn("ignoring configured thinking-effort tier: backend does not accept one",
+					"id", w.BackendID, "effort", b.Effort,
+					"hint", "only ACP-protocol backends (kiro) take --effort; "+
+						"move the setting under that backend to silence this")
+			}
 		}
 		if out.Default == nil || w.BackendID == defaultBackend {
 			out.Default = w
