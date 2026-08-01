@@ -244,6 +244,14 @@ type Process struct {
 	// the totalCost pattern. See docs/rfc/multi-backend.md §8.8.
 	contextUsagePercentBits atomic.Uint64 // math.Float64bits of last ContextUsagePercent
 	turnDurationMs          atomic.Int64  // last TurnDurationMs (ms)
+	// effort is the backend-reported thinking-effort tier (kiro:
+	// low/medium/high/xhigh/max). Empty for backends that never report it.
+	// atomic.Pointer[string] rather than an enum int so an unrecognised
+	// future kiro tier still reaches the dashboard — see EventMetadata.Effort
+	// and docs/rfc/kiro-effort-visibility.md §2. Mirrors the liveVersion
+	// pattern below (both are strings filled from event frames while the
+	// process runs, unlike model which is set once at spawn).
+	effort atomic.Pointer[string]
 	// meteringMu guards meteringUsage. Replaced whole on each metadata
 	// event so reads copy and the typical (no-metering) case stays cheap.
 	// Read-mostly: dashboard Snapshot polls call MeteringUsage at 1Hz × N
@@ -855,6 +863,18 @@ func (p *Process) TurnDurationMs() int64 {
 	return p.turnDurationMs.Load()
 }
 
+// Effort returns the backend-reported thinking-effort tier for the most
+// recent turn ("low" / "medium" / "high" / "xhigh" / "max" on kiro). Empty
+// when the backend never reports one (claude, codex) or before the first
+// metadata frame arrives. Lock-free; mirrors Model / LiveVersion in
+// returning "" for the unset pointer.
+func (p *Process) Effort() string {
+	if e := p.effort.Load(); e != nil {
+		return *e
+	}
+	return ""
+}
+
 // MeteringUsage returns a defensive copy of the most recent backend-reported
 // billing rows. Empty for backends that report cost only via TotalCost
 // (claude). Returns a fresh slice on every call so callers can safely retain
@@ -878,10 +898,14 @@ func (p *Process) MeteringUsage() []MeteringEntry {
 }
 
 // applyMetadata stores normalized metadata observed on a Type:"metadata"
-// event. Called from readLoop. Cheap; only ContextUsagePercent and
-// TurnDurationMs are atomically stored, MeteringUsage replaces the whole
-// slice under meteringMu. Each kiro turn emits at most one metadata frame
-// so contention is negligible.
+// event. Called from readLoop. Cheap; ContextUsagePercent, TurnDurationMs and
+// Effort are atomically stored, MeteringUsage replaces the whole slice under
+// meteringMu. A kiro turn emits two metadata frames (early: context+effort,
+// final: adds metering+duration) so contention is still negligible.
+//
+// Every field is guarded on being non-zero: a frame that omits a field must
+// not regress the value a previous frame established. Pinned by
+// TestProcess_ApplyMetadata_AndAccessors.
 func (p *Process) applyMetadata(m *EventMetadata) {
 	if m == nil {
 		return
@@ -891,6 +915,22 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 	}
 	if m.TurnDurationMs > 0 {
 		p.turnDurationMs.Store(m.TurnDurationMs)
+	}
+	// Overwrite semantics (NOT the per-unit accumulation MeteringUsage below
+	// uses): effort is a current-state tier, so a mid-session change from
+	// xhigh to max must replace the old value. The non-empty guard keeps a
+	// frame that omits effort from blanking an already-known tier — kiro
+	// sends two frames per turn, and a future version dropping the field
+	// from one of them would otherwise flicker the dashboard chip off.
+	if m.Effort != "" {
+		// Change-gate mirrors setLiveVersion: the tier is constant across most
+		// sessions, so re-storing an identical value every frame would allocate
+		// a string header and dirty a cache line that the 1 Hz × N-tab Snapshot
+		// poll reads. Steady state is now allocation-free.
+		if prev := p.effort.Load(); prev == nil || *prev != m.Effort {
+			e := m.Effort
+			p.effort.Store(&e)
+		}
 	}
 	if len(m.MeteringUsage) > 0 {
 		p.meteringMu.Lock()

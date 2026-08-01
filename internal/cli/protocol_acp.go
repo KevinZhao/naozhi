@@ -1039,6 +1039,13 @@ func normalizeContextUsage(v float64) float64 {
 //   - contextUsagePercentage (float)      → ContextUsagePercent (0-100, clamped)
 //   - turnDurationMs (int)                → TurnDurationMs
 //   - meteringUsage [{value, unit, unitPlural}] → MeteringUsage
+//   - effort (string)                     → Effort (low/medium/high/xhigh/max)
+//
+// kiro emits TWO metadata frames per turn (verified on kiro 2.16.0,
+// 2026-08-01): an early one carrying contextUsagePercentage + effort, then a
+// second at turn end that adds meteringUsage + turnDurationMs. Both carry
+// effort, so applyMetadata's non-empty guard keeps the tier stable even if a
+// future version omits it from one of the frames.
 //
 // contextUsagePercentage scaling: PoC validation captured kiro 2.3.0 emitting
 // 0-1 fractions (e.g. 0.0285 ≈ 2.85%), but a live deployment caught values
@@ -1056,6 +1063,7 @@ func normalizeContextUsage(v float64) float64 {
 // Event with an empty Metadata pointer would cause applyMetadata to no-op,
 // so on parse failure we return the same zero-Event-skip contract used by
 // parseSessionUpdate's default branch.
+
 // kiroMeteringEntry mirrors a single entry of kiro's `meteringUsage`
 // array.  Promoted to a named type so the encoding/json type-descriptor
 // cache is shared across calls (anonymous nested struct types have
@@ -1075,7 +1083,45 @@ type kiroMetadataParams struct {
 	ContextUsagePercentage float64             `json:"contextUsagePercentage"`
 	TurnDurationMs         int64               `json:"turnDurationMs"`
 	MeteringUsage          []kiroMeteringEntry `json:"meteringUsage"`
+	// Effort is decoded lazily as RawMessage rather than string so a future
+	// kiro that reshapes the field (it is already a nested
+	// output_config.effort object in kiro's own settings file) cannot fail the
+	// whole-struct Unmarshal. A type error there would discard the ENTIRE
+	// frame — taking contextUsagePercentage, turnDurationMs and meteringUsage
+	// down with it and silently zeroing cost / context / duration in the
+	// dashboard. Losing a decorative new field must never cost us the fields
+	// that already shipped. See effortFromRaw.
+	Effort json.RawMessage `json:"effort"`
 }
+
+// effortFromRaw coerces the raw `effort` value to a tier string. Only a JSON
+// string is accepted; any other shape (object, array, number, null) yields ""
+// so the rest of the metadata frame survives intact. Mirrors the log-and-skip
+// posture parseKiroMetadata takes for the frame as a whole.
+func effortFromRaw(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		slog.Warn("acp: _kiro.dev/metadata effort is not a string; ignoring the tier "+
+			"and keeping the rest of the frame",
+			"err", err, "raw", osutil.SanitizeForLog(string(raw), 64))
+		return ""
+	}
+	// The tier is process-controlled and held for the Process lifetime, then
+	// re-marshalled on every /api/sessions poll. The real vocabulary is 3-6
+	// chars; cap well above that so a pathological value cannot be retained
+	// or amplified. Mirrors the maxMeteringUnits bound on the sibling field.
+	// No ellipsis: the tier is an identifier, and "…" would corrupt the value
+	// the dashboard shows rather than usefully signalling truncation.
+	return textutil.TruncateRunesNoEllipsis(s, maxEffortRunes)
+}
+
+// maxEffortRunes bounds the retained effort tier. kiro's real tiers are
+// low/medium/high/xhigh/max (3-6 chars); the headroom absorbs a future longer
+// tier name without letting an anomalous process pin an unbounded string.
+const maxEffortRunes = 32
 
 func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 	var raw kiroMetadataParams
@@ -1087,6 +1133,7 @@ func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 	meta := &EventMetadata{
 		ContextUsagePercent: normalizeContextUsage(raw.ContextUsagePercentage),
 		TurnDurationMs:      raw.TurnDurationMs,
+		Effort:              effortFromRaw(raw.Effort),
 	}
 	if len(raw.MeteringUsage) > 0 {
 		meta.MeteringUsage = make([]MeteringEntry, 0, len(raw.MeteringUsage))

@@ -29,6 +29,7 @@
 | [cron-panel-consolidation-ui.md](cron-panel-consolidation-ui.md) | 设计提案（UI/UX 详细） | 2026-05-20 | 配套 cron-panel-consolidation：响应式断点、列表选中态、抽屉 6 段结构、状态机、文案、a11y、像素级 mockup |
 | [cron-history-redesign.md](cron-history-redesign.md) | Draft v1（提案中） | 2026-05-21 | 修订 cron-panel-consolidation-ui v2：detail 默认进历史 view、run 详情独立 sheet（桌面右抽屉/移动 bottom sheet 共组件）、双栏取代三栏、移动 3 级 push view、状态信号收敛、URL deep-link |
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA 就绪 | 2026-05-10 | EventLog 磁盘持久化，图片与历史事件跨重启可见 |
+| [kiro-effort-visibility.md](kiro-effort-visibility.md) | Draft v2（双独立评审通过并修订） | 2026-08-01 | kiro 每轮 `_kiro.dev/metadata.effort`（thinking effort 档位）端到端透出到 dashboard 会话头部：normalize 层新增 `EventMetadata.Effort` → `Process.effort` (`atomic.Pointer[string]`，存原始 string 保 forward-compat) → `SessionSnapshot.Effort`；前端走挂载点 + `fetchSessions` 重绘（**修复 `renderMainShell` 不在 turn 边界触发导致 chip 要切会话才刷新**，turn-timer 同样受此 pre-existing 缺陷影响）。只做「可见」不做「可控」——`--effort` 传参划为 non-goal |
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
 | [learning-system.md](learning-system.md) | 设计提案 | 2026-04-14 | 会话结束触发的闭环自学习（skills/MEMORY/USER） |
 | [lightbox-gallery-nav.md](lightbox-gallery-nav.md) | Draft v2（双评审通过修订） | 2026-06-10 | dashboard lightbox 多图导航：同消息图片组内左右切换（按钮/←→/swipe）+ 计数器 + 方向性预加载 + 工具栏 ± 缩放按钮 + 图片点击迁委托监听；纯前端零后端改动；测试主体 Playwright e2e |

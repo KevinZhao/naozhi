@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -1219,6 +1220,148 @@ func TestACPProtocol_ReadEvent_KiroMetadata_MissingFields(t *testing.T) {
 	}
 }
 
+// TestACPProtocol_ReadEvent_KiroMetadata_Effort pins the effort mapping using
+// the two frames kiro 2.16.0 actually emits per turn (captured live
+// 2026-08-01): an early frame with context+effort, then a final frame that
+// adds metering+duration. Both carry effort.
+// docs/rfc/kiro-effort-visibility.md §1
+func TestACPProtocol_ReadEvent_KiroMetadata_Effort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{{
+		name: "early frame (context + effort only)",
+		line: `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":12.94,"effort":"max"}}`,
+		want: "max",
+	}, {
+		name: "final frame (adds metering + duration)",
+		line: `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":12.94,"meteringUsage":[{"value":1.8,"unit":"credit","unitPlural":"credits"}],"turnDurationMs":6389,"effort":"max"}}`,
+		want: "max",
+	}, {
+		// kiro owns this vocabulary; a tier naozhi has never heard of must
+		// still reach the dashboard rather than be dropped by an allowlist.
+		name: "unrecognised tier passes through",
+		line: `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","effort":"ultra"}}`,
+		want: "ultra",
+	}, {
+		name: "absent effort yields empty string",
+		line: `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","turnDurationMs":500}}`,
+		want: "",
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := &ACPProtocol{}
+			ev, done, err := readOne(t, p, tc.line)
+			if err != nil {
+				t.Fatalf("ReadEvent: %v", err)
+			}
+			if done {
+				t.Error("metadata frame should not mark turn complete")
+			}
+			if ev.Metadata == nil {
+				t.Fatal("Metadata should be populated")
+			}
+			if ev.Metadata.Effort != tc.want {
+				t.Errorf("Effort = %q, want %q", ev.Metadata.Effort, tc.want)
+			}
+		})
+	}
+}
+
+// TestACPProtocol_KiroMetadata_EffortTypeDriftKeepsFrame is the regression
+// guard for the failure mode that makes a decorative field dangerous: if
+// `effort` ever arrives as something other than a JSON string (kiro already
+// models it as a nested output_config.effort OBJECT in its own settings file),
+// a whole-struct Unmarshal error would discard the ENTIRE frame — silently
+// zeroing the cost, context and duration readouts that already shipped.
+//
+// Contract: the tier degrades to "" and everything else survives.
+func TestACPProtocol_KiroMetadata_EffortTypeDriftKeepsFrame(t *testing.T) {
+	t.Parallel()
+	for _, shape := range []string{
+		`{"level":"max"}`, // object — the most plausible drift
+		`["max"]`,         // array
+		`5`,               // number
+		`null`,            // explicit null
+		`true`,            // bool
+	} {
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+			p := &ACPProtocol{}
+			line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{` +
+				`"sessionId":"s1","contextUsagePercentage":12.94,` +
+				`"meteringUsage":[{"value":1.8,"unit":"credit","unitPlural":"credits"}],` +
+				`"turnDurationMs":6389,"effort":` + shape + `}}`
+			ev, _, err := readOne(t, p, line)
+			if err != nil {
+				t.Fatalf("ReadEvent: %v", err)
+			}
+			if ev.Type != "metadata" || ev.Metadata == nil {
+				t.Fatalf("frame was dropped entirely (Type=%q Metadata=%v) — a bad "+
+					"effort shape must not cost us the rest of the frame", ev.Type, ev.Metadata)
+			}
+			if ev.Metadata.Effort != "" {
+				t.Errorf("Effort = %q, want empty for non-string shape", ev.Metadata.Effort)
+			}
+			// The fields that already shipped must be intact.
+			if got := ev.Metadata.TurnDurationMs; got != 6389 {
+				t.Errorf("TurnDurationMs = %d, want 6389 (survives effort drift)", got)
+			}
+			if got := ev.Metadata.ContextUsagePercent; got < 12.9 || got > 13.0 {
+				t.Errorf("ContextUsagePercent = %v, want ~12.94 (survives effort drift)", got)
+			}
+			if len(ev.Metadata.MeteringUsage) != 1 {
+				t.Errorf("MeteringUsage = %+v, want 1 entry (survives effort drift)",
+					ev.Metadata.MeteringUsage)
+			}
+		})
+	}
+}
+
+// TestACPProtocol_KiroMetadata_EffortLengthBounded caps a process-controlled
+// string that Process holds for its lifetime and re-marshals on every
+// /api/sessions poll.
+func TestACPProtocol_KiroMetadata_EffortLengthBounded(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	long := strings.Repeat("x", 4096)
+	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","effort":"` + long + `"}}`
+	ev, _, err := readOne(t, p, line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if ev.Metadata == nil {
+		t.Fatal("Metadata should be populated")
+	}
+	if n := len(ev.Metadata.Effort); n > maxEffortRunes {
+		t.Errorf("Effort length = %d, want <= %d", n, maxEffortRunes)
+	}
+}
+
+// TestProcess_DispatchMetadataEvent_AppliesEffort closes the seam between
+// parseKiroMetadata (wire → EventMetadata) and applyMetadata (EventMetadata →
+// Process state): both halves are tested individually, but readLoop's dispatch
+// is what actually connects them.
+func TestProcess_DispatchMetadataEvent_AppliesEffort(t *testing.T) {
+	t.Parallel()
+	p := &Process{}
+	// dispatchProtocolEvent returns false for metadata frames: they are status
+	// updates applied to Process state, not assistant output, so they stop
+	// here rather than flowing on to eventCh / EventLog.
+	if forwarded := p.dispatchProtocolEvent(Event{
+		Type:     "metadata",
+		Metadata: &EventMetadata{Effort: "max", TurnDurationMs: 1200},
+	}, slog.New(slog.DiscardHandler)); forwarded {
+		t.Error("metadata events must not be forwarded downstream")
+	}
+	if got := p.Effort(); got != "max" {
+		t.Errorf("Effort = %q after dispatch, want max", got)
+	}
+}
+
 // TestNormalizeContextUsage pins the dual-format + clamp contract for kiro's
 // contextUsagePercentage. Live deployment (PR #126 follow-up) found values
 // > 1.0 (kiro lets the counter run past 100% on overflow), so the helper
@@ -1291,6 +1434,9 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	if got := p.MeteringUsage(); got != nil {
 		t.Errorf("zero-value MeteringUsage = %v, want nil", got)
 	}
+	if got := p.Effort(); got != "" {
+		t.Errorf("zero-value Effort = %q, want empty (nil pointer)", got)
+	}
 
 	// UI Round 5 R5-4: per-unit accumulation. Two entries with the same
 	// Unit ("credit") within ONE applyMetadata call collapse into a single
@@ -1298,6 +1444,7 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	p.applyMetadata(&EventMetadata{
 		ContextUsagePercent: 42.5,
 		TurnDurationMs:      1500,
+		Effort:              "xhigh",
 		MeteringUsage: []MeteringEntry{
 			{Value: 0.01, Unit: "credit", UnitPlural: "credits"},
 			{Value: 0.02, Unit: "credit", UnitPlural: "credits"},
@@ -1308,6 +1455,9 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	}
 	if got := p.TurnDurationMs(); got != 1500 {
 		t.Errorf("TurnDurationMs = %v, want 1500", got)
+	}
+	if got := p.Effort(); got != "xhigh" {
+		t.Errorf("Effort = %q, want xhigh", got)
 	}
 	usage := p.MeteringUsage()
 	if len(usage) != 1 {
@@ -1353,6 +1503,50 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	}
 	if p.TurnDurationMs() != 1500 {
 		t.Error("zero-field applyMetadata should not overwrite existing duration")
+	}
+	// Same guard for Effort: kiro sends two frames per turn, so a frame that
+	// omits the tier must not blank an already-known one (that would flicker
+	// the dashboard tag off mid-turn).
+	if got := p.Effort(); got != "xhigh" {
+		t.Errorf("zero-field applyMetadata regressed Effort to %q, want xhigh", got)
+	}
+
+	// The realistic shape of that risk: a SECOND frame carrying
+	// metering+duration but no effort (kiro sends two frames per turn; a
+	// future version could drop the tier from the closing one). The other
+	// fields must still advance while the tier holds.
+	p.applyMetadata(&EventMetadata{
+		TurnDurationMs: 2000,
+		MeteringUsage:  []MeteringEntry{{Value: 0.1, Unit: "credit", UnitPlural: "credits"}},
+	})
+	if got := p.Effort(); got != "xhigh" {
+		t.Errorf("second frame without effort regressed tier to %q, want xhigh", got)
+	}
+	if got := p.TurnDurationMs(); got != 2000 {
+		t.Errorf("second frame should still advance TurnDurationMs; got %d, want 2000", got)
+	}
+}
+
+// TestProcess_ApplyMetadata_EffortOverwrites pins that effort REPLACES rather
+// than accumulates — the opposite of MeteringUsage's per-unit summing in the
+// same function. A session whose tier changes mid-flight (operator ran
+// /effort, or a resumed session picked up a new default) must report the
+// latest tier, not a merge of both.
+func TestProcess_ApplyMetadata_EffortOverwrites(t *testing.T) {
+	t.Parallel()
+	p := &Process{}
+	p.applyMetadata(&EventMetadata{Effort: "xhigh"})
+	if got := p.Effort(); got != "xhigh" {
+		t.Fatalf("Effort = %q, want xhigh", got)
+	}
+	p.applyMetadata(&EventMetadata{Effort: "max"})
+	if got := p.Effort(); got != "max" {
+		t.Errorf("Effort = %q after tier change, want max (overwrite, not merge)", got)
+	}
+	// Downgrade must work symmetrically — nothing about the ordering is special.
+	p.applyMetadata(&EventMetadata{Effort: "low"})
+	if got := p.Effort(); got != "low" {
+		t.Errorf("Effort = %q after downgrade, want low", got)
 	}
 }
 
