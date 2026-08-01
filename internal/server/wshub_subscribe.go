@@ -355,11 +355,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State, "has_more", hasMore)
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
 
-	// #2402: the pushLoop cursor is seeded from the initial history push —
-	// Advance records both the watermark (tail entry Time) AND the UUIDs at
-	// that trailing millisecond, so the first notify wave doesn't re-deliver
-	// the same-millisecond tail of the batch we just sent. See cli.SinceCursor.
-	csr := cli.NewSinceCursor()
+	csr := cli.NewSinceCursor() // #2402: Advance below seeds the pushLoop watermark
 	if len(entries) > 0 {
 		// Pooled marshal — initial history payloads can be hundreds of KB
 		// (max msg.Limit entries × ~500B-4KB each). SendJSON would otherwise

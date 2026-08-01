@@ -228,15 +228,12 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				if !ok {
 					return
 				}
-				// #2402: rewind the cursor when the resubscribe landed on a
-				// DIFFERENT ManagedSession (session replaced, e.g. /new or
-				// router eviction + respawn). A replaced session has a fresh
-				// event log whose wall-clock timestamps can predate the old
-				// watermark (NTP jumps or fast /new), so the first notify
-				// after a swap must deliver the full new history. Mirrors
-				// upstream/connector_subscribe.go's pointer-swap reset. The
-				// same-session process-flap path keeps its watermark so the
-				// catch-up below only pushes genuinely new entries.
+				// #2402: rewind on session REPLACEMENT (e.g. /new, router
+				// eviction + respawn) — the fresh event log's timestamps can
+				// predate the old watermark, so the first notify after a swap
+				// must deliver the full new history. Mirrors
+				// upstream/connector_subscribe.go. The same-session
+				// process-flap path keeps its watermark.
 				if newSess != sess {
 					csr.Reset()
 				}
@@ -283,18 +280,12 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 //
 // #2402 (kiro dashboard 不实时刷新): the previous implementation tracked a
 // naked lastTime int64 and queried EventEntriesSince(lastTime) — strictly
-// greater-than. An entry appended in the SAME millisecond as the tail of an
-// already-delivered wave, but landing in a LATER notify wave, was silently
-// dropped: its Time == lastTime never matched `Time > lastTime` again. The
-// ACP (kiro) backend hits this on every turn — ReadEvent synthesises the
-// turn-end (thinking, text, result) events from one stdout frame, each
-// appended via its own AppendBatch (same millisecond) with a notify in
-// between, so a pushLoop that woke between appends permanently lost the
-// visible reply text. This is the local-dashboard twin of R20260530-GO-1
-// (#1481), which fixed the identical bug in upstream/connector_subscribe.go;
-// both paths now share cli.SinceCursor (inclusive watermark query + UUID
-// dedup at the trailing millisecond). Same-millisecond redeliveries that
-// slip through to the client are absorbed by the dashboard's UUID dedup.
+// greater-than — so an entry appended in the SAME millisecond as the tail of
+// an already-delivered wave but landing in a LATER notify wave was silently
+// dropped. cli.SinceCursor (inclusive watermark query + UUID dedup at the
+// trailing millisecond) is the shared fix; see its file header for the full
+// rationale and the upstream twin R20260530-GO-1 (#1481). Same-millisecond
+// redeliveries that reach the client are absorbed by the dashboard's UUID dedup.
 //
 // R246-CR-006 / #744: previously inlined twice in eventPushLoop — once
 // in the regular notify arm and once in the post-resubscribe catch-up
@@ -325,9 +316,8 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 	// can keep it for the next iteration.
 	//
 	// QueryAfter re-admits the watermark millisecond; Filter drops the
-	// already-delivered UUIDs in place (write index never overtakes read
-	// index, so the backing array is shared and its capacity survives for
-	// the next wave).
+	// already-delivered UUIDs in place, so the backing array (and its
+	// capacity) survives for the next wave.
 	entries := sess.EventEntriesSinceAppend(buf[:0], csr.QueryAfter())
 	fetched := entries
 	entries = csr.Filter(entries)
@@ -344,9 +334,8 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 	// so its capacity is preserved across notify waves (a tail slice would
 	// shrink cap every call and defeat the reuse).
 	capped := capHistoryBatch(entries)
-	// The marshal-cache fingerprint keys on the pre-advance watermark: tabs
-	// in lock-step on the same session share (watermark, tail Time, count)
-	// and coalesce onto one marshal, exactly as the old lastTime did.
+	// The marshal-cache fingerprint keys on the pre-advance watermark, so
+	// lock-step tabs still coalesce onto one marshal as with the old lastTime.
 	data, err := h.marshalHistoryFrame(key, csr.Watermark(), capped)
 	if err != nil {
 		return true, fetched
