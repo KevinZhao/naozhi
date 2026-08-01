@@ -171,6 +171,7 @@ func main() {
 	wrappers := bws.Wrappers
 	backendModels := bws.Models
 	backendExtraArgs := bws.ExtraArgs
+	backendEfforts := bws.Efforts
 	defaultBackend := bws.DefaultID
 	wrapper := bws.Default
 
@@ -215,16 +216,22 @@ func main() {
 	// now carried by the project-stable session key; the old
 	// session.auto_chain config block is deprecated, see config loader.)
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:              wrapper,
-		Wrappers:             wrappers,
-		DefaultBackend:       defaultBackend,
-		MaxProcs:             cfg.Session.MaxProcs,
-		TTL:                  cfg.ParseTTL(),
-		PruneTTL:             cfg.ParsePruneTTL(),
-		Model:                cfg.CLI.Model,
-		ExtraArgs:            cfg.CLI.Args,
-		BackendModels:        backendModels,
-		BackendExtraArgs:     backendExtraArgs,
+		Wrapper:          wrapper,
+		Wrappers:         wrappers,
+		DefaultBackend:   defaultBackend,
+		MaxProcs:         cfg.Session.MaxProcs,
+		TTL:              cfg.ParseTTL(),
+		PruneTTL:         cfg.ParsePruneTTL(),
+		Model:            cfg.CLI.Model,
+		ExtraArgs:        cfg.CLI.Args,
+		BackendModels:    backendModels,
+		BackendExtraArgs: backendExtraArgs,
+		// No router-wide Effort: initBackendWrappers already resolved
+		// cli.effort into per-backend entries and dropped it for backends that
+		// cannot accept a tier, so BackendEfforts is the filtered truth. A
+		// router-level default would re-introduce the tier for those backends
+		// and make the arg-drift comparison disagree with the real spawn.
+		BackendEfforts:       backendEfforts,
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,

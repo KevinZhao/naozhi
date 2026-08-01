@@ -315,7 +315,11 @@ type AgentOpts struct {
 	// project-access-profile §7 — a dead session must resume on the SAME
 	// auth chain it was created on). RFC PR-B.
 	AccessProfile string
-	Exempt        bool // exempt from TTL, eviction, and activeCount (planner sessions)
+	// Effort overrides the backend's thinking-effort tier for this session
+	// (agents[<id>].effort). Empty = inherit the backend / router default.
+	// Only ACP-protocol backends act on it. docs/rfc/kiro-effort-control.md
+	Effort string
+	Exempt bool // exempt from TTL, eviction, and activeCount (planner sessions)
 }
 
 // SessionStatus indicates how a session was obtained.
@@ -453,6 +457,8 @@ type spawnParams struct {
 	Wrapper   *cli.Wrapper
 	Model     string
 	Args      []string
+	// Effort is the resolved thinking-effort tier ("" = pass no flag).
+	Effort    string
 	Workspace string
 	// ResumeID after workspace/jsonl guard. Empty means "spawn fresh".
 	ResumeID string
@@ -587,7 +593,8 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// (R53-ARCH-002). backendDefaultsFor consolidates the lookup that
 	// previously sat inline here and in router_shim drift detection
 	// (R222-ARCH-14, #739).
-	model, baseArgs := r.backendDefaultsFor(backendID)
+	bd := r.backendDefaultsFor(backendID)
+	model, baseArgs := bd.Model, bd.Args
 	// Access-profile default_model layers above the backend default but below
 	// any explicit per-request / PlannerModel choice (which arrives in
 	// opts.Model). RFC §2 model chain.
@@ -600,6 +607,17 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	args := make([]string, len(baseArgs))
 	copy(args, baseArgs)
 	args = append(args, opts.ExtraArgs...)
+
+	// Effort merge: cli.effort ← cli.backends[].effort (both folded into
+	// backendDefaultsFor) ← agents[].effort. Deliberately NO access-profile
+	// tier: profiles exist to constrain which auth chain / model an identity
+	// may use, and a thinking-effort tier carries no such security meaning —
+	// one less layer is one less precedence question.
+	// docs/rfc/kiro-effort-control.md §4.2
+	effort := bd.Effort
+	if opts.Effort != "" {
+		effort = opts.Effort
+	}
 
 	// Workspace: opts override > per-chat override > old session workspace > default.
 	//
@@ -663,6 +681,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		Wrapper:          wrapper,
 		Model:            model,
 		Args:             args,
+		Effort:           effort,
 		Workspace:        workspace,
 		ResumeID:         resumeID,
 		AccessProfileID:  accessProfileID,
@@ -979,6 +998,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	spawnOpts := cli.SpawnOptions{
 		Key:             key,
 		Model:           sp.Model,
+		Effort:          sp.Effort,
 		ResumeID:        resumeID,
 		ExtraArgs:       sp.Args,
 		WorkingDir:      workspace,

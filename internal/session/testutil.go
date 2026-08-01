@@ -57,7 +57,10 @@ type TestProcess struct {
 	// LiveVersionVal lets snapshot tests drive proc.LiveVersion() — the
 	// CLI binary version self-reported in system/init. R20260612-live-version.
 	LiveVersionVal string
-	SendFunc       func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// EffortVal lets snapshot tests drive proc.Effort() — the backend-reported
+	// thinking-effort tier. docs/rfc/kiro-effort-visibility.md
+	EffortVal string
+	SendFunc  func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -144,6 +147,7 @@ func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
 func (p *TestProcess) Model() string                      { return p.ModelVal }
 func (p *TestProcess) LiveVersion() string                { return p.LiveVersionVal }
+func (p *TestProcess) Effort() string                     { return p.EffortVal }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

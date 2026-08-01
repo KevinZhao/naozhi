@@ -263,6 +263,9 @@ type processIface interface {
 	ContextUsagePercent() float64
 	TurnDurationMs() int64
 	MeteringUsage() []cli.MeteringEntry
+	// Effort returns the backend-reported thinking-effort tier (kiro:
+	// low/medium/high/xhigh/max), "" when unreported.
+	Effort() string
 	// Model returns the spawn-time CLI model identifier (e.g.
 	// "claude-opus-4.7", "claude-sonnet-4.6") or "" when unconfigured.
 	// UI Round 5 R5-3.
@@ -697,4 +700,12 @@ type SessionSnapshot struct {
 	// available (kiro). Each entry is one billing dimension, e.g.
 	// {value: 0.024, unit: "credit"}.
 	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
+	// Effort is the backend's thinking-effort tier for the latest turn
+	// ("low" / "medium" / "high" / "xhigh" / "max" on kiro). Empty for
+	// backends that report none (claude, codex), for sessions whose process
+	// has been evicted, and before the first turn's metadata frame lands —
+	// the dashboard hides the header tag in all three cases. Not persisted
+	// to sessions.json, so it resets across restarts like TurnDurationMs.
+	// docs/rfc/kiro-effort-visibility.md
+	Effort string `json:"effort,omitempty"`
 }

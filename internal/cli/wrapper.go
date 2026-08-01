@@ -22,8 +22,18 @@ import (
 
 // SpawnOptions configures how a CLI process is spawned.
 type SpawnOptions struct {
-	Key             string // session key (used for shim naming)
-	Model           string
+	Key   string // session key (used for shim naming)
+	Model string
+	// Effort is the thinking-effort tier to spawn under (kiro:
+	// low/medium/high/xhigh/max). Empty passes no flag, leaving the backend
+	// to apply its own default. Only protocols advertising Caps.EffortTier
+	// consume it — the others ignore it, as they do PermissionMode/DebugFile.
+	//
+	// The tier binds to the PROCESS, not the session: kiro applies it to both
+	// session/new and session/load, but a resume spawned without the flag
+	// silently reverts to kiro's global default (verified on 2.16.0). Every
+	// spawn path must therefore keep passing it. docs/rfc/kiro-effort-control.md
+	Effort          string
 	ResumeID        string   // session ID to resume (empty = new session)
 	ExtraArgs       []string // additional CLI args
 	WorkingDir      string

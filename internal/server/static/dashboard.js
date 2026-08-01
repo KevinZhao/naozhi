@@ -484,6 +484,14 @@ async function fetchSessions() {
     const version = (data.stats && data.stats.version) || 0;
     const nodesHash = JSON.stringify(data.nodes || {});
     const historyHash = JSON.stringify(data.history_sessions || []);
+    // The effort tier changes at turn boundaries, which do NOT advance
+    // stats.version (storeGen only moves on session add/remove/rename/reset).
+    // renderMainShell doesn't run on turn completion either, so this poll is
+    // the only path by which a new tier reaches the screen — and it has to
+    // happen BEFORE the version short-circuit below, which is exactly where an
+    // earlier revision of this code sat and silently never fired.
+    // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
+    if (selectedKey) setHeaderEffortChip(data.sessions);
     if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
     lastNodesJSON = nodesHash;
@@ -2725,6 +2733,81 @@ function setHeaderGitChip(html) {
   if (el) el.innerHTML = html || '';
 }
 
+// EFFORT_LABELS maps kiro's thinking-effort tiers to a Chinese gloss for the
+// tooltip. The tag itself keeps kiro's raw lowercase token so what the
+// dashboard shows matches what `/effort`, `kiro-cli acp --effort` and
+// ~/.kiro/settings/cli.json use — translating the tier names would break that
+// mapping for the operator. Unlisted tiers still render (see effortTagHtml).
+const EFFORT_LABELS = {
+  low: '低 — 最快、最省，质量最弱',
+  medium: '中 — kiro 默认档',
+  high: '高',
+  xhigh: '极高 — 更慢、更贵',
+  max: '最高 — 最慢、最贵',
+};
+
+// effortTagHtml renders the backend-reported thinking-effort tier as a bare
+// inline tag. Visually it joins the .model-label / .detail-turn-timer family
+// (no border, no fill): the header's .detail row already carries two bordered
+// chips (.sc-origin, .git-chip) and a third would outweigh the primary
+// cli/model label.
+//
+// An unrecognised tier renders unstyled rather than being dropped — kiro owns
+// this vocabulary, and silently hiding a tier naozhi hasn't heard of would
+// misreport the session as having no effort at all (same reasoning as
+// backendChipInfo's orphan-backend handling).
+//
+// s.effort is a string the kiro process controls via _kiro.dev/metadata, so
+// it is escaped on both the text and attribute paths.
+function effortTagHtml(effort) {
+  const raw = effort || '';
+  if (!raw) return '';
+  const gloss = EFFORT_LABELS[raw];
+  const tip = 'thinking effort: ' + raw + (gloss ? ' — ' + gloss : '');
+  // Only the two top tiers get emphasis: they are the first thing to check
+  // when a turn was unusually slow or expensive. Emphasis is weight + full
+  // text colour, never a warning hue — a high tier is a deliberate setting,
+  // not a fault.
+  const hot = raw === 'max' || raw === 'xhigh';
+  // aria-label rather than the bare title the neighbouring chips rely on: read
+  // aloud, a lone "max" carries no meaning, and the leading "·" separator would
+  // be announced as "middle dot". Labelling the span supplies the context and
+  // suppresses the decorative punctuation in one go.
+  return '<span class="effort-tag' + (hot ? ' effort-hot' : '') +
+      '" title="' + escAttr(tip) + '" aria-label="' + escAttr(tip) + '">' +
+      esc(raw) + '</span>';
+}
+
+// setHeaderEffortChip repaints the header effort tag for the selected session.
+//
+// Called from two places, for two different reasons:
+//   - renderMainShell tail: the header was just rebuilt, emptying the mount.
+//     No argument — read the cached sessionsData.
+//   - fetchSessions, BEFORE its version short-circuit: a tier change does not
+//     advance stats.version, so this is the only path that gets a new tier onto
+//     the screen. sessionsData hasn't been updated at that point, hence the
+//     optional `sessions` argument carrying the fresh response rows.
+//
+// docs/rfc/kiro-effort-visibility.md §5.1
+function setHeaderEffortChip(sessions) {
+  const el = document.getElementById('header-effort');
+  if (!el) return;
+  let effort = '';
+  if (selectedKey) {
+    if (sessions) {
+      const node = selectedNode || 'local';
+      const row = sessions.find(s => s && s.key === selectedKey && (s.node || 'local') === node);
+      // A poll that no longer lists the session (deleted / filtered) clears
+      // the tag rather than leaving the previous session's tier behind.
+      effort = row ? row.effort : '';
+    } else {
+      effort = (sessionsData[sid(selectedKey, selectedNode)] || {}).effort;
+    }
+  }
+  const html = effortTagHtml(effort);
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 // repaintGitChip re-renders the chip for the currently selected session from
 // cache. Called at the end of renderMainShell so a header rebuild triggered by
 // something unrelated (rename, model update) doesn't drop the chip.
@@ -3205,6 +3288,11 @@ function renderMainShell() {
         // remote-node sessions.
         '<span class="detail-git" id="header-git"></span>' +
         ctxBarHtml +
+        // kiro thinking-effort tier. Built empty and filled by
+        // setHeaderEffortChip (called below and from fetchSessions) so a tier
+        // change lands without waiting for a header rebuild; collapses via
+        // :empty for backends that report no effort.
+        '<span class="detail-effort" id="header-effort"></span>' +
         turnTimerHtml +
         // Run-history overview ("N 轮 · 均 X · 最长 X"). Built empty here and
         // filled asynchronously by renderSessionRunsPanel once /api/sessions/runs
@@ -3292,6 +3380,8 @@ function renderMainShell() {
   // Repaint from cache so a rebuild driven by something unrelated (rename,
   // model arriving) doesn't blank the branch chip until the next fetch.
   repaintGitChip();
+  // Same rationale as repaintGitChip: the rebuild emptied #header-effort.
+  setHeaderEffortChip();
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.

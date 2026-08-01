@@ -293,6 +293,13 @@ type Caps struct {
 	// Name()=="acp" type-checks suffice; this field anticipates a
 	// third backend whose name does not encode the wire shape.
 	StreamJSON bool
+	// EffortTier is true if BuildArgs honours SpawnOptions.Effort — i.e. the
+	// CLI accepts a thinking-effort tier (kiro's `acp --effort`). Read by the
+	// composition root to reject `cli.backends[].effort` on a backend that
+	// would silently ignore it, so an operator never believes a configured
+	// tier is in force when it is not.
+	// docs/rfc/kiro-effort-control.md §4.3
+	EffortTier bool
 }
 
 // ProtocolCaps returns the capability set of any Protocol. Default
@@ -309,6 +316,12 @@ func ProtocolCaps(p Protocol) Caps {
 		Replay:     p.SupportsReplay(),
 		Priority:   p.SupportsPriority(),
 		StreamJSON: p.Name() != "acp",
+		// ACP is the only wire format whose CLI takes a tier flag today, and
+		// ACPProtocol.BuildArgs is what consumes SpawnOptions.Effort — so the
+		// derivation mirrors StreamJSON's inverse. A future non-ACP backend
+		// that grows a tier flag should implement Capabilities() rather than
+		// widen this default.
+		EffortTier: p.Name() == "acp",
 		// SoftInterrupt absent from current surface; leave false by default.
 		// Backends wanting to opt in should implement Capabilities().
 	}
