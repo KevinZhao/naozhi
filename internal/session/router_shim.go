@@ -174,6 +174,33 @@ func shutdownShimViaReconnect(
 	}
 }
 
+// firstArgvDivergence returns the first differing token of two argv slices as
+// an (old, new) pair, for logging why a shim was classified as drifted.
+// "(absent)" marks a slice that ended first. Both empty means the slices are
+// equal — callers only reach here when they are not, but the helper stays
+// total so a future caller cannot trip on it.
+//
+// Values are argv tokens the operator wrote in config.yaml (model ids, effort
+// tiers, flags), so they are safe to log verbatim; sanitising is unnecessary
+// and would obscure the very token being reported.
+func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
+	const absent = "(absent)"
+	n := max(len(oldArgs), len(newArgs))
+	for i := range n {
+		o, w := absent, absent
+		if i < len(oldArgs) {
+			o = oldArgs[i]
+		}
+		if i < len(newArgs) {
+			w = newArgs[i]
+		}
+		if o != w {
+			return o, w
+		}
+	}
+	return "", ""
+}
+
 // adoptableShimKey reports whether a live shim whose key is absent from
 // sessions.json may be rebuilt + reconnected rather than killed as an orphan
 // (#1875). It rejects the same key classes that sessionToStoreEntry refuses to
@@ -286,7 +313,17 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				// is: BuildArgs now emits `--effort` for ACP backends, so
 				// omitting it would make every restart read the surviving kiro
 				// shims as arg-drift and restart sessions that were fine.
-				// docs/rfc/kiro-effort-control.md §4.5
+				//
+				// KNOWN LIMITATION (pre-existing, widened not introduced): this
+				// comparison only sees BACKEND-level defaults, so any per-agent
+				// override reads as drift. Verified for effort (backend "high"
+				// vs agents[x].effort "max") and identically for the older
+				// agents[x].model (backend "sonnet" vs agent "opus"). Fixing it
+				// means changing what drift compares — either persisting the
+				// effective argv into shim state, or restricting the comparison
+				// to the backend-decidable subset — which affects every
+				// agent-level override and so is deliberately out of scope
+				// here. docs/rfc/kiro-effort-control.md §4.5.1
 				Effort: driftDefaults.Effort,
 				// Must mirror the real spawn (lifecycle) so a session started
 				// with `--settings <naozhi file>` is not misread as arg-drift
@@ -363,10 +400,18 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				"key", state.Key, "backend", state.Backend)
 			continue
 		case shimStateDrift:
+			// Naming the first divergence lets an operator tell an EXPECTED
+			// restart ("I changed cli.backends[].effort") from a spurious one
+			// (a per-agent override the backend-only comparison cannot see —
+			// see the KNOWN LIMITATION at the BuildArgs call above). Lengths
+			// alone left both looking identical in the log.
+			oldTok, newTok := firstArgvDivergence(storedBase, currentArgs)
 			slog.Info("shim config drifted, shutting down old shim",
 				"key", state.Key,
 				"old_args_len", len(storedBase),
-				"new_args_len", len(currentArgs))
+				"new_args_len", len(currentArgs),
+				"first_diff_old", oldTok,
+				"first_diff_new", newTok)
 			// Drift path: classify guarantees recWrapper is non-nil, so no
 			// SIGUSR2 fallback needed — if Reconnect fails, the 30s tick
 			// will revisit.

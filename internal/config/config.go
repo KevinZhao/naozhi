@@ -293,9 +293,11 @@ type CLIBackendConfig struct {
 	Model string   `yaml:"model,omitempty"` // overrides cli.model for this backend
 	Args  []string `yaml:"args,omitempty"`  // overrides cli.args for this backend
 	// Effort overrides cli.effort for this backend. Only meaningful for
-	// backends whose CLI accepts a tier flag (kiro); configuring it on one
-	// that does not is a config error rather than a silent no-op, so an
-	// operator never believes a tier is in force when it is not.
+	// backends whose CLI accepts a tier flag (kiro). Configuring it on one
+	// that does not is logged as a warning and dropped at startup — not a
+	// hard error, because cli.effort is propagated to EVERY backend by
+	// EnabledBackends, so refusing to boot would make a mixed claude+kiro
+	// deployment that sets the top-level default unstartable.
 	Effort string `yaml:"effort,omitempty"`
 }
 

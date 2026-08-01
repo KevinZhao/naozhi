@@ -107,6 +107,97 @@ func TestEffortAffectsArgv(t *testing.T) {
 	}
 }
 
+// TestFirstArgvDivergence covers the drift-log helper that lets an operator
+// tell an expected restart (they changed the configured tier) from a spurious
+// one (a per-agent override the backend-only drift comparison cannot see).
+func TestFirstArgvDivergence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		old, new         []string
+		wantOld, wantNew string
+	}{{
+		name: "tier changed — the case this was added for",
+		old:  []string{"acp", "--model", "m", "--effort", "high"},
+		new:  []string{"acp", "--model", "m", "--effort", "max"},
+		// Reports the values, not the flag: the flag matched, so the value is
+		// the actual divergence and the more useful thing to print.
+		wantOld: "high", wantNew: "max",
+	}, {
+		name:    "flag appeared",
+		old:     []string{"acp", "--model", "m"},
+		new:     []string{"acp", "--model", "m", "--effort", "max"},
+		wantOld: "(absent)", wantNew: "--effort",
+	}, {
+		name:    "flag disappeared",
+		old:     []string{"acp", "--effort", "low"},
+		new:     []string{"acp"},
+		wantOld: "--effort", wantNew: "(absent)",
+	}, {
+		name:    "identical yields empty pair",
+		old:     []string{"acp", "--model", "m"},
+		new:     []string{"acp", "--model", "m"},
+		wantOld: "", wantNew: "",
+	}, {
+		name:    "both empty",
+		old:     nil,
+		new:     nil,
+		wantOld: "", wantNew: "",
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotOld, gotNew := firstArgvDivergence(tc.old, tc.new)
+			if gotOld != tc.wantOld || gotNew != tc.wantNew {
+				t.Errorf("firstArgvDivergence() = (%q, %q), want (%q, %q)",
+					gotOld, gotNew, tc.wantOld, tc.wantNew)
+			}
+		})
+	}
+}
+
+// TestAgentEffortIsSeenAsDrift documents the known limitation head-on rather
+// than leaving it to be rediscovered: the drift comparison only sees
+// BACKEND-level defaults, so a per-agent tier override reads as drift and the
+// surviving shim gets restarted.
+//
+// This asserts CURRENT behaviour, not desired behaviour. It is pinned so that
+// a future fix (persisting the effective argv into shim state, or narrowing the
+// comparison to the backend-decidable subset) has to update this test
+// deliberately and cannot "accidentally" appear to still hold.
+// docs/rfc/kiro-effort-control.md §4.5.1
+func TestAgentEffortIsSeenAsDrift(t *testing.T) {
+	t.Parallel()
+	r := &Router{}
+	r.bkStore.model = "claude-fable-5"
+	r.bkStore.backendEfforts = map[string]string{"kiro": "high"}
+	proto := &cli.ACPProtocol{BackendID: "kiro"}
+
+	bd := r.backendDefaultsFor("kiro")
+	driftArgs := proto.BuildArgs(cli.SpawnOptions{
+		Model: bd.Model, ExtraArgs: bd.Args, Effort: bd.Effort,
+	})
+	// What spawnSession would build for a session whose agent overrides the tier.
+	spawnArgs := proto.BuildArgs(cli.SpawnOptions{
+		Model: bd.Model, ExtraArgs: bd.Args, Effort: "max",
+	})
+
+	if slices.Equal(driftArgs, spawnArgs) {
+		t.Fatal("agent-level effort no longer diverges from the drift check — " +
+			"if this was fixed deliberately, update §4.5.1 and the KNOWN " +
+			"LIMITATION comment in router_shim.go")
+	}
+	// The same holds for the older agents[].model, which is why this is a
+	// widened pre-existing gap rather than a defect introduced with effort.
+	if slices.Equal(
+		proto.BuildArgs(cli.SpawnOptions{Model: "sonnet"}),
+		proto.BuildArgs(cli.SpawnOptions{Model: "opus"}),
+	) {
+		t.Error("expected agents[].model to diverge too — the shared root cause " +
+			"cited in §4.5.1 no longer reproduces")
+	}
+}
+
 // TestBackendEffortsFeedDriftCheck closes the loop on the router side: the
 // drift check reads its tier from backendDefaultsFor, so a configured tier has
 // to survive that lookup for the mirror to have anything to pass.

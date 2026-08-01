@@ -99,7 +99,14 @@ cli:
   #    # instead, so the gateway and your interactive kiro can differ.
   #    #
   #    # Applies from the next spawn onward — it is a process start flag, so
-  #    # already-running sessions keep the tier they started with.
+  #    # already-running sessions keep the tier they started with. Concretely:
+  #    # edit this, restart naozhi, and each surviving session is detected as
+  #    # config-drifted, shut down, and re-spawned on the new tier when its
+  #    # next message arrives. Restarting naozhi alone does NOT re-tier a
+  #    # session (it normally just reconnects to the running process).
+  #    #
+  #    # In a multi-node deployment this is per-node: the primary's setting does
+  #    # not reach remote nodes, so configure each node that runs kiro.
   #    #
   #    # Only ACP-protocol backends (kiro) accept a tier; configuring one on
   #    # claude/codex logs a warning and is ignored.
@@ -172,6 +179,13 @@ agents:
     # thinking-effort tier for this agent. The per-agent layer is what lets a
     # background sweeper run cheap while a planner runs at "max".
     # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
+    #
+    # Caveat: naozhi's shim config-drift check only compares BACKEND-level
+    # args, so a session using this per-agent override is re-detected as
+    # drifted on every restart and re-spawned on its next message. Sessions
+    # are not lost, but their sidebar history starts empty. The same already
+    # applies to agents[].model. Set the tier on the backend instead if you
+    # need long-lived sessions to survive restarts untouched.
     #effort: "max"
 
 agent_commands:

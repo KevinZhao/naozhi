@@ -142,9 +142,16 @@ naozhi **主动构造 argv**，白名单是 flag-injection 防线（同
 `validateModelString` 的 R215-SEC-P2-1 动机），且拼错档位应当在启动时报错而不是
 让 kiro 静默拒绝或误解析。kiro 未来新增档位时更新这个白名单，是可接受的维护成本。
 
-额外校验：**给非 ACP backend 配 effort 应当报错**（NG4）。claude / codex 收不到
-这个参数，静默忽略会让操作者以为生效了。用 `backend.Profile` 的
-`Features`/capability 判断，而非硬编码 `id == "kiro"`。
+额外校验：给非 ACP backend 配 effort 必须让操作者知道（NG4）—— claude / codex
+收不到这个参数，静默忽略会让人以为生效了。用协议 capability 判断
+（`cli.Caps.EffortTier`），而非硬编码 `id == "kiro"`。
+
+**实现期修正（初稿写的是"应当报错"）**：落地为 **warn + drop，不是 fail-hard**。
+原因是 `EnabledBackends()` 无条件把 `cli.effort` 灌进**每个** backend 条目，
+所以 `cli.effort: "high"` + `backends: [claude, kiro]` 这个完全合理的混合部署
+里，claude 条目必然携带 tier —— fail-hard 会让它无法启动。检查点也因此落在
+组合根（`cmd/naozhi/main_init.go`，Protocol 在那里构造）而非 config 校验层：
+config 只管闭集格式，capability 归知道答案的那一层。
 
 ### 4.4 argv 落地
 
@@ -176,11 +183,42 @@ argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
 naozhi 后 kiro 会话全丢"）。`backendDefaultsFor` 当前签名
 `(string, []string)` 需扩成带 effort 的三元组或返回一个小 struct。
 
-注意 drift 检测**只能**用 backend 层默认（它不知道会话属于哪个 agent），所以
-agent 级 effort 会被它看作漂移。这需要在实现时确认：drift 比较的
-`storedBase` 是否本就排除了 agent 层 args？若不是，则 agent 级 effort 必须
-排除在 drift 比较之外，或把生效值一起持久化供比较。**这是实现期必须先验证的
-第一个问题**，写测试前先确认。
+### 4.5.1 agent 级覆盖与 drift 的关系（实现期已验证）
+
+初稿把这条标为"实现期必须先验证的第一个问题"。答案如下，实测确认：
+
+**`storedBase` 不排除 agent 层，所以 agent 级 effort 确实会被判为漂移。** 实测：
+
+```
+backend effort=high, agents[reviewer].effort=max
+  drift check argv:  [acp --model m --effort high]   ← backendDefaultsFor 只看 backend 层
+  real spawn argv:   [acp --model m --effort max]    ← 含 agent 覆盖
+  → argsDrift = true
+```
+
+**但这不是本 RFC 引入的缺陷，而是既存行为的暴露面扩大。** 同样实测确认
+`agents[].model` 完全同源：
+
+```
+backend model=sonnet, agents[x].model=opus
+  drift: [acp --model sonnet]  vs  spawn: [acp --model opus]  → drift = true
+```
+
+`agents[].args` 亦然（`--append-system-prompt` 恰好因在 `deniedExtraFlags`
+里被 `capExtraArgsBytes` 剥掉，planner 才侥幸不触发）。
+
+**处置决定：本 PR 不修，如实记录。** 理由是修它需要改 drift 比较的语义
+（要么把生效值持久化进 shim state 供比较，要么让 drift 只比较 backend 层能
+决定的那部分 argv），那是一个独立的、影响所有 agent 级覆盖的改动，混进来会
+让本 PR 无法独立评审与回滚。已在 `router_shim.go` 的镜像点记录该限制。
+
+运维可见后果：配了 `agents[].effort` 的 kiro 会话，每次重启（及 30s reconcile
+tick）被判漂移并 shutdown，降级为 suspended，下条消息重新 spawn。会话不丢，
+但侧栏历史会空——`router_shim.go` 的 JSONL 回填走 `r.claudeDir`，对 kiro 无效。
+
+**另一个语义确认**：操作者改了配置里的 effort 然后重启，此时 drift 是**正确
+的**而非误判 —— `--effort` 是进程启动参数无法热改，重启进程正是让新档生效的
+唯一途径。期望行为 = 当前行为。
 
 ## 5. Test strategy
 
@@ -215,7 +253,11 @@ agent 级 effort 会被它看作漂移。这需要在实现时确认：drift 比
 
 - 生效档位已经由前一个 RFC 透出到 dashboard —— **这正是验证配置生效的手段**：
   改配置 → 重启 → 看 header tag 是否变成期望档位。两个 RFC 在此闭环。
-- spawn 时的 `slog` 已记录 argv；`--effort` 自动出现在其中。
+- **离线核对生效档位**：argv 落在 shim state 文件的 `cli_args` 字段
+  （`~/.naozhi/shims/<hash>.json`），`--effort <tier>` 可直接读出。
+  （初稿说"spawn 时 slog 已记录 argv" —— **不成立**：`shim/manager.go` 的
+  `buildShimArgs` 结果直接进 `exec.Command`，全仓没有输出 argv 的 slog attr。）
+- 非 ACP backend 上的误配置在启动时 `slog.Warn`，带 actionable hint。
 - 不新增 metrics（同 visibility RFC 的理由：低频枚举状态）。
 
 ## 8. Compatibility & migration
