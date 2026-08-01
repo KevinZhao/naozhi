@@ -245,6 +245,7 @@ var deniedExtraFlags = map[string]struct{}{
 	"--allowed-tools":                {}, // permission allowlist override
 	"--disallowed-tools":             {}, // permission allowlist override
 	"--model":                        {}, // SpawnOptions.Model owns model selection
+	"--effort":                       {}, // SpawnOptions.Effort owns the tier; config validates a closed set
 	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
 	"--permission-prompt-tool":       {}, // permission gate plumbing
 	"--output-format":                {}, // BuildArgs pins stream-json; operator override breaks the NDJSON parser
@@ -393,7 +394,10 @@ func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 // See RNEW-ARCH-404: opt-in accessor for consumers migrating off
 // individual SupportsX() methods.
 func (p *ClaudeProtocol) Capabilities() Caps {
-	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
+	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true,
+		// The Claude CLI has no thinking-effort flag; SpawnOptions.Effort is
+		// ignored here, and the composition root rejects configuring it.
+		EffortTier: false}
 }
 
 // The NDJSON payload for an in-band "abort this turn" signal sent via stdin

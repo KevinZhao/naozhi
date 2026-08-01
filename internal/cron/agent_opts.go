@@ -30,7 +30,12 @@ type AgentOpts struct {
 	Model     string
 	Workspace string
 	ExtraArgs []string
-	Exempt    bool
+	// Effort mirrors session.AgentOpts.Effort so a cron job inherits the
+	// thinking-effort tier configured for its agent — the per-agent layer
+	// exists precisely so a background sweeper can run cheaper than an
+	// interactive planner. docs/rfc/kiro-effort-control.md
+	Effort string
+	Exempt bool
 }
 
 // SessionStatus mirrors session.SessionStatus value-for-value. The

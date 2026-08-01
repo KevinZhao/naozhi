@@ -729,6 +729,14 @@ type RouterConfig struct {
 	// drop a default flag for a specific backend. R53-ARCH-002.
 	BackendModels    map[string]string
 	BackendExtraArgs map[string][]string
+	// BackendEfforts carries the resolved thinking-effort tier per backend ID.
+	// There is deliberately no router-wide counterpart: the composition root
+	// folds cli.effort into these entries AND drops it for backends whose
+	// protocol cannot accept a tier, so this map is the filtered single source
+	// of truth. A router-level default would resurrect the tier for those
+	// backends and desync arg-drift detection from the real spawn.
+	// docs/rfc/kiro-effort-control.md
+	BackendEfforts map[string]string
 	// AccessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Keyed by profile ID. Nil/empty means no profiles
 	// configured — every session runs on the global settings.json baseline
@@ -916,6 +924,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.extraArgs = cfg.ExtraArgs
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
+	r.bkStore.backendEfforts = cfg.BackendEfforts
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.accessProfileOverrides = make(map[string]string)
 	r.accessProfiles = cfg.AccessProfiles

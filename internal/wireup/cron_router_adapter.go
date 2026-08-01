@@ -145,6 +145,7 @@ func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
 		Model:     o.Model,
 		Workspace: o.Workspace,
 		Backend:   o.Backend,
+		Effort:    o.Effort,
 		Exempt:    o.Exempt,
 	}
 	if len(o.ExtraArgs) > 0 {

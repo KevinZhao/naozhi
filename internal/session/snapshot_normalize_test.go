@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -40,6 +42,7 @@ func TestSnapshot_NormalizeFields_LiveProcess(t *testing.T) {
 	proc := newMetadataTestProcess(42.5, 1234, []cli.MeteringEntry{
 		{Value: 0.05, Unit: "credit", UnitPlural: "credits"},
 	})
+	proc.EffortVal = "xhigh"
 	s.storeProcess(proc)
 
 	snap := s.Snapshot()
@@ -55,6 +58,34 @@ func TestSnapshot_NormalizeFields_LiveProcess(t *testing.T) {
 	}
 	if len(snap.MeteringUsage) != 1 || snap.MeteringUsage[0].Value != 0.05 {
 		t.Errorf("MeteringUsage = %+v, want 1 entry", snap.MeteringUsage)
+	}
+	if snap.Effort != "xhigh" {
+		t.Errorf("Effort = %q, want xhigh", snap.Effort)
+	}
+}
+
+// TestSnapshot_EffortWireTag pins the JSON field name the dashboard reads.
+// Without this, renaming the tag (or dropping it) compiles, passes every other
+// Go test, and only shows up as a header tag that silently never appears —
+// dashboard.js reads `effort` off the /api/sessions row, and
+// sessions_shape_test.go only enforces the required key set, not this field.
+func TestSnapshot_EffortWireTag(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(SessionSnapshot{Effort: "max"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"effort":"max"`) {
+		t.Errorf(`marshalled snapshot missing "effort":"max"; got %s`, b)
+	}
+	// omitempty: a backend that reports no tier must not add the key at all,
+	// so the frontend's truthiness gate hides the tag instead of rendering "".
+	b2, err := json.Marshal(SessionSnapshot{})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if strings.Contains(string(b2), "effort") {
+		t.Errorf("empty Effort must be omitted (omitempty); got %s", b2)
 	}
 }
 
@@ -80,6 +111,12 @@ func TestSnapshot_NormalizeFields_NoProcess(t *testing.T) {
 	}
 	if snap.MeteringUsage != nil {
 		t.Errorf("MeteringUsage should be nil without proc; got %v", snap.MeteringUsage)
+	}
+	// Effort is a runtime observation, so unlike CostUnit it does NOT survive
+	// eviction — there is no persisted tier to fall back on (effort is never
+	// written to sessions.json). The dashboard tag hides in this state.
+	if snap.Effort != "" {
+		t.Errorf("Effort should be empty without proc; got %q", snap.Effort)
 	}
 }
 

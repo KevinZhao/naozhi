@@ -53,6 +53,22 @@ func TestToSessionAgentOpts_NilExtraArgs(t *testing.T) {
 	}
 }
 
+// TestToSessionAgentOpts_Effort closes the cron → session half of the
+// thinking-effort round-trip. Dropping the field here makes a cron job spawn on
+// the backend default instead of the tier configured for its agent — silently,
+// since nothing else reads it. The config → cron half is asserted in
+// cmd/naozhi's TestBuildAgentOpts. docs/rfc/kiro-effort-control.md
+func TestToSessionAgentOpts_Effort(t *testing.T) {
+	t.Parallel()
+	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "kiro", Effort: "max"}).Effort; got != "max" {
+		t.Errorf("Effort = %q, want max", got)
+	}
+	// Unset stays unset so the backend default applies.
+	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "kiro"}).Effort; got != "" {
+		t.Errorf("Effort = %q, want empty when the cron opts carry none", got)
+	}
+}
+
 // TestInterruptOutcome_Ordinals duplicates the init() panic check at test time
 // so a divergence is caught by `go test` in CI even before the binary is
 // booted. Without this, a refactor that reorders session.InterruptOutcome

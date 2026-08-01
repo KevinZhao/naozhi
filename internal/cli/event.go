@@ -117,6 +117,18 @@ type EventMetadata struct {
 	// entries with {value, unit:"credit"}. claude leaves this empty (cost
 	// already captured via CostUSD).
 	MeteringUsage []MeteringEntry `json:"metering_usage,omitempty"`
+
+	// Effort is the backend's thinking-effort tier for the turn just
+	// reported. kiro: from _kiro.dev/metadata.effort, one of
+	// low/medium/high/xhigh/max. claude / codex report no equivalent and
+	// leave this empty.
+	//
+	// Stored as the backend's raw string rather than a naozhi-side enum on
+	// purpose: kiro owns the tier vocabulary, so a future version adding a
+	// sixth tier must flow through to the dashboard instead of being
+	// silently dropped by a stale allowlist. See
+	// docs/rfc/kiro-effort-visibility.md §2 (alternatives) / §5 R4.
+	Effort string `json:"effort,omitempty"`
 }
 
 // MeteringEntry is one row of a backend-reported billing payload, modelled

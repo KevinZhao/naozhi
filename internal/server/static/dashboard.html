@@ -1441,6 +1441,24 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    "(模型未配置)" reads as a hint, not an error. */
 .main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);font-variant-numeric:tabular-nums}
 .main-header .model-label-unset{color:var(--nz-text-faint);font-style:italic}
+/* kiro thinking-effort tier (low/medium/high/xhigh/max). Joins the
+   .model-label / .detail-turn-timer family — bare inline text, no border or
+   fill — because the .detail row already carries two bordered chips
+   (.sc-origin, .git-chip) and a third would outweigh the primary cli/model
+   label. Empty for backends that report no effort, so the wrapper collapses.
+   docs/rfc/kiro-effort-visibility.md §5.1 */
+/* max-width + nowrap: the tier string comes from the kiro process, so a
+   pathological value must not wrap and grow the header height (measured: an
+   unbounded 400-char tier took .main-header from 64px to 135px, pushing the
+   transcript down). flex-shrink:0 keeps the 5 real tiers from being squeezed
+   to an ellipsis on a narrow viewport. */
+.main-header .detail-effort{display:inline-flex;align-items:center;flex-shrink:0;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nz-text-mute);font-size:var(--nz-fs-sm);letter-spacing:.2px;margin-right:auto}
+.main-header .detail-effort:empty{display:none}
+.main-header .detail-effort .effort-tag::before{content:"·";margin-right:4px;opacity:.45}
+/* xhigh / max: the first thing to check when a turn ran slow or expensive, so
+   they shed the mute downgrade. Weight + colour only — a high tier is a
+   deliberate setting, not a fault, and --nz-amber already means "running". */
+.main-header .detail-effort .effort-hot{color:var(--nz-text);font-weight:600}
 /* Git branch / worktree chip in the session-detail header. Filled async by
    renderGitChip; :empty collapses it so a non-repo workspace leaves no gap.
    The chip is the operator's "which checkout am I editing" signal, so a
@@ -1453,6 +1471,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    visibly jump position a beat after the session opens. */
 .main-header .detail-git{display:inline-flex;align-items:center;min-width:0;flex-shrink:1;margin-right:auto}
 .main-header .detail-git:empty{display:none}
+/* Only ONE element in the row may claim the free space: in flex the first auto
+   margin absorbs all of it, so with both chips present the git chip would eat
+   the slack and leave the effort tag stranded at the far right. The effort tag
+   sits after the git chip in DOM order, so when it has a value IT owns the auto
+   margin and the git chip drops back to a plain gap. */
+.main-header .detail:has(.detail-effort:not(:empty)) .detail-git{margin-right:0}
 .git-chip{display:inline-flex;align-items:center;gap:3px;max-width:220px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);cursor:default}
 .git-chip-icon{font-weight:400;opacity:.75}
 .git-chip-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
