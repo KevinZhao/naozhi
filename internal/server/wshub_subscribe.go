@@ -355,7 +355,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State, "has_more", hasMore)
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
 
-	var lastTime int64
+	csr := cli.NewSinceCursor() // #2402: Advance below seeds the pushLoop watermark
 	if len(entries) > 0 {
 		// Pooled marshal — initial history payloads can be hundreds of KB
 		// (max msg.Limit entries × ~500B-4KB each). SendJSON would otherwise
@@ -368,7 +368,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 			slog.Warn("history marshal failed, falling back", "err", err, "key", key)
 			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm})
 		}
-		lastTime = entries[len(entries)-1].Time
+		csr.Advance(entries)
 	} else if snap.State == "running" {
 		// Always send an (empty) history for running sessions so the client's
 		// _initialSubscribe flag is consumed. Without this, the client shows a
@@ -380,7 +380,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	spawned = true
 	go func() {
 		defer h.clientWG.Done()
-		h.eventPushLoop(c, key, gen, notify, sess, lastTime)
+		h.eventPushLoop(c, key, gen, notify, sess, csr)
 	}()
 }
 

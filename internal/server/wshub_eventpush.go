@@ -192,7 +192,7 @@ func (h *Hub) singleSubscriber(key string) bool {
 // Add). The guarantee is enforced by code shape, not by assertion; a
 // review that simply notes "+1 goroutine here" is insufficient without
 // also updating the WG pairing.
-func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
+func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, csr *cli.SinceCursor) {
 	defer func() {
 		if r := recover(); r != nil {
 			// Mirror readPump: bump counter first so the panic rate is
@@ -228,6 +228,15 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				if !ok {
 					return
 				}
+				// #2402: rewind on session REPLACEMENT (e.g. /new, router
+				// eviction + respawn) — the fresh event log's timestamps can
+				// predate the old watermark, so the first notify after a swap
+				// must deliver the full new history. Mirrors
+				// upstream/connector_subscribe.go. The same-session
+				// process-flap path keeps its watermark.
+				if newSess != sess {
+					csr.Reset()
+				}
 				sess = newSess
 				// Catch up on events missed during the resubscribe
 				// transition. resubscribeEvents may consume one pending
@@ -238,20 +247,18 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				// extracted into backfillSubscriberEvents so the same
 				// coalesced-marshal path serves both the post-resubscribe
 				// catch-up and the regular notify drain.
-				newLast, alive, b := h.backfillSubscriberEvents(c, key, sess, lastTime, evBuf)
+				alive, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
 				evBuf = b
 				if !alive {
 					return
 				}
-				lastTime = newLast
 				continue
 			}
-			newLast, alive, b := h.backfillSubscriberEvents(c, key, sess, lastTime, evBuf)
+			alive, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
 			evBuf = b
 			if !alive {
 				return
 			}
-			lastTime = newLast
 		case <-c.done:
 			return
 		case <-h.ctx.Done():
@@ -266,11 +273,19 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 	}
 }
 
-// backfillSubscriberEvents drains EventEntriesSince(lastTime) for sess,
-// marshals the batched "history" frame via the coalesced cache, and
-// writes it to c. Returns (newLastTime, alive) — the caller must update
-// its own lastTime with newLastTime AND exit when alive is false (the
-// client closed mid-drain).
+// backfillSubscriberEvents drains new entries for sess through the caller's
+// SinceCursor, marshals the batched "history" frame via the coalesced cache,
+// and writes it to c. Returns (alive, buf) — the caller must exit when alive
+// is false (the client closed mid-drain) and retain buf for the next wave.
+//
+// #2402 (kiro dashboard 不实时刷新): the previous implementation tracked a
+// naked lastTime int64 and queried EventEntriesSince(lastTime) — strictly
+// greater-than — so an entry appended in the SAME millisecond as the tail of
+// an already-delivered wave but landing in a LATER notify wave was silently
+// dropped. cli.SinceCursor (inclusive watermark query + UUID dedup at the
+// trailing millisecond) is the shared fix; see its file header for the full
+// rationale and the upstream twin R20260530-GO-1 (#1481). Same-millisecond
+// redeliveries that reach the client are absorbed by the dashboard's UUID dedup.
 //
 // R246-CR-006 / #744: previously inlined twice in eventPushLoop — once
 // in the regular notify arm and once in the post-resubscribe catch-up
@@ -287,13 +302,10 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // session — multi-tab dashboards previously paid N marshals per notify
 // wave for the identical (key, entries-tail) payload. R214-PERF-4.
 //
-// Behavior note: on marshal error the helper returns the unchanged
-// lastTime (matches the regular-notify arm's `continue` path). The
-// previous post-resubscribe inline branch advanced lastTime even on
-// marshal error, which silently dropped events — strictly more correct
-// to retry from the same lastTime on the next notify, which is what the
-// helper now does for both call sites.
-func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, lastTime int64, buf []cli.EventEntry) (int64, bool, []cli.EventEntry) {
+// Behavior note: on marshal error the helper returns without advancing
+// the cursor (matches the regular-notify arm's `continue` path), so the
+// same entries are retried from the same watermark on the next notify.
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *cli.SinceCursor, buf []cli.EventEntry) (bool, []cli.EventEntry) {
 	// R20260604-PERF-25 (#1740): pass the caller's per-goroutine buffer (sliced
 	// to [:0]) into EventEntriesSinceAppend so BOTH the dead-session
 	// (persistedHistory) and the live-process path reuse capacity instead of
@@ -302,26 +314,35 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 	// frame bytes), never retained past this call, so reusing the buffer on the
 	// next notify is safe. The (possibly grown) buffer is returned so the caller
 	// can keep it for the next iteration.
-	entries := sess.EventEntriesSinceAppend(buf[:0], lastTime)
+	//
+	// QueryAfter re-admits the watermark millisecond; Filter drops the
+	// already-delivered UUIDs in place, so the backing array (and its
+	// capacity) survives for the next wave.
+	entries := sess.EventEntriesSinceAppend(buf[:0], csr.QueryAfter())
+	fetched := entries
+	entries = csr.Filter(entries)
 	if len(entries) == 0 {
-		return lastTime, true, entries
+		return true, fetched
 	}
 	select {
 	case <-c.done:
-		return lastTime, false, entries
+		return false, fetched
 	default:
 	}
 	// capHistoryBatch may return a tail sub-slice of entries; marshal/advance
-	// from that view but return the full `entries` slice as the reusable buffer
+	// from that view but return the full `fetched` slice as the reusable buffer
 	// so its capacity is preserved across notify waves (a tail slice would
 	// shrink cap every call and defeat the reuse).
 	capped := capHistoryBatch(entries)
-	data, err := h.marshalHistoryFrame(key, lastTime, capped)
+	// The marshal-cache fingerprint keys on the pre-advance watermark, so
+	// lock-step tabs still coalesce onto one marshal as with the old lastTime.
+	data, err := h.marshalHistoryFrame(key, csr.Watermark(), capped)
 	if err != nil {
-		return lastTime, true, entries
+		return true, fetched
 	}
 	c.SendRaw(data)
-	return capped[len(capped)-1].Time, true, entries
+	csr.Advance(capped)
+	return true, fetched
 }
 
 // resubscribeEvents waits for a new process to be attached to the session and
