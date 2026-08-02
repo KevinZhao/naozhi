@@ -2,7 +2,9 @@
 
 该项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式。版本号按语义化版本（Semantic Versioning）管理。
 
-真正的 per-round 变更日志在 `docs/TODO.md` 顶部，本文件只归档对用户 / 运维可感知的大型变更。
+真正的 per-round 变更日志曾放在 `docs/TODO.md` 顶部；该文件已于 2026-05-26
+删除（待办迁至 GitHub Issues，映射见 `docs/rfc/todo-to-issues-migration.md`）。
+本文件只归档对用户 / 运维可感知的大型变更。
 
 ## [Unreleased]
 
@@ -45,4 +47,6 @@
 
 ## 历史版本
 
-在 2026-05-07 之前，所有变更记录在 `docs/TODO.md` 的 `Round NN` 小节里，不回填到本文件。后续版本发布时，将抽取对用户可感知的条目归档到这里。
+在 2026-05-07 之前，所有变更记录在已删除的 `docs/TODO.md` 的 `Round NN` 小节里，
+不回填到本文件；这些历史条目可通过 `git log -S` 在仓库历史中检索。后续版本发布时，
+将抽取对用户可感知的条目归档到这里。
