@@ -36,12 +36,19 @@ naozhi 的定位是"轻量 IM -> Claude Code CLI 网关"：用最少的代码把
    ```bash
    /usr/local/go/bin/go build ./...
    /usr/local/go/bin/go vet ./...
-   /usr/local/go/bin/go test -race -timeout 180s ./...
+   /usr/local/go/bin/go test -race -timeout 300s ./...
    ```
-   21+ 包必须全 `ok`，不接受用 `-run`/`-skip` 跳过失败测试凑绿。
+   输出里不允许出现任何 `FAIL`，也不接受用 `-run`/`-skip` 跳过失败测试凑绿。
+   （当前 85 个包里 79 个有测试、6 个是 `no test files` —— 所以"全 ok"的基准是
+   零 `FAIL`，不是数包数。）
+
+   `-timeout` 是**每个包**的上限，不是总时长。别往下调：`internal/server`
+   单包带 `-race` 就要 ~230s，用 `-timeout 180s` 会直接
+   `panic: test timed out after 3m0s`，看起来像真的测试失败。300s 与
+   `.github/workflows/ci.yml` 的 `test` job 保持一致。整套跑完约 4-5 分钟。
 3. 如果改动触碰了 `docs/design/`、`CLAUDE.md`、`config.example.yaml`，同步更新其他两处（单一事实源原则）。
 4. Commit message 参考 `git log --oneline -20` 近期风格
-5. PR 描述写清 **why**（动机、关联的 issue / TODO 条目），而非 what（代码本身会说话）
+5. PR 描述写清 **why**（动机、关联的 issue），而非 what（代码本身会说话）
 
 ## Testing
 
@@ -60,13 +67,18 @@ naozhi 的定位是"轻量 IM -> Claude Code CLI 网关"：用最少的代码把
 
 以下主题请开 issue 讨论而非直接发 PR：
 
-- 协议版本化（REST API / node reverse / shim state —— 见 `docs/TODO.md` RNEW-ARCH-401..403）
-- 零中断热重启
-- Gemini CLI 接入
+- 协议版本化（REST API / node reverse / shim state）—— 基础工作已完成
+  （#425 / #426 / #427），后续扩展先开 issue 对齐
+- 零中断热重启（现状是 `internal/shim` sidecar，见 `docs/design/shim-design.md`）
+- Gemini CLI 接入（必须走 ACP `Protocol` 实现，不要硬编码）
 - 大规模依赖升级（dependabot 自动开的 PR 优先合并）
+
+待办不再维护 `docs/TODO.md`（该文件已删除），一律走 GitHub Issues；历史 `Rxxx-`
+条目到 issue 的映射见 `docs/rfc/todo-to-issues-migration.md`。
 
 ## Questions
 
-issue 或 [Discussions](https://github.com/kevinzhao/naozhi/discussions) 讨论，不走邮件。
+一般问题走 [Issues](https://github.com/KevinZhao/naozhi/issues) 讨论，不走邮件。
+（本仓没有开启 GitHub Discussions。）
 
-安全问题请走 [SECURITY.md](./SECURITY.md)，不要公开在 issue 里。
+安全问题**不要**公开开 issue，走 [SECURITY.md](./SECURITY.md) 描述的私密上报流程。
