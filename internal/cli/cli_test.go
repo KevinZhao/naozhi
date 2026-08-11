@@ -780,17 +780,55 @@ func TestACPProtocol_BuildArgs_NoEffort(t *testing.T) {
 	}
 }
 
-// TestBuildArgs_EffortIgnoredByNonACP pins that the tier is inert on backends
-// whose CLI has no such flag, so a stray SpawnOptions.Effort cannot corrupt
-// their argv. The composition root also refuses to configure it there; this is
-// the defence one layer down.
-func TestBuildArgs_EffortIgnoredByNonACP(t *testing.T) {
+// TestClaudeProtocol_BuildArgs_Effort verifies opts.Effort reaches the Claude
+// CLI as `--effort <tier>`. Verified against CLI 2.1.226, which documents the
+// flag as "Effort level for the current session" and rejects out-of-set values
+// with a warning. A launch-time --effort also pins the tier over the
+// settings.json `effortLevel` key, which is why this argv site — not
+// settings.json — owns the tier for naozhi-spawned sessions.
+func TestClaudeProtocol_BuildArgs_Effort(t *testing.T) {
 	t.Parallel()
-	for _, p := range []Protocol{&ClaudeProtocol{}, &CodexProtocol{}} {
-		args := p.BuildArgs(SpawnOptions{Effort: "max"})
-		if slices.Contains(args, "--effort") || slices.Contains(args, "max") {
-			t.Errorf("%s.BuildArgs leaked the effort tier: %v", p.Name(), args)
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "claude-fable-5", Effort: "high"})
+	var ok bool
+	for i, a := range args {
+		if a == "--effort" && i+1 < len(args) && args[i+1] == "high" {
+			ok = true
+			break
 		}
+	}
+	if !ok {
+		t.Errorf("BuildArgs missing --effort high, got %v", args)
+	}
+	// The two flags must coexist — a session picks both a model and a tier.
+	if !slices.Contains(args, "--model") {
+		t.Errorf("BuildArgs dropped --model when Effort was set, got %v", args)
+	}
+}
+
+// TestClaudeProtocol_BuildArgs_NoEffort pins that an absent tier emits no flag.
+// `--effort ""` would be rejected by the CLI, and empty is the documented way
+// to say "leave whatever settings.json / the CLI default selects alone".
+func TestClaudeProtocol_BuildArgs_NoEffort(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	for _, a := range p.BuildArgs(SpawnOptions{Model: "claude-fable-5"}) {
+		if a == "--effort" {
+			t.Error("BuildArgs must not emit --effort when Effort is empty")
+		}
+	}
+}
+
+// TestBuildArgs_EffortIgnoredByCodex pins that the tier is inert on codex,
+// whose reasoning knob is a different axis (-c model_reasoning_effort=), so a
+// stray SpawnOptions.Effort cannot corrupt its argv. The composition root also
+// refuses to configure it there; this is the defence one layer down.
+func TestBuildArgs_EffortIgnoredByCodex(t *testing.T) {
+	t.Parallel()
+	p := &CodexProtocol{}
+	args := p.BuildArgs(SpawnOptions{Effort: "max"})
+	if slices.Contains(args, "--effort") || slices.Contains(args, "max") {
+		t.Errorf("%s.BuildArgs leaked the effort tier: %v", p.Name(), args)
 	}
 }
 
@@ -803,8 +841,8 @@ func TestProtocolCaps_EffortTier(t *testing.T) {
 	if !ProtocolCaps(&ACPProtocol{}).EffortTier {
 		t.Error("ACP must advertise EffortTier — kiro-cli acp takes --effort")
 	}
-	if ProtocolCaps(&ClaudeProtocol{}).EffortTier {
-		t.Error("Claude must not advertise EffortTier — no such flag")
+	if !ProtocolCaps(&ClaudeProtocol{}).EffortTier {
+		t.Error("Claude must advertise EffortTier — the CLI takes --effort as of 2.1.226")
 	}
 	if ProtocolCaps(&CodexProtocol{}).EffortTier {
 		t.Error("Codex must not advertise EffortTier — its reasoning knob is a different axis")

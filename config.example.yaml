@@ -145,8 +145,16 @@ cli:
   #    # In a multi-node deployment this is per-node: the primary's setting does
   #    # not reach remote nodes, so configure each node that runs kiro.
   #    #
-  #    # Only ACP-protocol backends (kiro) accept a tier; configuring one on
-  #    # claude/codex logs a warning and is ignored.
+  #    # claude and ACP-protocol backends (kiro) accept a tier. On claude it is
+  #    # forwarded as `claude --effort <tier>` (CLI 2.1.226+), which also pins
+  #    # the tier over ~/.claude/settings.json `effortLevel` for that process.
+  #    # codex does NOT: its knob is a different axis, set via that backend's
+  #    # args (`-c model_reasoning_effort=<tier>`). Configuring effort on codex
+  #    # logs a warning and is ignored.
+  #    #
+  #    # Note the tier is NOT settable through `args` on claude: --effort is in
+  #    # the protocol's denied-extra-flags list (this field owns that argv slot),
+  #    # so `args: ["--effort", "high"]` is stripped at spawn.
   #    effort: "xhigh"
   #    args: []
   #    # Optional: the model list the dashboard's per-session model popover
@@ -225,7 +233,7 @@ agents:
   researcher:
     model: "opus"
     args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
-    # Optional, kiro-backed sessions only: overrides the backend's
+    # Optional, claude- and kiro-backed sessions only: overrides the backend's
     # thinking-effort tier for this agent — e.g. run a cheap tier for a
     # frequently-scheduled cron agent while the default stays higher.
     # Precedence: cli.effort < cli.backends[].effort < agents[].effort.

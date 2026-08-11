@@ -309,8 +309,10 @@ func initBackendWrappers(
 			} else {
 				slog.Warn("ignoring configured thinking-effort tier: backend does not accept one",
 					"id", w.BackendID, "effort", b.Effort,
-					"hint", "only ACP-protocol backends (kiro) take --effort; "+
-						"move the setting under that backend to silence this")
+					"hint", "claude and ACP-protocol backends (kiro) take --effort; "+
+						"codex does not (its knob is -c model_reasoning_effort=, "+
+						"set it via that backend's args) — move the setting under a "+
+						"supporting backend to silence this")
 			}
 		}
 		if out.Default == nil || w.BackendID == defaultBackend {
