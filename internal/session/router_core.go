@@ -464,6 +464,7 @@ type Router struct {
 	// the operator-owned MCP server definition file, or "" to omit
 	// `--mcp-config`. Immutable after NewRouter; read at spawn (and at shim
 	// arg-drift comparison, which must mirror the spawn argv exactly).
+	// 读写: core (init only), lifecycle (spawn read), router_shim (drift read)
 	mcpConfigFile string
 
 	// attachmentTracker is the refcount tracker that bridges
