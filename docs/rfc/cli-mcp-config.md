@@ -228,4 +228,40 @@ claude -p --output-format stream-json --verbose \
 > 给验收日志引入无关噪声。`system/init` 在模型调用之前发出，故不影响 MCP 判定，
 > 但省掉该 flag 更干净。
 
+> **跑第 2/3 项前必须隔离 shim 状态**。这两项都要在本机起第二个 naozhi 进程，而 shim
+> 的 `StateDir`（默认 `$HOME/.naozhi/shims`）和 socket 目录（`XDG_RUNTIME_DIR` 否则
+> `~/.naozhi/run`）是从 **HOME 派生**的，不跟随 `session.store_path`。后果：第二个实例
+> 会 discover 到线上实例的 shim，因 `--settings` 路径不同判定 config drift，日志打
+> `shim config drifted, shutting down old shim` 并尝试关掉**线上**会话进程。
+> 验收配置必须同时给出：
+>
+> ```yaml
+> session:
+>   shim:
+>     state_dir: "/tmp/<scratch>/shims"   # 否则会看见并接管线上 shim
+> ```
+>
+> 外加 `XDG_RUNTIME_DIR=/tmp/<scratch>/xdg` 环境变量隔离 socket 目录。
+
+**验收结果（2026-08-20 本机实测）**
+
+- 第 1 项：`go build` / `go vet` / `go test ./...` 全绿（CI 同 run 上 8/9 job pass，仅
+  `vuln` 红，为 master 已存在的 stdlib CVE，与本 diff 无关）。
+- 第 2 项 **G5 三格全部达成**。按上述隔离配置起临时实例，三种坏文件下 naozhi 均跑满
+  超时窗口未退出（`timeout` 返回 124），各自恰好一条 `slog.Error`，且 `drift` 行 0 条：
+
+  | 输入 | 日志 |
+  |---|---|
+  | 文件不存在 | `mcp config: cannot stat file; staying without mcp config` |
+  | 尾逗号 JSON | `mcp config: file is not a JSON object with an "mcpServers" object; ...` |
+  | `{}` | `mcp config: file has no "mcpServers" object; ...` |
+
+- 第 3 项：以 naozhi 的完全相同 spawn 形状（`--setting-sources "" --settings
+  <naozhi settings> --mcp-config <file>`）实测 `system/init` → server `status: connected`、
+  `mcp_server_errors: null`、56 个工具可见。
+- 第 4 项（§7 的已知未知）**在本机场景下不再是阻塞项**：落地选的是 Amazon 企业版
+  `enterprise-asana-mcp`（本地 stdio），授权走 midway → Stonegate 3LO 换 token，token
+  缓存在该 server 自己的进程侧，**不经 cc 的 `~/.claude.json` `mcpOAuth`**，因此与
+  `--setting-sources ""` 是否共享 OAuth 无关。远程 http server 的该问题仍未验证。
+
 发布：合入 master 后按 `docs/ops/deployment-strategy.md` 打 tag，各机 `naozhi upgrade`。本机 launchd 实例可先本地构建验证（开发用途），但分发必须走 release pipeline。
