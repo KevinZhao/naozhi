@@ -1085,7 +1085,7 @@ avg turn 2-5:        1.5s
 | **Session 管理** | CC 内置 (单 session) | SDK 内置 (resume/fork) | 需自建 |
 | **并发** | 单 session 限制 | 需自建 | 需自建 |
 | **冷启动** | 无 (CC 常驻) | **~3s/轮 (每次 spawn)** | **仅首次 1.9s, 后续 1.5s** |
-| **工具能力** | 完整 CC 工具 | 完整 CC 工具 (需配置) | 完整 CC 工具 (需 `--setting-sources ""`) |
+| **工具能力** | 完整 CC 工具 | 完整 CC 工具 (需配置) | 完整 CC 工具 (需 `--setting-sources ""`；MCP 另需 `--mcp-config`，见下文 hooks 隔离条) |
 | **成熟度** | Preview | GA (v0.1.0+) | 自建 |
 
 ## 会话管理
@@ -1274,7 +1274,7 @@ Gateway 收到 SIGTERM/SIGINT 时：
 - **stream-json 协议变化** — CLI 官方格式，输出端有文档，但输入格式和完整事件 schema 无文档。Agent SDK 内部使用同一协议，协议稳定性与 SDK 一致
 - **并发限制** — 每个 claude 进程 ~350MB RSS (已验证)。t4g.small (2GB) 建议限制 2-3 并发，超出排队
 - **CLI 版本锁定** — 建议固定 CLI 版本，测试通过后再升级
-- **hooks 隔离** — 已通过 `--setting-sources ""` 解决。插件 Stop hooks 不加载，MCP/skills 正常
+- **hooks 隔离** — 已通过 `--setting-sources ""` 解决。插件 Stop hooks 不加载，skills 正常。**但 MCP 不正常**（2026-08-20 实测纠正）：`--setting-sources ""` 会连带屏蔽 `~/.claude.json` 的 `mcpServers` 段，`system/init` 的 `mcp_servers` 为空数组；settings 文件里写 `mcpServers` 键、工作目录放 `.mcp.json` 均无效。唯一入口是 `--mcp-config`，见 `docs/rfc/cli-mcp-config.md`（配置项 `cli.mcp_config`）。注意默认部署走的是 `--setting-sources user`，不受此影响；仅在开启 `naozhi_settings.enabled` 时命中
 - **进程僵尸** — 需定期健康检查，清理无响应进程
 
 ## 部署架构

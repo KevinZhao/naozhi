@@ -181,6 +181,20 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.DebugFile != "" && !strings.HasPrefix(opts.DebugFile, "-") && filepath.IsAbs(opts.DebugFile) {
 		args = append(args, "--debug-file", opts.DebugFile)
 	}
+	// Operator-opt-in MCP server set (RFC cli-mcp-config). Required because the
+	// SettingsFile branch above emits `--setting-sources ""`, which suppresses
+	// the `mcpServers` block of ~/.claude.json; `--mcp-config` is the only
+	// remaining injection point for such a spawn. Deliberately independent of
+	// which settings branch ran, so the two knobs compose.
+	//
+	// `--mcp-config` stays in deniedExtraFlags — this is the dedicated-field
+	// escape hatch that godoc prescribes, not a relaxation. Same absolute-path
+	// + no-leading-dash validation as --debug-file / --settings above; a value
+	// failing it is dropped (defence in depth, since cmd wiring already
+	// validated far more strictly — see SpawnOptions.MCPConfigFile godoc).
+	if opts.MCPConfigFile != "" && !strings.HasPrefix(opts.MCPConfigFile, "-") && filepath.IsAbs(opts.MCPConfigFile) {
+		args = append(args, "--mcp-config", opts.MCPConfigFile)
+	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
 }

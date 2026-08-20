@@ -460,6 +460,11 @@ type Router struct {
 	// value so a session started with --settings is not seen as drifted).
 	// 读写: core (init only), lifecycle (spawn read), router_shim (drift read)
 	naozhiSettingsFile string
+	// mcpConfigFile mirrors RouterConfig.MCPConfigFile: the absolute path to
+	// the operator-owned MCP server definition file, or "" to omit
+	// `--mcp-config`. Immutable after NewRouter; read at spawn (and at shim
+	// arg-drift comparison, which must mirror the spawn argv exactly).
+	mcpConfigFile string
 
 	// attachmentTracker is the refcount tracker that bridges
 	// event-log persist events to .meta sidecar updates. nil when
@@ -759,6 +764,24 @@ type RouterConfig struct {
 	// instead of the legacy `--setting-sources user`. Empty keeps the legacy
 	// path (bit-identical to today). ACP backends ignore it.
 	NaozhiSettingsFile string
+	// MCPConfigFile, when non-empty, is the absolute path to an operator-owned
+	// MCP server definition file (RFC cli-mcp-config). Every ClaudeProtocol
+	// spawn then runs `--mcp-config <file>`; empty omits the flag entirely
+	// (argv-identical to today). ACP / codex backends ignore it.
+	//
+	// Router-global on purpose, mirroring NaozhiSettingsFile: it deliberately
+	// does NOT travel through the per-backend BackendModels / BackendExtraArgs
+	// / BackendEfforts maps. That propagation path pushes a top-level value
+	// onto backends that cannot accept the flag (see the `cli.effort` →
+	// "backend does not accept one" warning it produced), and MCP server
+	// definitions are a high-privilege operator decision that intentionally
+	// has no per-agent / per-project override.
+	//
+	// The caller MUST have validated the file (exists, parses as JSON, has an
+	// `mcpServers` object) — cc refuses to start otherwise, which would turn a
+	// typo into a total spawn outage. cmd/naozhi's resolveMCPConfigFile owns
+	// that validation and passes "" on any failure.
+	MCPConfigFile string
 	// KiroSessionsDir is the kiro CLI's session-state root, typically
 	// ~/.kiro/sessions/cli. Empty disables kiro history fallback; non-
 	// empty enables the kirojsonl factory (registered via blank import
@@ -980,6 +1003,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// debug-dir problem never blocks session spawning.
 	r.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.naozhiSettingsFile = cfg.NaozhiSettingsFile
+	r.mcpConfigFile = cfg.MCPConfigFile
 	r.shutdownCond = sync.NewCond(&r.mu)
 	// historyCtx is cancelled by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.

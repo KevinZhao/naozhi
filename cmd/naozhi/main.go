@@ -211,6 +211,15 @@ func main() {
 	// "" so the router keeps the legacy `--setting-sources user` path.
 	naozhiSettingsFile := resolveNaozhiSettingsFile(cfg, storePath, claudeDir)
 
+	// Operator-owned MCP server set (RFC cli-mcp-config). Opt-in via
+	// cli.mcp_config; "" (the default) omits --mcp-config so every spawn stays
+	// argv-identical. Needed whenever naozhiSettingsFile is non-empty, since
+	// that path's `--setting-sources ""` suppresses ~/.claude.json's mcpServers.
+	// resolveMCPConfigFile validates the envelope and returns "" on any problem
+	// — cc refuses to start on a bad --mcp-config, so passing an unvalidated
+	// path would turn a typo in that file into a total spawn outage.
+	mcpConfigFile := resolveMCPConfigFile(cfg)
+
 	// (auto-workspace-chain policy removed — RFC
 	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
 	// now carried by the project-stable session key; the old
@@ -235,6 +244,7 @@ func main() {
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,
+		MCPConfigFile:        mcpConfigFile,
 		Workspace:            workspace,
 		StorePath:            storePath,
 		NoOutputTimeout:      noOutputTimeout,

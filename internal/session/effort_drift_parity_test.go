@@ -48,7 +48,12 @@ func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	// mirror that does not and cannot exist today.
 	//
 	// Extend this when a field is added that backend-level config CAN resolve.
-	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile"}
+	//
+	// MCPConfigFile qualifies for the same reason SettingsFile does: it is a
+	// single router-global value (RouterConfig.MCPConfigFile), not a per-session
+	// or per-agent one, so the drift side can reconstruct it exactly.
+	// RFC cli-mcp-config G4.
+	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile"}
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "router_shim.go", nil, 0)

@@ -274,6 +274,28 @@ type CLIConfig struct {
 	Backends []CLIBackendConfig `yaml:"backends,omitempty"`
 	Model    string             `yaml:"model"`
 	Args     []string           `yaml:"args"`
+	// MCPConfig is the path to an MCP server definition file handed to the
+	// Claude CLI via `--mcp-config` (RFC cli-mcp-config). Empty — the default —
+	// passes no flag, leaving every spawn argv-identical to today.
+	//
+	// Needed when NaozhiSettings.Enabled is on: that path spawns cc with
+	// `--setting-sources ""`, which suppresses the `mcpServers` block of
+	// ~/.claude.json, and `--mcp-config` is then the only way to hand MCP
+	// servers to the session.
+	//
+	// Must be an absolute path (after ExpandHome) to an existing file that
+	// parses as JSON and contains an `mcpServers` object. cc REFUSES TO START
+	// if any of those fail, so cmd wiring validates all three up front and
+	// falls back to "no MCP" rather than letting a typo become a total spawn
+	// outage. Inline JSON (which the CLI flag also accepts) is deliberately
+	// NOT supported — file-only keeps the permission check and content
+	// handling tractable. Recommended mode 0600: whoever can write this file
+	// can make every cc session run arbitrary commands via a stdio server.
+	//
+	// Deliberately NOT available per-backend or per-agent: MCP server
+	// definitions are a high-privilege operator decision with a single
+	// injection point.
+	MCPConfig string `yaml:"mcp_config,omitempty"`
 	// Effort is the default thinking-effort tier for backends that support
 	// one (kiro today: low/medium/high/xhigh/max). Empty — the default —
 	// passes no flag, leaving the backend to apply its own configured

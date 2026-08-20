@@ -1010,6 +1010,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// "" unless the operator opted into naozhi-owned isolated settings
 		// (RFC naozhi-owned-settings-v3); only ClaudeProtocol acts on it.
 		SettingsFile: r.naozhiSettingsFile,
+		// "" unless the operator configured cli.mcp_config (RFC
+		// cli-mcp-config); only ClaudeProtocol acts on it. Must stay mirrored
+		// in router_shim.go's arg-drift comparison — see the note there.
+		MCPConfigFile: r.mcpConfigFile,
 	}
 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
