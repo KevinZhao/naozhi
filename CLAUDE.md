@@ -289,7 +289,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 `config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
 - **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`. Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
+- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
 - **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)

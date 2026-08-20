@@ -87,6 +87,37 @@ type SpawnOptions struct {
 	// a non-absolute / leading-dash value as an argv-injection guard, mirroring
 	// --debug-file).
 	SettingsFile string
+
+	// MCPConfigFile, when non-empty, points the Claude CLI at an
+	// operator-owned MCP server definition file via `--mcp-config` (RFC
+	// cli-mcp-config). Empty (the zero value) omits the flag entirely, so
+	// every existing spawn stays argv-identical.
+	//
+	// Why a dedicated field instead of ExtraArgs: `--mcp-config` is listed in
+	// deniedExtraFlags (it mounts arbitrary MCP servers, including stdio ones
+	// = arbitrary command execution), and that denial stays. This field is the
+	// "dedicated SpawnOptions field that BuildArgs renders explicitly" escape
+	// hatch prescribed by the deniedExtraFlags godoc — the value originates
+	// from the operator's config.yaml, never from a prompt or agent args.
+	//
+	// Why it is needed at all: when SettingsFile is set (naozhi-owned isolated
+	// settings), BuildArgs emits `--setting-sources ""`, which suppresses every
+	// external config source — including the `mcpServers` block of
+	// ~/.claude.json. Measured on cc 2.1.235: `--mcp-config` is the ONLY
+	// remaining way to hand MCP servers to such a spawn (a `mcpServers` key
+	// inside the settings file and a workspace `.mcp.json` are both ignored).
+	//
+	// Independent of SettingsFile: the flag is emitted whenever this field is
+	// set, regardless of which settings path BuildArgs took.
+	//
+	// The path must be ABSOLUTE and must not start with '-' (argv-injection
+	// guard, mirroring SettingsFile / DebugFile); a value failing either check
+	// is dropped. Callers are additionally expected to have validated that the
+	// file exists, parses as JSON, and carries an `mcpServers` object — cc
+	// REFUSES TO START otherwise (see cmd/naozhi resolveMCPConfigFile), so an
+	// unvalidated path turns "no MCP" into "no naozhi". Only ClaudeProtocol
+	// consumes this; ACP / codex backends ignore it.
+	MCPConfigFile string
 }
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.

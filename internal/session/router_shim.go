@@ -330,6 +330,12 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				// (which would trigger an unnecessary restart). RFC
 				// naozhi-owned-settings-v3.
 				SettingsFile: r.naozhiSettingsFile,
+				// Same reason as SettingsFile directly above: BuildArgs emits
+				// `--mcp-config` for it, so omitting it here would make every
+				// surviving shim read as arg-drift after an upgrade that turns
+				// cli.mcp_config on — restarting sessions that were fine.
+				// RFC cli-mcp-config G4.
+				MCPConfigFile: r.mcpConfigFile,
 			})
 			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
 		}

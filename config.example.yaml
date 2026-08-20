@@ -50,6 +50,43 @@ cli:
   # collapsible widgets. Instruct the model to stick to pure Markdown.
   args: []
 
+  # Optional: MCP servers for naozhi-spawned Claude sessions (RFC
+  # docs/rfc/cli-mcp-config.md). Empty (the default) passes no flag.
+  #
+  # When you need this: only if naozhi_settings.enabled is true. That path
+  # spawns cc with `--setting-sources ""`, which suppresses every external
+  # config source -- including the `mcpServers` block of ~/.claude.json -- so
+  # sessions see zero MCP servers. `--mcp-config` is the only remaining way in
+  # (a `mcpServers` key inside the settings file and a workspace `.mcp.json`
+  # are both ignored; measured on cc 2.1.235). On the default
+  # `--setting-sources user` path cc already reads ~/.claude.json, so leave
+  # this empty unless you specifically want an extra, naozhi-only server set.
+  #
+  # Format: an ABSOLUTE path to a file shaped like ~/.claude.json's mcpServers:
+  #   {"mcpServers": {"asana": {"type": "http", "url": "https://..."}}}
+  # Inline JSON (which the CLI flag also accepts) is deliberately NOT supported
+  # -- file-only keeps permissions checkable.
+  #
+  # chmod 600 it. Whoever can write this file can add a stdio server, i.e. run
+  # arbitrary commands in every session. naozhi warns at startup if the file is
+  # group/other-writable.
+  #
+  # naozhi validates the envelope (regular file / plausible size / parses as
+  # JSON / has an `mcpServers` object) at startup and falls back to "no MCP"
+  # with a slog.Error if any check fails -- because cc REFUSES TO START on a bad
+  # --mcp-config, an unvalidated path would turn one stray comma in this file
+  # into a total spawn outage.
+  #
+  # RESTART NAOZHI AFTER EDITING THIS FILE. The validation above runs once at
+  # startup, but cc re-reads the file on every spawn, so breaking it while
+  # naozhi is running means new sessions fail to start until you fix it. A
+  # restart re-validates and degrades to "no MCP" instead.
+  #
+  # OAuth for remote servers is NOT managed by naozhi: authorize once in an
+  # interactive `claude` session via /mcp, which stores the token in
+  # ~/.claude.json's mcpOAuth.
+  # mcp_config: "~/.naozhi/mcp.json"
+
   # Optional: multiple backends in one deployment (RNEW-DOC-421).
   #
   # When to use: you want a single naozhi instance to spawn more than one
