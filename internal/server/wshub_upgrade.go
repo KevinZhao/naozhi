@@ -110,7 +110,20 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := h.upgrader.Upgrade(w, r, nil)
+	// gorilla's Upgrade hijacks the connection and writes the 101 handshake
+	// itself — headers accumulated on w (mintAnonCookie / renewAnonCookie
+	// write via http.SetCookie) are silently DROPPED unless forwarded through
+	// the responseHeader parameter ("Use the responseHeader to specify
+	// cookies (Set-Cookie)", gorilla/websocket server.go). The previous
+	// Upgrade(w, r, nil) meant a label minted on the WS handshake never
+	// reached the browser: a tab whose nz_anon had expired kept an
+	// unmatchable server-side owner while uploads minted fresh labels over
+	// HTTP — permanent upload/send owner divergence until a full page reload.
+	var respHdr http.Header
+	if sc := w.Header().Values("Set-Cookie"); len(sc) > 0 {
+		respHdr = http.Header{"Set-Cookie": sc}
+	}
+	conn, err := h.upgrader.Upgrade(w, r, respHdr)
 	if err != nil {
 		// Capture origin + remote IP so operators can diagnose
 		// CheckOrigin rejections or attribute floods to a specific client
@@ -233,6 +246,12 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 		// cookies pass the check unchanged so existing browser sessions
 		// keep their bucket across the upgrade.
 		if cookie, err := r.Cookie(anonCookieName); err == nil && isValidAnonCookieValue(cookie.Value) {
+			// Sliding renewal on the WS handshake too: the upgrade is often
+			// the FIRST request of a returning tab, and without renewal the
+			// label this connection's owner is derived from hard-expires an
+			// hour later while the connection lives on. HandleUpgrade
+			// forwards Set-Cookie headers into the 101 via responseHeader.
+			renewAnonCookie(w, r, h.auth, cookie.Value)
 			return ownerKeyFromCookie(cookie.Value), true, true
 		}
 		if h.auth != nil {

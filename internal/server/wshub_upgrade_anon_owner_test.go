@@ -72,11 +72,25 @@ func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 	if owner != want {
 		t.Fatalf("owner=%q; want %q (must equal ownerKeyFromCookie of the presented nz_anon)", owner, want)
 	}
-	// Must NOT mint a second cookie — Set-Cookie should be absent.
+	// Sliding renewal (owner-divergence fix): the reuse path MUST re-issue
+	// the SAME value with a fresh MaxAge so an actively-used label never
+	// hard-expires under a live WS connection. What it must NOT do is mint
+	// a DIFFERENT value — that would rotate the owner bucket on every
+	// reconnect, the regression this test originally pinned.
+	var renewed bool
 	for _, c := range w.Result().Cookies() {
 		if c.Name == anonCookieName {
-			t.Fatalf("unexpected Set-Cookie on reuse path: %#v", c)
+			if c.Value != "deadbeefcafebabe0011223344556677" {
+				t.Fatalf("reuse path minted a DIFFERENT nz_anon value %q — owner bucket would rotate on every WS reconnect", c.Value)
+			}
+			if c.MaxAge != anonCookieMaxAgeSeconds {
+				t.Fatalf("renewal MaxAge=%d; want %d", c.MaxAge, anonCookieMaxAgeSeconds)
+			}
+			renewed = true
 		}
+	}
+	if !renewed {
+		t.Fatalf("reuse path did not renew nz_anon — label hard-expires after %ds while the WS connection lives on (owner divergence)", anonCookieMaxAgeSeconds)
 	}
 }
 
