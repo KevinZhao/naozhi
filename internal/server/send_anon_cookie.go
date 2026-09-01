@@ -112,6 +112,16 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers) (
 		return "", fmt.Errorf("read random bytes: %w", err)
 	}
 	val := hex.EncodeToString(buf[:])
+	setAnonCookie(w, r, ah, val)
+	return val, nil
+}
+
+// setAnonCookie writes the nz_anon Set-Cookie header with the shared
+// attribute set (HttpOnly, SameSite=Strict, Secure policy per mintAnonCookie
+// godoc, MaxAge=anonCookieMaxAgeSeconds). Extracted so mintAnonCookie (fresh
+// random value) and renewAnonCookie (same value, fresh expiry) cannot drift
+// on attributes.
+func setAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) {
 	secure := ah != nil && ah.IsSecure(r)
 	// R222-SEC-4 / #687: force Secure when a dashboard token is configured —
 	// the operator has signalled multi-user intent, so plaintext sniff of the
@@ -125,7 +135,34 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers) (
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Secure: secure, MaxAge: anonCookieMaxAgeSeconds,
 	})
-	return val, nil
+}
+
+// renewAnonCookie re-issues the SAME nz_anon value with a fresh MaxAge —
+// sliding renewal, mirroring the nz_auth session cookie's renewal behaviour
+// (internal/dashboard/auth). Without it the label hard-expires
+// anonCookieMaxAgeSeconds after mint even while the dashboard is actively
+// used: a long-lived WS connection keeps serving the owner derived from the
+// expired label while the next /api/sessions/upload mints a NEW label — the
+// uploadStore owner for the upload then never matches the WS send's frozen
+// owner and every file-bearing send fails TakeAll with "file not found or
+// expired" (the "本机不能添加图片附件" bug; #2297 aligned the MaxAge down to
+// 1h but skipped the sliding renewal that makes the 1h ceiling livable).
+// Renewing on every owner-deriving request keeps the label alive exactly as
+// long as the browser keeps talking to us, without extending the idle bound.
+func renewAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) {
+	setAnonCookie(w, r, ah, val)
+}
+
+// renewedOwnerFromCookie is the shared "valid nz_anon presented" arm of the
+// HTTP owner-derivation path: sliding-renew the label (nil-w tolerant for
+// callers without a response to write into) and hand back the owner key it
+// hashes to. Lives here rather than inline in uploadOwner so the renewal
+// contract sits next to the mint/renew helpers it depends on.
+func renewedOwnerFromCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) string {
+	if w != nil {
+		renewAnonCookie(w, r, ah, val)
+	}
+	return ownerKeyFromCookie(val)
 }
 
 // ownerKeyFromCookie returns a stable owner key derived from an HMAC

@@ -279,11 +279,21 @@ func TestUploadOwner_AnonCookieFallback(t *testing.T) {
 	if a == b {
 		t.Fatalf("co-NAT users got identical owner %q — TakeAll theft still possible", a)
 	}
-	// Existing cookie is reused (no Set-Cookie on the response).
+	// Existing cookie is reused: the owner must derive from the presented
+	// value, and the sliding-renewal Set-Cookie must re-issue the SAME value
+	// (rotating it would move the owner bucket mid-session — the regression
+	// the original "no Set-Cookie" assertion was really guarding against).
 	w2, r2 := httptest.NewRecorder(), newReq()
 	r2.AddCookie(&http.Cookie{Name: anonCookieName, Value: "deadbeefcafebabe0011223344556677"})
 	uploadOwner(w2, r2, nil, false)
 	if c := findAnon(w2); c != nil {
-		t.Fatalf("unexpected Set-Cookie when nz_anon already present: %q", c.Value)
+		if c.Value != "deadbeefcafebabe0011223344556677" {
+			t.Fatalf("reuse path rotated nz_anon to %q — owner bucket moves mid-session", c.Value)
+		}
+		if c.MaxAge != anonCookieMaxAgeSeconds {
+			t.Fatalf("renewal MaxAge=%d; want %d", c.MaxAge, anonCookieMaxAgeSeconds)
+		}
+	} else {
+		t.Fatalf("no sliding renewal on reuse path — nz_anon hard-expires after %ds of active use (upload/WS owner divergence)", anonCookieMaxAgeSeconds)
 	}
 }

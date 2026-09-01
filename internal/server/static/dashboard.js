@@ -4848,11 +4848,23 @@ async function sendMessage() {
   // prevents a stuck banner if the server never responds.
   markSessionOptimisticRunning(selectedKey, selectedNode);
 
-  // WS path: always preferred now — uploads already on server, only file_ids travel.
-  if (wsm.isConnected()) {
+  // WS path: preferred for TEXT-ONLY sends. Sends carrying file_ids MUST go
+  // over HTTP instead: the uploadStore owner for a WS send is the one frozen
+  // at WebSocket upgrade time (wsDeriveUploadOwner → setUploadOwner, never
+  // refreshed in no-token mode), while /api/sessions/upload derives its owner
+  // from the CURRENT nz_anon cookie. The nz_anon label expires after
+  // anonCookieMaxAgeSeconds (1h) with no sliding renewal on old servers, so a
+  // long-lived dashboard tab ends up with upload-owner ≠ WS-owner and every
+  // file-bearing WS send fails TakeAll with "file not found or expired".
+  // HTTP sends carry the same cookie the upload just used (or freshly
+  // minted), so the two owners can never diverge. Token-mode deployments are
+  // owner-stable either way; routing on file presence keeps them on the same
+  // path for consistency.
+  if (wsm.isConnected() && fileIDs.length === 0) {
     const id = 'r' + (++wsm.sendCounter);
     const sendMsg = { type: 'send', key: selectedKey, text: text, id: id };
-    if (fileIDs.length > 0) sendMsg.file_ids = fileIDs;
+    // No file_ids here by construction — file-bearing sends take the HTTP
+    // path above so the uploadStore owner matches the upload's cookie.
     if (selectedNode && selectedNode !== 'local') sendMsg.node = selectedNode;
     if (sessionWorkspaces[selectedKey]) {
       sendMsg.workspace = sessionWorkspaces[selectedKey];
@@ -4873,26 +4885,7 @@ async function sendMessage() {
     if (wsm.send(sendMsg)) {
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
-      const el = document.getElementById('events-scroll');
-      if (el && text) {
-        const now = Date.now();
-        const html = eventHtml({type: 'user', detail: text, time: now});
-        if (html) {
-          const prevT = lastDividerTime(el);
-          if (prevT === 0 || now - prevT >= EVENT_DIVIDER_GAP_MS) {
-            el.insertAdjacentHTML('beforeend', timeDividerHtml(now));
-          }
-          el.insertAdjacentHTML('beforeend', html);
-          el.lastElementChild.classList.add('optimistic-msg');
-          // Always force-bottom after a send: the user just posted something
-          // and expects to see it, even if they had scrolled up to browse
-          // earlier history. stickEventsBottom handles async layout changes
-          // from input-area collapse and lazy images.
-          stickEventsBottom();
-          navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
-          navUpdatePill();
-        }
-      }
+      renderOptimisticUserMsg(text);
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
@@ -4981,6 +4974,13 @@ async function sendMessage() {
     } else {
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
       // Optimistic running flip already applied above — keep it.
+      // Optimistic bubble parity with the WS path — but ONLY while WS is
+      // connected: the live event stream (onHistory/onEvent) is what removes
+      // .optimistic-msg when the real "user" event arrives. The WS-down
+      // fallback keeps its legacy no-bubble behaviour because the polling
+      // path (appendEvents) has no optimistic-removal logic and would leave
+      // a duplicate bubble.
+      if (wsm.isConnected()) renderOptimisticUserMsg(text);
     }
 
     // Speed up polling when WS not connected
@@ -5002,6 +5002,35 @@ async function sendMessage() {
     sending = false;
     if (btn) btn.classList.remove('sending');
   }
+}
+
+// renderOptimisticUserMsg appends the just-sent text as an optimistic user
+// bubble at the bottom of the events scroller. The real "user" event pushed
+// by the server (onHistory/onEvent) removes the `.optimistic-msg` element
+// when it arrives. Shared by the WS send path and the HTTP send path used
+// for file-bearing sends (owner-divergence fix) — both run under a live WS
+// subscription, which is what guarantees the removal side fires. No-op when
+// text is empty (image-only sends have no text to echo; the thumbnails
+// arrive with the real user event).
+function renderOptimisticUserMsg(text) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !text) return;
+  const now = Date.now();
+  const html = eventHtml({type: 'user', detail: text, time: now});
+  if (!html) return;
+  const prevT = lastDividerTime(el);
+  if (prevT === 0 || now - prevT >= EVENT_DIVIDER_GAP_MS) {
+    el.insertAdjacentHTML('beforeend', timeDividerHtml(now));
+  }
+  el.insertAdjacentHTML('beforeend', html);
+  el.lastElementChild.classList.add('optimistic-msg');
+  // Always force-bottom after a send: the user just posted something and
+  // expects to see it, even if they had scrolled up to browse earlier
+  // history. stickEventsBottom handles async layout changes from input-area
+  // collapse and lazy images.
+  stickEventsBottom();
+  navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
+  navUpdatePill();
 }
 
 function clearPendingFiles() {
