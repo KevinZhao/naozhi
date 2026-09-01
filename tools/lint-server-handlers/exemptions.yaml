@@ -65,7 +65,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 809                          # 2026-09-01 +3：POST /api/sessions/override 注册（dashboard-model-effort-control RFC）；2026-07-31 fail 切换重采（2026-06-01 时 707）；主体逻辑在 dashboard_ccassets.go
+      current: 811                          # 2026-09-01 +2：GET /api/system/update 注册（dashboard-update-notice RFC）；2026-09-01 +3：POST /api/sessions/override 注册（dashboard-model-effort-control RFC）；2026-07-31 fail 切换重采（2026-06-01 时 707）；主体逻辑在 dashboard_ccassets.go
       limit: 500
       until_phase: "5"
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry

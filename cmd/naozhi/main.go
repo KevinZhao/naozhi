@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -468,6 +469,16 @@ func main() {
 		}
 	}
 
+	// Self-update state, built BEFORE the server so the same pointer reaches
+	// both the HTTP layer (which reads it) and the background checker started
+	// further down (which writes it). updateChecker stays nil when auto-update
+	// is disabled; the endpoint then reports the running version only.
+	updateStatus := selfupdate.NewStatus(version)
+	var updateChecker *selfupdate.Checker
+	if cfg.UpdateEnabled() {
+		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus)
+	}
+
 	// Server
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:          cfg.Server.Addr,
@@ -500,6 +511,8 @@ func main() {
 		Transcriber:             stt,
 		StartupCtx:              ctx,
 		Version:                 version,
+		UpdateStatus:            updateStatus,
+		UpdateChecker:           updateChecker,
 		SysessionManager:        sysMgr,
 		SysWorkDir:              sysWorkDir,
 		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).
@@ -701,9 +714,9 @@ func main() {
 	// Releases on cfg.UpdateInterval() and, per mode, notifies / downloads /
 	// downloads+restarts. All work is best-effort and error-swallowing so a
 	// failed check never disturbs the gateway. dev builds self-skip.
-	if cfg.UpdateEnabled() {
-		startUpdateChecker(ctx, cfg, platforms)
-	}
+	// Constructed earlier (alongside the server, which shares its Status);
+	// this only starts the polling loop.
+	startUpdateChecker(ctx, updateChecker)
 
 	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 

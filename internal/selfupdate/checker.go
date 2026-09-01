@@ -2,11 +2,13 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -103,6 +105,13 @@ type CheckerConfig struct {
 
 	// Notify, if non-nil, receives update notices (best-effort).
 	Notify NotifyFunc
+
+	// Status, if non-nil, receives every state transition so the dashboard
+	// can render it. Nil disables the reporting entirely and leaves this
+	// Checker behaving exactly as it did before Status existed — which is
+	// what lets the pre-existing tests in this package stand as a regression
+	// gate without modification.
+	Status *Status
 }
 
 // latestRelease is indirected so checker tests can stub the release lookup
@@ -122,7 +131,21 @@ type Checker struct {
 	// ModeDownload, so repeated ticks don't re-download the same release while
 	// CurrentVersion (the still-running old binary) stays unchanged.
 	installed string
+
+	// checkMu serializes on-demand checks (CheckNow) against each other and
+	// guards lastCheckNow. The periodic Run loop does NOT take it: it is a
+	// single goroutine on a >=1h cadence, and making it wait behind a
+	// dashboard-triggered check would be pointless coupling. Concurrent
+	// latestRelease calls are harmless (two reads of the same remote state)
+	// and Status has its own lock.
+	checkMu      sync.Mutex
+	lastCheckNow time.Time
 }
+
+// minOnDemandInterval throttles CheckNow. The dashboard calls it only to fill
+// the cold-start window (see CheckNow), but "only" still means once per open
+// browser tab, so the floor has to hold globally rather than per caller.
+const minOnDemandInterval = 15 * time.Minute
 
 // NewChecker builds a Checker. Returns nil when the config is unusable
 // (interval <= 0), so callers can simply skip Run.
@@ -195,6 +218,7 @@ func (c *Checker) checkOnce(ctx context.Context) {
 	defer cancel()
 
 	rel, err := latestRelease(cctx)
+	c.cfg.Status.noteCheck(relTag(rel), err)
 	if err != nil {
 		slog.Warn("auto-update: check failed", "err", err)
 		return
@@ -234,15 +258,19 @@ func (c *Checker) checkOnce(ctx context.Context) {
 // degrades to a logged warning + best-effort notice; the running service is
 // never left broken because Replace restores its backup on any swap failure.
 func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
+	c.cfg.Status.notePhase(PhaseInstalling, "", nil)
+
 	selfPath, err := SelfPath()
 	if err != nil {
 		slog.Warn("auto-update: locate running binary failed", "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
 		return
 	}
 
 	tmp, err := os.MkdirTemp("", "naozhi-autoupdate-*")
 	if err != nil {
 		slog.Warn("auto-update: temp dir failed", "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
 		return
 	}
 	defer os.RemoveAll(tmp)
@@ -250,6 +278,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	newBin, err := Download(ctx, rel, tmp)
 	if err != nil {
 		slog.Warn("auto-update: download/verify failed", "tag", rel.Tag, "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动下载失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
 		return
 	}
@@ -261,6 +290,12 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// permission to the install dir (binary in /usr/local/bin owned by
 		// root while the service runs as a normal user) — degrade to a notice.
 		slog.Warn("auto-update: install failed (service unchanged)", "tag", rel.Tag, "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
+		// A failure here is usually a permission problem, and the operator's
+		// fix (chown/chmod) happens outside this process. Drop the cached
+		// writability verdict so the dashboard reflects the fix immediately
+		// rather than up to preflightTTL later.
+		invalidatePreflight()
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动安装失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
 		return
 	}
@@ -268,6 +303,11 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	// Mark installed so we don't re-download next tick while the old binary
 	// is still the one running.
 	c.installed = rel.Tag
+	// PhaseStaged, not PhaseInstalling: the bytes are on disk and the ONLY
+	// thing between the operator and the new version is a restart. This is the
+	// transition the dashboard exists to surface — before it, a staged binary
+	// was invisible outside the log.
+	c.cfg.Status.notePhase(PhaseStaged, rel.Tag, nil)
 	slog.Info("auto-update: binary installed", "tag", rel.Tag, "path", selfPath, "restart", restart)
 
 	if !restart {
@@ -303,12 +343,19 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	//     bad. The next successful upgrade's Replace overwrites it (O_TRUNC), so
 	//     it does not accumulate.
 	slog.Info("auto-update: triggering self-restart", "tag", rel.Tag, "backup_kept", backupPath)
+	c.cfg.Status.notePhase(PhaseRestarting, rel.Tag, nil)
 	c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", rel.Tag))
 	if err := RestartServiceNoWait(ctx); err != nil {
 		// The binary is installed and verified; only the restart trigger
 		// failed to enqueue. Do NOT roll back — the operator can restart
 		// manually and the backup is still on disk.
 		slog.Warn("auto-update: restart trigger failed (binary IS installed)", "tag", rel.Tag, "err", err)
+		// Back to Staged rather than Failed: the install SUCCEEDED and the
+		// binary is waiting on disk. Reporting Failed here would tell the
+		// operator to retry an install that already completed — which in the
+		// staged state is the backup-destroying path (see ActionRestart).
+		// LastErr still carries why the restart did not happen.
+		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `sudo systemctl restart naozhi`。", rel.Tag, err))
 		return
 	}
@@ -323,3 +370,72 @@ func (c *Checker) notify(text string) {
 	}
 	c.cfg.Notify(text)
 }
+
+// relTag safely reads a tag off a possibly-nil Release.
+func relTag(rel *Release) string {
+	if rel == nil {
+		return ""
+	}
+	return rel.Tag
+}
+
+// CheckNow performs a single release lookup on demand and records it in
+// Status. It NEVER installs anything — it only learns the latest tag.
+//
+// Why it exists: the default cadence is 6h with check_on_start disabled, so a
+// freshly restarted naozhi knows nothing about available releases for up to six
+// hours. That is precisely when an operator is most likely to open the
+// dashboard and ask "am I current?", and the honest answer must not be a blank
+// space. CheckNow fills that window.
+//
+// Why it never installs: installing is a decision that belongs to the
+// configured Mode (or, from P2, to an explicit operator action). Letting a GET
+// request trigger a binary replacement as a side effect would make a read
+// endpoint mutate the deployment.
+//
+// Throttling is global, not per caller: minOnDemandInterval is enforced under
+// checkMu, so N dashboard tabs polling simultaneously still produce at most one
+// GitHub request per interval. Callers that lose the race get ErrCheckThrottled
+// and should simply render the existing Status.
+func (c *Checker) CheckNow(ctx context.Context) error {
+	if c == nil {
+		return errors.New("no update checker configured")
+	}
+	// A dev build has no meaningful released version to compare against —
+	// same rule checkOnce applies, stated here so the endpoint does not reach
+	// out to GitHub on developer machines at all.
+	if c.cfg.CurrentVersion == "dev" || c.cfg.CurrentVersion == "" {
+		return ErrCheckSkippedDev
+	}
+
+	c.checkMu.Lock()
+	defer c.checkMu.Unlock()
+	if !c.lastCheckNow.IsZero() && time.Since(c.lastCheckNow) < minOnDemandInterval {
+		return ErrCheckThrottled
+	}
+	// Stamp BEFORE the network call, not after. An unreachable GitHub can hold
+	// this goroutine for the full timeout below; stamping first means a slow
+	// failure still consumes the interval instead of letting every subsequent
+	// poll queue up behind the same dead endpoint.
+	c.lastCheckNow = time.Now()
+
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	rel, err := latestRelease(cctx)
+	c.cfg.Status.noteCheck(relTag(rel), err)
+	if err != nil {
+		slog.Debug("auto-update: on-demand check failed", "err", err)
+		return err
+	}
+	slog.Debug("auto-update: on-demand check done", "latest", rel.Tag)
+	return nil
+}
+
+// ErrCheckThrottled means an on-demand check was declined because one ran
+// recently. Not an error condition for the caller — render current Status.
+var ErrCheckThrottled = errors.New("update check throttled")
+
+// ErrCheckSkippedDev means the running build is a dev build, for which there
+// is no meaningful release comparison.
+var ErrCheckSkippedDev = errors.New("update check skipped for dev build")

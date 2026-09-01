@@ -40,6 +40,7 @@
 | F10 | 活跃 CLI 会话是否会被 naozhi 重启杀掉 | **不会**（既有机制，本 RFC 不重新验证）。`internal/shim` sidecar setsid 脱离 + systemd `KillMode=process`，重启后经 `Manager.Discover`/`Reconnect` 重新接上 |
 | F11 | 写端点的 CSRF 门 | **自动覆盖**。`internal/dashboard/auth/csrf.go` 对非安全方法做 Origin 校验 |
 | F12 | 前端确认框基础设施 | **已有且契合**。`confirmDialog({title,message,detail,confirmText,variant,countdownSecs})`（`dashboard.js:8781`），`countdownSecs` 速度带正适合"重启服务" |
+| F13 | `XPC_SERVICE_NAME` 是否会被非 launchd 场景误继承 | **会，且单读 env 有"重启错服务"的风险**。该变量是继承的：从一个 launchd 管理的父进程（Terminal.app 本身就是个 job）手工启动 naozhi，读到的是**父 job 的 label**。此时 `launchctl list com.apple.Terminal` 照样成功 → 旧的"存在即视为我们的服务"判据不成立 → `kickstart -k` 会重启操作者的终端。修法见 §3.6a 的 `verifiedLaunchdLabel`（实测本机交互 shell 无该变量，但这不构成安全前提） |
 
 ### 1.2 关键纠正：稳定态是 `staged`，用户要的是"生效"而非"安装"
 
@@ -320,12 +321,30 @@ func launchdServiceLabel() string {
 }
 ```
 
-> v1 曾设计一个 `DetectLaunchdLabel()`：遍历 `launchctl list`、对含 "naozhi"
-> 的 label 逐个再查 `Program` 并与 `SelfPath()` 比路径。**已废弃**——F5 让它
-> 变成纯粹的过度工程，且那套启发式在 label 不含 "naozhi" 的部署下会失效。
+但**光读 env 不够**（F13）：该变量是继承的，从 Terminal 之类的 launchd 子进程
+手工启动 naozhi 会读到父 job 的 label，而 `launchctl list <那个 label>` 照样
+成功——于是 `kickstart -k` 会重启操作者的终端。所以取到 label 后必须**确认这个
+job 跑的就是本 binary**：
 
-一处需要注意：`ServiceRunning()` 也在用 `launchdLabel` 常量，**同样要改**，
-否则 F4 只修了一半（重启前的 `ServiceRunning()` 门仍会返回 false 而静默跳过）。
+```go
+// verifiedLaunchdLabel 返回确认在管理本进程的 label，否则 ""。
+// 一次 `launchctl list <label>`（单个已知 label，不是扫描），解析 "Program"
+// 或 "ProgramArguments"[0]，与 SelfPath() 比（两侧都 EvalSymlinks）。
+// 取不到可执行路径就 fail closed —— 少重启一次可恢复，重启错服务不可恢复。
+func verifiedLaunchdLabel() string
+```
+
+`ServiceRunning()` 与 `restartLaunchd()` **都**走 `verifiedLaunchdLabel()`：
+
+- 只改 `restartLaunchd` 没用，`ServiceRunning()` 是它的前置门，常量留在那里
+  就仍然静默跳过（F4 只修一半）；
+- 只读 env 不校验，则引入 F13 的误重启。
+
+> v1 曾设计一个 `DetectLaunchdLabel()`：遍历 `launchctl list`、对含 "naozhi"
+> 的 label 逐个再查 `Program` 并与 `SelfPath()` 比路径。作为**发现**手段已废弃
+> （F5 让它成为过度工程，且启发式在 label 不含 "naozhi" 时失效）；但其中的
+> **路径比对**作为**校验**手段被保留下来——成本从"扫描全部 job"降到"查一个
+> 已知 label"，而它挡住的正是 F13。
 
 **(b) `restartLaunchd` 改用 `kickstart -k`：**
 
@@ -420,14 +439,57 @@ secret 放进限流器的 key 空间）。
 
 ## 5. 分阶段交付
 
-**P1 — 只读提示（零风险，可独立 merge）**
+**P1 — 只读提示（零风险，可独立 merge）— ✅ 已实现**
 `selfupdate.Status` + `Checker` 写入 + `CheckNow`（§3.7）+
-`GET /api/system/update` + chip 显示 + 预检。此时点击 chip 弹出说明气泡，
-按 `action` 给对应的手工命令（`install` → `naozhi upgrade`；`restart` →
-`launchctl kickstart -k …` / `systemctl restart naozhi`）。
+`GET /api/system/update` + chip 显示 + 预检 + §3.6 的 macOS 重启修复。
+点击 chip 弹出说明气泡，按 `action` 给对应的手工命令（`install` →
+`naozhi upgrade`；`restart` → `launchctl kickstart -k …` /
+`systemctl restart naozhi`）。
 
-P1 单独就解决了最大痛点：**本机现在这种"磁盘 v0.0.73 / 进程 v0.0.72 / 无人
-知晓"的状态会立刻变得可见**。
+> **为什么 §3.6 的 macOS 修复落在 P1 而不是 P2**：P1 的 `restart_supported` /
+> `can_apply` 都由 `ServiceRunning()` 推导，label 不对就会对着一台明明有受管
+> 服务的机器报"未检测到受管服务"。而 (a) 与 (b) 又不能拆开做——单改 (a) 会让
+> `ServiceRunning()` 第一次返回 true，从而让既有的坏 `unload`+`load` 路径真的
+> 被执行到，把"静默跳过"升级成"把服务摘掉"。所以两者必须同批。
+
+**P1 实测（2026-09-01，隔离实例 127.0.0.1:8199，binary 置于 /tmp 与系统实例无关）**
+
+`mode: notify`、`check_on_start: true`、启动后 8 秒：
+
+```json
+{"current":"v0.0.72","latest":"v0.0.73","staged":"","phase":"available",
+ "action":"install","can_apply":true,"restart_supported":false}
+```
+
+`checked_at` 只比启动晚 6 秒，而 `check_on_start` 自带 30 秒延迟——**这条
+`latest` 是 `CheckNow` 填的**，即 §3.7 的冷启动窗口填充确实在工作。
+
+切到 `mode: download` 后等 checkOnce 完成（T+50s）：
+
+```json
+{"current":"v0.0.72","latest":"v0.0.73","staged":"v0.0.73","phase":"staged",
+ "action":"restart","can_apply":false,
+ "blocked_reason":"未检测到受管服务（systemd / launchd），手动重启进程即可让新版本生效",
+ "restart_supported":false}
+```
+
+```
+-rwxr-xr-x  19159458  naozhi                        ← 已换成 v0.0.73
+-rw-------  27282914  naozhi.naozhi-upgrade.bak     ← 0600，仍是替换前那份
+```
+
+四条关键验收：
+
+1. **`action` 是 `restart` 而不是 `install`** —— §1.3 的核心要求在真实链路上成立。
+2. **`.bak` 保住了替换前的版本**，回滚 artifact 未被摧毁。
+3. **`CheckNow` 不触发安装**：T+8s 时 `latest` 已知而 `staged` 仍为空，安装是
+   到 checkOnce 才发生的。一个 GET 请求不会改变部署。
+4. **`restart_supported: false` 正确**：该实例不是 launchd 启动的，
+   `verifiedLaunchdLabel()` 返回空 → `can_apply` 随之为 false 并给出手工指引
+   （G5），而不是渲染一个点了必失败的按钮。
+
+P1 单独就解决了最大痛点：**本机那种"磁盘 v0.0.73 / 进程 v0.0.72 / 无人知晓"
+的状态现在会显示成一枚 `↻ v0.0.73` chip。**
 
 **P2 — 一键生效**
 `Checker.InstallLatest`（含 §1.3 的 staged-只重启分叉 + `installMu` 单飞）+
@@ -451,11 +513,19 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 - **§1.3 回归门（最重要的一条）**：构造 staged 态（`c.installed = latest`），
   调 `InstallLatest`，断言 (i) 没有发生任何 `Download`；(ii) `.bak` 文件内容
   **未被改写**；(iii) 只触发了重启。这条直接锁死"重复 apply 摧毁回滚 artifact"。
-- `launchdServiceLabel()`：`XPC_SERVICE_NAME` 有值 → 用它；空 → 回退常量。
+- `launchdServiceLabel()`：`XPC_SERVICE_NAME` 有值 → 用它；空/纯空白 → 回退常量。
+- `launchdJobRunsPath()`：喂**本机真实的** `launchctl list com.naozhi.agent`
+  输出（含 `Program` 与 `ProgramArguments` 两种形态）；断言匹配本 binary、
+  **拒绝 Terminal.app 那种真实存在但不是我们的 job**（F13）、无可执行路径时
+  fail closed。
 - `restartLaunchd` 命令行拼装：断言 `kickstart -k gui/<uid>/<label>`，且
-  **不再出现 `unload`**（防回归到 F6 的坏形态）。
-- `ServiceRunning()` 在 darwin 分支也用 `launchdServiceLabel()`（防 F4 只修一半）。
-- `CheckNow` 的 15m 节流：连续两次调用只发一次请求。
+  **不再出现 `unload`/`load`**（防回归到 F6 的坏形态）。
+- `ServiceRunning()` 与 `restartLaunchd()` 在 darwin 分支都用
+  `verifiedLaunchdLabel()`（防 F4 只修一半、防 F13）。
+- `CheckNow` 的 15m 节流：连续两次调用只发一次请求；8 个并发调用只产生 1 次
+  GitHub 查询（全局而非 per-caller）；**失败也消耗节流窗口**（时间戳在网络
+  调用之前写，否则 GitHub 挂掉时每次轮询都会排在同一个死端点后面）；dev build
+  完全不触网。
 
 **`internal/server`**
 
@@ -498,7 +568,7 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 | **重复 apply 摧毁 `.bak` 里的可回滚版本**（§1.3） | staged 态强制走 restart-only 分支；§6 有专门的回归门断言 `.bak` 未被改写。这是本 RFC 最高优先级的正确性约束（G7） |
 | 新 binary 起不来，dashboard 也没了，操作者失去唯一入口 | `Replace` 保留 `.bak`；`Mode: auto` 已确立"自重启路径永不删 backup"；`confirmDialog` 在触发前把回滚命令写在 `detail` 里（`cp <bak> <path> && chmod 0755 && <restart>`）供操作者复制 |
 | `kickstart -k` 在某些 macOS 版本 / domain 下行为不同 | 只在 `ServiceRunning()` 为真时调用；失败返回 error → `phase: failed` + 明确文案。plist `KeepAlive=true` 是二次保险 |
-| `XPC_SERVICE_NAME` 被人为篡改，导致重启了别的服务 | 该 env 由 launchd 注入，篡改它需要已经能控制 plist 或进程环境——那已是更高权限，不构成新增提权路径。非 launchd 场景（env 为空）回退常量 = 今天的行为 |
+| **`XPC_SERVICE_NAME` 被继承，导致重启了别的服务**（F13） | `verifiedLaunchdLabel()` 校验该 label 的 job 确实跑本 binary（比对 `Program` / `ProgramArguments[0]` 与 `SelfPath()`，两侧 EvalSymlinks），取不到路径则 fail closed。人为篡改该 env 需要已能控制进程环境，属更高权限，不构成新增提权路径 |
 | 冷启动 6h 窗口内功能空白 | §3.7 的 `CheckNow`，15m 全局节流，只在 `latest == ""` 时触发 |
 | 多 node 部署下误解为全量升级 | NG2 + `confirmDialog` 文案强制含"本节点"字样；静态契约测试断言该字样存在 |
 | 轮询增加负载 | 60s / 客户端，纯内存读 + 60s 缓存的预检，无网络。进行中才提到 3s |

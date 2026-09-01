@@ -225,6 +225,8 @@ func (s *Server) registerDashboard() {
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
+	// self-update state (docs/rfc/dashboard-update-notice.md); read-only in P1
+	s.mux.HandleFunc("GET /api/system/update", auth(s.handleUpdateStatus))
 	// instance-wide UI preferences (theme); persisted server-side so the
 	// choice survives a browser/device change or cache clear
 	// (dashboard/ext/uisettings)

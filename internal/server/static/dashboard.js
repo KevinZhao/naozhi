@@ -1562,6 +1562,166 @@ function showGitRemote(url) {
   showToast('GitHub remote: ' + shown);
 }
 
+// --- Self-Update Chip ---
+//
+// Surfaces GET /api/system/update in the sidebar header. See
+// docs/rfc/dashboard-update-notice.md.
+//
+// The one thing worth knowing before touching this: "a newer version exists"
+// and "a newer version is already on disk" are DIFFERENT states needing
+// opposite actions, and the server tells us which via `action` — we never
+// compare version strings here. Under the default update mode the steady state
+// is `restart` (the background checker downloads within seconds of finding a
+// release), so that is the common path, not the rare one.
+//
+// P1 is read-only: the chip reports, and clicking it explains what to run.
+// The in-place apply button arrives in P2.
+
+let updateState = null;
+let updateTimer = null;
+
+// UPDATE_POLL_MS is deliberately slow. Version state changes on a 6h server
+// cadence, so a minute of staleness is invisible, and this must not become
+// another per-second poll.
+const UPDATE_POLL_MS = 60000;
+
+async function fetchUpdateStatus() {
+  try {
+    const r = await fetch('/api/system/update');
+    if (!r.ok) return;
+    updateState = await r.json();
+    renderUpdateChip();
+  } catch (e) {
+    // Silent: a failed version poll must never produce a toast. It is
+    // background information and the chip simply keeps its previous state.
+  }
+}
+
+// updateChipView maps a status payload to the chip's presentation. Pure, so a
+// contract test can cover every branch without a DOM.
+function updateChipView(st) {
+  if (!st || !st.action || st.action === 'none') return { show: false };
+  const target = st.staged || st.latest || '';
+  if (st.phase === 'installing') {
+    return { show: true, busy: true, tag: target, title: '正在下载新版本…' };
+  }
+  if (st.phase === 'restarting') {
+    return { show: true, busy: true, tag: target, title: '正在重启以应用新版本…' };
+  }
+  if (st.phase === 'failed') {
+    return { show: true, failed: true, tag: target, title: '上次升级失败，点击查看原因' };
+  }
+  if (st.action === 'restart') {
+    // The staged case: bytes are already on disk, verified. A restart is the
+    // only remaining step — the icon is a restart glyph, not a download one.
+    return { show: true, restart: true, tag: target, title: target + ' 已就绪，重启生效' };
+  }
+  return { show: true, tag: target, title: '有新版本 ' + target + ' 可安装' };
+}
+
+function renderUpdateChip() {
+  const btn = document.getElementById('btn-update');
+  if (!btn) return;
+  const view = updateChipView(updateState);
+  if (!view.show) {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.classList.toggle('is-busy', !!view.busy);
+  btn.classList.toggle('is-failed', !!view.failed);
+  btn.title = view.title;
+  btn.setAttribute('aria-label', view.title);
+  const tag = document.getElementById('update-tag');
+  if (tag) tag.textContent = view.tag;
+  // Swap the glyph: an up-arrow reads as "fetch this", a circular arrow as
+  // "restart to apply". Getting these backwards would tell the operator to
+  // expect a download when none is needed.
+  const svg = btn.querySelector('svg');
+  if (svg) {
+    svg.innerHTML = view.restart
+      ? '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>'
+      : '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>';
+  }
+}
+
+// updateChipDetail builds the explanatory body shown when the chip is clicked.
+// Pure for the same reason as updateChipView.
+function updateChipDetail(st) {
+  const lines = [];
+  lines.push('当前版本：' + (st.current || '未知'));
+  if (st.action === 'restart') {
+    lines.push('已就绪：' + (st.staged || '') + '（已下载并校验，落盘完成）');
+    lines.push('');
+    lines.push('只需重启本节点服务即可生效，无需再次下载。');
+  } else if (st.action === 'install') {
+    lines.push('最新版本：' + (st.latest || ''));
+    lines.push('');
+    lines.push('需要下载并安装后重启本节点服务。');
+  }
+  if (st.running_sessions > 0) {
+    // Stated as reassurance, not warning: shim keeps the CLI subprocesses
+    // alive across a naozhi restart, so in-flight conversations survive.
+    lines.push('当前有 ' + st.running_sessions + ' 个会话正在运行；CLI 子进程由 shim 保持存活，对话不会中断。');
+  }
+  if (!st.can_apply && st.blocked_reason) {
+    lines.push('');
+    lines.push('⚠️ ' + st.blocked_reason);
+  }
+  if (st.last_error) {
+    lines.push('');
+    lines.push('上次错误：' + st.last_error);
+  }
+  if (st.check_error) {
+    lines.push('');
+    lines.push('版本检查失败：' + st.check_error);
+  }
+  // P1 has no apply button, so always hand over the exact command. Restart and
+  // install need different ones — telling someone to re-run `naozhi upgrade`
+  // when the binary is already staged is what makes them overwrite the backup.
+  lines.push('');
+  if (st.action === 'restart') {
+    lines.push('手动生效：');
+    lines.push(navigator.platform && navigator.platform.indexOf('Mac') === 0
+      ? '  launchctl kickstart -k gui/$(id -u)/com.naozhi.agent'
+      : '  sudo systemctl restart naozhi');
+  } else {
+    lines.push('手动升级：');
+    lines.push('  naozhi upgrade');
+  }
+  return lines.join('\n');
+}
+
+async function onUpdateChipClick() {
+  if (!updateState) return;
+  const st = updateState;
+  const titleMap = {
+    restart: '新版本已就绪',
+    install: '有新版本可用',
+  };
+  await confirmDialog({
+    title: titleMap[st.action] || '版本状态',
+    message: st.action === 'restart'
+      ? (st.staged || '') + ' 已下载完成，重启后生效'
+      : '最新版本 ' + (st.latest || '') + ' 可安装',
+    detail: updateChipDetail(st),
+    confirmText: '知道了',
+    cancelText: '关闭',
+    variant: 'primary',
+  });
+}
+
+function initUpdateChip() {
+  const btn = document.getElementById('btn-update');
+  if (!btn) return;
+  btn.addEventListener('click', onUpdateChipClick);
+  fetchUpdateStatus();
+  if (updateTimer) clearInterval(updateTimer);
+  updateTimer = setInterval(fetchUpdateStatus, UPDATE_POLL_MS);
+}
+
+document.addEventListener('DOMContentLoaded', initUpdateChip);
+
 // --- History Popover ---
 
 let activePopover = null;

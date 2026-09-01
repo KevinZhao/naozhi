@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/uiprefs"
@@ -163,6 +164,19 @@ type Server struct {
 	// AccessProfileSecretsDir; empty ConfigPath keeps create disabled (400).
 	// 读: routes.go.
 	accessProfilesH *accessprofile.Handler
+
+	// ── self-update state ──────────────────────────────
+	// updateStatus is the shared version state written by the background
+	// selfupdate.Checker; nil when the checker is disabled (GET then reports
+	// only the running version). updateChecker is the same Checker, held so
+	// the GET handler can fill the cold-start window via CheckNow.
+	// buildVersion is the `-X main.version` ldflag value, kept here so the
+	// endpoint can report the running version even with the checker disabled
+	// (HealthHandler holds its own copy for /health).
+	// 读: dashboard_update.go.
+	updateStatus  *selfupdate.Status
+	updateChecker *selfupdate.Checker
+	buildVersion  string
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -429,6 +443,9 @@ func buildServer(opts ServerOptions) *Server {
 		nodes:           nodes,
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
+		updateStatus:    opts.UpdateStatus,
+		updateChecker:   opts.UpdateChecker,
+		buildVersion:    opts.Version,
 		orient:          buildOrientConfig(opts),
 		// Instance-wide dashboard prefs (theme). Reuses opts.StateDir — the
 		// same data root the session/cron stores live under — so no new
