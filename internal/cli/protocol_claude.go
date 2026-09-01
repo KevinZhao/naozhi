@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // readEventPool recycles the scratch *Event that ReadEvent unmarshals each
@@ -445,6 +447,76 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	return nil
 }
 
+// WriteSetModel writes a set_model control_request to switch the live
+// session's model. Verified on claude 2.1.251
+// (docs/rfc/dashboard-model-effort-control.md §1 F6/F7/F14/F15):
+//
+//   - Success ack: control_response {subtype:"success"}; the switch can land
+//     mid-turn and affect the CURRENT turn's remaining output (F14) — the
+//     turn is not interrupted.
+//   - Rejection ack: control_response {subtype:"error", error:"…"} for both
+//     org-policy-restricted (F7) and unknown (F15) models. The CLI
+//     self-validates, so no manifest check is needed on this path.
+//   - Aliases ("opus") and canonical ids ("claude-opus-5") both work (F15).
+//   - The switch persists into claude's own session state (F8), but callers
+//     still re-apply via --model on respawn so kiro/claude behave alike.
+//
+// The ack is parsed by ReadEventInto's control_response branch into a
+// Type:"control_ack" Event carrying requestID — see the ModelSetter godoc.
+// Same byte-template construction as WriteInterrupt (single source of truth
+// for the control_request envelope shape).
+func (p *ClaudeProtocol) WriteSetModel(w io.Writer, requestID, model string) error {
+	var buf [320]byte
+	out := buf[:0]
+	out = append(out, `{"type":"control_request","request_id":`...)
+	out = appendJSONStringBytes(out, []byte(requestID))
+	out = append(out, `,"request":{"subtype":"set_model","model":`...)
+	out = appendJSONStringBytes(out, []byte(model))
+	out = append(out, `}}`...)
+	out = append(out, '\n')
+	if _, err := w.Write(out); err != nil {
+		return fmt.Errorf("write set_model control_request: %w", err)
+	}
+	return nil
+}
+
+// controlResponseFrame matches the CLI's control_response wire shape.
+// Kept minimal: only the fields the ack router consumes.
+type controlResponseFrame struct {
+	Response struct {
+		Subtype   string `json:"subtype"`
+		RequestID string `json:"request_id"`
+		Error     string `json:"error"`
+	} `json:"response"`
+}
+
+// parseControlAck converts a control_response line into a control_ack Event.
+// Returns ok=false for frames that carry no request_id (nothing to correlate
+// against — e.g. the bare `{"type":"control_response"}` shape older CLIs used
+// to emit) or that fail to parse; both degrade to the historical skip
+// behaviour so a malformed control frame can never kill the readLoop.
+// Error text is sanitized: it originates from the CLI (separate trust
+// boundary) and flows into slog attrs + the dashboard toast (F7 rejection
+// path). R184-SEC-M1 policy.
+func parseControlAck(line string) (Event, bool) {
+	var frame controlResponseFrame
+	if err := json.Unmarshal(stringToBytesUnsafe(line), &frame); err != nil {
+		return Event{}, false
+	}
+	if frame.Response.RequestID == "" {
+		return Event{}, false
+	}
+	ev := Event{
+		Type:         "control_ack",
+		SubType:      frame.Response.Subtype,
+		RPCRequestID: frame.Response.RequestID,
+	}
+	if frame.Response.Error != "" {
+		ev.Result = osutil.SanitizeForLog(frame.Response.Error, 256)
+	}
+	return ev, true
+}
+
 // ReadEvent parses a single CLI stream-json line into zero or more Events.
 //
 // R67-PERF-1 / R71-PERF-H1 / R227-PERF-1 archive anchor: the `line string`
@@ -498,10 +570,23 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool,
 	// json.Unmarshal as before.
 	// :"hook_ covers both :"hook_started" and :"hook_response" while
 	// keeping the colon-anchor that prevents false positives in user text
-	// (R260528-GO-16). control_response has no common prefix with hook_ so
-	// it is checked separately. [R250531-PERF-9]
-	if strings.Contains(line, `:"hook_`) ||
-		strings.Contains(line, `:"control_response"`) {
+	// (R260528-GO-16). control_response is no longer blanket-skipped: since
+	// the set_model control channel landed
+	// (docs/rfc/dashboard-model-effort-control.md §4.4) these frames carry
+	// the ack that Process.SetModel blocks on, so they are parsed into a
+	// control_ack Event instead. Frequency note: control_responses arrive
+	// once per control_request (interrupt / set_model) — rare — so the
+	// targeted parse costs nothing on the hot path; the substring check
+	// still gates it so ordinary frames never pay for it. Frames without a
+	// request_id (or that fail to parse) keep the historical skip so the
+	// pre-existing pool/skip contracts hold. [R250531-PERF-9]
+	if strings.Contains(line, `:"hook_`) {
+		return nil, false, nil
+	}
+	if strings.Contains(line, `:"control_response"`) {
+		if ev, ok := parseControlAck(line); ok {
+			return append(buf[:0], ev), false, nil
+		}
 		return nil, false, nil
 	}
 	// R220123-PERF-13 (#1637): unmarshal into a pooled *Event so the Event

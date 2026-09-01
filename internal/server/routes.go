@@ -319,6 +319,9 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
 	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+	// Per-session model/effort tuning from the dashboard header chips.
+	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	s.mux.HandleFunc("POST /api/sessions/override", auth(s.sessionH.HandleOverride))
 }
 
 // registerScratchRoutes wires the scratch-drawer route group (open / promote /

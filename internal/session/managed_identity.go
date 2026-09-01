@@ -198,6 +198,23 @@ func (s *ManagedSession) Model() string { return loadAtomicString(&s.model) }
 // the store-restore path in NewRouter when seeding from sessions.json.
 func (s *ManagedSession) SetModel(v string) { storeAtomicString(&s.model, v) }
 
+// TuningModel returns the operator's per-session model override ("" = no
+// override, config chain applies). docs/rfc/dashboard-model-effort-control.md §4.3.
+func (s *ManagedSession) TuningModel() string { return loadAtomicString(&s.tuningModel) }
+
+// SetTuningModel records the per-session model override. Callers must have
+// validated via tuningspec.ValidateModel; "" clears the override. Writers:
+// Router.SetSessionTuning (under r.mu) and the store-restore path.
+func (s *ManagedSession) SetTuningModel(v string) { storeAtomicString(&s.tuningModel, v) }
+
+// TuningEffort returns the operator's per-session thinking-effort override
+// ("" = no override). docs/rfc/dashboard-model-effort-control.md §4.3.
+func (s *ManagedSession) TuningEffort() string { return loadAtomicString(&s.tuningEffort) }
+
+// SetTuningEffort records the per-session effort override. Callers must
+// have validated via tuningspec.ValidateEffort; "" clears the override.
+func (s *ManagedSession) SetTuningEffort(v string) { storeAtomicString(&s.tuningEffort, v) }
+
 // SetHistorySource installs the backend-specific disk-tier Source. Called
 // by the router at session construction; safe to call after the session is
 // published (atomic store) but callers should not rely on mid-flight

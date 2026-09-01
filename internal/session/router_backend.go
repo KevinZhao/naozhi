@@ -82,6 +82,22 @@ type backendStore struct {
 	// stay structurally identical.
 	// 读写: backend (Set/GetSessionAccessProfile), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume)
 	accessProfileOverrides map[string]string
+	// configuredModelLists is the operator-declared model manifest per
+	// backend ID (cli.backends[].models) — the fallback tier the dashboard
+	// model popover shows when no agent-reported manifest exists (claude,
+	// or kiro before its first spawn). Read-only after NewRouter.
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// 读写: backend (BackendModelManifest), core (init)
+	configuredModelLists map[string][]string
+	// modelManifests caches the agent-reported model list per backend ID,
+	// refreshed opportunistically from any live process of that backend
+	// whenever BackendModelManifest is called (manifest reads are rare —
+	// dashboard picker/popover opens — so the per-call session scan is
+	// cheap). Survives process death so a suspended-only deployment still
+	// serves the last known list. Mutated under r.mu write lock.
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// 读写: backend (BackendModelManifest), core (init)
+	modelManifests map[string][]cli.ModelInfo
 }
 
 // R188-SEC-M2: model identifiers flow into the `--model` argv of the CLI child
@@ -419,4 +435,65 @@ func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 		Model: model, Args: args,
 		Effort: r.bkStore.backendEfforts[backendID],
 	}
+}
+
+// BackendModelManifest returns the model list the dashboard's per-session
+// model popover should offer for a backend ("" = router default backend).
+// docs/rfc/dashboard-model-effort-control.md §4.2.
+//
+// Two tiers, agent-reported first:
+//
+//  1. Runtime manifest: any LIVE process of this backend is asked for the
+//     availableModels it captured at Init (kiro session/new|load, F5/F12).
+//     A hit refreshes bkStore.modelManifests, so the list survives after
+//     every process of the backend is recycled — and tracks kiro upgrades,
+//     because each fresh spawn re-reports (RFC §6 R4).
+//  2. Configured fallback: cli.backends[].models (claude's alias list, or
+//     any operator-pinned set) when no runtime manifest was ever seen.
+//
+// Returns nil when neither tier has data — the popover then shows its
+// manual-input fallback ("清单在首次会话后可用").
+//
+// Takes r.mu for WRITING because a runtime hit updates the cache; manifest
+// reads are dashboard-popover-frequency (rare), so the write lock and the
+// O(sessions) scan cost nothing that matters.
+func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if backendID == "" {
+		backendID = r.bkStore.defaultBackend
+	}
+	for _, s := range r.ss.sessions {
+		sb := s.Backend()
+		if sb == "" {
+			sb = r.bkStore.defaultBackend
+		}
+		if sb != backendID {
+			continue
+		}
+		proc := s.loadProcess()
+		if proc == nil || !proc.Alive() {
+			continue
+		}
+		// Optional facet: TestProcess fakes and non-ACP processes miss it.
+		am, ok := proc.(interface{ AvailableModels() []cli.ModelInfo })
+		if !ok {
+			continue
+		}
+		if models := am.AvailableModels(); len(models) > 0 {
+			r.bkStore.modelManifests[backendID] = models
+			break
+		}
+	}
+	if m := r.bkStore.modelManifests[backendID]; len(m) > 0 {
+		return m
+	}
+	if lst := r.bkStore.configuredModelLists[backendID]; len(lst) > 0 {
+		out := make([]cli.ModelInfo, 0, len(lst))
+		for _, id := range lst {
+			out = append(out, cli.ModelInfo{ID: id})
+		}
+		return out
+	}
+	return nil
 }

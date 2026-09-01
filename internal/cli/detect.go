@@ -23,6 +23,13 @@ type BackendInfo struct {
 	Path        string `json:"path,omitempty"`
 	Version     string `json:"version,omitempty"`
 	Available   bool   `json:"available"`
+	// Models is the model manifest the dashboard's per-session model
+	// popover offers for this backend: agent-reported (kiro
+	// session/new|load availableModels, F5/F12) or the operator-declared
+	// cli.backends[].models fallback. Populated by Router.BackendsList;
+	// DetectBackendsCtx leaves it nil (dashboard-only field, same rule as
+	// Features). docs/rfc/dashboard-model-effort-control.md §4.2.
+	Models []ModelInfo `json:"models,omitempty"`
 	// ReplyTag is the short tag (e.g. "cc", "kiro") appended to IM replies
 	// and rendered in dashboard chips. Empty when no Profile is registered
 	// for the ID (legacy/unknown backend).

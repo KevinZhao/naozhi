@@ -2774,7 +2774,8 @@ function effortTagHtml(effort) {
   // be announced as "middle dot". Labelling the span supplies the context and
   // suppresses the decorative punctuation in one go.
   return '<span class="effort-tag' + (hot ? ' effort-hot' : '') +
-      '" title="' + escAttr(tip) + '" aria-label="' + escAttr(tip) + '">' +
+      '" title="' + escAttr(tip + ' — 点击切换档位') + '" aria-label="' + escAttr(tip) + '"' +
+      ' data-action="tuning-effort" style="cursor:pointer">' +
       esc(raw) + '</span>';
 }
 
@@ -2806,6 +2807,219 @@ function setHeaderEffortChip(sessions) {
   }
   const html = effortTagHtml(effort);
   if (el.innerHTML !== html) el.innerHTML = html;
+}
+
+// ===== Session tuning popover =====
+// Per-session model/effort switching from the header chips.
+// docs/rfc/dashboard-model-effort-control.md §4.1. Control lives where the
+// state is displayed: clicking the model label / effort tag opens a picker;
+// the choice POSTs /api/sessions/override and the server decides the apply
+// path (rpc / respawn / deferred — F9 split is server-side, the frontend
+// only renders the returned applied_via).
+
+const TUNING_EFFORT_TIERS = ['low', 'medium', 'high', 'xhigh', 'max'];
+let tuningPopoverCloseHandler = null;
+
+// Delegated dispatch for the header chips (data-action idiom, same as
+// SIDEBAR_PROJECT_ACTIONS — keeps the generated-onclick CSP ratchet flat).
+// Attached once at load; the chips are rebuilt by renderMainShell /
+// setHeaderEffortChip, so per-element binding would leak or miss repaints.
+document.addEventListener('click', (e) => {
+  const el = e.target.closest && e.target.closest('[data-action="tuning-model"],[data-action="tuning-effort"]');
+  if (!el) return;
+  e.stopPropagation();
+  openTuningPopover(el.dataset.action === 'tuning-model' ? 'model' : 'effort');
+});
+
+function dismissTuningPopover() {
+  const el = document.getElementById('tuning-popover');
+  if (el) el.remove();
+  if (tuningPopoverCloseHandler) {
+    document.removeEventListener('click', tuningPopoverCloseHandler);
+    tuningPopoverCloseHandler = null;
+  }
+}
+
+// tuningToast is a minimal self-dismissed notice — the dashboard has no
+// global toast helper, and the F7 rejection text (CLI-supplied, sanitized
+// server-side) needs a visible surface that outlives the popover.
+function tuningToast(msg, isError) {
+  let t = document.getElementById('tuning-toast');
+  if (t) t.remove();
+  t = document.createElement('div');
+  t.id = 'tuning-toast';
+  t.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);' +
+    'max-width:70%;padding:10px 16px;border-radius:10px;z-index:200;font-size:13px;' +
+    'background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
+    'border:1px solid ' + (isError ? 'var(--nz-danger, #d33)' : 'var(--nz-border)') + ';' +
+    'color:var(--nz-text)';
+  t.textContent = msg; // textContent — CLI-origin text must never hit innerHTML
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), isError ? 8000 : 4000);
+}
+
+// tuningModelsForSession resolves the popover's model choices from the
+// cached /api/cli/backends payload (BackendInfo.models: agent-reported for
+// kiro, cli.backends[].models fallback for claude). Empty list → the
+// popover shows its manual-input row only.
+function tuningModelsForSession(s) {
+  const backendID = (s && s.backend) || sessionBackends[selectedKey] ||
+    (cliBackends && cliBackends.default) || '';
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return { models: [], backendID };
+  const entry = cliBackends.backends.find(b => b && b.id === backendID) ||
+    cliBackends.backends.find(b => b && b.id === (cliBackends.default || ''));
+  return { models: (entry && Array.isArray(entry.models)) ? entry.models : [], backendID: entry ? entry.id : backendID };
+}
+
+function openTuningPopover(kind) {
+  dismissTuningPopover();
+  if (!selectedKey) return;
+  // NG4: override API is local-only in this slice; remote sessions get an
+  // explanation instead of a dead control (mirrors git chip's local-only).
+  if ((selectedNode || 'local') !== 'local') {
+    tuningToast('远程节点会话暂不支持切换模型/档位', false);
+    return;
+  }
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const running = s.state === 'running';
+  const rows = [];
+  const current = kind === 'model' ? (s.model || '') : (s.effort || '');
+
+  if (kind === 'model') {
+    const { models } = tuningModelsForSession(s);
+    for (const m of models) {
+      const active = m.id === current || (current && current.indexOf(m.id) !== -1);
+      rows.push({ value: m.id, label: m.id, desc: m.description || '', active });
+    }
+    if (models.length === 0) {
+      rows.push({ header: true, label: '清单在该 backend 首次会话后可用；可手动输入：' });
+    }
+    rows.push({ input: true });
+    rows.push({ value: '', label: '恢复默认（配置链）', reset: true });
+  } else {
+    for (const tier of TUNING_EFFORT_TIERS) {
+      rows.push({ value: tier, label: tier, active: tier === current });
+    }
+    rows.push({ value: '', label: '恢复默认（配置链）', reset: true });
+  }
+
+  const anchor = document.getElementById(kind === 'model' ? 'header-model' : 'header-effort');
+  if (!anchor) return;
+  const pop = document.createElement('div');
+  pop.id = 'tuning-popover';
+  pop.style.cssText = 'position:fixed;min-width:220px;max-width:320px;max-height:340px;' +
+    'overflow-y:auto;background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
+    'border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:120;' +
+    'font-size:13px;scrollbar-width:thin';
+  const rect = anchor.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 340)) + 'px';
+  pop.style.top = (rect.bottom + 6) + 'px';
+
+  const hint = kind === 'effort'
+    ? 'ⓘ 将重启 CLI 进程并恢复上下文' + (running ? '（会中断当前回合）' : '')
+    : 'ⓘ 生效时机以返回的应用路径为准';
+  let html = '<div style="padding:6px 12px;color:var(--nz-text-mute);font-size:12px;border-bottom:1px solid var(--nz-bg-2)">' +
+    (kind === 'model' ? '切换模型' : '切换 effort 档位') + '</div>';
+  for (const rowSpec of rows) {
+    if (rowSpec.header) {
+      html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:12px">' + esc(rowSpec.label) + '</div>';
+      continue;
+    }
+    if (rowSpec.input) {
+      html += '<div style="padding:6px 12px"><input id="tuning-manual-input" type="text" placeholder="model id…" ' +
+        'style="width:100%;box-sizing:border-box;background:var(--nz-bg-2);border:1px solid var(--nz-border);' +
+        'border-radius:6px;padding:5px 8px;color:var(--nz-text);font-size:12px"></div>';
+      continue;
+    }
+    const mark = rowSpec.active ? '● ' : (rowSpec.reset ? '↺ ' : '○ ');
+    html += '<div class="tuning-opt" data-value="' + escAttr(rowSpec.value) + '"' +
+      ' style="padding:7px 12px;cursor:pointer;color:var(--nz-text);' +
+      (rowSpec.active ? 'font-weight:600;color:var(--nz-accent);' : '') +
+      (rowSpec.reset ? 'border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute);' : '') + '"' +
+      (rowSpec.desc ? ' title="' + escAttr(rowSpec.desc) + '"' : '') + '>' +
+      mark + esc(rowSpec.label) + '</div>';
+  }
+  html += '<div style="padding:6px 12px;color:var(--nz-text-faint);font-size:11px;border-top:1px solid var(--nz-bg-2)">' + esc(hint) + '</div>';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+
+  pop.querySelectorAll('.tuning-opt').forEach(item => {
+    item.onmouseenter = () => item.style.background = 'var(--nz-hover-bg)';
+    item.onmouseleave = () => item.style.background = '';
+    item.addEventListener('click', () => {
+      const v = item.dataset.value;
+      dismissTuningPopover();
+      // Respawn-family switches interrupt a running turn — confirm first
+      // (§4.1 运行中防护; the server decides the actual path, we only warn
+      // for the case that ALWAYS respawns: effort changes).
+      if (kind === 'effort' && running &&
+          !confirm('会话正在运行：切换档位将中断当前回合并重启 CLI 进程（上下文保留）。继续？')) {
+        return;
+      }
+      postTuningOverride(kind, v);
+    });
+  });
+  const manual = pop.querySelector('#tuning-manual-input');
+  if (manual) {
+    manual.addEventListener('click', (e) => e.stopPropagation());
+    manual.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        const v = manual.value.trim();
+        dismissTuningPopover();
+        if (v) postTuningOverride('model', v);
+      }
+    };
+  }
+  setTimeout(() => {
+    tuningPopoverCloseHandler = (e) => {
+      if (!pop.contains(e.target)) dismissTuningPopover();
+    };
+    document.addEventListener('click', tuningPopoverCloseHandler);
+  }, 0);
+}
+
+// postTuningOverride sends the switch and renders the outcome. Pending
+// visual: the source chip dims until the next sessions poll repaints it
+// with the server-confirmed value (no optimistic promotion — §4.1 三态;
+// a rollback is visible because the poll simply keeps the old value).
+async function postTuningOverride(kind, value) {
+  const key = selectedKey;
+  const chip = document.getElementById(kind === 'model' ? 'header-model' : 'header-effort');
+  if (chip) chip.style.opacity = '0.45';
+  const restore = () => { if (chip) chip.style.opacity = ''; };
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const body = { key };
+    body[kind] = value;
+    const resp = await fetch('/api/sessions/override', {
+      method: 'POST', headers, body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const text = (await resp.text()).trim();
+      restore();
+      // 409 = CLI rejection (F7/F15): surface the CLI's own text verbatim.
+      tuningToast(resp.status === 409 ? ('切换被 CLI 拒绝：' + text) : ('切换失败：' + text), true);
+      return;
+    }
+    const data = await resp.json();
+    const via = data.applied_via || '';
+    const label = kind === 'model' ? '模型' : '档位';
+    if (via === 'rpc') {
+      tuningToast(label + '已切换（对下一轮生效）', false);
+    } else if (via === 'respawn') {
+      tuningToast(label + '已记录，CLI 进程将重启并恢复上下文（下条消息生效）', false);
+    } else {
+      tuningToast(label + '已记录，将于下次会话进程启动时生效', false);
+    }
+    // Pull fresh state now rather than waiting out the poll interval; the
+    // repaint clears the pending dim with the server-confirmed value.
+    setTimeout(() => { restore(); fetchSessions(); }, 800);
+  } catch (e) {
+    restore();
+    tuningToast('切换请求失败：网络错误', true);
+  }
 }
 
 // repaintGitChip re-renders the chip for the currently selected session from
@@ -3226,8 +3440,8 @@ function renderMainShell() {
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel
-    ? '<span class="model-label" title="' + escAttr(rawModel) + '">· ' + esc(compactModel) + '</span>'
-    : '<span class="model-label model-label-unset" title="model 未在 system/init 上报；可能仍在 spawn 中">· (模型未配置)</span>';
+    ? '<span class="model-label" id="header-model" data-action="tuning-model" style="cursor:pointer" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
+    : '<span class="model-label model-label-unset" id="header-model" data-action="tuning-model" style="cursor:pointer" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selectedKey);
   // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
   // "claude-code 2.1.143" cliLabel already names the backend; the

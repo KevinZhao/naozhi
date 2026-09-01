@@ -178,6 +178,7 @@ cli:
 - 所有会话列表（运行中 / 就绪 / 挂起）+ 实时状态更新
 - 事件流实时推送（thinking、tool_use、agent 调度、结果）
 - 直接在 Dashboard 发送消息、上传文件（图片）、按会话选择 backend
+- 会话级模型 / effort 切换：点击会话 header 的模型名或 effort 档位即可运行中切换（kiro 模型走 ACP `session/set_model`，claude 走 `set_model` control_request；effort 经优雅重启 + resume 生效，上下文保留），覆盖持久化、跨重启不弹回
 - 发现并接管外部 Claude CLI 进程（一键 Take Over）
 - 费用统计（per-session 累计 cost）
 - 项目管理（绑定配置、planner 重启）

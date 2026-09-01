@@ -149,6 +149,19 @@ cli:
   #    # claude/codex logs a warning and is ignored.
   #    effort: "xhigh"
   #    args: []
+  #    # Optional: the model list the dashboard's per-session model popover
+  #    # offers for this backend (click the model name in the chat header to
+  #    # switch a session's model at runtime — an override that persists for
+  #    # that session and outranks the config chain).
+  #    #
+  #    # For kiro this is only a cold-start fallback: the agent reports its
+  #    # real availableModels on every session start, and that list wins.
+  #    # For claude the CLI reports no manifest, so declare the aliases /
+  #    # canonical ids you want offered here (the popover also accepts free
+  #    # input; claude validates unknown names itself and the dashboard
+  #    # surfaces its rejection).
+  #    # docs/rfc/dashboard-model-effort-control.md §4.2.
+  #    models: ["sonnet", "opus", "haiku"]
   #
   # A top-level cli.effort works as an inheritable default for every backend
   # that supports one, exactly like cli.model:

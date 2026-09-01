@@ -174,6 +174,65 @@ func shutdownShimViaReconnect(
 	}
 }
 
+// driftCompareArgs reconstructs the argv a fresh spawn of this session would
+// use, for comparison against the shim-recorded argv in the drift check.
+// Extracted from the classifyShimState prep loop so the parity with the real
+// spawn path is testable in one call (tuning_drift_parity_test.go).
+//
+// backendDefaultsFor centralises the model/extraArgs lookup that otherwise
+// duplicated the resolveSpawnParamsLocked logic (R222-ARCH-14, #739). On top
+// of the backend layer, the session's tuning overrides are applied — they
+// sit at the top of resolveSpawnParamsLocked's chains and land in argv
+// (--model/--effort), so omitting them here would misclassify every tuned
+// session as arg-drift on every naozhi restart ("切过模型的会话一重启全丢").
+// sess may be nil (adopt path: shim survived a crash that predated the first
+// store save) — no session, no tuning, backend defaults apply.
+// docs/rfc/dashboard-model-effort-control.md §4.5.
+//
+// Effort must be mirrored for the same reason SettingsFile is: BuildArgs
+// emits `--effort` for ACP backends, so omitting it would make every restart
+// read the surviving kiro shims as arg-drift and restart sessions that were
+// fine.
+//
+// KNOWN LIMITATION (pre-existing, widened not introduced): this comparison
+// only sees backend-level defaults + session tuning, so any per-AGENT
+// override reads as drift. Verified for effort (backend "high" vs
+// agents[x].effort "max") and identically for the older agents[x].model.
+// Fixing it means changing what drift compares — either persisting the
+// effective argv into shim state, or restricting the comparison to the
+// backend-decidable subset — which affects every agent-level override and so
+// stays out of scope. docs/rfc/kiro-effort-control.md §4.5.1. Session tuning
+// does NOT share that limitation: the ManagedSession is available right here,
+// so there is no excuse to leave the same trap twice.
+func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID string, sess *ManagedSession) []string {
+	bd := r.backendDefaultsFor(backendID)
+	model, effort := bd.Model, bd.Effort
+	if sess != nil {
+		if tm := sess.TuningModel(); tm != "" {
+			model = tm
+		}
+		if te := sess.TuningEffort(); te != "" {
+			effort = te
+		}
+	}
+	return recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
+		Model:     model,
+		ExtraArgs: bd.Args,
+		Effort:    effort,
+		// Must mirror the real spawn (lifecycle) so a session started
+		// with `--settings <naozhi file>` is not misread as arg-drift
+		// (which would trigger an unnecessary restart). RFC
+		// naozhi-owned-settings-v3.
+		SettingsFile: r.naozhiSettingsFile,
+		// Same reason as SettingsFile directly above: BuildArgs emits
+		// `--mcp-config` for it, so omitting it here would make every
+		// surviving shim read as arg-drift after an upgrade that turns
+		// cli.mcp_config on — restarting sessions that were fine.
+		// RFC cli-mcp-config G4.
+		MCPConfigFile: r.mcpConfigFile,
+	})
+}
+
 // firstArgvDivergence returns the first differing token of two argv slices as
 // an (old, new) pair, for logging why a shim was classified as drifted.
 // "(absent)" marks a slice that ended first. Both empty means the slices are
@@ -302,41 +361,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		var storedBase, currentArgs []string
 		if recWrapper != nil {
 			storedBase = stripResumeArgs(state.CLIArgs)
-			// backendDefaultsFor centralises the model/extraArgs lookup that
-			// otherwise duplicated the resolveSpawnParamsLocked logic
-			// (R222-ARCH-14, #739).
-			driftDefaults := r.backendDefaultsFor(recBackendID)
-			currentArgs = recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
-				Model:     driftDefaults.Model,
-				ExtraArgs: driftDefaults.Args,
-				// Effort must be mirrored here for the same reason SettingsFile
-				// is: BuildArgs now emits `--effort` for ACP backends, so
-				// omitting it would make every restart read the surviving kiro
-				// shims as arg-drift and restart sessions that were fine.
-				//
-				// KNOWN LIMITATION (pre-existing, widened not introduced): this
-				// comparison only sees BACKEND-level defaults, so any per-agent
-				// override reads as drift. Verified for effort (backend "high"
-				// vs agents[x].effort "max") and identically for the older
-				// agents[x].model (backend "sonnet" vs agent "opus"). Fixing it
-				// means changing what drift compares — either persisting the
-				// effective argv into shim state, or restricting the comparison
-				// to the backend-decidable subset — which affects every
-				// agent-level override and so is deliberately out of scope
-				// here. docs/rfc/kiro-effort-control.md §4.5.1
-				Effort: driftDefaults.Effort,
-				// Must mirror the real spawn (lifecycle) so a session started
-				// with `--settings <naozhi file>` is not misread as arg-drift
-				// (which would trigger an unnecessary restart). RFC
-				// naozhi-owned-settings-v3.
-				SettingsFile: r.naozhiSettingsFile,
-				// Same reason as SettingsFile directly above: BuildArgs emits
-				// `--mcp-config` for it, so omitting it here would make every
-				// surviving shim read as arg-drift after an upgrade that turns
-				// cli.mcp_config on — restarting sessions that were fine.
-				// RFC cli-mcp-config G4.
-				MCPConfigFile: r.mcpConfigFile,
-			})
+			currentArgs = r.driftCompareArgs(recWrapper, recBackendID, sess)
 			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
 		}
 

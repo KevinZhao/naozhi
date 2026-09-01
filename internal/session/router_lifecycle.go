@@ -619,6 +619,23 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		effort = opts.Effort
 	}
 
+	// Session tuning overrides — the TOP of both chains. An operator's
+	// dashboard pick for THIS session outranks every config tier (deployer
+	// declarations about a CLASS of sessions) and the per-request opts
+	// (agent/planner defaults). Values were tuningspec-validated at write
+	// (SetSessionTuning) and re-validated at store load, so they are safe
+	// to feed BuildArgs. Read from the existing session entry: fresh keys
+	// have no entry and therefore no override, by construction.
+	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	if old := r.ss.sessions[key]; old != nil {
+		if tm := old.TuningModel(); tm != "" {
+			model = tm
+		}
+		if te := old.TuningEffort(); te != "" {
+			effort = te
+		}
+	}
+
 	// Workspace: opts override > per-chat override > old session workspace > default.
 	//
 	// R245-ARCH-32 (#883): the per-chat-override > default base tier is

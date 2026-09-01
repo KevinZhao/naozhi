@@ -170,6 +170,7 @@ func main() {
 	}
 	wrappers := bws.Wrappers
 	backendModels := bws.Models
+	backendModelLists := bws.ModelLists
 	backendExtraArgs := bws.ExtraArgs
 	backendEfforts := bws.Efforts
 	defaultBackend := bws.DefaultID
@@ -241,6 +242,7 @@ func main() {
 		// router-level default would re-introduce the tier for those backends
 		// and make the arg-drift comparison disagree with the real spawn.
 		BackendEfforts:       backendEfforts,
+		BackendModelLists:    backendModelLists,
 		AccessProfiles:       accessProfiles,
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,

@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -507,4 +508,127 @@ func (p *Process) InterruptViaControl() error {
 		return fmt.Errorf("write interrupt control_request: %w", err)
 	}
 	return nil
+}
+
+// setModelAckTimeout caps how long SetModel waits for the CLI's
+// acknowledgement. Sized from live measurement: claude processes control
+// requests in streaming gaps — a mid-turn ack took 7.5s on 2.1.251
+// (docs/rfc/dashboard-model-effort-control.md §1 F14) — so anything
+// single-digit risks false timeouts under load. 30s matches
+// acpHandshakeTimeout's order of magnitude for "the CLI is expected to
+// answer but may be busy".
+const setModelAckTimeout = 30 * time.Second
+
+// registerControlAck installs an ack waiter for a control request_id.
+// The returned channel receives nil (success ack), an error (error ack,
+// carrying the CLI's rejection text — F7), and is buffered so a delivery
+// racing the waiter's timeout never blocks the readLoop.
+func (p *Process) registerControlAck(reqID string) chan error {
+	ch := make(chan error, 1)
+	p.controlAckMu.Lock()
+	if p.controlAcks == nil {
+		p.controlAcks = make(map[string]chan error, 1)
+	}
+	p.controlAcks[reqID] = ch
+	p.controlAckMu.Unlock()
+	return ch
+}
+
+// unregisterControlAck removes an ack waiter (deferred by SetModel so a
+// late/never ack cannot leak the map entry).
+func (p *Process) unregisterControlAck(reqID string) {
+	p.controlAckMu.Lock()
+	delete(p.controlAcks, reqID)
+	p.controlAckMu.Unlock()
+}
+
+// deliverControlAck routes a control_ack Event from the readLoop to its
+// registered waiter. Unmatched acks (waiter timed out and unregistered, or
+// an interrupt's control_response — those never register) are dropped: they
+// are fire-and-forget from the CLI's perspective and carry no turn state.
+func (p *Process) deliverControlAck(ev Event) {
+	p.controlAckMu.Lock()
+	ch, ok := p.controlAcks[ev.RPCRequestID]
+	if ok {
+		delete(p.controlAcks, ev.RPCRequestID)
+	}
+	p.controlAckMu.Unlock()
+	if !ok {
+		return
+	}
+	if ev.SubType == "error" {
+		// ev.Result was sanitized at the protocol layer (parseControlAck /
+		// ACP interception) — safe for slog + dashboard toast.
+		ch <- fmt.Errorf("%w: %s", ErrSetModelRejected, ev.Result)
+		return
+	}
+	ch <- nil
+}
+
+// ErrSetModelRejected wraps a CLI-side rejection of a set_model request —
+// claude org-policy restriction (F7) or unknown model (F15). The wrapped
+// text is the CLI's own message; callers surface it verbatim to the
+// operator and MUST NOT record the override (RFC §6 R8: ack-before-persist).
+var ErrSetModelRejected = errors.New("set_model rejected by CLI")
+
+// SetModel switches the live session's model in place, without restarting
+// the CLI process. Protocol mapping and verified semantics are on the
+// ModelSetter godoc (protocol.go); this method owns the ack correlation:
+//
+//  1. Register an ack waiter under a fresh request_id.
+//  2. Write the protocol-specific request (ACP session/set_model RPC /
+//     claude set_model control_request).
+//  3. Block until the CLI acks, the process dies, or ctx/timeout expires.
+//
+// Returns:
+//   - nil: the CLI acknowledged the switch (kiro: RPC {} response — no wire
+//     echo of the model exists, F11, so ack==confirmation; claude:
+//     control_response success).
+//   - ErrSetModelRejected-wrapped: the CLI refused (claude F7/F15). The
+//     caller must not persist the override.
+//   - ErrSetModelUnsupported: protocol has no runtime channel (codex) or
+//     the ACP handshake hasn't produced a session yet. Callers fall back
+//     to record-only ("applies next spawn").
+//   - other errors: transport write failure / process death / timeout.
+//
+// Mid-turn safety was verified live on both backends (F13/F14): the request
+// does not interrupt an in-flight turn, so callers do not need to gate on
+// State==Running. NOTE for kiro callers: set_model resets the session's
+// effort tier to the new model's default (F9) — Router.SetSessionTuning is
+// responsible for choosing the respawn path instead when an effort tier is
+// in force; this method deliberately stays policy-free.
+func (p *Process) SetModel(ctx context.Context, model string) error {
+	ms, ok := p.protocol.(ModelSetter)
+	if !ok {
+		return ErrSetModelUnsupported
+	}
+	if !p.Alive() {
+		return fmt.Errorf("set_model: process not alive")
+	}
+	reqID := "naozhi-setmodel-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
+	ch := p.registerControlAck(reqID)
+	defer p.unregisterControlAck(reqID)
+	if err := ms.WriteSetModel(p.shimStdinWriter(), reqID, model); err != nil {
+		return err
+	}
+	timer := time.NewTimer(setModelAckTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-ch:
+		if err == nil {
+			// F11: kiro's ack carries no model echo, and claude's live value
+			// only refreshes on the next system/init — so on ack success WE
+			// update the live-process model mirror. Snapshot prefers
+			// proc.Model() over the persisted session field; without this
+			// the header would keep showing the old model until respawn.
+			p.setModel(model)
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.killCh:
+		return fmt.Errorf("set_model: process terminated while awaiting ack")
+	case <-timer.C:
+		return fmt.Errorf("set_model: no ack within %s", setModelAckTimeout)
+	}
 }

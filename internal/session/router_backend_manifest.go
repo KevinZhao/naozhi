@@ -41,6 +41,11 @@ func (r *Router) BackendsList() []cli.BackendInfo {
 	backends := make([]cli.BackendInfo, 0, len(ids))
 	for _, id := range ids {
 		info := cli.BackendInfo{ID: id, Available: true}
+		// Model manifest for the per-session model popover: runtime
+		// (agent-reported) tier first, configured fallback second — see
+		// BackendModelManifest. Takes r.mu internally; BackendsList runs
+		// unlocked (handler / reverse-RPC context), so no lock nesting.
+		info.Models = r.BackendModelManifest(id)
 		if wr := r.BackendWrapper(id); wr != nil {
 			info.DisplayName = wr.CLIName
 			// Path intentionally omitted — revealing installed-binary paths

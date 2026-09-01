@@ -34,6 +34,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 	"github.com/naozhi/naozhi/internal/sessionconst"
+	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
@@ -233,7 +234,7 @@ type Router struct {
 	// dirty is a plain bool. The annotation below covers the UNION of all
 	// accessing domains; the lint recurses one level so each inner field ALSO
 	// carries its own per-domain annotation on sessionStore.
-	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest), workspace (evictWorkspaceOverrideLocked byChat live-session check)
+	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest), workspace (evictWorkspaceOverrideLocked byChat live-session check), backend (BackendModelManifest live-proc manifest scan), tuning (SetSessionTuning lookup/record)
 	ss sessionStore
 	// bkStore is the backend/policy facet (Router P3, #383): the 8 read-only-
 	// after-NewRouter config fields (wrapper/wrappers/defaultBackend/backendIDs/
@@ -743,6 +744,12 @@ type RouterConfig struct {
 	// backends and desync arg-drift detection from the real spawn.
 	// docs/rfc/kiro-effort-control.md
 	BackendEfforts map[string]string
+	// BackendModelLists is the operator-declared model manifest per backend
+	// ID (cli.backends[].models), served by BackendModelManifest as the
+	// fallback tier below agent-reported manifests. Entries were
+	// validateModelString-gated at config load.
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	BackendModelLists map[string][]string
 	// AccessProfiles is the named auth/upstream overlay registry (RFC
 	// project-access-profile). Keyed by profile ID. Nil/empty means no profiles
 	// configured — every session runs on the global settings.json baseline
@@ -949,6 +956,8 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.bkStore.backendModels = cfg.BackendModels
 	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
 	r.bkStore.backendEfforts = cfg.BackendEfforts
+	r.bkStore.configuredModelLists = cfg.BackendModelLists
+	r.bkStore.modelManifests = make(map[string][]cli.ModelInfo)
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.accessProfileOverrides = make(map[string]string)
 	r.accessProfiles = cfg.AccessProfiles
@@ -1155,6 +1164,27 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 	// system/init.
 	if entry.Model != "" {
 		s.SetModel(entry.Model)
+	}
+	// Tuning-override restore with load-time re-validation (§4.6): these
+	// values feed --model/--effort argv on the next spawn, and sessions.json
+	// is hand-editable — a smuggled "-flag" shaped value must be dropped
+	// here, not passed to BuildArgs. Same validators as the write path
+	// (SetSessionTuning) and the config layer; drop-with-warn rather than
+	// fail-hard so one corrupt entry cannot block the whole store load.
+	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	if entry.TuningModel != "" {
+		if err := tuningspec.ValidateModel("stored tuning_model", entry.TuningModel); err != nil {
+			slog.Warn("dropping invalid persisted tuning_model", "key", entry.Key, "err", err)
+		} else {
+			s.SetTuningModel(entry.TuningModel)
+		}
+	}
+	if entry.TuningEffort != "" {
+		if err := tuningspec.ValidateEffort("stored tuning_effort", entry.TuningEffort); err != nil {
+			slog.Warn("dropping invalid persisted tuning_effort", "key", entry.Key, "err", err)
+		} else {
+			s.SetTuningEffort(entry.TuningEffort)
+		}
 	}
 	s.setSessionID(entry.SessionID)
 	if entry.LastActive != 0 {

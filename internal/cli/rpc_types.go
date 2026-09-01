@@ -128,9 +128,37 @@ type ACPTextContent struct {
 	Text string `json:"text"`
 }
 
-// ACPSessionNewResult is the result of session/new.
+// ACPSessionNewResult is the result of session/new (and structurally of
+// session/load — kiro returns the same models envelope on both, F12).
 type ACPSessionNewResult struct {
 	SessionID string `json:"sessionId"`
+	// Models carries the agent's model manifest: current selection + the
+	// full availableModels list (20 entries on kiro 2.20.2, F5). Parsed so
+	// the dashboard model popover can offer real choices instead of a
+	// hardcoded list; absent on agents that don't report it (nil-safe).
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	Models *ACPModelsEnvelope `json:"models,omitempty"`
+}
+
+// ACPModelsEnvelope matches the "models" object in session/new|load results.
+type ACPModelsEnvelope struct {
+	CurrentModelID  string         `json:"currentModelId"`
+	AvailableModels []ACPModelInfo `json:"availableModels"`
+}
+
+// ACPModelInfo is one selectable model as reported by the agent.
+type ACPModelInfo struct {
+	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// ModelInfo is the protocol-agnostic model-manifest entry naozhi caches and
+// serves via /api/cli/backends. JSON tags are the dashboard wire shape.
+type ModelInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // ACPPermissionRequestParams is the params of a session/request_permission

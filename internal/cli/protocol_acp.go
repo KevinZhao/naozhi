@@ -221,6 +221,29 @@ type ACPProtocol struct {
 	// independent of the cli/backend registry. Empty string falls back to
 	// LabelEmpty in the metric — useful for tests that don't wire it.
 	BackendID string
+
+	// ctrlMu guards pendingControl. A dedicated mutex (not mu) so the
+	// per-response lookup on the readLoop never contends with the
+	// high-frequency textBuf accumulation that mu serialises.
+	ctrlMu sync.Mutex
+	// pendingControl maps an in-flight control RPC's numeric id (today only
+	// session/set_model) to the caller's correlation requestID. ReadEvent's
+	// IsResponse branch consults this table FIRST: a matching response is
+	// surfaced as a Type:"control_ack" Event instead of being treated as the
+	// session/prompt turn-end — without this, a mid-turn set_model response
+	// would falsely close the active turn (F13 depends on the interception).
+	// Entries are removed on match; a response that never arrives leaks one
+	// int→string pair until process teardown (bounded: one entry per
+	// SetModel call, and Process.SetModel serialises via its ack table).
+	// docs/rfc/dashboard-model-effort-control.md §4.4.
+	pendingControl map[int]string
+
+	// availableModels caches the agent-reported model manifest from
+	// session/new / session/load results (F5/F12). Written once during Init
+	// (before readLoop starts), read later by the /api/cli/backends manifest
+	// path on arbitrary goroutines — hence atomic.
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	availableModels atomic.Pointer[[]ModelInfo]
 }
 
 func (p *ACPProtocol) Name() string { return "acp" }
@@ -362,9 +385,15 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 			JSONRPC: "2.0", ID: loadID, Method: "session/load",
 			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd, McpServers: []any{}},
 		}
-		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
+		// R232-CR-15 note applies to session/load too: the Msg variant keeps
+		// the metric emission uniform AND gives us the result payload —
+		// kiro returns the same models envelope on load as on new (F12), so
+		// resume refreshes the manifest cache just like a fresh spawn.
+		resp, err := p.sendAndWaitResponseMsg(rw, loadReq)
+		if err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
 		}
+		p.captureModels(resp.Result)
 		p.storeSessionID(resumeID)
 	} else {
 		newReq := RPCRequest{
@@ -384,10 +413,53 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		if err := json.Unmarshal(resp.Result, &result); err != nil {
 			return "", fmt.Errorf("acp parse session/new result: %w", err)
 		}
+		p.storeModels(result.Models)
 		p.storeSessionID(result.SessionID)
 	}
 
 	return p.loadSessionID(), nil
+}
+
+// captureModels best-effort parses a session/load result for the models
+// envelope. Parse failures are ignored — the manifest is an enhancement,
+// never a reason to fail Init (RFC §5: "解析失败不阻塞 Init").
+func (p *ACPProtocol) captureModels(result json.RawMessage) {
+	var parsed ACPSessionNewResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		return
+	}
+	p.storeModels(parsed.Models)
+}
+
+// storeModels normalises and publishes the agent-reported model manifest.
+// Entries without a modelId are dropped (nothing to feed set_model / --model
+// with). nil / empty envelopes leave any previously stored list in place —
+// a transiently silent agent must not wipe a good manifest.
+func (p *ACPProtocol) storeModels(env *ACPModelsEnvelope) {
+	if env == nil || len(env.AvailableModels) == 0 {
+		return
+	}
+	models := make([]ModelInfo, 0, len(env.AvailableModels))
+	for _, m := range env.AvailableModels {
+		if m.ModelID == "" {
+			continue
+		}
+		models = append(models, ModelInfo{ID: m.ModelID, Name: m.Name, Description: m.Description})
+	}
+	if len(models) == 0 {
+		return
+	}
+	p.availableModels.Store(&models)
+}
+
+// AvailableModels returns the agent-reported model manifest captured during
+// Init ("" before the handshake / on agents that don't report one). The
+// returned slice is shared — callers must not mutate it.
+func (p *ACPProtocol) AvailableModels() []ModelInfo {
+	if v := p.availableModels.Load(); v != nil {
+		return *v
+	}
+	return nil
 }
 
 // acpImageSource is the inner "source" object inside an ACP image content
@@ -545,6 +617,85 @@ func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images
 	return p.WriteMessage(w, text, images)
 }
 
+// registerPendingControl records an in-flight control RPC id → caller
+// requestID mapping for ReadEvent's response interception.
+func (p *ACPProtocol) registerPendingControl(id int, requestID string) {
+	p.ctrlMu.Lock()
+	if p.pendingControl == nil {
+		p.pendingControl = make(map[int]string, 1)
+	}
+	p.pendingControl[id] = requestID
+	p.ctrlMu.Unlock()
+}
+
+// takePendingControl removes and returns the caller requestID for a control
+// RPC id, or ("", false) when the id is not an in-flight control request
+// (i.e. it is the session/prompt response — the normal turn-end path).
+func (p *ACPProtocol) takePendingControl(id int) (string, bool) {
+	p.ctrlMu.Lock()
+	defer p.ctrlMu.Unlock()
+	reqID, ok := p.pendingControl[id]
+	if ok {
+		delete(p.pendingControl, id)
+	}
+	return reqID, ok
+}
+
+// dropPendingControl removes a registration after a failed write (the
+// request never reached the agent, so no response will arrive).
+func (p *ACPProtocol) dropPendingControl(id int) {
+	p.ctrlMu.Lock()
+	delete(p.pendingControl, id)
+	p.ctrlMu.Unlock()
+}
+
+// WriteSetModel sends a session/set_model RPC to switch the live session's
+// model. Verified on kiro 2.20.2 (F1/F13, docs/rfc/dashboard-model-effort-control.md §1):
+//
+//   - The RPC succeeds mid-turn without disturbing the in-flight prompt;
+//     the new model applies from the next turn.
+//   - kiro validates NOTHING here — an unknown modelId returns success and
+//     the failure surfaces on the next prompt (F10). Callers must validate
+//     against the availableModels manifest before invoking.
+//   - The switch is process-bound, not persisted by kiro (F2); callers own
+//     re-applying it via --model on every respawn.
+//
+// The response is intercepted by ReadEvent via pendingControl and emitted as
+// a control_ack Event carrying requestID — see the ModelSetter godoc.
+// Returns ErrSetModelUnsupported before the handshake (no session to target),
+// mirroring WriteInterrupt's pre-handshake contract.
+func (p *ACPProtocol) WriteSetModel(w io.Writer, requestID, model string) error {
+	sid := p.loadSessionID()
+	if sid == "" {
+		return ErrSetModelUnsupported
+	}
+	id := p.allocID()
+	req := RPCRequest{
+		JSONRPC: "2.0", ID: id, Method: "session/set_model",
+		Params: acpSetModelParams{SessionID: sid, ModelID: model},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("acp marshal session/set_model: %w", err)
+	}
+	// Register BEFORE the write: the readLoop may deliver the response on
+	// another goroutine the instant the frame reaches the agent.
+	p.registerPendingControl(id, requestID)
+	data = append(data, '\n')
+	if _, err := w.Write(data); err != nil {
+		p.dropPendingControl(id)
+		return fmt.Errorf("acp write session/set_model: %w", err)
+	}
+	return nil
+}
+
+// acpSetModelParams matches the parameters of the ACP "session/set_model"
+// RPC (F1). Named struct for the same reflect-cache reason as acpInitParams.
+type acpSetModelParams struct {
+	SessionID string `json:"sessionId"`
+	ModelID   string `json:"modelId"`
+}
+
 func (p *ACPProtocol) SupportsPriority() bool { return false }
 func (p *ACPProtocol) SupportsReplay() bool   { return false }
 
@@ -633,6 +784,24 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 
 	// Response (turn complete for session/prompt)
 	if msg.IsResponse() {
+		// Control-RPC interception (docs/rfc/dashboard-model-effort-control.md
+		// §4.4): a response matching an in-flight session/set_model id is an
+		// acknowledgement, NOT the session/prompt turn-end. It must be routed
+		// out as a control_ack BEFORE the generic turn-end handling below —
+		// otherwise a mid-turn set_model response would flush textBuf and
+		// close the active turn (operator-visible as a truncated reply).
+		// Checked for both success and error shapes so a rejected control RPC
+		// doesn't fall through into the ErrACPRPC turn-failure path either.
+		if id, ok := msg.IDAsInt(); ok {
+			if reqID, pending := p.takePendingControl(id); pending {
+				ev := Event{Type: "control_ack", SubType: "success", RPCRequestID: reqID}
+				if msg.Error != nil {
+					ev.SubType = "error"
+					ev.Result = osutil.SanitizeForLog(msg.Error.Message, 256)
+				}
+				return []Event{ev}, false, nil
+			}
+		}
 		if msg.Error != nil {
 			// Multi-Backend RFC §10 (Sprint 6a): record per-(backend, method,
 			// code) RPC errors. Method on a Response is unknown without
