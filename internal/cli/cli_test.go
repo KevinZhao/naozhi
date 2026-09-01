@@ -430,9 +430,16 @@ func TestClaudeProtocol_WriteInterrupt(t *testing.T) {
 	}
 }
 
-func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
+func TestClaudeProtocol_ReadEvent_ControlResponseBecomesAck(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
+	// Contract change (docs/rfc/dashboard-model-effort-control.md §4.4):
+	// control_response frames with a request_id are no longer silently
+	// skipped — they surface as a control_ack Event so Process.SetModel can
+	// correlate its pending acknowledgement. The load-bearing invariant is
+	// unchanged: a control_response must NEVER complete a turn (done stays
+	// false, and handleShimStdout consumes control_ack before dispatch so
+	// it never reaches EventLog either).
 	line := `{"type":"control_response","response":{"subtype":"success","request_id":"req-1"}}`
 	ev, done, err := readOne(t, p, line)
 	if err != nil {
@@ -441,8 +448,45 @@ func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
 	if done {
 		t.Error("control_response must not complete a turn")
 	}
-	if ev.Type != "" {
-		t.Errorf("control_response should be skipped, got Type=%q", ev.Type)
+	if ev.Type != "control_ack" {
+		t.Errorf("Type = %q, want control_ack", ev.Type)
+	}
+	if ev.SubType != "success" {
+		t.Errorf("SubType = %q, want success", ev.SubType)
+	}
+	if ev.RPCRequestID != "req-1" {
+		t.Errorf("RPCRequestID = %q, want req-1", ev.RPCRequestID)
+	}
+
+	// Error ack (F7 org-policy rejection): the CLI's error text rides in
+	// Result so the dashboard toast can show it verbatim.
+	line = `{"type":"control_response","response":{"subtype":"error","request_id":"req-2","error":"Model \"haiku\" is restricted"}}`
+	ev, done, err = readOne(t, p, line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Error("error control_response must not complete a turn")
+	}
+	if ev.Type != "control_ack" || ev.SubType != "error" {
+		t.Errorf("got Type=%q SubType=%q, want control_ack/error", ev.Type, ev.SubType)
+	}
+	if ev.RPCRequestID != "req-2" {
+		t.Errorf("RPCRequestID = %q, want req-2", ev.RPCRequestID)
+	}
+	if !strings.Contains(ev.Result, "restricted") {
+		t.Errorf("Result = %q, want CLI error text", ev.Result)
+	}
+
+	// A control_response WITHOUT request_id has nothing to correlate —
+	// keeps the historical skip (also what the event-pool tests pin).
+	line = `{"type":"control_response"}`
+	ev, done, err = readOne(t, p, line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done || ev.Type != "" {
+		t.Errorf("bare control_response should be skipped, got Type=%q done=%v", ev.Type, done)
 	}
 }
 

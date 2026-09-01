@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/sessionconst"
+	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
 // Config is the top-level naozhi configuration loaded from config.yaml.
@@ -321,6 +322,13 @@ type CLIBackendConfig struct {
 	// EnabledBackends, so refusing to boot would make a mixed claude+kiro
 	// deployment that sets the top-level default unstartable.
 	Effort string `yaml:"effort,omitempty"`
+	// Models optionally declares the model list the dashboard's per-session
+	// model popover offers for this backend. Primarily for claude (whose CLI
+	// reports no manifest — the built-in alias fallback is sonnet/opus/haiku);
+	// for kiro the agent-reported availableModels from session/new|load wins
+	// over this list. Each entry is validated like `model` (flag-injection
+	// guard). docs/rfc/dashboard-model-effort-control.md §4.2.
+	Models []string `yaml:"models,omitempty"`
 }
 
 type SessionConfig struct {
@@ -1259,6 +1267,18 @@ func validateConfig(cfg *Config) error {
 		if err := validateEffortString(fmt.Sprintf("cli.backends[%s].effort", b.ID), b.Effort); err != nil {
 			return err
 		}
+		// Each declared popover model feeds the same --model argv path as
+		// cli.backends[].model when the operator picks it, so the same
+		// flag-injection allowlist applies per entry.
+		// docs/rfc/dashboard-model-effort-control.md §4.2.
+		for i, m := range b.Models {
+			if m == "" {
+				return fmt.Errorf("cli.backends[%s].models[%d] is empty", b.ID, i)
+			}
+			if err := validateModelString(fmt.Sprintf("cli.backends[%s].models[%d]", b.ID, i), m); err != nil {
+				return err
+			}
+		}
 	}
 	// agents[*].args 同样会被拼进 exec.Command（session/router.go 按 agentID
 	// 合并 AgentOpts.ExtraArgs），配置层漏过等于放弃 NUL/控制字符防御。
@@ -1415,68 +1435,27 @@ func validateArgvStrings(field string, args []string) error {
 	return nil
 }
 
-// modelNameRe restricts model identifiers to characters that can never be
-// re-interpreted by Claude / Kiro / Gemini CLIs as a flag boundary. Real
-// Anthropic / vendor model strings are alphanumerics plus `.`, `_`, `-`
-// (e.g. "claude-opus-4-5", "kiro-1.0", "us.anthropic.claude-3-5-sonnet").
-// Empty is accepted by the caller (means "use backend default"); this regex
-// only validates non-empty strings.
-//
-// Why the leading character must be alphanumeric: BuildArgs appends
-// `--model <opts.Model>` to the argv, but a future refactor or alternate
-// backend that drops the `--model` flag and passes the model as a positional
-// could let "-foo" be re-parsed by the CLI's flag parser. The first char is
-// pinned to [A-Za-z0-9] so a leading `-` (or `.` ambiguous on some shells)
-// is rejected outright, eliminating that class of misuse at the
-// config-validation layer rather than relying on per-backend argv assembly
-// to stay correct forever.
-var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-
-// validEffortTiers is the closed set of thinking-effort tiers naozhi will
-// forward, matching `kiro-cli acp --effort` on kiro 2.16.0.
-//
-// Why an allowlist here when the read path deliberately avoids one: the
-// dashboard displays a tier kiro has ALREADY chosen, so refusing to render an
-// unfamiliar one would lose real information (see kiro-effort-visibility.md
-// §5 R4). Here naozhi is constructing argv, so the same flag-injection
-// argument that pins modelNameRe applies — and a typo'd tier should fail at
-// startup rather than being silently rejected by kiro on the first turn.
-// A future kiro tier requires updating this set; the error message says so.
-var validEffortTiers = map[string]struct{}{
-	"low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
-}
+// modelNameRe / validEffortTiers moved to internal/tuningspec (leaf) so the
+// session layer can reuse the SAME validators for dashboard tuning overrides
+// and sessions.json load-time re-validation without importing config
+// (config already reads session exports — the reverse import would cycle).
+// The wrappers below keep every existing call site and error string intact.
+// docs/rfc/dashboard-model-effort-control.md §4.3.
 
 // validateEffortString gates a configured thinking-effort tier. Empty is
 // allowed and means "pass no flag" (backend keeps its own default), matching
 // the fallback semantics of validateModelString.
 // docs/rfc/kiro-effort-control.md §4.3
 func validateEffortString(field, value string) error {
-	if value == "" {
-		return nil
-	}
-	if _, ok := validEffortTiers[value]; !ok {
-		return fmt.Errorf("%s %q is not a known thinking-effort tier "+
-			"(want one of: low, medium, high, xhigh, max) — if a newer kiro "+
-			"added a tier, extend validEffortTiers", field, value)
-	}
-	return nil
+	return tuningspec.ValidateEffort(field, value)
 }
 
 // validateModelString gates a configured model identifier. Empty is allowed
 // (caller-defined fallback semantics: cli.model empty → backend default,
-// agent.model empty → cli.model). Non-empty values must match modelNameRe.
-// R215-SEC-P2-1.
+// agent.model empty → cli.model). Non-empty values must match the
+// tuningspec model pattern. R215-SEC-P2-1.
 func validateModelString(field, value string) error {
-	if value == "" {
-		return nil
-	}
-	if len(value) > 128 {
-		return fmt.Errorf("%s %q is too long (max 128 chars)", field, value)
-	}
-	if !modelNameRe.MatchString(value) {
-		return fmt.Errorf("%s %q must match [A-Za-z0-9._-]+ — refusing (flag-injection guard)", field, value)
-	}
-	return nil
+	return tuningspec.ValidateModel(field, value)
 }
 
 // parseDurationRequired parses s as a positive duration.

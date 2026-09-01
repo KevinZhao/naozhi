@@ -10,6 +10,42 @@ import (
 // Callers should fall back to SIGINT-based Interrupt() or to Collect mode.
 var ErrInterruptUnsupported = errors.New("protocol does not support stdin interrupt")
 
+// ErrSetModelUnsupported is returned by Process.SetModel when the session's
+// protocol does not implement the ModelSetter facet (codex today). Callers
+// (Router.SetSessionTuning) treat it as "record the override; it applies on
+// the next spawn via --model" rather than a hard failure.
+// docs/rfc/dashboard-model-effort-control.md §4.4.
+var ErrSetModelUnsupported = errors.New("protocol does not support runtime model change")
+
+// ModelSetter is the OPTIONAL Protocol facet for runtime model switching,
+// surfaced via type assertion (same additive-extension pattern as
+// eventReaderInto / Capabilities — the Protocol god-interface stays
+// unchanged so existing implementations and test stubs do not break).
+//
+// Wire mapping (both verified live, docs/rfc/dashboard-model-effort-control.md §1):
+//   - ACP (kiro):        session/set_model RPC (F1). The response frame is
+//     intercepted by ReadEvent's pending-control table and surfaced as a
+//     Type:"control_ack" Event instead of a turn-end — without that
+//     interception the generic IsResponse branch would close the active
+//     turn mid-flight (F13 mid-turn safety depends on this).
+//   - stream-json (claude): control_request {subtype:"set_model"} (F6).
+//     The CLI's control_response is parsed into the same Type:"control_ack"
+//     Event; an error subtype carries the CLI's rejection text (e.g. the
+//     org-policy restriction of F7) in Event.Result.
+//
+// requestID is the caller's correlation key: it is echoed back verbatim in
+// the resulting control_ack Event's RPCRequestID regardless of protocol
+// (ACP maps its own numeric RPC id back to requestID internally), so
+// Process.SetModel can register its ack channel BEFORE writing — no
+// write-then-register race.
+type ModelSetter interface {
+	// WriteSetModel writes a runtime model-change request to the agent's
+	// stdin. The eventual acknowledgement arrives asynchronously on the
+	// readLoop as a Type:"control_ack" Event with RPCRequestID==requestID;
+	// SubType "success" or "error" (Result carries the error text).
+	WriteSetModel(w io.Writer, requestID, model string) error
+}
+
 // Protocol abstracts the communication protocol between naozhi and an AI CLI agent.
 // Implementations handle protocol-specific message formats, initialization handshakes,
 // and event parsing (e.g., Claude stream-json vs ACP JSON-RPC 2.0).

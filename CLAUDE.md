@@ -95,6 +95,7 @@ cmd/naozhi/main.go
   -> timeouts     超时 / deadline 常量的 canonical home
   -> sessionconst Session 调优常量
   -> sessionkey   Session key 前缀规范（router 命名空间）
+  -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
   -> backendid    Backend-ID 长度/格式校验
   -> apierr       Claude API 错误检测与本地化
   -> ctxutil      context.Context helpers

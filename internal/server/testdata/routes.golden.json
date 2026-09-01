@@ -266,6 +266,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/sessions/override",
+    "handler_type": "*dashsession.Handlers"
+  },
+  {
+    "method": "POST",
     "path": "/api/sessions/resume",
     "handler_type": "*dashsession.Handlers"
   },

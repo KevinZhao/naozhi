@@ -235,6 +235,15 @@ type Process struct {
 	// process connection is sufficient.
 	interruptSeq atomic.Int64
 
+	// controlAckMu guards controlAcks: pending SetModel acknowledgement
+	// waiters keyed by the control request_id. readLoop's control_ack
+	// interception (handleShimStdout) delivers into the registered channel;
+	// entries are registered before the wire write and removed by the waiter
+	// (deferred), so an ack for an abandoned/timed-out request is dropped
+	// harmlessly. docs/rfc/dashboard-model-effort-control.md §4.4.
+	controlAckMu sync.Mutex
+	controlAcks  map[string]chan error
+
 	eventLog  *EventLog
 	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 
@@ -1002,6 +1011,18 @@ func (p *Process) Model() string {
 		return *m
 	}
 	return ""
+}
+
+// AvailableModels returns the agent-reported model manifest captured during
+// this process's Init (ACP only today; nil for protocols that don't report
+// one). Delegates to the per-process protocol instance via type assertion —
+// the manifest is an optional facet like ModelSetter, so stream-json/codex
+// stay untouched. docs/rfc/dashboard-model-effort-control.md §4.2.
+func (p *Process) AvailableModels() []ModelInfo {
+	if am, ok := p.protocol.(interface{ AvailableModels() []ModelInfo }); ok {
+		return am.AvailableModels()
+	}
+	return nil
 }
 
 // setLiveVersion records the CLI binary version self-reported in the

@@ -119,6 +119,16 @@ type storeEntry struct {
 	// the dashboard can keep showing the right model after naozhi
 	// restart, before the next turn re-emits init. UI Round 5 R5-3.
 	Model string `json:"model,omitempty"`
+	// TuningModel / TuningEffort are the operator's per-session dashboard
+	// overrides ("" = none). Persisted so the override survives naozhi
+	// restarts — the kiro-side switch is process-bound (F2), so this file
+	// is the only durable record. Forward-compatible: pre-feature stores
+	// lack them (restore to ""), old binaries ignore unknown keys. Values
+	// are re-validated on load (loadStore) so a hand-edited file cannot
+	// smuggle argv-shaped strings into --model/--effort (§4.6).
+	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	TuningModel  string `json:"tuning_model,omitempty"`
+	TuningEffort string `json:"tuning_effort,omitempty"`
 
 	// prevGen is the ManagedSession.prevHistoryGen value observed when the
 	// PrevSessionIDs / PrevSessionOrigins slices above were snapshotted. It is
@@ -268,6 +278,8 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		UserLabel:          s.UserLabel(),
 		LabelOrigin:        s.LabelOrigin(),
 		Model:              s.Model(),
+		TuningModel:        s.TuningModel(),
+		TuningEffort:       s.TuningEffort(),
 	}, true
 }
 
@@ -296,6 +308,8 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.UserLabel == b.UserLabel &&
 		a.LabelOrigin == b.LabelOrigin &&
 		a.Model == b.Model &&
+		a.TuningModel == b.TuningModel &&
+		a.TuningEffort == b.TuningEffort &&
 		a.prevGen == b.prevGen
 }
 

@@ -454,6 +454,21 @@ type ManagedSession struct {
 	// proc.Model()) wins over this when both are available; this field
 	// is the fallback for restart / pre-init windows. UI Round 5 R5-3.
 	model atomic.Pointer[string]
+	// tuningModel / tuningEffort are the operator's per-session overrides
+	// picked in the dashboard (docs/rfc/dashboard-model-effort-control.md
+	// §4.3). "" = no override (config chain applies). They sit at the TOP of
+	// resolveSpawnParamsLocked's model/effort precedence chains and persist
+	// to sessions.json — unlike the one-shot backendOverrides map, a tuning
+	// override is a durable declaration of how this session should run, so
+	// it must survive TTL recycles and naozhi restarts (the CLI-side switch
+	// is process-bound on kiro, F2 — persistence lives HERE or nowhere).
+	// Distinct from `model` above: that mirrors what the CLI REPORTED
+	// (display), these record what the operator DEMANDED (control).
+	// Values are tuningspec-validated at every write (SetSessionTuning) and
+	// re-validated at store load so a hand-edited sessions.json cannot
+	// inject argv (§4.6).
+	tuningModel  atomic.Pointer[string]
+	tuningEffort atomic.Pointer[string]
 	// totalCost is the cumulative cost carried over from a previous process
 	// incarnation: written at construction (either in NewRouter() when
 	// restoring from store, or in spawnSession() when inheriting from the

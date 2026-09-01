@@ -475,6 +475,16 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		if ev.Type == "" {
 			continue
 		}
+		// control_ack is Process-internal plumbing: it resolves a pending
+		// SetModel waiter (deliverControlAck) and must never reach
+		// HandleEvent / EventLog / the dashboard — it is an RPC ack, not
+		// conversation content. Intercepted before HandleEvent so a
+		// protocol cannot accidentally swallow it.
+		// docs/rfc/dashboard-model-effort-control.md §4.4.
+		if ev.Type == "control_ack" {
+			p.deliverControlAck(ev)
+			continue
+		}
 		if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
 			continue
 		}

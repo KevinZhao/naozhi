@@ -219,9 +219,14 @@ type backendWrappers struct {
 	// backends whose Protocol accepts one (ACP / kiro); initBackendWrappers
 	// warns and drops the setting for any other backend.
 	// docs/rfc/kiro-effort-control.md
-	Efforts   map[string]string
-	Default   *cli.Wrapper
-	DefaultID string
+	Efforts map[string]string
+	// ModelLists holds the operator-declared per-backend model manifests for
+	// the dashboard model popover (cli.backends[].models). Fallback tier:
+	// agent-reported manifests (kiro session/new|load) win at request time.
+	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	ModelLists map[string][]string
+	Default    *cli.Wrapper
+	DefaultID  string
 }
 
 // initBackendWrappers constructs cli.Wrapper instances for every enabled
@@ -247,11 +252,12 @@ func initBackendWrappers(
 	defaultBackend := cfg.DefaultBackendID()
 
 	out := backendWrappers{
-		Wrappers:  make(map[string]*cli.Wrapper, len(backendsCfg)),
-		Models:    make(map[string]string, len(backendsCfg)),
-		ExtraArgs: make(map[string][]string, len(backendsCfg)),
-		Efforts:   make(map[string]string, len(backendsCfg)),
-		DefaultID: defaultBackend,
+		Wrappers:   make(map[string]*cli.Wrapper, len(backendsCfg)),
+		Models:     make(map[string]string, len(backendsCfg)),
+		ExtraArgs:  make(map[string][]string, len(backendsCfg)),
+		Efforts:    make(map[string]string, len(backendsCfg)),
+		ModelLists: make(map[string][]string, len(backendsCfg)),
+		DefaultID:  defaultBackend,
 	}
 
 	for _, b := range backendsCfg {
@@ -283,6 +289,9 @@ func initBackendWrappers(
 		}
 		if len(b.Args) > 0 {
 			out.ExtraArgs[w.BackendID] = b.Args
+		}
+		if len(b.Models) > 0 {
+			out.ModelLists[w.BackendID] = b.Models
 		}
 		// A tier configured on a backend whose CLI has no flag for it would be
 		// a silent no-op, leaving the operator to believe it is in force. The
