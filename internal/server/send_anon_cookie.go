@@ -153,6 +153,18 @@ func renewAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, 
 	setAnonCookie(w, r, ah, val)
 }
 
+// renewedOwnerFromCookie is the shared "valid nz_anon presented" arm of the
+// HTTP owner-derivation path: sliding-renew the label (nil-w tolerant for
+// callers without a response to write into) and hand back the owner key it
+// hashes to. Lives here rather than inline in uploadOwner so the renewal
+// contract sits next to the mint/renew helpers it depends on.
+func renewedOwnerFromCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) string {
+	if w != nil {
+		renewAnonCookie(w, r, ah, val)
+	}
+	return ownerKeyFromCookie(val)
+}
+
 // ownerKeyFromCookie returns a stable owner key derived from an HMAC
 // auth-cookie value. The cookie is itself an HMAC hex string so hashing it
 // ensures the owner key does not leak raw MAC material (the old code used a
