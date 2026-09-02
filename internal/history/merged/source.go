@@ -46,6 +46,9 @@ package merged
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"log/slog"
 	"slices"
 	"strings"
@@ -172,10 +175,25 @@ func entryCmp(a, b cli.EventEntry) int {
 // deterministic pipeline (cli.MakeThumbnail at maxDim=600 — the local
 // tier via buildUserEntry, the fallback via discovery.ThumbnailFn which
 // claudejsonl's init wires to the same function), so the data URIs match
-// byte-for-byte. Key on the joined thumbnail list; a decode failure that
+// byte-for-byte. Key on the thumbnails' digest; a decode failure that
 // dropped a thumbnail on one side only makes the keys differ, i.e. we
 // degrade to "no dedup" (a duplicate bubble) rather than ever collapsing
 // two distinct messages.
+//
+// Two encoding details keep the key honest:
+//
+//   - A kind tag ("t" for text-keyed, "i" for image-keyed) puts the two
+//     forms in disjoint namespaces. Without it the encodings overlap: a
+//     Detail of "\x1f"+<image field> reproduces an image-keyed value
+//     byte-for-byte. Contrived, but a separator alone cannot rule it out —
+//     only a tag that no other branch can emit can.
+//   - Thumbnails are digested rather than inlined. Each data URI runs
+//     40-110 KB and contentKey is called per entry per tier on every
+//     pairContent / LoadBefore pass, so inlining them allocated and copied
+//     megabytes per merge to produce a value only ever used for equality.
+//     A length-prefixed SHA-256 gives identical semantics at constant size;
+//     the length prefix keeps the concatenation unambiguous so two
+//     different image lists cannot digest to the same preimage.
 //
 // The 0x1f unit separator keeps field boundaries unambiguous so a value
 // can't be forged by content that happens to contain the delimiter.
@@ -186,19 +204,23 @@ func contentKey(e cli.EventEntry) string {
 	var b strings.Builder
 	b.WriteString(e.Type)
 	b.WriteByte(0x1f)
-	b.WriteString(e.Detail)
 	if e.Detail == "" {
-		// Image-only identity. Prefixed with a second separator so an
-		// (unlikely) Detail that textually equals a data URI cannot collide
-		// with the image-keyed form of another entry.
+		// Image-only identity.
+		b.WriteString("i")
 		b.WriteByte(0x1f)
-		for i, img := range e.Images {
-			if i > 0 {
-				b.WriteByte(0x1f)
-			}
-			b.WriteString(img)
+		sum := sha256.New()
+		var lenBuf [8]byte
+		for _, img := range e.Images {
+			binary.BigEndian.PutUint64(lenBuf[:], uint64(len(img)))
+			sum.Write(lenBuf[:])
+			sum.Write([]byte(img))
 		}
+		b.WriteString(hex.EncodeToString(sum.Sum(nil)))
+		return b.String()
 	}
+	b.WriteString("t")
+	b.WriteByte(0x1f)
+	b.WriteString(e.Detail)
 	return b.String()
 }
 

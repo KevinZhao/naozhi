@@ -131,6 +131,13 @@ const sessionUnread = {};
 // accepted/queued (server-side session_state takes over) and on any real
 // session_state WS push.
 const sessionOptimisticRunning = {};
+// sessionOptimisticPrevState: sid(key,node) -> 乐观翻转成 'running' 之前，服务端
+// 最后报告的真实状态。onSessionState 判 dead→running 重订阅时必须用它：翻转发生
+// 在网络往返之前，所以对每一次本页发起的 send，服务端真正的 running 广播到达时
+// sessionsData[sKey].state 恒为 'running'，直接读它会把"进程被回收后从本页发消息"
+// 这个最常见的失联场景判成普通 ready→running。与 sessionOptimisticRunning 同生
+// 同灭。
+const sessionOptimisticPrevState = {};
 // sessionLastSent: sid(key,node) -> 最近一次发出的用户文本（当前 turn 的输入）。
 // 在 sendMessage 成功发出后记录；turn 自然跑完 (running→ready/dead) 时清掉。
 // 若用户在 running 中点击中断，则把这段文本回填到 #msg-input（Claude Code
@@ -5081,6 +5088,7 @@ function markSessionOptimisticRunning(key, node) {
   const sd = sessionsData[sKey];
   if (!sd) return;
   if (sd.state === 'running') return; // server already said running
+  sessionOptimisticPrevState[sKey] = sd.state;
   sd.state = 'running';
   sessionOptimisticRunning[sKey] = true;
   // Sidebar parity: flip the card's dot/label to running right now so the
@@ -5109,6 +5117,7 @@ function rollbackOptimisticRunning(key, node) {
   const sKey = sid(key, node || 'local');
   if (!sessionOptimisticRunning[sKey]) return;
   delete sessionOptimisticRunning[sKey];
+  delete sessionOptimisticPrevState[sKey];
   if (_optimisticRunningTimers[sKey]) {
     clearTimeout(_optimisticRunningTimers[sKey]);
     delete _optimisticRunningTimers[sKey];
@@ -11613,21 +11622,23 @@ const wsm = {
 
   onHistory(msg) {
     if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
-    // 订阅代际防护：subscribe 请求已发出但 'subscribed' ack 尚未回来的窗口
-    // 里，收到的同 key history 帧只可能来自被顶替的旧订阅（服务端契约：
-    // completeSubscribe 总是先发 'subscribed' 再发初始 history；节点中继
-    // reverseconn/relay 同样先 ack）。若旧订阅的在途增量帧被当成初始帧
-    // 消费，会用零星几条最新事件整页替换会话内容，并把
-    // lastRenderedEventTime 推到最新 —— 随后真正的初始帧走增量路径时被
-    // 时间戳守卫整批丢弃，表现为"运行中重复点击会话后消息丢失/顺序错乱"。
-    // ack 之前一律丢弃；仅在期待初始帧时启用，增量 catch-up 订阅
-    // (after>0) 维持原有时间戳守卫语义不变。
-    if (this._initialSubscribe && this._pendingSubscribeKey === msg.key) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const events = msg.events || [];
-    const isInitial = this._initialSubscribe;
-    this._initialSubscribe = false;
+    // 初始帧判别以服务端的 initial 标记为准（ServerMsg.Initial），不看到达
+    // 顺序，也不看 'subscribed' ack 是否已回来 —— 两者都不可靠：
+    //   * reverseconn 首订阅路径的 history 由本地 FetchEvents goroutine 发出，
+    //     ack 却要经远端 readLoop 绕回来，该调用点明确写了两者顺序不定；
+    //   * 被顶替订阅的 eventPushLoop 是独立 goroutine，unsub() 不排空在途的
+    //     backfill，它的帧可以落在新 ack 的前面或后面。
+    // 旧逻辑"第一个到达的 history 帧就是初始帧"因此会把零星几条增量事件当整页
+    // 渲染，并把 lastRenderedEventTime 推到最新，随后真正的初始帧走增量路径被
+    // 时间戳守卫整批丢弃 —— 即"运行中重复点击会话后消息丢失/顺序错乱"。
+    // backfill 帧不带 initial 标记，所以无论何时落地都只走增量 append，
+    // _initialSubscribe 留给真正的初始帧消费。
+    const isInitial = this._initialSubscribe && msg.initial === true;
+    // 只有真正消费了初始帧才清标记（旧代码无条件清，是上述丢帧的直接原因）。
+    if (isInitial) this._initialSubscribe = false;
 
     // Rebuild the answered-set from history BEFORE rendering so card
     // re-renders show the correct locked state. The Set is in-memory so
@@ -12003,7 +12014,9 @@ const wsm = {
     // FIRST: the wasDead computation below needs to know whether prev.state
     // is a real server-reported 'running' or just the pre-send optimistic flip.
     const wasOptimisticRunning = !!sessionOptimisticRunning[sKey];
+    const optimisticPrevState = sessionOptimisticPrevState[sKey];
     delete sessionOptimisticRunning[sKey];
+    delete sessionOptimisticPrevState[sKey];
     if (_optimisticRunningTimers[sKey]) {
       clearTimeout(_optimisticRunningTimers[sKey]);
       delete _optimisticRunningTimers[sKey];
@@ -12028,10 +12041,21 @@ const wsm = {
     // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
     // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
     // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
-    // 恒为 'running' —— 若不排除乐观态，dead→running 的重订阅 (case 2)
-    // 对本页发送永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个
-    // 最常见的失联场景。
-    const wasDead = prev.death_reason && (prevState !== 'running' || wasOptimisticRunning);
+    // 恒为 'running' —— 若直接读它，dead→running 的重订阅 (case 2) 对本页发送
+    // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
+    // 用翻转前记录的真实状态还原判据。
+    const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
+    // 判据是 state==='dead' 本身，而不是 death_reason 是否非空。二者不等价：
+    // death_reason 由 mapSendError 在 no_output_timeout / total_timeout 时写入
+    // (internal/session/managed_send.go)，进程未必被回收，会话随后回到 ready
+    // 却留着这个陈旧标记。按 death_reason 判会让此后每一次普通发送都命中
+    // case 2，强制 lastEventTimeWs=0 全量重订阅 —— 而全量重渲染
+    // (el.innerHTML = html) 会抹掉刚发出、服务端还没回显的 .optimistic-msg
+    // 气泡，正是 case 3 旁边那句注释警告过的危害。sessionsData.state 保留后端
+    // 真实状态（UI 层才把 dead 显示成 ready，见下方 displayState），所以
+    // 'dead' 是可靠且精确的判据，对齐 case 2 注释本身的表述
+    // ("subscribed but process was dead → revived")。
+    const wasDead = effectivePrevState === 'dead';
     // Chat-style unread: a running→ready (or dead) transition means the model
     // just produced a reply. Bump the unread counter unless the operator is
     // already looking at that card — in which case they're reading it live.

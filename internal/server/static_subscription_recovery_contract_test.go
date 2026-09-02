@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -64,8 +65,7 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 // sessionsData.state='running' BEFORE the send round-trip, so for every
 // dashboard-initiated send the server's real running broadcast observed
 // prevState==='running' and the dead→running resubscribe branch (wasDead)
-// was dead code. The fix captures the optimistic flag before clearing it and
-// lets it punch through the masked state.
+// was dead code. The fix records the pre-flip state and judges on that.
 func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -74,23 +74,53 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 	}
 	js := string(data)
 
+	// markSessionOptimisticRunning must stash the real state before overwriting
+	// it — nothing downstream can reconstruct it afterwards.
+	markIdx := strings.Index(js, "function markSessionOptimisticRunning(")
+	if markIdx < 0 {
+		t.Fatal("markSessionOptimisticRunning not found")
+	}
+	markBody := js[markIdx:]
+	if end := strings.Index(markBody, "\n}\n"); end > 0 {
+		markBody = markBody[:end]
+	}
+	stashIdx := strings.Index(markBody, "sessionOptimisticPrevState[sKey] = sd.state")
+	flipIdx := strings.Index(markBody, "sd.state = 'running'")
+	if stashIdx < 0 {
+		t.Fatal("markSessionOptimisticRunning must record the pre-flip state in sessionOptimisticPrevState — wasDead cannot otherwise tell a real 'running' from the optimistic flip")
+	}
+	if flipIdx >= 0 && stashIdx > flipIdx {
+		t.Error("sessionOptimisticPrevState must be stashed BEFORE `sd.state = 'running'` — stashing after records the flip itself")
+	}
+
 	body := extractJSBlock(t, js, "onSessionState(msg) {")
 
-	captureIdx := strings.Index(body, "const wasOptimisticRunning = !!sessionOptimisticRunning[sKey]")
+	captureIdx := strings.Index(body, "const optimisticPrevState = sessionOptimisticPrevState[sKey]")
 	if captureIdx < 0 {
-		t.Fatal("onSessionState must capture sessionOptimisticRunning BEFORE deleting it — wasDead needs to know prev.state was an optimistic flip")
+		t.Fatal("onSessionState must read sessionOptimisticPrevState before deleting it")
 	}
-	deleteIdx := strings.Index(body, "delete sessionOptimisticRunning[sKey]")
+	deleteIdx := strings.Index(body, "delete sessionOptimisticPrevState[sKey]")
 	if deleteIdx >= 0 && deleteIdx < captureIdx {
-		t.Error("wasOptimisticRunning must be captured BEFORE `delete sessionOptimisticRunning[sKey]` — capturing after always reads false")
+		t.Error("optimisticPrevState must be captured BEFORE its delete — capturing after always reads undefined")
 	}
-	if !strings.Contains(body, "prevState !== 'running' || wasOptimisticRunning") {
-		t.Error("wasDead must treat an optimistically-flipped 'running' as not-really-running: `prev.death_reason && (prevState !== 'running' || wasOptimisticRunning)`")
+	if !strings.Contains(body, "wasOptimisticRunning ? optimisticPrevState : prevState") {
+		t.Error("wasDead must judge on the pre-flip state when the flip was optimistic")
+	}
+	// Judging on death_reason instead of state==='dead' regresses a distinct
+	// bug: mapSendError stamps no_output_timeout/total_timeout without the
+	// process necessarily being reaped, so a lingering death_reason on a ready
+	// session made every subsequent ordinary send force a full-page resubscribe,
+	// wiping the just-sent optimistic bubble.
+	if !strings.Contains(body, "const wasDead = effectivePrevState === 'dead'") {
+		t.Error("wasDead must be `effectivePrevState === 'dead'`, not a death_reason test — a stale death_reason on a ready session must not force a resubscribe")
+	}
+	if strings.Contains(body, "prev.death_reason && ") {
+		t.Error("wasDead must not gate on prev.death_reason — see comment above; death_reason outlives the death it described")
 	}
 }
 
-// TestDashboardJS_OnHistoryDropsPreAckStaleFrames pins the fix for "运行中重复
-// 点击 session 后消息顺序错乱/丢失" (stale-frame race).
+// TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag pins the fix for "运行中
+// 重复点击 session 后消息顺序错乱/丢失" (stale-frame race).
 //
 // Re-clicking the currently-selected running session calls wsm.subscribe()
 // (selectSession skips unsubscribe when the key is unchanged) which sets
@@ -98,11 +128,16 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 // superseded subscription could then be consumed AS the initial frame:
 // full-page-replacing the pane with a couple of newest events and pushing
 // lastRenderedEventTime to the tip — after which the REAL initial frame was
-// batch-dropped by the incremental time guard. Server contract: 'subscribed'
-// is always sent before the initial history frame (completeSubscribe;
-// node relay reverseconn/relay ack likewise), so any same-key history frame
-// arriving while the subscribe is still pending is provably stale.
-func TestDashboardJS_OnHistoryDropsPreAckStaleFrames(t *testing.T) {
+// batch-dropped by the incremental time guard.
+//
+// The decision MUST key on the server's per-frame Initial flag, not on arrival
+// order and not on whether the 'subscribed' ack has landed:
+//   - ReverseConn.Subscribe's first-subscriber path emits history from a local
+//     goroutine while the ack round-trips through the remote, so history can
+//     legitimately arrive first (an ack-gated gate blanks remote sessions).
+//   - A superseded eventPushLoop's backfill can land either side of the new ack,
+//     so an ack gate does not even close the race it targets.
+func TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -112,18 +147,54 @@ func TestDashboardJS_OnHistoryDropsPreAckStaleFrames(t *testing.T) {
 
 	body := extractJSBlock(t, js, "onHistory(msg) {")
 
-	gate := "if (this._initialSubscribe && this._pendingSubscribeKey === msg.key) return;"
-	gateIdx := strings.Index(body, gate)
-	if gateIdx < 0 {
-		t.Fatalf("onHistory must drop history frames that arrive before the 'subscribed' ack when expecting an initial frame — gate %q missing", gate)
+	if !strings.Contains(body, "const isInitial = this._initialSubscribe && msg.initial === true") {
+		t.Error("onHistory must gate the full-page render on the server's msg.initial flag: `this._initialSubscribe && msg.initial === true`")
 	}
-	// The gate must sit BEFORE _initialSubscribe is consumed, otherwise the
-	// stale frame still burns the initial-render flag.
-	consumeIdx := strings.Index(body, "this._initialSubscribe = false")
-	if consumeIdx < 0 {
-		t.Fatal("could not find _initialSubscribe consumption in onHistory")
+	// The flag must only be consumed when an initial frame was actually
+	// rendered. Unconditional consumption is what let a backfill frame burn it.
+	if !strings.Contains(body, "if (isInitial) this._initialSubscribe = false") {
+		t.Error("_initialSubscribe must be consumed only when isInitial holds — an incremental backfill frame must leave it armed for the real initial frame")
 	}
-	if gateIdx > consumeIdx {
-		t.Error("stale-frame gate must run BEFORE `this._initialSubscribe = false` — a stale frame must not consume the initial-render flag")
+	// Guard against a relapse to the ack-ordering assumption.
+	if strings.Contains(body, "_pendingSubscribeKey === msg.key) return") {
+		t.Error("onHistory must not drop frames based on the 'subscribed' ack having landed — reverseconn's first-subscribe path does not guarantee that order")
+	}
+}
+
+// TestServerMsg_InitialFlagOnlyOnOpeningFrames is the server half of the
+// contract TestDashboardJS_OnHistoryKeysInitialRenderOnServerFlag depends on.
+// Since the client now treats Initial as authoritative, an opening frame that
+// forgets the flag leaves the pane stuck on the loading placeholder, and a
+// backfill frame that wrongly sets it full-page-replaces a live conversation.
+// Both failure modes are invisible in unit tests of either side alone, so pin
+// the emitters by source inspection.
+func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		file string
+		// wantInitial: every `Type: "history"` construction in this file is an
+		// opening frame and must carry Initial: true. Otherwise none may.
+		wantInitial bool
+	}{
+		// completeSubscribe's three arms: suspended-session history, the
+		// pooled/fallback initial page, and the empty frame for running sessions.
+		{file: "wshub_subscribe.go", wantInitial: true},
+		// eventPushLoop backfill — incremental by construction.
+		{file: "wshub_eventpush.go", wantInitial: false},
+	} {
+		src, err := os.ReadFile(tc.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.file, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if !strings.Contains(line, `Type: "history"`) {
+				continue
+			}
+			has := strings.Contains(line, "Initial: true")
+			if has != tc.wantInitial {
+				t.Errorf("%s:%d: history frame Initial=%v, want %v\n  %s",
+					tc.file, i+1, has, tc.wantInitial, strings.TrimSpace(line))
+			}
+		}
 	}
 }
