@@ -65,12 +65,14 @@ func RedactAbsolutePathsInto(b *strings.Builder, s string) {
 				cc == '\'' || cc == '"' || cc == '`' {
 				break
 			}
-			if cc == '\\' && !isWin {
-				// A backslash never belongs to a POSIX / home-relative path
-				// token in the text we redact; in raw JSON it starts an
-				// escape (`\"`, `\n`) whose consumption would leave the
-				// enclosing document unparseable. Windows drive paths use it
-				// as the separator and keep consuming.
+			if cc == '\\' && !isWin && j+1 < len(s) && s[j+1] == '"' {
+				// `\"` inside raw JSON is the escaped quote that closes the
+				// string containing the path; consuming the backslash would
+				// leave `<path>""` and an unparseable document (PR #2439).
+				// Any other backslash (`/x\ y`, `\n`) stays part of the token
+				// as before — RedactAbsolutePaths also runs on plain IM text
+				// where over-splitting would leak the tail. Windows drive
+				// paths use `\` as the separator and keep consuming.
 				break
 			}
 			if cc == ':' && j+1 < len(s) && (s[j+1] == ' ' || s[j+1] == '\n') {

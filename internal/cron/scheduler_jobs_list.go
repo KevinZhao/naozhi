@@ -74,19 +74,6 @@ func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
 // scanning the entire s.jobs map — O(jobs-in-chat) vs the historical O(N).
 // Matters once a deployment accumulates many cron jobs across many chats:
 // dashboard list polls hit ListJobs at 1 Hz per active chat.
-// GetJob returns a copy of the job with the given id. The bool is false when
-// no such job exists. Read-only; callers that need to mutate go through
-// UpdateJob so persistence and cron re-registration stay atomic.
-func (s *Scheduler) GetJob(id string) (Job, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	j, ok := s.jobs[id]
-	if !ok {
-		return Job{}, false
-	}
-	return *j, true
-}
-
 func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -100,6 +87,19 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 		result = append(result, *j)
 	}
 	return result
+}
+
+// GetJob returns a copy of the job with the given id. The bool is false when
+// no such job exists. Read-only; callers that need to mutate go through
+// UpdateJob so persistence and cron re-registration stay atomic.
+func (s *Scheduler) GetJob(id string) (Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return Job{}, false
+	}
+	return *j, true
 }
 
 // JobWithNextRun pairs a Job snapshot with its next scheduled run time so

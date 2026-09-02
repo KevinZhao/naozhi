@@ -36,7 +36,7 @@ file_size:
     # in commit message satisfies rule 5. New dashboard/project/files.go
     # entry tracks the post-move size (1633) until Phase 5 internal split.
     - path: internal/dashboard/project/files.go
-      current: 1768                         # 2026-07-31 fail 切换重采（Phase 2 搬迁时 1633）；dashboard 子包硬上限 800
+      current: 1769                         # 2026-09-02 +1：textMimeSet 加 application/typescript（PR #2439 .ts/.tsx 预览误判二进制）；2026-07-31 fail 切换重采（Phase 2 搬迁时 1633）；dashboard 子包硬上限 800
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分（每个 serve* / handle* 一个文件）
     - path: internal/server/dashboard_send.go
@@ -57,7 +57,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 1105                         # 2026-09-01 +33：self-update 字段组与其 `// 读:` 注释（dashboard-update-notice RFC P1+P2）；2026-07-31 fail 切换重采（2026-05-28 helpers 抽离后 992）
+      current: 1107                         # 2026-09-02 +2：sessionH Deps 透传 ProjectStableKeyEnabled（PR #2439 stats.projects 补 stableKey）；2026-09-01 +33：self-update 字段组与其 `// 读:` 注释（dashboard-update-notice RFC P1+P2）；2026-07-31 fail 切换重采（2026-05-28 helpers 抽离后 992）
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线

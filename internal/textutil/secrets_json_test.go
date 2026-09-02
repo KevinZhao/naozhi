@@ -36,3 +36,34 @@ func TestRedactSecrets_EnvAssignmentInsideJSONStringKeepsJSONValid(t *testing.T)
 		})
 	}
 }
+
+// TestRedactSecrets_BareValueKeepsEscapesAndWindowsPaths pins the review
+// finding on PR #2439: the bare-value branch must not stop at a lone
+// backslash. RedactSecrets also runs on plain IM / WS / self-update text, so
+// a Windows path or an escaped byte inside a secret value has to be masked
+// whole; only an unescaped quote (JSON string boundary) may end the run.
+func TestRedactSecrets_BareValueKeepsEscapesAndWindowsPaths(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"windows path", `PASSWORD=C:\Users\bob\pw done`, `PASSWORD=[REDACTED] done`},
+		{"single escape", `TOKEN=foo\bar done`, `TOKEN=[REDACTED] done`},
+		{"leading escape", `TOKEN=\x done`, `TOKEN=[REDACTED] done`},
+		{"double backslash inside JSON string", `{"c":"TOKEN=\\abc"}`, `{"c":"TOKEN=[REDACTED]"}`},
+		{"escaped quote span inside JSON string", `{"c":"TOKEN=\"abc\" x"}`, `{"c":"TOKEN=\"[REDACTED]\" x"}`},
+		// An unescaped quote is a JSON string boundary in the dashboard's
+		// input and therefore ends the run; the leading fragment is masked.
+		{"unescaped quote ends run", `SECRET=a"b`, `SECRET=[REDACTED]"b`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactSecrets(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+			if strings.HasPrefix(tc.in, "{") && !json.Valid([]byte(got)) {
+				t.Errorf("JSON input produced invalid JSON: %s", got)
+			}
+		})
+	}
+}
