@@ -18,12 +18,13 @@ import (
 // serves /api/sessions/events (sendHistoryToClient's HTTP fallback) and lets
 // the test inject arbitrary frames toward the relay.
 type relayResubServer struct {
-	srv        *httptest.Server
-	subscribes atomic.Int32
-	history    atomic.Int32
-	connMu     sync.Mutex
-	conn       *websocket.Conn
-	connReady  chan struct{}
+	srv          *httptest.Server
+	subscribes   atomic.Int32
+	unsubscribes atomic.Int32
+	history      atomic.Int32
+	connMu       sync.Mutex
+	conn         *websocket.Conn
+	connReady    chan struct{}
 }
 
 func newRelayResubServer(t *testing.T) *relayResubServer {
@@ -57,8 +58,11 @@ func newRelayResubServer(t *testing.T) *relayResubServer {
 			if err := conn.ReadJSON(&msg); err != nil {
 				return
 			}
-			if msg.Type == "subscribe" {
+			switch msg.Type {
+			case "subscribe":
 				s.subscribes.Add(1)
+			case "unsubscribe":
+				s.unsubscribes.Add(1)
 			}
 		}
 	}))
@@ -159,9 +163,14 @@ func TestWSRelay_Resubscribe_AfterRemoteTimeout_ResendsSubscribe(t *testing.T) {
 		t.Errorf("r.subs[%q] has %d entries, want 1", key, n)
 	}
 	// A third subscribe without another timeout must NOT churn the remote
-	// again: the dropped marker is single-shot.
+	// again: the dropped marker is single-shot. Deterministic negative check:
+	// Subscribe writes any `subscribe` frame synchronously, so an `unsubscribe`
+	// written afterwards on the same WS is ordered behind it — once the fake
+	// has seen the unsubscribe, every subscribe frame has been counted.
 	relay.Subscribe(sink, key, 0)
 	waitFor(t, "http history for plain re-subscribe", func() bool { return fake.history.Load() >= 1 })
+	relay.Unsubscribe(sink, key)
+	waitFor(t, "unsubscribe probe frame", func() bool { return fake.unsubscribes.Load() == 1 })
 	if n := fake.subscribes.Load(); n != 2 {
 		t.Errorf("remote saw %d subscribe frames, want 2 (dropped marker must be consumed by the rebuild)", n)
 	}
@@ -186,13 +195,17 @@ func TestWSRelay_Resubscribe_WithoutTimeout_UsesHTTPHistory(t *testing.T) {
 
 	relay.Subscribe(sink, key, 0)
 	waitFor(t, "http history request", func() bool { return fake.history.Load() == 1 })
-
-	time.Sleep(50 * time.Millisecond)
-	if n := fake.subscribes.Load(); n != 1 {
-		t.Errorf("remote saw %d subscribe frames, want 1", n)
-	}
 	if n := relaySubCount(relay, key); n != 1 {
 		t.Errorf("r.subs[%q] has %d entries, want 1", key, n)
+	}
+	// Ordering probe instead of a sleep: Subscribe writes any `subscribe`
+	// frame synchronously before returning, and the unsubscribe below is
+	// written after it on the same WS, so once the fake has read the
+	// unsubscribe it has read every subscribe frame there will ever be.
+	relay.Unsubscribe(sink, key)
+	waitFor(t, "unsubscribe probe frame", func() bool { return fake.unsubscribes.Load() == 1 })
+	if n := fake.subscribes.Load(); n != 1 {
+		t.Errorf("remote saw %d subscribe frames, want 1", n)
 	}
 }
 

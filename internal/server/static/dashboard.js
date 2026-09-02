@@ -11367,7 +11367,12 @@ const wsm = {
         }
         // Server confirmed subscription — apply authoritative state
         this.subscribedKey = this._pendingSubscribeKey || msg.key;
-        this.subscribedNode = this._pendingSubscribeNode || 'local';
+        // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
+        // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
+        // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
+        // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
+        // 不再清簿记 → 不重订阅，原 bug 复现。
+        this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local';
         this._pendingSubscribeKey = null;
         this._pendingSubscribeNode = null;
         // Track whether the server started an eventPushLoop for this subscription.

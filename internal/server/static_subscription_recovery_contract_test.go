@@ -251,3 +251,41 @@ func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
 		t.Error("Initial branch must not gate the cursor reset on the frame carrying events — see F3 rationale above")
 	}
 }
+
+// TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab pins the follow-up to
+// #2421 review F1. After the relay rebuilds a dropped remote subscription (or
+// reconnects), the remote's `subscribed` ack is fanned out to EVERY local tab
+// on the key — the relay injects "node" into each forwarded frame and
+// ReverseConn sets Node explicitly. A tab that was not pending must therefore
+// take the node from the frame, not fall back to 'local': with subscribedNode
+// rewritten to 'local', the subscription_timeout handler's node-match guard
+// fails and the bookkeeping is never cleared, so the tab never re-subscribes —
+// the exact bug the rebuild fixes.
+//
+// Invariant before: non-pending `subscribed` → subscribedNode = 'local'
+// (drops the node of a remote key).
+// Invariant after:  subscribedNode = pending node, else the frame's node,
+// else 'local' — a remote key never collapses to 'local'.
+func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	idx := strings.Index(js, "case 'subscribed':")
+	if idx < 0 {
+		t.Fatal("case 'subscribed' handler not found")
+	}
+	body := js[idx:]
+	if end := strings.Index(body, "case 'error':"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local'") {
+		t.Error("subscribed handler must resolve subscribedNode as `_pendingSubscribeNode || msg.node || 'local'` — a fanned-out remote ack must not rewrite a remote key's node to 'local'")
+	}
+	if strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || 'local'") {
+		t.Error("subscribed handler must not fall straight back to 'local' when not pending — see rationale above")
+	}
+}
