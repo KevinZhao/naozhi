@@ -23,7 +23,7 @@ func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 		mu      sync.Mutex
 		gotMsgs []string
 	)
-	onAsyncError := func(msg string) {
+	onAsyncError := func(_ error, msg string) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotMsgs = append(gotMsgs, msg)
@@ -85,7 +85,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 	t.Cleanup(hub.Shutdown)
 
 	called := false
-	onAsyncError := func(_ string) {
+	onAsyncError := func(_ error, _ string) {
 		called = true
 		panic("synthetic onAsyncError panic")
 	}

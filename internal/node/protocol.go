@@ -8,7 +8,7 @@ import (
 
 // ServerMsg is a message sent from the server to the WebSocket client.
 type ServerMsg struct {
-	Type   string           `json:"type"`             // auth_ok, auth_fail, subscribed, unsubscribed, history, event, send_ack, pong, error, agent_event, agent_meta, agent_done, agent_subscribe_rejected
+	Type   string           `json:"type"`             // auth_ok, auth_fail, subscribed, unsubscribed, history, event, send_ack, send_error, pong, error, agent_event, agent_meta, agent_done, agent_subscribe_rejected
 	Key    string           `json:"key,omitempty"`    // session key
 	Event  *cli.EventEntry  `json:"event,omitempty"`  // single event (push); also reused for agent_event body
 	Events []cli.EventEntry `json:"events,omitempty"` // event batch (history)
