@@ -139,10 +139,11 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 		SettingsFile: r.naozhiSettingsFile,
 	})
 
-	// The spawn then replaces the entry.
+	// The spawn then replaces the entry, carrying the snapshotted overrides.
+	_, _, _, _, ov := snapshotOldSessionLocked(s)
 	fresh := r.installFreshSessionLocked(
 		key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
-		nil, nil, 0, 0, 0, false, "sess-drift-3", 0,
+		nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
 	)
 
 	wrapper, backendID := r.wrapperFor("kiro")

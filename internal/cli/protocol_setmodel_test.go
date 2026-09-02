@@ -11,6 +11,7 @@ package cli
 // just on kiro's behaviour.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -248,16 +249,24 @@ func itoa(n int) string {
 // setModelAckTimeout (30s) against a process that was already dead.
 func TestProcess_SetModel_ReturnsOnNaturalExit(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv)
 	go p.readLoop()
 	defer p.Kill()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- p.SetModel(context.Background(), "opus") }()
 
-	// Let SetModel get past the Alive() check and park on the ack select,
-	// then have the CLI exit naturally (no Kill → killCh stays open).
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic sync (no sleep): the set_model control_request reaching
+	// the shim side proves SetModel is past its Alive() check and parked on
+	// the ack select. Only then let the CLI exit naturally (no Kill → killCh
+	// stays open). net.Pipe is unbuffered, so this read is the handshake.
+	line, err := bufio.NewReader(srv.conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading set_model request from shim side: %v", err)
+	}
+	if !strings.Contains(line, "set_model") {
+		t.Fatalf("first shim frame is not the set_model request: %s", line)
+	}
+	startServerDrain(srv) // absorb anything else (deferred Kill) so no writer blocks
 	srv.SendCLIExited(0)
 
 	select {

@@ -706,6 +706,18 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 }
 
+// sessionOverrides is the operator-owned per-session state that must
+// outlive the process it was set on: the dashboard tuning override
+// (docs/rfc/dashboard-model-effort-control.md §4.3 / §4.5) and the user
+// label with its origin (label+origin travel as one unit). Captured by
+// snapshotOldSessionLocked and re-applied by installFreshSessionLocked.
+type sessionOverrides struct {
+	tuningModel  string
+	tuningEffort string
+	userLabel    string
+	labelOrigin  string
+}
+
 // snapshotOldSessionLocked captures the per-session fields that spawnSession
 // needs to read AFTER it releases r.mu. Returns (prevIDs copy, totalCost,
 // createdAtNanos). Pure read; safe to call with old == nil (returns zero
@@ -720,9 +732,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 // validate → reserve → spawn → register sequence does not require the
 // reader to scroll through the snapshot block to find the next phase.
 // Behavior is byte-for-byte identical to the previous inline copy.
-func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, int64) {
+func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {
 	if old == nil {
-		return nil, 0, 0, 0
+		return nil, 0, 0, 0, sessionOverrides{}
 	}
 	var oldPrevIDs []string
 	if len(old.prevSessionIDs) > 0 {
@@ -765,7 +777,20 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 	// carry. The error is bounded (only turns straddling the spawn instant) and
 	// cost is advisory, not billing-authoritative.
 	oldCostSpent := loadTotalCost(&old.costSpent)
-	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt
+	// Operator-owned overrides (tuning model/effort, user label+origin) are
+	// snapshotted HERE, under the same r.mu hold as everything else, so they
+	// come from the same object as the history/cost/createdAt above.
+	// installFreshSessionLocked must not re-read r.ss.sessions[key]: the map
+	// entry may have been swapped (RegisterForResume stub) or removed
+	// (Remove) during the unlocked history copy, which would pair one
+	// session's history with another's tuning.
+	ov := sessionOverrides{
+		tuningModel:  old.TuningModel(),
+		tuningEffort: old.TuningEffort(),
+		userLabel:    old.UserLabel(),
+		labelOrigin:  old.LabelOrigin(),
+	}
+	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, ov
 }
 
 // collectPreviousHistory gathers JSONL-backed history entries and the
@@ -1103,7 +1128,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	if old != nil {
 		oldSID = old.getSessionID()
 	}
-	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt := snapshotOldSessionLocked(old)
+	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, oldOverrides := snapshotOldSessionLocked(old)
 	r.mu.Unlock()
 
 	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
@@ -1131,7 +1156,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	s := r.installFreshSessionLocked(
 		key, proc, workspace, backendID, accessProfileID, wrapper, resumeID,
 		oldHistory, prevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, opts.Exempt, oldSID,
-		oldUserTurns,
+		oldUserTurns, oldOverrides,
 	)
 	r.mu.Unlock()
 
@@ -1198,6 +1223,7 @@ func (r *Router) installFreshSessionLocked(
 	exempt bool,
 	oldSID string,
 	oldUserTurns int64,
+	overrides sessionOverrides,
 ) *ManagedSession {
 	s := &ManagedSession{
 		key:              key,
@@ -1254,14 +1280,14 @@ func (r *Router) installFreshSessionLocked(
 	// next TTL recycle spawns back on the config default, and a naozhi
 	// restart in between reads the surviving shim as arg-drift
 	// (driftCompareArgs) and rebuilds it as default. The user label is the
-	// same shape of state (dashboard rename) and rides along.
+	// same shape of state (dashboard rename) and rides along. Values come
+	// from the snapshotOldSessionLocked capture (same object as the
+	// history/cost above), never from a re-read of r.ss.sessions[key].
 	// docs/rfc/dashboard-model-effort-control.md §4.3 / §4.5.
-	if old := r.ss.sessions[key]; old != nil {
-		s.SetTuningModel(old.TuningModel())
-		s.SetTuningEffort(old.TuningEffort())
-		s.SetUserLabel(old.UserLabel())
-		s.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
-	}
+	s.SetTuningModel(overrides.tuningModel)
+	s.SetTuningEffort(overrides.tuningEffort)
+	s.SetUserLabel(overrides.userLabel)
+	s.setLabelOrigin(overrides.labelOrigin) // label+origin travel as one unit
 	// attachProcessAndSnapshotPersisted: serialises storeProcess + seededLen
 	// reset under historyMu so a concurrent InjectHistory observes the
 	// (process, seededLen=len(persistedHistory)) pair and forwards only
@@ -1858,6 +1884,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	fresh.SetCLIName(old.CLIName())
 	fresh.SetCLIVersion(old.CLIVersion())
 	fresh.SetUserLabel(old.UserLabel())
+	fresh.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
 	// Tuning overrides are keyed to the conversation, not the key string —
 	// the renamed session keeps running under the same argv, so dropping
 	// them here would make the next respawn/drift check flip it to default.

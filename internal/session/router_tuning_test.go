@@ -384,9 +384,20 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	r.ss.sessions[key] = old
 	r.indexAdd(key)
 
+	// Mirror spawnSession: snapshot under the first r.mu hold, then install.
+	// The fresh entry must be fed from that snapshot, not from a re-read of
+	// the map — so swap the map entry for an unrelated stub in between (what
+	// RegisterForResume / Remove can do during the unlocked history copy) and
+	// require the ORIGINAL values to win.
+	_, _, _, _, ov := snapshotOldSessionLocked(old)
+	stub := newSessionWithID(key, "sess-stub")
+	stub.SetTuningModel("stub-model")
+	stub.SetUserLabel("stub label")
+	r.ss.sessions[key] = stub
+
 	fresh := r.installFreshSessionLocked(
 		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
-		nil, nil, 0, 0, 0, false, "sess-old", 0,
+		nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
 	)
 	r.mu.Unlock()
 
@@ -408,6 +419,9 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	if r.SessionFor(key) != fresh {
 		t.Error("fresh session not published under key")
 	}
+	if fresh.TuningModel() == "stub-model" || fresh.UserLabel() == "stub label" {
+		t.Error("fresh entry took values from a re-read of r.ss.sessions[key] instead of the snapshot")
+	}
 }
 
 // TestRenameSession_InheritsTuning covers the takeover/rename path, which
@@ -421,6 +435,8 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 	s := newSessionWithID(oldKey, "sess-rn")
 	s.SetTuningModel("claude-haiku-4.5")
 	s.SetTuningEffort("low")
+	s.SetUserLabel("auto title")
+	s.setLabelOrigin("auto")
 	r.mu.Lock()
 	r.ss.sessions[oldKey] = s
 	r.indexAdd(oldKey)
@@ -435,6 +451,10 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 	}
 	if got.TuningModel() != "claude-haiku-4.5" || got.TuningEffort() != "low" {
 		t.Errorf("tuning lost across rename: model=%q effort=%q", got.TuningModel(), got.TuningEffort())
+	}
+	if got.UserLabel() != "auto title" || got.LabelOrigin() != "auto" {
+		t.Errorf("label+origin must travel as one unit across rename: label=%q origin=%q",
+			got.UserLabel(), got.LabelOrigin())
 	}
 }
 
