@@ -393,16 +393,11 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
-	// Do not echo the client-supplied fid in the error response; the id is
-	// user-controlled and echoing it back with SetEscapeHTML(false) would
-	// allow HTML payloads to appear unescaped in any future text/html
-	// degraded path. Log the offending id internally for operator triage.
-	//
-	// Atomic TakeAll: if any fid is missing, expired, or foreign-owned,
-	// nothing is consumed — the user can retry the whole batch after
-	// re-uploading instead of losing the earlier valid images silently.
-	// R37-CONCUR4.
+	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user
+	// theft. Never echo the client-supplied fid in the error (user-controlled;
+	// SetEscapeHTML(false) would render it unescaped on a text/html degraded
+	// path) — log it internally. Atomic TakeAll (R37-CONCUR4): if any fid is
+	// missing/expired/foreign-owned nothing is consumed, so the batch retry works.
 	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
 	if !ok {
 		return
@@ -614,6 +609,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 				slog.Error("remote send",
 					"node", osutil.SanitizeForLog(node, 128),
 					"key", session.SanitizeLogAttr(capturedKey), "err", err)
+				// No ack channel left on HTTP — notify the key's subscribers (F1).
+				if h.hub != nil {
+					h.hub.broadcastSendError(capturedKey, asyncErrorMessage(err))
+				}
 			} else {
 				nc.RefreshSubscription(capturedKey)
 			}
@@ -629,7 +628,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 		AccessProfile: accessProfile,
-	}, nil)
+	}, h.hub.httpSendErrorCallback(key))
 	if err != nil {
 		cleanup()
 		// Forward only the localised user-facing label; the raw error may

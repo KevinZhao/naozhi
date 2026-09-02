@@ -11406,6 +11406,9 @@ const wsm = {
       case 'send_ack':
         this.onSendAck(msg);
         break;
+      case 'send_error':
+        this.onSendError(msg);
+        break;
       case 'interrupt_ack':
         break;
       case 'session_state':
@@ -12003,6 +12006,24 @@ const wsm = {
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
+  },
+
+  // send_error: the HTTP send path (every file-bearing send, plus the WS-down
+  // fallback) has no per-request back-channel after its 202, so the server
+  // fans asynchronous failures (spawn error, passthrough send failure, remote
+  // node send failure) out to every subscriber of the key as this frame. Reuse
+  // the send_ack error recovery — toast, drop the optimistic bubble, roll back
+  // the running flip — but only touch the on-screen bubble when the failed key
+  // is the one being viewed; for any other key just undo its running state.
+  onSendError(msg) {
+    if (!msg || !msg.key) return;
+    const node = msg.node || 'local';
+    if (msg.key === selectedKey && node === (selectedNode || 'local')) {
+      this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
+      return;
+    }
+    rollbackOptimisticRunning(msg.key, node);
+    delete sessionLastSent[sid(msg.key, node)];
   },
 
   onSessionState(msg) {
