@@ -33,8 +33,18 @@ type wsRelay struct {
 	connReady chan struct{}          // non-nil while a dial is in progress; closed when done
 	subs      map[string][]EventSink // remote session key -> local clients
 	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
-	done      chan struct{}
-	closed    bool
+	// remoteDropped marks keys whose remote-side subscription the primary
+	// has discarded (it pushed session_state{reason:"subscription_timeout"}
+	// after its 60s resubscribeEvents window). r.subs[key] is still populated
+	// — the browsers are told and re-subscribe on the next running broadcast
+	// — so without this marker Subscribe would take the alreadySubscribed
+	// branch, hand back one HTTP history page and never rebuild the remote
+	// WS subscription; every later event for the key would be lost. The
+	// marker is single-shot: the next Subscribe on the key re-sends
+	// `subscribe` and clears it. (#2421 review F1)
+	remoteDropped map[string]bool
+	done          chan struct{}
+	closed        bool
 	// R190-LEAK-M1 / R188-CONC-H1: baseCtx unifies cancellation of in-flight
 	// sendHistoryToClient RPCs. Close() fires baseCancel so FetchEvents
 	// unwinds without needing a per-call watcher goroutine. Mirrors the
@@ -63,13 +73,14 @@ func newWSRelay(node *HTTPClient) *wsRelay {
 	nodeField := []byte(`"node":` + string(nodeJSON) + `,`)
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &wsRelay{
-		node:       node,
-		nodeField:  nodeField,
-		subs:       make(map[string][]EventSink),
-		lastEvent:  make(map[string]int64),
-		done:       make(chan struct{}),
-		baseCtx:    baseCtx,
-		baseCancel: baseCancel,
+		node:          node,
+		nodeField:     nodeField,
+		subs:          make(map[string][]EventSink),
+		lastEvent:     make(map[string]int64),
+		remoteDropped: make(map[string]bool),
+		done:          make(chan struct{}),
+		baseCtx:       baseCtx,
+		baseCancel:    baseCancel,
 	}
 }
 
@@ -88,7 +99,17 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 		return
 	}
 	alreadySubscribed := len(r.subs[key]) > 0
-	r.subs[key] = append(r.subs[key], c)
+	// Same client re-subscribing (re-click / recovery after the remote
+	// dropped us): keep exactly one entry. (#2421 review F1)
+	if !containsSink(r.subs[key], c) {
+		r.subs[key] = append(r.subs[key], c)
+	}
+	// The remote told us it discarded this key's subscription; whoever
+	// re-subscribes first rebuilds it over the WS instead of taking the
+	// history-only branch. Clear the marker here so the rebuild happens
+	// once — later same-key subscribers go back to the HTTP history page.
+	rebuildRemote := alreadySubscribed && r.remoteDropped[key]
+	delete(r.remoteDropped, key)
 	// R184-REL-M2: seed r.lastEvent[key] with the caller's `after` on
 	// first subscribe. Without this, a racing reconnect() that snapshots
 	// r.subs/r.lastEvent between our append here and the server's first
@@ -103,18 +124,23 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	}
 	// R184-CONC-M1: wg.Add under r.mu so Close() observing r.closed=true
 	// is guaranteed to see our Add; Close() sets r.closed before Wait().
-	if alreadySubscribed {
+	historyOnly := alreadySubscribed && !rebuildRemote
+	if historyOnly {
 		r.wg.Add(1)
 	}
 	r.mu.Unlock()
 
-	if alreadySubscribed {
+	if historyOnly {
 		// Key already subscribed on remote; send history via HTTP to just this client
 		go r.sendHistoryToClient(c, key, after)
 		return
 	}
 
-	// First subscriber for this key: subscribe on the remote WS
+	// First subscriber for this key — or the remote discarded the shared
+	// subscription (subscription_timeout) and this is the rebuild: subscribe
+	// on the remote WS. The remote answers with `subscribed` + an Initial
+	// history frame, which readLoop fans out to every local subscriber of
+	// the key, so the rebuilding client gets its opening page from there.
 	r.writeJSON(ClientMsg{Type: "subscribe", Key: key, After: after})
 }
 
@@ -124,6 +150,7 @@ func (r *wsRelay) Unsubscribe(c EventSink, key string) {
 	empty := removeSub(r.subs, key, c)
 	if empty {
 		delete(r.lastEvent, key)
+		delete(r.remoteDropped, key)
 	}
 	r.mu.Unlock()
 
@@ -139,6 +166,7 @@ func (r *wsRelay) RemoveClient(c EventSink) {
 	emptyKeys := removeSubAll(r.subs, c)
 	for _, key := range emptyKeys {
 		delete(r.lastEvent, key)
+		delete(r.remoteDropped, key)
 	}
 	r.mu.Unlock()
 
@@ -160,6 +188,7 @@ func (r *wsRelay) Close() {
 	r.conn = nil
 	r.subs = make(map[string][]EventSink)
 	r.lastEvent = make(map[string]int64)
+	r.remoteDropped = make(map[string]bool)
 	r.mu.Unlock()
 
 	// R190-LEAK-M1: cancel baseCtx so any in-flight FetchEvents inside
@@ -384,9 +413,10 @@ func (r *wsRelay) forwardEvent(data []byte) {
 	// Parse only the key and type for routing + lastEvent tracking.
 	// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.
 	var header struct {
-		Type  string `json:"type"`
-		Key   string `json:"key"`
-		Event struct {
+		Type   string `json:"type"`
+		Key    string `json:"key"`
+		Reason string `json:"reason"`
+		Event  struct {
 			Time int64 `json:"time"`
 		} `json:"event"`
 	}
@@ -400,6 +430,15 @@ func (r *wsRelay) forwardEvent(data []byte) {
 		r.lastEvent[header.Key] = header.Event.Time
 	}
 	subs := r.subs[header.Key]
+	// The remote's resubscribeEvents gave up on this key and dropped OUR
+	// (the relay connection's) subscription — see wshub_eventpush.go. Mark it
+	// so the next Subscribe rebuilds the remote subscription instead of
+	// treating the key as still live. Only while someone local still holds
+	// the key: a timeout for an already-unsubscribed key has nothing to
+	// recover and must not grow the map. (#2421 review F1)
+	if header.Type == "session_state" && header.Reason == "subscription_timeout" && len(subs) > 0 {
+		r.remoteDropped[header.Key] = true
+	}
 	snapPtr := subSnapPool.Get().(*[]EventSink)
 	clients := *snapPtr
 	if cap(clients) < len(subs) {
@@ -538,6 +577,9 @@ func (r *wsRelay) reconnect() {
 				resubscribes = append(resubscribes, resub{key, r.lastEvent[key]})
 			}
 		}
+		// Every held key is re-subscribed below on the fresh connection, so
+		// no remote-side drop is outstanding any more.
+		clear(r.remoteDropped)
 		r.mu.Unlock()
 
 		for _, e := range resubscribes {
