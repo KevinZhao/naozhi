@@ -11613,6 +11613,16 @@ const wsm = {
 
   onHistory(msg) {
     if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    // 订阅代际防护：subscribe 请求已发出但 'subscribed' ack 尚未回来的窗口
+    // 里，收到的同 key history 帧只可能来自被顶替的旧订阅（服务端契约：
+    // completeSubscribe 总是先发 'subscribed' 再发初始 history；节点中继
+    // reverseconn/relay 同样先 ack）。若旧订阅的在途增量帧被当成初始帧
+    // 消费，会用零星几条最新事件整页替换会话内容，并把
+    // lastRenderedEventTime 推到最新 —— 随后真正的初始帧走增量路径时被
+    // 时间戳守卫整批丢弃，表现为"运行中重复点击会话后消息丢失/顺序错乱"。
+    // ack 之前一律丢弃；仅在期待初始帧时启用，增量 catch-up 订阅
+    // (after>0) 维持原有时间戳守卫语义不变。
+    if (this._initialSubscribe && this._pendingSubscribeKey === msg.key) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const events = msg.events || [];
@@ -11989,15 +11999,39 @@ const wsm = {
     const sKey = sid(msg.key, msgNode);
     // Real state arrived — the optimistic flip has served its purpose, regardless
     // of whether the server says running/ready/dead. Clear the flag so future
-    // turns don't short-circuit the running→ready rollback logic.
+    // turns don't short-circuit the running→ready rollback logic. Capture it
+    // FIRST: the wasDead computation below needs to know whether prev.state
+    // is a real server-reported 'running' or just the pre-send optimistic flip.
+    const wasOptimisticRunning = !!sessionOptimisticRunning[sKey];
     delete sessionOptimisticRunning[sKey];
     if (_optimisticRunningTimers[sKey]) {
       clearTimeout(_optimisticRunningTimers[sKey]);
       delete _optimisticRunningTimers[sKey];
     }
+    // 服务端 resubscribeEvents 60s 超时后已经丢弃了本连接对该 key 的订阅
+    // (wshub_eventpush.go)，此后这条订阅不会再有任何事件帧。必须同步清掉
+    // 本地订阅簿记 —— 否则客户端永远"以为自己订阅着"：下一次 running 广播
+    // 到达时 needSub 的 case 1 (subscribedKey mismatch) 不成立、case 3
+    // (_subscriptionSuspended) 也不成立，整轮 turn 的事件全部推空，
+    // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
+    // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
+    if (msg.reason === 'subscription_timeout' &&
+        this.subscribedKey === msg.key &&
+        (this.subscribedNode || 'local') === msgNode) {
+      this.subscribedKey = null;
+      this.subscribedNode = null;
+      this._subscriptionSuspended = false;
+      this.lastEventTimeWs = 0;
+    }
     const prev = sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
-    const wasDead = prev.death_reason && prevState !== 'running';
+    // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
+    // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
+    // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
+    // 恒为 'running' —— 若不排除乐观态，dead→running 的重订阅 (case 2)
+    // 对本页发送永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个
+    // 最常见的失联场景。
+    const wasDead = prev.death_reason && (prevState !== 'running' || wasOptimisticRunning);
     // Chat-style unread: a running→ready (or dead) transition means the model
     // just produced a reply. Bump the unread counter unless the operator is
     // already looking at that card — in which case they're reading it live.
