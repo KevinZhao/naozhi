@@ -140,6 +140,18 @@ type Checker struct {
 	// and Status has its own lock.
 	checkMu      sync.Mutex
 	lastCheckNow time.Time
+
+	// installMu serializes everything that writes the binary, and guards
+	// `installed`. Before the dashboard could trigger an install this package
+	// had a single writer (the Run goroutine) and needed no lock; InstallLatest
+	// (install.go) made that false.
+	//
+	// It covers the `installed` short-circuit as well as doInstall itself, not
+	// just the write: the check and the install must be one atomic decision.
+	// Splitting them would let two callers both read "not installed yet" and
+	// both Replace(), and the SECOND Replace is the one that copies the new
+	// binary over the backup and destroys the rollback artifact (RFC §1.3).
+	installMu sync.Mutex
 }
 
 // minOnDemandInterval throttles CheckNow. The dashboard calls it only to fill
@@ -229,7 +241,7 @@ func (c *Checker) checkOnce(ctx context.Context) {
 	// (an adversary pushing v0.0.1 to trigger a rollback to a vulnerable release).
 	// semverGreater returns false on parse failure, falling back to conservative
 	// "do not upgrade" — same effect as skipping the check.
-	if rel.Tag == c.installed {
+	if rel.Tag == c.installedTag() {
 		slog.Debug("auto-update: already installed this release", "tag", rel.Tag)
 		return
 	}
@@ -247,31 +259,68 @@ func (c *Checker) checkOnce(ctx context.Context) {
 		c.notify(fmt.Sprintf("🆕 naozhi %s 可用（当前 %s）。运行 `naozhi upgrade` 升级。",
 			rel.Tag, c.cfg.CurrentVersion))
 	case ModeDownload:
-		c.doInstall(cctx, rel, false)
+		// Error deliberately dropped: doInstall already logged and notified.
+		// The tick loop's contract is to never propagate a failure — the
+		// error return exists for InstallLatest, whose caller is an HTTP
+		// handler that must report the outcome.
+		_ = c.installLocked(cctx, rel, false)
 	case ModeAuto:
-		c.doInstall(cctx, rel, true)
+		_ = c.installLocked(cctx, rel, true)
 	}
+}
+
+// installedTag reads the installed tag under installMu.
+func (c *Checker) installedTag() string {
+	c.installMu.Lock()
+	defer c.installMu.Unlock()
+	return c.installed
+}
+
+// installLocked runs doInstall under installMu, re-checking the already-
+// installed short-circuit inside the lock.
+//
+// checkOnce checks that condition too, before the mode switch, but that read
+// is only an optimisation — it can go stale the moment it is taken if the
+// dashboard is installing concurrently. The check that MATTERS is this one,
+// because it is the one that cannot be raced past into a second Replace()
+// (RFC §1.3).
+func (c *Checker) installLocked(ctx context.Context, rel *Release, restart bool) error {
+	c.installMu.Lock()
+	defer c.installMu.Unlock()
+	if rel.Tag == c.installed {
+		return ErrNothingToDo
+	}
+	return c.doInstall(ctx, rel, restart)
 }
 
 // doInstall downloads, verifies, and atomically replaces the binary. When
 // restart is true it also restarts the running service. Every failure mode
 // degrades to a logged warning + best-effort notice; the running service is
 // never left broken because Replace restores its backup on any swap failure.
-func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
+//
+// Callers MUST hold installMu: this both writes `installed` and performs the
+// Replace whose second invocation in the staged state would destroy the backup
+// (RFC §1.3). Reach it through installLocked or InstallLatest, never directly.
+//
+// It returns the failure in addition to logging + notifying it. The two callers
+// need different error policies from one pipeline: the background tick swallows
+// (a failed check must never disturb the gateway), while the dashboard's apply
+// handler has an operator waiting for an answer.
+func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) error {
 	c.cfg.Status.notePhase(PhaseInstalling, "", nil)
 
 	selfPath, err := SelfPath()
 	if err != nil {
 		slog.Warn("auto-update: locate running binary failed", "err", err)
 		c.cfg.Status.notePhase(PhaseFailed, "", err)
-		return
+		return err
 	}
 
 	tmp, err := os.MkdirTemp("", "naozhi-autoupdate-*")
 	if err != nil {
 		slog.Warn("auto-update: temp dir failed", "err", err)
 		c.cfg.Status.notePhase(PhaseFailed, "", err)
-		return
+		return err
 	}
 	defer os.RemoveAll(tmp)
 
@@ -280,7 +329,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		slog.Warn("auto-update: download/verify failed", "tag", rel.Tag, "err", err)
 		c.cfg.Status.notePhase(PhaseFailed, "", err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动下载失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
-		return
+		return err
 	}
 
 	backupPath, err := Replace(newBin, selfPath)
@@ -297,7 +346,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// rather than up to preflightTTL later.
 		invalidatePreflight()
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动安装失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
-		return
+		return err
 	}
 
 	// Mark installed so we don't re-download next tick while the old binary
@@ -316,7 +365,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// Keep the backup as a manual rollback artifact until a restart picks
 		// up the new binary; a stale .bak is harmless and small.
 		_ = backupPath
-		return
+		return nil
 	}
 
 	// R20260602141221-CR-3: do NOT gate the restart on an outer ServiceRunning()
@@ -357,10 +406,11 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// LastErr still carries why the restart did not happen.
 		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `sudo systemctl restart naozhi`。", rel.Tag, err))
-		return
+		return err
 	}
 	// Restart is queued; this process is about to receive SIGTERM. The
 	// "🔄 restarting" notice above is the last one this generation emits.
+	return nil
 }
 
 // notify delivers a notice best-effort.

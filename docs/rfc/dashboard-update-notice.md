@@ -491,10 +491,135 @@ secret 放进限流器的 key 空间）。
 P1 单独就解决了最大痛点：**本机那种"磁盘 v0.0.73 / 进程 v0.0.72 / 无人知晓"
 的状态现在会显示成一枚 `↻ v0.0.73` chip。**
 
-**P2 — 一键生效**
+**P2 — 一键生效 — ✅ 已实现**
 `Checker.InstallLatest`（含 §1.3 的 staged-只重启分叉 + `installMu` 单飞）+
-`POST apply` + `confirmDialog` + 进行中轮询 + **§3.6 的 macOS 重启修复**。
-后者是 P2 的硬前置：不修则 macOS 上"点了也不生效"。
+`POST apply` + `confirmDialog` + 进行中轮询。§3.6 的 macOS 重启修复已随 P1
+落地（见上），P2 直接受益。
+
+### P2 实现中发现的第三条 staged 路径（§1.3 的补全）
+
+RFC 原先只识别两种"已 staged"：`c.installed`（本进程装的）与
+`rel.Tag == c.installed`。**还有第三种，而它恰好是 §1.3 最容易触发的一种**：
+操作者在 shell 里跑了 `naozhi upgrade`。那是另一个进程，本进程的 `installed`
+仍为空，`Status.staged` 也为空 → GET 报 `action: install` → apply 走完整
+`doInstall` → **第二次 `Replace()` 把 `.bak` 里的可回滚版本 O_TRUNC 掉**，
+正是 G7 要防的事故，只是触发者从"重复点击"换成了"命令行 + dashboard 混用"。
+
+补法是在 `InstallLatest` 的 install 分支前探测磁盘：`<SelfPath()> --version`
+（打印 ldflag 版本即退出，不读 config、不开端口、不碰状态），等于目标 tag
+就降级为 restart-only 并把 `installed` 补上。
+
+执行自己的 install path 不构成新增攻击面：能写那个文件的人在下一次重启就已
+获得代码执行，而下一次重启正是本功能要触发的事。探测失败一律视为"测不出"
+（`(…, false)`）并走正常安装路径 —— 它是安全网，不是门禁。
+
+`onDiskVersionFn` 是可替换的测试缝，所以单测不会真的 exec 任何东西。
+
+**残留缺口（P3 候选，非阻塞）**：`GET` **不做**这个探测（每次轮询 exec 一次
+不可接受），所以上述场景下 chip 文案仍会说"可安装"。点下去的行为是正确的
+（降级为只重启、`.bak` 不受损），只是文案偏保守。要修就得给探测结果加一层
+与 preflight 同级的 60s 缓存。
+
+### P2 的其它设计决定
+
+- **`POST` 的 `confirm_action` 必须回传**。TOCTOU：UI 显示 `restart` 时后台
+  checker 刚好装完变成别的状态，那一次点击就不再是操作者同意过的那件事。
+  不一致 → 409，前端立即重读状态。
+- **`restart` 参数由 handler 按 `ServiceRunning()` 决定**，且
+  `InstallLatest` 内部还会再降一次级：若要求重启而无受管服务，安装照做、
+  phase 落回 `staged` 并把 `ErrRestartUnsupported` 写进 `LastErr`。否则
+  `doInstall` 会进 `PhaseRestarting` 然后调用一个 no-op 原语，chip 就永远停在
+  "正在重启…"——一个不会有人来重启的进程。UI 文案同步分叉为「仅下载安装」。
+- **限流不是为了防并发**（`TryLock` 已经防了），是为了防按住按钮刷失败路径 →
+  刷日志 / 刷 GitHub。key 是常量 ⇒ 全局限流，对"安装本来就是全局单例"是正确
+  语义，但代码注释必须写明，否则后人会以为它是 per-user（dashboard token 是
+  单一共享值，per-token 限流实际等价于全局）。拒绝的请求也消耗窗口：要限的是
+  尝试次数，不是成功次数。
+- **`rollback_hint` 在确认前就给**。它回答的失败是"新 binary 起不来"，而那个
+  失败里，本该告诉操作者怎么恢复的 dashboard 正是消失的东西。所以逃生路线必须
+  在服务还活着的时候印在屏幕上。无受管服务时**只给 `cp` + `chmod`**，不猜重启
+  命令——`launchdServiceLabel()` 此时回退成常量，硬拼出来的是一条注定失败的
+  命令，还挂在 `&&` 链尾把前半段的成功一起吞掉。
+- **`updateApplyFn` 测试缝**：handler 测试若真调 `InstallLatest` 就会从单测里
+  打 GitHub。生产为 nil（走 `s.updateChecker.InstallLatest`）。
+
+### P2 代码评审后的三处修正（2026-09-02）
+
+**(a) 前端的"正在应用"标志必须有 deadline。** `InstallLatest` 有四条返回
+error 但**有意不动 `phase`** 的路径：release lookup 失败（`noteCheck` 在
+`err != nil` 时只写 `CheckErr` 就 return，且 `TestInstallLatest_LookupFailureLeavesPhase`
+把这条钉成契约——什么都没装，报 `PhaseFailed` 是不诚实的）、`ErrNothingToDo`、
+`ErrInstallInProgress`、`ErrCheckSkippedDev`。而前端清 `updateApplying` 的条件
+只看 `action`/`phase`（`none`/`failed`/`staged`），在这些状态下 action 仍是
+`install`、phase 仍是 `available` → **三个条件永不成立**，chip 会以 3s 轮询
+永久停在"正在应用新版本，服务即将重启…"，点击只回一句"升级正在进行中"，
+只能靠刷新页面恢复。最常见的触发就是点 apply 时 GitHub 那一下网络抖动。
+
+修法落在前端而不是后端（后端不谎报 phase 是对的）：`UPDATE_APPLY_MAX_MS`
+（90s）兜底，与 `markSessionOptimisticRunning` 的 20s 安全定时器同型。90s 是
+因为慢 lookup 发生在 `doInstall` 写 `PhaseInstalling` **之前**，窗口必须能装下
+它；早退的代价很小（回落到服务端事实，且重复点击安全——TryLock + 三条 staged
+短路让二次 apply 成为 no-op），晚退的代价只是一个陈旧但诚实的标签。
+`setUpdateApplying` 是该标志的唯一写者，deadline 因此不会被"直接清 flag"的
+路径孤儿化。
+
+**(b) 202 必须在起 goroutine 之前 write + Flush。** 原实现先 `go func()` 再
+`writeJSONStatus`。仅调顺序还不够：net/http 会把 handler 的响应留在 buffer 里
+直到 handler 返回，而 restart-only 路径前面没有下载，goroutine 可在毫秒级走到
+`launchctl kickstart -k` / `systemctl restart`，随之而来的 SIGTERM 完全可能
+先到。那样浏览器看到的是连接中断，`applyUpdate` 把它报成"升级请求失败"——
+**在 apply 正在成功的那一刻告诉操作者它失败了**。所以写完立刻
+`http.Flusher.Flush()`，再起 goroutine。
+
+`TestUpdateApply_RespondsBeforeWorkCompletes` 抓不到这个：它用 channel 把 apply
+卡住，顺序问题被掩盖。新增两条覆盖：行为测试（自定义 `flushRecorder`，断言
+apply 进入时 flush 已发生）+ 源码顺序守卫（httptest 下 flush 永远大幅领先，
+所以真正的不变量是**源码顺序**，与 `TestUpdateApply_DetachedContextSourceGuard`
+同法）。两条都经过反向验证：把 write+flush 移回 goroutine 之后，二者同时失败。
+
+**(c) `install_enabled` 补进 GET 形状契约的 required 列表。** 前端
+`updateCanApply` 要求 `can_apply && install_enabled` 同时为真才渲染按钮，所以
+该字段一旦停止下发，功能会静默退化成"永远只显示手工命令"，而其余测试全绿。
+形状契约的意义正是钉住这种字段。
+
+**P2 实测（2026-09-01，隔离实例 127.0.0.1:8198，binary 在 /tmp，`mode: notify`）**
+
+`current=v0.0.72`、远端 `latest=v0.0.74`，`action: install`、`can_apply: true`：
+
+```
+POST /api/system/update/apply {"confirm_action":"install"} → 202 {"status":"started"}
+23:05:39 dashboard update: apply requested  action=install restart=false
+23:05:42 auto-update: binary installed     tag=v0.0.74 restart=false   (2.6s)
+```
+
+```
+-rwxr-xr-x  19176002  naozhi                        ← 真实下载校验替换成 v0.0.74
+-rw-------  27301618  naozhi.naozhi-upgrade.bak     ← 0600，仍是 v0.0.72
+```
+
+替换后 `action` 自动变成 `restart`、`can_apply: false` +
+`blocked_reason: 未检测到受管服务…`（该实例不是 launchd 启动的，G5 成立）。
+
+随后逐条验收（同一实例）：
+
+| 验收 | 结果 |
+|---|---|
+| staged 态发 `confirm_action: install` | **409** `state changed: confirmed "install" but current action is "restart"` |
+| 紧接第二次 POST | **429** `too many update attempts` |
+| 31s 后发 `confirm_action: restart` | **409** `未检测到受管服务…`（preflight 快速失败，未起任何后台 goroutine） |
+| **三次 apply 尝试后 `.bak` md5** | **`cb5199963cdb42b7adaf39a8a736a2ef` 不变（G7 成立）** |
+| `.bak` 加执行位后 `--version` | **`v0.0.72`** —— 回滚 artifact 真的可用，不只是"文件还在" |
+| 无 token 的 GET / POST | 双双 **401** |
+| `dashboard_install: false` 重启后 | POST **403**，GET 仍 **200** 且 `install_enabled: false`、`action` 照实报 `install` |
+
+最有价值的一条是 `.bak` 的 md5：它是在**真实下载+替换发生过之后**、又经历三次
+apply 尝试（含一次 staged 态的 restart 确认）才校验的，所以 §1.3 的约束是在
+真链路上被验证的，不是靠单测断言。
+
+**仍未验证的一条**：G2 的"点击 → launchd 真的重启 → 重连后 `current` 为新版本"
+需要一台由 launchd 托管、且跑着含本 PR 版本的实例——只有正式实例 :8180 满足，
+需要操作者授权重启它。`restartOnly` 走的是 P1 已实测可用的
+`kickstart -k gui/<uid>/<label>`，但"整条链在受管进程上真的换代"仍缺一次实机确认。
 
 **P3 — 可选增强**
 WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false` 下的按需 check
@@ -539,6 +664,11 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 - `can_apply == false` 时 POST → 409 且**不启动任何后台 goroutine**。
 - `dashboard_install: false` → POST 403，GET 照常 200。
 - 限流：连续 POST 第二次 → 429。
+- **202 在起 goroutine 之前 write + Flush**（见 P2 修正 (b)）：行为测试断言
+  apply 进入时 flush 已发生，源码守卫断言 `writeJSONStatus` 与 `f.Flush()`
+  的位置都早于 `go func()`。
+- GET 形状契约的 required 必须含 `install_enabled`——前端拿它当门，字段消失
+  会静默退化成"只给手工命令"（见 P2 修正 (c)）。
 - routes.go 每加一行路由要 bump `tools/lint-server-handlers/exemptions.yaml`
   的 baseline（见 `ab29e61e` 先例，本次 +2 行）。
 
@@ -546,6 +676,9 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 
 - `#btn-update` 存在且默认带 `hidden`；三种 `action` 的中文文案齐备且互不相同；
   CSS 只用既有 token（grep 断言不出现新 `--nz-*` 定义或裸色值）。
+- `UPDATE_APPLY_MAX_MS` 存在，且不出现裸 `updateApplying = true`——标志必须
+  经 `setUpdateApplying` 写入，否则 deadline 会被绕过而 chip 可能永久卡在
+  "正在应用新版本"（见 P2 修正 (a)）。
 
 **手工验收**
 
@@ -558,8 +691,11 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
   `--version`）——§1.3 的手工确认。
 - G4 把 binary chown 到 root：chip 仍显示，但给手工命令而非按钮。
 - G5 Linux 生产节点上的同一路径：`systemctl restart --no-block` 生效。
-- G6 `install` 路径断网 → `phase: failed` + `last_error` 可读，服务仍在旧版本
-  上正常跑。
+- G6 `install` 路径断网，分两种失败：**下载/替换**失败 → `phase: failed` +
+  `last_error` 可读；**release lookup** 失败 → `phase` 不动（什么都没装，报
+  `failed`是不诚实的）、`check_error` 可读，chip 在 `UPDATE_APPLY_MAX_MS`
+  后自行回落。两种都要求服务仍在旧版本上正常跑。（原稿只写了前一种，把后一种
+  也当成 `failed`——正是 P2 修正 (a) 的前端卡死之源。）
 
 ## 7. 风险与缓解
 

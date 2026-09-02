@@ -321,6 +321,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/system/update/apply",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "POST",
     "path": "/api/transcribe",
     "handler_type": "*transcribe.Handler"
   },

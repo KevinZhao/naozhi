@@ -478,6 +478,9 @@ func main() {
 	if cfg.UpdateEnabled() {
 		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus)
 	}
+	// Whether the dashboard may apply an update itself, as opposed to only
+	// reporting one (update.dashboard_install, default true).
+	updateDashboardInstall := cfg.UpdateDashboardInstall()
 
 	// Server
 	srv := server.NewWithOptions(server.ServerOptions{
@@ -513,6 +516,7 @@ func main() {
 		Version:                 version,
 		UpdateStatus:            updateStatus,
 		UpdateChecker:           updateChecker,
+		UpdateDashboardInstall:  &updateDashboardInstall,
 		SysessionManager:        sysMgr,
 		SysWorkDir:              sysWorkDir,
 		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).

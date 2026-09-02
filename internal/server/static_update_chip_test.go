@@ -124,3 +124,73 @@ func TestUpdateChipJSContract(t *testing.T) {
 		t.Error("expected a 60s poll interval for the update status; a faster cadence adds load for state that changes on a 6h server cadence")
 	}
 }
+
+// TestUpdateApplyJSContract guards the apply flow's correctness-critical rules.
+func TestUpdateApplyJSContract(t *testing.T) {
+	js := string(staticAssetBytes("dashboard.js"))
+	if js == "" {
+		t.Fatal("dashboard.js asset empty")
+	}
+
+	if !strings.Contains(js, "'/api/system/update/apply'") {
+		t.Error("dashboard.js must POST to /api/system/update/apply")
+	}
+
+	// confirm_action closes the TOCTOU: the operator agreed to what they were
+	// shown, and if the background checker changed the state in between the
+	// server must refuse rather than silently do the other thing.
+	if !strings.Contains(js, "confirm_action") {
+		t.Error("the apply POST must echo confirm_action so a state change between render and click is a 409 instead of the wrong operation")
+	}
+
+	// A speed bump on a request that restarts the gateway. countdownSecs is the
+	// existing confirmDialog affordance for exactly this (RFC F12).
+	if !strings.Contains(js, "countdownSecs: 3") {
+		t.Error("the apply confirmation must use a countdown speed bump; restarting the gateway on a stray double-Enter is the failure mode")
+	}
+
+	// The two operations must not be described with the same words: agreeing to
+	// "download and install" when the bytes are already staged is what leads an
+	// operator into the backup-destroying repeat.
+	for _, phrase := range []string{"立即重启生效", "立即安装并重启"} {
+		if !strings.Contains(js, phrase) {
+			t.Errorf("expected distinct confirm copy %q for the two apply actions", phrase)
+		}
+	}
+
+	// Both the deployment's ability (can_apply) and its permission
+	// (install_enabled) must gate the button; either one false ⇒ explain,
+	// don't offer.
+	if !strings.Contains(js, "st.can_apply") || !strings.Contains(js, "st.install_enabled") {
+		t.Error("the apply button must be gated on BOTH can_apply and install_enabled")
+	}
+
+	// The way out has to be on screen while the service is still up: if the new
+	// build does not boot, this dashboard is gone.
+	if !strings.Contains(js, "rollback_hint") {
+		t.Error("the confirmation must surface rollback_hint before applying — after a failed boot the dashboard cannot tell anyone how to recover")
+	}
+
+	// While applying, the poll speeds up (the operator is watching) but only
+	// then — the idle cadence must stay at 60s.
+	if !strings.Contains(js, "UPDATE_POLL_BUSY_MS = 3000") {
+		t.Error("expected a 3s poll while an apply is in flight")
+	}
+
+	// The busy flag needs a deadline, because several apply outcomes leave the
+	// server's `phase` deliberately untouched: a failed release lookup records
+	// only check_error (selfupdate.Status.noteCheck returns early on error), and
+	// ErrNothingToDo / ErrInstallInProgress record nothing. In those states
+	// action stays 'install' and phase stays 'available', so none of the
+	// terminal conditions in fetchUpdateStatus fire — an undeadlined flag would
+	// leave the chip claiming "正在应用新版本" at the 3s cadence for the rest of
+	// the page's life, with nothing being applied.
+	if !strings.Contains(js, "UPDATE_APPLY_MAX_MS") {
+		t.Error("the in-flight apply flag must have a deadline: a failed release lookup never moves `phase`, so nothing else would ever clear it")
+	}
+	// One writer, so the deadline cannot be orphaned by a path that clears the
+	// flag directly.
+	if strings.Contains(js, "updateApplying = true") {
+		t.Error("set the apply flag through setUpdateApplying(true) so its deadline is always armed with it")
+	}
+}

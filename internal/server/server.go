@@ -29,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
@@ -173,10 +174,21 @@ type Server struct {
 	// buildVersion is the `-X main.version` ldflag value, kept here so the
 	// endpoint can report the running version even with the checker disabled
 	// (HealthHandler holds its own copy for /health).
+	// updateInstallEnabled gates POST /api/system/update/apply
+	// (update.dashboard_install). updateApplyLimiter throttles that endpoint;
+	// see newUpdateApplyLimiter for why it is global rather than per-caller.
 	// 读: dashboard_update.go.
-	updateStatus  *selfupdate.Status
-	updateChecker *selfupdate.Checker
-	buildVersion  string
+	// updateApplyFn overrides what POST .../apply actually runs. Nil in
+	// production (the handler then calls updateChecker.InstallLatest); the seam
+	// exists so handler tests can exercise the 202 path without a real install
+	// reaching out to GitHub from a unit test.
+	// 读: dashboard_update.go.
+	updateStatus         *selfupdate.Status
+	updateChecker        *selfupdate.Checker
+	buildVersion         string
+	updateInstallEnabled bool
+	updateApplyLimiter   *ratelimit.Limiter
+	updateApplyFn        func(ctx context.Context, restart bool) error
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -446,7 +458,11 @@ func buildServer(opts ServerOptions) *Server {
 		updateStatus:    opts.UpdateStatus,
 		updateChecker:   opts.UpdateChecker,
 		buildVersion:    opts.Version,
-		orient:          buildOrientConfig(opts),
+		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default and
+		// keeping the zero-value ServerOptions (tests, embedders) usable.
+		updateInstallEnabled: opts.UpdateDashboardInstall == nil || *opts.UpdateDashboardInstall,
+		updateApplyLimiter:   newUpdateApplyLimiter(),
+		orient:               buildOrientConfig(opts),
 		// Instance-wide dashboard prefs (theme). Reuses opts.StateDir — the
 		// same data root the session/cron stores live under — so no new
 		// ServerOptions field or main.go wiring is needed. Empty StateDir

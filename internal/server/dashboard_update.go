@@ -1,6 +1,7 @@
-// dashboard_update.go — self-update state for the dashboard.
+// dashboard_update.go — self-update state and apply for the dashboard.
 //
-//	GET /api/system/update   version state + what the operator can do
+//	GET  /api/system/update        version state + what the operator can do
+//	POST /api/system/update/apply  carry it out (install and/or restart)
 //
 // Gated by the same auth middleware as the rest of /api/*. Structured after
 // dashboard_system.go: a thin handler over state another subsystem owns.
@@ -13,16 +14,21 @@
 // enough that a second implementation would drift, and the failure mode of
 // getting it wrong is destroying the rollback backup (RFC §1.3).
 //
-// See docs/rfc/dashboard-update-notice.md. P1 is read-only; POST .../apply
-// arrives in P2.
+// See docs/rfc/dashboard-update-notice.md.
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/selfupdate"
+	"golang.org/x/time/rate"
 )
 
 // updateStatusResponse is the wire shape of GET /api/system/update.
@@ -62,6 +68,15 @@ type updateStatusResponse struct {
 	// Enabled is false when the auto-update checker is not running, in which
 	// case Latest is not maintained and the UI should not claim to be current.
 	Enabled bool `json:"enabled"`
+	// InstallEnabled reports whether POST .../apply is permitted
+	// (update.dashboard_install). False ⇒ the UI shows the manual command
+	// instead of a button; the status above is still accurate.
+	InstallEnabled bool `json:"install_enabled"`
+	// RollbackHint is a paste-ready command that restores the previous binary,
+	// shown in the confirmation BEFORE applying — if the new build fails to
+	// boot, the dashboard that would carry this advice is gone. Empty when
+	// there is nothing to apply.
+	RollbackHint string `json:"rollback_hint,omitempty"`
 }
 
 // handleUpdateStatus serves the self-update state.
@@ -114,11 +129,160 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		RestartSupported: selfupdate.ServiceRunning(),
 		RunningSessions:  s.runningSessionCount(),
 		Enabled:          s.updateStatus != nil,
+		InstallEnabled:   s.updateInstallEnabled && s.updateChecker != nil,
+	}
+	if action != selfupdate.ActionNone {
+		resp.RollbackHint = selfupdate.RollbackHint()
 	}
 	if !snap.CheckedAt.IsZero() {
 		resp.CheckedAt = snap.CheckedAt.Format(time.RFC3339)
 	}
 	writeJSON(w, resp)
+}
+
+// updateApplyRequest is the POST body.
+//
+// ConfirmAction is required and must equal the `action` the server currently
+// computes. It is not redundant with the URL: it closes a TOCTOU in which the
+// operator sees "restart" in the chip, the background checker finishes a
+// download in the meantime, and the click then means something the operator
+// never agreed to. Disagreement is a 409 and the UI re-reads the state.
+type updateApplyRequest struct {
+	ConfirmAction string `json:"confirm_action"`
+}
+
+// newUpdateApplyLimiter builds the throttle for POST .../apply.
+//
+// What it is for: NOT preventing concurrent installs — InstallLatest's TryLock
+// already makes those impossible. It stops a held-down button from spraying the
+// failure path: each rejected attempt otherwise writes log lines and, on the
+// install branch, a fresh GitHub request.
+//
+// Note the key is a constant, so this is a GLOBAL limit, not per user. That is
+// deliberate and correct here (installing is a whole-process singleton), but it
+// is worth stating because the dashboard token is a single shared secret — a
+// per-token limiter would look per-user while behaving exactly like this one.
+// The token itself is never used as a key: secrets do not belong in a cache
+// keyspace that outlives the request.
+func newUpdateApplyLimiter() *ratelimit.Limiter {
+	return ratelimit.New(ratelimit.Config{
+		Rate:    rate.Every(30 * time.Second),
+		Burst:   1,
+		MaxKeys: 4,
+		TTL:     time.Hour,
+	})
+}
+
+// updateApplyKey is the single bucket every apply attempt shares.
+const updateApplyKey = "system-update-apply"
+
+// applyBackgroundTimeout bounds the detached work. A download of a ~20MB asset
+// over a slow link plus verification is minutes at worst; beyond this something
+// is wedged and the context should release it.
+const applyBackgroundTimeout = 10 * time.Minute
+
+// handleUpdateApply carries out what handleUpdateStatus reported.
+//
+// Returns 202 and does the work in a detached goroutine. This is not a stylistic
+// choice: the successful path ends with this process being SIGTERMed by the
+// service manager, so a synchronous handler would be killed before its response
+// reached the browser. The client learns the outcome by polling GET — including
+// the good outcome, which looks like "the connection dropped, then `current`
+// came back as the new version".
+func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	// CSRF is covered by the auth middleware's Origin check on non-safe methods
+	// (internal/dashboard/auth/csrf.go); no extra gate needed here.
+	if !s.updateInstallEnabled {
+		http.Error(w, "dashboard install disabled (update.dashboard_install=false)", http.StatusForbidden)
+		return
+	}
+	// Throttle before the state checks so a stuck retry loop cannot spin on
+	// them either. A rejected attempt consuming the window is intended: the
+	// point is to bound attempts, not just successes.
+	if s.updateApplyLimiter != nil && !s.updateApplyLimiter.Allow(updateApplyKey) {
+		http.Error(w, "too many update attempts; wait a moment", http.StatusTooManyRequests)
+		return
+	}
+	if s.updateChecker == nil {
+		// No checker ⇒ update.enabled is false. The read-only endpoint still
+		// works, but there is no subsystem here to run an install.
+		http.Error(w, "auto-update is disabled (update.enabled=false)", http.StatusConflict)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	var req updateApplyRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	snap := s.updateStatus.Snapshot()
+	if snap.Current == "" {
+		snap.Current = s.buildVersion
+	}
+	action := snap.Action()
+	if action == selfupdate.ActionNone {
+		http.Error(w, "nothing to apply", http.StatusConflict)
+		return
+	}
+	if req.ConfirmAction != string(action) {
+		// The operator confirmed a different operation than the one that would
+		// run now. Make them look again rather than guessing which they meant.
+		http.Error(w, fmt.Sprintf("state changed: confirmed %q but current action is %q",
+			req.ConfirmAction, action), http.StatusConflict)
+		return
+	}
+	if pre := selfupdate.CheckPreflight(action, snap.Current); !pre.CanApply {
+		http.Error(w, pre.Reason, http.StatusConflict)
+		return
+	}
+
+	// Restart only if there is something to restart. Passing true with no
+	// managed service would strand the UI on "restarting" (InstallLatest
+	// degrades it too; deciding here keeps the intent visible at the call site).
+	restart := selfupdate.ServiceRunning()
+	apply := s.updateApplyFn
+	if apply == nil {
+		apply = s.updateChecker.InstallLatest
+	}
+	slog.Info("dashboard update: apply requested",
+		"action", action, "current", snap.Current, "latest", snap.Latest,
+		"staged", snap.Staged, "restart", restart,
+		"running_sessions", s.runningSessionCount())
+
+	// Write AND FLUSH the 202 before the work starts, not after. Ordering alone
+	// would not be enough: net/http holds a handler's response in its buffer
+	// until the handler returns, while on the restart path the goroutine below
+	// can have this process SIGTERMed within milliseconds of starting (there is
+	// no download in front of the `launchctl kickstart` / `systemctl restart`).
+	// Lose that race and the browser sees a dropped connection, which the
+	// dashboard reports as "升级请求失败" — telling the operator it failed at the
+	// exact moment it is succeeding.
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "started"})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	go func() {
+		// context.Background, NOT r.Context(): the request is already finished
+		// by the time this runs, and its context would be cancelled — killing
+		// the download a moment after starting it.
+		ctx, cancel := context.WithTimeout(context.Background(), applyBackgroundTimeout)
+		defer cancel()
+		if err := apply(ctx, restart); err != nil {
+			// Everything the operator needs is already in Status (phase +
+			// last_error) and will reach them on the next poll; this log line is
+			// for the server-side record.
+			level := slog.LevelWarn
+			if errors.Is(err, selfupdate.ErrNothingToDo) || errors.Is(err, selfupdate.ErrInstallInProgress) {
+				level = slog.LevelInfo
+			}
+			slog.Log(ctx, level, "dashboard update: apply did not complete", "action", action, "err", err)
+			return
+		}
+		slog.Info("dashboard update: apply finished", "action", action)
+	}()
 }
 
 // phaseOrIdle keeps the wire contract non-empty: a nil Status yields the zero

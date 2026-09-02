@@ -109,6 +109,13 @@ type ServerOptions struct {
 	// restart. Nil disables that fallback; the endpoint still serves Status.
 	UpdateChecker *selfupdate.Checker
 
+	// UpdateDashboardInstall gates POST /api/system/update/apply.
+	// nil defaults to TRUE (config.UpdateDashboardInstall's default), so a
+	// deployment that says nothing gets the button and a test harness does not
+	// have to opt in. An explicit false makes the endpoint 403 while the
+	// read-only GET keeps working — see UpdateConfig.DashboardInstall.
+	UpdateDashboardInstall *bool
+
 	// DebugMode gates registration of /api/debug/pprof and /api/debug/vars.
 	// Default false — both endpoints become 404 even for loopback+auth callers,
 	// closing the residual surface where a leaked dashboard token plus host

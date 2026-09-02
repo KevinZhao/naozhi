@@ -58,9 +58,14 @@ func TestUpdateStatusShape(t *testing.T) {
 
 	// Always present, even with nothing to report — the dashboard polls this
 	// and must not have to distinguish "absent" from "nothing to do".
+	// install_enabled is load bearing rather than informational: the chip offers
+	// the button only when can_apply AND install_enabled are both true, so if
+	// this field ever stopped being emitted the feature would silently degrade
+	// to "always show the manual command" with every other test still green.
 	required := []string{
 		"current", "latest", "staged", "phase", "action",
 		"can_apply", "restart_supported", "running_sessions", "enabled",
+		"install_enabled",
 	}
 	for _, k := range required {
 		if _, ok := body[k]; !ok {

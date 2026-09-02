@@ -169,3 +169,9 @@ func invalidatePreflight() {
 	preflightCached = nil
 	preflightMu.Unlock()
 }
+
+// InvalidatePreflightCache is invalidatePreflight for callers outside this
+// package. The cache key ignores `current` (in production it never changes), so
+// a test that evaluates preflight for one version would otherwise leak its
+// verdict into the next — call this between cases.
+func InvalidatePreflightCache() { invalidatePreflight() }
