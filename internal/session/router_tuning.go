@@ -138,14 +138,24 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		effectiveEffort = te
 	}
 
-	respawnNeeded := effortChanged || (modelChanged && caps.EffortTier && effectiveEffort != "")
+	// Clearing the model override ("恢复默认", pointer to "") has no model id
+	// to hand the CLI: set_model("") would blank kiro's header and make
+	// claude reject the request, leaving a live session that can never be
+	// restored to default. It therefore always takes the respawn/deferred
+	// path — the next spawn simply omits the override and the config chain
+	// reapplies (RFC §4.3 清除语义).
+	modelCleared := modelChanged && *model == ""
+	respawnNeeded := effortChanged || modelCleared ||
+		(modelChanged && caps.EffortTier && effectiveEffort != "")
 
 	proc := sess.loadProcess()
 	alive := proc != nil && proc.Alive()
 
 	// RPC fast path defers recording until the CLI acks (§6 R8). Every
 	// other path records now, under the same r.mu hold as the decision.
-	rpcPath := modelChanged && !respawnNeeded && alive
+	// `*model != ""` is implied by !respawnNeeded but spelled out so the
+	// invariant "never RPC an empty model" survives a future refactor.
+	rpcPath := modelChanged && *model != "" && !respawnNeeded && alive
 	if !rpcPath {
 		if modelChanged {
 			sess.SetTuningModel(*model)

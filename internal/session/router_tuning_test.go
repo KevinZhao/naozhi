@@ -297,3 +297,65 @@ func TestSetSessionTuning_ErrorTextIsSanitizedUpstream(t *testing.T) {
 		t.Errorf("CLI text must reach the caller for the dashboard toast, got: %v", err)
 	}
 }
+
+// TestSetSessionTuning_ClearModelNeverTakesRPC pins the "恢复默认" fix: a
+// pointer-to-"" model means "drop the override, let the config chain decide
+// on the next spawn". There is no model id to hand the CLI, so the RPC fast
+// path must never fire — sending set_model("") clears kiro's header and
+// makes claude return an error, leaving a live session that can never be
+// restored to default. Clearing behaves like an effort change: lazy respawn
+// when alive, record-only when suspended.
+func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name     string
+		backend  string
+		effort   string // pre-existing tuning effort (kiro only)
+		alive    bool
+		wantMode string
+	}{
+		{"claude alive", "claude", "", true, TuningAppliedRespawn},
+		{"kiro alive, no effort tier", "kiro", "", true, TuningAppliedRespawn},
+		{"kiro alive, with effort tier", "kiro", "low", true, TuningAppliedRespawn},
+		{"claude suspended", "claude", "", false, TuningAppliedDeferred},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mkTuningTestRouter(t)
+			var proc *tuningFakeProc
+			var s *ManagedSession
+			if tc.alive {
+				proc = &tuningFakeProc{TestProcess: NewTestProcess()}
+				s = addTuningSession(r, "k1", tc.backend, proc)
+			} else {
+				s = addTuningSession(r, "k1", tc.backend, nil)
+			}
+			s.SetTuningModel("m-old")
+			if tc.effort != "" {
+				s.SetTuningEffort(tc.effort)
+			}
+
+			mode, err := r.SetSessionTuning(ctx, "k1", strp(""), nil)
+			if err != nil {
+				t.Fatalf("clearing model must not error: %v", err)
+			}
+			if mode == TuningAppliedRPC {
+				t.Fatal("applied_via = rpc — empty model must never be sent over the control channel")
+			}
+			if mode != tc.wantMode {
+				t.Errorf("mode = %q, want %q", mode, tc.wantMode)
+			}
+			if proc != nil {
+				if proc.setModelCalled {
+					t.Errorf("SetModel(%q) was invoked on the live process", proc.setModelArg)
+				}
+				if proc.AliveVal {
+					t.Error("live process must be closed for lazy respawn so the next spawn drops --model")
+				}
+			}
+			if s.TuningModel() != "" {
+				t.Errorf("TuningModel = %q, want cleared", s.TuningModel())
+			}
+		})
+	}
+}
