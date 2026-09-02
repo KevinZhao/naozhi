@@ -10,8 +10,10 @@
 package server
 
 import (
+	"errors"
 	"sync/atomic"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -41,11 +43,36 @@ func (h *Hub) broadcastSendError(key, errMsg string) {
 	})
 }
 
+// asyncErrorFn is the sessionSend post-ack failure callback: err is the
+// underlying error (nil at the literal-message sites — interrupt timeout,
+// owner-loop panic), msg the localised user-facing label.
+type asyncErrorFn func(err error, msg string)
+
+// informationalSendErr reports whether err is a passthrough outcome the user
+// already knows about: their own /urgent preemption, a /clear-/new reset, or a
+// reconnect with unknown state. session_state corrects the UI for all three.
+func informationalSendErr(err error) bool {
+	return errors.Is(err, cli.ErrAbortedByUrgent) ||
+		errors.Is(err, cli.ErrSessionReset) ||
+		errors.Is(err, cli.ErrReconnectedUnknown)
+}
+
 // httpSendErrorCallback adapts broadcastSendError to the sessionSend
-// onAsyncError signature for the HTTP send path. sessionSend already passes
-// the localised asyncErrorMessage label, so the callback forwards it as-is.
-func (h *Hub) httpSendErrorCallback(key string) func(string) {
-	return func(errMsg string) { h.broadcastSendError(key, errMsg) }
+// onAsyncError signature for the HTTP send path.
+//
+// Informational outcomes are dropped here (M1): the WS callback can address the
+// originating connection alone, but this one fans out to every subscriber of
+// the key — if A's HTTP send is aborted by B's /urgent, B's tab would otherwise
+// receive a send_error for its own key and tear down its own optimistic bubble
+// and running flip. HTTP cannot single out the originator, so it stays silent
+// and lets session_state settle the UI. Real failures still fan out.
+func (h *Hub) httpSendErrorCallback(key string) asyncErrorFn {
+	return func(err error, errMsg string) {
+		if informationalSendErr(err) {
+			return
+		}
+		h.broadcastSendError(key, errMsg)
+	}
 }
 
 // fanOutToSubscribers delivers one frame to every authenticated client

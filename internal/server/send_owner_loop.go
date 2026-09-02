@@ -29,7 +29,7 @@ import (
 // it mid-flight, DoneOrDrain returns nil and this loop exits cleanly.
 // Caller must arrange sendWG accounting via TrackSend — ownerLoop does not
 // touch sendWG directly so it can be launched with a defer-release closure.
-func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError func(string)) {
+func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
 	defer func() {
 		if r := recover(); r != nil {
 			h.handleOwnerLoopPanic(key, onAsyncError, r)
@@ -87,12 +87,12 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 //  1. Logs the panic with a full stack trace for operator triage.
 //  2. Clears the message queue so a stale owner is not left holding the key.
 //  3. Signals the dashboard client via onAsyncError so the UI can tell the
-//     user the turn was lost. HTTP path passes nil onAsyncError (ack already
+//     user the turn was lost. HTTP path fans out via httpSendErrorCallback (ack already
 //     shipped), so this is a no-op there. RETRY3.
 //
 // A nested recover around onAsyncError absorbs a cascading panic (e.g., a
 // broken WS writer) so the outer defer always completes.
-func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any) {
+func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError asyncErrorFn, r any) {
 	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if h.queue != nil {
 		h.queue.Discard(key)
@@ -104,7 +104,7 @@ func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any)
 					slog.Error("ownerLoop onAsyncError panic recovered", "key", key, "panic", rr)
 				}
 			}()
-			onAsyncError("处理异常，请稍后重试。")
+			onAsyncError(nil, "处理异常，请稍后重试。")
 		}()
 	}
 }

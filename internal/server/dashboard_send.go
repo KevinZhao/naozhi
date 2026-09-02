@@ -515,7 +515,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if node != "" && node != "local" {
 		if len(images) > 0 {
 			cleanup()
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
+			writeSendError(w, http.StatusBadRequest, "files not supported for remote nodes", filesConsumed)
 			return
 		}
 		// Syntactic workspace gate — same rationale as the WS path in

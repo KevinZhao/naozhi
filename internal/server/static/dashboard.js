@@ -4975,6 +4975,11 @@ async function sendMessage() {
     // flip to 'running'. Every other success ('accepted'/'queued') should
     // show the banner immediately. Read the body once (before clearing the
     // input) so we can branch on status without reviving the stale text.
+    // Record the sent text BEFORE awaiting the body: a send_error frame for
+    // this turn can arrive on the WS while we wait, and onSendError gates on
+    // sessionLastSent to tell "our failed send" from another tab's.
+    const sentSid = sid(selectedKey, selectedNode);
+    if (text) sessionLastSent[sentSid] = text;
     let ackStatus = '';
     try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
 
@@ -4990,8 +4995,8 @@ async function sendMessage() {
       // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
       // so the running banner doesn't hang on a no-op command.
       rollbackOptimisticRunning(selectedKey, selectedNode);
+      delete sessionLastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
     } else {
-      if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
       // Optimistic running flip already applied above — keep it.
       // Optimistic bubble parity with the WS path — but ONLY while WS is
       // connected: the live event stream (onHistory/onEvent) is what removes
@@ -12023,19 +12028,27 @@ const wsm = {
   // send_error: the HTTP send path (every file-bearing send, plus the WS-down
   // fallback) has no per-request back-channel after its 202, so the server
   // fans asynchronous failures (spawn error, passthrough send failure, remote
-  // node send failure) out to every subscriber of the key as this frame. Reuse
-  // the send_ack error recovery — toast, drop the optimistic bubble, roll back
-  // the running flip — but only touch the on-screen bubble when the failed key
-  // is the one being viewed; for any other key just undo its running state.
+  // node send failure) out to every subscriber of the key as this frame.
+  //
+  // Gate on sessionLastSent: the frame reaches every tab watching the key, but
+  // only the tab that actually sent the failed message owns an optimistic
+  // bubble / running flip for it. A second operator's tab (or this tab after
+  // it sent nothing) must ignore the frame entirely — otherwise it would tear
+  // down its own legitimate optimistic state and toast about a message it
+  // never sent. When we did send: reuse the send_ack error recovery (toast,
+  // drop the optimistic bubble, roll back running) for the on-screen key, or
+  // just undo the running flip for a key we sent to and then navigated away.
   onSendError(msg) {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
+    const sKey = sid(msg.key, node);
+    if (!sessionLastSent[sKey]) return;
     if (msg.key === selectedKey && node === (selectedNode || 'local')) {
       this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;
     }
     rollbackOptimisticRunning(msg.key, node);
-    delete sessionLastSent[sid(msg.key, node)];
+    delete sessionLastSent[sKey];
   },
 
   onSessionState(msg) {

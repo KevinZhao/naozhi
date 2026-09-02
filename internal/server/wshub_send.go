@@ -176,7 +176,9 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		ResumeID:      msg.ResumeID,
 		Backend:       msg.Backend,
 		AccessProfile: msg.AccessProfile,
-	}, func(errMsg string) {
+	}, func(_ error, errMsg string) {
+		// Originator-only channel: informational outcomes (/urgent abort,
+		// reset) are reported here on purpose — the sender wants to know.
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
 	})
 	if err != nil {

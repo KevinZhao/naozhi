@@ -2,11 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // postSendJSON issues an authenticated JSON POST to handleSend and returns the
@@ -107,5 +111,45 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 	}
 	if _, ok := recvMsg(t, otherOut); ok {
 		t.Fatal("non-subscriber must not receive send_error")
+	}
+}
+
+// TestHTTPSendErrorCallback_SkipsInformationalErrors pins the M1 rule: the HTTP
+// callback fans out to EVERY subscriber of the key, so outcomes the user
+// already knows about (ErrAbortedByUrgent / ErrSessionReset /
+// ErrReconnectedUnknown — session_state corrects the UI) must not become a
+// send_error that would tear down a second tab's own optimistic state. The WS
+// path keeps reporting them because it can address the originator alone.
+// Real failures (spawn error) must still fan out.
+func TestHTTPSendErrorCallback_SkipsInformationalErrors(t *testing.T) {
+	const key = "feishu:p2p:alice"
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+	sub, subOut := newCapturedClient(t, hub)
+	registerSub(hub, sub, key)
+
+	cb := hub.httpSendErrorCallback(key)
+	for _, e := range []error{
+		cli.ErrAbortedByUrgent,
+		fmt.Errorf("passthrough: %w", cli.ErrSessionReset), // wrapped — errors.Is, not ==
+		cli.ErrReconnectedUnknown,
+	} {
+		cb(e, asyncErrorMessage(e))
+	}
+	if m, ok := recvMsg(t, subOut); ok {
+		t.Fatalf("informational error must not fan out, got %+v", m)
+	}
+
+	spawnErr := errors.New("spawn process: exec: no wrapper")
+	cb(spawnErr, asyncErrorMessage(spawnErr))
+	m, ok := recvMsg(t, subOut)
+	if !ok || m.Type != "send_error" || m.Key != key {
+		t.Fatalf("real failure must fan out as send_error, got ok=%v %+v", ok, m)
+	}
+	// Literal-message sites (interrupt timeout / owner-loop panic) pass a nil
+	// error and must still reach subscribers.
+	cb(nil, "处理异常，请稍后重试。")
+	if m, ok := recvMsg(t, subOut); !ok || m.Error != "处理异常，请稍后重试。" {
+		t.Fatalf("nil-error literal message must fan out, got ok=%v %+v", ok, m)
 	}
 }

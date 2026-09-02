@@ -88,6 +88,14 @@ func TestDashboardJS_HTTPSendFailureFeedback(t *testing.T) {
 	if !strings.Contains(js, "onSendError(msg) {") {
 		t.Error("onSendError handler missing — send_error must reuse the send_ack error recovery")
 	}
+	// M1: the frame fans out to every subscriber of the key; only the tab that
+	// sent the failed message may touch its optimistic state.
+	if !strings.Contains(js, "const sKey = sid(msg.key, node);\n    if (!sessionLastSent[sKey]) return;") {
+		t.Error("onSendError must be gated on sessionLastSent — a tab that did not send the failed message must ignore the frame")
+	}
+	if !strings.Contains(js, "if (text) sessionLastSent[sentSid] = text;\n    let ackStatus = '';") {
+		t.Error("HTTP send must record sessionLastSent before awaiting the ack body so a fast send_error cannot race the gate")
+	}
 
 	// F3
 	if !strings.Contains(js, "j.files_consumed") {
