@@ -411,3 +411,11 @@ RFC §4.5.1 末段"drift 是正确的而非误判"）。
 9. `internal/server/static/dashboard.js` — chip popover / 三态 /
    applyFeatureGates 接线 / 远程置灰
 10. `config.example.yaml` + README 功能表更新
+
+## Errata（2026-09-02，#2412 合并）
+
+claude CLI 自 2.1.226 起接受 `--effort <low|medium|high|xhigh|max>`，`ClaudeProtocol.Capabilities().EffortTier` 改为 true。本文写作时（F1–F15 实测于 claude 2.1.251 但沿用「claude 无 effort」假设）以下表述随之失效：
+
+- §1「claude 无 effort 概念，不受影响」、§5 F9 行「claude 始终 RPC」、校验行「claude+effort → 400」、capability gate 行「claude 会话 effort popover 不挂载」：现在 claude 与 kiro 同等对待——有生效 effort 的 claude 会话切 model 走 respawn，无 effort 走 RPC；claude+effort 记录为 override，只有 codex 仍 400。
+- F9 对 claude 是**保守套用**：claude 的 `set_model` control_request 是否保留启动时的 `--effort` pin 未实测（claude 的 effort 是 session 级设置，没有 kiro 那种 per-model `defaultEffortLevel`，直觉上不会重置）。若实测证明保留，可新增 `Caps` 字段把 F9 收窄回 ACP，让配了 effort 的 claude 会话重新享受 RPC 快路径。
+- 已知可见性缺口：dashboard 的 effort chip 取值来自 `proc.Effort()`（backend 上报的 metadata，claude 不上报），因此 claude 的 tier 在 UI 上仍为空、只能经 `POST /api/sessions/override` 设置。
