@@ -58,6 +58,13 @@ func TestDashboardJS_EventAlreadyRenderedHelper(t *testing.T) {
 // log had 586 text uuids that re-emit (same uuid, multiple times) — a generic
 // "skip if seen" would freeze streaming output. The bug only manifests on user
 // bubbles, which are immutable, so the dedup is deliberately user-scoped.
+//
+// One deliberate exception (static_events_panel_contract_test.go): onHistory /
+// appendEvents dedup ANY type by uuid when the event shares the watermark
+// millisecond exactly. A same-time same-uuid pair is always the same entry
+// (RFC §3 measured the 586 re-emits as same uuid + same time + same content),
+// so that narrow case cannot freeze streaming text; newer-time re-emits are
+// still appended as before.
 func TestDashboardJS_UserBubbleDedupScopedToUser(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)

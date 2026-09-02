@@ -86,12 +86,13 @@ function defaultSessions() {
 
 function defaultEvents() {
   return [
-    { type: 'system', summary: 'session started', time: Date.now() - 10000 },
-    { type: 'user', detail: 'hello world', time: Date.now() - 8000 },
+    { type: 'system', summary: 'session started', time: Date.now() - 10000, uuid: 'ev-sys-0001' },
+    { type: 'user', detail: 'hello world', time: Date.now() - 8000, uuid: 'ev-usr-0002' },
     {
       type: 'text',
       detail: 'Hi! Here is some **bold** and `inline code`.\n\n```javascript\nconsole.log("hello");\n```\n\nAnd a table:\n\n| Col A | Col B |\n|-------|-------|\n| 1     | 2     |',
       time: Date.now() - 5000,
+      uuid: 'ev-txt-0003',
     },
   ];
 }
@@ -217,6 +218,7 @@ function startMockServer(overrides = {}) {
   let cronCreateCalls = [];
   let loginCalls = [];
   let favoriteCalls = [];
+  let labelCalls = [];
   let authedCookies = new Set();
 
   const server = http.createServer((req, res) => {
@@ -314,8 +316,32 @@ function startMockServer(overrides = {}) {
 
     if (pathname === '/api/sessions/events' && req.method === 'GET') {
       if (!checkAuth()) return;
+      // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
+      // 1 s poll never re-delivers the watermark millisecond.
+      const after = Number(url.searchParams.get('after') || 0);
+      const out = after > 0 ? eventsData.filter(e => !e.time || e.time > after) : eventsData;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(eventsData));
+      res.end(JSON.stringify(out));
+      return;
+    }
+
+    // Rename (user_label). Records the call and patches the snapshot like the
+    // real handler; bumps stats.version so the next poll re-renders the card.
+    if (pathname === '/api/sessions/label' && req.method === 'PATCH') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        labelCalls.push(body);
+        try {
+          const b = JSON.parse(body || '{}');
+          const s = (sessionsData.sessions || []).find(x => x.key === b.key);
+          if (s) s.user_label = b.label || '';
+          if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
+        } catch (_) { /* malformed body: still ack like a lenient server */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
 
@@ -589,6 +615,7 @@ function startMockServer(overrides = {}) {
         get cronCreateCalls() { return cronCreateCalls; },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
+        get labelCalls() { return labelCalls; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.
@@ -608,7 +635,7 @@ function startMockServer(overrides = {}) {
           const s = (sessionsData.sessions || []).find(x => x.key === key);
           if (s) s.effort = effort;
         },
-        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
+        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; },
       });
     });
   });
