@@ -118,19 +118,15 @@ func putJSONEnc(e *jsonEncBuf) {
 // response field destined for innerHTML, route it through a dedicated helper
 // or the CSP `sandbox` iframe path instead of relaxing this rule.
 func WriteJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	e := getJSONEnc()
-	defer putJSONEnc(e)
-	if err := e.enc.Encode(v); err != nil {
-		slog.Debug("write json response", "err", err)
-		return
-	}
-	if _, err := w.Write(e.buf.Bytes()); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
+	WriteJSONStatus(w, http.StatusOK, v)
 }
+
+// encodeFailureBody is the fixed envelope served when the handler's value
+// cannot be marshalled (e.g. an invalid json.RawMessage smuggled in from
+// disk). Emitting a 500 + this body — instead of the implicit 200 with an
+// empty body — makes the failure visible to the dashboard, which otherwise
+// rendered "no records" for a panel whose data was simply unencodable.
+var encodeFailureBody = []byte("{\"error\":\"response encoding failed\"}\n")
 
 // WriteJSONRaw writes a pre-serialised JSON body with the same headers as
 // WriteJSON, skipping the encoder entirely. Use it to transparently relay a
@@ -170,21 +166,26 @@ func WriteOK(w http.ResponseWriter) {
 	}
 }
 
-// WriteJSONStatus is like WriteJSON but writes a non-200 HTTP status code.
-// Content-Type must be set before WriteHeader, so this helper ensures
-// the correct ordering: Set header → WriteHeader → Encode body.
+// WriteJSONStatus is like WriteJSON but writes an explicit HTTP status code.
+// The body is encoded into the pooled buffer BEFORE WriteHeader so an encode
+// failure can still downgrade the status to 500 with an error envelope; the
+// header order (Content-Type → WriteHeader → body) is preserved.
 func WriteJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
 	e := getJSONEnc()
 	defer putJSONEnc(e)
+	var body []byte
 	if err := e.enc.Encode(v); err != nil {
-		slog.Debug("write json response", "err", err)
-		return
+		slog.Warn("write json response: encode failed", "status", status, "err", err)
+		status = http.StatusInternalServerError
+		body = encodeFailureBody
+	} else {
+		body = e.buf.Bytes()
 	}
-	if _, err := w.Write(e.buf.Bytes()); err != nil {
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }

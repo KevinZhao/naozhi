@@ -204,6 +204,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reader := cli.NewTranscriptReader(info.JSONLPath)
+	defer reader.Close()
 	entries, err := reader.Read(after, limit)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -215,6 +216,12 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("agent_events: transcript read failed", "path", info.JSONLPath, "err", err)
 		http.Error(w, "transcript read error", http.StatusInternalServerError)
 		return
+	}
+	if entries == nil {
+		// An empty transcript must serialise as `[]`, not `null`:
+		// agent_view.js treats a falsy body as "no data" and never
+		// subscribes to the live feed (permanent spinner).
+		entries = []cli.EventEntry{}
 	}
 	httputil.WriteJSON(w, entries)
 }
