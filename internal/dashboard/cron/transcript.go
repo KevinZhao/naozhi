@@ -1178,21 +1178,24 @@ compare:
 // R20260607-SEC-8 (#1914): summariseToolInput's one-line Summary already runs
 // through sanitizeWireText (→ RedactSecrets), but the full Input RawMessage
 // surfaced verbatim — a cron job that read a file containing credentials would
-// echo them back in the transcript response's `input` field. RedactSecrets is
-// JSON-safe here: it only swaps secret-token runs (which never contain JSON
-// structural bytes) for the shorter literal "[REDACTED]", so the JSON shape is
-// preserved and re-encoding is unnecessary. Returns the input unchanged when
-// nothing matched (RedactSecrets aliases clean strings) so the common path
-// pays only a single prefix scan.
+// echo them back in the transcript response's `input` field.
+//
+// The redaction MUST leave valid JSON behind: an `input` that json.Encoder
+// refuses to emit fails the whole transcript response (WriteJSON → 500, and
+// before that fix a silent empty 200). RedactSecrets' `KEY=value` masking
+// can swallow a closing `"}` when the assignment sits at the end of a JSON
+// string, so the substitution goes through redactRawJSON which falls back to
+// per-string-value redaction whenever the text-level result is no longer
+// well-formed. Clean input is returned unchanged (aliased).
 func redactToolInput(in json.RawMessage) json.RawMessage {
 	if len(in) == 0 {
 		return in
 	}
-	redacted := textutil.RedactSecrets(string(in))
-	if redacted == string(in) {
+	out := redactRawJSON(string(in), textutil.RedactSecrets)
+	if string(out) == string(in) {
 		return in
 	}
-	return json.RawMessage(redacted)
+	return out
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.

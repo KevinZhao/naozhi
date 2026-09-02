@@ -43,6 +43,10 @@ type discoveryCache struct {
 	getExclude func() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool)
 	projectMgr *project.Manager
 
+	// scanFn is the discovery scan entry point; nil means discovery.Scan.
+	// Tests inject a failing scanner to exercise the error path.
+	scanFn func(claudeDir string, pids map[int]bool, sids map[string]bool, cwds map[string]bool) ([]discovery.DiscoveredSession, error)
+
 	// lastDirMtime is the last observed mtime of ~/.claude/sessions/.
 	// When it hasn't changed and all cached PIDs are still alive,
 	// we skip the expensive full Scan() call.
@@ -141,10 +145,20 @@ func (dc *discoveryCache) refresh() {
 	}
 
 	pids, sids, cwds := dc.getExclude()
-	sessions, err := discovery.Scan(dc.claudeDir, pids, sids, cwds)
+	scan := dc.scanFn
+	if scan == nil {
+		scan = discovery.Scan
+	}
+	sessions, err := scan(dc.claudeDir, pids, sids, cwds)
 	if err != nil {
+		// Keep the previous snapshot and leave lastDirMtime untouched: a
+		// transient error used to publish an empty list AND advance the
+		// mtime, so every following tick short-circuited on "dir unchanged"
+		// and the discovered panel stayed empty until the directory was
+		// touched again. Not advancing the mtime makes the next tick retry
+		// the full scan.
 		slog.Warn("discovery cache refresh", "err", err)
-		sessions = nil
+		return
 	}
 	if sessions == nil {
 		sessions = []discovery.DiscoveredSession{}

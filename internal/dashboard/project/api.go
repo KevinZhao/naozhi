@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -234,6 +235,11 @@ type projectsListEntry struct {
 	// entries.
 	StableKey string `json:"stableKey,omitempty"`
 }
+
+// ProjectsListEntryType exposes the /api/projects row type for cross-package
+// wire-shape contract tests (the /api/sessions stats.projects row mirrors a
+// subset of its fields and must not drift).
+func ProjectsListEntryType() reflect.Type { return reflect.TypeOf(projectsListEntry{}) }
 
 // GET /api/projects — list all projects (local + remote).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
