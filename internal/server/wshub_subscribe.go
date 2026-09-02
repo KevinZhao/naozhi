@@ -239,7 +239,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 			entries = sess.EventLastN(0)
 		}
 		if len(entries) > 0 {
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: initialHasMorePtr(msg, hasMore)})
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
 		}
 		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries), "has_more", hasMore)
 		return
@@ -362,11 +362,11 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// allocate a fresh buffer per subscribe handshake; eventPushLoop
 		// already uses marshalPooled for the same shape. R218-PERF-14.
 		hm := initialHasMorePtr(msg, hasMore)
-		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm}); err == nil {
+		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm, Initial: true}); err == nil {
 			c.SendRaw(data)
 		} else {
 			slog.Warn("history marshal failed, falling back", "err", err, "key", key)
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm})
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm, Initial: true})
 		}
 		csr.Advance(entries)
 	} else if snap.State == "running" {
@@ -374,7 +374,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// _initialSubscribe flag is consumed. Without this, the client shows a
 		// blank events area until eventPushLoop delivers the first batch, which
 		// can be a noticeable delay if the process just started.
-		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}})
+		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}, Initial: true})
 	}
 
 	spawned = true

@@ -52,6 +52,35 @@ type ServerMsg struct {
 	// omitted; those clients fall back to the length heuristic. Older clients
 	// ignore the unknown field either way.
 	HasMore *bool `json:"has_more,omitempty"`
+
+	// Initial marks a "history" frame as the opening page of a subscription —
+	// the one the dashboard renders by replacing the whole events pane. Every
+	// other history frame (eventPushLoop backfill, a remote node's streamEvents
+	// batch relayed as "events") is an incremental append and MUST leave this
+	// false.
+	//
+	// The client cannot infer this from arrival order. Two independent reasons:
+	//
+	//   - ReverseConn.Subscribe's first-subscriber path fetches history from a
+	//     LOCAL goroutine while the "subscribed" ack round-trips through the
+	//     remote's readLoop, so history can legitimately precede the ack (the
+	//     ordering is called out at that call site).
+	//   - A superseded subscription's eventPushLoop is a separate goroutine and
+	//     unsub() does not drain an in-flight backfill, so its frames can land
+	//     either side of the new ack.
+	//
+	// Without an explicit marker the dashboard consumed whichever history frame
+	// arrived first as the opening page: a handful of live events replaced the
+	// whole conversation and pushed the render watermark to the newest entry,
+	// after which the real opening page was dropped wholesale by the client's
+	// timestamp guard. Keying the decision on this flag instead makes it
+	// order-independent.
+	//
+	// omitempty: only initial frames carry it. Incremental frames stay
+	// byte-identical to before, which keeps them poolable and lets
+	// historyMarshalCache go on sharing one buffer across a multi-tab fan-out
+	// (the flag is per-frame, never per-client).
+	Initial bool `json:"initial,omitempty"`
 }
 
 // AgentMetaPatch carries aggregator-side counters the server_tailer pushes
