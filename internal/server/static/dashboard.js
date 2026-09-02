@@ -4198,9 +4198,13 @@ async function loadEarlierEvents() {
     console.error('load earlier events:', e);
     if (!stale()) updateEarlierButton('error');
   } finally {
-    // A stale call must not release the flag selectSession already reset for
-    // the new session — that would let a second page-back run concurrently.
-    if (!stale()) _earlierLoading = false;
+    // Release the flag unless selectSession has already reset it for a newer
+    // session (it bumps _earlierGen) — otherwise a second page-back could run
+    // concurrently. Keyed on the generation only, NOT the full stale(): paths
+    // that flip selectedKey without selectSession (pending-session create,
+    // dismiss / discovered preview → selectedKey=null) never reset the flag,
+    // so a stale() check here would leave it stuck true until the next select.
+    if (gen === _earlierGen) _earlierLoading = false;
   }
 }
 
@@ -13214,13 +13218,12 @@ function openSessionContextMenu(card, x, y) {
     {
       label: '重命名', icon: ICONS.edit,
       action: () => {
-        // renameSession() reads selectedKey/selectedNode, so we flip the
-        // selection first. Keeps the prompt simple (same input widget the
-        // hover-visible ✎ button uses) at the cost of one extra click if
-        // the user was on a different session — acceptable for a mobile-
-        // only power-user shortcut.
-        selectedKey = key;
-        selectedNode = node;
+        // renameSession() reads selectedKey/selectedNode and repaints only the
+        // header of the CURRENT shell (renderMainHeader), so the target must
+        // be properly selected first — flipping the globals alone would stamp
+        // this card's header onto whatever conversation is on screen.
+        // selectSession is a no-op re-select when the card is already open.
+        selectSession(key, node);
         renameSession();
       },
     },

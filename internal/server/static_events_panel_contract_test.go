@@ -113,7 +113,9 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 		"const stale = () => selectedKey !== key || selectedNode !== node || gen !== _earlierGen;",
 		// The URL must be built from the captured identity, not the live globals.
 		"encodeURIComponent(key) +",
-		"if (!stale()) _earlierLoading = false;",
+		// finally keys on the generation only: selectedKey=null paths (dismiss /
+		// pending create) never reset the flag, so a full stale() would stick it.
+		"if (gen === _earlierGen) _earlierLoading = false;",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("loadEarlierEvents missing stale guard piece: %q", want)
@@ -129,6 +131,18 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 	}
 	if strings.Contains(body, "encodeURIComponent(selectedKey)") {
 		t.Error("loadEarlierEvents must not read the live selectedKey after capture")
+	}
+	if strings.Contains(body, "if (!stale()) _earlierLoading = false;") {
+		t.Error("loadEarlierEvents finally must not gate the flag release on stale() — selectedKey=null switch paths never reset it")
+	}
+
+	// Mobile long-press rename must go through selectSession so renderMainHeader
+	// repaints the shell that actually belongs to the renamed session.
+	if strings.Contains(js, "        selectedKey = key;\n        selectedNode = node;\n        renameSession();") {
+		t.Error("long-press rename must not flip selectedKey/selectedNode directly before renameSession()")
+	}
+	if !strings.Contains(js, "        selectSession(key, node);\n        renameSession();") {
+		t.Error("long-press rename must call selectSession(key, node) before renameSession()")
 	}
 
 	// selectSession resets the flag + bumps the generation, right after the
