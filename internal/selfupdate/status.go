@@ -15,6 +15,7 @@
 package selfupdate
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -267,4 +268,18 @@ func (s *Status) notePhase(p Phase, staged string, err error) {
 	// A successful transition clears the previous failure so the dashboard
 	// does not keep showing a stale error next to a healthy state.
 	s.lastErr = ""
+}
+
+// MarkFailed records an apply that died outside the Checker's own error
+// handling — the HTTP layer's recover() boundary around the detached apply
+// goroutine. Without it a panic mid-install would leave the phase parked on
+// `installing` (which the dashboard renders as busy) with no error to show.
+//
+// It does not touch `staged`: if a binary was written before the panic, the
+// dashboard must keep offering a restart rather than a second install.
+func (s *Status) MarkFailed(err error) {
+	if err == nil {
+		err = errors.New("update apply aborted")
+	}
+	s.notePhase(PhaseFailed, "", err)
 }

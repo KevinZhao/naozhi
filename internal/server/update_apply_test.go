@@ -514,3 +514,62 @@ func TestUpdateStatusRollbackHint(t *testing.T) {
 		t.Errorf("rollback_hint present with nothing to apply: %v", body2["rollback_hint"])
 	}
 }
+
+// manual_command is server-computed. install ⇒ `naozhi upgrade`; a staged
+// binary with no service managing this process ⇒ "" (blocked_reason already
+// tells the operator to restart the process by hand, and a guessed `systemctl
+// restart naozhi` would hit the wrong service). The managed-restart variant
+// lives in selfupdate.TestManualCommand where the probe can be stubbed.
+func TestUpdateStatusManualCommand(t *testing.T) {
+	srv, _ := applyTestServer(t, installFixture())
+	_, body := getUpdateStatus(t, srv)
+	if got := body["manual_command"]; got != "naozhi upgrade" {
+		t.Errorf("manual_command = %v for action=install, want naozhi upgrade", got)
+	}
+
+	srv2, _ := applyTestServer(t, selfupdate.StatusFixture{
+		Current: "v1.0.0", Latest: "v1.1.0", Staged: "v1.1.0", Phase: selfupdate.PhaseStaged,
+	})
+	_, body2 := getUpdateStatus(t, srv2)
+	if got, present := body2["manual_command"]; !present {
+		t.Error("manual_command must always be present (empty when there is nothing to paste)")
+	} else if body2["restart_supported"] == false && got != "" {
+		t.Errorf("manual_command = %v with no service managing this process; must be empty rather than restart something else", got)
+	}
+}
+
+// A panic inside the detached apply must neither crash the process nor leave
+// the status parked on a busy phase with nothing to show.
+func TestUpdateApply_PanicIsRecovered(t *testing.T) {
+	srv, _ := applyTestServer(t, installFixture())
+	entered := make(chan struct{})
+	srv.updateApplyFn = func(context.Context, bool) error {
+		defer close(entered)
+		panic("boom")
+	}
+	// Silence the panic log line; the assertion is on state, not output.
+	w := postApply(t, srv, `{"confirm_action":"install"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%q", w.Code, w.Body.String())
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply goroutine never ran")
+	}
+	// The recover runs after `entered` closes; give it a moment to record.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snap := srv.updateStatus.Snapshot()
+		if snap.Phase == selfupdate.PhaseFailed {
+			if snap.LastErr == "" {
+				t.Error("last_error must carry the panic so the operator sees why")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("phase = %q after a panicking apply, want %q", snap.Phase, selfupdate.PhaseFailed)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

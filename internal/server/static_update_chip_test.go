@@ -110,14 +110,18 @@ func TestUpdateChipJSContract(t *testing.T) {
 		t.Error("the chip must special-case action === 'restart' (staged binary: restart only, no re-download)")
 	}
 
-	// Both action paths must produce DIFFERENT operator instructions. Telling
-	// someone to re-run `naozhi upgrade` when the binary is already staged is
-	// exactly what overwrites the backup.
-	if !strings.Contains(js, "naozhi upgrade") {
-		t.Error("the install path must surface the `naozhi upgrade` command")
+	// The manual command is SERVER state (`manual_command`), never derived in the
+	// browser: navigator.platform is the operator's machine, not the node being
+	// upgraded, and the launchd label is a per-deployment fact the client cannot
+	// know. The per-platform strings live in selfupdate.ManualCommand and are
+	// covered by TestManualCommand there.
+	if !strings.Contains(js, "st.manual_command") {
+		t.Error("the chip must print the server-provided manual_command when it cannot apply")
 	}
-	if !strings.Contains(js, "kickstart") || !strings.Contains(js, "systemctl restart naozhi") {
-		t.Error("the restart path must surface a restart command for both macOS (launchctl kickstart) and Linux (systemctl restart)")
+	for _, banned := range []string{"navigator.platform", "com.naozhi.", "systemctl restart naozhi", "kickstart"} {
+		if strings.Contains(js, banned) {
+			t.Errorf("dashboard.js must not contain %q: the manual command is computed server-side (GET /api/system/update manual_command)", banned)
+		}
 	}
 
 	// Multi-node deployments: the endpoint only ever acts on the process the

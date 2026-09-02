@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
@@ -86,9 +87,57 @@ func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
 		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
 			body = body[:end+1]
 		}
-		if n := strings.Count(body, "selfupdate.ServiceRunning()"); n > 1 {
+		n := strings.Count(body, "selfupdate.ServiceManagesThisProcess()") + strings.Count(body, "selfupdate.ServiceRunning()")
+		if n > 1 {
 			t.Errorf("%s probes the service %d times; probe once and pass the result to CheckPreflight / RollbackHint / the response field", fn, n)
 		}
+		// The dashboard restarts THIS process. ServiceRunning() answers "is any
+		// naozhi unit active", which from an unmanaged instance beside the
+		// system service would restart the wrong one (F2).
+		if strings.Contains(body, "selfupdate.ServiceRunning()") {
+			t.Errorf("%s must probe selfupdate.ServiceManagesThisProcess(), not ServiceRunning(): the restart has to land on this process", fn)
+		}
+	}
+}
+
+// TestUpdateStatus_ColdStartFillGuard pins the two properties of the on-demand
+// fill in handleUpdateStatus that a behavioural test cannot reach without a
+// GitHub stub (the release lookup seam is internal to selfupdate):
+//
+//   - the gate is `latest == ""` alone. A failed check advances checkedAt, so a
+//     gate that also required "never tried" would, after one transient failure
+//     at boot, never fill again until the 6h tick.
+//   - the check runs under updateColdStartFillTimeout, not CheckNow's own 60s:
+//     this is inline in a polled GET.
+func TestUpdateStatus_ColdStartFillGuard(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
+	if err != nil {
+		t.Fatalf("read dashboard_update.go: %v", err)
+	}
+	src := string(b)
+	at := strings.Index(src, "func (s *Server) handleUpdateStatus")
+	if at < 0 {
+		t.Fatal("handleUpdateStatus not found")
+	}
+	body := src[at:]
+	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+		body = body[:end+1]
+	}
+	if !strings.Contains(body, `latest == "" {`) {
+		t.Error(`the cold-start fill must gate on latest == "" only`)
+	}
+	if strings.Contains(body, "at.IsZero()") {
+		t.Error("the cold-start fill must not require checkedAt to be zero: a failed check stamps it, which would disable the fill after one blip (F8)")
+	}
+	if !strings.Contains(body, "updateColdStartFillTimeout") {
+		t.Error("CheckNow from the GET handler must run under updateColdStartFillTimeout")
+	}
+	if updateColdStartFillTimeout > 15*time.Second {
+		t.Errorf("updateColdStartFillTimeout = %s; a polled GET must not block for long", updateColdStartFillTimeout)
 	}
 }
 
@@ -111,10 +160,14 @@ func TestUpdateStatusShape(t *testing.T) {
 	// the button only when can_apply AND install_enabled are both true, so if
 	// this field ever stopped being emitted the feature would silently degrade
 	// to "always show the manual command" with every other test still green.
+	//
+	// manual_command is what the chip prints when it cannot apply; it is always
+	// emitted (empty when there is nothing to paste) so the browser never has to
+	// fall back to guessing the server's platform.
 	required := []string{
 		"current", "latest", "staged", "phase", "action",
 		"can_apply", "restart_supported", "running_sessions", "enabled",
-		"install_enabled",
+		"install_enabled", "manual_command",
 	}
 	for _, k := range required {
 		if _, ok := body[k]; !ok {
@@ -132,8 +185,38 @@ func TestUpdateStatusShape(t *testing.T) {
 	if got := body["phase"]; got != string(selfupdate.PhaseIdle) {
 		t.Errorf("phase = %v, want %q", got, selfupdate.PhaseIdle)
 	}
+	// enabled tracks the CHECKER, not the Status: main.go always builds a
+	// Status (so `current` is always known), but only update.enabled=true wires
+	// a Checker that maintains `latest`. With a Status and no Checker the
+	// endpoint must not claim the version information is being kept current.
+	if got := body["enabled"]; got != false {
+		t.Errorf("enabled = %v, want false when no Checker is wired (Status alone does not keep latest current)", got)
+	}
+}
+
+// TestUpdateStatusEnabledTracksChecker is the positive half of the `enabled`
+// contract. A dev-build Checker is used because CheckNow refuses to reach
+// GitHub for dev builds, so the cold-start fill in the handler stays offline.
+func TestUpdateStatusEnabledTracksChecker(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 2, Workspace: t.TempDir()})
+	checker := selfupdate.NewChecker(selfupdate.CheckerConfig{
+		CurrentVersion: "dev",
+		Interval:       time.Hour,
+	})
+	srv := NewWithOptions(ServerOptions{
+		Addr:          ":0",
+		Router:        router,
+		Backend:       "claude",
+		Version:       "dev",
+		UpdateStatus:  selfupdate.NewStatus("dev"),
+		UpdateChecker: checker,
+	})
+	code, body := getUpdateStatus(t, srv)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
 	if got := body["enabled"]; got != true {
-		t.Errorf("enabled = %v, want true when a Status is wired", got)
+		t.Errorf("enabled = %v, want true when a Checker is wired", got)
 	}
 }
 

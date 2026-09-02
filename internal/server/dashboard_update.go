@@ -65,9 +65,18 @@ type updateStatusResponse struct {
 	RestartSupported bool `json:"restart_supported"`
 	// RunningSessions lets the UI state the blast radius of a restart.
 	RunningSessions int `json:"running_sessions"`
-	// Enabled is false when the auto-update checker is not running, in which
-	// case Latest is not maintained and the UI should not claim to be current.
+	// Enabled is false when no auto-update Checker is wired (update.enabled
+	// false), in which case Latest is not maintained and the UI should not
+	// claim to be current. Keyed on the Checker, not the Status: main.go always
+	// builds a Status so `current` is known, so a Status-based flag would be
+	// true on every deployment.
 	Enabled bool `json:"enabled"`
+	// ManualCommand is what the operator runs by hand when the dashboard
+	// cannot apply Action itself: `naozhi upgrade` for install, the platform's
+	// service restart for restart (only when a managed service runs this
+	// process), "" when there is nothing to paste. Computed here because it
+	// depends on the SERVER's OS and launchd label, not the browser's.
+	ManualCommand string `json:"manual_command"`
 	// InstallEnabled reports whether POST .../apply is permitted
 	// (update.dashboard_install). False ⇒ the UI shows the manual command
 	// instead of a button; the status above is still accurate.
@@ -91,16 +100,26 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	// this the dashboard would show nothing for hours — exactly when an
 	// operator who just restarted is most likely to be checking.
 	//
-	// Deliberately narrow: only when we have never learned a tag. CheckNow
-	// throttles globally on top of that, so N polling tabs cannot amplify into
-	// N requests against GitHub, and a steadily-running deployment never
-	// reaches this path at all.
+	// Deliberately narrow: only while we have never learned a tag. A failed
+	// check advances checkedAt but not `latest`, so gating on `latest` alone
+	// (not "never tried") lets a later poll retry after one transient failure
+	// at boot — otherwise a single blip would leave the chip blank until the 6h
+	// tick. CheckNow throttles globally (minOnDemandInterval, stamped before the
+	// network call) on top of that, so N polling tabs — or N retries after a
+	// failure — cannot amplify into N requests against GitHub, and a
+	// steadily-running deployment never reaches this path at all.
 	if s.updateChecker != nil {
-		if at, latest := s.updateStatus.LastCheck(); latest == "" && at.IsZero() {
+		if _, latest := s.updateStatus.LastCheck(); latest == "" {
+			// Bounded: this is a GET on a polled endpoint, and CheckNow's own
+			// bound is 60s. A GitHub that hangs must not hold the status page
+			// hostage for a minute — a fill that misses this window is simply
+			// picked up by the next poll.
+			ctx, cancel := context.WithTimeout(r.Context(), updateColdStartFillTimeout)
 			// Errors are intentionally ignored: this is a best-effort fill and
 			// CheckNow has already recorded any failure into Status, which is
 			// what we are about to serve.
-			_ = s.updateChecker.CheckNow(r.Context())
+			_ = s.updateChecker.CheckNow(ctx)
+			cancel()
 		}
 	}
 
@@ -119,7 +138,12 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	// verifiedLaunchdLabel), and this endpoint is polled by every open
 	// dashboard — the preflight gate, the restart_supported field and
 	// RollbackHint used to fork separately for the same unchanging fact.
-	serviceRunning := selfupdate.ServiceRunning()
+	//
+	// ServiceManagesThisProcess, not ServiceRunning: everything downstream is
+	// about restarting THIS process. A host with a systemd unit active and this
+	// naozhi started by hand beside it must report restart_supported=false, or
+	// the button would restart the system service and leave us untouched.
+	serviceRunning := selfupdate.ServiceManagesThisProcess()
 	pre := selfupdate.CheckPreflight(action, current, serviceRunning)
 
 	resp := updateStatusResponse{
@@ -134,8 +158,9 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		BlockedReason:    pre.Reason,
 		RestartSupported: serviceRunning,
 		RunningSessions:  s.runningSessionCount(),
-		Enabled:          s.updateStatus != nil,
+		Enabled:          s.updateChecker != nil,
 		InstallEnabled:   s.updateInstallEnabled && s.updateChecker != nil,
+		ManualCommand:    selfupdate.ManualCommand(action, serviceRunning),
 	}
 	if action != selfupdate.ActionNone {
 		resp.RollbackHint = selfupdate.RollbackHint(serviceRunning)
@@ -181,6 +206,11 @@ func newUpdateApplyLimiter() *ratelimit.Limiter {
 
 // updateApplyKey is the single bucket every apply attempt shares.
 const updateApplyKey = "system-update-apply"
+
+// updateColdStartFillTimeout bounds the on-demand release check a GET may
+// trigger to fill the cold-start window. Short by design: this runs inline in a
+// polled read endpoint.
+const updateColdStartFillTimeout = 10 * time.Second
 
 // applyBackgroundTimeout bounds the detached work. A download of a ~20MB asset
 // over a slow link plus verification is minutes at worst; beyond this something
@@ -243,8 +273,9 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	// managed service would strand the UI on "restarting" (InstallLatest
 	// degrades it too; deciding here keeps the intent visible at the call site).
 	// One probe, shared with the preflight gate below — the same fact, and on
-	// darwin each read is a `launchctl list` fork.
-	restart := selfupdate.ServiceRunning()
+	// darwin each read is a `launchctl list` fork. ServiceManagesThisProcess so
+	// the restart we ask for is a restart of US (see handleUpdateStatus).
+	restart := selfupdate.ServiceManagesThisProcess()
 	if pre := selfupdate.CheckPreflight(action, snap.Current, restart); !pre.CanApply {
 		http.Error(w, pre.Reason, http.StatusConflict)
 		return
@@ -273,6 +304,17 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
+		// A panic here is not in any request's call stack, so nothing above us
+		// recovers it: it would take the whole process down mid-upgrade. Same
+		// boundary the other detached server goroutines have (wshub_eventpush,
+		// send_owner_loop). Status is moved to failed so the chip does not stay
+		// parked on "installing" with nothing to show for it.
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("dashboard update: apply goroutine panicked", "action", action, "panic", rec)
+				s.updateStatus.MarkFailed(fmt.Errorf("apply aborted: %v", rec))
+			}
+		}()
 		// context.Background, NOT r.Context(): the request is already finished
 		// by the time this runs, and its context would be cancelled — killing
 		// the download a moment after starting it.

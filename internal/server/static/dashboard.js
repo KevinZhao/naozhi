@@ -1780,15 +1780,17 @@ function updateChipDetail(st) {
   // Cannot apply from here — hand over the exact command. Restart and install
   // need different ones: telling someone to re-run `naozhi upgrade` when the
   // binary is already staged is what makes them overwrite the backup.
-  lines.push('');
-  if (st.action === 'restart') {
-    lines.push('手动生效：');
-    lines.push(navigator.platform && navigator.platform.indexOf('Mac') === 0
-      ? '  launchctl kickstart -k gui/$(id -u)/com.naozhi.agent'
-      : '  sudo systemctl restart naozhi');
-  } else {
-    lines.push('手动升级：');
-    lines.push('  naozhi upgrade');
+  //
+  // The command itself comes from the server (`manual_command`): it depends on
+  // the SERVER's OS and its real launchd label, neither of which this browser
+  // can know — the browser's platform APIs describe the operator's laptop, not
+  // the node being upgraded. Empty means there is nothing to paste (a staged
+  // binary with no managed service: blocked_reason already says to restart by
+  // hand).
+  if (st.manual_command) {
+    lines.push('');
+    lines.push(st.action === 'restart' ? '手动生效：' : '手动升级：');
+    lines.push('  ' + st.manual_command);
   }
   return lines.join('\n');
 }
