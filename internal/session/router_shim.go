@@ -520,6 +520,13 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// "running" spinner until the next unrelated broadcast.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
 
+		// Wrapper.SpawnReconnect has no SpawnOptions, so the spawn-pinned
+		// effort tier is recovered from the argv the shim recorded at spawn
+		// (same tokens BuildArgs emitted, same source driftCompareArgs
+		// compares against). Fill-if-unset: a metadata report the readLoop
+		// already consumed from the replay stays authoritative.
+		proc.SeedEffortFromArgs(state.CLIArgs)
+
 		// Wrapper.SpawnReconnect has no cwd (shim owns it), so its
 		// proc.InitLinker("") left the SubagentLinker with empty
 		// projectDir and Resolve bails on every team agent task_id.
