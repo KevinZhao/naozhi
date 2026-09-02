@@ -628,6 +628,11 @@ func (p *Process) SetModel(ctx context.Context, model string) error {
 		return ctx.Err()
 	case <-p.killCh:
 		return fmt.Errorf("set_model: process terminated while awaiting ack")
+	case <-p.done:
+		// Natural exit (EOF / cli_exited → readLoop returned) never closes
+		// killCh; without this arm the ack wait sat out the full
+		// setModelAckTimeout against an already-dead process.
+		return fmt.Errorf("set_model: process exited while awaiting ack")
 	case <-timer.C:
 		return fmt.Errorf("set_model: no ack within %s", setModelAckTimeout)
 	}

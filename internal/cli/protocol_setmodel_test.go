@@ -12,9 +12,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestACPProtocol_WriteSetModel_Wire pins the session/set_model request
@@ -236,4 +238,37 @@ func TestCodexProtocol_NoModelSetter(t *testing.T) {
 func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// TestProcess_SetModel_ReturnsOnNaturalExit pins the ack-wait's exit
+// condition: a CLI that dies while we await the control_response (EOF /
+// cli_exited → readLoop returns → p.done closes) must fail SetModel
+// promptly. Only killCh was selected on before, and a natural exit never
+// closes killCh — so the dashboard request sat for the full
+// setModelAckTimeout (30s) against a process that was already dead.
+func TestProcess_SetModel_ReturnsOnNaturalExit(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	go p.readLoop()
+	defer p.Kill()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.SetModel(context.Background(), "opus") }()
+
+	// Let SetModel get past the Alive() check and park on the ack select,
+	// then have the CLI exit naturally (no Kill → killCh stays open).
+	time.Sleep(50 * time.Millisecond)
+	srv.SendCLIExited(0)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("SetModel returned nil after the CLI exited; want an error")
+		}
+		if !strings.Contains(err.Error(), "exited") && !strings.Contains(err.Error(), "terminated") {
+			t.Errorf("error should name the process exit, got: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SetModel still blocked 3s after the CLI exited — ack wait ignores p.done and would sit out the full 30s timeout")
+	}
 }
