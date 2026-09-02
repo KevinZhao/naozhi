@@ -153,10 +153,24 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Guard: notify=true with no effective target would silently drop
-	// notifications. Mirror the HandleCreate check.
+	// notifications. Mirror the HandleCreate check — but against the
+	// EFFECTIVE post-patch target: the dashboard PATCHes only the fields that
+	// changed, so ticking "notify" on a job that already carries a per-job
+	// target arrives as a bare {"notify":true}. Fields absent from the
+	// request inherit the job's current value; fields present (including
+	// explicit "") override it.
 	if req.Notify != nil && *req.Notify {
-		perJobSet := req.NotifyPlatform != nil && *req.NotifyPlatform != "" &&
-			req.NotifyChatID != nil && *req.NotifyChatID != ""
+		effPlatform, effChatID := "", ""
+		if cur, ok := h.scheduler.GetJob(id); ok {
+			effPlatform, effChatID = cur.NotifyPlatform, cur.NotifyChatID
+		}
+		if req.NotifyPlatform != nil {
+			effPlatform = *req.NotifyPlatform
+		}
+		if req.NotifyChatID != nil {
+			effChatID = *req.NotifyChatID
+		}
+		perJobSet := effPlatform != "" && effChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
 			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return

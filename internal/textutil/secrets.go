@@ -155,11 +155,28 @@ const secretRedactedMarker = "[REDACTED]"
 //     immediately before `=`) to avoid false positives on benign names like
 //     `TOKENIZER`, `AUTHOR`, or `KEYBOARD`.
 //
-// Value capture handles three forms: a double-quoted span, a single-quoted
-// span, or a bare whitespace-delimited run. Quoted spans are captured whole so
-// a passphrase with spaces (`PASSWORD="my long secret"`) is fully masked to
-// `PASSWORD="[REDACTED]"` rather than leaking everything after the first word.
-var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)`)
+// Value capture handles these forms: a double-quoted span, a single-quoted
+// span, a JSON-escaped double-quoted span (`\"…\"`, as seen when the
+// assignment sits inside a JSON string value), a run that merely opens with
+// a quote (unterminated, e.g. a multiline PEM dump), or a bare run. Quoted
+// spans are captured whole so a passphrase with spaces
+// (`PASSWORD="my long secret"`) is fully masked to `PASSWORD="[REDACTED]"`
+// rather than leaking everything after the first word.
+//
+// The bare run is `(?:[^\s"'\\]|\\[^"'\s])+`: any non-whitespace byte, where a
+// backslash is consumed TOGETHER with the byte it escapes (so Windows paths
+// `C:\Users\bob\pw`, `foo\bar`, `\x` are masked whole), and the run stops
+// only before an unescaped `"` / `'` or an escaped quote `\"` / `\'`. Those
+// are exactly the bytes that close a JSON string, so an assignment embedded
+// in raw JSON (`{"cmd":"export API_KEY=abc"}`) no longer swallows the
+// closing `"}` and produces unencodable output — the dashboard runs
+// RedactSecrets over raw tool_use.input / NDJSON lines and a JSON-breaking
+// substitution used to turn a 200 into an empty body (PR #2439). The
+// dashboard additionally falls back to per-string-value redaction
+// (cron.redactRawJSON), so this text-level rule is deliberately NOT narrowed
+// any further: IM replies, self-update notices and WS event pushes call
+// RedactSecrets on plain text and must keep masking whole values.
+var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*\\"|["'](?:[^\s"'\\]|\\[^"'\s])+|(?:[^\s"'\\]|\\[^"'\s])+)`)
 
 // RedactSecrets walks s once, swapping any occurrence of a well-known
 // secret-prefix pattern for `[REDACTED]`. Returns the original (aliased)
@@ -266,6 +283,12 @@ func redactEnvAssignments(s string) string {
 			valStart++
 		}
 		val := m[valStart:]
+		if len(val) >= 4 && strings.HasPrefix(val, `\"`) && strings.HasSuffix(val, `\"`) {
+			// JSON-escaped quoted span (assignment inside a JSON string
+			// value): keep both escaped delimiters so the enclosing JSON
+			// stays well-formed.
+			return m[:valStart] + `\"` + secretRedactedMarker + `\"`
+		}
 		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
 			// Properly quoted span: keep both delimiting quotes and mask the
 			// whole span (which may contain spaces), so `PASSWORD="my long
