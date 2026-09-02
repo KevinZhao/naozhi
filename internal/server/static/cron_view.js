@@ -58,19 +58,35 @@ function cronTimezoneDiffers() {
   return server !== -new Date().getTimezoneOffset();
 }
 
-// cronTimezoneSuffix — " (CST)" / " (Asia/Shanghai)" appended to schedule
-// text when the browser zone differs from the server zone; '' otherwise.
+// cronTimezoneUTCTag — the bare "UTC+08:00" from timezone_label, '' if absent.
+function cronTimezoneUTCTag() {
+  const m = /UTC[+-]\d{2}:\d{2}/.exec(cronTimezoneLabel || '');
+  return m ? m[0] : '';
+}
+
+// cronTimezoneHasName — false when the scheduler runs on time.Local
+// (loc.String() === "Local") or the name is missing; "Local" is meaningless to
+// a browser user so those cases fall back to the UTC±HH:MM offset.
+function cronTimezoneHasName() {
+  return !!cronTimezone && cronTimezone !== 'Local';
+}
+
+// cronTimezoneSuffix — " (CST)" / " (Asia/Shanghai)" / " (UTC+08:00)" appended
+// to schedule text when the browser zone differs from the server zone; ''
+// otherwise. Preference: abbr → IANA name → UTC offset (Local / empty abbr
+// never leak as " (Local)" or " ()").
 function cronTimezoneSuffix() {
   if (!cronTimezoneDiffers()) return '';
-  const tag = cronTimezoneAbbr || cronTimezone;
+  const tag = cronTimezoneAbbr || (cronTimezoneHasName() ? cronTimezone : cronTimezoneUTCTag());
   return tag ? ' (' + tag + ')' : '';
 }
 
 // cronTimezoneNote — sentence-form variant for the editor freq-hint:
 // "时间按服务器时区 Asia/Shanghai (UTC+08:00) 计算。" or '' when zones match.
+// A "Local (UTC+08:00)" label collapses to "UTC+08:00".
 function cronTimezoneNote() {
   if (!cronTimezoneDiffers()) return '';
-  const label = cronTimezoneLabel || cronTimezone;
+  const label = cronTimezoneHasName() ? (cronTimezoneLabel || cronTimezone) : cronTimezoneUTCTag();
   return label ? '时间按服务器时区 ' + label + ' 计算，与浏览器本地时间不同。' : '';
 }
 
@@ -3697,7 +3713,10 @@ function renderCronTimelineForJob(jobId) {
     // 后端每 job 只嵌 recent_runs_cap 条摘要（服务端 recentRunsPerJob，随
     // 响应下发）。少于 cap → 历史已全在手；等于 cap（或 cap 未知）→ 可能还有
     // 更多，留给首次「加载更多」以 nextBefore 向 /api/cron/runs 确认。
-    st.done = cronRecentRunsCap > 0 && job.recent_runs.length < cronRecentRunsCap;
+    // stats.total（累计运行数）≤ 已有行数时也已到结尾，省一次空翻页请求。
+    const total = (job.stats && job.stats.total) | 0;
+    st.done = (cronRecentRunsCap > 0 && job.recent_runs.length < cronRecentRunsCap) ||
+      (total > 0 && total <= st.runs.length);
   }
   st.lastMountAt = Date.now();
   // Mount path: unconditional innerHTML rewrite (shell remount or

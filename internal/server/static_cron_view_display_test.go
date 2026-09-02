@@ -55,20 +55,23 @@ func TestCronViewJS_RecentRunsSeedUsesServerCap(t *testing.T) {
 	if !strings.Contains(fetchBody, "data.recent_runs_cap") {
 		t.Error("fetchCronJobs: must read data.recent_runs_cap from /api/cron")
 	}
-	seedBody := cronViewFnBody(t, js, "function renderCronTimelineForJob(jobId)", 2000)
+	seedBody := cronViewFnBody(t, js, "function renderCronTimelineForJob(jobId)", 2500)
 	if !strings.Contains(seedBody, "cronRecentRunsCap") {
 		t.Error("renderCronTimelineForJob: st.done seeding must compare against cronRecentRunsCap, not a literal")
 	}
+	if !strings.Contains(seedBody, "total <= st.runs.length") {
+		t.Error("renderCronTimelineForJob: when stats.total <= rows already in hand the list is complete — skip the empty /api/cron/runs round-trip")
+	}
 }
 
-// TestCronViewJS_TimelineDetailStopsPropagation pins bug #2: the .ctr-detail
+// TestCronViewJS_TimelineDetailClickGuard pins bug #2: the .ctr-detail
 // block is nested inside the .ctr row whose onclick is cronTimelineSelectRun
 // — which collapses the row when it is already expanded. Any click inside the
 // detail (输入快照 <details>, ↩ 重放自, text selection) therefore folded the
 // row. Both row handlers (click + Enter/Space keydown) must ignore events
 // originating inside .ctr-detail. The guard lives in the row handler (not an
 // extra onclick on the detail) so the CSP inline-onclick ratchet stays flat.
-func TestCronViewJS_TimelineDetailStopsPropagation(t *testing.T) {
+func TestCronViewJS_TimelineDetailClickGuard(t *testing.T) {
 	t.Parallel()
 	js := cronViewDisplayJS(t)
 	body := cronViewFnBody(t, js, "function cronTimelineRowHtml(", 6000)
@@ -125,6 +128,19 @@ func TestCronViewJS_ServerTimezoneSurfaced(t *testing.T) {
 	}
 	if !strings.Contains(js, "function cronTimezoneSuffix(") {
 		t.Fatal("cron_view.js: cronTimezoneSuffix helper must exist (returns '' when browser zone matches the server zone)")
+	}
+	// time.Local schedulers report loc.String()=="Local" with an empty abbr;
+	// neither may leak into the UI — fall back to the UTC±HH:MM offset.
+	if !strings.Contains(js, "cronTimezone !== 'Local'") {
+		t.Error("cron_view.js: timezone name 'Local' must be treated as no-name (fall back to the UTC offset from timezone_label)")
+	}
+	if !strings.Contains(js, "function cronTimezoneUTCTag(") {
+		t.Error("cron_view.js: cronTimezoneUTCTag helper must extract UTC±HH:MM from timezone_label for the fallback")
+	}
+	for _, fn := range []string{"function cronTimezoneSuffix()", "function cronTimezoneNote()"} {
+		if !strings.Contains(cronViewFnBody(t, js, fn, 600), "cronTimezoneUTCTag()") {
+			t.Errorf("%s must fall back to cronTimezoneUTCTag() when abbr/name are unusable", fn)
+		}
 	}
 	for _, fn := range []string{
 		"function cronJobCardHtml(j)",
