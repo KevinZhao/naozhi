@@ -114,15 +114,15 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	}
 }
 
-// TestHandleAPISessions_StatsProjectsOmitemptyEmpty verifies that the
-// `projects` key is ABSENT (not emitted as null or empty array) when no
-// project manager is wired. Prior map code handled this via the `if
-// len(projectList) > 0 { stats["projects"] = ... }` branch; the struct
-// migration uses the `omitempty` tag. A nil Projects slice plus omitempty
-// means the field is dropped from the JSON output — dashboard.js's
-// `if (data.stats.projects) projectsData = data.stats.projects;` guard
-// must still short-circuit correctly.
-func TestHandleAPISessions_StatsProjectsOmitemptyEmpty(t *testing.T) {
+// TestHandleAPISessions_StatsProjectsAlwaysArray verifies that the
+// `projects` key is ALWAYS present as a JSON array — `[]` when no project
+// manager is wired or every project was removed. The field used to carry
+// `omitempty`, which dropped the key on an empty list; dashboard.js's
+// `if (data.stats.projects) projectsData = data.stats.projects;` guard then
+// kept rendering the previous (stale) list after the last project was
+// deleted. An empty array is truthy in JS, so it flows through the same guard
+// and clears the sidebar.
+func TestHandleAPISessions_StatsProjectsAlwaysArray(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
@@ -131,13 +131,18 @@ func TestHandleAPISessions_StatsProjectsOmitemptyEmpty(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.sessionH.HandleList(w, req)
 
-	var resp map[string]any
+	var resp struct {
+		Stats map[string]json.RawMessage `json:"stats"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	stats := resp["stats"].(map[string]any)
-	if v, ok := stats["projects"]; ok {
-		t.Errorf("stats.projects should be absent when no projects; got %v", v)
+	raw, ok := resp.Stats["projects"]
+	if !ok {
+		t.Fatalf("stats.projects must be present (as []) when no projects; body=%s", w.Body.String())
+	}
+	if string(raw) != "[]" {
+		t.Errorf("stats.projects = %s, want []", raw)
 	}
 }
 

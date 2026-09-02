@@ -20,7 +20,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
-	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -163,10 +162,12 @@ type sessionStats struct {
 	// "naozhi v1.2.3-dirty · dark" without conflating with the poll-version
 	// field. Omitempty preserves the legacy wire shape when the ldflag is
 	// unset (e.g. `go run` without -X, or `go build` without Makefile).
-	VersionTag string             `json:"version_tag,omitempty"`
-	Uptime     string             `json:"uptime"`
-	Watchdog   watchdogStats      `json:"watchdog"`
-	Projects   []projectListEntry `json:"projects,omitempty"`
+	VersionTag string        `json:"version_tag,omitempty"`
+	Uptime     string        `json:"uptime"`
+	Watchdog   watchdogStats `json:"watchdog"`
+	// Projects has NO omitempty: after the last project is removed the
+	// dashboard must receive `projects: []` to clear its stale list.
+	Projects []projectListEntry `json:"projects"`
 }
 
 // nodeStatusEntry is the per-node element in /api/sessions "nodes".
@@ -209,28 +210,6 @@ type sessionListMultiResp struct {
 	Stats           sessionStats               `json:"stats"`
 	Nodes           map[string]nodeStatusEntry `json:"nodes"`
 	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
-}
-
-// projectListEntry is the per-project element in /api/sessions "stats.projects".
-// Named struct (vs map[string]any{6 keys}) eliminates P inner-map allocs and
-// 6×P interface{} boxing ops per 1 Hz dashboard poll. `omitempty` tags
-// preserve the previous JSON shape: local rows without a git remote, or
-// remote-cached rows that didn't round-trip favorite/github, simply drop
-// those keys instead of emitting false/"". dashboard.js consumes
-// name/path/node/favorite/git_remote_url/github via `p.favorite`, `p.name`,
-// etc. — all six are bool-or-string so struct marshaling is byte-equivalent
-// to the prior map literal. R70-PERF-M1 / R67-PERF-2 (struct variant).
-type projectListEntry struct {
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	Node         string `json:"node"`
-	Favorite     bool   `json:"favorite,omitempty"`
-	GitRemoteURL string `json:"git_remote_url,omitempty"`
-	GitHub       bool   `json:"github,omitempty"`
-	// CreatedAt anchors the project's sidebar order: the dashboard sorts
-	// projects by this value ascending so newly-added folders always land at
-	// the bottom of their tier. unix ms.
-	CreatedAt int64 `json:"created_at,omitempty"`
 }
 
 // isUnknownRPCMethodErr reports whether a remote-proxy error came from the
@@ -315,7 +294,10 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 type Handlers struct {
 	router     *sessionpkg.Router
 	projectMgr *project.Manager
-	scheduler  CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
+	// projectStableKeyEnabled gates emitting projectListEntry.StableKey;
+	// mirrors dashproject.Handlers.projectStableKeyEnabled.
+	projectStableKeyEnabled bool
+	scheduler               CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
 	// cronSessions is the optional Scheduler-side view consulted when
 	// building the history panel via KnownSessionIDs(). When nil, cron-spawned
 	// JSONLs are NOT filtered from history (degraded behaviour matches pre-R245).
@@ -864,85 +846,8 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 	if live := h.router.CLIVersion(); live != "" {
 		stats.CLIVersion = live
 	}
-	if projectList := h.buildProjectList(now); len(projectList) > 0 {
-		stats.Projects = projectList
-	}
+	stats.Projects = h.buildProjectList(now)
 	return stats
-}
-
-// buildProjectList returns the dashboard sidebar's "Projects" panel data —
-// local projects (cached at 1s buckets via projectListLocalAt) plus any
-// remote-node projects forwarded through the node cache.
-//
-// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
-// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
-// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
-// the inner-map + interface{} boxing overhead. R70-PERF-M1.
-//
-// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
-// one rebuild/sec via projectListCache. The 1s bucket is invisible to
-// human operators (project CRUD is minute-scale) and avoids touching the
-// project package with a version hook. The cached slice is read-only —
-// see projectListSnapshot godoc for the alias contract that keeps
-// concurrent reads race-free. Split out per R246-CR-002 (#736).
-func (h *Handlers) buildProjectList(now time.Time) []projectListEntry {
-	var projectList []projectListEntry
-	if h.projectMgr != nil {
-		projectList = h.projectListLocalAt(now)
-	}
-	// Merge remote projects (always, even without a local project manager).
-	// When we will append remote rows onto the cached local slice we MUST
-	// detach the cache first: projectListLocalAt returns the cached header
-	// (alias contract), so an append that fits the existing capacity would
-	// silently mutate every other reader's view. Building the merged slice
-	// fresh keeps the cached entry untouched. R247-PERF-15.
-	if !h.nodeAccess.HasNodes() {
-		return projectList
-	}
-	cachedProjects := h.nodeCache.Projects()
-	var remoteCount int
-	for _, items := range cachedProjects {
-		remoteCount += len(items)
-	}
-	if remoteCount > 0 {
-		merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
-		copy(merged, projectList)
-		projectList = merged
-	}
-	for _, items := range cachedProjects {
-		for _, item := range items {
-			name := strOrFallback(item, "name", "Name")
-			path := strOrFallback(item, "path", "Path")
-			nd, _ := item["node"].(string)
-			if name == "" {
-				continue
-			}
-			entry := projectListEntry{Name: name, Path: path, Node: nd}
-			if v, ok := item["favorite"].(bool); ok {
-				entry.Favorite = v
-			}
-			// Remote node may be running an older binary that hasn't
-			// redacted the URL yet — always run the redactor on data
-			// forwarded via the node cache so credentials never leak
-			// even if a peer node is behind on patches.
-			if v, ok := item["git_remote_url"].(string); ok && v != "" {
-				entry.GitRemoteURL = dashproject.RedactGitRemoteURL(v)
-			}
-			if v, ok := item["github"].(bool); ok {
-				entry.GitHub = v
-			}
-			// JSON numbers decode as float64 from map[string]any. Pull
-			// remote-node CreatedAt the same way; pre-feature peers won't
-			// emit the key, so the zero-value fallback keeps their
-			// projects at the very top of the sidebar (oldest by
-			// definition) until they upgrade and self-stamp.
-			if v, ok := item["created_at"].(float64); ok {
-				entry.CreatedAt = int64(v)
-			}
-			projectList = append(projectList, entry)
-		}
-	}
-	return projectList
 }
 
 // buildLocalResp constructs the single-node /api/sessions JSON shape.
@@ -1622,21 +1527,6 @@ type uptimeSnapshot struct {
 	Str    string
 }
 
-// projectListSnapshot caches the local projectList slice build inside
-// HandleList at 1-second granularity. Bucket is unix-seconds at the time
-// of build; a new bucket triggers a rebuild on the first miss.
-//
-// READ-ONLY CONTRACT: HandleList reads Entries via the slice header only
-// (no append, no element mutation) and copies the header into the response
-// struct, which then JSON-encodes into the per-request buffer. Multiple
-// concurrent readers therefore alias the same backing array — race-free
-// because writers ALWAYS install a freshly built slice, never mutate in
-// place. R247-PERF-15 [REPEAT-3].
-type projectListSnapshot struct {
-	Bucket  int64
-	Entries []projectListEntry
-}
-
 // uptimeStringAt returns time.Since(startedAt).Round(time.Second).String()
 // with a 1-second resolution memoisation. HandleList captures time.Now()
 // once at the top of the request so the filter pass and the per-session
@@ -1653,45 +1543,6 @@ func (h *Handlers) uptimeStringAt(now time.Time) string {
 	s := d.String()
 	h.uptimeCache.Store(&uptimeSnapshot{Bucket: bucket, Str: s})
 	return s
-}
-
-// projectListLocalAt returns the local projectListEntry slice with 1-second
-// cache resolution. The returned slice is shared READ-ONLY across concurrent
-// callers in the same bucket; any caller that intends to append must copy
-// first (HandleList does this in the remote-merge branch). h.projectMgr
-// MUST be non-nil — callers gate on that check before invoking. R247-PERF-15
-// [REPEAT-3].
-//
-// Cache races are benign: two pollers crossing a bucket boundary may each
-// rebuild and Store; whichever writes last wins, the loser's locally
-// computed slice is GC'd as soon as the response encodes. Critically, both
-// rebuilds produce identical content (Manager.All takes a read lock and
-// returns sorted snapshots) so observers cannot see torn data even if they
-// hold an old header concurrent with the new Store.
-func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
-	bucket := now.Unix()
-	if cur := h.projectListCache.Load(); cur != nil && cur.Bucket == bucket {
-		return cur.Entries
-	}
-	projects := h.projectMgr.All()
-	entries := make([]projectListEntry, 0, len(projects))
-	for _, p := range projects {
-		entries = append(entries, projectListEntry{
-			Name:      p.Name,
-			Path:      p.Path,
-			Node:      "local",
-			Favorite:  p.Config.Favorite,
-			CreatedAt: p.Config.CreatedAt,
-			// Strip embedded userinfo (PAT) before handing the URL to any
-			// dashboard client. Round 46 redacted /api/projects but missed
-			// this path — /api/sessions is polled every few seconds, so
-			// the leak is actually larger here.
-			GitRemoteURL: dashproject.RedactGitRemoteURL(p.GitRemoteURL),
-			GitHub:       p.IsGitHub,
-		})
-	}
-	h.projectListCache.Store(&projectListSnapshot{Bucket: bucket, Entries: entries})
-	return entries
 }
 
 // initStaticStats pre-builds the immutable subset of /api/sessions stats so
@@ -2005,6 +1856,9 @@ type Deps struct {
 	RetiredStore  *discovery.RetiredStore
 	ValidateWS    func(ws, root string) (string, error)
 	SystemInfoFn  func() map[string]any
+	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
+	// (same switch as the /api/projects list).
+	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps.
@@ -2031,6 +1885,8 @@ func New(d Deps) *Handlers {
 		retiredStore:  d.RetiredStore,
 		validateWS:    d.ValidateWS,
 		systemInfoFn:  d.SystemInfoFn,
+
+		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
 	}
 }
 

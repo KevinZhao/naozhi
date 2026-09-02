@@ -307,12 +307,23 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	// filesystem layout to an authenticated operator. osutil.RedactAbsolutePaths
 	// swaps each path token for the literal "<path>", which is legal inside a
 	// JSON string, so the NDJSON line stays valid JSON.
+	//
+	// Both redactors CAN still damage structure at the edges (an env
+	// assignment ending at `"}`; a path followed by a JSON-escaped quote), and
+	// a single unencodable line used to fail the whole response. redactRawJSON
+	// re-applies the redaction per string value when the text-level pass broke
+	// the line, and substitutes a placeholder for lines that were never JSON.
 	events := make([]json.RawMessage, len(lines))
 	for i, ln := range lines {
-		redacted := osutil.RedactAbsolutePaths(textutil.RedactSecrets(string(ln)))
-		events[i] = json.RawMessage(redacted)
+		events[i] = redactRawJSON(string(ln), redactEventText)
 	}
 	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
+}
+
+// redactEventText is the per-string redaction chain for sandbox run events:
+// secrets first, then absolute host paths (same order as sanitizeWireText).
+func redactEventText(s string) string {
+	return osutil.RedactAbsolutePaths(textutil.RedactSecrets(s))
 }
 
 // cronRunSnapshotResp is the wire shape for GET /api/cron/runs/{run}/snapshot
