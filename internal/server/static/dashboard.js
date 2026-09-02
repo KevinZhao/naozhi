@@ -2860,6 +2860,10 @@ function selectSession(key, node) {
   lastRenderedEventTime = 0;
   oldestFetchedEventTime = 0;
   _autoPageBackCount = 0; // reset the blank-page recovery budget per session
+  // Invalidate any in-flight "load earlier" page of the previous session and
+  // free the flag so the new session can page back immediately.
+  _earlierGen++;
+  _earlierLoading = false;
   mobileEnterChat();
   stopPreviewPolling();
   const activeCard = setActiveSessionCard(key, node);
@@ -3038,12 +3042,15 @@ async function fetchSessionRuns(key, node) {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch('/api/sessions/runs?key=' + encodeURIComponent(key), { headers });
-    if (!resp.ok) { panel.hidden = true; setHeaderRunStats(''); return; }
+    // Stale-check the error branch too: the header we would clear belongs to
+    // whichever session is selected NOW, not the one this fetch was for.
+    if (!resp.ok) { if (selectedKey !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }
     const data = await resp.json();
     // Guard against a stale response landing after the user switched sessions.
     if (selectedKey !== key) return;
     renderSessionRunsPanel(data);
   } catch (_) {
+    if (selectedKey !== key) return;
     panel.hidden = true;
     setHeaderRunStats('');
   }
@@ -3428,7 +3435,9 @@ async function fetchGitState(key, node) {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch('/api/sessions/git?key=' + encodeURIComponent(key), { headers });
-    if (!resp.ok) { delete gitStateCache[cacheKey]; setHeaderGitChip(''); return; }
+    // The cache entry is per-session so dropping it is always right; the
+    // header chip is only cleared when this session is still the selected one.
+    if (!resp.ok) { delete gitStateCache[cacheKey]; if (selectedKey !== key || selectedNode !== node) return; setHeaderGitChip(''); return; }
     const data = await resp.json();
     gitStateCache[cacheKey] = data;
     // Guard against a stale response landing after the user switched sessions.
@@ -3436,6 +3445,7 @@ async function fetchGitState(key, node) {
     setHeaderGitChip(gitChipHtml(data));
   } catch (_) {
     delete gitStateCache[cacheKey];
+    if (selectedKey !== key || selectedNode !== node) return;
     setHeaderGitChip('');
   }
 }
@@ -3644,7 +3654,9 @@ async function renameSession() {
   }
   lastVersion = 0;
   debouncedFetchSessions();
-  if (typeof renderMainShell === 'function') renderMainShell();
+  // Header-only repaint: a full renderMainShell would rebuild #events-scroll
+  // empty with nothing refetching the conversation (see renderMainHeader).
+  renderMainHeader();
   showToast(next ? '已重命名' : '已恢复默认标题');
 }
 
@@ -3794,10 +3806,11 @@ async function downloadSessionMarkdown() {
   }
 }
 
-function renderMainShell() {
-  const main = document.getElementById('main');
-  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-
+// mainHeaderHtml builds the .main-header block (title, rename/export buttons,
+// detail line with the empty #header-git / #header-effort / #header-runstats
+// mounts) for session snapshot `s`. Shared by renderMainShell (full shell) and
+// renderMainHeader (header-only repaint) so the two can never drift.
+function mainHeaderHtml(s) {
   const keyParts = (selectedKey || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
@@ -3881,8 +3894,7 @@ function renderMainShell() {
     ? '<button type="button" class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
 
-  main.innerHTML =
-    '<div class="main-header">' +
+  return '<div class="main-header">' +
       '<button type="button" class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">' + ICONS.back + '</button>' +
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
@@ -3908,7 +3920,34 @@ function renderMainShell() {
         '<span class="detail-runstats" id="header-runstats"></span>' +
       '</div>' +
       '</div>' +
-    '</div>' +
+    '</div>';
+}
+
+// renderMainHeader repaints ONLY the header of the current session's shell.
+// renameSession used to call renderMainShell, which rebuilds #events-scroll
+// empty — and nothing on the rename path refetches history (the WS stays
+// subscribed with its cursor advanced; the poll cursor lastEventTime is not
+// reset), so the conversation vanished until the session was re-selected.
+// Falls back to a full rebuild when no shell is mounted yet.
+function renderMainHeader() {
+  const main = document.getElementById('main');
+  const header = main ? main.querySelector(':scope > .main-header') : null;
+  if (!header || !document.getElementById('events-scroll')) { renderMainShell(); return; }
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  header.outerHTML = mainHeaderHtml(s);
+  // The mounts inside the header were just emptied — repaint from cache /
+  // refetch exactly as renderMainShell's tail does.
+  repaintGitChip();
+  setHeaderEffortChip();
+  fetchSessionRuns(selectedKey, selectedNode);
+}
+
+function renderMainShell() {
+  const main = document.getElementById('main');
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+
+  main.innerHTML =
+    mainHeaderHtml(s) +
     // cron-panel-consolidation RFC §4.2: cron timeline used to mount here
     // (#cron-timeline-panel placeholder above the events scroll). It now
     // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
@@ -4080,6 +4119,10 @@ async function fetchEvents(full) {
 //
 // Idempotent: calls bail out while a prior fetch is in flight.
 let _earlierLoading = false;
+// _earlierGen is bumped by selectSession so a stale loadEarlierEvents (still
+// awaiting the previous session's page) can neither prepend into the new
+// session's scroller nor clear the new session's in-flight flag.
+let _earlierGen = 0;
 
 // _autoPageBackCount bounds the frontend safety net for the "parallel agent
 // team ate my history" bug. The server's visible-aware initial read
@@ -4141,18 +4184,27 @@ async function loadEarlierEvents() {
   if (!oldestTime) oldestTime = oldestFetchedEventTime;
   if (!oldestTime) return;
 
+  // Capture session identity at dispatch time (mirrors fetchEvents): the
+  // operator can switch sessions while we await, and prepending the old
+  // session's page into the new session's scroller grafts two histories.
+  const key = selectedKey;
+  const node = selectedNode;
+  const gen = _earlierGen;
+  const stale = () => selectedKey !== key || selectedNode !== node || gen !== _earlierGen;
   _earlierLoading = true;
   updateEarlierButton('loading');
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey) +
+    let url = '/api/sessions/events?key=' + encodeURIComponent(key) +
               '&before=' + oldestTime + '&limit=' + EARLIER_PAGE_LIMIT;
-    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
+    if (node && node !== 'local') url += '&node=' + encodeURIComponent(node);
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(url, { headers });
+    if (stale()) return;
     if (!r.ok) { updateEarlierButton('error'); return; }
     const events = await r.json();
+    if (stale()) return;
     if (!Array.isArray(events) || events.length === 0) {
       updateEarlierButton('done');
       return;
@@ -4162,9 +4214,15 @@ async function loadEarlierEvents() {
     updateEarlierButton(events.length >= EARLIER_PAGE_LIMIT ? 'ready' : 'done');
   } catch (e) {
     console.error('load earlier events:', e);
-    updateEarlierButton('error');
+    if (!stale()) updateEarlierButton('error');
   } finally {
-    _earlierLoading = false;
+    // Release the flag unless selectSession has already reset it for a newer
+    // session (it bumps _earlierGen) — otherwise a second page-back could run
+    // concurrently. Keyed on the generation only, NOT the full stale(): paths
+    // that flip selectedKey without selectSession (pending-session create,
+    // dismiss / discovered preview → selectedKey=null) never reset the flag,
+    // so a stale() check here would leave it stuck true until the next select.
+    if (gen === _earlierGen) _earlierLoading = false;
   }
 }
 
@@ -4379,8 +4437,11 @@ function appendEvents(events) {
   let sawUser = false;
   events.forEach(e => {
     if (isInternalEvent(e)) return;
-    // Deduplicate: skip events at or before the last rendered time
-    if (e.time && e.time <= lastRenderedEventTime) return;
+    // Deduplicate: drop strictly-older events. Same-ms events are legitimate
+    // siblings (thinking + text from one frame, two text blocks) and are only
+    // dropped when their uuid is already on screen — same rule as onHistory.
+    if (e.time && e.time < lastRenderedEventTime) return;
+    if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -12304,7 +12365,18 @@ const wsm = {
       // cases the message must be visible even if the viewport was scrolled up.
       let sawUser = false;
       display.forEach(e => {
-        if (e.time && e.time <= lastRenderedEventTime) return;
+        // Strictly-older events were rendered by an earlier frame. Same-ms
+        // events must NOT be dropped on time alone: one CLI frame's blocks
+        // (thinking + text, process_event_format.go) and ACP's trailing
+        // thinking/text/result share one millisecond, and eventHtml(thinking)
+        // renders nothing while the cursor below still advances — so `<=`
+        // swallowed the text bubble that followed. Same-ms replays (the backend
+        // re-admits the watermark ms, #2402) are dropped by uuid instead: a
+        // same-time same-uuid pair is always the same entry (RFC dashboard-
+        // event-uuid-idempotent-render §3). Newer-time events keep their
+        // append behaviour untouched, so streaming text is never frozen.
+        if (e.time && e.time < lastRenderedEventTime) return;
+        if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
         if (e.type === 'user') {
           // uuid idempotency for user bubbles: the time-cursor guard above
           // misses the bug case (onEvent rendered the real user event but a
@@ -12809,7 +12881,11 @@ const wsm = {
     const incoming = msg.events || [];
     if (incoming.length === 0) return;
     const lastTime = this.cronLive.lastEventTimeMs;
-    const newOnes = incoming.filter(e => !e.time || e.time > lastTime);
+    // Same-ms siblings pass the time gate; same-ms replays are dropped by uuid
+    // against the buffered array (mirrors onHistory's same-ms rule).
+    const seen = new Set((this.cronLive.events || []).map(e => e.uuid).filter(Boolean));
+    const newOnes = incoming.filter(e => !e.time || e.time > lastTime ||
+      (e.time === lastTime && !(e.uuid && seen.has(e.uuid))));
     let merged = (this.cronLive.events || []).concat(newOnes);
     if (merged.length > CRON_LIVE_MAX_EVENTS) {
       const dropped = merged.length - CRON_LIVE_MAX_EVENTS;
@@ -12829,7 +12905,9 @@ const wsm = {
     if (typeof isCronSessionFrozen === 'function' && isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
-    if (ev.time && ev.time <= this.cronLive.lastEventTimeMs) return;
+    if (ev.time && ev.time < this.cronLive.lastEventTimeMs) return;
+    if (ev.time && ev.time === this.cronLive.lastEventTimeMs && ev.uuid &&
+        (this.cronLive.events || []).some(e => e.uuid === ev.uuid)) return;
     this.cronLive.events = this.cronLive.events || [];
     this.cronLive.events.push(ev);
     if (this.cronLive.events.length > CRON_LIVE_MAX_EVENTS) {
@@ -13366,13 +13444,12 @@ function openSessionContextMenu(card, x, y) {
     {
       label: '重命名', icon: ICONS.edit,
       action: () => {
-        // renameSession() reads selectedKey/selectedNode, so we flip the
-        // selection first. Keeps the prompt simple (same input widget the
-        // hover-visible ✎ button uses) at the cost of one extra click if
-        // the user was on a different session — acceptable for a mobile-
-        // only power-user shortcut.
-        selectedKey = key;
-        selectedNode = node;
+        // renameSession() reads selectedKey/selectedNode and repaints only the
+        // header of the CURRENT shell (renderMainHeader), so the target must
+        // be properly selected first — flipping the globals alone would stamp
+        // this card's header onto whatever conversation is on screen.
+        // selectSession is a no-op re-select when the card is already open.
+        selectSession(key, node);
         renameSession();
       },
     },
