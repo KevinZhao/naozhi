@@ -124,8 +124,12 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 	// doInstall's restart branch would enter PhaseRestarting and then call a
 	// primitive that is a no-op with no managed service, leaving the chip
 	// spinning on "restarting" for a process nobody is going to restart.
+	//
+	// ServiceManagesThisProcess, not ServiceRunning: the restart has to land on
+	// US. A unit that is active but runs some other naozhi process would take
+	// the restart while this one keeps running the old binary.
 	wantRestart := restart
-	if restart && !ServiceRunning() {
+	if restart && !ServiceManagesThisProcess() {
 		restart = false
 	}
 	if err := c.doInstall(ctx, rel, restart); err != nil {
@@ -144,15 +148,16 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 // restartOnly restarts the service without touching the binary. Callers must
 // hold installMu.
 //
-// The ServiceRunning() gate here is NOT the outer gate R20260602141221-CR-3
-// forbids in doInstall. That one was harmful because a stale "not running" read
-// skipped the restart while `installed` had already been set, so the next tick
-// short-circuited and the staged binary was stranded with no log and no notice.
-// Here nothing is installed as a side effect and the verdict is returned to an
-// HTTP handler that shows it to the operator, plus recorded in LastErr — the
-// failure mode CR-3 protects against (silence) cannot occur.
+// The ServiceManagesThisProcess() gate here is NOT the outer gate
+// R20260602141221-CR-3 forbids in doInstall. That one was harmful because a
+// stale "not running" read skipped the restart while `installed` had already
+// been set, so the next tick short-circuited and the staged binary was stranded
+// with no log and no notice. Here nothing is installed as a side effect and the
+// verdict is returned to an HTTP handler that shows it to the operator, plus
+// recorded in LastErr — the failure mode CR-3 protects against (silence) cannot
+// occur.
 func (c *Checker) restartOnly(ctx context.Context, tag string) error {
-	if !ServiceRunning() {
+	if !ServiceManagesThisProcess() {
 		c.cfg.Status.notePhase(PhaseStaged, tag, ErrRestartUnsupported)
 		return ErrRestartUnsupported
 	}
@@ -197,11 +202,43 @@ func RollbackHint(serviceRunning bool) string {
 	if !serviceRunning {
 		return restore
 	}
-	restart := "sudo systemctl restart naozhi"
+	return restore + " && " + restartCommand()
+}
+
+// restartCommand is the shell command an operator runs to restart the managed
+// service on this host, built from the real platform and the real launchd
+// label. Only meaningful when a managed service exists — callers gate on that.
+func restartCommand() string {
 	if runtime.GOOS == "darwin" {
-		restart = fmt.Sprintf("launchctl kickstart -k gui/%d/%s", os.Getuid(), launchdServiceLabel())
+		return fmt.Sprintf("launchctl kickstart -k gui/%d/%s", os.Getuid(), launchdServiceLabel())
 	}
-	return restore + " && " + restart
+	return "sudo systemctl restart naozhi"
+}
+
+// ManualCommand is the command the dashboard shows when it cannot carry out
+// `action` itself (preflight blocked, dashboard_install off). It is computed
+// here so the browser never guesses: the browser only knows its OWN platform,
+// which is not the server's, and the launchd label is a property of this
+// deployment (see launchdServiceLabel) that a client cannot know at all.
+//
+//   - ActionInstall: `naozhi upgrade` — the CLI does the download + Replace
+//     with the same safeguards as the background checker.
+//   - ActionRestart with a service that manages this process: the platform's
+//     restart command.
+//   - ActionRestart without one: "" — there is no command to give; the
+//     preflight reason already tells the operator to restart the process by
+//     hand, and `systemctl restart naozhi` would restart the wrong thing.
+//   - ActionNone: "".
+func ManualCommand(action Action, serviceManaged bool) string {
+	switch action {
+	case ActionInstall:
+		return "naozhi upgrade"
+	case ActionRestart:
+		if serviceManaged {
+			return restartCommand()
+		}
+	}
+	return ""
 }
 
 // onDiskVersionProbeTimeout bounds the version probe below. Generous enough for

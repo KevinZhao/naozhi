@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -22,6 +21,44 @@ func withStubbedOnDiskVersion(t *testing.T, v string, ok bool) {
 	t.Cleanup(func() { onDiskVersionFn = orig })
 }
 
+// withNoManagedService makes the process look unmanaged to every probe, and
+// installs a RestartServiceNoWait stub that records calls instead of touching
+// the host's service manager. The returned func reports how many restarts were
+// requested.
+//
+// Every InstallLatest(…, restart=true) test MUST use this. Without it, on a
+// Linux host that runs naozhi under systemd, the restart-only path reaches the
+// real `systemctl restart --no-block naozhi` — and the test suite restarts the
+// production service it happens to be running next to.
+func withNoManagedService(t *testing.T) (restarts func() int) {
+	t.Helper()
+	withStubbedUnitActive(t, func() bool { return false })
+	withStubbedMainPID(t, 0)
+	return withStubbedRestartNoWait(t, nil)
+}
+
+// withStubbedRestartNoWait swaps the RestartServiceNoWait implementation for one
+// that counts calls and returns err. No-t.Parallel rule applies.
+func withStubbedRestartNoWait(t *testing.T, err error) (calls func() int) {
+	t.Helper()
+	orig := restartServiceNoWaitFn
+	n := 0
+	restartServiceNoWaitFn = func(context.Context) error {
+		n++
+		return err
+	}
+	t.Cleanup(func() { restartServiceNoWaitFn = orig })
+	return func() int { return n }
+}
+
+// withStubbedMainPID swaps the systemd MainPID probe. No-t.Parallel rule applies.
+func withStubbedMainPID(t *testing.T, pid int) {
+	t.Helper()
+	orig := systemdMainPID
+	systemdMainPID = func() int { return pid }
+	t.Cleanup(func() { systemdMainPID = orig })
+}
+
 // TestInstallLatest_StagedDoesNotDownload is the RFC §1.3 regression gate, and
 // the most important test in this file.
 //
@@ -30,22 +67,19 @@ func withStubbedOnDiskVersion(t *testing.T, v string, ok bool) {
 // the backup — which holds the one version we could roll back to — is
 // overwritten with the new binary, and the deployment loses its escape hatch
 // while looking perfectly healthy.
+//
+// What is asserted: the release lookup is never made (lookups == 0) — it is the
+// first step of the install path, so not reaching it means no Download and no
+// Replace either. An earlier version of this test also wrote a fake .bak into a
+// TempDir and checked its bytes; that proved nothing, because Replace() writes
+// next to SelfPath(), never into a TempDir.
 func TestInstallLatest_StagedDoesNotDownload(t *testing.T) {
 	var lookups int
 	withStubbedLatest(t, func(context.Context) (*Release, error) {
 		lookups++
 		return &Release{Tag: "v1.1.0"}, nil
 	})
-
-	// A .bak holding the rollback version. Any Download/Replace on this path
-	// would rewrite it; asserting on its bytes is stronger than asserting on a
-	// call count because it is the actual thing we are protecting.
-	dir := t.TempDir()
-	backup := filepath.Join(dir, "naozhi"+backupSuffix)
-	const rollbackBytes = "v1.0.0-binary"
-	if err := os.WriteFile(backup, []byte(rollbackBytes), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	restarts := withNoManagedService(t)
 
 	c := NewChecker(CheckerConfig{
 		CurrentVersion: "v1.0.0",
@@ -68,17 +102,89 @@ func TestInstallLatest_StagedDoesNotDownload(t *testing.T) {
 	if lookups != 0 {
 		t.Errorf("latestRelease called %d times; a staged binary needs no remote lookup at all", lookups)
 	}
-	got, readErr := os.ReadFile(backup)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if string(got) != rollbackBytes {
-		t.Errorf("backup was rewritten (%q); the staged path must never Replace() again — RFC §1.3", got)
+	if n := restarts(); n != 0 {
+		t.Errorf("RestartServiceNoWait called %d times with no managed service; the gate must refuse before the primitive", n)
 	}
 	// Phase stays Staged (not Failed): the install DID succeed earlier, and
 	// reporting Failed here would invite a retry, which is the destructive path.
 	if snap := c.cfg.Status.Snapshot(); snap.Phase != PhaseStaged {
 		t.Errorf("phase = %q, want %q after a restart that could not be performed", snap.Phase, PhaseStaged)
+	}
+}
+
+// TestInstallLatest_StagedRestartsWhenManaged is the positive half: with a
+// service that manages this process, the staged path calls the (stubbed)
+// restart primitive exactly once, still without a lookup, and reports
+// PhaseRestarting.
+func TestInstallLatest_StagedRestartsWhenManaged(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the managed-process probe is stubbable on linux only")
+	}
+	var lookups int
+	withStubbedLatest(t, func(context.Context) (*Release, error) {
+		lookups++
+		return &Release{Tag: "v1.1.0"}, nil
+	})
+	withStubbedUnitActive(t, func() bool { return true })
+	withStubbedMainPID(t, os.Getpid())
+	restarts := withStubbedRestartNoWait(t, nil)
+
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeDownload,
+		Interval:       time.Hour,
+		Status:         st,
+	})
+	c.installed = "v1.1.0"
+
+	if err := c.InstallLatest(context.Background(), true); err != nil {
+		t.Fatalf("InstallLatest: %v", err)
+	}
+	if lookups != 0 {
+		t.Errorf("latestRelease called %d times on the staged path, want 0", lookups)
+	}
+	if n := restarts(); n != 1 {
+		t.Errorf("RestartServiceNoWait called %d times, want exactly 1", n)
+	}
+	if snap := st.Snapshot(); snap.Phase != PhaseRestarting {
+		t.Errorf("phase = %q, want %q once the restart is queued", snap.Phase, PhaseRestarting)
+	}
+}
+
+// A unit that is active but runs a DIFFERENT process (an isolated instance
+// beside the system service, or this very test binary) must not be restarted
+// from here: it would take down the system service and leave this process on
+// the old binary, parked on "restarting".
+func TestInstallLatest_StagedRefusesForeignService(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the managed-process probe is stubbable on linux only")
+	}
+	withStubbedLatest(t, func(context.Context) (*Release, error) {
+		t.Error("staged path must not look up releases")
+		return nil, errors.New("unreachable")
+	})
+	withStubbedUnitActive(t, func() bool { return true }) // a naozhi unit IS active…
+	withStubbedMainPID(t, os.Getpid()+1)                  // …but it is not us
+	restarts := withStubbedRestartNoWait(t, nil)
+
+	st := NewStatus("v1.0.0")
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeDownload,
+		Interval:       time.Hour,
+		Status:         st,
+	})
+	c.installed = "v1.1.0"
+
+	if err := c.InstallLatest(context.Background(), true); !errors.Is(err, ErrRestartUnsupported) {
+		t.Errorf("err = %v, want ErrRestartUnsupported when the active unit runs another process", err)
+	}
+	if n := restarts(); n != 0 {
+		t.Errorf("RestartServiceNoWait called %d times; restarting a service that does not run us is the F2 bug", n)
+	}
+	if snap := st.Snapshot(); snap.Phase != PhaseStaged {
+		t.Errorf("phase = %q, want %q", snap.Phase, PhaseStaged)
 	}
 }
 
@@ -94,6 +200,7 @@ func TestInstallLatest_OnDiskProbeShortCircuits(t *testing.T) {
 		return &Release{Tag: "v1.1.0"}, nil
 	})
 	withStubbedOnDiskVersion(t, "v1.1.0", true) // someone else already staged it
+	restarts := withNoManagedService(t)
 
 	st := NewStatus("v1.0.0")
 	c := NewChecker(CheckerConfig{
@@ -110,6 +217,9 @@ func TestInstallLatest_OnDiskProbeShortCircuits(t *testing.T) {
 	}
 	if lookups != 1 {
 		t.Errorf("latestRelease called %d times, want 1", lookups)
+	}
+	if n := restarts(); n != 0 {
+		t.Errorf("RestartServiceNoWait called %d times with no managed service, want 0", n)
 	}
 	if c.installed != "v1.1.0" {
 		t.Errorf("installed = %q; the probe's finding must be recorded so later ticks short-circuit too", c.installed)
@@ -352,5 +462,104 @@ func TestRollbackHint_IncludesRestartWhenServiceRuns(t *testing.T) {
 	}
 	if !strings.Contains(hint, want) {
 		t.Errorf("hint %q must end in %q when a managed service exists", hint, want)
+	}
+}
+
+// ServiceManagesThisProcess is the gate every in-process restart goes through.
+// "A unit is active" is not enough: the unit must run US. Linux-only because
+// the darwin branch shells out to launchctl with nothing to stub.
+func TestServiceManagesThisProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd probes are stubbable on linux only")
+	}
+	cases := []struct {
+		name   string
+		active bool
+		pid    int
+		want   bool
+	}{
+		{"active unit, we are MainPID", true, os.Getpid(), true},
+		{"active unit, MainPID is another process", true, os.Getpid() + 1, false},
+		{"active unit, MainPID unknown", true, 0, false},
+		{"inactive unit even if pid matched", false, os.Getpid(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withStubbedUnitActive(t, func() bool { return tc.active })
+			withStubbedMainPID(t, tc.pid)
+			if got := ServiceManagesThisProcess(); got != tc.want {
+				t.Errorf("ServiceManagesThisProcess() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ServiceRunning keeps the "is there a daemon at all" meaning the CLI upgrader
+// relies on: `naozhi upgrade` in a shell is never MainPID, and it must still
+// find the service to restart.
+func TestServiceRunning_DoesNotRequireSelfPID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd probes are stubbable on linux only")
+	}
+	withStubbedUnitActive(t, func() bool { return true })
+	withStubbedMainPID(t, os.Getpid()+1)
+	if !ServiceRunning() {
+		t.Error("ServiceRunning() must be true for an active unit regardless of which process asks")
+	}
+}
+
+// The self-restart primitive must gate on ServiceManagesThisProcess, never on
+// ServiceRunning. This is a source guard because the behaviour it protects —
+// `systemctl restart naozhi` reaching a service that does not run this process
+// — is exactly what a unit test must never be allowed to exercise for real.
+func TestRestartSystemdNoWait_GatesOnSelfManaged(t *testing.T) {
+	src, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
+	}
+	body := funcBody(t, string(src), "func restartSystemdNoWait()")
+	if !strings.Contains(body, "if !ServiceManagesThisProcess()") {
+		t.Error("restartSystemdNoWait must gate on !ServiceManagesThisProcess(); an active unit that runs another process is not ours to restart")
+	}
+	if strings.Contains(body, "ServiceRunning()") {
+		t.Error("restartSystemdNoWait must not consult ServiceRunning(): it answers a different question (see F2)")
+	}
+}
+
+// ManualCommand is what the browser prints when it cannot apply; it must come
+// from the server's platform and label, never from navigator.platform.
+func TestManualCommand(t *testing.T) {
+	if got := ManualCommand(ActionInstall, false); got != "naozhi upgrade" {
+		t.Errorf("install, unmanaged: %q, want naozhi upgrade", got)
+	}
+	if got := ManualCommand(ActionInstall, true); got != "naozhi upgrade" {
+		t.Errorf("install, managed: %q, want naozhi upgrade", got)
+	}
+	// Restart without a service that manages this process: no command. The
+	// preflight reason already says "restart the process by hand", and
+	// `systemctl restart naozhi` here would restart something else.
+	if got := ManualCommand(ActionRestart, false); got != "" {
+		t.Errorf("restart, unmanaged: %q, want empty", got)
+	}
+	if got := ManualCommand(ActionNone, true); got != "" {
+		t.Errorf("none: %q, want empty", got)
+	}
+
+	got := ManualCommand(ActionRestart, true)
+	switch runtime.GOOS {
+	case "darwin":
+		t.Setenv(xpcServiceNameEnv, "com.naozhi.agent")
+		got = ManualCommand(ActionRestart, true)
+		if !strings.HasPrefix(got, "launchctl kickstart -k gui/") || !strings.HasSuffix(got, "/com.naozhi.agent") {
+			t.Errorf("restart on darwin = %q; want kickstart -k gui/<uid>/<real label>", got)
+		}
+	default:
+		if got != "sudo systemctl restart naozhi" {
+			t.Errorf("restart on %s = %q, want sudo systemctl restart naozhi", runtime.GOOS, got)
+		}
+	}
+	// The same command RollbackHint appends, so the two never disagree.
+	if hint := RollbackHint(true); hint != "" && !strings.HasSuffix(hint, " && "+got) {
+		t.Errorf("RollbackHint(true) = %q must end with ManualCommand(restart) = %q", hint, got)
 	}
 }

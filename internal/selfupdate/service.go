@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,8 +103,23 @@ func RestartService(ctx context.Context) error {
 // daemon came up. systemd's Restart=always is what actually brings the new
 // binary up here; our job ends at "restart triggered".
 //
-// A non-running service is a no-op (not an error).
+// A service that does not manage THIS process is a no-op (not an error) — see
+// ServiceManagesThisProcess for why the gate is not merely "a unit is active".
+//
+// The body lives behind restartServiceNoWaitFn so tests can observe (and
+// refuse) the call: every path that reaches this function in production ends
+// with the current process being killed, which is not something a unit test
+// may do to the host it runs on.
 func RestartServiceNoWait(ctx context.Context) error {
+	return restartServiceNoWaitFn(ctx)
+}
+
+// restartServiceNoWaitFn is the injectable implementation of
+// RestartServiceNoWait. Same test-hygiene rule as systemdUnitActive: tests that
+// swap it must not run in parallel.
+var restartServiceNoWaitFn = restartServiceNoWait
+
+func restartServiceNoWait(context.Context) error {
 	switch runtime.GOOS {
 	case "linux":
 		return restartSystemdNoWait()
@@ -116,8 +132,13 @@ func RestartServiceNoWait(ctx context.Context) error {
 
 // restartSystemdNoWait issues `systemctl restart --no-block` and returns once
 // the job is queued. No waitServiceActive — see RestartServiceNoWait.
+//
+// Gated on ServiceManagesThisProcess, not ServiceRunning: this is the
+// self-restart primitive, and a `systemctl restart naozhi` issued from a process
+// the unit does NOT run would restart the system service while leaving the
+// caller — and its dashboard, stuck on "restarting" — exactly as it was.
 func restartSystemdNoWait() error {
-	if !ServiceRunning() {
+	if !ServiceManagesThisProcess() {
 		return nil
 	}
 	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "--no-block", "naozhi").CombinedOutput(); err != nil {
@@ -139,11 +160,63 @@ var systemdUnitActive = func() bool {
 	return exec.Command(resolveTrustedBin("systemctl"), "is-active", "--quiet", "naozhi").Run() == nil
 }
 
-// ServiceRunning reports whether the naozhi service is currently active.
+// ServiceRunning reports whether A naozhi service is currently active on this
+// host. It says nothing about whether that service runs the calling process.
+//
+// This is the right question for an EXTERNAL upgrader — `naozhi upgrade` in a
+// shell replaces the binary and then needs to know if there is a daemon to
+// restart. For an in-process decision ("should I restart myself via the
+// service manager?") use ServiceManagesThisProcess instead.
 func ServiceRunning() bool {
 	switch runtime.GOOS {
 	case "linux":
 		return systemdUnitActive()
+	case "darwin":
+		return verifiedLaunchdLabel() != ""
+	default:
+		return false
+	}
+}
+
+// systemdMainPID returns the MainPID of the naozhi unit as systemd reports it,
+// or 0 when the unit is unknown, inactive, or the query fails. Indirected for
+// tests under the same no-t.Parallel rule as systemdUnitActive.
+//
+// MainPID is the process ExecStart launched (deploy/naozhi.service runs the
+// naozhi binary directly, Type=notify with NotifyAccess=main), so for a
+// systemd-managed naozhi it IS the server process — no shim or wrapper sits in
+// between.
+var systemdMainPID = func() int {
+	out, err := exec.Command(resolveTrustedBin("systemctl"), "show", "naozhi", "-p", "MainPID", "--value").Output()
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// ServiceManagesThisProcess reports whether the service manager runs THIS
+// process — i.e. whether asking it to restart "naozhi" restarts us.
+//
+// The distinction from ServiceRunning is not academic. A host with a systemd
+// unit active and a second naozhi started by hand (an isolated instance under
+// /tmp, a `go test` binary, an operator debugging on another port) has
+// ServiceRunning() == true from inside that second process too. Acting on it
+// there — the dashboard "重启生效" button — issues `systemctl restart naozhi`,
+// which restarts the SYSTEM service, leaves this process on the old binary, and
+// parks its status on "restarting" for a restart that is never coming.
+//
+// Linux: the unit must be active AND its MainPID must be our pid. Darwin:
+// verifiedLaunchdLabel already confirms the job's executable is SelfPath(),
+// which for a launchd-spawned process is the equivalent check, so the two
+// predicates coincide there.
+func ServiceManagesThisProcess() bool {
+	switch runtime.GOOS {
+	case "linux":
+		return systemdUnitActive() && systemdMainPID() == os.Getpid()
 	case "darwin":
 		return verifiedLaunchdLabel() != ""
 	default:
