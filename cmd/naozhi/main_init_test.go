@@ -89,17 +89,22 @@ func TestLogConfigValidationDiagnostics_RoutesByLevel(t *testing.T) {
 // field for those protocols), so without this test the gate could be deleted
 // unnoticed — and the router's "filtered single source of truth" comment would
 // quietly become false. docs/rfc/kiro-effort-control.md §4.3
+//
+// claude moved to the accept side when CLI 2.1.226 was confirmed to take
+// `--effort`; codex is the remaining backend the gate has to drop, since its
+// reasoning knob is `-c model_reasoning_effort=` on a different axis.
 func TestInitBackendWrappers_EffortCapabilityFilter(t *testing.T) {
 	t.Parallel()
 	backend.EnsureDefaults()
 	cfg := &config.Config{
 		CLI: config.CLIConfig{
 			// Mirrors the mixed deployment the RFC uses to argue against
-			// failing hard: a top-level default lands on both backends.
+			// failing hard: a top-level default lands on every backend.
 			Effort: "high",
 			Backends: []config.CLIBackendConfig{
 				{ID: "kiro", Path: "/tmp/never-kiro"},
 				{ID: "claude", Path: "/tmp/never-claude"},
+				{ID: "codex", Path: "/tmp/never-codex"},
 			},
 			Backend: "kiro",
 		},
@@ -109,8 +114,12 @@ func TestInitBackendWrappers_EffortCapabilityFilter(t *testing.T) {
 	if got := bws.Efforts["kiro"]; got != "high" {
 		t.Errorf("Efforts[kiro] = %q, want high (ACP accepts --effort)", got)
 	}
-	if got, ok := bws.Efforts["claude"]; ok {
-		t.Errorf("Efforts[claude] = %q, want absent — claude has no tier flag, "+
+	if got := bws.Efforts["claude"]; got != "high" {
+		t.Errorf("Efforts[claude] = %q, want high (claude CLI accepts --effort "+
+			"as of 2.1.226)", got)
+	}
+	if got, ok := bws.Efforts["codex"]; ok {
+		t.Errorf("Efforts[codex] = %q, want absent — codex has no tier flag, "+
 			"so recording one would put an unusable value in the router map", got)
 	}
 }

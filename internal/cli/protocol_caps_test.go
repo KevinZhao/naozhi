@@ -70,7 +70,10 @@ func TestProtocolCaps_ImplementationWins(t *testing.T) {
 func TestProtocolCaps_Claude(t *testing.T) {
 	t.Parallel()
 	got := ProtocolCaps(&ClaudeProtocol{})
-	want := Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
+	// EffortTier: the Claude CLI takes --effort as of 2.1.226 ("Effort level
+	// for the current session"); BuildArgs forwards SpawnOptions.Effort there.
+	want := Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true,
+		EffortTier: true}
 	if got != want {
 		t.Fatalf("claude caps: got %+v want %+v", got, want)
 	}

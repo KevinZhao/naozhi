@@ -330,10 +330,11 @@ type Caps struct {
 	// third backend whose name does not encode the wire shape.
 	StreamJSON bool
 	// EffortTier is true if BuildArgs honours SpawnOptions.Effort — i.e. the
-	// CLI accepts a thinking-effort tier (kiro's `acp --effort`). Read by the
-	// composition root to reject `cli.backends[].effort` on a backend that
-	// would silently ignore it, so an operator never believes a configured
-	// tier is in force when it is not.
+	// CLI accepts a thinking-effort tier (kiro's `acp --effort`, and the Claude
+	// CLI's own `--effort` since 2.1.226). Read by the composition root to
+	// reject `cli.backends[].effort` on a backend that would silently ignore
+	// it, so an operator never believes a configured tier is in force when it
+	// is not.
 	// docs/rfc/kiro-effort-control.md §4.3
 	EffortTier bool
 }

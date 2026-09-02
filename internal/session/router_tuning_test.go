@@ -39,6 +39,7 @@ func mkTuningTestRouter(t *testing.T) *Router {
 	r.bkStore.wrappers = map[string]*cli.Wrapper{
 		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
 	}
 	r.bkStore.defaultBackend = "claude"
 	r.bkStore.backendOverrides = make(map[string]string)
@@ -74,14 +75,26 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if _, err := r.SetSessionTuning(ctx, "missing", strp("opus"), nil); !errors.Is(err, ErrTuningUnknownSession) {
 		t.Errorf("unknown key: err = %v, want ErrTuningUnknownSession", err)
 	}
-	// claude has no EffortTier capability → setting a tier is a 400, not a
-	// silent record (§4.3).
-	if _, err := r.SetSessionTuning(ctx, "k1", nil, strp("high")); !errors.Is(err, ErrTuningEffortUnsupported) {
-		t.Errorf("claude+effort: err = %v, want ErrTuningEffortUnsupported", err)
+	// claude accepts `--effort` since CLI 2.1.226 (#2412: EffortTier=true),
+	// so a tier on a claude session is recorded (suspended → deferred), not
+	// rejected. Pinning this here is what catches a future Capabilities()
+	// regression at the session layer, not just in internal/cli.
+	if via, err := r.SetSessionTuning(ctx, "k1", nil, strp("high")); err != nil || via != TuningAppliedDeferred {
+		t.Errorf("claude+effort: via=%q err=%v, want deferred/nil", via, err)
 	}
-	// …but CLEARING an effort on claude is fine (no-op, not an error).
+	if got := r.ss.sessions["k1"].TuningEffort(); got != "high" {
+		t.Errorf("claude+effort: recorded tier = %q, want high", got)
+	}
+	// Clearing it is fine too.
 	if _, err := r.SetSessionTuning(ctx, "k1", nil, strp("")); err != nil {
 		t.Errorf("clearing effort on claude must not error: %v", err)
+	}
+	// codex has no EffortTier capability (its knob is -c
+	// model_reasoning_effort=) → setting a tier is a 400, not a silent
+	// record (§4.3).
+	addTuningSession(r, "k-codex", "codex", nil)
+	if _, err := r.SetSessionTuning(ctx, "k-codex", nil, strp("high")); !errors.Is(err, ErrTuningEffortUnsupported) {
+		t.Errorf("codex+effort: err = %v, want ErrTuningEffortUnsupported", err)
 	}
 }
 
@@ -168,7 +181,11 @@ func TestSetSessionTuning_RPCPath(t *testing.T) {
 // TestSetSessionTuning_F9PathSelection is the §5 "F9 路径选择" row: a kiro
 // session with an effective effort tier must take the respawn path for a
 // model switch (RPC would silently drop the tier, F9); without a tier the
-// RPC fast path applies; claude always RPC.
+// RPC fast path applies; claude without an effective tier takes RPC too
+// (claude's EffortTier is true since #2412, so a claude session WITH a
+// configured tier respawns on model switch just like kiro — F9 is applied
+// conservatively there because whether claude's set_model preserves the
+// launch-time --effort pin has not been measured).
 func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 	ctx := context.Background()
 

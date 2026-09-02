@@ -135,6 +135,27 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	// Thinking-effort tier. `--effort <low|medium|high|xhigh|max>` exists on the
+	// Claude CLI as of 2.1.226 ("Effort level for the current session"); an
+	// out-of-set value is rejected by the CLI with a warning and falls back to
+	// its default, and config validation already pins the same closed set
+	// (config.validEffortTiers), so a bad tier can never reach argv.
+	//
+	// A launch-time `--effort` acts as a session pin in the CLI: it also
+	// overrides the settings.json `effortLevel` for that process, which is why
+	// this flag — not a settings.json key — is the tier's source of truth for
+	// naozhi-spawned sessions. Empty means "pass no flag" and the CLI keeps
+	// whatever settings.json / its own default selects.
+	//
+	// Historical note: this was previously omitted (Caps.EffortTier=false) on
+	// the belief that the Claude CLI had no tier flag. During that period
+	// `args: ["--effort", "high"]` under cli.backends[claude] looked correct in
+	// config.yaml but was silently stripped by deniedExtraFlags below on every
+	// spawn — see the ExtraArgs comment for why the flag stays denied there
+	// (SpawnOptions.Effort owns this argv site).
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
+	}
 	if opts.ResumeID != "" {
 		if resumeIDRe.MatchString(opts.ResumeID) {
 			args = append(args, "--resume", opts.ResumeID)
@@ -409,11 +430,14 @@ func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 // Capabilities returns the hard-coded Caps for Claude stream-json.
 // See RNEW-ARCH-404: opt-in accessor for consumers migrating off
 // individual SupportsX() methods.
+//
+// EffortTier=true since CLI 2.1.226: BuildArgs forwards SpawnOptions.Effort as
+// `--effort <tier>`. This was false while the flag was believed to be
+// kiro-only, which made `cli.backends[claude].effort` a startup warning and
+// `args: ["--effort", ...]` a silently-stripped no-op.
 func (p *ClaudeProtocol) Capabilities() Caps {
 	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true,
-		// The Claude CLI has no thinking-effort flag; SpawnOptions.Effort is
-		// ignored here, and the composition root rejects configuring it.
-		EffortTier: false}
+		EffortTier: true}
 }
 
 // The NDJSON payload for an in-band "abort this turn" signal sent via stdin

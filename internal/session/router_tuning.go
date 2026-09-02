@@ -53,7 +53,8 @@ var ErrTuningUnknownSession = errors.New("no session for key")
 
 // ErrTuningEffortUnsupported is returned when an effort tier is set for a
 // session whose backend protocol does not honour SpawnOptions.Effort
-// (claude/codex). Mapped to 400 by the API handler — silently recording it
+// (codex; claude accepts `--effort` since CLI 2.1.226, see
+// ClaudeProtocol.Capabilities). Mapped to 400 by the API handler — silently recording it
 // would let the operator believe a tier is in force when it is not (same
 // rationale as kiro-effort-control §4.3's warn-and-drop, but this is an
 // interactive path where an error is actionable).
