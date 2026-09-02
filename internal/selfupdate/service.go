@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,8 +103,23 @@ func RestartService(ctx context.Context) error {
 // daemon came up. systemd's Restart=always is what actually brings the new
 // binary up here; our job ends at "restart triggered".
 //
-// A non-running service is a no-op (not an error).
+// A service that does not manage THIS process is a no-op (not an error) — see
+// ServiceManagesThisProcess for why the gate is not merely "a unit is active".
+//
+// The body lives behind restartServiceNoWaitFn so tests can observe (and
+// refuse) the call: every path that reaches this function in production ends
+// with the current process being killed, which is not something a unit test
+// may do to the host it runs on.
 func RestartServiceNoWait(ctx context.Context) error {
+	return restartServiceNoWaitFn(ctx)
+}
+
+// restartServiceNoWaitFn is the injectable implementation of
+// RestartServiceNoWait. Same test-hygiene rule as systemdUnitActive: tests that
+// swap it must not run in parallel.
+var restartServiceNoWaitFn = restartServiceNoWait
+
+func restartServiceNoWait(context.Context) error {
 	switch runtime.GOOS {
 	case "linux":
 		return restartSystemdNoWait()
@@ -113,8 +132,13 @@ func RestartServiceNoWait(ctx context.Context) error {
 
 // restartSystemdNoWait issues `systemctl restart --no-block` and returns once
 // the job is queued. No waitServiceActive — see RestartServiceNoWait.
+//
+// Gated on ServiceManagesThisProcess, not ServiceRunning: this is the
+// self-restart primitive, and a `systemctl restart naozhi` issued from a process
+// the unit does NOT run would restart the system service while leaving the
+// caller — and its dashboard, stuck on "restarting" — exactly as it was.
 func restartSystemdNoWait() error {
-	if !ServiceRunning() {
+	if !ServiceManagesThisProcess() {
 		return nil
 	}
 	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "--no-block", "naozhi").CombinedOutput(); err != nil {
@@ -136,25 +160,178 @@ var systemdUnitActive = func() bool {
 	return exec.Command(resolveTrustedBin("systemctl"), "is-active", "--quiet", "naozhi").Run() == nil
 }
 
-// ServiceRunning reports whether the naozhi service is currently active.
+// ServiceRunning reports whether A naozhi service is currently active on this
+// host. It says nothing about whether that service runs the calling process.
+//
+// This is the right question for an EXTERNAL upgrader — `naozhi upgrade` in a
+// shell replaces the binary and then needs to know if there is a daemon to
+// restart. For an in-process decision ("should I restart myself via the
+// service manager?") use ServiceManagesThisProcess instead.
 func ServiceRunning() bool {
 	switch runtime.GOOS {
 	case "linux":
 		return systemdUnitActive()
 	case "darwin":
-		out, err := exec.Command(resolveTrustedBin("launchctl"), "list", launchdLabel).Output()
-		return err == nil && len(out) > 0
+		return verifiedLaunchdLabel() != ""
 	default:
 		return false
 	}
 }
 
-// LaunchdLabel is the launchd service label used by both naozhi install and
-// naozhi upgrade to ensure they operate on the same plist.
+// systemdMainPID returns the MainPID of the naozhi unit as systemd reports it,
+// or 0 when the unit is unknown, inactive, or the query fails. Indirected for
+// tests under the same no-t.Parallel rule as systemdUnitActive.
+//
+// MainPID is the process ExecStart launched (deploy/naozhi.service runs the
+// naozhi binary directly, Type=notify with NotifyAccess=main), so for a
+// systemd-managed naozhi it IS the server process — no shim or wrapper sits in
+// between.
+var systemdMainPID = func() int {
+	out, err := exec.Command(resolveTrustedBin("systemctl"), "show", "naozhi", "-p", "MainPID", "--value").Output()
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// ServiceManagesThisProcess reports whether the service manager runs THIS
+// process — i.e. whether asking it to restart "naozhi" restarts us.
+//
+// The distinction from ServiceRunning is not academic. A host with a systemd
+// unit active and a second naozhi started by hand (an isolated instance under
+// /tmp, a `go test` binary, an operator debugging on another port) has
+// ServiceRunning() == true from inside that second process too. Acting on it
+// there — the dashboard "重启生效" button — issues `systemctl restart naozhi`,
+// which restarts the SYSTEM service, leaves this process on the old binary, and
+// parks its status on "restarting" for a restart that is never coming.
+//
+// Linux: the unit must be active AND its MainPID must be our pid. Darwin:
+// verifiedLaunchdLabel already confirms the job's executable is SelfPath(),
+// which for a launchd-spawned process is the equivalent check, so the two
+// predicates coincide there.
+func ServiceManagesThisProcess() bool {
+	switch runtime.GOOS {
+	case "linux":
+		return systemdUnitActive() && systemdMainPID() == os.Getpid()
+	case "darwin":
+		return verifiedLaunchdLabel() != ""
+	default:
+		return false
+	}
+}
+
+// LaunchdLabel is the launchd service label `naozhi install` writes into the
+// plist. It is the FALLBACK label, not the authoritative one — a plist written
+// by hand (or by an earlier naozhi version, or by a config-management tool)
+// can carry any label at all, and the running process must honour whatever it
+// was actually launched under. See launchdServiceLabel.
 const LaunchdLabel = "com.naozhi.naozhi"
 
-// keep unexported alias so internal helpers stay readable
-const launchdLabel = LaunchdLabel
+// xpcServiceNameEnv is the environment variable launchd injects into every
+// process it spawns, set to that job's label.
+const xpcServiceNameEnv = "XPC_SERVICE_NAME"
+
+// launchdServiceLabel returns the label of the launchd job this process is
+// running under.
+//
+// Reading it from the environment rather than assuming LaunchdLabel fixes a
+// silent, load-bearing bug: a deployment whose plist uses any other label
+// (observed in this project's own dev deployment: "com.naozhi.agent") made
+// ServiceRunning() return false, which made every restart path — `naozhi
+// upgrade`, auto-update mode "auto", and RestartServiceNoWait — quietly decide
+// there was no service to restart and do nothing. No error, no warning; the
+// operator was simply left with a staged binary that never applied.
+//
+// launchd sets XPC_SERVICE_NAME to the job label for the processes it spawns,
+// so this is the authoritative value, obtained without shelling out.
+//
+// The fallback matters for the non-launchd case: `naozhi upgrade` run by hand
+// from a terminal has no XPC_SERVICE_NAME, and there we keep the historical
+// behaviour of assuming the label `naozhi install` would have written.
+func launchdServiceLabel() string {
+	if l := strings.TrimSpace(os.Getenv(xpcServiceNameEnv)); l != "" {
+		return l
+	}
+	return LaunchdLabel
+}
+
+// verifiedLaunchdLabel returns the launchd label managing THIS binary, or ""
+// when no such job can be confirmed.
+//
+// The verification is not paranoia — it closes a way to restart the wrong
+// service. XPC_SERVICE_NAME is inherited, so a naozhi started by hand from a
+// launchd-managed parent (Terminal.app is itself a launchd job) sees that
+// parent's label. Acting on it unchecked would mean `launchctl kickstart -k
+// gui/501/com.apple.Terminal` — restarting the operator's terminal instead of
+// naozhi. And a bare `launchctl list <label>` succeeds there, so existence
+// alone is not evidence.
+//
+// So we confirm the job actually runs our own executable. Cheap: one
+// `launchctl list <label>` for a single known label, not a scan.
+func verifiedLaunchdLabel() string {
+	label := launchdServiceLabel()
+	out, err := exec.Command(resolveTrustedBin("launchctl"), "list", label).Output()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	self, err := SelfPath()
+	if err != nil {
+		return ""
+	}
+	if !launchdJobRunsPath(string(out), self) {
+		return ""
+	}
+	return label
+}
+
+// launchdJobPathRe pulls the executable out of `launchctl list <label>` output.
+// The plist-ish dump contains either
+//
+//	"Program" = "/path/to/bin";
+//
+// or, when the plist only sets ProgramArguments,
+//
+//	"ProgramArguments" = (
+//	        "/path/to/bin";
+//
+// Matching `Program` first and falling back to the first ProgramArguments entry
+// covers both, which matters because `naozhi install` writes ProgramArguments
+// without a Program key.
+var launchdJobPathRe = regexp.MustCompile(`"Program"\s*=\s*"([^"]+)"`)
+
+var launchdJobArgv0Re = regexp.MustCompile(`"ProgramArguments"\s*=\s*\(\s*\n?\s*"([^"]+)"`)
+
+// launchdJobRunsPath reports whether the job description refers to selfPath.
+// Both sides are symlink-resolved so /usr/local/bin/naozhi and a symlink to it
+// compare equal — SelfPath() already resolves, and the plist may not.
+func launchdJobRunsPath(listOutput, selfPath string) bool {
+	candidates := make([]string, 0, 2)
+	if m := launchdJobPathRe.FindStringSubmatch(listOutput); len(m) == 2 {
+		candidates = append(candidates, m[1])
+	}
+	if m := launchdJobArgv0Re.FindStringSubmatch(listOutput); len(m) == 2 {
+		candidates = append(candidates, m[1])
+	}
+	if len(candidates) == 0 {
+		// No executable in the dump: cannot confirm, so refuse. Failing closed
+		// means we skip a restart we might have been able to do; failing open
+		// means we might restart something else entirely.
+		return false
+	}
+	for _, c := range candidates {
+		if c == selfPath {
+			return true
+		}
+		if resolved, err := filepath.EvalSymlinks(c); err == nil && resolved == selfPath {
+			return true
+		}
+	}
+	return false
+}
 
 // restartConfirmTimeout bounds how long restartSystemd waits for the unit to
 // report active again after issuing an async restart. naozhi's unit is
@@ -222,17 +399,37 @@ func waitServiceActive(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
+// restartLaunchd restarts the naozhi launchd job.
+//
+// It uses `launchctl kickstart -k`, which asks launchd to terminate the job and
+// start it again. That indirection is the whole point: the caller is normally
+// the very process being restarted, so launchd — not us — has to be the one
+// holding the restart across our death.
+//
+// The previous implementation was `launchctl unload <plist>` followed by
+// `launchctl load -w <plist>`. That cannot work for a self-restart: `unload`
+// removes the job whose process is making the call, so the `load` line runs (at
+// best) in a race against our own SIGTERM and (at worst) never runs at all,
+// leaving the service unloaded — stopped, not restarted. `kickstart -k` keeps
+// the job registered in the domain throughout and mirrors the semantics of
+// `systemctl restart --no-block` on the Linux side.
 func restartLaunchd() error {
-	if !ServiceRunning() {
+	// verifiedLaunchdLabel, not launchdServiceLabel: the label must be
+	// confirmed to manage this binary before we hand it to kickstart -k.
+	// See verifiedLaunchdLabel for what an unverified label can restart.
+	label := verifiedLaunchdLabel()
+	if label == "" {
+		// No confirmed managing job — same "nothing to restart" semantics the
+		// systemd path has when the unit is inactive.
 		return nil
 	}
-	plistPath := launchdPlistPath()
-	launchctl := resolveTrustedBin("launchctl")
-	if out, err := exec.Command(launchctl, "unload", plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl unload: %w\n%s", err, out)
-	}
-	if out, err := exec.Command(launchctl, "load", "-w", plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load: %w\n%s", err, out)
+	// gui/<uid> is the domain for a LaunchAgent, which is what `naozhi
+	// install` writes (~/Library/LaunchAgents). A LaunchDaemon would need
+	// `system/`; if daemon installs are ever supported, branch on the plist
+	// location here.
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
+	if out, err := exec.Command(resolveTrustedBin("launchctl"), "kickstart", "-k", target).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl kickstart -k %s: %w\n%s", target, err, out)
 	}
 	return nil
 }

@@ -591,12 +591,31 @@ type UpdateConfig struct {
 	// a download/install outcome). Empty fields disable IM delivery
 	// (the check still logs).
 	Notify CronNotifyTarget `yaml:"notify,omitempty"`
+
+	// DashboardInstall gates the dashboard's "apply now" button
+	// (POST /api/system/update/apply). nil (unset) defaults to true; an
+	// explicit `dashboard_install: false` keeps the read-only version chip
+	// working while making the apply endpoint return 403.
+	//
+	// Separate from Enabled on purpose. Seeing that a release exists and
+	// replacing the binary + restarting the service are different risk levels,
+	// and "do not auto-install in the background, but let me click it myself"
+	// is a coherent policy that a single switch could not express.
+	DashboardInstall *bool `yaml:"dashboard_install,omitempty"`
 }
 
 // UpdateEnabled reports whether the auto-update checker should run. nil
 // (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
 func (c *Config) UpdateEnabled() bool {
 	return c.Update.Enabled == nil || *c.Update.Enabled
+}
+
+// UpdateDashboardInstall reports whether the dashboard may trigger an install /
+// restart. nil (unset in YAML) defaults to true; an explicit
+// `dashboard_install: false` disables the apply endpoint while leaving the
+// read-only status endpoint intact.
+func (c *Config) UpdateDashboardInstall() bool {
+	return c.Update.DashboardInstall == nil || *c.Update.DashboardInstall
 }
 
 // ImageOrientConfig configures auto-orientation of uploaded images that
