@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	transcribepkg "github.com/naozhi/naozhi/internal/transcribe"
@@ -93,6 +94,27 @@ type ServerOptions struct {
 	// value means "unknown" — /health omits the field, keeping the
 	// legacy wire shape.
 	Version string
+
+	// UpdateStatus is the shared self-update state the background
+	// selfupdate.Checker writes into, surfaced by GET /api/system/update so
+	// the dashboard can show "a newer version is available" / "a newer version
+	// is staged, restart to apply". Nil (checker disabled, or a test harness)
+	// makes that endpoint report only the running version.
+	UpdateStatus *selfupdate.Status
+
+	// UpdateChecker is the same Checker that owns UpdateStatus. It is held so
+	// GET /api/system/update can trigger an on-demand check during the
+	// cold-start window — the default cadence is 6h with check_on_start off,
+	// which would otherwise leave the dashboard blank for hours after a
+	// restart. Nil disables that fallback; the endpoint still serves Status.
+	UpdateChecker *selfupdate.Checker
+
+	// UpdateDashboardInstall gates POST /api/system/update/apply.
+	// nil defaults to TRUE (config.UpdateDashboardInstall's default), so a
+	// deployment that says nothing gets the button and a test harness does not
+	// have to opt in. An explicit false makes the endpoint 403 while the
+	// read-only GET keeps working — see UpdateConfig.DashboardInstall.
+	UpdateDashboardInstall *bool
 
 	// DebugMode gates registration of /api/debug/pprof and /api/debug/vars.
 	// Default false — both endpoints become 404 even for loopback+auth callers,

@@ -2,11 +2,13 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -103,6 +105,13 @@ type CheckerConfig struct {
 
 	// Notify, if non-nil, receives update notices (best-effort).
 	Notify NotifyFunc
+
+	// Status, if non-nil, receives every state transition so the dashboard
+	// can render it. Nil disables the reporting entirely and leaves this
+	// Checker behaving exactly as it did before Status existed — which is
+	// what lets the pre-existing tests in this package stand as a regression
+	// gate without modification.
+	Status *Status
 }
 
 // latestRelease is indirected so checker tests can stub the release lookup
@@ -122,7 +131,33 @@ type Checker struct {
 	// ModeDownload, so repeated ticks don't re-download the same release while
 	// CurrentVersion (the still-running old binary) stays unchanged.
 	installed string
+
+	// checkMu serializes on-demand checks (CheckNow) against each other and
+	// guards lastCheckNow. The periodic Run loop does NOT take it: it is a
+	// single goroutine on a >=1h cadence, and making it wait behind a
+	// dashboard-triggered check would be pointless coupling. Concurrent
+	// latestRelease calls are harmless (two reads of the same remote state)
+	// and Status has its own lock.
+	checkMu      sync.Mutex
+	lastCheckNow time.Time
+
+	// installMu serializes everything that writes the binary, and guards
+	// `installed`. Before the dashboard could trigger an install this package
+	// had a single writer (the Run goroutine) and needed no lock; InstallLatest
+	// (install.go) made that false.
+	//
+	// It covers the `installed` short-circuit as well as doInstall itself, not
+	// just the write: the check and the install must be one atomic decision.
+	// Splitting them would let two callers both read "not installed yet" and
+	// both Replace(), and the SECOND Replace is the one that copies the new
+	// binary over the backup and destroys the rollback artifact (RFC §1.3).
+	installMu sync.Mutex
 }
+
+// minOnDemandInterval throttles CheckNow. The dashboard calls it only to fill
+// the cold-start window (see CheckNow), but "only" still means once per open
+// browser tab, so the floor has to hold globally rather than per caller.
+const minOnDemandInterval = 15 * time.Minute
 
 // NewChecker builds a Checker. Returns nil when the config is unusable
 // (interval <= 0), so callers can simply skip Run.
@@ -195,6 +230,7 @@ func (c *Checker) checkOnce(ctx context.Context) {
 	defer cancel()
 
 	rel, err := latestRelease(cctx)
+	c.cfg.Status.noteCheck(relTag(rel), err)
 	if err != nil {
 		slog.Warn("auto-update: check failed", "err", err)
 		return
@@ -205,7 +241,7 @@ func (c *Checker) checkOnce(ctx context.Context) {
 	// (an adversary pushing v0.0.1 to trigger a rollback to a vulnerable release).
 	// semverGreater returns false on parse failure, falling back to conservative
 	// "do not upgrade" — same effect as skipping the check.
-	if rel.Tag == c.installed {
+	if rel.Tag == c.installedTag() {
 		slog.Debug("auto-update: already installed this release", "tag", rel.Tag)
 		return
 	}
@@ -223,35 +259,77 @@ func (c *Checker) checkOnce(ctx context.Context) {
 		c.notify(fmt.Sprintf("🆕 naozhi %s 可用（当前 %s）。运行 `naozhi upgrade` 升级。",
 			rel.Tag, c.cfg.CurrentVersion))
 	case ModeDownload:
-		c.doInstall(cctx, rel, false)
+		// Error deliberately dropped: doInstall already logged and notified.
+		// The tick loop's contract is to never propagate a failure — the
+		// error return exists for InstallLatest, whose caller is an HTTP
+		// handler that must report the outcome.
+		_ = c.installLocked(cctx, rel, false)
 	case ModeAuto:
-		c.doInstall(cctx, rel, true)
+		_ = c.installLocked(cctx, rel, true)
 	}
+}
+
+// installedTag reads the installed tag under installMu.
+func (c *Checker) installedTag() string {
+	c.installMu.Lock()
+	defer c.installMu.Unlock()
+	return c.installed
+}
+
+// installLocked runs doInstall under installMu, re-checking the already-
+// installed short-circuit inside the lock.
+//
+// checkOnce checks that condition too, before the mode switch, but that read
+// is only an optimisation — it can go stale the moment it is taken if the
+// dashboard is installing concurrently. The check that MATTERS is this one,
+// because it is the one that cannot be raced past into a second Replace()
+// (RFC §1.3).
+func (c *Checker) installLocked(ctx context.Context, rel *Release, restart bool) error {
+	c.installMu.Lock()
+	defer c.installMu.Unlock()
+	if rel.Tag == c.installed {
+		return ErrNothingToDo
+	}
+	return c.doInstall(ctx, rel, restart)
 }
 
 // doInstall downloads, verifies, and atomically replaces the binary. When
 // restart is true it also restarts the running service. Every failure mode
 // degrades to a logged warning + best-effort notice; the running service is
 // never left broken because Replace restores its backup on any swap failure.
-func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
+//
+// Callers MUST hold installMu: this both writes `installed` and performs the
+// Replace whose second invocation in the staged state would destroy the backup
+// (RFC §1.3). Reach it through installLocked or InstallLatest, never directly.
+//
+// It returns the failure in addition to logging + notifying it. The two callers
+// need different error policies from one pipeline: the background tick swallows
+// (a failed check must never disturb the gateway), while the dashboard's apply
+// handler has an operator waiting for an answer.
+func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) error {
+	c.cfg.Status.notePhase(PhaseInstalling, "", nil)
+
 	selfPath, err := SelfPath()
 	if err != nil {
 		slog.Warn("auto-update: locate running binary failed", "err", err)
-		return
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
+		return err
 	}
 
 	tmp, err := os.MkdirTemp("", "naozhi-autoupdate-*")
 	if err != nil {
 		slog.Warn("auto-update: temp dir failed", "err", err)
-		return
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
+		return err
 	}
 	defer os.RemoveAll(tmp)
 
 	newBin, err := Download(ctx, rel, tmp)
 	if err != nil {
 		slog.Warn("auto-update: download/verify failed", "tag", rel.Tag, "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动下载失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
-		return
+		return err
 	}
 
 	backupPath, err := Replace(newBin, selfPath)
@@ -261,13 +339,24 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// permission to the install dir (binary in /usr/local/bin owned by
 		// root while the service runs as a normal user) — degrade to a notice.
 		slog.Warn("auto-update: install failed (service unchanged)", "tag", rel.Tag, "err", err)
+		c.cfg.Status.notePhase(PhaseFailed, "", err)
+		// A failure here is usually a permission problem, and the operator's
+		// fix (chown/chmod) happens outside this process. Drop the cached
+		// writability verdict so the dashboard reflects the fix immediately
+		// rather than up to preflightTTL later.
+		invalidatePreflight()
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 自动安装失败：%v。请手动 `naozhi upgrade`。", rel.Tag, err))
-		return
+		return err
 	}
 
 	// Mark installed so we don't re-download next tick while the old binary
 	// is still the one running.
 	c.installed = rel.Tag
+	// PhaseStaged, not PhaseInstalling: the bytes are on disk and the ONLY
+	// thing between the operator and the new version is a restart. This is the
+	// transition the dashboard exists to surface — before it, a staged binary
+	// was invisible outside the log.
+	c.cfg.Status.notePhase(PhaseStaged, rel.Tag, nil)
 	slog.Info("auto-update: binary installed", "tag", rel.Tag, "path", selfPath, "restart", restart)
 
 	if !restart {
@@ -276,7 +365,7 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		// Keep the backup as a manual rollback artifact until a restart picks
 		// up the new binary; a stale .bak is harmless and small.
 		_ = backupPath
-		return
+		return nil
 	}
 
 	// R20260602141221-CR-3: do NOT gate the restart on an outer ServiceRunning()
@@ -303,17 +392,25 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	//     bad. The next successful upgrade's Replace overwrites it (O_TRUNC), so
 	//     it does not accumulate.
 	slog.Info("auto-update: triggering self-restart", "tag", rel.Tag, "backup_kept", backupPath)
+	c.cfg.Status.notePhase(PhaseRestarting, rel.Tag, nil)
 	c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", rel.Tag))
 	if err := RestartServiceNoWait(ctx); err != nil {
 		// The binary is installed and verified; only the restart trigger
 		// failed to enqueue. Do NOT roll back — the operator can restart
 		// manually and the backup is still on disk.
 		slog.Warn("auto-update: restart trigger failed (binary IS installed)", "tag", rel.Tag, "err", err)
+		// Back to Staged rather than Failed: the install SUCCEEDED and the
+		// binary is waiting on disk. Reporting Failed here would tell the
+		// operator to retry an install that already completed — which in the
+		// staged state is the backup-destroying path (see ActionRestart).
+		// LastErr still carries why the restart did not happen.
+		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, err)
 		c.notify(fmt.Sprintf("⚠️ naozhi %s 已安装但重启触发失败：%v。请手动 `sudo systemctl restart naozhi`。", rel.Tag, err))
-		return
+		return err
 	}
 	// Restart is queued; this process is about to receive SIGTERM. The
 	// "🔄 restarting" notice above is the last one this generation emits.
+	return nil
 }
 
 // notify delivers a notice best-effort.
@@ -323,3 +420,72 @@ func (c *Checker) notify(text string) {
 	}
 	c.cfg.Notify(text)
 }
+
+// relTag safely reads a tag off a possibly-nil Release.
+func relTag(rel *Release) string {
+	if rel == nil {
+		return ""
+	}
+	return rel.Tag
+}
+
+// CheckNow performs a single release lookup on demand and records it in
+// Status. It NEVER installs anything — it only learns the latest tag.
+//
+// Why it exists: the default cadence is 6h with check_on_start disabled, so a
+// freshly restarted naozhi knows nothing about available releases for up to six
+// hours. That is precisely when an operator is most likely to open the
+// dashboard and ask "am I current?", and the honest answer must not be a blank
+// space. CheckNow fills that window.
+//
+// Why it never installs: installing is a decision that belongs to the
+// configured Mode (or, from P2, to an explicit operator action). Letting a GET
+// request trigger a binary replacement as a side effect would make a read
+// endpoint mutate the deployment.
+//
+// Throttling is global, not per caller: minOnDemandInterval is enforced under
+// checkMu, so N dashboard tabs polling simultaneously still produce at most one
+// GitHub request per interval. Callers that lose the race get ErrCheckThrottled
+// and should simply render the existing Status.
+func (c *Checker) CheckNow(ctx context.Context) error {
+	if c == nil {
+		return errors.New("no update checker configured")
+	}
+	// A dev build has no meaningful released version to compare against —
+	// same rule checkOnce applies, stated here so the endpoint does not reach
+	// out to GitHub on developer machines at all.
+	if c.cfg.CurrentVersion == "dev" || c.cfg.CurrentVersion == "" {
+		return ErrCheckSkippedDev
+	}
+
+	c.checkMu.Lock()
+	defer c.checkMu.Unlock()
+	if !c.lastCheckNow.IsZero() && time.Since(c.lastCheckNow) < minOnDemandInterval {
+		return ErrCheckThrottled
+	}
+	// Stamp BEFORE the network call, not after. An unreachable GitHub can hold
+	// this goroutine for the full timeout below; stamping first means a slow
+	// failure still consumes the interval instead of letting every subsequent
+	// poll queue up behind the same dead endpoint.
+	c.lastCheckNow = time.Now()
+
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	rel, err := latestRelease(cctx)
+	c.cfg.Status.noteCheck(relTag(rel), err)
+	if err != nil {
+		slog.Debug("auto-update: on-demand check failed", "err", err)
+		return err
+	}
+	slog.Debug("auto-update: on-demand check done", "latest", rel.Tag)
+	return nil
+}
+
+// ErrCheckThrottled means an on-demand check was declined because one ran
+// recently. Not an error condition for the caller — render current Status.
+var ErrCheckThrottled = errors.New("update check throttled")
+
+// ErrCheckSkippedDev means the running build is a dev build, for which there
+// is no meaningful release comparison.
+var ErrCheckSkippedDev = errors.New("update check skipped for dev build")

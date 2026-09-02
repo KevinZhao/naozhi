@@ -57,7 +57,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 1072                         # 2026-07-31 fail 切换重采（2026-05-28 helpers 抽离后 992）
+      current: 1105                         # 2026-09-01 +33：self-update 字段组与其 `// 读:` 注释（dashboard-update-notice RFC P1+P2）；2026-07-31 fail 切换重采（2026-05-28 helpers 抽离后 992）
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
@@ -65,7 +65,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 809                          # 2026-09-01 +3：POST /api/sessions/override 注册（dashboard-model-effort-control RFC）；2026-07-31 fail 切换重采（2026-06-01 时 707）；主体逻辑在 dashboard_ccassets.go
+      current: 813                          # 2026-09-01 +2：POST /api/system/update/apply 注册（dashboard-update-notice RFC P2）；2026-09-01 +2：GET /api/system/update 注册（同 RFC P1）；2026-09-01 +3：POST /api/sessions/override 注册（dashboard-model-effort-control RFC）；2026-07-31 fail 切换重采（2026-06-01 时 707）；主体逻辑在 dashboard_ccassets.go
       limit: 500
       until_phase: "5"
     # internal/server/agent_tailer.go: entry removed 2026-07-31 — tailerRegistry
@@ -105,3 +105,10 @@ handle_baseline:
     - Server.handleDashboard
     - Server.handlePlannerStats     # v0.6.1 新增：PR #1349 引入
     - Server.handleSystemDaemons
+    # 2026-09-01 新增（dashboard-update-notice RFC）：两个 handler 都读 Server
+    # 字段（updateStatus / updateChecker / updateInstallEnabled /
+    # updateApplyLimiter / router），与 handleSystemDaemons 同型 —— 拆到
+    # internal/dashboard/update/ 子包要先把这组字段连同 selfupdate 依赖一起搬，
+    # 为两个各 ~60 行的 handler 开子包不划算。Phase 5 与上面四个一并处理。
+    - Server.handleUpdateStatus
+    - Server.handleUpdateApply

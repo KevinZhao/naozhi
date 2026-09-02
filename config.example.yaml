@@ -351,6 +351,10 @@ projects:
 #                         #   auto     — replace binary AND restart now
 #  interval: "6h"         # check cadence (>=1h floor)
 #  check_on_start: false  # run one check ~30s after startup
+#  dashboard_install: true  # default true; the dashboard's version chip can
+#                           # apply the update (install and/or restart THIS
+#                           # node). false keeps the chip read-only — it still
+#                           # reports the version, the apply endpoint 403s.
 #  notify:                # optional IM target for update notices
 #    platform: "feishu"
 #    chat_id: "oc_xxxxx"
