@@ -187,6 +187,8 @@ function defaultGitStates() {
  * @param {object} [overrides.sessions] - Custom sessions response.
  * @param {object[]} [overrides.events] - Custom events response.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
+ * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
+ *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
  * @param {boolean} [overrides.requireAuth] - If true, require bearer token.
  * @param {string} [overrides.authToken] - Expected token value.
  * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
@@ -202,6 +204,8 @@ function startMockServer(overrides = {}) {
   const sessionsData = overrides.sessions || defaultSessions();
   const eventsData = overrides.events || defaultEvents();
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
+  // 与后端 cronListResp 对齐：recent_runs_cap 恒为 recentRunsPerJob(5)；时区字段按需注入。
+  const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = overrides.gitStates || defaultGitStates();
   const sessionRuns = overrides.sessionRuns || {};
   const requireAuth = overrides.requireAuth || false;
@@ -437,8 +441,8 @@ function startMockServer(overrides = {}) {
     if (pathname === '/api/cron' && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      // Dashboard expects { jobs: [...] } format
-      res.end(JSON.stringify({ jobs: cronJobsData }));
+      // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
+      res.end(JSON.stringify(Object.assign({ jobs: cronJobsData }, cronListMeta)));
       return;
     }
 

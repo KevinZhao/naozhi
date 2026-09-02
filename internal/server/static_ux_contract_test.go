@@ -2810,15 +2810,18 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	if !strings.Contains(js, "function setCronStatusFilter(status)") {
 		t.Error("dashboard.js missing setCronStatusFilter handler")
 	}
-	// Cron panel surfaces 'all' + 'active' chips on the visible status row;
-	// the 'attention' status remains a valid filter target (settable via
-	// setCronStatusFilter, used by the missed-banner click handler) but is
-	// no longer rendered as a dedicated chip — the count was redundant with
-	// the header cron-badge and competed for attention with the chips that
-	// actually drive day-to-day filtering.
+	// Cron panel surfaces 'all' + 'active' + 'attention' chips on the status
+	// row. The 'attention' chip was once dropped as redundant with the header
+	// cron-badge, but the badge later moved to the rail as a bare red dot with
+	// no in-panel counterpart — operators saw "需关注 N" with no way to list
+	// those jobs (fix/cron-view-display #6). Chips are emitted through one
+	// statusChip(status, label) template so the CSP inline-onclick ratchet
+	// stays flat; pin the three call sites so the filterCronJobs status
+	// domain and the UI surface stay in sync.
 	for _, chip := range []string{
-		`data-status="all"`,
-		`data-status="active"`,
+		"statusChip('all', ",
+		"statusChip('active', ",
+		"statusChip('attention', ",
 	} {
 		if !strings.Contains(js, chip) {
 			t.Errorf("dashboard.js missing cron status chip %s", chip)
