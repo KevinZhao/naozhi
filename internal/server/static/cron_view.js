@@ -25,6 +25,54 @@ let cronJobs = [];
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
+// recent_runs_cap from GET /api/cron — the server-side per-job cap on the
+// embedded recent_runs preview (recentRunsPerJob). 0 until the first fetch.
+// renderCronTimelineForJob uses it to tell "history fully in hand" (len <
+// cap) from "first page only" (len == cap) without a second literal here.
+let cronRecentRunsCap = 0;
+// Scheduler timezone from GET /api/cron (timezone = IANA name, e.g.
+// Asia/Shanghai; timezone_abbr = CST; timezone_label = "Asia/Shanghai
+// (UTC+08:00)"). Cron expressions are evaluated in THIS zone, so when the
+// browser sits in a different offset every schedule surface (card chip /
+// drawer 什么时候 / editor picker) is annotated via cronTimezoneSuffix().
+let cronTimezone = '';
+let cronTimezoneAbbr = '';
+let cronTimezoneLabel = '';
+
+// cronTimezoneOffsetMinutes parses the UTC offset out of timezone_label
+// ("... (UTC+08:00)"). Returns null when the label is absent / unparsable.
+function cronTimezoneOffsetMinutes() {
+  const m = /UTC([+-])(\d{2}):(\d{2})/.exec(cronTimezoneLabel || '');
+  if (!m) return null;
+  const sign = m[1] === '-' ? -1 : 1;
+  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+}
+
+// cronTimezoneDiffers — true when the browser's current UTC offset differs
+// from the scheduler's. Offset (not IANA name) is the comparison because two
+// zones on the same offset render identical wall-clock times and need no
+// annotation. Unknown server offset → false (never annotate on guesswork).
+function cronTimezoneDiffers() {
+  const server = cronTimezoneOffsetMinutes();
+  if (server === null) return false;
+  return server !== -new Date().getTimezoneOffset();
+}
+
+// cronTimezoneSuffix — " (CST)" / " (Asia/Shanghai)" appended to schedule
+// text when the browser zone differs from the server zone; '' otherwise.
+function cronTimezoneSuffix() {
+  if (!cronTimezoneDiffers()) return '';
+  const tag = cronTimezoneAbbr || cronTimezone;
+  return tag ? ' (' + tag + ')' : '';
+}
+
+// cronTimezoneNote — sentence-form variant for the editor freq-hint:
+// "时间按服务器时区 Asia/Shanghai (UTC+08:00) 计算。" or '' when zones match.
+function cronTimezoneNote() {
+  if (!cronTimezoneDiffers()) return '';
+  const label = cronTimezoneLabel || cronTimezone;
+  return label ? '时间按服务器时区 ' + label + ' 计算，与浏览器本地时间不同。' : '';
+}
 
 // cron-panel-consolidation RFC §4.5: cronDetailJobId is the only state
 // gate for the per-job drawer. null = drawer closed; otherwise the
@@ -439,7 +487,7 @@ function buildFreqPickerHtml(initial) {
       weeklySelect +
       monthlySelect +
     '</div>' +
-    '<div class="freq-hint">任务会在上述时间点后 0-2 分钟内随机启动（防并发峰值）。</div>';
+    '<div class="freq-hint">任务会在上述时间点后 0-2 分钟内随机启动（防并发峰值）。' + esc(cronTimezoneNote()) + '</div>';
 }
 
 // freqCurrentDescriptor reads the picker state back into a descriptor.
@@ -1754,7 +1802,7 @@ function cronJobCardHtml(j) {
   const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
     ' onclick="event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')"' +
     ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')}"' +
-    ' title="点击修改时间">' + esc(human) + '</span>';
+    ' title="点击修改时间">' + esc(human + cronTimezoneSuffix()) + '</span>';
   let iconGlyphs = '';
   // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
   // last_error_class 提供 terminal 着色（transport 红+⚠）。
@@ -1848,7 +1896,9 @@ function cronStatsBadgeHtml(j) {
   // 但保留在分母里，与详情页"120 次"的口径一致；后续 P3 可拆开）。
   const rate = total > 0 ? Math.round((ok * 100) / total) : 0;
   let cls, label;
-  if (rate >= 100 && stats.failed === 0 && stats.timed_out === 0) {
+  // failed / timed_out 后端 omitempty：为 0 时字段缺失 → undefined，必须 || 0
+  // 否则 ok 分支永不可达（健康任务一直显示 100% 而非绿色 N）。
+  if (rate >= 100 && (stats.failed || 0) === 0 && (stats.timed_out || 0) === 0) {
     cls = 'ok'; label = String(total);
   } else if (rate >= 80) {
     cls = 'mid'; label = rate + '%';
@@ -1918,7 +1968,9 @@ function cronErrorClassLabel(cls) {
     case 'workdir_unreachable': return '工作目录不可达';
     case 'workdir_outside_root': return '工作目录越界';
     case 'overlap_skipped': return '重叠跳过';
+    case 'router_missing': return '路由未就绪';
     case 'paused_concurrent': return '暂停时被抢';
+    case 'deleted_concurrent': return '运行中被删除';
     case 'panic': return '内部异常';
     // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
     // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
@@ -2003,6 +2055,7 @@ function getCronTimelineState(jobId) {
       runs: [],
       nextBefore: 0,
       done: false,         // true = next_before 缺失，已到结尾
+      showAll: false,      // true = 用户已展开 5 行折叠（查看全部 / 展开第 ≥6 行），重绘不再折回
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
@@ -2043,16 +2096,16 @@ function cronTimelineHtml(jobId, job, st) {
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
 
   // P3 §4 折叠机制：data-collapsed=true 时 CSS 只露前 5 行；点 [查看全部]
-  // 切到 false。本地视图状态用 dataset 而非 module-level，因为重绘时
-  // renderCronTimelineForJob 整段重建 innerHTML，模块状态会被冲掉；DOM
-  // 属性同样会被冲掉但用户的"展开"动作本就是 single-click ad-hoc 行为，
-  // 不持久化也合理。
-  const initiallyCollapsed = st.runs.length > 5 ? 'true' : 'false';
+  // 切到 false。展开态记在 st.showAll（而非只在 DOM dataset）：detail fetch
+  // 落地 / WS 刷新 / 选中行都会走 renderCronTimelinePanel 整段重建 innerHTML，
+  // 只存 DOM 的话每次重绘都折回 5 行。
+  const collapsed = st.runs.length > 5 && !st.showAll;
+  const initiallyCollapsed = collapsed ? 'true' : 'false';
   const hiddenCount = Math.max(0, st.runs.length - 5);
 
   let moreBtn = '';
   if (st.runs.length > 0) {
-    if (st.runs.length > 5) {
+    if (collapsed) {
       // 折叠态："查看全部 N 条"——展开后再让既有 [加载更多] 接管分页。
       moreBtn = '<button type="button" class="ct-more-btn ct-show-all"' +
         ' data-hidden-count="' + hiddenCount + '"' +
@@ -2273,6 +2326,7 @@ function cronTimelineToggleShowAll(btn) {
   rows.setAttribute('data-collapsed', 'false');
   const jobId = rows.getAttribute('data-job-id') || '';
   const st = cronTimelineState[jobId];
+  if (st) st.showAll = true;
   // 替换按钮：用既有 cronTimelineLoadMore 路径——st.done 的话变灰态 [已到结尾]。
   const next = document.createElement('div');
   next.className = 'ct-more';
@@ -2336,10 +2390,16 @@ function cronTimelineRowHtml(jobId, r, st) {
       '</div>';
   }
 
+  // 行 onclick/onkeydown 是 cronTimelineSelectRun（同 run 二次点击 = collapse）。
+  // .ctr-detail 嵌在行内，不加 closest('.ctr-detail') 守卫的话点 <details>
+  // 输入快照 / ↩ 重放自 / ↻ 重放 / 拖选文字都会把行折起来。守卫写在行
+  // handler 里而不是给 detail 再挂一个 onclick，是为了不增加 inline onclick
+  // 计数（CSP ratchet TestDashboardCSP_GeneratedHandlerSurfaceRatchet）。
+  const detailGuard = '!event.target.closest(\'.ctr-detail\')';
   return '<div class="ctr' + (isExpanded ? ' is-selected is-expanded' : '') + '" data-run-id="' + escAttr(runId) + '"' +
-      ' onclick="cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' onclick="if(' + detailGuard + ')cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
       ' role="button" tabindex="0" aria-pressed="' + (isExpanded ? 'true' : 'false') + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '"' +
-      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
+      ' onkeydown="if((event.key===\'Enter\'||event.key===\' \')&&' + detailGuard + '){event.preventDefault();cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
     '<div class="ctr-main">' +
       '<span class="ctr-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="ctr-state">' + esc(stateLbl) + '</span>' +
@@ -2663,9 +2723,12 @@ function cronTimelineExpand(jobId, runId) {
   if (!jobId || !runId) return;
   cronExpandedRunId.jobId = jobId;
   cronExpandedRunId.runId = runId;
+  const st = getCronTimelineState(jobId);
+  // 展开第 ≥6 行（键盘 ↓ 翻页 / loadMore 回调）时自动解除折叠，否则该行
+  // 被 .ct-rows[data-collapsed] CSS 隐藏，看起来像"点了没反应"。
+  if (!st.showAll && st.runs.findIndex(r => r && r.run_id === runId) >= 5) st.showAll = true;
   renderCronTimelinePanel(jobId);
   scrollExpandedRunIntoView(runId);
-  const st = getCronTimelineState(jobId);
   if (!st.details[runId]) {
     cronTimelineFetchDetail(jobId, runId);
   }
@@ -3312,25 +3375,11 @@ function cronDrawerHtml(j) {
   //   just-triggered (3-10 s) → "已派发 ✓" (disabled, quiet hold)
   // running takes precedence over just-triggered so a real WS-confirmed
   // run-state always wins over the optimistic local lock.
-  const cooldown = cronTriggerCooldownState(id);
-  let triggerDisabled = false;
-  let triggerLabel = '\u25B7 立即执行';
-  let triggerTooltip = '立即执行一次';
-  let triggerCls = 'cda-btn primary';
-  if (isPaused) {
-    triggerDisabled = true;
-    triggerTooltip = '已暂停。请先恢复任务。';
-  } else if (isRunning) {
-    triggerDisabled = true;
-    triggerLabel = '\u25B7 运行中…';
-    triggerTooltip = '上一次执行尚未完成，请等待结束。';
-    triggerCls += ' is-running';
-  } else if (cooldown) {
-    triggerDisabled = true;
-    triggerLabel = '\u25B7 ' + cooldown.label;
-    triggerCls += cooldown.phase === 'sending' ? ' is-sending' : ' is-sent';
-    triggerTooltip = '刚已触发一次，请稍候。';
-  }
+  const trig = cronTriggerButtonState(j);
+  const triggerDisabled = trig.disabled;
+  const triggerLabel = trig.label;
+  const triggerTooltip = trig.tooltip;
+  const triggerCls = trig.cls;
   const pauseBtn = isPaused
     ? '<button type="button" class="cda-btn" onclick="cronResume(\'' + escJs(id) + '\')" title="恢复任务调度">\u25B6 恢复</button>'
     : '<button type="button" class="cda-btn" onclick="cronPause(\'' + escJs(id) + '\')" title="暂停后调度跳过">\u23F8 暂停</button>';
@@ -3400,6 +3449,57 @@ function cronDrawerHtml(j) {
   // focal point during a live run, definition can wait.
   return headerHtml + cockpitHtml + currentHtml + liveHtml + specHtml + summaryHtml + historyHtml +
     actionsHtml.replace('<nav class="cron-drawer-actions"', '<nav class="cron-drawer-actions is-sticky"');
+}
+
+// cronTriggerButtonState — the 立即执行 button's disable matrix (see the
+// comment block in cronDrawerHtml). Pure; shared by the drawer render and
+// cronDrawerRefreshTriggerBtn so the 200 ms cooldown tick can patch the
+// button in place instead of rebuilding the whole drawer.
+function cronTriggerButtonState(j) {
+  const id = j.id || '';
+  const isPaused = !!j.paused;
+  const isRunning = !!(j.current_run && j.current_run.started_at);
+  const cooldown = cronTriggerCooldownState(id);
+  const st = { disabled: false, label: '\u25B7 立即执行', tooltip: '立即执行一次', cls: 'cda-btn primary' };
+  if (isPaused) {
+    st.disabled = true;
+    st.tooltip = '已暂停。请先恢复任务。';
+  } else if (isRunning) {
+    st.disabled = true;
+    st.label = '\u25B7 运行中…';
+    st.tooltip = '上一次执行尚未完成，请等待结束。';
+    st.cls += ' is-running';
+  } else if (cooldown) {
+    st.disabled = true;
+    st.label = '\u25B7 ' + cooldown.label;
+    st.cls += cooldown.phase === 'sending' ? ' is-sending' : ' is-sent';
+    st.tooltip = '刚已触发一次，请稍候。';
+  }
+  return st;
+}
+
+// cronDrawerRefreshTriggerBtn — targeted repaint of the drawer's primary
+// action button(s) for the open job. Called from the cooldown tick every
+// 200 ms; touching only the button keeps text selection, <details> open
+// state and scroll position inside the drawer intact (a full
+// renderCronDrawer here used to wipe all three for 10 s after 立即执行).
+function cronDrawerRefreshTriggerBtn() {
+  if (cronDetailJobId === null) return;
+  const job = (cronJobs || []).find(x => x && x.id === cronDetailJobId);
+  if (!job) return;
+  const btns = document.querySelectorAll('#cron-detail-pane .cron-drawer-actions .cda-btn.primary');
+  if (!btns.length) return;
+  const st = cronTriggerButtonState(job);
+  for (const btn of btns) {
+    if (btn.className !== st.cls) btn.className = st.cls;
+    if (btn.textContent !== st.label) btn.textContent = st.label;
+    if (btn.title !== st.tooltip) btn.title = st.tooltip;
+    if (btn.disabled !== st.disabled) {
+      btn.disabled = st.disabled;
+      if (st.disabled) btn.setAttribute('aria-disabled', 'true');
+      else btn.removeAttribute('aria-disabled');
+    }
+  }
 }
 
 // cronDrawerCockpitHtml — the KPI cockpit (下次运行 / 成功率 / 平均耗时 /
@@ -3472,7 +3572,7 @@ function cronDrawerSpecHtml(j) {
     nextLine = '<span class="css-when-paused">尚未排期</span>';
   }
   const whenBody =
-    '<div class="css-when-schedule">' + esc(schedule) + '</div>' +
+    '<div class="css-when-schedule">' + esc(schedule + cronTimezoneSuffix()) + '</div>' +
     '<div class="css-when-next">' + nextLine + '</div>';
 
   // 在哪里 — workdir, single-line truncated. Long paths get ellipsis +
@@ -3540,11 +3640,19 @@ function formatDurationShort(ms) {
 // cronPhaseLabel maps backend phase strings to operator-friendly Chinese.
 // Falls back to a neutral "执行中…" for unknown phases so the UI never
 // shows raw enum names. RFC UI §4.4.
+// Phase values are the cron.Phase* constants (internal/cron/runinflight.go):
+// queued → jittering → spawning → sending. Legacy dispatch/send/waiting
+// aliases stay for any cached payloads.
 function cronPhaseLabel(phase) {
   switch (phase) {
     case 'queued':
     case 'dispatch':
       return '已派发，等待调度';
+    case 'jittering':
+      return '随机延迟中（防并发峰值）';
+    case 'spawning':
+      return '正在启动会话';
+    case 'sending':
     case 'send':
       return '等待 CLI 响应';
     case 'waiting':
@@ -3580,12 +3688,16 @@ function renderCronTimelineForJob(jobId) {
     st.runs = [];
     st.nextBefore = 0;
     st.done = false;
+    st.showAll = false;
   }
   if (st.runs.length === 0 && job && Array.isArray(job.recent_runs) && job.recent_runs.length > 0) {
     st.runs = job.recent_runs.slice();
     const oldest = st.runs[st.runs.length - 1];
     st.nextBefore = oldest && oldest.started_at ? oldest.started_at : 0;
-    st.done = job.recent_runs.length < 10;
+    // 后端每 job 只嵌 recent_runs_cap 条摘要（服务端 recentRunsPerJob，随
+    // 响应下发）。少于 cap → 历史已全在手；等于 cap（或 cap 未知）→ 可能还有
+    // 更多，留给首次「加载更多」以 nextBefore 向 /api/cron/runs 确认。
+    st.done = cronRecentRunsCap > 0 && job.recent_runs.length < cronRecentRunsCap;
   }
   st.lastMountAt = Date.now();
   // Mount path: unconditional innerHTML rewrite (shell remount or
@@ -3650,19 +3762,34 @@ function renderCronPanel() {
   const summaryChip = summaryParts.length > 0
     ? '<span class="cj-summary" hidden>· ' + summaryParts.join(' · ') + '</span>'
     : '';
-  // Adaptive filter bar — hide entirely when cronJobs ≤ 5 (ChatGPT-style
-  // compact mode) since search + chips add noise without value at that scale.
-  // Rendered only when meaningful to keep the header area spacious.
-  const showFilterBar = cronJobs.length > 5;
+  // Adaptive filter bar — search row only when cronJobs > 5 (ChatGPT-style
+  // compact mode: search adds noise at small scale). The status chips row
+  // additionally shows whenever something 需关注 exists (the rail badge says
+  // "需关注 N" — the panel must offer the matching 需关注 chip) or a non-default
+  // filter is active (the missed-banner sets 'attention'; without chips a
+  // ≤5-job install had no visible way back to 全部).
+  const showSearchRow = cronJobs.length > 5;
+  const showFilterBar = showSearchRow || attentionCount > 0 || cronFilterStatus !== 'all';
+  // 单一 chip 模板：新增 需关注 chip 的同时不增加 inline onclick 字面量数
+  // （CSP ratchet TestDashboardCSP_GeneratedHandlerSurfaceRatchet）。
+  const statusChip = (status, label, extraCls) =>
+    '<button type="button" class="cron-status-chip' + (extraCls ? ' ' + extraCls : '') + chipActive(status) + '" data-status="' + status + '" aria-pressed="' + chipPressed(status) + '" onclick="setCronStatusFilter(\'' + status + '\')">' + label + '</button>';
+  const attentionChip = (attentionCount > 0 || cronFilterStatus === 'attention')
+    ? statusChip('attention', '需关注 ' + attentionCount, 'attention')
+    : '';
+  const searchRow = showSearchRow
+    ? '<div class="cron-search-row">' +
+        '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+        '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
+      '</div>'
+    : '';
   const filterBar = showFilterBar
     ? '<div class="cron-filter-bar">' +
-        '<div class="cron-search-row">' +
-          '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
-          '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
-        '</div>' +
+        searchRow +
         '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
-          '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
-          '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
+          statusChip('all', '全部') +
+          statusChip('active', '运行中') +
+          attentionChip +
           // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
           '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
             '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
@@ -3935,6 +4062,10 @@ async function fetchCronJobs() {
     }
     cronJobs = data.jobs || [];
     cronNotifyDefault = data.notify_default || null;
+    cronRecentRunsCap = (data.recent_runs_cap | 0) > 0 ? (data.recent_runs_cap | 0) : 0;
+    cronTimezone = data.timezone || '';
+    cronTimezoneAbbr = data.timezone_abbr || '';
+    cronTimezoneLabel = data.timezone_label || '';
     // Badge surfaces jobs needing attention (paused or last run errored),
     // not the raw total — avoids a persistent red dot on healthy setups.
     // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
@@ -4017,22 +4148,18 @@ function ensureCronTriggerCooldownTick() {
   const anyHot = Object.keys(cronJustTriggered).length > 0;
   if (anyHot && !cronTriggerCooldownTickTimer) {
     cronTriggerCooldownTickTimer = setInterval(() => {
-      // Sweep stale entries; if any expired, repaint the affected rows /
-      // drawer so the button leaves cooldown.
-      let anyExpired = false;
+      // Sweep expired entries; the in-place button patch below then lets
+      // the drawer's trigger button leave cooldown.
       const now = Date.now();
       for (const k of Object.keys(cronJustTriggered)) {
         if (now - cronJustTriggered[k] >= CRON_TRIGGER_COOLDOWN_MS) {
           delete cronJustTriggered[k];
-          anyExpired = true;
         }
       }
-      if (anyExpired || true) {
-        // Repaint drawer cooldown labels so the spinner→✓→idle transitions
-        // happen even if no other event fires. The repaint is targeted to
-        // the actions row so it doesn't wipe focus / scroll position.
-        if (cronDetailJobId !== null) renderCronDrawer();
-      }
+      // Patch only the drawer's trigger button so the spinner→✓→idle
+      // transitions happen even if no other event fires, without rebuilding
+      // the drawer (which wiped text selection / <details> state every 200 ms).
+      cronDrawerRefreshTriggerBtn();
       if (Object.keys(cronJustTriggered).length === 0) {
         clearInterval(cronTriggerCooldownTickTimer);
         cronTriggerCooldownTickTimer = null;
