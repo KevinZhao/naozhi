@@ -4935,26 +4935,38 @@ async function sendMessage() {
 
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
 
-    if (r.status === 401 || r.status === 403) {
-      if (input) setMsgValue(input, text);
-      rollbackOptimisticRunning(selectedKey, selectedNode);
-      showAuthModal();
-      return;
-    }
-    if (r.status === 429) {
-      if (input) setMsgValue(input, text);
-      rollbackOptimisticRunning(selectedKey, selectedNode);
-      showToast('消息队列已满，请稍后重试', 'warning');
-      return;
-    }
     if (!r.ok) {
       if (input) setMsgValue(input, text);
       rollbackOptimisticRunning(selectedKey, selectedNode);
       // Some error paths still write text/plain; fall back to text() so we
       // always surface the real message instead of a generic "send failed".
       const raw = await r.text().catch(() => '');
-      let detail = '';
-      try { const j = JSON.parse(raw); if (j && j.error) detail = j.error; } catch (_) { if (raw) detail = raw; }
+      let detail = '', filesConsumed = false;
+      try {
+        const j = JSON.parse(raw);
+        if (j && j.error) detail = j.error;
+        if (j && j.files_consumed) filesConsumed = true;
+      } catch (_) { if (raw) detail = raw; }
+      // files_consumed: the server already took the pre-uploaded attachments
+      // out of the uploadStore before rejecting (post-TakeAll 4xx/5xx), so the
+      // chips we still hold reference dead ids — a retry would fail with
+      // "file not found or expired". Drop them and ask for a re-attach.
+      // Pre-TakeAll rejections (and 401/403/429 from the middleware/limiter)
+      // never set the flag, so the user's unsent attachments stay put.
+      if (filesConsumed) {
+        clearPendingFiles();
+        showToast('附件已失效，请重新添加后再发送', 'warning');
+      }
+      if (r.status === 401 || r.status === 403) {
+        showAuthModal();
+        return;
+      }
+      if (r.status === 429) {
+        // The server names the limiter that fired (send vs upload rate limit);
+        // there is no queue-full 429 on this path, so never invent one.
+        showToast(detail || '请求过于频繁，请稍后重试', 'warning');
+        return;
+      }
       showAPIError('发送消息', r.status, detail);
       return;
     }
@@ -5002,7 +5014,7 @@ async function sendMessage() {
       }, 15000);
     }
   } catch (e) {
-    if (input) input.value = text;
+    if (input) setMsgValue(input, text);
     rollbackOptimisticRunning(selectedKey, selectedNode);
     showNetworkError('发送消息', e);
   } finally {

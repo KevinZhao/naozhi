@@ -51,3 +51,54 @@ func TestDashboardJS_FileSendsRouteOverHTTP(t *testing.T) {
 		t.Error("HTTP send success path must render the optimistic bubble when WS is connected — file-bearing sends now take this path and would otherwise lose the immediate echo the WS path always had")
 	}
 }
+
+// TestDashboardJS_HTTPSendFailureFeedback pins the #2418 follow-up fixes on
+// the client side of the HTTP send path (F1/F2/F3/F6):
+//
+//   - F1: the server fans asynchronous HTTP-send failures out as a
+//     `send_error` frame; the dashboard must dispatch it through the same
+//     recovery as a WS send_ack error (toast + drop optimistic bubble +
+//     roll back the running flip).
+//   - F2: #msg-input is contentEditable — `input.value = text` is a silent
+//     no-op, so a failed send lost the user's text. Every restore must go
+//     through setMsgValue.
+//   - F3: when the server says the pre-uploaded attachments were already
+//     consumed (files_consumed), the client must drop its stale chips and
+//     ask the user to re-attach; a blind retry would 400 with the very
+//     "file not found or expired" symptom #2418 fixed.
+//   - F6: 429 is not "queue full" — the server body names the limiter that
+//     fired, so the client must display it instead of a hardcoded label.
+func TestDashboardJS_HTTPSendFailureFeedback(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// F2
+	if strings.Contains(js, "input.value = text") {
+		t.Error("dashboard.js must not assign input.value on #msg-input (contentEditable) — use setMsgValue(input, text)")
+	}
+
+	// F1
+	if !strings.Contains(js, "case 'send_error':") {
+		t.Error("WS dispatcher must handle the send_error frame emitted for asynchronous HTTP-send failures")
+	}
+	if !strings.Contains(js, "onSendError(msg) {") {
+		t.Error("onSendError handler missing — send_error must reuse the send_ack error recovery")
+	}
+
+	// F3
+	if !strings.Contains(js, "j.files_consumed") {
+		t.Error("HTTP send failure branch must read files_consumed from the error body")
+	}
+	if !strings.Contains(js, "if (filesConsumed) {\n        clearPendingFiles();") {
+		t.Error("HTTP send failure branch must clearPendingFiles() when the server reports files_consumed")
+	}
+
+	// F6
+	if strings.Contains(js, "showToast('消息队列已满，请稍后重试'") {
+		t.Error("HTTP 429 must display the server's limiter-specific label, not a hardcoded queue-full message")
+	}
+}
