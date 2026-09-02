@@ -5112,6 +5112,55 @@ function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
 function setMsgValue(el, v) { if (el) el.innerText = v; }
 function clearMsg(el) { if (el) el.textContent = ''; }
 
+// validateComposerForSend runs the synchronous pre-send checks that depend on
+// the live composer (text-level backend feature gates, byte cap, in-flight
+// uploads). Toasts and returns false when the send must abort. sendMessage
+// calls it twice: once before closing the reentrancy gate and again after
+// `await awaitPendingOrients()` — the composer stays editable during that wait,
+// so text and attachments captured before the await can be stale (#2405).
+function validateComposerForSend(text) {
+  // Multi-Backend RFC §8.3 D9 — `/urgent` requires the backend's
+  // `passthrough` feature (preempt the running turn with a fresh user
+  // message). kiro / ACP backends don't preempt; the server-side
+  // dispatcher would either error or queue the message confusingly.
+  // Toast and abort send so the operator is told *why* before they
+  // wonder where their preemption went. Title-attr on /urgent button
+  // would be ideal but /urgent is a text prefix typed in the input;
+  // detect at send time instead.
+  if (text && /^\s*\/urgent\b/.test(text) && !featureForCurrent('passthrough')) {
+    showToast('当前后端不支持 /urgent 抢占（请用 Esc 中断后再发）', 'warning');
+    return false;
+  }
+
+  // Multi-Backend RFC §8.3 D13 — `@-mention` embedded context only
+  // works when the backend reads file paths from inside the prompt
+  // (claude does; kiro doesn't). Strip-and-warn would silently change
+  // the prompt; better to abort + toast so the operator can paste the
+  // absolute path or content explicitly.
+  if (text && /(?:^|\s)@[\w./-]/.test(text) && !featureForCurrent('embedded_context')) {
+    showToast('当前后端不支持 @ 文件 mention，请粘贴绝对路径或文件内容', 'warning');
+    return false;
+  }
+
+  // Per-field byte cap matches server maxWSSendTextBytes (1 MB). Reject
+  // up-front so oversize pastes don't round-trip and return a silent
+  // send_ack error that the optimistic bubble would have already printed.
+  const byteLen = new Blob([text]).size;
+  if (byteLen > 1024 * 1024) {
+    showToast('消息过长 (' + Math.ceil(byteLen / 1024) + ' KB > 1024 KB 上限)', 'warning');
+    return false;
+  }
+
+  // Block send while any attachment is still uploading or errored —
+  // we only reference file_ids on the server, so partial uploads would
+  // silently drop images. User can retry or remove the bad one.
+  if (pendingFiles.some(f => f.status === 'uploading')) {
+    showToast('图片上传中，请稍候…', 'warning');
+    return false;
+  }
+  return true;
+}
+
 async function sendMessage() {
   if (sending) return;
 
@@ -5194,46 +5243,33 @@ async function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = getMsgValue(input);
   if (!text && pendingFiles.length === 0) return;
+  if (!validateComposerForSend(text)) return;
 
-  // Multi-Backend RFC §8.3 D9 — `/urgent` requires the backend's
-  // `passthrough` feature (preempt the running turn with a fresh user
-  // message). kiro / ACP backends don't preempt; the server-side
-  // dispatcher would either error or queue the message confusingly.
-  // Toast and abort send so the operator is told *why* before they
-  // wonder where their preemption went. Title-attr on /urgent button
-  // would be ideal but /urgent is a text prefix typed in the input;
-  // detect at send time instead.
-  if (text && /^\s*\/urgent\b/.test(text) && !featureForCurrent('passthrough')) {
-    showToast('当前后端不支持 /urgent 抢占（请用 Esc 中断后再发）', 'warning');
-    return;
+  // #2405 — close the reentrancy gate BEFORE the first await. sendComposerTurn
+  // starts with `await awaitPendingOrients()`, which can block for up to
+  // ORIENT_MAX_WAIT_MS while the composer stays editable. With the gate set
+  // only after that await, every Enter pressed during the wait spawned another
+  // sendMessage that captured the same text; once orient settled, waiter #1
+  // sent text+file_ids and cleared the composer while #2..N each fired a
+  // text-only ghost over WS. The `.sending` class is the visible cue that the
+  // click registered. The finally is the ONLY reset — every exit path of the
+  // gated half goes through it.
+  sending = true;
+  const btn = document.getElementById('btn-send');
+  if (btn) btn.classList.add('sending');
+  try {
+    await sendComposerTurn(selectedKey, selectedNode);
+  } finally {
+    sending = false;
+    if (btn) btn.classList.remove('sending');
   }
+}
 
-  // Multi-Backend RFC §8.3 D13 — `@-mention` embedded context only
-  // works when the backend reads file paths from inside the prompt
-  // (claude does; kiro doesn't). Strip-and-warn would silently change
-  // the prompt; better to abort + toast so the operator can paste the
-  // absolute path or content explicitly.
-  if (text && /(?:^|\s)@[\w./-]/.test(text) && !featureForCurrent('embedded_context')) {
-    showToast('当前后端不支持 @ 文件 mention，请粘贴绝对路径或文件内容', 'warning');
-    return;
-  }
-
-  // Per-field byte cap matches server maxWSSendTextBytes (1 MB). Reject
-  // up-front so oversize pastes don't round-trip and return a silent
-  // send_ack error that the optimistic bubble would have already printed.
-  const byteLen = new Blob([text]).size;
-  if (byteLen > 1024 * 1024) {
-    showToast('消息过长 (' + Math.ceil(byteLen / 1024) + ' KB > 1024 KB 上限)', 'warning');
-    return;
-  }
-
-  // Block send while any attachment is still uploading or errored —
-  // we only reference file_ids on the server, so partial uploads would
-  // silently drop images. User can retry or remove the bad one.
-  if (pendingFiles.some(f => f.status === 'uploading')) {
-    showToast('图片上传中，请稍候…', 'warning');
-    return;
-  }
+// sendComposerTurn is the gated half of sendMessage: the caller holds the
+// `sending` gate for its whole duration. targetKey/targetNode are the session
+// the operator hit send on; a switch during the orient wait aborts the send
+// rather than redirecting the captured text to the newly selected session.
+async function sendComposerTurn(targetKey, targetNode) {
   // Auto-orient runs as a fire-and-forget vision side-call after upload
   // (maybeAutoOrient). If the user hits send within its ~12s window, the
   // server would TakeAll the upload BEFORE the rotation's in-place Replace
@@ -5241,10 +5277,17 @@ async function sendMessage() {
   // in-flight orient to settle (hard-capped at ORIENT_MAX_WAIT_MS) so the
   // rotated bytes are in the store before we consume the file_ids. Silent by
   // design: no toast, the user already clicked send and the rotation is
-  // best-effort. Re-check selectedKey after the await in case the user
-  // switched sessions while waiting.
+  // best-effort.
   await awaitPendingOrients();
-  if (!selectedKey) return;
+  if (!selectedKey || selectedKey !== targetKey || selectedNode !== targetNode) return;
+  // The composer stayed editable during the wait: re-read the text and re-run
+  // the synchronous checks. Without the uploading re-check an id-less upload
+  // dropped mid-wait was filtered out of fileIDs and then deleted by
+  // clearPendingFiles() — the attachment vanished without a trace.
+  const input = document.getElementById('msg-input');
+  const text = getMsgValue(input);
+  if (!text && pendingFiles.length === 0) return;
+  if (!validateComposerForSend(text)) return;
   const failed = pendingFiles.filter(f => f.status === 'error');
   if (failed.length > 0) {
     const detail = failed[0].error || '';
@@ -5273,9 +5316,6 @@ async function sendMessage() {
   }
   const fileIDs = pendingFiles.map(f => f.id).filter(Boolean);
 
-  sending = true;
-  const btn = document.getElementById('btn-send');
-  if (btn) btn.classList.add('sending');
   // Flip the send→stop button + running banner BEFORE the network round trip,
   // not after — a resumed session has no CLI process yet, so the first send
   // triggers a subprocess spawn that can take several hundred ms. Leaving the
@@ -5303,23 +5343,19 @@ async function sendMessage() {
     // No file_ids here by construction — file-bearing sends take the HTTP
     // path above so the uploadStore owner matches the upload's cookie.
     if (selectedNode && selectedNode !== 'local') sendMsg.node = selectedNode;
-    if (sessionWorkspaces[selectedKey]) {
-      sendMsg.workspace = sessionWorkspaces[selectedKey];
-      delete sessionWorkspaces[selectedKey];
-      delete sessionNodes[selectedKey];
-    }
-    if (sessionBackends[selectedKey]) {
-      sendMsg.backend = sessionBackends[selectedKey];
-      // Backend is consumed once on session spawn; clear afterward so a
-      // later re-send doesn't try to retrofit onto an existing session.
-      delete sessionBackends[selectedKey];
-    }
-    if (sessionAccessProfiles[selectedKey]) {
-      // Access profile, like backend, is consumed once on session spawn.
-      sendMsg.access_profile = sessionAccessProfiles[selectedKey];
-      delete sessionAccessProfiles[selectedKey];
-    }
+    if (sessionWorkspaces[selectedKey]) sendMsg.workspace = sessionWorkspaces[selectedKey];
+    if (sessionBackends[selectedKey]) sendMsg.backend = sessionBackends[selectedKey];
+    if (sessionAccessProfiles[selectedKey]) sendMsg.access_profile = sessionAccessProfiles[selectedKey];
     if (wsm.send(sendMsg)) {
+      // Workspace/backend/access profile are consumed once on session spawn;
+      // forget them only now that the frame is out. A failed wsm.send falls
+      // through to the HTTP path below, which must still see them.
+      if (sendMsg.workspace) {
+        delete sessionWorkspaces[selectedKey];
+        delete sessionNodes[selectedKey];
+      }
+      delete sessionBackends[selectedKey];
+      delete sessionAccessProfiles[selectedKey];
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
       renderOptimisticUserMsg(text);
@@ -5332,9 +5368,6 @@ async function sendMessage() {
       // this key. Only on the success path — a failed wsm.send falls through to
       // HTTP below and must keep the entry for that retry.
       persistPending();
-      // Optimistic running flip already applied above — no-op if unchanged.
-      sending = false;
-      if (btn) btn.classList.remove('sending');
       return;
     }
     // WS send failed, fall through to HTTP path below
@@ -5458,9 +5491,6 @@ async function sendMessage() {
     if (input) setMsgValue(input, text);
     rollbackOptimisticRunning(selectedKey, selectedNode);
     showNetworkError('发送消息', e);
-  } finally {
-    sending = false;
-    if (btn) btn.classList.remove('sending');
   }
 }
 
@@ -5539,10 +5569,15 @@ function markSessionOptimisticRunning(key, node) {
   if (!key) return;
   const sKey = sid(key, node || 'local');
   const sd = sessionsData[sKey];
-  if (!sd) return;
-  if (sd.state === 'running') return; // server already said running
-  sessionOptimisticPrevState[sKey] = sd.state;
-  sd.state = 'running';
+  if (sd && sd.state === 'running') return; // server already said running
+  // A just-created session has no sessionsData entry until the next list
+  // fetch. Still flip the button/banner below (#2405: the missing feedback on
+  // a new session's first send invited Enter mashing); fetchSessions keeps the
+  // flag-forced 'running' once the entry lands, onSessionState clears it.
+  if (sd) {
+    sessionOptimisticPrevState[sKey] = sd.state;
+    sd.state = 'running';
+  }
   sessionOptimisticRunning[sKey] = true;
   // Sidebar parity: flip the card's dot/label to running right now so the
   // left list never looks idle while the main banner already says working.
@@ -5579,10 +5614,10 @@ function rollbackOptimisticRunning(key, node) {
   if (sd && sd.state === 'running') {
     sd.state = 'ready';
     patchSidebarCardState(key, node, 'ready');
-    if (key === selectedKey && (node || 'local') === selectedNode) {
-      updateSendButton('ready');
-    }
   }
+  // The flip may have been applied without a sessionsData entry (new session's
+  // first send) — restore the button either way.
+  if (key === selectedKey && (node || 'local') === selectedNode) updateSendButton('ready');
 }
 
 // --- Running banner: tool activity + agent tracking ---
