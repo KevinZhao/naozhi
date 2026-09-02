@@ -217,7 +217,7 @@ const (
 type Router struct {
 	// 读写: core (lock primitive itself), all router_*.go (acquired by methods)
 	mu sync.RWMutex
-	// 读写: core, lifecycle, cleanup, capacity (waitForCapacity broadcast/wait)
+	// 读写: core, lifecycle, cleanup, capacity (waitForCapacity broadcast/wait), tuning (respawn broadcast)
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
 	// ss is the session-table facet (Router P4, #383): the primary session
 	// table (sessions), its two secondary indices (byChat chat→keys, keyhash

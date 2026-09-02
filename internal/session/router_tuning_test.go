@@ -437,3 +437,26 @@ func TestRenameSession_InheritsTuning(t *testing.T) {
 		t.Errorf("tuning lost across rename: model=%q effort=%q", got.TuningModel(), got.TuningEffort())
 	}
 }
+
+// TestSetSessionTuning_RespawnReleasesActiveSlot pins the capacity
+// bookkeeping of the lazy-respawn path: closing the live process frees a
+// session slot exactly like a TTL recycle / evict does, so activeCount must
+// drop. Without it every tuning respawn leaks one slot (the follow-up spawn
+// Adds 1 again) until the max-sessions gate starts evicting healthy sessions.
+func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
+	r := mkTuningTestRouter(t)
+	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
+	addTuningSession(r, "k1", "kiro", proc)
+	r.ss.activeCount.Store(1) // the session above is the one live, non-exempt entry
+
+	mode, err := r.SetSessionTuning(context.Background(), "k1", nil, strp("max"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != TuningAppliedRespawn {
+		t.Fatalf("mode = %q, want respawn (test premise)", mode)
+	}
+	if got := r.ss.activeCount.Load(); got != 0 {
+		t.Errorf("activeCount after tuning respawn = %d, want 0 (slot leaked)", got)
+	}
+}
