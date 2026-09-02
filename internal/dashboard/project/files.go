@@ -249,6 +249,7 @@ func isPublicTmpIrregularType(info os.FileInfo) bool {
 var textMimeSet = map[string]struct{}{
 	"application/json":          {},
 	"application/javascript":    {},
+	"application/typescript":    {},
 	"application/xml":           {},
 	"application/x-yaml":        {},
 	"application/yaml":          {},
