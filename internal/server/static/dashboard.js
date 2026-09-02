@@ -10744,17 +10744,24 @@ function renderMdUncached(s) {
   const parts = s.split(BLOCK_SPLIT_RE);
   return parts.map(part => {
     if (part.startsWith('```')) {
-      const m = part.match(/^```([^\n]*)\n?([\s\S]*?)```$/);
-      // Info string → lang: first whitespace-delimited word, restricted to a
+      // Single-line fence (```ls -la```) carries no info string — everything
+      // between the backticks is code. Skip the info-string match for it,
+      // otherwise the greedy `[^\n]*` below would swallow the body as "lang".
+      const oneLine = part.indexOf('\n') === -1;
+      const m = oneLine ? null : part.match(/^```([^\n]*)\n?([\s\S]*?)```$/);
+      // Info string → lang: first word, cut at whitespace / `:` / `{` so
+      // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
       // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
       // punctuation never reaches data-lang. The old `(\w*)` stopped at the
       // first non-word char and left the remainder (`++`) in the code body.
-      const lang = m ? (m[1].trim().split(/\s+/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
+      const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
       // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
       // the remainder arrives as a plain part that still starts with ```):
       // strip only the opening ```lang line. The old slice(3, -3) assumed a
       // closing fence and ate the last 3 characters of live output.
-      const code = m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
+      const code = oneLine
+        ? part.replace(/^```/, '').replace(/```$/, '')
+        : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
       if (lang === 'mermaid') {
         const id = 'mmd-' + (++mermaidCounter);
         mermaidPending[id] = code;
@@ -11173,11 +11180,13 @@ function inlineMd(s) {
   // here also keeps them out of the link's visible text where they would
   // otherwise dangle past sentences like `see <https://x.y/z>` or
   // `[link](https://x.y/z)`. Defence-in-depth, not the only barrier.
-  // The URL charset additionally stops at CJK punctuation / fullwidth forms
-  // (U+3000–303F, U+FF00–FFEF) so `https://x.com/a。然后` no longer swallows
-  // the rest of the sentence, and at the `&lt;`/`&gt;` entities esc() emitted
-  // for `<https://…>` so the closing bracket stays out of the href.
-  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3000-\u303f\uff00-\uffef])+)/g, function(_, prefix, url) {
+  // The URL charset additionally stops at CJK / fullwidth *punctuation* only
+  // (U+3001–3003, 3008–3011, 3014–301F, FF01–FF0F, FF1A–FF20, FF3B–FF40,
+  // FF5B–FF65) so `https://x.com/a。然后` no longer swallows the rest of the
+  // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
+  // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
+  // emitted for `<https://…>` so the closing bracket stays out of the href.
+  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g, function(_, prefix, url) {
     // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
     // the decoded URL for the href (escAttr re-encodes it exactly once).
     var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');

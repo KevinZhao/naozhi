@@ -102,6 +102,12 @@ test.describe('renderMd 链接 / fence / 表格 / 斜体', () => {
     expect(h3).toContain('href="https://x.com/d"');
   });
 
+  test('URL 路径里的 〇 / 々 / 半角片假名不被截断（日文路径）', async () => {
+    const html = await render('見る https://ja.example.org/wiki/〇々ｶﾅ ページ');
+    expect(html).toContain('href="https://ja.example.org/wiki/〇々ｶﾅ"');
+    expect(html).toMatch(/<\/a> ページ/);
+  });
+
   test('URL 路径里的汉字不被截断', async () => {
     const html = await render('看 https://zh.wikipedia.org/wiki/中文 页面');
     expect(html).toContain('href="https://zh.wikipedia.org/wiki/中文"');
@@ -127,6 +133,18 @@ test.describe('renderMd 链接 / fence / 表格 / 斜体', () => {
     expect(html).not.toContain('data-lang="py&quot;');
     expect(html).toMatch(/data-lang="py[a-z]*"/);
     expect(html).toMatch(/<code[^>]*>x<\/code>/);
+  });
+
+  test('单行 fence ```ls -la``` 内容整体作为代码保留', async () => {
+    const html = await render('```ls -la```');
+    expect(html).toMatch(/<code[^>]*>ls -la<\/code>/);
+    expect(html).not.toContain('data-lang');
+  });
+
+  test('```python:main.py 的 lang 在 : 处截断', async () => {
+    const html = await render('```python:main.py\nx = 1\n```');
+    expect(html).toContain('data-lang="python"');
+    expect(html).toMatch(/<code[^>]*>x = 1<\/code>/);
   });
 
   test('普通 ```python fence 行为不变', async () => {
