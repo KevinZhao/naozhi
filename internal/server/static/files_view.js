@@ -18,6 +18,13 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+  // Attribute-value context: nz.util.esc deliberately leaves quotes alone, so
+  // a file named `a"b` would truncate data-name="…" and the click handler
+  // navigated to the wrong path. Use this for every attr="' + … + '" splice.
+  function escAttr(s) {
+    if (U.escAttr) return U.escAttr(s);
+    return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
   function toast(m) { if (U.showToast) U.showToast(m); }
   function $(id) { return document.getElementById(id); }
 
@@ -123,8 +130,8 @@
     if (!chips.length) { wrap.innerHTML = ''; wrap.hidden = true; return; }
     wrap.hidden = false;
     wrap.innerHTML = '<span class="files-qj-label">快速跳转</span>' + chips.map(function (c) {
-      return '<button type="button" class="files-qj" data-project="' + esc(c.name) + '" title="' +
-        esc(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
+      return '<button type="button" class="files-qj" data-project="' + escAttr(c.name) + '" title="' +
+        escAttr(byName[c.name].path || c.name) + '">' + (c.fav ? '★ ' : '') + esc(c.name) + '</button>';
     }).join('');
   }
 
@@ -157,7 +164,7 @@
       renderCrumbs();
       renderList(res);
     }).catch(function (e) {
-      renderEmpty('加载失败：' + esc(e.message));
+      renderEmpty('加载失败：' + e.message);
     });
   }
 
@@ -177,7 +184,7 @@
       if (!seg) return;
       acc = acc ? acc + '/' + seg : seg;
       html += '<span class="files-crumb-sep">/</span>' +
-        '<button type="button" class="files-crumb" data-dir="' + esc(acc) + '">' + esc(seg) + '</button>';
+        '<button type="button" class="files-crumb" data-dir="' + escAttr(acc) + '">' + esc(seg) + '</button>';
     });
     wrap.innerHTML = html;
   }
@@ -199,8 +206,10 @@
       html += '<div class="files-row files-up" data-kind="up"><span class="files-ic">↑</span>' +
         '<span class="files-name">上级目录</span></div>';
     }
-    if (!entries.length && !state.dir) {
-      box.innerHTML = '<div class="files-empty">空目录</div>';
+    if (!entries.length) {
+      // Keep the ↑ 上级目录 row (when present) so an empty subdirectory is
+      // still navigable out of.
+      box.innerHTML = html + '<div class="files-empty">空目录</div>';
       return;
     }
     entries.forEach(function (e) {
@@ -208,7 +217,7 @@
       var meta = e.is_dir ? '' : (e.symlink ? '链接' : fmtSize(e.size));
       var cls = 'files-row' + (e.is_dir ? ' files-dir' : '') + (e.symlink ? ' files-link' : '');
       var kind = e.symlink ? 'symlink' : (e.is_dir ? 'dir' : 'file');
-      html += '<div class="' + cls + '" data-kind="' + kind + '" data-name="' + esc(e.name) + '">' +
+      html += '<div class="' + cls + '" data-kind="' + kind + '" data-name="' + escAttr(e.name) + '">' +
         '<span class="files-ic">' + icon + '</span>' +
         '<span class="files-name">' + esc(e.name) + '</span>' +
         '<span class="files-meta">' + esc(meta) + '</span>';
@@ -292,7 +301,8 @@
     }
     // Text / unknown → preview JSON {content, truncated, size, mime}.
     fetchJSON(fileApiUrl(state.project, 'local', rel, 'preview')).then(function (res) {
-      if (res && res.mime && !/^text\//.test(res.mime) && res.content == null) {
+      // Server shape for non-text files is {content:"", binary:true}.
+      if (res && res.binary) {
         body.innerHTML = '<div class="files-empty">该文件不可预览，请下载查看。</div>';
         return;
       }
@@ -436,7 +446,7 @@
     $('files-main').hidden = false;
     document.body.classList.add('nz-view-files');
     loadRoots().then(function () { loadDir(state.loaded ? state.dir : ''); })
-      .catch(function (e) { renderEmpty('加载项目失败：' + esc(e.message)); });
+      .catch(function (e) { renderEmpty('加载项目失败：' + e.message); });
   }
   function hide() {
     document.body.classList.remove('nz-view-files');
