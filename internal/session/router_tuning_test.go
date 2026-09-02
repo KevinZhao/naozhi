@@ -359,3 +359,81 @@ func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
 		})
 	}
 }
+
+// TestInstallFreshSessionLocked_InheritsTuning pins the respawn half of the
+// tuning lifecycle: SetSessionTuning's respawn/deferred paths only record
+// the override on the CURRENT ManagedSession, and the next spawn builds its
+// argv from it (resolveSpawnParamsLocked) — but installFreshSessionLocked
+// then REPLACES that struct. If the fresh struct does not carry the override
+// forward, sessions.json is rewritten without it, the following TTL recycle
+// spawns back on the config default, and a naozhi restart in between reads
+// the surviving shim as arg-drift and rebuilds it as default. The user label
+// is operator-owned state of the same shape and rides along.
+func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	wrapper := cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro")
+	const key = "dash:direct:inherit:general"
+
+	old := newSessionWithID(key, "sess-old")
+	old.SetBackend("kiro")
+	old.SetTuningModel("claude-haiku-4.5")
+	old.SetTuningEffort("low")
+	old.SetUserLabel("my label")
+	old.setLabelOrigin("auto")
+	r.mu.Lock()
+	r.ss.sessions[key] = old
+	r.indexAdd(key)
+
+	fresh := r.installFreshSessionLocked(
+		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
+		nil, nil, 0, 0, 0, false, "sess-old", 0,
+	)
+	r.mu.Unlock()
+
+	if fresh == old {
+		t.Fatal("test premise broken: installFreshSessionLocked must allocate a new struct")
+	}
+	if got := fresh.TuningModel(); got != "claude-haiku-4.5" {
+		t.Errorf("TuningModel after respawn = %q, want claude-haiku-4.5", got)
+	}
+	if got := fresh.TuningEffort(); got != "low" {
+		t.Errorf("TuningEffort after respawn = %q, want low", got)
+	}
+	if got := fresh.UserLabel(); got != "my label" {
+		t.Errorf("UserLabel after respawn = %q, want %q", got, "my label")
+	}
+	if got := fresh.LabelOrigin(); got != "auto" {
+		t.Errorf("LabelOrigin after respawn = %q, want auto (AutoTitler must keep ownership)", got)
+	}
+	if r.SessionFor(key) != fresh {
+		t.Error("fresh session not published under key")
+	}
+}
+
+// TestRenameSession_InheritsTuning covers the takeover/rename path, which
+// builds its own fresh struct instead of going through
+// installFreshSessionLocked and must carry the override too.
+func TestRenameSession_InheritsTuning(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	const oldKey = "scratch:abc:general:general"
+	const newKey = "feishu:direct:alice:aside-general-deadbeef"
+
+	s := newSessionWithID(oldKey, "sess-rn")
+	s.SetTuningModel("claude-haiku-4.5")
+	s.SetTuningEffort("low")
+	r.mu.Lock()
+	r.ss.sessions[oldKey] = s
+	r.indexAdd(oldKey)
+	r.mu.Unlock()
+
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("RenameSession returned false")
+	}
+	got := r.SessionFor(newKey)
+	if got == nil {
+		t.Fatal("renamed session missing")
+	}
+	if got.TuningModel() != "claude-haiku-4.5" || got.TuningEffort() != "low" {
+		t.Errorf("tuning lost across rename: model=%q effort=%q", got.TuningModel(), got.TuningEffort())
+	}
+}

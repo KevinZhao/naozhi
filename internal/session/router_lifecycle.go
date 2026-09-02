@@ -1247,6 +1247,21 @@ func (r *Router) installFreshSessionLocked(
 	s.SetAccessProfile(accessProfileID)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
+	// Operator-owned per-session state must outlive the process it was set
+	// on. resolveSpawnParamsLocked already read the OLD entry's tuning to
+	// build this spawn's argv (--model/--effort); if the fresh entry does not
+	// carry the same values, sessions.json is rewritten without them, the
+	// next TTL recycle spawns back on the config default, and a naozhi
+	// restart in between reads the surviving shim as arg-drift
+	// (driftCompareArgs) and rebuilds it as default. The user label is the
+	// same shape of state (dashboard rename) and rides along.
+	// docs/rfc/dashboard-model-effort-control.md §4.3 / §4.5.
+	if old := r.ss.sessions[key]; old != nil {
+		s.SetTuningModel(old.TuningModel())
+		s.SetTuningEffort(old.TuningEffort())
+		s.SetUserLabel(old.UserLabel())
+		s.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
+	}
 	// attachProcessAndSnapshotPersisted: serialises storeProcess + seededLen
 	// reset under historyMu so a concurrent InjectHistory observes the
 	// (process, seededLen=len(persistedHistory)) pair and forwards only
@@ -1843,6 +1858,11 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	fresh.SetCLIName(old.CLIName())
 	fresh.SetCLIVersion(old.CLIVersion())
 	fresh.SetUserLabel(old.UserLabel())
+	// Tuning overrides are keyed to the conversation, not the key string —
+	// the renamed session keeps running under the same argv, so dropping
+	// them here would make the next respawn/drift check flip it to default.
+	fresh.SetTuningModel(old.TuningModel())
+	fresh.SetTuningEffort(old.TuningEffort())
 	if dr := loadAtomicString(&old.deathReason); dr != "" {
 		storeAtomicString(&fresh.deathReason, dr)
 	}
