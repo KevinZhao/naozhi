@@ -86,6 +86,11 @@ let discoveredItems = []; // discovered sessions, merged into sidebar
 let lastDiscoveredJSON = ''; // #1770: last /api/discovered payload, to skip forced re-render when unchanged
 let previewTimer = null;
 let previewEventCount = 0;
+// _previewGen is bumped on every previewDiscovered() entry. The awaited
+// preview fetch and the 2s poll tick compare their captured generation
+// against it so a stale call can't render into (or start a second interval
+// for) a card the operator has since clicked away from.
+let _previewGen = 0;
 let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
 let sessionCounter = 0;
 let availableAgents = ['general'];
@@ -2074,11 +2079,15 @@ function applyHistoryFilter(merged, query) {
   // or "4月29日 周三" depending on navigator.language). Day headers are
   // recomputed on filter because a 3-entry result may span fewer days
   // than the full list.
+  // Group by the SAME key the list is sorted on (retired_at || last_active,
+  // see the merged.sort above). Grouping by last_active alone while sorting
+  // by retired_at interleaved days and repeated day headers.
   let currentDay = '';
   itemsEl.innerHTML = filtered.map(s => {
     let dayHeader = '';
-    if (s.last_active) {
-      const d = new Date(s.last_active);
+    const groupTs = s.retired_at || s.last_active;
+    if (groupTs) {
+      const d = new Date(groupTs);
       const dayStr = historyDayLabel(d);
       if (dayStr !== currentDay) {
         currentDay = dayStr;
@@ -2445,7 +2454,7 @@ function sessionCardHtml(s) {
       '<div class="sc-header">' +
         '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
         unreadBadge +
-        (ago ? '<span class="sc-time"' + (absTime ? ' title="' + escAttr(absTime) + '"' : '') + '>' + ago + '</span>' : '') +
+        (ago ? '<span class="sc-time"' + (absTime ? ' title="' + escAttr(absTime) + '"' : '') + ' data-ts="' + s.last_active + '">' + ago + '</span>' : '') +
       '</div>' +
       responseHtml +
       '<div class="sc-meta">' + metaHtml + '</div>' +
@@ -3440,6 +3449,18 @@ function invalidateGitState(key, node) {
   if (key === selectedKey) fetchGitState(key, node || 'local');
 }
 
+// removeSidebarCard drops a session card from the DOM without waiting for
+// the next renderSidebar. It MUST also reset _lastSidebarHtml: renderSidebar
+// skips `list.innerHTML = html` when the rebuilt string equals the cache, so
+// a DOM-only removal would leave the cache describing a card that is no
+// longer mounted and the next (identical) render would never bring it back
+// — e.g. after a failed DELETE whose .finally re-fetches the list.
+function removeSidebarCard(key) {
+  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  if (card) card.remove();
+  _lastSidebarHtml = null;
+}
+
 // dismissSession removes a session from the sidebar. The × button deletes
 // immediately with no confirmation — per operator preference, the friction
 // isn't worth it. Accidental deletes are recoverable by re-entering the
@@ -3477,8 +3498,7 @@ async function dismissSession(key, node, opts) {
       document.getElementById('main').innerHTML = mainEmptyHtml();
       wireQuickAskInput();
     }
-    const card = document.querySelector('.session-card[data-key="' + key + '"]');
-    if (card) card.remove();
+    removeSidebarCard(key);
     lastVersion = 0;
     debouncedFetchSessions();
     return;
@@ -3525,8 +3545,7 @@ async function dismissSession(key, node, opts) {
         document.getElementById('main').innerHTML = mainEmptyHtml();
         wireQuickAskInput();
       }
-      const card = document.querySelector('.session-card[data-key="' + key + '"]');
-      if (card) card.remove();
+      removeSidebarCard(key);
       lastVersion = 0;
       debouncedFetchSessions();
     } catch (e) { showNetworkError('关闭外部会话', e); }
@@ -3550,8 +3569,7 @@ async function dismissSession(key, node, opts) {
     document.getElementById('main').innerHTML = mainEmptyHtml();
     wireQuickAskInput();
   }
-  const card = document.querySelector('.session-card[data-key="' + key + '"]');
-  if (card) card.remove();
+  removeSidebarCard(key);
 
   const headers = {'Content-Type': 'application/json'};
   const token = getToken();
@@ -5092,8 +5110,7 @@ async function sendMessage() {
       // Remove from discoveredItems so renderSidebar won't re-create the card
       discoveredItems = discoveredItems.filter(d => d.pid !== pd.pid);
       // Remove the discovered card from sidebar
-      const card = document.querySelector('.session-card[data-key="_discovered:' + pd.pid + '"]');
-      if (card) card.remove();
+      removeSidebarCard('_discovered:' + pd.pid);
       pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
@@ -9139,6 +9156,34 @@ function historyDayLabel(d) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
 }
 
+// Sidebar relative-time ticker. While WS is connected renderSidebar only
+// runs on sessions_update (the 5s /api/sessions poll short-circuits on an
+// unchanged version), so a card's "2m ago" label froze at whatever the last
+// render produced. Rather than force a full sidebar rebuild every minute,
+// recompute just the .sc-time text from the data-ts stamp renderSessionCard
+// emits. Paused while the tab is hidden via the visibilitychange gate below
+// (same as the other pollers) — stale text on a hidden tab costs nothing.
+const SIDEBAR_TIME_TICK_MS = 60000;
+let sidebarTimeTimer = null;
+function refreshSidebarTimes() {
+  const list = document.getElementById('session-list');
+  if (!list) return;
+  list.querySelectorAll('.sc-time[data-ts]').forEach(el => {
+    const ts = Number(el.dataset.ts);
+    if (!ts) return;
+    const txt = timeAgo(ts);
+    if (el.textContent !== txt) el.textContent = txt;
+  });
+}
+function startSidebarTimeTick() {
+  if (sidebarTimeTimer) return;
+  refreshSidebarTimes();
+  sidebarTimeTimer = setInterval(refreshSidebarTimes, SIDEBAR_TIME_TICK_MS);
+}
+function stopSidebarTimeTick() {
+  if (sidebarTimeTimer) { clearInterval(sidebarTimeTimer); sidebarTimeTimer = null; }
+}
+
 function timeAgo(ms, future) {
   if (!ms) return '\u2014';
   const d = future ? ms - Date.now() : Date.now() - ms;
@@ -11480,7 +11525,9 @@ function systemTickLabel(ns) {
 // The skipped_* keys are "skipped_" + the daemon's Skipped-map reason
 // (flattenTickReport in manager.go). Keys MUST match the reasons the daemon
 // actually emits — AutoTitler's bumpSkip(...) calls in auto_titler.go produce
-// reserved_namespace / group_chat / origin_user / min_user_turns / no_new_turns.
+// reserved_namespace / group_chat / origin_user / min_first_turns /
+// min_rename_interval / no_new_turns (pinned by
+// TestDashboardJS_SystemStatLabelsMatchAutoTitlerSkipReasons).
 // Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
 const SYSTEM_STAT_LABELS = {
   examined: '检查',
@@ -11488,7 +11535,7 @@ const SYSTEM_STAT_LABELS = {
   skipped_reserved_namespace: '跳过·保留命名空间',
   skipped_group_chat: '跳过·群聊',
   skipped_origin_user: '跳过·用户已命名',
-  skipped_min_user_turns: '跳过·轮次不足',
+  skipped_min_first_turns: '跳过·轮次不足',
   skipped_no_new_turns: '跳过·无新增对话',
   skipped_min_rename_interval: '跳过·命名间隔未到',
 };
@@ -11788,9 +11835,36 @@ const wsm = {
           setCronLiveStatus('stopped');
           break;
         }
-        // Subscribe failed (e.g. session not found yet) — reset pending
-        this._pendingSubscribeKey = null;
-        this._pendingSubscribeNode = null;
+        // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
+        // reaches every tab regardless of what it is subscribed to. Drop only
+        // the bookkeeping that points at the dead node, snap selectedNode back
+        // to local via the existing reconcile path, and re-fetch so the
+        // sidebar reflects the node's sessions going away.
+        if (msg.node && msg.error === 'node disconnected') {
+          if (this.subscribedNode === msg.node) {
+            this.subscribedKey = null;
+            this.subscribedNode = null;
+          }
+          if (this._pendingSubscribeNode === msg.node) {
+            this._pendingSubscribeKey = null;
+            this._pendingSubscribeNode = null;
+          }
+          nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
+          reconcileSelectedNode();
+          lastVersion = 0;
+          debouncedFetchSessions();
+          break;
+        }
+        // Subscribe failed (e.g. session not found yet) — reset pending, but
+        // only when the frame is about THIS subscribe: a keyed error for a
+        // different key (or an agent_subscribe validation error, which also
+        // arrives as a bare `error`) must not wipe an unrelated in-flight
+        // subscribe. Keyless frames without a node are the legacy shape of a
+        // subscribe rejection and still clear pending.
+        if (!msg.key || msg.key === this._pendingSubscribeKey) {
+          this._pendingSubscribeKey = null;
+          this._pendingSubscribeNode = null;
+        }
         break;
       case 'history':
         if (isCronLiveKey(msg.key)) { this.onCronLiveHistory(msg); break; }
@@ -11807,6 +11881,7 @@ const wsm = {
         this.onSendError(msg);
         break;
       case 'interrupt_ack':
+        this.onInterruptAck(msg);
         break;
       case 'session_state':
         if (isCronLiveKey(msg.key)) { this.onCronLiveSessionState(msg); break; }
@@ -11875,6 +11950,17 @@ const wsm = {
         // bursty cron_run_ended events for the same job collapse to one
         // sort+innerHTML rebuild per paint frame instead of one per event.
         if (msg && msg.job_id) cronTimelineRefreshHeadDebounced(msg.job_id);
+        break;
+      case 'daemon_run_started':
+      case 'daemon_run_ended':
+        // System-daemon (sysession) run boundary. fetchSystemDaemons is the
+        // only path that updates the 系统 rail attention badge; without this
+        // case it ran solely at boot / on panel open / on the 5s poll while
+        // the system view is active, so a daemon failing in the background
+        // never lit the badge until the operator happened to open the view.
+        fetchSystemDaemons().then(() => {
+          if (activeView === 'system') renderSystemView();
+        }).catch(() => {});
         break;
       case 'pong':
         break;
@@ -12410,6 +12496,22 @@ const wsm = {
     }
   },
 
+  // onInterruptAck surfaces a failed / no-op interrupt. interruptSession()
+  // toasts "已发送中断" optimistically the moment the frame leaves the socket,
+  // so a status:"error" ack (unknown node / server shutting down / remote RPC
+  // failure / internal error) or "not_running" (no live process to interrupt)
+  // must be reported or the operator believes the interrupt landed.
+  onInterruptAck(msg) {
+    if (!msg || msg.status === 'ok') return;
+    if (msg.status === 'not_running') {
+      showToast('会话未在运行，无需中断', 'warning');
+      return;
+    }
+    if (msg.status === 'error') {
+      showAPIError('中断会话', 500, msg.error || '');
+    }
+  },
+
   // send_error: the HTTP send path (every file-bearing send, plus the WS-down
   // fallback) has no per-request back-channel after its 202, so the server
   // fans asynchronous failures (spawn error, passthrough send failure, remote
@@ -12778,6 +12880,12 @@ function handleDiscoveredClick(el) {
 }
 
 async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliName, entrypoint) {
+  // Generation guard: two rapid clicks on different discovered cards both
+  // pass the synchronous prologue, then the first call's awaited fetch used to
+  // resolve into the SECOND card's #events-scroll and arm a second
+  // setInterval without clearing the first (previewTimer was simply
+  // overwritten → leaked interval appending the wrong session's events).
+  const gen = ++_previewGen;
   stopPreviewPolling();
   // Deselect any managed session. We null `selectedKey` but deliberately
   // leave `selectedNode` intact — it now doubles as the sidebar filter and
@@ -12839,12 +12947,17 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     try {
       events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
     } catch (err) {
+      if (gen !== _previewGen) return;
       const errText = err.message || '';
       const el0 = document.getElementById('events-scroll');
       if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || '预览失败') + '</div>';
       if (err.status) showAPIError('预览会话', err.status, errText);
       return;
     }
+    // A newer previewDiscovered() (or a selectSession / panel switch that
+    // bumped nothing but replaced #main) may have superseded this call while
+    // the fetch was in flight — never paint into someone else's panel.
+    if (gen !== _previewGen) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const display = processEventsForDisplay(events);
@@ -12855,6 +12968,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       stickEventsBottom();
     }
     navRebuild();
+    // Tear down any interval a racing call may have armed in the meantime so
+    // exactly one poll loop exists per preview panel. Must precede the
+    // previewEventCount assignment below — stopPreviewPolling resets it.
+    stopPreviewPolling();
     previewEventCount = events.length;
     const capturedSid = sessionId;
     // #1770: guard against overlapping ticks. Each tick re-fetches the full
@@ -12863,6 +12980,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     // Mirrors _fetchEventsInFlight on the main events poll.
     let previewInFlight = false;
     previewTimer = setInterval(async () => {
+      // A newer previewDiscovered() already cleared this interval in its
+      // prologue; the check is defence-in-depth against a tick that was
+      // queued before clearInterval landed.
+      if (gen !== _previewGen) return;
       if (previewInFlight) return;
       previewInFlight = true;
       try {
@@ -12872,6 +12993,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
+        if (gen !== _previewGen) return;
         if (all.length <= previewEventCount) return;
         const fresh = all.slice(previewEventCount);
         previewEventCount = all.length;
@@ -12931,8 +13053,7 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     // Remove from discoveredItems so renderSidebar won't re-create the card
     discoveredItems = discoveredItems.filter(d => d.pid !== pid);
     // Immediately remove the discovered card from DOM
-    const card = document.querySelector('.session-card[data-key="_discovered:' + pid + '"]');
-    if (card) card.remove();
+    removeSidebarCard('_discovered:' + pid);
     // Force refresh (clear cache so renderSidebar runs)
     lastVersion = 0;
     await fetchSessions();
@@ -13776,6 +13897,7 @@ scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 30000);
 // fetchCronJobs() bootstrap moved to cron_view.js tail (PR-1).
 fetchSystemDaemons().catch(function () {}); // prime the 系统 rail badge
+startSidebarTimeTick();
 wsm.connect();
 
 // RNEW-UX-014: suspend background pollers when the tab is hidden. 1-5s
@@ -13796,6 +13918,7 @@ wsm.connect();
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
     if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    stopSidebarTimeTick();
     // #1770: also pause the WS keep-alive ping while the tab is hidden. The
     // 30s app-level ping wakes the mobile radio every 30s for nothing —
     // connection liveness is independently maintained by the server's
@@ -13816,6 +13939,9 @@ wsm.connect();
     if (!discoveredPollTimer) {
       discoveredPollTimer = setInterval(scanDiscovered, 30000);
     }
+    // Relative-time labels drifted while hidden; startSidebarTimeTick
+    // refreshes them once immediately before re-arming the 60s tick.
+    startSidebarTimeTick();
     // eventTimer is a WS-outage fallback. If WS is live, events already
     // arrive via the socket and the timer is redundant; let the normal
     // WS state transitions re-arm it if the socket drops.
