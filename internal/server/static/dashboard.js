@@ -3214,7 +3214,7 @@ function tuningToast(msg, isError) {
   t = document.createElement('div');
   t.id = 'tuning-toast';
   t.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);' +
-    'max-width:70%;padding:10px 16px;border-radius:10px;z-index:200;font-size:13px;' +
+    'max-width:70%;padding:10px 16px;border-radius:10px;z-index:var(--nz-z-toast);font-size:13px;' +
     'background:var(--nz-overlay-pill-bg);backdrop-filter:blur(8px);' +
     'border:1px solid ' + (isError ? 'var(--nz-danger, #d33)' : 'var(--nz-border)') + ';' +
     'color:var(--nz-text)';

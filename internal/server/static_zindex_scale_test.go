@@ -16,6 +16,7 @@ package server
 import (
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,41 @@ func TestDashboardHTML_ZIndexScale(t *testing.T) {
 			t.Errorf("z-index scale token --nz-z-%s=%d does not exceed the previous tier (%d) — scale must ascend %v", name, v, prev, want)
 		}
 		prev = v
+	}
+}
+
+// TestDashboardJS_ZIndexLiterals extends the scale guard to inline styles
+// built in dashboard.js. tuningToast used to hard-code z-index:200 — equal to
+// --nz-z-drawer and, once --nz-z-modal (205) was introduced, BELOW an open
+// dialog / cmd-palette, so the toast was covered exactly when it was needed.
+// Inline styles can reference the CSS custom properties, so they must.
+func TestDashboardJS_ZIndexLiterals(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) No wild literal, same rule as the stylesheet.
+	for _, m := range reZIndexLiteral.FindAllStringSubmatch(js, -1) {
+		v, _ := strconv.Atoi(m[1])
+		if v >= 1000 {
+			t.Errorf("dashboard.js: wild z-index literal %d — use var(--nz-z-*)", v)
+		}
+	}
+	// (2) No literal at or above the blocking-surface band (drawer=200 and
+	// up): a value there competes with modal / toast / menu ordering and must
+	// name the tier instead. Smaller literals (row-local popovers under the
+	// popover tier) are tolerated for now.
+	for _, m := range reZIndexLiteral.FindAllStringSubmatch(js, -1) {
+		v, _ := strconv.Atoi(m[1])
+		if v >= 200 {
+			t.Errorf("dashboard.js: z-index literal %d sits in the blocking-surface band — use var(--nz-z-drawer|modal|toast|menu|overlay|lightbox)", v)
+		}
+	}
+	// (3) The transient tuning toast rides the toast tier.
+	if !strings.Contains(js, "z-index:var(--nz-z-toast)") {
+		t.Error("dashboard.js tuningToast must use z-index:var(--nz-z-toast) so it clears an open modal / cmd-palette")
 	}
 }
