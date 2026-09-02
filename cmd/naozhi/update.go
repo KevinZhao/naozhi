@@ -11,17 +11,30 @@ import (
 	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
-// startUpdateChecker launches the background auto-update checker goroutine.
-// It bridges config + the platform map into the platform-agnostic
+// newUpdateChecker builds the auto-update checker without starting it. It
+// bridges config + the platform map into the platform-agnostic
 // selfupdate.Checker via a best-effort NotifyFunc.
-func startUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform) {
-	checker := selfupdate.NewChecker(selfupdate.CheckerConfig{
+//
+// Construction is separate from launch because the dashboard needs the same
+// Checker instance the background loop uses: the HTTP layer holds it to fill
+// the cold-start window (Checker.CheckNow), and `status` is the object both
+// sides communicate through. Building it here — before the server — is what
+// lets one pointer reach both. Returns nil when the config is unusable, so
+// callers can pass the result straight through.
+func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status) *selfupdate.Checker {
+	return selfupdate.NewChecker(selfupdate.CheckerConfig{
 		CurrentVersion: version,
 		Mode:           selfupdate.ParseMode(cfg.Update.Mode),
 		Interval:       cfg.UpdateInterval(),
 		CheckOnStart:   cfg.Update.CheckOnStart,
 		Notify:         updateNotifyFunc(ctx, cfg, platforms),
+		Status:         status,
 	})
+}
+
+// startUpdateChecker launches the background polling loop for a checker built
+// by newUpdateChecker. A nil checker is a no-op.
+func startUpdateChecker(ctx context.Context, checker *selfupdate.Checker) {
 	if checker == nil {
 		return
 	}
