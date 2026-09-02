@@ -89,6 +89,19 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	return result
 }
 
+// GetJob returns a copy of the job with the given id. The bool is false when
+// no such job exists. Read-only; callers that need to mutate go through
+// UpdateJob so persistence and cron re-registration stay atomic.
+func (s *Scheduler) GetJob(id string) (Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return Job{}, false
+	}
+	return *j, true
+}
+
 // JobWithNextRun pairs a Job snapshot with its next scheduled run time so
 // callers rendering lists (dashboard) don't need a second round-trip per job.
 type JobWithNextRun struct {
