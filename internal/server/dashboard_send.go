@@ -303,7 +303,7 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "send rate limit exceeded"})
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": sendRateLimitedMsg})
 		return
 	}
 
@@ -319,7 +319,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// Without this, 30 req/min × 5 files × 10 MB = 1.5 GB/min of inline
 		// file bytes would be funneled into CLI stdin.
 		if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
-			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
+			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": uploadRateLimitedMsg})
 			return
 		}
 		// Shrink body cap to 22 MB (2× max inline file 10 MB + form overhead)
@@ -668,7 +668,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // node, so a local override would be meaningless.
 func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
 	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "send rate limit exceeded"})
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": sendRateLimitedMsg})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
