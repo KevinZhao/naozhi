@@ -11717,7 +11717,12 @@ const wsm = {
         }
         // Server confirmed subscription — apply authoritative state
         this.subscribedKey = this._pendingSubscribeKey || msg.key;
-        this.subscribedNode = this._pendingSubscribeNode || 'local';
+        // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
+        // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
+        // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
+        // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
+        // 不再清簿记 → 不重订阅，原 bug 复现。
+        this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local';
         this._pendingSubscribeKey = null;
         this._pendingSubscribeNode = null;
         // Track whether the server started an eventPushLoop for this subscription.
@@ -12036,9 +12041,14 @@ const wsm = {
       // cursor to the earliest event we received, independent of DOM
       // contents so loadEarlierEvents still works after a fully-filtered
       // page.
+      //
+      // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
+      // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
+      // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
+      // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
+      // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
+      lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
       if (events.length > 0) {
-        const last = events[events.length - 1];
-        if (last.time) lastRenderedEventTime = last.time;
         const first = events[0];
         if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
           oldestFetchedEventTime = first.time;

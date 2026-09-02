@@ -186,15 +186,106 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", tc.file, err)
 		}
+		found := 0
 		for i, line := range strings.Split(string(src), "\n") {
 			if !strings.Contains(line, `Type: "history"`) {
 				continue
 			}
+			found++
 			has := strings.Contains(line, "Initial: true")
 			if has != tc.wantInitial {
 				t.Errorf("%s:%d: history frame Initial=%v, want %v\n  %s",
 					tc.file, i+1, has, tc.wantInitial, strings.TrimSpace(line))
 			}
 		}
+		// Without this the loop is vacuously green if the emitter is renamed
+		// or moved (e.g. `Type: historyType`) — the test would then pin
+		// nothing. Mirrors internal/node/initial_frame_contract_test.go.
+		if found == 0 {
+			t.Errorf("%s: expected at least one `Type: \"history\"` frame to pin, found none — did the emitter move?", tc.file)
+		}
+	}
+}
+
+// TestDashboardJS_EmptyInitialFrameResetsRenderCursor pins #2421 review
+// finding F3. The Initial branch of onHistory full-page-replaces the pane, so
+// lastRenderedEventTime must describe ONLY what that page rendered. It used to
+// be updated only when the frame carried events, which left a stale high
+// watermark behind in this sequence:
+//
+//  1. a superseded subscription's backfill frame (incremental) pushes
+//     lastRenderedEventTime to the tip;
+//  2. the real Initial frame for a just-started running session is EMPTY
+//     (completeSubscribe's "always send an empty history for running
+//     sessions" arm) — the pane resets to the loading placeholder but the
+//     watermark is left at the tip;
+//  3. the new eventPushLoop pushes the same batch again; every event fails
+//     `e.time <= lastRenderedEventTime` and the whole batch is dropped.
+//
+// Invariant before: Initial frame with events → cursor = last event time;
+// Initial frame without events → cursor unchanged (stale).
+// Invariant after:  Initial frame → cursor = last event time, or 0 when the
+// frame is empty — unconditionally, because the pane is now empty too.
+func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	body := extractJSBlock(t, js, "onHistory(msg) {")
+	start := strings.Index(body, "if (isInitial) {")
+	if start < 0 {
+		t.Fatal("onHistory must have an `if (isInitial) {` full-render branch")
+	}
+	initial := body[start:]
+	if end := strings.Index(initial, "\n    } else {"); end > 0 {
+		initial = initial[:end]
+	}
+
+	if !strings.Contains(initial, "lastRenderedEventTime = events.length ? ") {
+		t.Error("Initial branch must reset lastRenderedEventTime unconditionally (`events.length ? <last.time> : 0`) — an empty Initial frame must clear the watermark, not leave a stale one that drops the next incremental batch")
+	}
+	if strings.Contains(initial, "if (last.time) lastRenderedEventTime = last.time") {
+		t.Error("Initial branch must not gate the cursor reset on the frame carrying events — see F3 rationale above")
+	}
+}
+
+// TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab pins the follow-up to
+// #2421 review F1. After the relay rebuilds a dropped remote subscription (or
+// reconnects), the remote's `subscribed` ack is fanned out to EVERY local tab
+// on the key — the relay injects "node" into each forwarded frame and
+// ReverseConn sets Node explicitly. A tab that was not pending must therefore
+// take the node from the frame, not fall back to 'local': with subscribedNode
+// rewritten to 'local', the subscription_timeout handler's node-match guard
+// fails and the bookkeeping is never cleared, so the tab never re-subscribes —
+// the exact bug the rebuild fixes.
+//
+// Invariant before: non-pending `subscribed` → subscribedNode = 'local'
+// (drops the node of a remote key).
+// Invariant after:  subscribedNode = pending node, else the frame's node,
+// else 'local' — a remote key never collapses to 'local'.
+func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	idx := strings.Index(js, "case 'subscribed':")
+	if idx < 0 {
+		t.Fatal("case 'subscribed' handler not found")
+	}
+	body := js[idx:]
+	if end := strings.Index(body, "case 'error':"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || msg.node || 'local'") {
+		t.Error("subscribed handler must resolve subscribedNode as `_pendingSubscribeNode || msg.node || 'local'` — a fanned-out remote ack must not rewrite a remote key's node to 'local'")
+	}
+	if strings.Contains(body, "this.subscribedNode = this._pendingSubscribeNode || 'local'") {
+		t.Error("subscribed handler must not fall straight back to 'local' when not pending — see rationale above")
 	}
 }
