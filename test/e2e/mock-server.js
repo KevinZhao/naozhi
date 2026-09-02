@@ -205,6 +205,9 @@ function startMockServer(overrides = {}) {
   const gitStates = overrides.gitStates || defaultGitStates();
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
+  // deleteStatus lets a test force DELETE /api/sessions to fail (e.g. 500)
+  // so the dismiss-failure re-sync path can be exercised.
+  const deleteStatus = overrides.deleteStatus || 200;
 
   let sendCalls = [];
   let bindCalls = [];
@@ -407,6 +410,11 @@ function startMockServer(overrides = {}) {
 
     if (pathname === '/api/sessions' && req.method === 'DELETE') {
       if (!checkAuth()) return;
+      if (deleteStatus !== 200) {
+        res.writeHead(deleteStatus, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'mock delete failure' }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
