@@ -90,8 +90,19 @@ func TestDashboardJS_HTTPSendFailureFeedback(t *testing.T) {
 	}
 	// M1: the frame fans out to every subscriber of the key; only the tab that
 	// sent the failed message may touch its optimistic state.
-	if !strings.Contains(js, "const sKey = sid(msg.key, node);\n    if (!sessionLastSent[sKey]) return;") {
-		t.Error("onSendError must be gated on sessionLastSent — a tab that did not send the failed message must ignore the frame")
+	if !strings.Contains(js, "if (!sessionLastSent[sKey] && !httpSendPending.has(sKey)) return;") {
+		t.Error("onSendError must be gated on httpSendPending / sessionLastSent — a tab that did not send the failed message must ignore the frame")
+	}
+	// Image-only sends have no text and therefore no sessionLastSent entry, so
+	// the originator mark must be the dedicated set, added BEFORE the HTTP
+	// request leaves (a send_error can arrive as soon as the server has it).
+	if !strings.Contains(js, "const httpSendPending = new Set();") {
+		t.Error("httpSendPending set missing — image-only HTTP sends need an originator mark independent of sessionLastSent")
+	}
+	addIdx := strings.Index(js, "httpSendPending.add(sentSid);")
+	fetchIdx := strings.Index(js, "const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});")
+	if addIdx < 0 || fetchIdx < 0 || addIdx > fetchIdx || fetchIdx-addIdx > 400 {
+		t.Errorf("httpSendPending.add(sentSid) must immediately precede the sendMessage HTTP fetch (add=%d fetch=%d)", addIdx, fetchIdx)
 	}
 	if !strings.Contains(js, "if (text) sessionLastSent[sentSid] = text;\n    let ackStatus = '';") {
 		t.Error("HTTP send must record sessionLastSent before awaiting the ack body so a fast send_error cannot race the gate")

@@ -144,6 +144,14 @@ const sessionOptimisticPrevState = {};
 // 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
 // 用户已经开始敲的新内容。
 const sessionLastSent = {};
+// httpSendPending: sids this tab has an HTTP send in flight for (added before
+// the request leaves, cleared on sync rejection / send_error / the key's next
+// ready|dead state). onSendError gates on it so a send_error fanned out to
+// every subscriber of the key is acted on only by the tab that sent — and,
+// unlike sessionLastSent (which carries interrupt re-fill semantics and is
+// only set when there is text), it also covers image-only sends, the main
+// HTTP-send case.
+const httpSendPending = new Set();
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
@@ -4933,9 +4941,15 @@ async function sendMessage() {
       delete sessionAccessProfiles[selectedKey];
     }
 
+    // Mark this tab as the originator BEFORE the request leaves (text or
+    // image-only alike): a send_error for this turn can arrive over the WS
+    // any time after the server has the request.
+    const sentSid = sid(selectedKey, selectedNode);
+    httpSendPending.add(sentSid);
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
 
     if (!r.ok) {
+      httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
       if (input) setMsgValue(input, text);
       rollbackOptimisticRunning(selectedKey, selectedNode);
       // Some error paths still write text/plain; fall back to text() so we
@@ -4975,10 +4989,8 @@ async function sendMessage() {
     // flip to 'running'. Every other success ('accepted'/'queued') should
     // show the banner immediately. Read the body once (before clearing the
     // input) so we can branch on status without reviving the stale text.
-    // Record the sent text BEFORE awaiting the body: a send_error frame for
-    // this turn can arrive on the WS while we wait, and onSendError gates on
-    // sessionLastSent to tell "our failed send" from another tab's.
-    const sentSid = sid(selectedKey, selectedNode);
+    // Record the sent text BEFORE awaiting the body (interrupt re-fill source;
+    // also a secondary onSendError gate).
     if (text) sessionLastSent[sentSid] = text;
     let ackStatus = '';
     try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
@@ -4996,6 +5008,7 @@ async function sendMessage() {
       // so the running banner doesn't hang on a no-op command.
       rollbackOptimisticRunning(selectedKey, selectedNode);
       delete sessionLastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
+      httpSendPending.delete(sentSid);
     } else {
       // Optimistic running flip already applied above — keep it.
       // Optimistic bubble parity with the WS path — but ONLY while WS is
@@ -5019,6 +5032,7 @@ async function sendMessage() {
       }, 15000);
     }
   } catch (e) {
+    httpSendPending.delete(sid(selectedKey, selectedNode));
     if (input) setMsgValue(input, text);
     rollbackOptimisticRunning(selectedKey, selectedNode);
     showNetworkError('发送消息', e);
@@ -12030,19 +12044,23 @@ const wsm = {
   // fans asynchronous failures (spawn error, passthrough send failure, remote
   // node send failure) out to every subscriber of the key as this frame.
   //
-  // Gate on sessionLastSent: the frame reaches every tab watching the key, but
-  // only the tab that actually sent the failed message owns an optimistic
-  // bubble / running flip for it. A second operator's tab (or this tab after
-  // it sent nothing) must ignore the frame entirely — otherwise it would tear
-  // down its own legitimate optimistic state and toast about a message it
-  // never sent. When we did send: reuse the send_ack error recovery (toast,
-  // drop the optimistic bubble, roll back running) for the on-screen key, or
-  // just undo the running flip for a key we sent to and then navigated away.
+  // Gate on httpSendPending / sessionLastSent: the frame reaches every tab
+  // watching the key, but only the tab that actually sent the failed message
+  // owns an optimistic bubble / running flip for it. A second operator's tab
+  // (or this tab after it sent nothing) must ignore the frame entirely —
+  // otherwise it would tear down its own legitimate optimistic state and
+  // toast about a message it never sent. httpSendPending is the primary gate
+  // (set for every HTTP send, image-only included); sessionLastSent is the
+  // text-only secondary. When we did send: reuse the send_ack error recovery
+  // (toast, drop the optimistic bubble if any, roll back running) for the
+  // on-screen key, or just undo the running flip for a key we sent to and
+  // then navigated away from.
   onSendError(msg) {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
     const sKey = sid(msg.key, node);
-    if (!sessionLastSent[sKey]) return;
+    if (!sessionLastSent[sKey] && !httpSendPending.has(sKey)) return;
+    httpSendPending.delete(sKey);
     if (msg.key === selectedKey && node === (selectedNode || 'local')) {
       this.onSendAck({ status: 'error', key: msg.key, node: msg.node, error: msg.error });
       return;
@@ -12114,6 +12132,10 @@ const wsm = {
     // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
     // interruptSession 会先消费 lastSent 再发中断。
     if (turnCompleted) delete sessionLastSent[sKey];
+    // The HTTP send reached a terminal state (or never became a turn): the
+    // originator mark is no longer needed — drop it so it cannot linger and
+    // let a much later send_error for someone else's send slip through.
+    if (msg.state === 'ready' || msg.state === 'dead') httpSendPending.delete(sKey);
     // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
     // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
     // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
