@@ -563,6 +563,8 @@ func buildServer(opts ServerOptions) *Server {
 		RetiredStore:  retiredStore,
 		ValidateWS:    validateWorkspace,
 		SystemInfoFn:  systemInfo,
+
+		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
 	s.sessionH.InitStaticStats()
 	s.sessionH.WarmHistoryCache()

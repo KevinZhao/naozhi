@@ -75,36 +75,50 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				oldNames := s.projectMgr.ProjectNames()
-				if err := s.projectMgr.Scan(); err != nil {
-					s.log().Warn("project rescan", "err", err)
-					continue
-				}
-				newNames := s.projectMgr.ProjectNames()
-
-				// Detect removed projects and clean up orphaned planner
-				// sessions. The set-diff is the pure business rule (which
-				// projects disappeared) and lives in removedProjectNames so
-				// it is unit-testable without a Router/Hub — the first
-				// concrete slice of ARCH-SVR-2 (#460) "sink business logic
-				// out of server". The router/hub side effects below stay in
-				// the server layer because they are the HTTP/WS adapter's job.
-				removed := removedProjectNames(oldNames, newNames)
-				changed := len(oldNames) != len(newNames)
-				for _, name := range removed {
-					changed = true
-					plannerKey := project.PlannerKeyFor(name)
-					if s.router.Remove(plannerKey) {
-						s.log().Info("removed orphaned planner", "project", name)
-					}
-				}
-				if changed {
-					s.log().Info("project list changed", "count", len(newNames))
-					if s.hub != nil {
-						s.hub.BroadcastSessionsUpdate()
-					}
-				}
+				s.projectScanTick()
 			}
 		}
 	}()
+}
+
+// projectScanTick runs one rescan of the projects root and applies the
+// router/hub side effects for any added or removed project. Extracted from
+// the ticker loop so the change-detection contract is unit-testable.
+func (s *Server) projectScanTick() {
+	oldNames := s.projectMgr.ProjectNames()
+	if err := s.projectMgr.Scan(); err != nil {
+		s.log().Warn("project rescan", "err", err)
+		return
+	}
+	newNames := s.projectMgr.ProjectNames()
+
+	// Detect removed projects and clean up orphaned planner
+	// sessions. The set-diff is the pure business rule (which
+	// projects disappeared) and lives in removedProjectNames so
+	// it is unit-testable without a Router/Hub — the first
+	// concrete slice of ARCH-SVR-2 (#460) "sink business logic
+	// out of server". The router/hub side effects below stay in
+	// the server layer because they are the HTTP/WS adapter's job.
+	removed := removedProjectNames(oldNames, newNames)
+	changed := len(oldNames) != len(newNames)
+	for _, name := range removed {
+		changed = true
+		plannerKey := project.PlannerKeyFor(name)
+		if s.router.Remove(plannerKey) {
+			s.log().Info("removed orphaned planner", "project", name)
+		}
+	}
+	if changed {
+		s.log().Info("project list changed", "count", len(newNames))
+		// The dashboard gates its /api/sessions re-render on stats.version;
+		// a broadcast alone leaves the version unchanged and the sidebar
+		// never picks up the added / removed project. Mirror
+		// HandleFavoriteToggle: bump first, then push.
+		if s.router != nil {
+			s.router.BumpVersion()
+		}
+		if s.hub != nil {
+			s.hub.BroadcastSessionsUpdate()
+		}
+	}
 }
