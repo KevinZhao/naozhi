@@ -9545,6 +9545,17 @@ function safeUrl(u) {
   return '#';
 }
 
+// Reverse exactly the three entities esc() emits (&amp; &lt; &gt;) in a
+// single pass. inlineMd runs esc(s) before its link passes, so a URL capture
+// arrives with `&` already encoded; feeding that straight into escAttr()
+// double-encodes the href. Single-pass means a literal `&amp;lt;` in the
+// source decodes to `&lt;` (as authored), never to `<`.
+function decodeEscEntities(s) {
+  return s.replace(/&(amp|lt|gt);/g, function(_, name) {
+    return name === 'amp' ? '&' : name === 'lt' ? '<' : '>';
+  });
+}
+
 let mermaidLoading = false;
 let mermaidReady = false;
 
@@ -10778,9 +10789,24 @@ function renderMdUncached(s) {
   const parts = s.split(BLOCK_SPLIT_RE);
   return parts.map(part => {
     if (part.startsWith('```')) {
-      const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
-      const lang = m ? m[1] : '';
-      const code = m ? m[2].replace(/\n$/, '') : part.slice(3, -3);
+      // Single-line fence (```ls -la```) carries no info string — everything
+      // between the backticks is code. Skip the info-string match for it,
+      // otherwise the greedy `[^\n]*` below would swallow the body as "lang".
+      const oneLine = part.indexOf('\n') === -1;
+      const m = oneLine ? null : part.match(/^```([^\n]*)\n?([\s\S]*?)```$/);
+      // Info string → lang: first word, cut at whitespace / `:` / `{` so
+      // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
+      // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
+      // punctuation never reaches data-lang. The old `(\w*)` stopped at the
+      // first non-word char and left the remainder (`++`) in the code body.
+      const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
+      // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
+      // the remainder arrives as a plain part that still starts with ```):
+      // strip only the opening ```lang line. The old slice(3, -3) assumed a
+      // closing fence and ate the last 3 characters of live output.
+      const code = oneLine
+        ? part.replace(/^```/, '').replace(/```$/, '')
+        : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
       if (lang === 'mermaid') {
         const id = 'mmd-' + (++mermaidCounter);
         mermaidPending[id] = code;
@@ -11123,8 +11149,22 @@ function inlineMd(s) {
   // adding a unit test asserting the bold output never contains a raw
   // '<' character.
   s = s.replace(/\*\*(.+?)\*\*/g, (_, c) => '<strong>' + c + '</strong>');
-  s = s.replace(/\*(.+?)\*/g, (_, c) => '<em>' + c + '</em>');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
+  // Italic requires the opening `*` to be followed by, and the closing `*` to
+  // be preceded by, non-whitespace — so arithmetic like `2 * 3 * 4` no longer
+  // turns into `2 <em> 3 </em> 4`. Lookbehind is already relied upon by the
+  // inline-math pass above.
+  s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
+  // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
+  // blocks remote images, so an <img> would only ever render broken. Drop the
+  // `!` and let the link pass below handle the target: remote → clickable
+  // md-link labelled with the alt text; local path → the fileRefCode rescue
+  // below, which is the existing image-preview path (preview/download buttons).
+  s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, urlEsc) {
+    // `urlEsc` is the esc()'d capture (`&` → `&amp;`). Decode esc's entities
+    // before the scheme check + escAttr so the href is encoded exactly once —
+    // previously `?a=1&b=2` shipped as `?a=1&amp;amp;b=2`.
+    const url = decodeEscEntities(urlEsc);
     const safe = safeUrl(url);
     // `text` is the already-esc()'d+partially-transformed capture — it may
     // legitimately contain <strong>/<em>/<code> spans from prior passes.
@@ -11142,13 +11182,13 @@ function inlineMd(s) {
       // invisible to scanEventForFileRefs (which only walks <code>/.md-code).
       // Re-render a path-shaped target as inline <code> so the file-ref
       // scanner attaches the same [↗ preview][↓ download] buttons it gives
-      // backtick paths. `url` is already esc()'d (esc ran above), so embed it
+      // backtick paths. `urlEsc` is already esc()'d (esc ran above), so embed it
       // directly; scanEventForFileRefs reads code.textContent (browser-decoded
       // back to the real path) when calling the exists API. Display uses the
       // path itself rather than `text` so the user sees which file resolves —
       // and so the scanner's textContent is the path, not a friendly label.
       //
-      // The `url` capture is NOT raw text — earlier inlineMd passes have already
+      // The `urlEsc` capture is NOT raw text — earlier inlineMd passes have already
       // tokenized it. Two classes of contamination must be rejected before the
       // target can be embedded in <code>:
       //   1. naozhi-injected markup: the bold/italic passes run before this and
@@ -11166,7 +11206,7 @@ function inlineMd(s) {
       // fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
       // fractions `1/2`, doc slugs without an extension — don't hijack the link
       // into a bogus file ref with the author's label discarded.
-      const target = url.trim();
+      const target = urlEsc.trim();
       if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
         const { path: bare } = splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
@@ -11185,10 +11225,19 @@ function inlineMd(s) {
   // here also keeps them out of the link's visible text where they would
   // otherwise dangle past sentences like `see <https://x.y/z>` or
   // `[link](https://x.y/z)`. Defence-in-depth, not the only barrier.
-  s = s.replace(/(^|[^"'>])(https?:\/\/[^\s<)}\]]+)/g, function(_, prefix, url) {
-    var clean = url.replace(/[.,;:!?)>\]"']+$/, '');
-    var trail = url.slice(clean.length);
-    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + clean + '</a>' + trail;
+  // The URL charset additionally stops at CJK / fullwidth *punctuation* only
+  // (U+3001–3003, 3008–3011, 3014–301F, FF01–FF0F, FF1A–FF20, FF3B–FF40,
+  // FF5B–FF65) so `https://x.com/a。然后` no longer swallows the rest of the
+  // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
+  // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
+  // emitted for `<https://…>` so the closing bracket stays out of the href.
+  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g, function(_, prefix, url) {
+    // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
+    // the decoded URL for the href (escAttr re-encodes it exactly once).
+    var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
+    var trail = url.slice(shown.length);
+    var clean = decodeEscEntities(shown);
+    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
   });
   // Restore math tokens after escaping
   if (mathTokens.length > 0) {
@@ -11204,8 +11253,13 @@ function inlineMd(s) {
 }
 
 function renderTable(lines) {
-  if (lines.length < 2) return lines.map(l => inlineMd(l) + '\n').join('');
-  if (!/^\|[\s\-:]+(\|[\s\-:]+)+\|$/.test(lines[1].trim())) return lines.map(l => inlineMd(l) + '\n').join('');
+  // Fallback (not a real table): emit each row as its own line. The block
+  // renderer joins ordinary lines with <br>, so do the same here — a bare
+  // '\n' collapses inside white-space:normal and the rows ran together.
+  const fallback = () => lines.map(l => inlineMd(l) + '<br>').join('');
+  if (lines.length < 2) return fallback();
+  // Separator row: `|---|` (single column) is valid GFM too.
+  if (!/^\|[\s\-:]+(\|[\s\-:]+)*\|$/.test(lines[1].trim())) return fallback();
   // Honour the GFM `\|` escape for a literal pipe inside a cell (common when
   // authors quote shell snippets like `cmd \| true`). Without this the cell
   // splits mid-snippet and the trailing fragment spills into an extra column.
