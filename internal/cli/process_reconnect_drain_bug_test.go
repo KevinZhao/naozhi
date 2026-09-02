@@ -204,3 +204,62 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 		t.Errorf("isMidTurn = false; want true — done=true must NOT settle a turn that emitted no result Event (#2303)")
 	}
 }
+
+// TestIsMidTurn_SkipsControlAck pins the reconnect regression introduced by
+// the set_model control channel: a claude control_response carrying a
+// request_id parses into a Type:"control_ack" Event. It is an RPC receipt,
+// not turn content, so it must not be the frame that decides mid-turn-ness.
+// Scenario: idle claude session → operator switches model (control_response
+// buffered in the shim) → naozhi restarts → replay ends with the ack. Reading
+// that as "last event != result" arms reconnectedMidTurn, the session sits in
+// StateRunning forever (no result will ever come) and every Send fails with
+// ErrProcessBusy.
+func TestIsMidTurn_SkipsControlAck(t *testing.T) {
+	proto := &ClaudeProtocol{}
+	const ack = `{"type":"control_response","response":{"subtype":"success","request_id":"naozhi-setmodel-1"}}`
+	const errAck = `{"type":"control_response","response":{"subtype":"error","request_id":"naozhi-setmodel-2","error":"unknown model"}}`
+
+	tests := []struct {
+		name    string
+		replays []shim.ServerMsg
+		want    bool
+	}{
+		{
+			name: "result then set_model ack -> still turn complete",
+			replays: []shim.ServerMsg{
+				{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]},"session_id":"s1"}`},
+				{Type: "replay", Line: `{"type":"result","result":"ok","session_id":"s1"}`},
+				{Type: "replay", Line: ack},
+			},
+			want: false,
+		},
+		{
+			name: "result then rejected set_model ack -> still turn complete",
+			replays: []shim.ServerMsg{
+				{Type: "replay", Line: `{"type":"result","result":"ok","session_id":"s1"}`},
+				{Type: "replay", Line: errAck},
+			},
+			want: false,
+		},
+		{
+			name: "assistant then set_model ack -> still mid turn",
+			replays: []shim.ServerMsg{
+				{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"still going"}]},"session_id":"s1"}`},
+				{Type: "replay", Line: ack},
+			},
+			want: true,
+		},
+		{
+			name:    "only a set_model ack -> nothing semantic, not mid turn",
+			replays: []shim.ServerMsg{{Type: "replay", Line: ack}},
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMidTurn(tt.replays, proto); got != tt.want {
+				t.Errorf("isMidTurn() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
