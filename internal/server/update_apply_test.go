@@ -32,9 +32,14 @@ func applyTestServer(t *testing.T, fixture selfupdate.StatusFixture) (*Server, f
 		Workspace: t.TempDir(),
 	})
 	// A real Checker so the handler's "auto-update disabled" branch is not the
-	// one under test; its methods are never called because updateApplyFn wins.
+	// one under test. POST never reaches it (updateApplyFn wins), but GET DOES:
+	// handleUpdateStatus calls CheckNow whenever Status.Latest is empty, and a
+	// fixture without Latest would send this unit test to GitHub. CurrentVersion
+	// is pinned to "dev" so CheckNow refuses before the network (ErrCheckSkippedDev)
+	// — the handler never reads the Checker's version, only the Status's, so the
+	// fixtures keep meaning what they say.
 	checker := selfupdate.NewChecker(selfupdate.CheckerConfig{
-		CurrentVersion: fixture.Current,
+		CurrentVersion: "dev",
 		Interval:       time.Hour,
 	})
 	srv := NewWithOptions(ServerOptions{
@@ -547,7 +552,6 @@ func TestUpdateApply_PanicIsRecovered(t *testing.T) {
 		defer close(entered)
 		panic("boom")
 	}
-	// Silence the panic log line; the assertion is on state, not output.
 	w := postApply(t, srv, `{"confirm_action":"install"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", w.Code, w.Body.String())
@@ -557,7 +561,11 @@ func TestUpdateApply_PanicIsRecovered(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("apply goroutine never ran")
 	}
-	// The recover runs after `entered` closes; give it a moment to record.
+	// `entered` closes inside the panicking seam, BEFORE the handler goroutine's
+	// deferred recover runs MarkFailed; the production goroutine exposes no
+	// signal after that point, so this is a bounded Eventually (2s, 10ms poll),
+	// not a deterministic join. It only ever waits for a defer that is already
+	// unwinding, so in practice it completes on the first or second poll.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		snap := srv.updateStatus.Snapshot()
