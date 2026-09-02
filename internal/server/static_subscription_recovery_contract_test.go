@@ -186,15 +186,23 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", tc.file, err)
 		}
+		found := 0
 		for i, line := range strings.Split(string(src), "\n") {
 			if !strings.Contains(line, `Type: "history"`) {
 				continue
 			}
+			found++
 			has := strings.Contains(line, "Initial: true")
 			if has != tc.wantInitial {
 				t.Errorf("%s:%d: history frame Initial=%v, want %v\n  %s",
 					tc.file, i+1, has, tc.wantInitial, strings.TrimSpace(line))
 			}
+		}
+		// Without this the loop is vacuously green if the emitter is renamed
+		// or moved (e.g. `Type: historyType`) — the test would then pin
+		// nothing. Mirrors internal/node/initial_frame_contract_test.go.
+		if found == 0 {
+			t.Errorf("%s: expected at least one `Type: \"history\"` frame to pin, found none — did the emitter move?", tc.file)
 		}
 	}
 }
