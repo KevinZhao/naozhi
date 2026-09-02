@@ -2217,16 +2217,19 @@ func TestDashboardHTML_R110P3_PaletteFavoriteStyles(t *testing.T) {
 	}
 	css := string(data)
 
-	// The .cp-icon-fav rule must exist and use the same #e3b341 gold the
+	// The .cp-icon-fav rule must exist and use the same --nz-star-fg gold the
 	// sidebar's .sh-btn.star-on already uses — the two surfaces should
-	// read as "the same starred state".
-	if !strings.Contains(css, ".cmd-palette-item .cp-icon-fav{color:#e3b341}") {
+	// read as "the same starred state". (Was a shared #e3b341 literal; the
+	// 2026-09 light sweep tokenised it so light theme can remap to a deeper
+	// gold — the parity guard in static_light_theme_parity_test.go covers
+	// the remap.)
+	if !strings.Contains(css, ".cmd-palette-item .cp-icon-fav{color:var(--nz-star-fg)}") {
 		t.Error("dashboard.html missing .cp-icon-fav color rule — palette favorite star loses its gold tint")
 	}
-	// Assert the sidebar reference still uses #e3b341 so the link in
-	// the rule comment above remains valid. If the sidebar color ever
-	// changes, THIS is where we notice and update both sides together.
-	if !strings.Contains(css, ".section-header .sh-btn.star-on{color:#e3b341}") {
+	// Assert the sidebar reference still uses the same token so the two
+	// sides can't drift apart. If the sidebar color ever changes, THIS is
+	// where we notice and update both sides together.
+	if !strings.Contains(css, ".section-header .sh-btn.star-on{color:var(--nz-star-fg)}") {
 		t.Error("sidebar .sh-btn.star-on color changed — update .cp-icon-fav (palette favorite) to match or justify the divergence")
 	}
 }

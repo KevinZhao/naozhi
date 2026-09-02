@@ -9,7 +9,7 @@
 //
 // This guard pins two invariants so the scale can't silently erode:
 //  1. No rule re-introduces the wild 9999 literal (or any z-index ≥ 1000).
-//  2. The six scale tokens are defined in :root in strictly ascending order,
+//  2. The seven scale tokens are defined in :root in strictly ascending order,
 //     so the documented layering (lightbox on top) holds.
 package server
 
@@ -46,7 +46,9 @@ func TestDashboardHTML_ZIndexScale(t *testing.T) {
 	// (2) The scale tokens exist and ascend in the documented order. A token
 	// defined out of order would invert layering (e.g. a popover painting over
 	// the lightbox).
-	want := []string{"popover", "drawer", "toast", "menu", "overlay", "lightbox"}
+	// modal sits between drawer and toast: it must clear the split-view front
+	// drawer (literal 202) yet stay under toasts.
+	want := []string{"popover", "drawer", "modal", "toast", "menu", "overlay", "lightbox"}
 	got := map[string]int{}
 	for _, m := range reZIndexToken.FindAllStringSubmatch(html, -1) {
 		v, _ := strconv.Atoi(m[2])

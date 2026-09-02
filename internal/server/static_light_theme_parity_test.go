@@ -40,6 +40,14 @@ var lightParityTokens = []string{
 	// R20260610-UI-1: history-popover project label gold. Was a bare #d4a017
 	// with no light override; tokenised + remapped to a deeper gold for light.
 	"--nz-project-label-fg",
+	// 2026-09 light hard-coded fg sweep: IM-origin chip text (slack / discord /
+	// weixin were pastel dark-theme literals, <2:1 on white) and the favourite
+	// star (gold #e3b341 ~1.7:1 on white). Both light blocks must remap.
+	"--nz-origin-slack-fg",
+	"--nz-origin-discord-fg",
+	"--nz-origin-weixin-fg",
+	"--nz-star-fg",
+	"--nz-star-fg-hover",
 }
 
 // Literals that the sweep removed from rule bodies. They legitimately remain as
@@ -53,6 +61,15 @@ var forbiddenLightLiterals = []string{
 	"#1c2128", // dark voice card
 	"#1f2937", // alien dark-blue hover / active fill
 	"#d4a017", // history-popover project label gold (no light override) — R20260610-UI-1
+	// 2026-09 sweep: GitHub-Dark pastels that only read on a dark surface.
+	"#7ee787", // doctor-feat-on / doctor-status-ok / tc-status-completed / event.result → --nz-green
+	"#79c0ff", // tc-status-in_progress / cmd-palette mark → --nz-accent
+	"#ff7b72", // tc-status-failed → --nz-red
+	"#d8b4fe", // sc-origin.kind-slack → --nz-origin-slack-fg
+	"#b4c0ff", // sc-origin.kind-discord → --nz-origin-discord-fg
+	"#a7f3d0", // sc-origin.kind-weixin → --nz-origin-weixin-fg
+	"#e3b341", // favourite star (sidebar + palette) → --nz-star-fg
+	"#f7c744", // favourite star hover → --nz-star-fg-hover
 }
 
 var reColorOrBgLiteral = regexp.MustCompile(`(?:color|background(?:-color)?):#[0-9a-fA-F]{3,8}`)

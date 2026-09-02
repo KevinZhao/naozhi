@@ -684,6 +684,7 @@ body{background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFo
 .login h1{font-size:1.5rem;margin-bottom:.3rem;font-weight:600;letter-spacing:-.02em}
 .login p{color:#666;font-size:.85rem;margin-bottom:1.5rem}
 input[type="text"]{position:absolute;left:-9999px;width:1px;height:1px}
+label[for=token]{position:absolute;left:-9999px}
 input[type="password"]{width:100%;padding:.75rem 1rem;background:#0a0a0a;border:1px solid #333;border-radius:8px;color:#e0e0e0;font-size:.95rem;outline:none;margin-bottom:1rem;transition:border-color .2s}
 input[type="password"]:focus{border-color:#4a9eff}
 button{width:100%;padding:.75rem;background:#4a9eff;color:#fff;border:none;border-radius:8px;font-size:.95rem;cursor:pointer;font-weight:500;transition:background .2s}
@@ -706,7 +707,7 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <p>enter token to continue</p>
 <form id="login-form" action="/api/auth/noscript" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
-<label for="token" style="position:absolute;left:-9999px">dashboard token</label>
+<label for="token">dashboard token</label>
 <input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" aria-label="dashboard token" autofocus>
 <button type="submit" aria-label="Sign in">login</button>
 </form>
@@ -721,7 +722,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
   try{
     var res=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
     if(res.ok){window.location.href='/dashboard'}
-    else{document.getElementById('err').textContent='invalid token'}
+    else{document.getElementById('err').textContent=res.status===429?'尝试过多，请稍后再试':'invalid token'}
   }catch(e){document.getElementById('err').textContent='network error'}
 });
 </script></body></html>`

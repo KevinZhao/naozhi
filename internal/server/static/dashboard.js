@@ -3812,7 +3812,7 @@ function renderMainShell() {
   // the dashboard but keep the raw value in `title` for debug.
   const rawModel = s.model || '';
   const compactModel = rawModel
-    .replace(/^global\.anthropic\./, '')      // strip Bedrock-style prefix
+    .replace(/^(global|us|eu|apac)\.anthropic\./, '') // strip Bedrock inference-profile prefix
     .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
     .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
   const modelLabel = rawModel

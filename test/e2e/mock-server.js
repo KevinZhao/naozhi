@@ -192,6 +192,7 @@ function defaultGitStates() {
  * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
  * @param {Function} [overrides.onCronCreate] - Callback when POST /api/cron is called.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
+ * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -202,6 +203,7 @@ function startMockServer(overrides = {}) {
   const eventsData = overrides.events || defaultEvents();
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
   const gitStates = overrides.gitStates || defaultGitStates();
+  const sessionRuns = overrides.sessionRuns || {};
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
 
@@ -322,6 +324,24 @@ function startMockServer(overrides = {}) {
       const state = gitStates[key] || { is_repo: false };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(state));
+      return;
+    }
+
+    // Run-history overview ("N 轮 · 共 X · 花费 $Y") that renderSessionRunsPanel
+    // promotes into the header's .detail-runstats. Only served for keys a
+    // test opted into; the default 404 mirrors a session with no recorded
+    // runs (dashboard hides the panel and leaves the header slot empty).
+    if (pathname === '/api/sessions/runs' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const key = url.searchParams.get('key') || '';
+      const payload = sessionRuns[key];
+      if (!payload) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload));
       return;
     }
 
