@@ -598,7 +598,7 @@ func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 		return
 	}
 	if len(entries) > 0 {
-		c.SendJSON(ServerMsg{Type: "history", Key: key, Node: r.node.ID, Events: entries})
+		c.SendJSON(ServerMsg{Type: "history", Key: key, Node: r.node.ID, Events: entries, Initial: true})
 	}
 }
 

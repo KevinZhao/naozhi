@@ -447,7 +447,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			}
 			cl.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: c.id})
 			if len(entries) > 0 {
-				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
+				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries, Initial: true})
 			}
 		}()
 	} else {
@@ -473,8 +473,9 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 		// for the RPC; the "subscribed" message from the remote arrives via
 		// readLoop and the history message from here can arrive in either
 		// order. Order doesn't matter for the client: onHistory merges by
-		// key/time, and the initial page render is keyed on history arrival
-		// not on subscribed arrival.
+		// key/time, and the initial page render is keyed on the frame's
+		// Initial flag (ServerMsg.Initial) rather than on arrival order —
+		// which is exactly why this frame must set it.
 		//
 		// Derive the timeout from baseCtx so a connection drop cancels the
 		// RPC through ctx cancellation — no auxiliary watcher goroutine
@@ -490,7 +491,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 				return
 			}
 			if len(entries) > 0 {
-				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
+				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries, Initial: true})
 			}
 		}()
 	}

@@ -46,6 +46,9 @@ package merged
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"log/slog"
 	"slices"
 	"strings"
@@ -152,26 +155,70 @@ func entryCmp(a, b cli.EventEntry) int {
 // old Summary-bearing key allowed.
 //
 // Returns "" — meaning "no content identity, do not dedup by content" —
-// when Detail is empty. Such an entry carries no comparable text, so a
-// content key over it would degenerate to one bucket per Type and let
-// unrelated events match each other. Time was the only thing separating
-// them before, and with Time out of the key the honest answer is to
-// abstain. These entries are still deduped by exact UUID, the same
-// conservative stance the package already takes for missing-UUID entries
-// (see mergeDedup's "Missing UUID" note): never synthesize an identity we
-// cannot defend. Locally a `result` event has no Detail; `thinking` does
-// populate it. The fallback tier only ever emits "user" and "text"
-// entries (both always carry Detail), so this branch guards local-only
-// kinds rather than a live cross-tier case.
+// when Detail is empty AND the entry carries no images. Such an entry has
+// no comparable content at all, so a key over it would degenerate to one
+// bucket per Type and let unrelated events match each other. Time was the
+// only thing separating them before, and with Time out of the key the
+// honest answer is to abstain. These entries are still deduped by exact
+// UUID, the same conservative stance the package already takes for
+// missing-UUID entries (see mergeDedup's "Missing UUID" note): never
+// synthesize an identity we cannot defend. Locally a `result` event has no
+// Detail; `thinking` does populate it.
+//
+// Image-only user messages are the exception that needs its own identity:
+// both tiers emit them with Detail=="" (buildUserEntry truncates the empty
+// text; discovery's parseHistoryLine likewise), so the Detail-based key
+// abstained on BOTH sides and — the two tiers' UUIDs never coinciding by
+// construction — every image-only message rendered twice, skewed apart by
+// up to contentSkewLeadMS. The thumbnails ARE comparable content: both
+// tiers derive them from the identical original bytes through the same
+// deterministic pipeline (cli.MakeThumbnail at maxDim=600 — the local
+// tier via buildUserEntry, the fallback via discovery.ThumbnailFn which
+// claudejsonl's init wires to the same function), so the data URIs match
+// byte-for-byte. Key on the thumbnails' digest; a decode failure that
+// dropped a thumbnail on one side only makes the keys differ, i.e. we
+// degrade to "no dedup" (a duplicate bubble) rather than ever collapsing
+// two distinct messages.
+//
+// Two encoding details keep the key honest:
+//
+//   - A kind tag ("t" for text-keyed, "i" for image-keyed) puts the two
+//     forms in disjoint namespaces. Without it the encodings overlap: a
+//     Detail of "\x1f"+<image field> reproduces an image-keyed value
+//     byte-for-byte. Contrived, but a separator alone cannot rule it out —
+//     only a tag that no other branch can emit can.
+//   - Thumbnails are digested rather than inlined. Each data URI runs
+//     40-110 KB and contentKey is called per entry per tier on every
+//     pairContent / LoadBefore pass, so inlining them allocated and copied
+//     megabytes per merge to produce a value only ever used for equality.
+//     A length-prefixed SHA-256 gives identical semantics at constant size;
+//     the length prefix keeps the concatenation unambiguous so two
+//     different image lists cannot digest to the same preimage.
 //
 // The 0x1f unit separator keeps field boundaries unambiguous so a value
 // can't be forged by content that happens to contain the delimiter.
 func contentKey(e cli.EventEntry) string {
-	if e.Detail == "" {
+	if e.Detail == "" && len(e.Images) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(e.Type)
+	b.WriteByte(0x1f)
+	if e.Detail == "" {
+		// Image-only identity.
+		b.WriteString("i")
+		b.WriteByte(0x1f)
+		sum := sha256.New()
+		var lenBuf [8]byte
+		for _, img := range e.Images {
+			binary.BigEndian.PutUint64(lenBuf[:], uint64(len(img)))
+			sum.Write(lenBuf[:])
+			sum.Write([]byte(img))
+		}
+		b.WriteString(hex.EncodeToString(sum.Sum(nil)))
+		return b.String()
+	}
+	b.WriteString("t")
 	b.WriteByte(0x1f)
 	b.WriteString(e.Detail)
 	return b.String()
