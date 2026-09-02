@@ -297,3 +297,186 @@ func TestSetSessionTuning_ErrorTextIsSanitizedUpstream(t *testing.T) {
 		t.Errorf("CLI text must reach the caller for the dashboard toast, got: %v", err)
 	}
 }
+
+// TestSetSessionTuning_ClearModelNeverTakesRPC pins the "恢复默认" fix: a
+// pointer-to-"" model means "drop the override, let the config chain decide
+// on the next spawn". There is no model id to hand the CLI, so the RPC fast
+// path must never fire — sending set_model("") clears kiro's header and
+// makes claude return an error, leaving a live session that can never be
+// restored to default. Clearing behaves like an effort change: lazy respawn
+// when alive, record-only when suspended.
+func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name     string
+		backend  string
+		effort   string // pre-existing tuning effort (kiro only)
+		alive    bool
+		wantMode string
+	}{
+		{"claude alive", "claude", "", true, TuningAppliedRespawn},
+		{"kiro alive, no effort tier", "kiro", "", true, TuningAppliedRespawn},
+		{"kiro alive, with effort tier", "kiro", "low", true, TuningAppliedRespawn},
+		{"claude suspended", "claude", "", false, TuningAppliedDeferred},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mkTuningTestRouter(t)
+			var proc *tuningFakeProc
+			var s *ManagedSession
+			if tc.alive {
+				proc = &tuningFakeProc{TestProcess: NewTestProcess()}
+				s = addTuningSession(r, "k1", tc.backend, proc)
+			} else {
+				s = addTuningSession(r, "k1", tc.backend, nil)
+			}
+			s.SetTuningModel("m-old")
+			if tc.effort != "" {
+				s.SetTuningEffort(tc.effort)
+			}
+
+			mode, err := r.SetSessionTuning(ctx, "k1", strp(""), nil)
+			if err != nil {
+				t.Fatalf("clearing model must not error: %v", err)
+			}
+			if mode == TuningAppliedRPC {
+				t.Fatal("applied_via = rpc — empty model must never be sent over the control channel")
+			}
+			if mode != tc.wantMode {
+				t.Errorf("mode = %q, want %q", mode, tc.wantMode)
+			}
+			if proc != nil {
+				if proc.setModelCalled {
+					t.Errorf("SetModel(%q) was invoked on the live process", proc.setModelArg)
+				}
+				if proc.AliveVal {
+					t.Error("live process must be closed for lazy respawn so the next spawn drops --model")
+				}
+			}
+			if s.TuningModel() != "" {
+				t.Errorf("TuningModel = %q, want cleared", s.TuningModel())
+			}
+		})
+	}
+}
+
+// TestInstallFreshSessionLocked_InheritsTuning pins the respawn half of the
+// tuning lifecycle: SetSessionTuning's respawn/deferred paths only record
+// the override on the CURRENT ManagedSession, and the next spawn builds its
+// argv from it (resolveSpawnParamsLocked) — but installFreshSessionLocked
+// then REPLACES that struct. If the fresh struct does not carry the override
+// forward, sessions.json is rewritten without it, the following TTL recycle
+// spawns back on the config default, and a naozhi restart in between reads
+// the surviving shim as arg-drift and rebuilds it as default. The user label
+// is operator-owned state of the same shape and rides along.
+func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	wrapper := cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro")
+	const key = "dash:direct:inherit:general"
+
+	old := newSessionWithID(key, "sess-old")
+	old.SetBackend("kiro")
+	old.SetTuningModel("claude-haiku-4.5")
+	old.SetTuningEffort("low")
+	old.SetUserLabel("my label")
+	old.setLabelOrigin("auto")
+	r.mu.Lock()
+	r.ss.sessions[key] = old
+	r.indexAdd(key)
+
+	// Mirror spawnSession: snapshot under the first r.mu hold, then install.
+	// The fresh entry must be fed from that snapshot, not from a re-read of
+	// the map — so swap the map entry for an unrelated stub in between (what
+	// RegisterForResume / Remove can do during the unlocked history copy) and
+	// require the ORIGINAL values to win.
+	_, _, _, _, ov := snapshotOldSessionLocked(old)
+	stub := newSessionWithID(key, "sess-stub")
+	stub.SetTuningModel("stub-model")
+	stub.SetUserLabel("stub label")
+	r.ss.sessions[key] = stub
+
+	fresh := r.installFreshSessionLocked(
+		key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
+		nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
+	)
+	r.mu.Unlock()
+
+	if fresh == old {
+		t.Fatal("test premise broken: installFreshSessionLocked must allocate a new struct")
+	}
+	if got := fresh.TuningModel(); got != "claude-haiku-4.5" {
+		t.Errorf("TuningModel after respawn = %q, want claude-haiku-4.5", got)
+	}
+	if got := fresh.TuningEffort(); got != "low" {
+		t.Errorf("TuningEffort after respawn = %q, want low", got)
+	}
+	if got := fresh.UserLabel(); got != "my label" {
+		t.Errorf("UserLabel after respawn = %q, want %q", got, "my label")
+	}
+	if got := fresh.LabelOrigin(); got != "auto" {
+		t.Errorf("LabelOrigin after respawn = %q, want auto (AutoTitler must keep ownership)", got)
+	}
+	if r.SessionFor(key) != fresh {
+		t.Error("fresh session not published under key")
+	}
+	if fresh.TuningModel() == "stub-model" || fresh.UserLabel() == "stub label" {
+		t.Error("fresh entry took values from a re-read of r.ss.sessions[key] instead of the snapshot")
+	}
+}
+
+// TestRenameSession_InheritsTuning covers the takeover/rename path, which
+// builds its own fresh struct instead of going through
+// installFreshSessionLocked and must carry the override too.
+func TestRenameSession_InheritsTuning(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	const oldKey = "scratch:abc:general:general"
+	const newKey = "feishu:direct:alice:aside-general-deadbeef"
+
+	s := newSessionWithID(oldKey, "sess-rn")
+	s.SetTuningModel("claude-haiku-4.5")
+	s.SetTuningEffort("low")
+	s.SetUserLabel("auto title")
+	s.setLabelOrigin("auto")
+	r.mu.Lock()
+	r.ss.sessions[oldKey] = s
+	r.indexAdd(oldKey)
+	r.mu.Unlock()
+
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("RenameSession returned false")
+	}
+	got := r.SessionFor(newKey)
+	if got == nil {
+		t.Fatal("renamed session missing")
+	}
+	if got.TuningModel() != "claude-haiku-4.5" || got.TuningEffort() != "low" {
+		t.Errorf("tuning lost across rename: model=%q effort=%q", got.TuningModel(), got.TuningEffort())
+	}
+	if got.UserLabel() != "auto title" || got.LabelOrigin() != "auto" {
+		t.Errorf("label+origin must travel as one unit across rename: label=%q origin=%q",
+			got.UserLabel(), got.LabelOrigin())
+	}
+}
+
+// TestSetSessionTuning_RespawnReleasesActiveSlot pins the capacity
+// bookkeeping of the lazy-respawn path: closing the live process frees a
+// session slot exactly like a TTL recycle / evict does, so activeCount must
+// drop. Without it every tuning respawn leaks one slot (the follow-up spawn
+// Adds 1 again) until the max-sessions gate starts evicting healthy sessions.
+func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
+	r := mkTuningTestRouter(t)
+	proc := &tuningFakeProc{TestProcess: NewTestProcess()}
+	addTuningSession(r, "k1", "kiro", proc)
+	r.ss.activeCount.Store(1) // the session above is the one live, non-exempt entry
+
+	mode, err := r.SetSessionTuning(context.Background(), "k1", nil, strp("max"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != TuningAppliedRespawn {
+		t.Fatalf("mode = %q, want respawn (test premise)", mode)
+	}
+	if got := r.ss.activeCount.Load(); got != 0 {
+		t.Errorf("activeCount after tuning respawn = %d, want 0 (slot leaked)", got)
+	}
+}

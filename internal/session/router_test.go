@@ -2762,16 +2762,16 @@ func TestCollectPreviousHistory(t *testing.T) {
 // plain function so it works without a Router).
 func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("nil returns zero values", func(t *testing.T) {
-		prev, cost, spent, created := snapshotOldSessionLocked(nil)
-		if prev != nil || cost != 0 || spent != 0 || created != 0 {
-			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v, %v), want (nil, 0, 0, 0)",
-				prev, cost, spent, created)
+		prev, cost, spent, created, ov := snapshotOldSessionLocked(nil)
+		if prev != nil || cost != 0 || spent != 0 || created != 0 || ov != (sessionOverrides{}) {
+			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v, %v, %+v), want zero values",
+				prev, cost, spent, created, ov)
 		}
 	})
 
 	t.Run("prevSessionIDs defensive copy", func(t *testing.T) {
 		s := &ManagedSession{prevSessionIDs: []string{"id-a", "id-b"}}
-		prev, _, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _, _ := snapshotOldSessionLocked(s)
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-b" {
 			t.Fatalf("prev = %v, want [id-a id-b]", prev)
 		}
@@ -2785,7 +2785,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("totalCost falls back to store when no proc", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.totalCost, 1.234)
-		_, cost, _, _ := snapshotOldSessionLocked(s)
+		_, cost, _, _, _ := snapshotOldSessionLocked(s)
 		if cost != 1.234 {
 			t.Errorf("cost = %v, want 1.234 (from store, proc=nil)", cost)
 		}
@@ -2794,7 +2794,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("costSpent carries the genuine monotonic total", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.costSpent, 7.5)
-		_, _, spent, _ := snapshotOldSessionLocked(s)
+		_, _, spent, _, _ := snapshotOldSessionLocked(s)
 		if spent != 7.5 {
 			t.Errorf("spent = %v, want 7.5 (carried across spawn)", spent)
 		}
@@ -2803,7 +2803,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("createdAt round-trips", func(t *testing.T) {
 		s := &ManagedSession{}
 		s.createdAt.Store(123456789)
-		_, _, _, created := snapshotOldSessionLocked(s)
+		_, _, _, created, _ := snapshotOldSessionLocked(s)
 		if created != 123456789 {
 			t.Errorf("created = %v, want 123456789", created)
 		}
@@ -2811,9 +2811,22 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 
 	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
 		s := &ManagedSession{}
-		prev, _, _, _ := snapshotOldSessionLocked(s)
+		prev, _, _, _, _ := snapshotOldSessionLocked(s)
 		if prev != nil {
 			t.Errorf("prev = %v, want nil for empty source", prev)
+		}
+	})
+
+	t.Run("operator overrides are captured with the rest of the snapshot", func(t *testing.T) {
+		s := &ManagedSession{}
+		s.SetTuningModel("claude-haiku-4.5")
+		s.SetTuningEffort("low")
+		s.SetUserLabel("my label")
+		s.setLabelOrigin("auto")
+		_, _, _, _, ov := snapshotOldSessionLocked(s)
+		want := sessionOverrides{tuningModel: "claude-haiku-4.5", tuningEffort: "low", userLabel: "my label", labelOrigin: "auto"}
+		if ov != want {
+			t.Errorf("overrides = %+v, want %+v", ov, want)
 		}
 	})
 }
@@ -2852,6 +2865,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		exempt bool,
 		oldSID string,
 		oldUserTurns int64,
+		overrides sessionOverrides,
 	) *ManagedSession {
 		return r.installFreshSessionLocked
 	}

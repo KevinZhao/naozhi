@@ -922,7 +922,7 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 		// settles the mid-turn question).
 		picked := ""
 		for j := len(events) - 1; j >= 0; j-- {
-			if events[j].Type != "" {
+			if events[j].Type != "" && !isTurnNeutralEventType(events[j].Type) {
 				picked = events[j].Type
 				break
 			}
@@ -935,6 +935,24 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 	}
 	// "result" marks turn complete; anything else means mid-turn
 	return lastType != "" && lastType != "result"
+}
+
+// isTurnNeutralEventType reports whether an Event type carries no turn
+// state and must be skipped by isMidTurn's reverse walk.
+//
+// control_ack is the receipt for a naozhi-originated control RPC (claude
+// control_response / ACP session/set_model response, see ModelSetter). It
+// is emitted whether or not a turn is in flight — an idle session whose
+// operator switched models leaves it as the LAST buffered shim line — so
+// treating it as "last event != result" would arm reconnectedMidTurn on a
+// session that has no result coming, parking it in StateRunning forever
+// (every Send → ErrProcessBusy) after a naozhi restart.
+//
+// Every other Type the protocols emit (assistant / user / system / result /
+// metadata / permission_request) is produced inside a turn or is the
+// turn-end itself, so it stays authoritative here.
+func isTurnNeutralEventType(t string) bool {
+	return t == "control_ack"
 }
 
 // shimLineReader adapts Process shim connection to the LineReader interface.

@@ -111,3 +111,49 @@ func TestTuningDriftParity_NilSessionFallsBack(t *testing.T) {
 		t.Errorf("nil-session drift args must carry backend defaults, got %v", args)
 	}
 }
+
+// TestTuningDriftParity_SurvivesRespawn extends the parity guard past the
+// first incarnation: after a tuning respawn replaces the ManagedSession
+// (installFreshSessionLocked), the NEW entry must still reconstruct the same
+// argv the spawn actually used. Otherwise the very restart that follows a
+// model switch misreads the tuned shim as arg-drift and rebuilds it default.
+func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
+	r := mkTuningRouter(t)
+	// installFreshSessionLocked touches the id indexes that NewRouter
+	// normally allocates; the minimal fixture above does not.
+	r.ss.idToKey = map[string]string{}
+	r.kid.ids = map[string]bool{}
+	key := "dash:direct:drift3:general"
+	s := newSessionWithID(key, "sess-drift-3")
+	s.SetBackend("kiro")
+	s.SetTuningModel("claude-haiku-4.5")
+	s.SetTuningEffort("low")
+	r.ss.sessions[key] = s
+
+	// argv of the respawn, as spawnSession assembles it from the OLD entry.
+	sp := r.resolveSpawnParamsLocked(key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
+	realArgs := sp.Wrapper.Protocol.BuildArgs(cli.SpawnOptions{
+		Model:        sp.Model,
+		ExtraArgs:    sp.Args,
+		Effort:       sp.Effort,
+		SettingsFile: r.naozhiSettingsFile,
+	})
+
+	// The spawn then replaces the entry, carrying the snapshotted overrides.
+	_, _, _, _, ov := snapshotOldSessionLocked(s)
+	fresh := r.installFreshSessionLocked(
+		key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
+		nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
+	)
+
+	wrapper, backendID := r.wrapperFor("kiro")
+	driftArgs := r.driftCompareArgs(wrapper, backendID, fresh)
+	if !slices.Equal(realArgs, driftArgs) {
+		t.Fatalf("post-respawn entry diverges from the argv it was spawned with — "+
+			"the next naozhi restart would rebuild this tuned session as default.\n"+
+			"  real:  %v\n  drift: %v", realArgs, driftArgs)
+	}
+	if !slices.Contains(realArgs, "claude-haiku-4.5") || !slices.Contains(realArgs, "low") {
+		t.Fatalf("tuning values missing from argv %v — parity above is vacuous", realArgs)
+	}
+}

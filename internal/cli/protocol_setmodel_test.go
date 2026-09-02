@@ -11,10 +11,13 @@ package cli
 // just on kiro's behaviour.
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestACPProtocol_WriteSetModel_Wire pins the session/set_model request
@@ -236,4 +239,45 @@ func TestCodexProtocol_NoModelSetter(t *testing.T) {
 func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// TestProcess_SetModel_ReturnsOnNaturalExit pins the ack-wait's exit
+// condition: a CLI that dies while we await the control_response (EOF /
+// cli_exited → readLoop returns → p.done closes) must fail SetModel
+// promptly. Only killCh was selected on before, and a natural exit never
+// closes killCh — so the dashboard request sat for the full
+// setModelAckTimeout (30s) against a process that was already dead.
+func TestProcess_SetModel_ReturnsOnNaturalExit(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	go p.readLoop()
+	defer p.Kill()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.SetModel(context.Background(), "opus") }()
+
+	// Deterministic sync (no sleep): the set_model control_request reaching
+	// the shim side proves SetModel is past its Alive() check and parked on
+	// the ack select. Only then let the CLI exit naturally (no Kill → killCh
+	// stays open). net.Pipe is unbuffered, so this read is the handshake.
+	line, err := bufio.NewReader(srv.conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading set_model request from shim side: %v", err)
+	}
+	if !strings.Contains(line, "set_model") {
+		t.Fatalf("first shim frame is not the set_model request: %s", line)
+	}
+	startServerDrain(srv) // absorb anything else (deferred Kill) so no writer blocks
+	srv.SendCLIExited(0)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("SetModel returned nil after the CLI exited; want an error")
+		}
+		if !strings.Contains(err.Error(), "exited") && !strings.Contains(err.Error(), "terminated") {
+			t.Errorf("error should name the process exit, got: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SetModel still blocked 3s after the CLI exited — ack wait ignores p.done and would sit out the full 30s timeout")
+	}
 }

@@ -138,14 +138,24 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		effectiveEffort = te
 	}
 
-	respawnNeeded := effortChanged || (modelChanged && caps.EffortTier && effectiveEffort != "")
+	// Clearing the model override ("恢复默认", pointer to "") has no model id
+	// to hand the CLI: set_model("") would blank kiro's header and make
+	// claude reject the request, leaving a live session that can never be
+	// restored to default. It therefore always takes the respawn/deferred
+	// path — the next spawn simply omits the override and the config chain
+	// reapplies (RFC §4.3 清除语义).
+	modelCleared := modelChanged && *model == ""
+	respawnNeeded := effortChanged || modelCleared ||
+		(modelChanged && caps.EffortTier && effectiveEffort != "")
 
 	proc := sess.loadProcess()
 	alive := proc != nil && proc.Alive()
 
 	// RPC fast path defers recording until the CLI acks (§6 R8). Every
 	// other path records now, under the same r.mu hold as the decision.
-	rpcPath := modelChanged && !respawnNeeded && alive
+	// `*model != ""` is implied by !respawnNeeded but spelled out so the
+	// invariant "never RPC an empty model" survives a future refactor.
+	rpcPath := modelChanged && *model != "" && !respawnNeeded && alive
 	if !rpcPath {
 		if modelChanged {
 			sess.SetTuningModel(*model)
@@ -209,6 +219,19 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		// suspended→spawn path (RFC §6 R6).
 		storeAtomicString(&sess.deathReason, "tuning_respawn")
 		proc.Close()
+		// Capacity bookkeeping, same shape as evictOldest / Cleanup's
+		// TTL path (close-but-keep-entry): recount instead of a manual
+		// activeCount.Add(-1) so the per-backend gauge and the total stay
+		// in lockstep with what the map actually holds. Without this every
+		// tuning respawn leaks one slot (the follow-up spawn Adds 1).
+		// Broadcast under r.mu so Shutdown's cond.Wait predicate cannot
+		// re-evaluate between Close and the wakeup (R191-CONC-H1).
+		r.mu.Lock()
+		if r.shutdownCond != nil {
+			r.shutdownCond.Broadcast()
+		}
+		r.countActive()
+		r.mu.Unlock()
 		r.notifyChange()
 		slog.Info("session tuning applied via respawn", "key", logKey,
 			"model_changed", modelChanged, "effort_changed", effortChanged)
