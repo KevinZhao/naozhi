@@ -104,6 +104,20 @@ type Conn interface {
 	Close()
 }
 
+// containsSink reports whether c already sits in clients. Subscribe paths use
+// it to keep re-subscribes by the same EventSink idempotent: a browser that
+// re-clicks the selected session (or re-subscribes after the remote dropped
+// its subscription) must not be appended twice, or every fan-out reaches it
+// twice. Caller must hold the lock protecting the slice. (#2421 review F1)
+func containsSink(clients []EventSink, c EventSink) bool {
+	for _, cl := range clients {
+		if cl == c {
+			return true
+		}
+	}
+	return false
+}
+
 // removeSub removes c from subs[key]. Returns true if the key has no subscribers left.
 // Caller must hold the lock protecting subs.
 func removeSub(subs map[string][]EventSink, key string, c EventSink) bool {

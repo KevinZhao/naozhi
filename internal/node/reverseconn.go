@@ -425,7 +425,14 @@ func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bo
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
-	c.subs[key] = append(c.subs[key], cl)
+	// Same client re-subscribing (dashboard re-click / dead→running
+	// recovery): keep exactly one entry, or broadcastToSubs would deliver
+	// every frame twice to that browser. It still takes the additional-
+	// subscriber path below for its `subscribed` ack + history page.
+	// (#2421 review F1)
+	if !containsSink(c.subs[key], cl) {
+		c.subs[key] = append(c.subs[key], cl)
+	}
 	// Add under subMu (mirroring the spawn) so Close()'s subWG.Wait() never
 	// races an Add. R202606f-GO-010 (#2294).
 	c.subWG.Add(1)
