@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -990,6 +991,58 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 // ProtocolName returns the protocol name.
 func (p *Process) ProtocolName() string {
 	return p.protocol.Name()
+}
+
+// seedEffort pre-fills the effort tier from the spawn pin. `--effort <tier>`
+// is launch-time state on every EffortTier protocol (claude pins the session,
+// kiro overrides its configured default), so the tier the wrapper put in argv
+// IS the running tier — and claude never reports it back in a metadata frame,
+// which left Snapshot.Effort empty and the dashboard chip without a click
+// target (RFC dashboard-model-effort-control §4.1). Called by Wrapper.Spawn
+// before readLoop starts and by SeedEffortFromArgs on reconnect.
+//
+// Fill-if-unset (CompareAndSwap from nil): a backend-reported tier
+// (applyMetadata, kiro) is a live observation and must never be clobbered by
+// the static pin, whichever arrives first — on the reconnect path readLoop
+// may already have consumed a replayed metadata frame. applyMetadata's own
+// non-empty overwrite still lets a later report replace the seed.
+//
+// No-op on protocols without Caps.EffortTier (codex): BuildArgs dropped the
+// tier, so claiming it would misreport the session.
+func (p *Process) seedEffort(tier string) {
+	if tier == "" || !p.caps.EffortTier {
+		return
+	}
+	e := tier
+	p.effort.CompareAndSwap(nil, &e)
+}
+
+// SeedEffortFromArgs is the reconnect-path seedEffort: Wrapper.SpawnReconnect
+// has no SpawnOptions, but the shim recorded the spawn argv
+// (shim.State.CLIArgs), so the tier is recovered from the same tokens
+// BuildArgs emitted. Exported for the session router's ReconnectShims loop.
+func (p *Process) SeedEffortFromArgs(args []string) {
+	p.seedEffort(effortFromArgs(args))
+}
+
+// effortFromArgs extracts the tier from a `--effort <tier>` / `--effort=<tier>`
+// argv, last occurrence winning (CLI flag semantics). "" when absent or
+// dangling. Pure; parity with BuildArgs is pinned by
+// TestEffortFromArgs_RoundTripsBuildArgs.
+func effortFromArgs(args []string) string {
+	tier := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--effort":
+			if i+1 < len(args) {
+				tier = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(args[i], "--effort="):
+			tier = strings.TrimPrefix(args[i], "--effort=")
+		}
+	}
+	return tier
 }
 
 // setModel records the spawn-time model. Called once by Wrapper.Spawn

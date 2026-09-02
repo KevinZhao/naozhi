@@ -317,6 +317,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// NOT seeded from persisted state the way Model is — effort is never
 		// written to sessions.json, so there is no stored value to fall back
 		// on. docs/rfc/kiro-effort-visibility.md §9
+		// For EffortTier backends the process pre-seeds this from the spawn
+		// pin (cli.Process.seedEffort), so claude shows its --effort tier
+		// without ever reporting one; kiro's metadata report overwrites.
 		snap.Effort = proc.Effort()
 	}
 

@@ -759,6 +759,10 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// cli.backends[].model first, falling back to top-level cli.model.
 	// "" means the operator left it unconfigured.
 	proc.setModel(opts.Model)
+	// Same for the effort tier: `--effort` is a spawn pin, so argv is the
+	// truth for the life of the process. Seeded before readLoop so a kiro
+	// metadata report can only ever overwrite it, never race it.
+	proc.seedEffort(opts.Effort)
 	// R20260612-global-version: let this process push its self-reported
 	// binary version (init frame) up to the wrapper so the global dashboard
 	// banner reflects a host claude upgrade without a naozhi restart.
