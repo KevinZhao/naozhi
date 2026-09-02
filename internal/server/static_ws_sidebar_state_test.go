@@ -113,12 +113,28 @@ func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 		t.Fatal("case 'daemon_run_ended' missing")
 	}
 	tail := body[idx:]
-	brk := strings.Index(tail, "break;")
-	if brk < 0 {
-		t.Fatal("daemon_run_ended case has no break")
+	end := strings.Index(tail, "case 'pong':")
+	if end < 0 {
+		t.Fatal("case 'pong' must follow daemon_run_ended")
 	}
-	if !strings.Contains(tail[:brk], "fetchSystemDaemons()") {
+	daemonCase := tail[:end]
+	if !strings.Contains(daemonCase, "fetchSystemDaemons()") {
 		t.Error("daemon_run_* case must call fetchSystemDaemons() so updateSystemBadge runs")
+	}
+	// Hub-wide broadcast, ~4 frames/min/tab: must honour the RNEW-UX-014
+	// hidden-tab suspension instead of fetching in the background.
+	if !strings.Contains(daemonCase, "if (document.hidden) break;") {
+		t.Error("daemon_run_* case must skip the fetch while document.hidden")
+	}
+	// ...and startPollers must re-sync the badge once the tab is visible again.
+	js := readDashboardJS(t)
+	startIdx := strings.Index(js, "const startPollers = () => {")
+	visIdx := strings.Index(js, "document.addEventListener('visibilitychange'")
+	if startIdx < 0 || visIdx < startIdx {
+		t.Fatal("startPollers / visibilitychange listener not found in expected order")
+	}
+	if !strings.Contains(js[startIdx:visIdx], "fetchSystemDaemons()") {
+		t.Error("startPollers must call fetchSystemDaemons() to catch up on daemon_run_* frames ignored while hidden")
 	}
 }
 
@@ -174,8 +190,8 @@ func TestDashboardJS_ErrorFrameGuardsPendingSubscribeKey(t *testing.T) {
 	if !strings.Contains(errCase, "msg.key === this._pendingSubscribeKey") {
 		t.Error("error case must compare msg.key against this._pendingSubscribeKey before clearing pending state")
 	}
-	if !strings.Contains(errCase, "msg.error === 'node disconnected'") {
-		t.Error("error case must recognise the PurgeNodeSubscriptions frame (msg.node + 'node disconnected')")
+	if !strings.Contains(errCase, "if (!msg.key && msg.node && msg.error === 'node disconnected')") {
+		t.Error("error case must recognise the PurgeNodeSubscriptions frame (keyless + msg.node + 'node disconnected')")
 	}
 	if !strings.Contains(errCase, "reconcileSelectedNode()") {
 		t.Error("node-disconnected error must run reconcileSelectedNode() so selectedNode snaps back to local")
@@ -201,34 +217,45 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if !strings.Contains(js, "let _previewGen = 0;") {
 		t.Error("_previewGen counter must be declared")
 	}
-	if !strings.Contains(fn, "const gen = ++_previewGen;") {
-		t.Error("previewDiscovered must bump _previewGen on entry")
+	// The bump lives in stopPreviewPolling() so EVERY caller that moves the
+	// operator off the discovered panel (selectSession, the createSession
+	// paths, a newer preview) invalidates an in-flight preview fetch — the
+	// managed-session panel reuses the #events-scroll id, so an element
+	// existence check alone cannot tell the two apart.
+	stopIdx := strings.Index(js, "function stopPreviewPolling() {")
+	if stopIdx < 0 {
+		t.Fatal("stopPreviewPolling not found")
+	}
+	stopFn := js[stopIdx:]
+	if e := strings.Index(stopFn, "\n}\n"); e > 0 {
+		stopFn = stopFn[:e]
+	}
+	if !strings.Contains(stopFn, "_previewGen++;") {
+		t.Error("stopPreviewPolling() must bump _previewGen so selectSession/createSession invalidate in-flight previews")
+	}
+	if !strings.Contains(fn, "stopPreviewPolling();\n  const gen = _previewGen;") {
+		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = _previewGen (capturing before the call would be invalidated by its own bump)")
+	}
+	if strings.Contains(fn, "++_previewGen") {
+		t.Error("previewDiscovered must not bump _previewGen itself — the bump belongs to stopPreviewPolling()")
 	}
 	if strings.Count(fn, "if (gen !== _previewGen) return;") < 3 {
 		t.Error("previewDiscovered must check the generation after the awaited fetch (ok + error paths) AND inside the poll tick")
 	}
-	// The interval must be armed only after the previous one is torn down,
-	// and the teardown must happen BEFORE previewEventCount is seeded
-	// (stopPreviewPolling resets it to 0 — the other order would make the
-	// first tick re-append every already-rendered event).
 	idxSet := strings.Index(fn, "previewTimer = setInterval(")
 	if idxSet < 0 {
 		t.Fatal("previewTimer = setInterval( not found")
 	}
 	idxGen := strings.Index(fn, "if (gen !== _previewGen) return;\n    const el = document.getElementById('events-scroll');")
 	if idxGen < 0 || idxGen > idxSet {
-		t.Error("generation check must precede the #events-scroll lookup and previewTimer = setInterval(")
+		t.Fatal("generation check must precede the #events-scroll lookup and previewTimer = setInterval(")
 	}
-	idxStop := strings.LastIndex(fn[:idxSet], "stopPreviewPolling();")
-	idxCount := strings.Index(fn[:idxSet], "previewEventCount = events.length;")
-	if idxStop < 0 || idxCount < 0 {
-		t.Fatal("stopPreviewPolling() / previewEventCount = events.length must both precede setInterval")
-	}
-	if idxStop < idxGen {
-		t.Error("stopPreviewPolling() must be re-run after the awaited fetch, right before arming the interval")
-	}
-	if idxStop > idxCount {
-		t.Error("stopPreviewPolling() must run BEFORE previewEventCount = events.length (it resets the counter)")
+	// Between the post-fetch generation check and arming the interval there
+	// must be NO stopPreviewPolling() call: it bumps _previewGen and would
+	// invalidate this very call (its tick would bail on the first fire). The
+	// prologue call already cleared any older generation's interval.
+	if strings.Contains(fn[idxGen:idxSet], "stopPreviewPolling();") {
+		t.Error("previewDiscovered must not call stopPreviewPolling() between the gen check and setInterval — it would invalidate its own generation")
 	}
 }
 

@@ -11840,7 +11840,7 @@ const wsm = {
         // the bookkeeping that points at the dead node, snap selectedNode back
         // to local via the existing reconcile path, and re-fetch so the
         // sidebar reflects the node's sessions going away.
-        if (msg.node && msg.error === 'node disconnected') {
+        if (!msg.key && msg.node && msg.error === 'node disconnected') {
           if (this.subscribedNode === msg.node) {
             this.subscribedKey = null;
             this.subscribedNode = null;
@@ -11958,6 +11958,12 @@ const wsm = {
         // case it ran solely at boot / on panel open / on the 5s poll while
         // the system view is active, so a daemon failing in the background
         // never lit the badge until the operator happened to open the view.
+        //
+        // This is a hub-wide broadcast (sysession ticks ~every 30s → a few
+        // frames per minute per tab). Honour the RNEW-UX-014 hidden-tab
+        // suspension: skip the fetch while hidden; startPollers re-fetches
+        // once on the visibilitychange back to visible so the badge catches up.
+        if (document.hidden) break;
         fetchSystemDaemons().then(() => {
           if (activeView === 'system') renderSystemView();
         }).catch(() => {});
@@ -12845,6 +12851,12 @@ function flashSendBtn() {
 function stopPreviewPolling() {
   if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
   previewEventCount = 0;
+  // Invalidate any in-flight previewDiscovered(): every caller of this
+  // function (selectSession, the createSession paths, a newer preview) is
+  // moving the operator off the discovered panel, so a preview fetch that
+  // resolves afterwards must neither paint into the now-managed
+  // #events-scroll nor re-arm previewTimer.
+  _previewGen++;
 }
 
 /* ===== Discovery & Takeover ===== */
@@ -12885,8 +12897,9 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   // resolve into the SECOND card's #events-scroll and arm a second
   // setInterval without clearing the first (previewTimer was simply
   // overwritten → leaked interval appending the wrong session's events).
-  const gen = ++_previewGen;
+  // stopPreviewPolling() bumps _previewGen, so capture AFTER calling it.
   stopPreviewPolling();
+  const gen = _previewGen;
   // Deselect any managed session. We null `selectedKey` but deliberately
   // leave `selectedNode` intact — it now doubles as the sidebar filter and
   // nulling it would strand the user on an empty list until their next
@@ -12954,9 +12967,11 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       if (err.status) showAPIError('预览会话', err.status, errText);
       return;
     }
-    // A newer previewDiscovered() (or a selectSession / panel switch that
-    // bumped nothing but replaced #main) may have superseded this call while
-    // the fetch was in flight — never paint into someone else's panel.
+    // A newer previewDiscovered(), selectSession() or createSession() (all of
+    // which run stopPreviewPolling → _previewGen++) may have superseded this
+    // call while the fetch was in flight. The managed-session panel reuses the
+    // #events-scroll id, so an element check alone is not enough — never
+    // paint into someone else's panel.
     if (gen !== _previewGen) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
@@ -12968,10 +12983,11 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       stickEventsBottom();
     }
     navRebuild();
-    // Tear down any interval a racing call may have armed in the meantime so
-    // exactly one poll loop exists per preview panel. Must precede the
-    // previewEventCount assignment below — stopPreviewPolling resets it.
-    stopPreviewPolling();
+    // previewTimer is provably null here: it is only ever armed below, after
+    // this generation check, and any older generation's interval was cleared
+    // by the stopPreviewPolling() in our own prologue. Do NOT call
+    // stopPreviewPolling() at this point — it would bump _previewGen and
+    // invalidate this very call.
     previewEventCount = events.length;
     const capturedSid = sessionId;
     // #1770: guard against overlapping ticks. Each tick re-fetches the full
@@ -13942,6 +13958,9 @@ wsm.connect();
     // Relative-time labels drifted while hidden; startSidebarTimeTick
     // refreshes them once immediately before re-arming the 60s tick.
     startSidebarTimeTick();
+    // daemon_run_* WS frames are ignored while hidden (see wsm.onMessage), so
+    // re-sync the 系统 rail badge once on return.
+    fetchSystemDaemons().catch(function () {});
     // eventTimer is a WS-outage fallback. If WS is live, events already
     // arrive via the socket and the timer is redundant; let the normal
     // WS state transitions re-arm it if the socket drops.
