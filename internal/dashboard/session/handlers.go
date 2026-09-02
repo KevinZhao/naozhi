@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -163,10 +164,12 @@ type sessionStats struct {
 	// "naozhi v1.2.3-dirty · dark" without conflating with the poll-version
 	// field. Omitempty preserves the legacy wire shape when the ldflag is
 	// unset (e.g. `go run` without -X, or `go build` without Makefile).
-	VersionTag string             `json:"version_tag,omitempty"`
-	Uptime     string             `json:"uptime"`
-	Watchdog   watchdogStats      `json:"watchdog"`
-	Projects   []projectListEntry `json:"projects,omitempty"`
+	VersionTag string        `json:"version_tag,omitempty"`
+	Uptime     string        `json:"uptime"`
+	Watchdog   watchdogStats `json:"watchdog"`
+	// Projects has NO omitempty: after the last project is removed the
+	// dashboard must receive `projects: []` to clear its stale list.
+	Projects []projectListEntry `json:"projects"`
 }
 
 // nodeStatusEntry is the per-node element in /api/sessions "nodes".
@@ -231,6 +234,17 @@ type projectListEntry struct {
 	// projects by this value ascending so newly-added folders always land at
 	// the bottom of their tier. unix ms.
 	CreatedAt int64 `json:"created_at,omitempty"`
+
+	// The three fields below mirror /api/projects' projectsListEntry byte-
+	// for-byte (same names, same tags). dashboard.js populates projectsData
+	// ONLY from this stats.projects list, yet reads p.stableKey (continue
+	// session), p.dir_mtime (picker order) and p.config.emoji / display_name
+	// (labels) — fields that used to exist on /api/projects alone, so the
+	// palette silently degraded. TestProjectListEntry_MirrorsProjectsListEntry
+	// pins the parity.
+	Config     project.ProjectConfig `json:"config"`
+	DirModTime int64                 `json:"dir_mtime,omitempty"`
+	StableKey  string                `json:"stableKey,omitempty"`
 }
 
 // isUnknownRPCMethodErr reports whether a remote-proxy error came from the
@@ -315,7 +329,10 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 type Handlers struct {
 	router     *sessionpkg.Router
 	projectMgr *project.Manager
-	scheduler  CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
+	// projectStableKeyEnabled gates emitting projectListEntry.StableKey;
+	// mirrors dashproject.Handlers.projectStableKeyEnabled.
+	projectStableKeyEnabled bool
+	scheduler               CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
 	// cronSessions is the optional Scheduler-side view consulted when
 	// building the history panel via KnownSessionIDs(). When nil, cron-spawned
 	// JSONLs are NOT filtered from history (degraded behaviour matches pre-R245).
@@ -864,9 +881,7 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 	if live := h.router.CLIVersion(); live != "" {
 		stats.CLIVersion = live
 	}
-	if projectList := h.buildProjectList(now); len(projectList) > 0 {
-		stats.Projects = projectList
-	}
+	stats.Projects = h.buildProjectList(now)
 	return stats
 }
 
@@ -897,6 +912,9 @@ func (h *Handlers) buildProjectList(now time.Time) []projectListEntry {
 	// silently mutate every other reader's view. Building the merged slice
 	// fresh keeps the cached entry untouched. R247-PERF-15.
 	if !h.nodeAccess.HasNodes() {
+		if projectList == nil {
+			projectList = []projectListEntry{}
+		}
 		return projectList
 	}
 	cachedProjects := h.nodeCache.Projects()
@@ -939,10 +957,39 @@ func (h *Handlers) buildProjectList(now time.Time) []projectListEntry {
 			if v, ok := item["created_at"].(float64); ok {
 				entry.CreatedAt = int64(v)
 			}
+			if v, ok := item["dir_mtime"].(float64); ok {
+				entry.DirModTime = int64(v)
+			}
+			if v, ok := item["stableKey"].(string); ok {
+				entry.StableKey = v
+			}
+			if v, ok := item["config"].(map[string]any); ok {
+				entry.Config = decodeRemoteProjectConfig(v)
+			}
 			projectList = append(projectList, entry)
 		}
 	}
+	if projectList == nil {
+		projectList = []projectListEntry{}
+	}
 	return projectList
+}
+
+// decodeRemoteProjectConfig converts a peer node's `config` object (decoded
+// as map[string]any by the node cache) into a ProjectConfig. Unknown keys
+// from a newer peer are dropped; a malformed object yields the zero value so
+// the row still renders with directory-name fallbacks. Remote-only path —
+// the local list copies p.Config directly.
+func decodeRemoteProjectConfig(m map[string]any) project.ProjectConfig {
+	var cfg project.ProjectConfig
+	b, err := json.Marshal(m)
+	if err != nil {
+		return cfg
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return project.ProjectConfig{}
+	}
+	return cfg
 }
 
 // buildLocalResp constructs the single-node /api/sessions JSON shape.
@@ -1676,12 +1723,19 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 	projects := h.projectMgr.All()
 	entries := make([]projectListEntry, 0, len(projects))
 	for _, p := range projects {
+		var stableKey string
+		if h.projectStableKeyEnabled {
+			stableKey = sessionpkg.ProjectStableKey(p.Path, "general")
+		}
 		entries = append(entries, projectListEntry{
-			Name:      p.Name,
-			Path:      p.Path,
-			Node:      "local",
-			Favorite:  p.Config.Favorite,
-			CreatedAt: p.Config.CreatedAt,
+			Name:       p.Name,
+			Path:       p.Path,
+			Node:       "local",
+			Favorite:   p.Config.Favorite,
+			CreatedAt:  p.Config.CreatedAt,
+			Config:     p.Config,
+			DirModTime: p.DirModTime,
+			StableKey:  stableKey,
 			// Strip embedded userinfo (PAT) before handing the URL to any
 			// dashboard client. Round 46 redacted /api/projects but missed
 			// this path — /api/sessions is polled every few seconds, so
@@ -2005,6 +2059,9 @@ type Deps struct {
 	RetiredStore  *discovery.RetiredStore
 	ValidateWS    func(ws, root string) (string, error)
 	SystemInfoFn  func() map[string]any
+	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
+	// (same switch as the /api/projects list).
+	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps.
@@ -2031,6 +2088,8 @@ func New(d Deps) *Handlers {
 		retiredStore:  d.RetiredStore,
 		validateWS:    d.ValidateWS,
 		systemInfoFn:  d.SystemInfoFn,
+
+		projectStableKeyEnabled: d.ProjectStableKeyEnabled,
 	}
 }
 

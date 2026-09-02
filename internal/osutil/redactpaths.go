@@ -65,6 +65,14 @@ func RedactAbsolutePathsInto(b *strings.Builder, s string) {
 				cc == '\'' || cc == '"' || cc == '`' {
 				break
 			}
+			if cc == '\\' && !isWin {
+				// A backslash never belongs to a POSIX / home-relative path
+				// token in the text we redact; in raw JSON it starts an
+				// escape (`\"`, `\n`) whose consumption would leave the
+				// enclosing document unparseable. Windows drive paths use it
+				// as the separator and keep consuming.
+				break
+			}
 			if cc == ':' && j+1 < len(s) && (s[j+1] == ' ' || s[j+1] == '\n') {
 				// `path: reason` — stop before the ':' so the reason tail
 				// survives redaction.

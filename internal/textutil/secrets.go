@@ -155,11 +155,20 @@ const secretRedactedMarker = "[REDACTED]"
 //     immediately before `=`) to avoid false positives on benign names like
 //     `TOKENIZER`, `AUTHOR`, or `KEYBOARD`.
 //
-// Value capture handles three forms: a double-quoted span, a single-quoted
-// span, or a bare whitespace-delimited run. Quoted spans are captured whole so
-// a passphrase with spaces (`PASSWORD="my long secret"`) is fully masked to
-// `PASSWORD="[REDACTED]"` rather than leaking everything after the first word.
-var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)`)
+// Value capture handles these forms: a double-quoted span, a single-quoted
+// span, a JSON-escaped double-quoted span (`\"…\"`, as seen when the
+// assignment sits inside a JSON string value), a run that merely opens with
+// a quote (unterminated, e.g. a multiline PEM dump), or a bare run. Quoted
+// spans are captured whole so a passphrase with spaces
+// (`PASSWORD="my long secret"`) is fully masked to `PASSWORD="[REDACTED]"`
+// rather than leaking everything after the first word.
+//
+// The bare run stops at whitespace, `"`, `'` and `\` — never at `\S` — so an
+// assignment embedded in a JSON string (`{"cmd":"export API_KEY=abc"}`) does
+// not swallow the closing `"}` and produce unencodable output. The dashboard
+// runs RedactSecrets over raw tool_use.input / NDJSON lines; a JSON-breaking
+// substitution there used to turn a 200 into an empty body (#dashboard-api).
+var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*\\"|["'][^\s"'\\]+|[^\s"'\\]+)`)
 
 // RedactSecrets walks s once, swapping any occurrence of a well-known
 // secret-prefix pattern for `[REDACTED]`. Returns the original (aliased)
@@ -266,6 +275,12 @@ func redactEnvAssignments(s string) string {
 			valStart++
 		}
 		val := m[valStart:]
+		if len(val) >= 4 && strings.HasPrefix(val, `\"`) && strings.HasSuffix(val, `\"`) {
+			// JSON-escaped quoted span (assignment inside a JSON string
+			// value): keep both escaped delimiters so the enclosing JSON
+			// stays well-formed.
+			return m[:valStart] + `\"` + secretRedactedMarker + `\"`
+		}
 		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
 			// Properly quoted span: keep both delimiting quotes and mask the
 			// whole span (which may contain spaces), so `PASSWORD="my long
