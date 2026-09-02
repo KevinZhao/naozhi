@@ -405,11 +405,9 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// R20260610-085718-LB-9 (#2014): run pure-input validation (key + text cap)
 	// BEFORE uploadStore.TakeAll consumes (and deletes) the pre-uploaded file
-	// entries. TakeAll's R37-CONCUR4 retry contract is only honoured if no
-	// validation can fail after it: a 400 returned post-TakeAll would silently
-	// GC the already-consumed attachments, forcing the user to re-upload the
-	// whole batch. Mirrors the WS path (wshub_send.go), which validates before
-	// taking attachments.
+	// entries, so a 400 here leaves the batch intact for retry (mirrors the WS
+	// path). Rejections that can still fire AFTER TakeAll set files_consumed
+	// on the body (writeSendError) so the client drops its stale chips (F3).
 	if key == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
 		return
@@ -436,7 +434,8 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(fileIDs) > 0 {
+	filesConsumed := len(fileIDs) > 0 // true ⇒ TakeAll below deletes the store entries
+	if filesConsumed {
 		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
 		if err != nil {
 			slog.Debug("send: one or more file_ids not found or expired", "count", len(fileIDs))
@@ -447,7 +446,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if text == "" && len(images) == 0 {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text or files required"})
+		writeSendError(w, http.StatusBadRequest, "text or files required", filesConsumed)
 		return
 	}
 
@@ -456,7 +455,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// don't leave files on disk that will never be read. The deeper
 	// remote-node branch below repeats this check for defence in depth.
 	if node != "" && node != "local" && len(images) > 0 {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
+		writeSendError(w, http.StatusBadRequest, "files not supported for remote nodes", filesConsumed)
 		return
 	}
 
@@ -493,12 +492,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("attachment workspace validation failed",
 				"key", session.SanitizeLogAttr(key), "err", err)
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
+			writeSendError(w, http.StatusBadRequest, "invalid workspace", filesConsumed)
 			return
 		}
 		resolved, rb, perr := persistFileRefs(validatedWS, images, key, owner)
 		if perr != nil {
-			writeJSONStatus(w, perr.status, map[string]string{"error": perr.msg})
+			writeSendError(w, perr.status, perr.msg, filesConsumed)
 			return
 		}
 		images = resolved
@@ -637,7 +636,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// Operators retain full diagnostics via the slog at sessionSend's
 		// own callsite. R218-SEC-P1.
 		slog.Warn("dashboard sessionSend rejected", "key", session.SanitizeLogAttr(key), "err", err)
-		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": asyncErrorMessage(err)})
+		writeSendError(w, http.StatusForbidden, asyncErrorMessage(err), filesConsumed)
 		return
 	}
 	// From this point on the attachments have entered the dispatch pipeline
