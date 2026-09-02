@@ -441,7 +441,7 @@ func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 // model popover should offer for a backend ("" = router default backend).
 // docs/rfc/dashboard-model-effort-control.md §4.2.
 //
-// Two tiers, agent-reported first:
+// Three tiers, agent-reported first:
 //
 //  1. Runtime manifest: any LIVE process of this backend is asked for the
 //     availableModels it captured at Init (kiro session/new|load, F5/F12).
@@ -450,9 +450,15 @@ func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 //     because each fresh spawn re-reports (RFC §6 R4).
 //  2. Configured fallback: cli.backends[].models (claude's alias list, or
 //     any operator-pinned set) when no runtime manifest was ever seen.
+//  3. Observed fallback: the models this deployment has actually run under
+//     the backend — router default model, every session's live/persisted
+//     Model(), every TuningModel() override — see observedModelsLocked.
+//     Backends that never report a manifest (claude) and have no
+//     cli.backends[].models configured would otherwise leave the popover
+//     with only the manual-input box.
 //
-// Returns nil when neither tier has data — the popover then shows its
-// manual-input fallback ("清单在首次会话后可用").
+// Returns nil when no tier has data — the popover then shows its
+// manual-input fallback with a per-protocol hint.
 //
 // Takes r.mu for WRITING because a runtime hit updates the cache; manifest
 // reads are dashboard-popover-frequency (rare), so the write lock and the
@@ -495,5 +501,41 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 		}
 		return out
 	}
-	return nil
+	return r.observedModelsLocked(backendID)
+}
+
+// observedModelsLocked is BackendModelManifest's third tier: the deduped set
+// of model ids seen for backendID in this deployment. Order is stable for the
+// dashboard — router default first (it is what a fresh session runs under),
+// then every session's Model() / TuningModel() sorted ascending; map
+// iteration order never leaks out. Nothing is hardcoded: an alias like
+// "sonnet" appears only because some session actually ran under it.
+// Caller holds r.mu. Returns nil when nothing was observed.
+func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
+	seen := make(map[string]bool)
+	var out []cli.ModelInfo
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, cli.ModelInfo{ID: id})
+	}
+	add(r.backendDefaultsFor(backendID).Model)
+	var rest []string
+	for _, s := range r.ss.sessions {
+		sb := s.Backend()
+		if sb == "" {
+			sb = r.bkStore.defaultBackend
+		}
+		if sb != backendID {
+			continue
+		}
+		rest = append(rest, s.Model(), s.TuningModel())
+	}
+	slices.Sort(rest)
+	for _, id := range rest {
+		add(id)
+	}
+	return out
 }

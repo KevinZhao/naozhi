@@ -3233,7 +3233,13 @@ function tuningModelsForSession(s) {
   if (!cliBackends || !Array.isArray(cliBackends.backends)) return { models: [], backendID };
   const entry = cliBackends.backends.find(b => b && b.id === backendID) ||
     cliBackends.backends.find(b => b && b.id === (cliBackends.default || ''));
-  return { models: (entry && Array.isArray(entry.models)) ? entry.models : [], backendID: entry ? entry.id : backendID };
+  return {
+    models: (entry && Array.isArray(entry.models)) ? entry.models : [],
+    backendID: entry ? entry.id : backendID,
+    // BackendInfo.protocol ("acp" | "stream-json") decides the empty-manifest
+    // hint: only ACP backends ever report a list after their first session.
+    protocol: entry ? (entry.protocol || '') : '',
+  };
 }
 
 function openTuningPopover(kind) {
@@ -3251,13 +3257,18 @@ function openTuningPopover(kind) {
   const current = kind === 'model' ? (s.model || '') : (s.effort || '');
 
   if (kind === 'model') {
-    const { models } = tuningModelsForSession(s);
+    const { models, protocol } = tuningModelsForSession(s);
     for (const m of models) {
       const active = m.id === current || (current && current.indexOf(m.id) !== -1);
       rows.push({ value: m.id, label: m.id, desc: m.description || '', active });
     }
     if (models.length === 0) {
-      rows.push({ header: true, label: '清单在该 backend 首次会话后可用；可手动输入：' });
+      // ACP backends (kiro) report their manifest on the first session;
+      // stream-json backends (claude) never do — telling a claude operator to
+      // wait would be a lie, so point at the config knob instead.
+      rows.push({ header: true, label: protocol === 'acp'
+        ? '清单在该 backend 首次会话后可用；可手动输入：'
+        : '该 backend 不上报模型清单；可在 config.yaml 的 cli.backends[].models 配置候选，或手动输入：' });
     }
     rows.push({ input: true });
     rows.push({ value: '', label: '恢复默认（配置链）', reset: true });
