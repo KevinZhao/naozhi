@@ -23,6 +23,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// wsFileNotFoundMsg is the WS-path TakeAll miss label. Same sentinel text as
+// the HTTP path plus a recovery hint (#2418 follow-up F5) because the WS owner
+// may simply be stale — see the comment above the TakeAll call in handleSend.
+const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后再发送"
+
 // remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
 // owning peer node before the dashboard goroutine gives up. R244-ARCH-16
 // (#1054): named so the value is greppable and tunable in one place instead
@@ -108,6 +113,15 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// Atomic TakeAll: partial failure leaves the store untouched so the user
 	// can retry with a fresh upload batch rather than silently losing the
 	// earlier images. R37-CONCUR4.
+	//
+	// #2418: the owner used here is the one frozen at WebSocket upgrade
+	// (wsDeriveUploadOwner → setUploadOwner) and is never refreshed in
+	// no-token mode, so it can diverge from the request-time owner
+	// /api/sessions/upload used. The bundled dashboard therefore routes every
+	// file-bearing send over HTTP and never sends file_ids on this path; it is
+	// kept for third-party / legacy clients. A miss is most likely that
+	// divergence (or plain expiry), and re-attaching mints a fresh upload
+	// under the current owner — say so instead of a bare "not found".
 	var images []cli.Attachment
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
@@ -118,7 +132,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		if err != nil {
 			// Never echo fids (user-controlled) back in the error; log internally.
 			slog.Debug("ws send: one or more file_ids not found or expired", "count", len(msg.FileIDs))
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired"})
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: wsFileNotFoundMsg})
 			return
 		}
 		images = append(images, taken...)
@@ -162,7 +176,9 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		ResumeID:      msg.ResumeID,
 		Backend:       msg.Backend,
 		AccessProfile: msg.AccessProfile,
-	}, func(errMsg string) {
+	}, func(_ error, errMsg string) {
+		// Originator-only channel: informational outcomes (/urgent abort,
+		// reset) are reported here on purpose — the sender wants to know.
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
 	})
 	if err != nil {

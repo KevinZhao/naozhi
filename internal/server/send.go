@@ -187,9 +187,10 @@ const interruptAcquireTimeout = 2 * time.Second
 // was enqueued behind the active turn — a background drain loop will process it
 // after the current turn completes, coalescing with any other queued messages.
 //
-// onAsyncError is called from the owner goroutine if GetOrCreate fails; it may
-// be nil (HTTP path has no back-channel after ack).
-func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
+// onAsyncError (may be nil) fires from the owner goroutine when the turn fails
+// after the ack; it gets the underlying error (nil at literal-message sites) +
+// localised label so fan-out callers can filter (Hub.httpSendErrorCallback).
+func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 	// R175-SEC-P1: use the canonical session.ValidateSessionKey gate
 	// (also used by handleEvents / handleDelete / handleSetLabel / HTTP
@@ -440,14 +441,14 @@ func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
 }
 
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
-func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError func(string)) {
+func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := h.sessionOptsFor(key)
 	sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
 	if err != nil {
 		slog.Error("send: get session", "key", key, "err", err)
 		if onAsyncError != nil {
-			onAsyncError(asyncErrorMessage(err))
+			onAsyncError(err, asyncErrorMessage(err))
 		}
 		return
 	}
@@ -477,14 +478,14 @@ func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError fu
 //
 // `priority` is forwarded as-is to SendPassthrough: "" for normal messages,
 // "now" for /urgent preemption.
-func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError func(string)) {
+func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := h.sessionOptsFor(key)
 	sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)
 	if err != nil {
 		slog.Error("passthrough: get session", "key", key, "err", err)
 		if onAsyncError != nil {
-			onAsyncError(asyncErrorMessage(err))
+			onAsyncError(err, asyncErrorMessage(err))
 		}
 		return
 	}
@@ -493,15 +494,13 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 		// ErrAbortedByUrgent, ErrReconnectedUnknown, ErrSessionReset are
 		// informational — the user knows what happened (or will see a
 		// dashboard state update). Only log at Warn for surprising failures.
-		if errors.Is(err, cli.ErrAbortedByUrgent) ||
-			errors.Is(err, cli.ErrSessionReset) ||
-			errors.Is(err, cli.ErrReconnectedUnknown) {
+		if informationalSendErr(err) {
 			slog.Debug("passthrough: send completed with informational error", "key", key, "err", err)
 		} else {
 			slog.Warn("passthrough: send failed", "key", key, "err", err)
 		}
 		if onAsyncError != nil {
-			onAsyncError(asyncErrorMessage(err))
+			onAsyncError(err, asyncErrorMessage(err))
 		}
 	} else {
 		h.autoSaveCronPrompt("passthrough", key, text)
@@ -543,7 +542,7 @@ func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
 // Once both conditions hold, delete sessionSendLegacy and its sole caller
 // branch in sessionSend together so the guard/interrupt semantics live in
 // exactly one place. R222-CR-8.
-func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
+func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 
 	acquired := h.guard.TryAcquire(key)
@@ -582,7 +581,7 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
-					onAsyncError("会话中断超时，请稍后重试。")
+					onAsyncError(nil, "会话中断超时，请稍后重试。")
 				}
 				return
 			}
