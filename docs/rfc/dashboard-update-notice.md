@@ -222,7 +222,11 @@ POST /api/system/update/apply    触发，202 + 后台执行
   "can_apply": true,
   "blocked_reason": "",
   "restart_supported": true,
-  "running_sessions": 3
+  "running_sessions": 3,
+  "enabled": true,
+  "install_enabled": true,
+  "manual_command": "sudo systemctl restart naozhi",
+  "rollback_hint": "cp /usr/local/bin/naozhi.naozhi-upgrade.bak /usr/local/bin/naozhi && chmod 0755 /usr/local/bin/naozhi && sudo systemctl restart naozhi"
 }
 ```
 
@@ -231,9 +235,15 @@ POST /api/system/update/apply    触发，202 + 后台执行
   只需重启）。**前端不做 semver 比较、不自己推状态机**，避免前后端两套语义漂移。
 - `can_apply` / `blocked_reason` 是预检结果（§3.5），UI 靠它决定渲染按钮还是
   渲染手工命令。
-- `restart_supported` = `ServiceRunning() && GOOS ∈ {linux, darwin}`。false 且
-  `action == "restart"` 时无事可做，UI 给手工命令。
+- `restart_supported` = `ServiceManagesThisProcess()`（受管服务跑的**是本进程**，
+  见 §5 F2；不是 `ServiceRunning()`）。false 且 `action == "restart"` 时无事可做，
+  UI 给手工命令。
 - `running_sessions` 让确认框能如实说明影响面（§3.4）。
+- `enabled` = 有 Checker（`update.enabled`）；`install_enabled` = 允许 POST apply
+  （`update.dashboard_install`）。
+- `manual_command` 由服务端按自身 GOOS + 真实 launchd label 生成（§5 F3），前端
+  不可 apply 时原样打印；空表示没有可贴的命令。
+- `rollback_hint` 仅在 `action != none` 时给出（§5 P2 设计决定）。
 
 **POST 语义**：
 
@@ -646,6 +656,63 @@ apply 尝试（含一次 staged 态的 restart 确认）才校验的，所以 §
 需要一台由 launchd 托管、且跑着含本 PR 版本的实例——只有正式实例 :8180 满足，
 需要操作者授权重启它。`restartOnly` 走的是 P1 已实测可用的
 `kickstart -k gui/<uid>/<label>`，但"整条链在受管进程上真的换代"仍缺一次实机确认。
+
+### P2 二轮评审修正（2026-09-02）
+
+**F1 · P0 单测会重启生产服务。** `TestInstallLatest_StagedDoesNotDownload` 与
+`TestInstallLatest_OnDiskProbeShortCircuits` 调 `InstallLatest(ctx, true)` 却没
+stub 服务探测：在一台由 systemd 托管 naozhi 的 Linux 上，restart-only 路径直达
+真实的 `systemctl restart --no-block naozhi`——跑一次 `go test` 就重启旁边的生产
+实例。修法：`RestartServiceNoWait` 的实现下沉为包内变量 `restartServiceNoWaitFn`，
+测试用 `withNoManagedService(t)`（unit 不活跃 + MainPID=0 + 记录调用的 restart
+stub）并**断言 restart 未被调用**；新增 `TestInstallLatest_StagedRestartsWhenManaged`
+证明受管态下 seam 恰好被调一次（正向），`TestInstallLatest_StagedRefusesForeignService`
+证明 unit 活跃但 MainPID 不是自己时拒绝（F2 的回归门）。
+
+**F2 · P1 Linux `ServiceRunning()` 不校验"这个 unit 跑的是我"。** darwin 侧
+`verifiedLaunchdLabel` 会核对 job 的可执行文件 = `SelfPath()`，Linux 只查
+`is-active`。后果：/tmp 隔离实例、`go test` 进程都会看到 `restart_supported: true`，
+点「重启生效」→ 重启的是系统服务，本进程留在旧版本、phase 卡 `restarting`。修法：
+拆成两个语义——`ServiceRunning()`（**存在**受管服务，CLI `naozhi upgrade` 从 shell
+运行时不是 MainPID，必须保留这条）与新增 `ServiceManagesThisProcess()`（受管的
+**是本进程**：Linux = `is-active` && `systemctl show naozhi -p MainPID --value` ==
+`os.Getpid()`；`deploy/naozhi.service` 的 ExecStart 直接跑 naozhi、`NotifyAccess=main`，
+MainPID 就是主进程，实机核对 `/proc/<MainPID>/exe` 亦为 naozhi 本体；darwin 沿用
+`verifiedLaunchdLabel`，两者重合）。dashboard 两个 handler、`InstallLatest` 的降级、
+`restartOnly`、`restartSystemdNoWait` 全部改用后者；`upgrade.go` 不动。
+`TestUpdateHandlers_ProbeServiceOnce` 同时守住"handler 不得再用 `ServiceRunning()`"。
+
+**F3 · P2 手工命令按浏览器 OS 猜且硬编码 dev 机 label。** `dashboard.js` 用
+`navigator.platform` 判 Mac/Linux，并写死 `com.naozhi.agent`——那是操作者笔记本的
+OS 与某一台 dev 机的 label，与被升级的节点无关。修法：GET 新增 `manual_command`
+（服务端按 `runtime.GOOS` + 真实 `launchdServiceLabel()` 生成；`install` →
+`naozhi upgrade`；`restart` 且受管本进程 → 平台重启命令；`restart` 且无受管服务 →
+空，`blocked_reason` 已说"手动重启进程"，再给 `systemctl restart naozhi` 恰恰是 F2
+那个错误的服务）。`restartCommand()` 与 `RollbackHint` 共用，二者不会漂移
+（`TestManualCommand` 断言 hint 以该命令结尾）。前端删掉平台分支，JS 契约测试反向
+禁止 `navigator.platform` / `com.naozhi.` / 硬编码重启命令再出现。
+
+**F4 · P2 `.bak` 字节断言永真。** 旧测试把假 `.bak` 写进 `t.TempDir()`，而
+`Replace()` 写的是 `SelfPath()+backupSuffix`，两者永不相交，断言不可能失败。已删，
+改为 F1 引入的注入点断言（`lookups == 0` + restart stub 调用记录），注释不再声称
+保护 `.bak` 字节。
+
+**F7 · P3 后台 apply goroutine 无 recover。** 它不在任何请求栈上，panic 直接带走
+整个进程。补 `defer recover()`（同 `wshub_eventpush` / `send_owner_loop` 的写法），
+并新增 `Status.MarkFailed` 把 phase 落到 `failed` + `last_error`，否则 chip 会停在
+`installing`。`TestUpdateApply_PanicIsRecovered` 覆盖。
+
+**F8 · P3 冷启动补检条件过严 + 可挂 60s。** 原条件 `latest=="" && at.IsZero()`，
+而 `noteCheck` 失败也推进 `checkedAt`，启动时一次网络抖动就让补检永久失效直到 6h
+tick。放宽为 `latest==""`；`CheckNow` 自带 15min 全局节流（`checkMu` 内、网络调用
+**前**盖章），放宽不会打爆 GitHub。同时给 GET 侧的 `CheckNow` 套 10s
+`updateColdStartFillTimeout`，替代原本可能吃满的 60s。`TestUpdateStatus_ColdStartFillGuard`
+源码守卫。
+
+**顺带：`enabled` 恒为 true。** 原为 `s.updateStatus != nil`，但 main.go 无条件建
+Status，生产永远 true。改为 `s.updateChecker != nil`（真正反映 `update.enabled`），
+`TestUpdateStatusShape` 的断言随之翻转，新增 `TestUpdateStatusEnabledTracksChecker`
+（dev-build Checker，`CheckNow` 对 dev 不出网）。
 
 **P3 — 可选增强**
 WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false` 下的按需 check
