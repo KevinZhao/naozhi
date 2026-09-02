@@ -198,3 +198,48 @@ func TestServerMsg_InitialFlagOnlyOnOpeningFrames(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardJS_EmptyInitialFrameResetsRenderCursor pins #2421 review
+// finding F3. The Initial branch of onHistory full-page-replaces the pane, so
+// lastRenderedEventTime must describe ONLY what that page rendered. It used to
+// be updated only when the frame carried events, which left a stale high
+// watermark behind in this sequence:
+//
+//  1. a superseded subscription's backfill frame (incremental) pushes
+//     lastRenderedEventTime to the tip;
+//  2. the real Initial frame for a just-started running session is EMPTY
+//     (completeSubscribe's "always send an empty history for running
+//     sessions" arm) — the pane resets to the loading placeholder but the
+//     watermark is left at the tip;
+//  3. the new eventPushLoop pushes the same batch again; every event fails
+//     `e.time <= lastRenderedEventTime` and the whole batch is dropped.
+//
+// Invariant before: Initial frame with events → cursor = last event time;
+// Initial frame without events → cursor unchanged (stale).
+// Invariant after:  Initial frame → cursor = last event time, or 0 when the
+// frame is empty — unconditionally, because the pane is now empty too.
+func TestDashboardJS_EmptyInitialFrameResetsRenderCursor(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	body := extractJSBlock(t, js, "onHistory(msg) {")
+	start := strings.Index(body, "if (isInitial) {")
+	if start < 0 {
+		t.Fatal("onHistory must have an `if (isInitial) {` full-render branch")
+	}
+	initial := body[start:]
+	if end := strings.Index(initial, "\n    } else {"); end > 0 {
+		initial = initial[:end]
+	}
+
+	if !strings.Contains(initial, "lastRenderedEventTime = events.length ? ") {
+		t.Error("Initial branch must reset lastRenderedEventTime unconditionally (`events.length ? <last.time> : 0`) — an empty Initial frame must clear the watermark, not leave a stale one that drops the next incremental batch")
+	}
+	if strings.Contains(initial, "if (last.time) lastRenderedEventTime = last.time") {
+		t.Error("Initial branch must not gate the cursor reset on the frame carrying events — see F3 rationale above")
+	}
+}

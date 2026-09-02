@@ -11686,9 +11686,14 @@ const wsm = {
       // cursor to the earliest event we received, independent of DOM
       // contents so loadEarlierEvents still works after a fully-filtered
       // page.
+      //
+      // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
+      // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
+      // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
+      // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
+      // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
+      lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
       if (events.length > 0) {
-        const last = events[events.length - 1];
-        if (last.time) lastRenderedEventTime = last.time;
         const first = events[0];
         if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
           oldestFetchedEventTime = first.time;
