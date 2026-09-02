@@ -314,7 +314,10 @@ func TestInstallLatest_NilChecker(t *testing.T) {
 // paste-ready — it is the operator's only recourse when a new build will not
 // boot and the dashboard is gone with it.
 func TestRollbackHint(t *testing.T) {
-	hint := RollbackHint()
+	// serviceRunning=false is now an argument rather than an environment fact,
+	// so the no-service branch is reachable on any host — it used to be skipped
+	// on a machine that happened to run naozhi under launchd/systemd.
+	hint := RollbackHint(false)
 	if hint == "" {
 		t.Skip("SelfPath unavailable in this environment")
 	}
@@ -324,12 +327,9 @@ func TestRollbackHint(t *testing.T) {
 	if !strings.Contains(hint, "chmod 0755") {
 		t.Errorf("hint %q must restore the exec bit; a copied backup without it will not run", hint)
 	}
-	// A test process is not a managed service, so no restart command may be
-	// appended: launchdServiceLabel() would fall back to a constant label and
-	// produce a command that fails, inside a && chain that hides the restore.
-	if ServiceRunning() {
-		t.Skip("this process is under a managed service; the no-service branch is what needs the assertion")
-	}
+	// With no managed service no restart command may be appended:
+	// launchdServiceLabel() would fall back to a constant label and produce a
+	// command that fails, inside a && chain that hides the restore.
 	for _, unwanted := range []string{"kickstart", "systemctl"} {
 		if strings.Contains(hint, unwanted) {
 			t.Errorf("hint %q must not guess a restart command with no managed service detected", hint)
@@ -338,20 +338,19 @@ func TestRollbackHint(t *testing.T) {
 }
 
 // With a managed service the hint DOES end in a restart — restoring the bytes
-// alone leaves the bad build running.
+// alone leaves the bad build running. Both platforms are covered now that the
+// service verdict is injected: this case used to be linux-only because
+// systemdUnitActive was the only probe that could be stubbed.
 func TestRollbackHint_IncludesRestartWhenServiceRuns(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("systemdUnitActive is the only service probe that can be stubbed")
-	}
-	orig := systemdUnitActive
-	systemdUnitActive = func() bool { return true }
-	t.Cleanup(func() { systemdUnitActive = orig })
-
-	hint := RollbackHint()
+	hint := RollbackHint(true)
 	if hint == "" {
 		t.Skip("SelfPath unavailable in this environment")
 	}
-	if !strings.Contains(hint, "systemctl restart") {
-		t.Errorf("hint %q must end in a restart when a managed service exists", hint)
+	want := "systemctl restart"
+	if runtime.GOOS == "darwin" {
+		want = "launchctl kickstart -k"
+	}
+	if !strings.Contains(hint, want) {
+		t.Errorf("hint %q must end in %q when a managed service exists", hint, want)
 	}
 }

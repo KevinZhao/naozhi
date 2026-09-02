@@ -179,7 +179,11 @@ func (c *Checker) restartOnly(ctx context.Context, tag string) error {
 // answers for is "the new binary does not start", and in that failure the
 // dashboard that would have told them how to recover is precisely what is gone.
 // So the escape route has to be on screen while the service is still up.
-func RollbackHint() string {
+//
+// `serviceRunning` is supplied by the caller for the same reason as in
+// CheckPreflight: it is a `launchctl list` fork on darwin, the caller already
+// holds the answer, and this function is on a polled path.
+func RollbackHint(serviceRunning bool) string {
 	path, err := SelfPath()
 	if err != nil {
 		return ""
@@ -190,7 +194,7 @@ func RollbackHint() string {
 	// when this process was not launched by launchd, so the "helpful" tail would
 	// be a command that fails, inside a && chain that swallows the restore's
 	// success message. Restoring the bytes is the part only this hint knows.
-	if !ServiceRunning() {
+	if !serviceRunning {
 		return restore
 	}
 	restart := "sudo systemctl restart naozhi"

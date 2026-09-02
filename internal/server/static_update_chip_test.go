@@ -80,6 +80,14 @@ func TestUpdateChipStylesUseExistingTokens(t *testing.T) {
 			t.Errorf("expected the chip to reuse %s", tok)
 		}
 	}
+
+	// The busy state must be legible as "still working", not merely as "not
+	// clickable" — the poll behind it is 3 seconds apart, so a dimmed static
+	// glyph reads as a stuck button. Reuse the existing keyframes/duration pair
+	// rather than defining another animation.
+	if !strings.Contains(block, "animation:spin var(--nz-dur-spin)") {
+		t.Errorf("the is-busy chip must spin its glyph using the existing spin keyframes and --nz-dur-spin:\n%s", block)
+	}
 }
 
 // TestUpdateChipJSContract guards the browser-side rules that the RFC identifies

@@ -50,13 +50,22 @@ var (
 
 // CheckPreflight evaluates applicability for the given action. Results are
 // cached for preflightTTL, keyed by nothing — the inputs (platform, install
-// dir permissions, service state) are process-global.
+// dir permissions) are process-global.
 //
 // The `action` argument matters because the blocking conditions differ: an
 // ActionRestart needs a manageable service but does NOT need a writable
 // install directory (no bytes are written), while ActionInstall needs the
 // directory and does not strictly need a running service.
-func CheckPreflight(action Action, current string) Preflight {
+//
+// `serviceRunning` is passed IN rather than probed here, and the reason is cost,
+// not style: on darwin ServiceRunning() shells out to `launchctl list`, and
+// every caller already needs that same fact for its own response. Probing it
+// here as well made the status endpoint fork three times per poll (this gate,
+// the response's restart_supported field, and RollbackHint) for one answer that
+// cannot change between them. Note it must stay a live read at the CALL site —
+// caching it would make a just-installed launchd job invisible for a TTL, which
+// on the POST path means refusing an apply that would in fact work.
+func CheckPreflight(action Action, current string, serviceRunning bool) Preflight {
 	if action == ActionNone {
 		return Preflight{CanApply: false, Reason: ""}
 	}
@@ -65,9 +74,9 @@ func CheckPreflight(action Action, current string) Preflight {
 	defer preflightMu.Unlock()
 	if preflightCached != nil && preflightNow().Sub(preflightAt) < preflightTTL {
 		// The cached entry covers the expensive, action-independent probes.
-		// Re-evaluate the cheap action-specific gate below so switching from
+		// Re-evaluate the action-specific gate below so switching from
 		// staged→install inside one TTL window cannot serve a stale verdict.
-		if p := actionGate(action); !p.CanApply {
+		if p := actionGate(action, serviceRunning); !p.CanApply {
 			return p
 		}
 		return *preflightCached
@@ -79,19 +88,19 @@ func CheckPreflight(action Action, current string) Preflight {
 	if !p.CanApply {
 		return p
 	}
-	if g := actionGate(action); !g.CanApply {
+	if g := actionGate(action, serviceRunning); !g.CanApply {
 		return g
 	}
 	return p
 }
 
 // actionGate holds the checks that depend on which action is being offered.
-func actionGate(action Action) Preflight {
+func actionGate(action Action, serviceRunning bool) Preflight {
 	switch action {
 	case ActionRestart:
 		// Staged binary + no service we can drive = the operator has to
 		// restart the process themselves. Nothing is broken; say so plainly.
-		if !ServiceRunning() {
+		if !serviceRunning {
 			return Preflight{
 				CanApply: false,
 				Reason:   "未检测到受管服务（systemd / launchd），手动重启进程即可让新版本生效",

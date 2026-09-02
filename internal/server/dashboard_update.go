@@ -114,7 +114,13 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	snap.Current = current
 
 	action := snap.Action()
-	pre := selfupdate.CheckPreflight(action, current)
+	// Probe the service ONCE per request and hand the answer to everything that
+	// needs it. On darwin this is a `launchctl list` fork (service.go's
+	// verifiedLaunchdLabel), and this endpoint is polled by every open
+	// dashboard — the preflight gate, the restart_supported field and
+	// RollbackHint used to fork separately for the same unchanging fact.
+	serviceRunning := selfupdate.ServiceRunning()
+	pre := selfupdate.CheckPreflight(action, current, serviceRunning)
 
 	resp := updateStatusResponse{
 		Current:          current,
@@ -126,13 +132,13 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		LastError:        snap.LastErr,
 		CanApply:         pre.CanApply,
 		BlockedReason:    pre.Reason,
-		RestartSupported: selfupdate.ServiceRunning(),
+		RestartSupported: serviceRunning,
 		RunningSessions:  s.runningSessionCount(),
 		Enabled:          s.updateStatus != nil,
 		InstallEnabled:   s.updateInstallEnabled && s.updateChecker != nil,
 	}
 	if action != selfupdate.ActionNone {
-		resp.RollbackHint = selfupdate.RollbackHint()
+		resp.RollbackHint = selfupdate.RollbackHint(serviceRunning)
 	}
 	if !snap.CheckedAt.IsZero() {
 		resp.CheckedAt = snap.CheckedAt.Format(time.RFC3339)
@@ -233,15 +239,17 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 			req.ConfirmAction, action), http.StatusConflict)
 		return
 	}
-	if pre := selfupdate.CheckPreflight(action, snap.Current); !pre.CanApply {
+	// Restart only if there is something to restart. Passing true with no
+	// managed service would strand the UI on "restarting" (InstallLatest
+	// degrades it too; deciding here keeps the intent visible at the call site).
+	// One probe, shared with the preflight gate below — the same fact, and on
+	// darwin each read is a `launchctl list` fork.
+	restart := selfupdate.ServiceRunning()
+	if pre := selfupdate.CheckPreflight(action, snap.Current, restart); !pre.CanApply {
 		http.Error(w, pre.Reason, http.StatusConflict)
 		return
 	}
 
-	// Restart only if there is something to restart. Passing true with no
-	// managed service would strand the UI on "restarting" (InstallLatest
-	// degrades it too; deciding here keeps the intent visible at the call site).
-	restart := selfupdate.ServiceRunning()
 	apply := s.updateApplyFn
 	if apply == nil {
 		apply = s.updateChecker.InstallLatest

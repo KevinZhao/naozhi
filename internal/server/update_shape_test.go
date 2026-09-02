@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -41,6 +44,52 @@ func getUpdateStatus(t *testing.T, srv *Server) (int, map[string]any) {
 		}
 	}
 	return w.Code, body
+}
+
+// TestUpdateHandlers_ProbeServiceOnce keeps the service probe to one call per
+// request in each handler.
+//
+// It is a source guard because the cost is only visible on darwin, where
+// ServiceRunning() forks `launchctl list` (service.go's verifiedLaunchdLabel) —
+// a behavioural test would have to stub a probe that is not stubbable there, and
+// on linux the fork does not exist to be counted. GET is polled by every open
+// dashboard (every 3s while an apply is in flight), and three call sites once
+// grew out of one fact: the preflight gate, the restart_supported field, and
+// RollbackHint. Whoever needs the verdict should take the caller's copy.
+func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "dashboard_update.go"))
+	if err != nil {
+		t.Fatalf("read dashboard_update.go: %v", err)
+	}
+	// Comments in this file discuss the probe at length; counting them would
+	// report violations that do not exist.
+	var code []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		code = append(code, line)
+	}
+	src := strings.Join(code, "\n")
+
+	for _, fn := range []string{"handleUpdateStatus", "handleUpdateApply"} {
+		at := strings.Index(src, "func (s *Server) "+fn)
+		if at < 0 {
+			t.Fatalf("%s not found", fn)
+		}
+		body := src[at:]
+		// Bound the block at the next top-level declaration.
+		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+			body = body[:end+1]
+		}
+		if n := strings.Count(body, "selfupdate.ServiceRunning()"); n > 1 {
+			t.Errorf("%s probes the service %d times; probe once and pass the result to CheckPreflight / RollbackHint / the response field", fn, n)
+		}
+	}
 }
 
 // TestUpdateStatusShape locks the wire contract. dashboard.js branches on

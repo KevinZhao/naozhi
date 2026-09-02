@@ -1385,6 +1385,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .hdr-btn-update{width:auto;padding:0 7px;gap:4px;color:var(--nz-accent);border-color:var(--nz-accent)}
 .hdr-btn-update .hdr-update-tag{font-size:var(--nz-fs-2xs);font-weight:600;font-family:var(--nz-font-mono);letter-spacing:-.01em}
 .hdr-btn-update.is-busy{opacity:.6;pointer-events:none}
+/* Spin the glyph while an apply is in flight: the dim + pointer-events:none
+   above says "not clickable" but nothing says "still working", and the poll it
+   is waiting on is 3s apart. Reuses the existing spin keyframes and duration
+   token (same pair as .upload-status.uploading); the site-wide
+   prefers-reduced-motion guard neutralises it without a rule of its own. */
+.hdr-btn-update.is-busy svg{animation:spin var(--nz-dur-spin) linear infinite}
 .hdr-btn-update.is-failed{color:var(--nz-red);border-color:var(--nz-red)}
 /* Section header */
 .section-header{padding:6px 12px 6px 16px;font-size:var(--nz-fs-sm);font-weight:600;color:var(--nz-text-mute);text-transform:none;letter-spacing:0;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:6px}

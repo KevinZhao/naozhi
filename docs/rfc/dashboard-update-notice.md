@@ -543,7 +543,7 @@ RFC 原先只识别两种"已 staged"：`c.installed`（本进程装的）与
 - **`updateApplyFn` 测试缝**：handler 测试若真调 `InstallLatest` 就会从单测里
   打 GitHub。生产为 nil（走 `s.updateChecker.InstallLatest`）。
 
-### P2 代码评审后的三处修正（2026-09-02）
+### P2 代码评审后的修正（2026-09-02）
 
 **(a) 前端的"正在应用"标志必须有 deadline。** `InstallLatest` 有四条返回
 error 但**有意不动 `phase`** 的路径：release lookup 失败（`noteCheck` 在
@@ -581,6 +581,32 @@ apply 进入时 flush 已发生）+ 源码顺序守卫（httptest 下 flush 永�
 `updateCanApply` 要求 `can_apply && install_enabled` 同时为真才渲染按钮，所以
 该字段一旦停止下发，功能会静默退化成"永远只显示手工命令"，而其余测试全绿。
 形状契约的意义正是钉住这种字段。
+
+**(d) 服务探测由调用方注入，每请求只做一次。** `ServiceRunning()` 在 darwin 上
+是一次 `launchctl list` fork（`verifiedLaunchdLabel`），而 staged 稳定态下的一次
+GET 会独立探测**三遍**同一个不会变的事实：`CheckPreflight` 里的 `actionGate`
+（原注释称它 "cheap"——在 launchd 上它不是）、响应的 `restart_supported` 字段、
+以及 `RollbackHint()`。这条路径被每个打开的 dashboard 按 60s 轮询，apply 期间
+提到 3s。
+
+`CheckPreflight(action, current, serviceRunning)` 与 `RollbackHint(serviceRunning)`
+改为接受该事实，由 handler 探测一次后分发：GET 3→1 次，POST 2→1 次（POST 本来
+就要为 `restart` 参数算一遍）。**特意没有加缓存**：缓存会让刚配好的 launchd job
+在一个 TTL 内隐形，在 POST 路径上等于拒掉一次本可以成功的 apply。
+`TestUpdateHandlers_ProbeServiceOnce` 是源码守卫——这个成本只在 darwin 上存在，
+而 darwin 上那个 probe 无法 stub，行为测试数不到。
+
+签名改动顺带修好了两个测试的可达性：`TestRollbackHint` 的 no-service 分支此前
+在"本机恰好由 launchd 托管"时被 skip，`TestRollbackHint_IncludesRestartWhenServiceRuns`
+此前是 linux-only（`systemdUnitActive` 是唯一能 stub 的探针）。现在两者都在任何
+主机上真跑，后者按 GOOS 断言 `kickstart` 或 `systemctl`。
+
+**(e) busy 态的 spinner 补上**（§3.4 原本就要求"disabled + spinner"，实现只做到
+了 dim + `pointer-events:none`）。等待的轮询有 3s 间隔，一个变暗的静止图标读起来
+像卡住的按钮而不是"正在工作"。复用既有的 `spin` keyframes 与 `--nz-dur-spin`
+（与 `.upload-status.uploading` 同一对），不新增动画、不新增颜色 token；站点级
+`prefers-reduced-motion` guard 自动覆盖它，无需自带规则。`restart` 态的图标本身
+就是循环箭头，转起来正好。
 
 **P2 实测（2026-09-01，隔离实例 127.0.0.1:8198，binary 在 /tmp，`mode: notify`）**
 
@@ -669,6 +695,8 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
   的位置都早于 `go func()`。
 - GET 形状契约的 required 必须含 `install_enabled`——前端拿它当门，字段消失
   会静默退化成"只给手工命令"（见 P2 修正 (c)）。
+- **每个 handler 只探测服务一次**（源码守卫，见 P2 修正 (d)）：`ServiceRunning()`
+  在 darwin 上是 fork，需要它的地方应取调用方那一份。
 - routes.go 每加一行路由要 bump `tools/lint-server-handlers/exemptions.yaml`
   的 baseline（见 `ab29e61e` 先例，本次 +2 行）。
 
@@ -679,6 +707,7 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 - `UPDATE_APPLY_MAX_MS` 存在，且不出现裸 `updateApplying = true`——标志必须
   经 `setUpdateApplying` 写入，否则 deadline 会被绕过而 chip 可能永久卡在
   "正在应用新版本"（见 P2 修正 (a)）。
+- busy 态用既有 `spin` keyframes + `--nz-dur-spin` 转图标（见 P2 修正 (e)）。
 
 **手工验收**
 
@@ -707,7 +736,7 @@ WS 推进度（取代轮询）；下载字节进度条；`update.enabled: false`
 | **`XPC_SERVICE_NAME` 被继承，导致重启了别的服务**（F13） | `verifiedLaunchdLabel()` 校验该 label 的 job 确实跑本 binary（比对 `Program` / `ProgramArguments[0]` 与 `SelfPath()`，两侧 EvalSymlinks），取不到路径则 fail closed。人为篡改该 env 需要已能控制进程环境，属更高权限，不构成新增提权路径 |
 | 冷启动 6h 窗口内功能空白 | §3.7 的 `CheckNow`，15m 全局节流，只在 `latest == ""` 时触发 |
 | 多 node 部署下误解为全量升级 | NG2 + `confirmDialog` 文案强制含"本节点"字样；静态契约测试断言该字样存在 |
-| 轮询增加负载 | 60s / 客户端，纯内存读 + 60s 缓存的预检，无网络。进行中才提到 3s |
+| 轮询增加负载 | 60s / 客户端，无网络：Status 是内存读，预检缓存 60s。**唯一的非内存成本是每请求一次 `ServiceRunning()`**——darwin 上是一次 `launchctl list` fork，由 handler 探测后分发给预检 / `restart_supported` / `RollbackHint`（P2 修正 (d) 之前是三次）。有意不缓存它：见修正 (d)。进行中才提到 3s |
 | 操作者在 turn 进行中点了重启 | F10：shim 让 CLI 子进程跨重启存活。`detail` 如实说明并列出 `running_sessions` 供判断 |
 | `dev` build 被误替换 | `checkOnce` 已跳过 dev；预检把它列为第一条阻塞原因（§3.5） |
 
