@@ -5,13 +5,13 @@ import (
 	"crypto/subtle"
 	"expvar"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -167,12 +167,34 @@ func warnInsecureReversePrivateOnce(host string) {
 }
 
 // isPrivateHost reports whether host (Host header value, may include port)
-// refers to an RFC1918 private, IPv6 unique-local, or link-local address.
-// Used to classify cleartext-token exposure on /ws-node: a private-segment
-// upgrade is a lower (but non-zero) exposure than a public/routable one.
-// Hostnames that are not IP literals are treated as non-private since their
-// resolution is not known at this layer.
+// refers to an RFC1918 private, IPv6 unique-local, or link-local UNICAST
+// address. Used to classify cleartext-token exposure on /ws-node: a
+// private-segment upgrade is a lower (but non-zero) exposure than a
+// public/routable one. Hostnames that are not IP literals are treated as
+// non-private since their resolution is not known at this layer.
+//
+// Range membership comes from envpolicy.ClassifyHost (#2300) so this site
+// cannot drift from the shim/envpolicy SSRF guards on what "private" means.
+// The POLICY here is deliberately narrower than those outbound guards: this
+// is an inbound Host header, and "private" == "accept plaintext with a
+// warning", so classifying MORE ranges as private would LOOSEN the gate.
+// Loopback is excluded (isLoopbackHost owns it), link-local multicast and the
+// unspecified address are excluded (never a legitimate LAN peer → fall
+// through to the public hard-reject).
 func isPrivateHost(host string) bool {
+	k, ok := envpolicy.ClassifyHost(stripHostPort(host))
+	if !ok {
+		return false
+	}
+	return k.Any(envpolicy.IPPrivate | envpolicy.IPLinkLocalUnicast)
+}
+
+// stripHostPort reduces a Host header value to its bare host part for
+// net.ParseIP: "[::1]:8080" → "::1", "[fd00::1]" → "fd00::1",
+// "10.0.0.1:80" → "10.0.0.1". A bare unbracketed IPv6 literal (e.g.
+// "fd00::1") has multiple colons and is left intact (#2339). Hostnames pass
+// through with only a single trailing ":port" removed.
+func stripHostPort(host string) string {
 	h := host
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {
 		if strings.HasPrefix(host, "[") {
@@ -180,51 +202,28 @@ func isPrivateHost(host string) bool {
 				h = host[1:rb]
 			}
 		} else if strings.IndexByte(host, ':') == i {
-			// Exactly one colon → host:port (hostname or IPv4). A bare
-			// unbracketed IPv6 literal (e.g. "fd00::1") has multiple colons
-			// and must be left intact for net.ParseIP below (#2339).
+			// Exactly one colon → host:port (hostname or IPv4).
 			h = host[:i]
 		}
 	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		h = host[1 : len(host)-1]
 	}
-	ip := net.ParseIP(h)
-	if ip == nil {
-		return false
-	}
-	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	return h
 }
 
 // isLoopbackHost reports whether host (Host header value, may include
 // port) refers to a loopback address. Used by reverseUpgrader's
 // defence-in-depth check.
 func isLoopbackHost(host string) bool {
-	h := host
-	if i := strings.LastIndexByte(host, ':'); i >= 0 {
-		// Bracketed IPv6 form `[::1]:port` — trim brackets for compare.
-		if strings.HasPrefix(host, "[") {
-			if rb := strings.IndexByte(host, ']'); rb >= 0 {
-				h = host[1:rb]
-			}
-		} else if strings.IndexByte(host, ':') == i {
-			// Exactly one colon → host:port (hostname or IPv4). A bare
-			// unbracketed IPv6 literal (e.g. "::1") has multiple colons
-			// and must be left intact for net.ParseIP below.
-			h = host[:i]
-		}
-	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		h = host[1 : len(host)-1]
-	}
+	h := stripHostPort(host)
 	if strings.ToLower(h) == "localhost" {
 		return true
 	}
 	// Cover the entire 127.0.0.0/8 range and ::1, not just the canonical
 	// literals — 127.0.0.2, 127.255.255.254 etc. are valid loopback
 	// addresses (Linux can bind them) and must be treated as local.
-	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
-		return true
-	}
-	return false
+	k, ok := envpolicy.ClassifyHost(h)
+	return ok && k.Has(envpolicy.IPLoopback)
 }
 
 // ReverseServer accepts /ws-node connections from remote naozhi nodes.

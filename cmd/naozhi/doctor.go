@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -163,8 +164,24 @@ type doctor struct {
 	json       bool
 	configPath string
 
+	// client issues every HTTP probe; nil means http.DefaultClient (the
+	// production path). Tests inject httptest.Server.Client() so parallel
+	// subtests never share http.DefaultTransport: httptest.Server.Close()
+	// calls DefaultTransport.CloseIdleConnections(), which can close a
+	// sibling subtest's freshly pooled body-less response connection before
+	// its RoundTrip has consumed the response (#2473).
+	client *http.Client
+
 	hasFail  bool
 	findings []finding
+}
+
+// httpClient returns the probe client, defaulting to http.DefaultClient.
+func (d *doctor) httpClient() *http.Client {
+	if d.client != nil {
+		return d.client
+	}
+	return http.DefaultClient
 }
 
 func (d *doctor) run() {

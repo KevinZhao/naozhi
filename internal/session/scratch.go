@@ -443,7 +443,8 @@ func SanitizeQuote(s string) (string, bool) {
 	// the C1 control range. Bidi / zero-width / BOM codepoints are removed
 	// with the same rule sanitizeKeyComponent uses for log attrs — without
 	// them a quoted shell prompt could rewrite operator journalctl output
-	// via ANSI / bidi overrides.
+	// via ANSI / bidi overrides. The deny-set is sessionkey.IsForbiddenKeyRune
+	// (R202606f-ARCH-6, #2301); only the \n / \t exemption is local.
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -451,14 +452,7 @@ func SanitizeQuote(s string) (string, bool) {
 			b.WriteRune(r)
 			continue
 		}
-		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			continue
-		}
-		switch {
-		case r >= 0x200B && r <= 0x200F,
-			r >= 0x202A && r <= 0x202E,
-			r == 0x2028, r == 0x2029,
-			r == 0xFEFF:
+		if sessionkey.IsForbiddenKeyRune(r) {
 			continue
 		}
 		b.WriteRune(r)
