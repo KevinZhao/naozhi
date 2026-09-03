@@ -1,9 +1,6 @@
 package session
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"slices"
 	"testing"
 
@@ -37,67 +34,40 @@ import (
 func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	t.Parallel()
 
-	// The backend-decidable argv fields — those the drift check CAN know,
-	// because backendDefaultsFor resolves them from backend-level config alone.
+	// Every argv-bearing field the drift check must reproduce. Both paths now
+	// build their SpawnOptions in argvSpawnOptions (spawn_argv.go), so this list
+	// is asserted against that one constructor — TestSpawnArgv_SingleSourceOfTruth
+	// pins that no consumer builds a competing literal.
 	//
-	// Deliberately not "every argv-bearing field": DebugFile also reaches argv
-	// but is a per-session path the drift side cannot reconstruct, so with
-	// NAOZHI_CLI_DEBUG enabled every claude shim already reads as drifted.
-	// That is a pre-existing gap of the same family as the per-agent overrides
-	// documented in §4.5.1, and out of scope here — listing it would assert a
-	// mirror that does not and cannot exist today.
-	//
-	// Extend this when a field is added that backend-level config CAN resolve.
+	// DebugFile is on the list as of the 2026-09-02 fix. It was previously
+	// excluded here as a per-session path "the drift side cannot reconstruct" —
+	// that was wrong, and the exclusion documented a live bug rather than a
+	// limitation: cliDebugPathFor is a pure function of the session key
+	// (KeyHash), and the drift loop holds state.Key. While it was omitted, every
+	// naozhi restart on a host with NAOZHI_CLI_DEBUG set read EVERY live claude
+	// shim as drifted and killed its CLI. See debugfile_drift_parity_test.go.
 	//
 	// MCPConfigFile qualifies for the same reason SettingsFile does: it is a
 	// single router-global value (RouterConfig.MCPConfigFile), not a per-session
 	// or per-agent one, so the drift side can reconstruct it exactly.
 	// RFC cli-mcp-config G4.
-	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile"}
+	//
+	// Still deliberately absent: ResumeID (session state, stripped from the
+	// stored argv by stripResumeArgs) and PermissionMode (both paths rely on the
+	// same zero value — see argvSpawnOptions).
+	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "DebugFile"}
 
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "router_shim.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse router_shim.go: %v", err)
-	}
-
-	// Find the cli.SpawnOptions composite literal passed to BuildArgs and
-	// collect the field names it sets.
-	var got []string
-	var found bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "BuildArgs" || len(call.Args) != 1 {
-			return true
-		}
-		lit, ok := call.Args[0].(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		found = true
-		for _, elt := range lit.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				if id, ok := kv.Key.(*ast.Ident); ok {
-					got = append(got, id.Name)
-				}
-			}
-		}
-		return false
-	})
-
-	if !found {
-		t.Fatal("no BuildArgs(cli.SpawnOptions{...}) call found in router_shim.go — " +
-			"if the drift check moved, move this test with it")
+	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
+	if literals == 0 {
+		t.Fatalf("no cli.SpawnOptions literal found in %s — if the argv "+
+			"constructor moved, move this test with it", argvConstructorFile)
 	}
 	for _, want := range required {
 		if !slices.Contains(got, want) {
-			t.Errorf("router_shim.go drift check omits SpawnOptions.%s (sets %v).\n"+
-				"The real spawn passes it, so every restart would read live shims as "+
-				"arg-drift and needlessly restart healthy sessions.", want, got)
+			t.Errorf("argvSpawnOptions omits SpawnOptions.%s (sets %v).\n"+
+				"Both the real spawn and the drift check read it from here, so every "+
+				"restart would read live shims as arg-drift and kill healthy sessions.",
+				want, got)
 		}
 	}
 }
@@ -197,45 +167,22 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 	})
 }
 
-// TestSpawnOptionsLiteral_CarriesEffort is the mirror of the drift-side AST
-// assertion, pointed at the real spawn. Deleting `Effort: sp.Effort` from the
-// SpawnOptions literal in router_lifecycle.go compiles and passes every
-// behavioural test — the tier just silently stops reaching the CLI — so the
-// production literal itself has to be asserted.
-func TestSpawnOptionsLiteral_CarriesEffort(t *testing.T) {
+// TestSpawnArgvConstructor_CarriesEffort is the narrow, RFC-owned assertion that
+// the tier still reaches argv at all. Deleting `Effort: effort` from
+// argvSpawnOptions compiles and passes every behavioural test — the tier just
+// silently stops reaching the CLI — so the production literal itself has to be
+// asserted. Kept separate from the required-list check above so a
+// kiro-effort-control regression names itself in the failure output.
+func TestSpawnArgvConstructor_CarriesEffort(t *testing.T) {
 	t.Parallel()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "router_lifecycle.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse router_lifecycle.go: %v", err)
+	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
+	if literals == 0 {
+		t.Fatalf("no cli.SpawnOptions literal found in %s — if the argv "+
+			"constructor moved, move this test with it", argvConstructorFile)
 	}
-
-	var found bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		sel, ok := lit.Type.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "SpawnOptions" {
-			return true
-		}
-		found = true
-		for _, elt := range lit.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Effort" {
-					return false
-				}
-			}
-		}
-		t.Error("the cli.SpawnOptions literal in router_lifecycle.go does not set " +
-			"Effort — the configured tier would never reach the CLI, and no " +
-			"behavioural test would notice")
-		return false
-	})
-	if !found {
-		t.Fatal("no cli.SpawnOptions literal found in router_lifecycle.go — " +
-			"if spawn assembly moved, move this test with it")
+	if !slices.Contains(got, "Effort") {
+		t.Errorf("argvSpawnOptions does not set Effort (sets %v) — the configured "+
+			"tier would never reach the CLI, and no behavioural test would notice", got)
 	}
 }
 

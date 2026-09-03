@@ -7783,16 +7783,23 @@ function sanitizeKeySlug(s) {
   // PRESENTATION FORM U+FE13, MODIFIER LETTER U+A789, RATIO U+2236) so a
   // project folder containing e.g. 'foo：bar' cannot survive as a
   // colon-like byte into the 4-segment key that strings.SplitN(":",4)
-  // relies on server-side. Also strips bidi override / embedding /
-  // directional isolate characters (U+202A–U+202E, U+2066–U+2069) and
-  // Unicode line separators (U+2028/U+2029) that bypass the
-  // ASCII-control-only filter below and can corrupt log output. Then
+  // relies on server-side. Also strips every non-ASCII codepoint the
+  // server-side session.ValidateSessionKey rejects (#2429): C1 controls
+  // (U+0080-U+009F), zero-width / LTR-RTL marks (U+200B-U+200F), bidi
+  // override / embedding (U+202A-U+202E), Unicode line separators
+  // (U+2028/U+2029) and the BOM (U+FEFF), plus the directional isolates
+  // (U+2066-U+2069) the IM-path sanitizer drops. A project directory
+  // whose name carries a zero-width space would otherwise produce a key
+  // the server 400s on first send, leaving a pending card that can never
+  // send. The class is written with \uXXXX escapes ONLY - the Go contract
+  // test TestDashboardJS_SanitizeKeySlug_CoversServerDenySet parses it
+  // and asserts it is a superset of session.DeniedKeyRuneRanges. Then
   // collapse runs of filesystem-hostile chars into single dashes so the
   // key stays short and readable. Cap at 64 bytes to leave plenty of
   // headroom under the 128-byte sanitizeKeyComponent cap.
   let safe = String(s)
     .replace(/[:：︓꞉∶]/g, '-')
-    .replace(/[‪-‮⁦-⁩\u2028\u2029]/g, '')
+    .replace(/[\u0080-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
     .replace(/[\s/\\?*<>|"\x00-\x1f\x7f]+/g, '-');
   safe = safe.replace(/-+/g, '-').replace(/^-|-$/g, '');
   if (safe.length > 64) safe = safe.slice(0, 64);
@@ -8059,6 +8066,22 @@ function fuzzyMatch(query, text) {
   return {score: 100 - ranges.length, ranges};
 }
 
+// matchProjectPath fuzzy-matches the query against the path AS RENDERED
+// (shortPath: home prefix collapsed to ~, long paths truncated) so the
+// returned ranges index into the same string buildProjectRow highlights.
+// Matching the raw path and then painting the ranges onto the short path
+// shifted every <mark> by the collapsed prefix length (and could run past
+// the end of the string) - #2429. If the visible text does not match but
+// the full path does (e.g. the user typed the collapsed /home/<user>
+// prefix), the row still qualifies with the full-path score but no
+// highlight, so the result set is never narrower than before.
+function matchProjectPath(query, path) {
+  const shown = fuzzyMatch(query, shortPath(path));
+  if (shown) return shown;
+  const full = fuzzyMatch(query, path);
+  return full ? {score: full.score, ranges: []} : null;
+}
+
 function highlight(text, ranges) {
   if (!ranges || !ranges.length) return esc(text);
   let out = '';
@@ -8085,7 +8108,7 @@ function renderPaletteList(state, query) {
       return;
     }
     const nameM = fuzzyMatch(q, p.name);
-    const pathM = fuzzyMatch(q, p.path);
+    const pathM = matchProjectPath(q, p.path);
     if (!nameM && !pathM) return;
     const score = Math.max(nameM ? nameM.score + 500 : 0, pathM ? pathM.score : 0);
     scored.push({
@@ -8142,6 +8165,7 @@ function renderPaletteList(state, query) {
     list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
     // Still render custom row below.
     const customEl = buildCustomRow(q, 0);
+    customEl.addEventListener('mouseenter', () => setActiveIdx(state, 0));
     list.appendChild(customEl);
     state.items = [{type: 'custom', query: q}];
     updateActiveRow(state);
@@ -8150,13 +8174,21 @@ function renderPaletteList(state, query) {
 
   list.innerHTML = '';
   items.forEach((it, i) => {
+    let row;
     if (it.type === 'quick') {
-      list.appendChild(buildQuickRow(i));
+      row = buildQuickRow(i);
     } else if (it.type === 'project') {
-      list.appendChild(buildProjectRow(it.data, i));
+      row = buildProjectRow(it.data, i);
     } else {
-      list.appendChild(buildCustomRow(it.query, i));
+      row = buildCustomRow(it.query, i);
     }
+    // Hover must move the keyboard cursor too (#2429): the row builders
+    // only know their index, so wire mouseenter here where `state` is in
+    // scope and route through setActiveIdx so state.activeIdx and the
+    // .active class never disagree - otherwise Enter opens the row the
+    // arrow keys last touched, not the one under the pointer.
+    row.addEventListener('mouseenter', () => setActiveIdx(state, i));
+    list.appendChild(row);
   });
   updateActiveRow(state);
 }
@@ -8200,7 +8232,6 @@ function buildProjectRow(s, idx) {
       '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
     '</div>' + nodeBadge;
   el.addEventListener('click', () => pickPaletteProject(p));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
@@ -8216,7 +8247,6 @@ function buildQuickRow(idx) {
       (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
     '</div>';
   el.addEventListener('click', () => pickPaletteQuick());
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
@@ -8245,11 +8275,14 @@ function buildCustomRow(query, idx) {
     '<span class="cp-icon">+</span>' +
     '<div class="cp-main"><div class="cp-name" style="color:var(--nz-text-mute)">' + label + '</div></div>';
   el.addEventListener('click', () => pickPaletteCustom(query));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
-function setActiveIdx(idx) {
+// setActiveIdx is the single writer for the palette cursor: it records the
+// index in state (what Enter reads) and repaints the .active class (what
+// the user sees). Keyboard navigation and hover both route through it.
+function setActiveIdx(state, idx) {
+  state.activeIdx = idx;
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   overlay.querySelectorAll('.cmd-palette-item').forEach(el => {
@@ -8258,7 +8291,7 @@ function setActiveIdx(idx) {
 }
 
 function updateActiveRow(state) {
-  setActiveIdx(state.activeIdx);
+  setActiveIdx(state, state.activeIdx);
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   const active = overlay.querySelector('.cmd-palette-item.active');
