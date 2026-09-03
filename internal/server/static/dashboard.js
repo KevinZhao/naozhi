@@ -10259,6 +10259,24 @@ function isMathInline(tex) {
   return true;
 }
 
+// isMathDisplay — content sanity gate for a `$$...$$` block captured by
+// BLOCK_SPLIT_RE (`tex` is the inner text, `$$` already stripped). Shell
+// prose uses `$$` for the current PID, so two of them on one line
+// (`echo $$ then kill $$`) form a syntactically valid display-math pair
+// whose "formula" is the prose in between (#2428). Accept when:
+//   1) an unambiguous LaTeX / equation char is present (\ ^ _ { } =)
+//   2) the block spans multiple lines — a deliberately fenced formula block
+//   3) otherwise the same heuristic as inline `$...$` (isMathInline)
+// Trade-off: a bare 3+ letter word (`$$ area $$`) has no hint and renders
+// literally, same as inline `$USD$`.
+function isMathDisplay(tex) {
+  const t = tex.trim();
+  if (t === '') return false;
+  if (/[\\^_{}=]/.test(t)) return true;
+  if (t.indexOf('\n') !== -1) return true;
+  return isMathInline(t);
+}
+
 function renderKatex(tex, displayMode) {
   if (katexReady) {
     try { return katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
@@ -11402,6 +11420,29 @@ function parseListItem(line, baselineCols) {
   return { kind: 'ol', depth, cols, startNum, content: m[4] };
 }
 
+// mergeProseDollarBlocks — post-process `s.split(BLOCK_SPLIT_RE)`. The split
+// with a capturing group alternates text / block / text / ...; odd indexes
+// are matched blocks. A `$$...$$` block whose content fails isMathDisplay
+// (shell `echo $$ then kill $$`, #2428) is folded back into the surrounding
+// text so the line keeps flowing as one prose part. Rendering it as its own
+// part would inject a spurious <br> mid-sentence and re-run the block
+// heuristics on the fragment. Fenced code / \[ \] / \begin{} blocks are
+// untouched.
+function mergeProseDollarBlocks(parts) {
+  if (parts.length < 3) return parts;
+  const out = [parts[0]];
+  for (let i = 1; i < parts.length; i += 2) {
+    const block = parts[i];
+    const text = parts[i + 1] || '';
+    if (block.startsWith('$$') && !isMathDisplay(block.slice(2, -2))) {
+      out[out.length - 1] += block + text;
+    } else {
+      out.push(block, text);
+    }
+  }
+  return out;
+}
+
 function renderMdUncached(s) {
   // Normalize CRLF/CR to LF up front. Source can be Windows-pasted text or
   // IM payloads carrying \r\n. Without this every per-line regex below
@@ -11410,7 +11451,7 @@ function renderMdUncached(s) {
   if (s.indexOf('\r') !== -1) s = s.replace(/\r\n?/g, '\n');
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
-  const parts = s.split(BLOCK_SPLIT_RE);
+  const parts = mergeProseDollarBlocks(s.split(BLOCK_SPLIT_RE));
   return parts.map(part => {
     if (part.startsWith('```')) {
       // Single-line fence (```ls -la```) carries no info string — everything
@@ -11481,7 +11522,10 @@ function renderMdUncached(s) {
         '</div>' +
         '</div>';
     }
-    if (part.startsWith('$$') && part.endsWith('$$')) {
+    // isMathDisplay re-checked here: mergeProseDollarBlocks folds a rejected
+    // `$$...$$` back into its neighbouring text, and when both neighbours are
+    // empty the merged prose part itself still starts/ends with `$$`.
+    if (part.startsWith('$$') && part.endsWith('$$') && isMathDisplay(part.slice(2, -2))) {
       return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
     }
     if (part.startsWith('\\[') && part.endsWith('\\]')) {
