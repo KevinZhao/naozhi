@@ -22,18 +22,21 @@ const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const KEY_B = 'dashboard:direct:2026-01-01-120001-2:otherproject';
 
-// conversation(n) builds n alternating user/text events with strictly
-// increasing timestamps (1 s apart) so both `after` and `before` cursors have
-// unambiguous boundaries.
-function conversation(n, tag) {
+// conversation(n) builds n alternating user/text events with increasing
+// timestamps (1 s apart). Indices listed in `sameMsAsPrev` reuse the previous
+// event's millisecond — the "one CLI frame, several blocks" shape — so a page
+// or ring edge can fall inside a same-ms sibling group.
+function conversation(n, tag, sameMsAsPrev = []) {
   const base = Date.now() - (n + 10) * 1000;
   const out = [];
+  let t = base;
   for (let i = 0; i < n; i++) {
+    if (i > 0 && !sameMsAsPrev.includes(i)) t += 1000;
     const user = i % 2 === 0;
     out.push({
       type: user ? 'user' : 'text',
       detail: (user ? 'Q' : 'A') + '-' + tag + '-' + i,
-      time: base + i * 1000,
+      time: t,
       uuid: 'ev-' + tag + '-' + i,
     });
   }
@@ -48,9 +51,13 @@ async function openSession(page, mock, key) {
 }
 
 test.describe('Events panel #2430 P2', () => {
-  test('export pages past the in-memory ring and reports the true count', async ({ browser }) => {
+  test('export pages past the in-memory ring, keeps same-ms siblings at the ring edge, reports the true count', async ({ browser }) => {
+    // 700 events; ring = last 500 = indices 200..699. Index 200 shares its
+    // millisecond with 199 (ring edge splits the sibling pair) and 451/452
+    // with 450 (a group inside the paged region). A strict `before=<oldest>`
+    // cursor can never reach 199 — and would still toast a "complete" export.
     const mock = await startMockServer({
-      eventsByKey: { [KEY_A]: conversation(700, 'a') },
+      eventsByKey: { [KEY_A]: conversation(700, 'a', [200, 451, 452]) },
       eventsRingSize: 500,
     });
     try {
@@ -63,9 +70,16 @@ test.describe('Events panel #2430 P2', () => {
       const download = await dl;
       const md = fs.readFileSync(await download.path(), 'utf8');
 
-      // 700 alternating events → 350 user headings; a ring-only export has 250.
+      // 700 alternating events → 350 user + 350 assistant headings; a
+      // ring-only export has 250 user headings, a strict-cursor export 699 total.
       expect((md.match(/^## 用户/gm) || []).length).toBe(350);
+      expect((md.match(/^## /gm) || []).length).toBe(700);
       expect(md).toContain('Q-a-0');
+      // The same-ms sibling left of the ring edge and every member of the
+      // inner group survive; nothing is exported twice.
+      for (const i of [199, 200, 450, 451, 452]) {
+        expect((md.match(new RegExp('-a-' + i + '\\b', 'g')) || []).length).toBe(1);
+      }
       await expect(page.locator('#toast')).toContainText('已导出 700 条事件');
       await expect(page.locator('#toast')).not.toContainText('已截断');
 
@@ -81,16 +95,19 @@ test.describe('Events panel #2430 P2', () => {
   test('WS-down session switch during a slow tail poll still renders the paged first page', async ({ browser }) => {
     const mock = await startMockServer({
       eventsByKey: { [KEY_B]: conversation(150, 'b') },
-      eventsTailDelayMs: 2500,
+      // Held well past the switch below (and past fetchJSON's 5 s timeout) so
+      // the race isn't a wall-clock coin flip.
+      eventsTailDelayMs: 6000,
     });
     try {
       const ctx = await browser.newContext({ ...desktop });
       const page = await ctx.newPage();
       await openSession(page, mock, KEY_A);
 
-      // Poll ticks every 1 s; the first tail poll (after=…) fires at ~1 s and
-      // is held 2.5 s by the mock. Switch to B while it is in flight.
-      await page.waitForTimeout(1500);
+      // Poll ticks every 1 s; wait until the mock has actually received the
+      // first tail poll (after=…) for A — it is then held 6 s — and switch to
+      // B while it is in flight.
+      await expect.poll(() => mock.eventsCalls.filter(q => /after=/.test(q)).length, { timeout: 5000 }).toBeGreaterThan(0);
       await page.click(`.session-card[data-key="${KEY_B}"]`);
 
       // The paged full fetch (limit=100 + X-Events-Has-More=1) must run and

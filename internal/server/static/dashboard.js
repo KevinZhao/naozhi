@@ -3768,12 +3768,27 @@ const EXPORT_PAGE_LIMIT = 500;
 const EXPORT_MAX_PAGES = 40;
 let _exportInFlight = false;
 
+// exportEventKey identifies an entry across overlapping pages: the backend's
+// uuid when present, else (time,type,detail) for pre-uuid synthetic entries.
+function exportEventKey(e) {
+  if (e && e.uuid) return 'u:' + e.uuid;
+  return 'k:' + ((e && e.time) || 0) + '|' + ((e && e.type) || '') + '|' + ((e && e.detail) || '');
+}
+
 // fetchAllSessionEvents returns { events, truncated } (or { status } on a
 // non-2xx first page). `truncated` is set whenever the export is known or
-// suspected to be incomplete — page cap hit, a later page failed, or the
-// cursor made no progress — so the caller must warn rather than claim a full
-// export. Remote nodes skip the pager: the reverse-RPC relay predates
-// before/limit and would replay the same tail forever.
+// suspected to be incomplete — page cap hit, a later page failed or was
+// malformed, a full page yielded nothing new, or a remote node (whose relay
+// ignores before/limit and so can only ever serve the ring) returned a
+// ring-sized slice — so the caller must warn rather than claim a full export.
+//
+// Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
+// (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
+// same-millisecond sibling group (one CLI frame's blocks) split by the ring
+// edge or a 500-entry page edge would lose its older members for good under a
+// strict cursor. Re-admitting the watermark millisecond and dropping what we
+// already hold by exportEventKey keeps every sibling; progress is measured by
+// "new entries after dedup", not by the cursor moving.
 async function fetchAllSessionEvents(key, node, headers) {
   const remote = !!(node && node !== 'local');
   const base = '/api/sessions/events?key=' + encodeURIComponent(key) +
@@ -3782,21 +3797,35 @@ async function fetchAllSessionEvents(key, node, headers) {
   if (!r.ok) return { status: r.status };
   let events = await r.json();
   if (!Array.isArray(events)) events = [];
-  if (remote || events.length === 0) return { events, truncated: false };
+  if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
+  if (events.length === 0) return { events, truncated: false };
 
+  const seen = new Set(events.map(exportEventKey));
   let truncated = false;
   let oldest = (events[0] && events[0].time) || 0;
   for (let pages = 0; oldest > 0; pages++) {
     if (pages >= EXPORT_MAX_PAGES) { truncated = true; break; }
-    const pr = await fetch(base + '&before=' + oldest + '&limit=' + EXPORT_PAGE_LIMIT, { headers });
+    const pr = await fetch(base + '&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT, { headers });
     if (!pr.ok) { truncated = true; break; }
     const page = await pr.json();
-    if (!Array.isArray(page) || page.length === 0) break;
-    const pageOldest = (page[0] && page[0].time) || 0;
-    // Strict `before` guarantees progress; anything else means the server
-    // handed back a slice we can't trust to terminate — stop and warn.
-    if (!pageOldest || pageOldest >= oldest) { truncated = true; break; }
-    events = page.concat(events);
+    if (!Array.isArray(page)) { truncated = true; break; }
+    if (page.length === 0) break;
+    const fresh = page.filter(e => {
+      const k = exportEventKey(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (fresh.length === 0) {
+      // A full page of entries we already hold can't be told apart from a
+      // same-ms flood wider than one page — stop and warn. A short page of
+      // known entries just means the history is exhausted.
+      if (page.length >= EXPORT_PAGE_LIMIT) truncated = true;
+      break;
+    }
+    events = fresh.concat(events);
+    const pageOldest = (fresh[0] && fresh[0].time) || 0;
+    if (!pageOldest) break; // untimed head reached; nothing older to cursor on
     oldest = pageOldest;
   }
   return { events, truncated };
@@ -4657,11 +4686,18 @@ function lockRenderedAskCards(scrollEl) {
     _askAnswered.add(tuid);
     card.querySelectorAll('button').forEach(b => { b.disabled = true; });
     const content = card.querySelector('.event-content');
-    if (content && !content.querySelector('.ask-status')) {
+    if (!content) return;
+    const status = content.querySelector('.ask-status');
+    if (!status) {
       const div = document.createElement('div');
       div.className = 'ask-status';
       div.textContent = '已回答';
       content.appendChild(div);
+    } else if (status.textContent.indexOf('发送失败') === 0) {
+      // onAskSubmit's failure rollback left the card actionable; a user event
+      // from another surface has since answered it, so the failure copy is
+      // stale — replace it rather than leave a locked card saying "failed".
+      status.textContent = '已回答';
     }
   });
 }

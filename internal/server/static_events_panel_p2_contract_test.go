@@ -59,14 +59,32 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 
 	pager := jsFuncBody(t, js, "fetchAllSessionEvents")
 	for _, want := range []string{
-		"'&before=' + ",                 // same cursor contract as loadEarlierEvents
-		"'&limit=' + EXPORT_PAGE_LIMIT", // page size == server maxEventsPageLimit
-		"EXPORT_MAX_PAGES",              // hard upper bound
-		"truncated = true",              // cap / no-progress / page error all flag truncation
+		// Re-admit the watermark ms: ring + disk sources are strictly `< before`,
+		// so `before = oldest` would lose same-ms siblings split by a page edge.
+		"'&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT",
+		"const seen = new Set(events.map(exportEventKey));", // dedup across overlapping pages
+		"if (fresh.length === 0) {",                          // progress = new entries after dedup
+		"EXPORT_MAX_PAGES",                                   // hard upper bound
+		"truncated = true",                                   // cap / malformed / stalled full page flag truncation
+		"if (!Array.isArray(page)) { truncated = true; break; }",
+		// Remote relay ignores before/limit → ring-only; a ring-sized slice is
+		// probably incomplete and must not toast as a full export.
+		"if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };",
 	} {
 		if !strings.Contains(pager, want) {
 			t.Errorf("fetchAllSessionEvents missing %q", want)
 		}
+	}
+	if strings.Contains(pager, "'&before=' + oldest + '&limit='") {
+		t.Error("fetchAllSessionEvents still uses the strict `before = oldest` cursor — same-ms siblings at a page edge are lost")
+	}
+	// Untimed head: concat first, then stop (never drop the page).
+	if !strings.Contains(pager, "events = fresh.concat(events);\n    const pageOldest = (fresh[0] && fresh[0].time) || 0;\n    if (!pageOldest) break;") {
+		t.Error("fetchAllSessionEvents must concat the page before breaking on an untimed head")
+	}
+	keyFn := jsFuncBody(t, js, "exportEventKey")
+	if !strings.Contains(keyFn, "e.uuid") || !strings.Contains(keyFn, "e.detail") {
+		t.Error("exportEventKey must key on uuid, falling back to (time,type,detail)")
 	}
 	if !strings.Contains(js, "const EXPORT_PAGE_LIMIT = 500;") {
 		t.Error("EXPORT_PAGE_LIMIT must equal the server's maxEventsPageLimit (500)")
@@ -111,6 +129,7 @@ func TestDashboardJS_AskCardLocksOnIncrementalUserEvent(t *testing.T) {
 		"_askAnswered.add(tuid);",
 		"b.disabled = true;",
 		"'ask-status'",
+		"indexOf('发送失败') === 0", // stale failure copy is overwritten with 已回答
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("lockRenderedAskCards missing %q", want)
