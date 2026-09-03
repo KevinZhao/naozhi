@@ -147,9 +147,9 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			case "thinking":
 				entry.Type = "thinking"
 				// R20260602190132-PERF-11: one UTF-8 scan derives both the
-				// 120-rune Summary and the eventDetailMaxRunes Detail rather
+				// 120-rune Summary and the EventDetailMaxRunes Detail rather
 				// than scanning block.Text twice from the head.
-				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, eventDetailMaxRunes)
+				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, EventDetailMaxRunes)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name

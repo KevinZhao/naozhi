@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // TestSource_UUID_DistinctDetailSameSummary covers #2336: two codex lines
@@ -41,5 +43,13 @@ func TestSource_UUID_DistinctDetailSameSummary(t *testing.T) {
 	}
 	if got[0].UUID == got[1].UUID {
 		t.Errorf("same-ts same-summary entries with different detail share UUID %q — merged.Source would drop one", got[0].UUID)
+	}
+	// Pin the canonical derivation (kirojsonl/uuid_test.go does the same):
+	// distinctness alone would let a refactor drift to any detail-sensitive
+	// hash while silently breaking the cross-source convention.
+	for i, e := range got {
+		if want := textutil.DeriveLegacyUUID(e.Time, e.Type, e.Summary, e.Detail); e.UUID != want {
+			t.Errorf("entry %d: UUID %q, want canonical DeriveLegacyUUID %q", i, e.UUID, want)
+		}
 	}
 }

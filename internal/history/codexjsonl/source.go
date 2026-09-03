@@ -42,7 +42,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // SessionIDFunc returns the codex thread ID for the bound session, or ""
@@ -417,28 +417,9 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		return cli.EventEntry{}, false
 	}
 
-	// Truncate to the same caps the claude path uses (history_tail.go): a
-	// 120-rune Summary and a 16000-rune Detail. Without this the full message
-	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
-	// boundary, and the dashboard renders an unbounded mega-bubble.
-	summary, detail := textutil.TruncateRunesPair(ev.Message, 120, 16000)
-	return cli.EventEntry{
-		Time: timeMS,
-		Type: entryType,
-		// Derive a deterministic UUID so merged.Source can dedup overlapping
-		// pages. Without it the entry carries an empty UUID, which
-		// merged.mergeSorted treats as un-dedupable — the same codex line then
-		// renders twice whenever a LoadBefore `beforeMS` cursor straddles a
-		// previously-returned entry. claude (via discovery.history_tail) and
-		// kiro (kirojsonl) both set this; codex must match the contract.
-		// Fold the real detail (not "") into the hash, as kiro does: two
-		// lines sharing the same ms timestamp and 120-rune summary but
-		// differing in the detail tail must not collide, or merged.Source's
-		// UUID-first dedup silently drops the second one (#2336).
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
-		Summary: summary,
-		Detail:  detail,
-	}, true
+	// Truncation caps and the deterministic dedup UUID (#2336) come from the
+	// shared recipe — see history.NewDerivedEntry for why both matter.
+	return history.NewDerivedEntry(timeMS, entryType, ev.Message), true
 }
 
 // parseISOms converts codex's ISO-8601 RFC3339 timestamp (e.g.

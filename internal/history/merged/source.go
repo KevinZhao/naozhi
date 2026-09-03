@@ -55,6 +55,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Source is the merged history.Source. Either Local or Fallback may
@@ -150,9 +151,27 @@ func entryCmp(a, b cli.EventEntry) int {
 // text (discovery/history_tail.go). Keying on Summary therefore missed
 // every image-bearing turn — the original doubling bug, unfixed. Detail
 // is the same text on both sides, so it is the reliable discriminator;
-// it is also the wider field (2000/16000 runes vs Summary's 120), which
-// makes an accidental cross-turn collision strictly less likely than the
-// old Summary-bearing key allowed.
+// it is also the wider field than Summary's 120 runes, which makes an
+// accidental cross-turn collision strictly less likely than the old
+// Summary-bearing key allowed.
+//
+// Detail is NORMALISED to the tightest tier cap before keying. The two
+// tiers truncate the same source text at different bounds: the local tier
+// caps user prompts at cli.EventDetailMaxRunes (2000, process_send.go)
+// while the fallback readers cap the same prompt at history.DetailMaxRunes
+// (16000). For any prompt longer than the live cap the raw Detail strings
+// therefore differ at rune 2000 — and since the two tiers' UUIDs never
+// coincide by construction, BOTH dedup branches missed and every long
+// prompt rendered twice. (Assistant text is capped at 16000 on both sides,
+// so for it the normalisation is a no-op equality-wise.) Re-truncating both sides to the tighter cap makes the keys equal
+// exactly when the underlying texts agree through the live-visible prefix
+// (TruncateRunes(TruncateRunes(s, 16000), 2000) == TruncateRunes(s, 2000)
+// — the ellipsis marker is re-appended identically). The theoretical cost
+// is a false pair between two distinct same-Type turns inside the skew
+// window agreeing on their first 2000 runes; the survivor's visible Detail
+// is identical to the dropped entry's through the entire live-tier render,
+// the same residual accepted by the derived-UUID hash over truncated
+// detail (history.NewDerivedEntry), so the trade is taken knowingly.
 //
 // Returns "" — meaning "no content identity, do not dedup by content" —
 // when Detail is empty AND the entry carries no images. Such an entry has
@@ -220,7 +239,11 @@ func contentKey(e cli.EventEntry) string {
 	}
 	b.WriteString("t")
 	b.WriteByte(0x1f)
-	b.WriteString(e.Detail)
+	// Normalise to the live tier's cap so a fallback Detail truncated at
+	// history.DetailMaxRunes keys identically to its live twin truncated at
+	// cli.EventDetailMaxRunes — see the doc comment above. TruncateRunes is
+	// a no-op (no scan, no alloc) for anything already within the cap.
+	b.WriteString(textutil.TruncateRunes(e.Detail, cli.EventDetailMaxRunes))
 	return b.String()
 }
 

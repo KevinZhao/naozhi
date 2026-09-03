@@ -28,6 +28,14 @@ import (
 // derivation rule without bumping — any change here MUST flip the prefix
 // to "v2" and carry a CHANGELOG note that MergedSource's dedup window is
 // effectively reset.
+//
+// Scope of that contract: it governs the hash RULE in this function (the
+// field set, ordering, separators, digest). A call site correcting which
+// values it passes (e.g. codexjsonl folding the real detail where it
+// mistakenly passed "" — #2336/#2445) is a bug fix, not a rule change; it
+// shifts UUIDs only for entries that were colliding or mis-derived, none
+// of which are ever persisted (derived UUIDs are recomputed per LoadBefore
+// and replay batches never reach the persist sink).
 func DeriveLegacyUUID(timeMS int64, typ, summary, detail string) string {
 	h := sha256.New()
 	h.Write([]byte("v1\x00"))
