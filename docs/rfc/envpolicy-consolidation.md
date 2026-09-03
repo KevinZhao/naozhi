@@ -1,6 +1,6 @@
 # RFC: envpolicy — 统一分散的 Claude env allow/deny 策略
 
-> **状态**: Draft v1（待评审）
+> **状态**: Phase 1 已落地（#891）；Phase 2 IP 分类叶子（`envpolicy.ClassifyIP`，shim/node 接入）已落地（#2300）；列表语义统一仍待独立评审
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
 > **范围**: 把分散在三处的 Claude 子进程环境变量过滤策略中**已被验证可安全共享的叶子校验器与 per-backend 凭据矩阵**抽取到一个新的 `internal/envpolicy` 包，先消除重复实现、统一安全不变量的单一来源；**不**在本轮统一三处的完整 allow/deny 列表语义。
