@@ -252,6 +252,41 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
     }
   });
 
+  test('node disconnect does not deselect a local session just because the node picker points at that node', async ({ browser }) => {
+    const sessions = defaultSessions();
+    sessions.nodes.n1 = { display_name: 'Node 1', status: 'ok' };
+    const mock = await startMockServer({ sessions });
+    try {
+      const ctx = await browser.newContext({ ...desktop });
+      const page = await ctx.newPage();
+      await openSession(page, mock, KEY_A);
+      const result = await page.evaluate(() => {
+        // eslint-disable-next-line no-eval
+        const g = (expr) => eval(expr);
+        const ws = g('wsm');
+        // wireNodePicker rewrites the global dispatch target as soon as the
+        // new-session picker changes node; the local session stays selected.
+        g('selectedNode = "n1"');
+        const before = g('selectedKey');
+        ws.onMessage({ type: 'error', node: 'n1', error: 'node disconnected' });
+        return {
+          before,
+          after: g('selectedKey'),
+          node: g('selectedNode'),
+          eventsPane: !!document.getElementById('events-scroll'),
+          toast: (document.getElementById('toast') || {}).textContent || '',
+        };
+      });
+      expect(result.after).toBe(result.before);
+      expect(result.node).toBe('local'); // reconcileSelectedNode still snaps the picker back
+      expect(result.eventsPane).toBe(true);
+      expect(result.toast).not.toContain('已断开');
+      await ctx.close();
+    } finally {
+      mock.server.close();
+    }
+  });
+
   test('node disconnect leaves a selected pending session on that node selected', async ({ browser }) => {
     const sessions = defaultSessions();
     sessions.nodes.n1 = { display_name: 'Node 1', status: 'ok' };

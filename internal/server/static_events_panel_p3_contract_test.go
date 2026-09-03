@@ -153,10 +153,19 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	} else {
 		t.Fatal("node-disconnected branch must still call reconcileSelectedNode()")
 	}
-	// Must compare against the dead node BEFORE reconcileSelectedNode snaps
-	// selectedNode back to local, and must leave pending sessions alone.
-	if !strings.Contains(branch, "if (selectedKey && selectedNode === msg.node && sessionWorkspaces[selectedKey] === undefined) {") {
-		t.Error("node-disconnected branch must deselect the selected session only when it lived on that node and is not a pending (never-sent) session")
+	// Ownership must come from the session store (sessionsData / sessionNodes
+	// keyed by the dead node), never from selectedNode: that global is the
+	// dispatch target and wireNodePicker rewrites it on the new-session
+	// picker's change event, so a local session with the picker on n1 would
+	// otherwise be wiped when n1 disconnects. Pending sessions stay alone.
+	if !strings.Contains(branch, "(sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)") {
+		t.Error("node-disconnected branch must resolve the selected session's node from sessionsData/sessionNodes, not selectedNode")
+	}
+	if strings.Contains(branch, "selectedNode === msg.node") {
+		t.Error("node-disconnected branch must not infer session ownership from selectedNode (dispatch target, rewritten by wireNodePicker)")
+	}
+	if !strings.Contains(branch, "sessionWorkspaces[selectedKey] === undefined") {
+		t.Error("node-disconnected branch must skip pending (never-sent) sessions")
 	}
 	if !strings.Contains(branch, "deselectNodeSession(msg.node);") {
 		t.Error("node-disconnected branch must call deselectNodeSession")

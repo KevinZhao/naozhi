@@ -12315,9 +12315,14 @@ const wsm = {
           // it any more and its key means nothing under the `local` node
           // reconcileSelectedNode snaps to, so deselect it (the backend's
           // "deselect stale sessions" contract) before selectedNode moves.
+          // Ownership comes from the session store, NOT from selectedNode:
+          // that global is the dispatch target and wireNodePicker rewrites
+          // it the moment the new-session picker changes node, so a local
+          // session with the picker on n1 must survive n1 going away.
           // Pending (never-sent) sessions are only a draft target — they stay
           // selected and are neither cleared nor deleted here.
-          if (selectedKey && selectedNode === msg.node && sessionWorkspaces[selectedKey] === undefined) {
+          if (selectedKey && sessionWorkspaces[selectedKey] === undefined &&
+              (sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)) {
             deselectNodeSession(msg.node);
           }
           nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
