@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // getSessionID returns the session ID lock-free via atomic.Pointer[string].
@@ -1053,7 +1054,9 @@ func scanLastSummaries(entries []cli.EventEntry) (prompt, activity, response str
 			activity = e.Summary
 		}
 		if response == "" && e.Type == "text" {
-			response = e.Summary
+			// Mirrors EventLog's store-time strip so the replay-seeded
+			// cache and the live summary render identically (#2435).
+			response = textutil.StripMarkdown(e.Summary)
 		}
 		if prompt != "" && activity != "" && response != "" {
 			break

@@ -8,6 +8,8 @@ package cli
 import (
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // sanitizeImagesAligned drops any data URI that is not an image/* data URL
@@ -171,8 +173,10 @@ func (l *EventLog) Append(e EventEntry) {
 		// R110-P1: assistant text reply — feed sidebar 30-rune preview.
 		// Stored even when Summary is empty so a freshly-streamed empty
 		// text block (rare but possible) overwrites stale values rather
-		// than leaving last-turn's response visible.
-		storeAtomicString(&l.lastResponseSummary, e.Summary)
+		// than leaving last-turn's response visible. Markdown notation is
+		// stripped at store time (#2435): the sidebar renders this as plain
+		// text, so "## 判分" / "**x**" / backticks must not leak through.
+		storeAtomicString(&l.lastResponseSummary, textutil.StripMarkdown(e.Summary))
 	} else if IsActivityType(e.Type) {
 		// IsActivityType is the shared predicate for the "activity" set;
 		// session.ManagedSession history scans also consume it so the
@@ -507,7 +511,7 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		storeAtomicString(&l.lastPromptSummary, lastPrompt)
 	}
 	if sawResponse {
-		storeAtomicString(&l.lastResponseSummary, lastResponse)
+		storeAtomicString(&l.lastResponseSummary, textutil.StripMarkdown(lastResponse))
 	}
 	if sawActivity {
 		storeAtomicString(&l.lastActivitySummary, lastActivity)
