@@ -39,6 +39,11 @@
 // millisecond.
 //
 // Not goroutine-safe: each streaming loop owns exactly one cursor.
+//
+// One-shot request/response readers (dashboard HTTP poll, relay
+// fetch_events, agent_events) cannot hold a cursor; they use
+// SinceInclusive (since_inclusive.go) for the same watermark-1 query and
+// leave the uuid dedup to the client.
 package cli
 
 // SinceCursor tracks a streaming watermark over EventLog entries with

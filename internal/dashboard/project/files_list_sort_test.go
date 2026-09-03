@@ -81,3 +81,33 @@ func TestSortEntries_Empty(t *testing.T) {
 		t.Fatalf("expected empty, got %v", entries)
 	}
 }
+
+// #2433 item 5: names that collide under case-folding (Makefile / makefile)
+// must sort identically regardless of the ReadDir input order, otherwise the
+// listing "jitters" between refreshes.
+func TestSortEntries_CaseFoldTiesDeterministic(t *testing.T) {
+	t.Parallel()
+	perms := [][]string{
+		{"Makefile", "makefile", "MAKEFILE"},
+		{"makefile", "MAKEFILE", "Makefile"},
+		{"MAKEFILE", "Makefile", "makefile"},
+	}
+	var first []string
+	for _, p := range perms {
+		entries := make([]listEntry, len(p))
+		for i, n := range p {
+			entries[i] = listEntry{Name: n}
+		}
+		sortEntries(entries)
+		got := namesOf(entries)
+		if first == nil {
+			first = got
+			continue
+		}
+		for i := range got {
+			if got[i] != first[i] {
+				t.Fatalf("order depends on input order: %v vs %v (input %v)", first, got, p)
+			}
+		}
+	}
+}

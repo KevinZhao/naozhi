@@ -78,6 +78,20 @@ var scanBufPool = sync.Pool{
 	},
 }
 
+// maxLineBytes is the longest jsonl record the forward scan accepts.
+// Assistant messages can be long, so this is well above bufio.Scanner's
+// 64 KiB default; anything longer (kiro ToolResults reach tens of MiB on
+// a single line) is skipped rather than aborting the scan (#2448).
+const maxLineBytes = 1 << 20
+
+// lineReaderPool recycles the bufio.Reader that sits between the file and
+// the scanner so an oversized record can be drained and the scan resumed
+// (see parseFile). Pooled for the same per-page churn reason as
+// scanBufPool (mirrors naozhilog/source.go's bufReaderPool).
+var lineReaderPool = sync.Pool{
+	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
+}
+
 // kindPromptMarker and kindAsstMarker are byte quick-filters: a jsonl line
 // that contains neither cannot decode into a Prompt or AssistantMessage
 // record, so decodeLine can skip it before paying for two json.Unmarshal
@@ -281,19 +295,28 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			anchor = headPromptAnchor(ctx, f, off)
 		}
 	}
-	limited := io.LimitReader(f, maxFileBytes)
-	scanner := bufio.NewScanner(limited)
-	// Allow 1 MiB lines — assistant messages can be long. Default 64 KiB
-	// would silently truncate on token-rich replies. The initial buffer is
-	// pooled: bufio.Scanner only grows (never shrinks below) the slice we hand
-	// it, so returning it at zero length recycles the 64 KiB backing array.
+	// br sits between the file and the scanner so that an oversized record
+	// can be skipped (#2448): bufio.Scanner is unusable after ErrTooLong, so
+	// the rest of the line is drained from br and a fresh scanner resumes on
+	// br without losing any bytes already buffered past the long line.
+	br := lineReaderPool.Get().(*bufio.Reader)
+	br.Reset(io.LimitReader(f, maxFileBytes))
+	defer func() {
+		br.Reset(nil)
+		lineReaderPool.Put(br)
+	}()
+	// Allow maxLineBytes lines — bufio.Scanner's default 64 KiB would
+	// silently truncate on token-rich replies. The initial buffer is pooled:
+	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
+	// returning it at zero length recycles the 64 KiB backing array.
 	bufPtr := scanBufPool.Get().(*[]byte)
 	defer func() {
 		b := (*bufPtr)[:0]
 		*bufPtr = b
 		scanBufPool.Put(bufPtr)
 	}()
-	scanner.Buffer(*bufPtr, 1<<20)
+	scanner := bufio.NewScanner(br)
+	scanner.Buffer(*bufPtr, maxLineBytes)
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
@@ -342,36 +365,84 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		out = append(out, entry)
 	}
 
-	if skipPartialFirstLine && scanner.Scan() {
-		// The first scanned line is the tail of the record straddling the
-		// seek boundary. Reassemble it with the head bytes the backscan kept
-		// so the record is parsed (and advances the borrow state) exactly as
-		// it would be in a whole-file read; with no fragment it stays dropped.
-		if len(anchor.fragment) > 0 {
-			processLine(append(anchor.fragment, scanner.Bytes()...))
-		}
-	}
-	for scanner.Scan() {
-		// Cooperative cancellation. Done lookups every ctxCheckEvery
-		// lines keep the cost negligible while still guaranteeing
-		// prompt return on shutdown / dashboard navigation.
-		if processed%ctxCheckEvery == 0 {
-			select {
-			case <-ctx.Done():
-				return out
-			default:
+	if skipPartialFirstLine {
+		if scanner.Scan() {
+			// The first scanned line is the tail of the record straddling the
+			// seek boundary. Reassemble it with the head bytes the backscan
+			// kept so the record is parsed (and advances the borrow state)
+			// exactly as it would be in a whole-file read; with no fragment it
+			// stays dropped.
+			if len(anchor.fragment) > 0 {
+				processLine(append(anchor.fragment, scanner.Bytes()...))
 			}
+		} else if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+			// The straddling partial line is itself oversized. Never Scan this
+			// scanner again: with an error set, bufio.Scanner hands the
+			// buffered 1 MiB prefix back as a final token (split-at-EOF
+			// recovery) and it would reach processLine as if it were a whole
+			// record. Drain the rest of the line and rebuild instead.
+			if !discardRestOfLine(br) {
+				return out
+			}
+			scanner = bufio.NewScanner(br)
+			scanner.Buffer(*bufPtr, maxLineBytes)
 		}
-		processed++
-		processLine(scanner.Bytes())
 	}
-	if err := scanner.Err(); err != nil {
-		// Partial-write tails surface here as bufio errors. Treat as
-		// end-of-file so the merge layer doesn't lose the entries we
-		// already accumulated.
-		slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
+	for {
+		for scanner.Scan() {
+			// Cooperative cancellation. Done lookups every ctxCheckEvery
+			// lines keep the cost negligible while still guaranteeing
+			// prompt return on shutdown / dashboard navigation.
+			if processed%ctxCheckEvery == 0 {
+				select {
+				case <-ctx.Done():
+					return out
+				default:
+				}
+			}
+			processed++
+			processLine(scanner.Bytes())
+		}
+		err := scanner.Err()
+		if !errors.Is(err, bufio.ErrTooLong) {
+			if err != nil {
+				// Partial-write tails surface here as bufio errors. Treat as
+				// end-of-file so the merge layer doesn't lose the entries we
+				// already accumulated.
+				slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
+			}
+			return out
+		}
+		// One record exceeds maxLineBytes (#2448). The scanner has consumed
+		// exactly its buffer's worth of the line (no '\n' in it, or it would
+		// have been a token); drop the remainder and resume with a fresh
+		// scanner so the records after it still surface. The oversized
+		// record itself is skipped, as headPromptAnchor skips an oversized
+		// carry. This also covers the partial first line of the tail window
+		// being oversized — the head fragment is simply never reassembled.
+		if !discardRestOfLine(br) {
+			return out
+		}
+		scanner = bufio.NewScanner(br)
+		scanner.Buffer(*bufPtr, maxLineBytes)
 	}
-	return out
+}
+
+// discardRestOfLine drops bytes from br up to and including the next '\n'.
+// Returns false when the input ends (or fails) before a newline is seen, in
+// which case nothing further can be scanned.
+func discardRestOfLine(br *bufio.Reader) bool {
+	for {
+		_, err := br.ReadSlice('\n')
+		switch {
+		case err == nil:
+			return true
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		default:
+			return false
+		}
+	}
 }
 
 // headBackscanChunk is the read size for headPromptAnchor's reverse walk.
@@ -472,7 +543,7 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 		} else {
 			carry = append(carry[:0], buf...)
 		}
-		if len(carry) > headBackscanChunk {
+		if len(carry) > maxLineBytes {
 			// Longer than any line the forward scanner accepts; the record
 			// would be rejected anyway, so stop growing the fragment.
 			carry = carry[:0]

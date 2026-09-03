@@ -968,7 +968,8 @@ func eventsBefore(entries []cli.EventEntry, before int64) []cli.EventEntry {
 // Query parameters:
 //   - key       (required): session key
 //   - node      (optional): remote node ID (proxy to that node)
-//   - after     (optional, ms): incremental fetch — entries with Time > after
+//   - after     (optional, ms): incremental fetch — entries with Time >= after
+//     (re-admits the watermark ms, #2456; client dedups by uuid)
 //   - before    (optional, ms): pagination fetch — entries with Time < before,
 //     returning up to `limit` newest-first-then-
 //     reversed (chronological) entries
@@ -1101,7 +1102,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	var entries []cli.EventEntry
 	switch {
 	case afterStr != "":
-		entries = sess.EventEntriesSince(after)
+		entries = sess.EventEntriesSince(cli.SinceInclusive(after))
 		if limit > 0 && len(entries) > limit {
 			// Preserve the newest on a full catch-up so the client doesn't
 			// miss events it just streamed through.

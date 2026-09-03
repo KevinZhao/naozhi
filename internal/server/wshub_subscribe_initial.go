@@ -11,12 +11,11 @@ import (
 )
 
 // entriesSinceReconnect is the `subscribe{after}` catch-up read. It re-admits
-// the after-millisecond itself (#2432): EntriesSince is strictly greater-than,
-// so a same-ms sibling appended after the client's last delivery would never
-// be replayed. The dashboard dedups same-ms replays by uuid (onHistory /
-// onCronLiveHistory), so the over-inclusive read is safe.
+// the after-millisecond itself (#2432) via cli.SinceInclusive — shared with
+// the HTTP poll fallback and the relay fetch_events RPC (#2456) so the three
+// catch-up reads cannot drift apart again.
 func entriesSinceReconnect(sess *session.ManagedSession, after int64) []cli.EventEntry {
-	return sess.EventEntriesSince(after - 1)
+	return sess.EventEntriesSince(cli.SinceInclusive(after))
 }
 
 // emptyInitialHistoryWanted reports whether a subscribe that found no entries
