@@ -46,10 +46,12 @@ type CacheView interface {
 	EvictPID(pid int)
 }
 
-// NodeAccessor is the same subset of server.NodeAccessor used by
-// DiscoveryHandlers — duplicated locally so we don't reverse-import server.
-// The two interfaces stay structurally identical; nodeAccessor in server
-// satisfies both.
+// NodeAccessor is the 2-method subset of contracts.NodeAccessor that
+// DiscoveryHandlers actually call. Kept narrow (rather than aliasing the
+// shared contract, #2285) because the package's test doubles implement only
+// these two methods; contracts' TestDashboardContractsDeclaredOnce asserts
+// this stays a strict subset so the shapes cannot drift. server's
+// *nodeAccessor satisfies both.
 type NodeAccessor interface {
 	HasNodes() bool
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)

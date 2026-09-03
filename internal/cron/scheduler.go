@@ -390,6 +390,16 @@ type Scheduler struct {
 	// see clock.go. Read via s.now() so a zero-value Scheduler still falls back
 	// to wall-clock time rather than nil-panicking.
 	clock cronClock
+
+	// finishRunPreAppendHook is a test-only seam invoked by finishRun after
+	// recordTerminalResult has released s.mu and immediately before the
+	// jobStillExists re-check that gates the runs/<jobID>/ write (#2058).
+	// Lets TestFinishRun_DeleteRaceNoOrphanRunsDir land a DeleteJobByID
+	// deterministically inside that window instead of sampling it with
+	// racing goroutines (#2473). Always nil in production; set only from
+	// tests before the scheduler is shared across goroutines. Mirrors
+	// runStore.cacheGetPostWarmHook.
+	finishRunPreAppendHook func(jobID string)
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin. cfg carries the

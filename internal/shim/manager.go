@@ -26,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // shimReadyMsg carries the result of the shim's ready-line scan back to
@@ -36,13 +37,11 @@ type shimReadyMsg struct {
 }
 
 // validateKeyForShim rejects keys that would leak control bytes into the
-// shim argv / socket path. Mirrors session.ValidateSessionKey; we keep a
-// local copy here because session → shim is a one-way import and the
-// shim package must remain a leaf. Keep this rule set in sync with
-// session.ValidateSessionKey — the byte cap below matches
-// session.MaxSessionKeyBytes (4*128+3=515), and the rune filter mirrors
-// that function verbatim. If either side grows new rune classes, update
-// both together.
+// shim argv / socket path. Mirrors session.ValidateSessionKey; session →
+// shim is a one-way import so we cannot call it directly, but the rune
+// deny-set is shared through the zero-dep internal/sessionkey leaf
+// (R202606f-ARCH-6, #2301) — only the byte cap below is still a local copy
+// of session.MaxSessionKeyBytes (4*128+3=515). Keep that cap in sync.
 //
 // R237-CR-12 (#719): the "keep in sync" guarantee is no longer comment-only.
 // TestValidateKeyForShim_Contract pins this validator's behaviour against
@@ -64,14 +63,10 @@ func validateKeyForShim(k string) error {
 		return errors.New("key invalid utf-8")
 	}
 	for _, r := range k {
-		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			return errors.New("key contains control character")
-		}
 		switch {
-		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
-			r >= 0x202A && r <= 0x202E, // bidi embedding / override
-			r == 0x2028, r == 0x2029,   // line / paragraph separator
-			r == 0xFEFF: // BOM
+		case sessionkey.IsControlKeyRune(r):
+			return errors.New("key contains control character")
+		case sessionkey.IsInvisibleKeyRune(r):
 			return errors.New("key contains invisible control character")
 		}
 	}
@@ -1684,7 +1679,20 @@ func shimEndpointEnvDropped(kv string) bool {
 
 // validateShimEndpointURL enforces https:// unless the host is loopback
 // (localhost / 127.0.0.0/8 / ::1), for which plain http is allowed so local
-// mock gateways still work. Mirrors filterClaudeEnv's validateClaudeBaseURLEnv.
+// mock gateways still work.
+//
+// Relationship to envpolicy.ValidateBaseURLValue (the parent-env / sysession
+// guard): both share the IP-range classifier envpolicy.ClassifyHost (#2300),
+// so "what is private / link-local / loopback" cannot drift between them.
+// The POLICIES intentionally differ, and this one is the stricter of the two:
+//
+//   - https:// to ANY non-loopback internal literal is rejected here with no
+//     escape hatch. envpolicy honours NAOZHI_ALLOW_PRIVATE_BASE_URL for
+//     RFC1918/ULA/loopback; the shim env is the last hop before a process
+//     that holds the API key, so no opt-out is offered at this boundary.
+//   - https:// to the unspecified address (0.0.0.0 / ::) is rejected here;
+//     envpolicy currently lets it through. Aligning that is an owner policy
+//     decision tracked from #2300, not a refactor-time change.
 //
 // R20260603150052-SEC-7 (#1713): even an https:// target must not point at a
 // literal internal IP (loopback excepted for local mocks). Without this, an
@@ -1700,7 +1708,10 @@ func validateShimEndpointURL(v string) error {
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		host := u.Hostname()
-		if ip := net.ParseIP(host); ip != nil && shimEndpointInternalIP(ip) && !ip.IsLoopback() {
+		// Deny-set = every internal class except loopback (local https
+		// mocks). The classes are disjoint (pinned in envpolicy tests), so
+		// clearing the loopback bit never un-denies another range.
+		if k, ok := envpolicy.ClassifyHost(host); ok && k&^envpolicy.IPLoopback != 0 {
 			return fmt.Errorf("https:// to internal IP %q rejected (SSRF/IMDS guard)", host)
 		}
 		return nil
@@ -1709,21 +1720,12 @@ func validateShimEndpointURL(v string) error {
 		if strings.EqualFold(host, "localhost") {
 			return nil
 		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if k, ok := envpolicy.ClassifyHost(host); ok && k.Has(envpolicy.IPLoopback) {
 			return nil
 		}
 		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
 	}
 	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
-}
-
-// shimEndpointInternalIP reports whether ip falls in the SSRF deny-set:
-// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or the
-// unspecified address. Mirrors weixin's rejectInternalIP deny-set.
-func shimEndpointInternalIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,

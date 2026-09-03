@@ -4,12 +4,8 @@
 // internal/server.
 package memory
 
-import "net/http"
+import "github.com/naozhi/naozhi/internal/dashboard/contracts"
 
-// IPLimiter is the subset of internal/server.ipLimiter the memory handler
-// uses. server's *ipLimiter satisfies this shape; we accept the interface
-// so the sub-package doesn't reverse-import server.
-type IPLimiter interface {
-	Allow(remoteAddr string) bool
-	AllowRequest(r *http.Request) bool
-}
+// IPLimiter aliases the shared dashboard contract (#2285); server's
+// *ipLimiter is injected without a reverse import.
+type IPLimiter = contracts.IPLimiter

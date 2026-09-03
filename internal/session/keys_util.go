@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // R229-CR-6: extracted from managed.go so the session-key construction /
@@ -44,44 +46,23 @@ func sanitizeKeyComponent(s string) string {
 		}
 	}
 	s = strings.ReplaceAll(s, ":", "_")
-	// Drop ALL C0 control bytes (including tab) AND Unicode formatting/bidi chars
-	// that terminal log viewers render as invisible or swap-displayed:
-	//   - U+2028/U+2029 LINE/PARAGRAPH SEPARATOR are treated as newlines by
-	//     some JSON log consumers → log-line injection.
-	//   - U+202A..U+202E (embedding/override/pop) flip terminal output
-	//     left-to-right, letting an attacker mask fabricated log content
-	//     under `tail -f` / `journalctl`.
-	//   - U+200B..U+200F (zero-width space / joiner / LTR/RTL mark) are
-	//     invisible; unsafe for human-readable log attrs.
-	//   - U+FEFF BOM is invisible.
-	// These classes aren't covered by the C0 gate in the fast path and would
-	// otherwise slip through for chat IDs whose byte length fits in one
-	// Unicode codepoint (3 bytes for 2028/2029, also mapped per-rune here).
+	// Map every codepoint a session key may not contain to '_' (rationale
+	// per class lives on sessionkey/denyset.go):
+	//   - ALL C0 controls including tab — slog.TextHandler uses tab as the
+	//     key/value separator so an embedded tab would fragment one attr
+	//     into two. Matches the fast-path gate above. R60-GO-M1.
+	//   - DEL + C1 (U+007F..U+009F). The fast-path byte gate rejects 8-bit
+	//     *bytes*, but a chat ID that arrives as valid UTF-8 containing a C1
+	//     codepoint (0xC2 0x80..0xC2 0x9F) takes the slow path because the
+	//     first byte (0xC2) is ≥ 0x80; without this the C1 codepoint survives
+	//     and terminals may interpret it as a control function. R61-GO-6.
+	//   - Unicode bidi / zero-width / LS-PS / BOM classes that terminal log
+	//     viewers render as invisible or swap-displayed. Not covered by the
+	//     C0 gate in the fast path.
 	// Done via strings.Map because the ReplaceAll-based fast path is 1:1
 	// on bytes; rune-truncation below handles any multi-byte tail.
-	s = strings.Map(func(r rune) rune {
-		// Strip ALL C0 controls including tab; slog.TextHandler uses tab as
-		// the key/value separator so an embedded tab would fragment one attr
-		// into two. Matches the fast-path gate above. R60-GO-M1.
-		//
-		// Also strip DEL (U+007F) and the C1 control range (U+0080..U+009F).
-		// The fast-path byte gate rejects 8-bit *bytes*, but a chat ID that
-		// arrives as valid UTF-8 containing a C1 codepoint (encoded as
-		// 0xC2 0x80..0xC2 0x9F) takes the slow path because the first byte
-		// (0xC2) is ≥ 0x80. Without this branch the C1 codepoint survives
-		// and terminals may interpret it as a control function. R61-GO-6.
-		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			return '_'
-		}
-		switch {
-		case r >= 0x200B && r <= 0x200F, // zero-width space / joiner / LTR/RTL mark
-			r >= 0x202A && r <= 0x202E, // embedding / override / pop
-			r == 0x2028, r == 0x2029,   // line/paragraph separator
-			r == 0xFEFF: // BOM
-			return '_'
-		}
-		return r
-	}, s)
+	// R202606f-ARCH-6 (#2301): do not re-inline the deny-set here.
+	s = strings.Map(sessionkey.SanitizeKeyRune, s)
 	// Cheap byte-length gate first: UTF-8 byte length is always ≥ rune count,
 	// so strings with ≤ maxKeyComponent bytes cannot exceed maxKeyComponent
 	// runes. Only pay for RuneCountInString + []rune conversion when byte

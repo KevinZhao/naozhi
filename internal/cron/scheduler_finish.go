@@ -436,6 +436,9 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// record. Best-effort: a delete landing AFTER this check but before the
 	// disk write is the same crash-recovery contract already documented above
 	// (over-report, self-heals) — this just closes the wide, observable window.
+	if s.finishRunPreAppendHook != nil {
+		s.finishRunPreAppendHook(a.job.ID)
+	}
 	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(a.job.ID) {
 		s.appendRun(&CronRun{
 			RunID:      a.runID,
