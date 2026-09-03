@@ -8142,6 +8142,10 @@ function createNewSession() {
         }
         refreshBackendPicker('new-backend-slot');
       });
+      // First-open path: a failed REMOTE manifest arrives here as null and
+      // renderBackendPicker(null) painted an empty slot. Route through
+      // refreshBackendPicker so the retry notice shows on open too (#2429).
+      if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -8237,6 +8241,9 @@ function openProjectPalette(backendsData, profilesData) {
     renderPaletteList(state, input.value);
     refreshBackendPicker('cp-backend-slot');
   });
+  // First-open path: see the no-projects modal above — a null remote
+  // manifest must surface the retry notice, not an empty slot (#2429).
+  if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }

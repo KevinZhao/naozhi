@@ -188,6 +188,17 @@ async function fetchJSON() {
 	if !strings.Contains(refresh, "renderBackendFetchFailed(") {
 		t.Error("refreshBackendPicker must render renderBackendFetchFailed(...) (retry affordance) when a remote manifest is null (#2429)")
 	}
+	// The FIRST-open paths seed the slot from renderBackendPicker(null) -> ''
+	// and only repaint via refreshBackendPicker on a node switch; both must
+	// route a null remote manifest through refreshBackendPicker on open too.
+	palette := extractJSFunction(t, js, "openProjectPalette")
+	if !strings.Contains(palette, "if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');") {
+		t.Error("openProjectPalette must call refreshBackendPicker('cp-backend-slot') when opened with a null manifest on a remote node (#2429 M1)")
+	}
+	create := extractJSFunction(t, js, "createNewSession")
+	if !strings.Contains(create, "if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');") {
+		t.Error("createNewSession no-projects modal must call refreshBackendPicker('new-backend-slot') when opened with a null manifest on a remote node (#2429 M1)")
+	}
 }
 
 // Item 7: mermaid must pick its theme from the resolved dashboard theme
@@ -195,10 +206,11 @@ async function fetchJSON() {
 func TestDashboardJS_MermaidTheme_FollowsDashboardTheme(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
-	if strings.Contains(js, "theme: 'dark'") {
-		t.Error("dashboard.js still initialises mermaid with theme: 'dark' — use mermaidThemeName() (#2429)")
-	}
 	run := extractJSFunction(t, js, "runMermaid")
+	load := extractJSFunction(t, js, "loadMermaid")
+	if strings.Contains(load, "theme: 'dark'") || strings.Contains(run, "theme: 'dark'") {
+		t.Error("loadMermaid/runMermaid still initialise mermaid with theme: 'dark' — use mermaidConfig()/mermaidThemeName() (#2429)")
+	}
 	if !strings.Contains(run, "mermaid.initialize(mermaidConfig())") {
 		t.Error("runMermaid must re-initialise mermaid with mermaidConfig() before each run so new diagrams follow the current theme")
 	}
