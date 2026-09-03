@@ -331,6 +331,22 @@ func TestReverseServer_StaleDeregister_doesNotFireForReplacedConn(t *testing.T) 
 
 	deregistered := make(chan string, 4)
 	rs.OnDeregister = func(id string) { deregistered <- id }
+	// The server writes the "registered" frame BEFORE installing the conn
+	// into s.conns, so the client-side ack does not prove the server-side
+	// map insert happened. If conn1's handler is descheduled in that gap
+	// while conn2 registers, conn2 lands first and conn1 then overwrites
+	// it — conn2 becomes an orphan whose close never deregisters (owns ==
+	// false) and conn1 is never closed. OnRegister fires only after the
+	// insert, so gate each dial on it to pin the order this test assumes.
+	registered := make(chan struct{}, 4)
+	rs.OnRegister = func(string, *ReverseConn) { registered <- struct{}{} }
+	waitRegistered := func(label string) {
+		select {
+		case <-registered:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: timeout waiting for OnRegister", label)
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws-node", rs)
@@ -341,11 +357,13 @@ func TestReverseServer_StaleDeregister_doesNotFireForReplacedConn(t *testing.T) 
 	if resp := reverseAuth(t, conn1, "node-1", "tok", "host"); resp.Type != "registered" {
 		t.Fatalf("conn1: expected registered, got %q", resp.Type)
 	}
+	waitRegistered("conn1")
 
 	conn2 := dialReverseNode(t, srv)
 	if resp := reverseAuth(t, conn2, "node-1", "tok", "host"); resp.Type != "registered" {
 		t.Fatalf("conn2: expected registered, got %q", resp.Type)
 	}
+	waitRegistered("conn2")
 
 	// conn1 is closed by the server on reconnect; its deregister goroutine
 	// unblocks. The stale deregister must NOT fire because conn2 (the live
