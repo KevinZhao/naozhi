@@ -505,6 +505,12 @@ func parseMemoryFrontmatter(raw []byte) (memoryFrontmatter, string) {
 			meta.name = v
 		case "description":
 			meta.description = v
+		case "type":
+			// Top-level `type:` (the form Claude Code writes) is honoured, but
+			// never overrides a nested `metadata.type` (#2433).
+			if meta.typ == "" {
+				meta.typ = v
+			}
 		}
 	}
 	return meta, strings.TrimLeft(body, "\r\n")
