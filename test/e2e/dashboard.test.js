@@ -803,6 +803,31 @@ test.describe('New session creation', () => {
     await ctx.close();
   });
 
+  // #2476: the New Session palette must start a fresh session even when the
+  // backend supplies a project stableKey (stats.projects carries it since
+  // v0.0.78). Resuming the stable dashboard:pj: session is the sidebar card's
+  // job; clicking a project row here must never land on the folder's existing
+  // (possibly running) session.
+  test('palette project row starts a fresh session, not the project-stable one', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const hasStable = await page.evaluate(() => (projectsData.find(p => p.name === 'myproject') || {}).stableKey);
+    expect(hasStable).toBe('dashboard:pj:0123456789abcdef:general');
+
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toMatch(/^dashboard:direct:/);
+    expect(key).toContain('-myproject:');
+    expect(key).not.toContain('dashboard:pj:');
+    await ctx.close();
+  });
+
   test('project picker lists available projects', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();

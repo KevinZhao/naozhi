@@ -14,7 +14,11 @@ import (
 //     project opens (continue vs new).
 //  2. The continue path reuses a backend dashboard:pj: key and only swaps
 //     the trailing agent segment (no client-side sha256 → no algorithm drift).
-//  3. The project-open palette path passes mode:'continue' + p.stableKey.
+//  3. The "New Session" palette project row starts a FRESH session
+//     (mode:'new', no stableKey). Continuing the project-stable
+//     conversation is the sidebar card's job; stats.projects only started
+//     carrying stableKey in v0.0.78, and when it did the row silently began
+//     resuming the folder's running session (#2476).
 //  4. Quick sessions stay one-off (mode:'new').
 func TestDashboardJS_ResolveSessionKeyWiring(t *testing.T) {
 	t.Parallel()
@@ -29,14 +33,18 @@ func TestDashboardJS_ResolveSessionKeyWiring(t *testing.T) {
 		"function resolveSessionKey(mode, stableKey, projectOrFolder, agentID, timestamp)",
 		// Continue path reconstructs the pj key from the backend hash segment.
 		"'dashboard:pj:' + parts[2] + ':' + agent",
-		// Palette project open continues with the backend-supplied stableKey.
-		"{ mode: 'continue', stableKey: p.stableKey || '', accessProfile: accessProfile }",
+		// Palette project row starts a fresh session (#2476).
+		"{ mode: 'new', accessProfile: accessProfile }",
 		// Quick session is explicitly one-off.
 		"{ mode: 'new' }",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("dashboard.js missing project-stable-key wiring: %q", want)
 		}
+	}
+	// The palette must not resume via stableKey any more: New Session means new.
+	if strings.Contains(js, "{ mode: 'continue', stableKey: p.stableKey") {
+		t.Errorf("pickPaletteProject still continues the project-stable session; the New Session palette row must use mode:'new' (#2476)")
 	}
 
 	// Guard: the continue branch must NOT compute a hash client-side. A

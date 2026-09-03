@@ -65,7 +65,7 @@ function defaultSessions() {
       default_workspace: '/home/user/workspace',
       agents: ['general', 'reviewer', 'researcher'],
       projects: [
-        { name: 'myproject', path: '/home/user/workspace/myproject', favorite: false, github: true, git_remote_url: 'https://github.com/acme/myproject.git' },
+        { name: 'myproject', path: '/home/user/workspace/myproject', favorite: false, github: true, git_remote_url: 'https://github.com/acme/myproject.git', stableKey: 'dashboard:pj:0123456789abcdef:general' },
         { name: 'otherproject', path: '/home/user/workspace/otherproject', favorite: false, github: false, git_remote_url: '' },
         { name: 'pinned-empty', path: '/home/user/workspace/pinned-empty', favorite: true, github: true, git_remote_url: 'git@github.com:acme/pinned.git' },
       ],

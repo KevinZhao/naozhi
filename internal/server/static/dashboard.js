@@ -8752,11 +8752,16 @@ function pickPaletteProject(p) {
   const backend = getSelectedBackend();
   const accessProfile = getSelectedAccessProfile();
   const agent = getSelectedAgent();
-  // Default project open = continue the project-stable conversation. p.stableKey
-  // is supplied by /api/projects when the feature is enabled (empty otherwise,
-  // in which case resolveSessionKey falls back to a timestamp key).
+  // The palette is the "New Session" entry point, so a project row always
+  // starts a fresh timestamp-keyed session (mode:'new'). Continuing the
+  // project-stable conversation (dashboard:pj:<hash>) is what the sidebar
+  // card for that session is for. Until v0.0.78 stats.projects carried no
+  // stableKey, so this path always fell back to a fresh key in practice;
+  // when the field appeared the row silently started resuming the folder's
+  // existing (often running) session — exactly the opposite of what a user
+  // clicking "New Session" asked for (#2476).
   doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
-    { mode: 'continue', stableKey: p.stableKey || '', accessProfile: accessProfile });
+    { mode: 'new', accessProfile: accessProfile });
 }
 
 function pickPaletteCustom(initialValue) {
