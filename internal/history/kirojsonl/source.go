@@ -365,13 +365,27 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		out = append(out, entry)
 	}
 
-	if skipPartialFirstLine && scanner.Scan() {
-		// The first scanned line is the tail of the record straddling the
-		// seek boundary. Reassemble it with the head bytes the backscan kept
-		// so the record is parsed (and advances the borrow state) exactly as
-		// it would be in a whole-file read; with no fragment it stays dropped.
-		if len(anchor.fragment) > 0 {
-			processLine(append(anchor.fragment, scanner.Bytes()...))
+	if skipPartialFirstLine {
+		if scanner.Scan() {
+			// The first scanned line is the tail of the record straddling the
+			// seek boundary. Reassemble it with the head bytes the backscan
+			// kept so the record is parsed (and advances the borrow state)
+			// exactly as it would be in a whole-file read; with no fragment it
+			// stays dropped.
+			if len(anchor.fragment) > 0 {
+				processLine(append(anchor.fragment, scanner.Bytes()...))
+			}
+		} else if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+			// The straddling partial line is itself oversized. Never Scan this
+			// scanner again: with an error set, bufio.Scanner hands the
+			// buffered 1 MiB prefix back as a final token (split-at-EOF
+			// recovery) and it would reach processLine as if it were a whole
+			// record. Drain the rest of the line and rebuild instead.
+			if !discardRestOfLine(br) {
+				return out
+			}
+			scanner = bufio.NewScanner(br)
+			scanner.Buffer(*bufPtr, maxLineBytes)
 		}
 	}
 	for {

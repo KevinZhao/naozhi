@@ -115,3 +115,69 @@ func TestParseFile_TailWindowStartsInsideOversizedLine(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFile_OversizedPartialFirstLineNotFedAsToken pins the F1 review
+// finding on #2448: when the tail window's partial first line is oversized,
+// the skip-branch Scan() fails with ErrTooLong, but a further Scan() on the
+// same scanner hands back the buffered 1 MiB prefix as a final token (Go's
+// split-at-EOF recovery). If that prefix happens to be a complete Prompt
+// record it would be injected as a user entry and poison the borrow state.
+// Layout: [anchor Prompt · 2 head assistants · filler] · oversized
+// ToolResults line whose bytes from off onward begin with an exactly-1 MiB
+// valid Prompt (decoyTS) followed by junk · ~13 MiB of window records.
+func TestParseFile_OversizedPartialFirstLineNotFedAsToken(t *testing.T) {
+	t.Parallel()
+	const headAssistants = 2
+	var head strings.Builder
+	head.WriteString(promptLine("anchor", 1_700_000_000) + "\n")
+	for i := 0; i < headAssistants; i++ {
+		head.WriteString(orphanAssistantLine("head", i))
+	}
+	padWith(&head, toolResultsFiller, 1<<20)
+	prefix := `{"version":"v1","kind":"ToolResults","data":{"message_id":"big","content":[{"kind":"toolResult","data":{"content":[{"kind":"text","data":"`
+	base := len(promptLine("", decoyTS))
+	injected := promptLine(strings.Repeat("q", maxLineBytes-base), decoyTS)
+	if len(injected) != maxLineBytes {
+		t.Fatalf("fixture: injected len=%d want %d", len(injected), maxLineBytes)
+	}
+	suffix := `"}}]}}` + "\n"
+
+	var tail strings.Builder
+	const winAssistants = 4
+	for i := 0; i < winAssistants; i++ {
+		tail.WriteString(orphanAssistantLine("win", i))
+		padWith(&tail, toolResultsFiller, tail.Len()+(13<<20)/winAssistants)
+	}
+	tail.WriteString(orphanAssistantLine("last", 0))
+	// off = Size-maxFileBytes must land exactly at the start of injected:
+	// maxLineBytes + junk + len(suffix) + tail.Len() == maxFileBytes.
+	junk := maxFileBytes - maxLineBytes - len(suffix) - tail.Len()
+	if junk <= 0 {
+		t.Fatalf("fixture: tail too long (%d)", tail.Len())
+	}
+	body := head.String() + prefix + injected + strings.Repeat("z", junk) + suffix + tail.String()
+	if off := len(body) - maxFileBytes; off != head.Len()+len(prefix) {
+		t.Fatalf("fixture: off=%d want %d", off, head.Len()+len(prefix))
+	}
+
+	got := parseTempSession(t, body)
+	assertNoDecoyAnchor(t, got)
+	for _, e := range got {
+		if e.Type == "user" {
+			t.Errorf("oversized-line prefix injected as user entry: %+v", e)
+		}
+	}
+	want := make([]string, 0, winAssistants+1)
+	for i := 0; i < winAssistants; i++ {
+		want = append(want, fmt.Sprintf("win-%d", i))
+	}
+	want = append(want, "last-0")
+	if s := summaries(got); strings.Join(s, "|") != strings.Join(want, "|") {
+		t.Fatalf("window entries\n got: %v\nwant: %v", s, want)
+	}
+	for i, e := range got {
+		if want := int64(1_700_000_000*1000 + 1 + headAssistants + i); e.Time != want {
+			t.Errorf("entry %q Time = %d, want %d (borrow state poisoned?)", e.Summary, e.Time, want)
+		}
+	}
+}

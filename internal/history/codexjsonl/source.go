@@ -297,8 +297,18 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	}()
 	scanner := bufio.NewScanner(br)
 	scanner.Buffer(*bufPtr, maxLineBytes)
-	if skipPartialFirstLine && scanner.Scan() {
-		// Discard the partial line straddling the seek boundary.
+	if skipPartialFirstLine && !scanner.Scan() && errors.Is(scanner.Err(), bufio.ErrTooLong) {
+		// A successful Scan discards the partial line straddling the seek
+		// boundary. When that partial line is itself oversized, never Scan
+		// this scanner again: with an error set, bufio.Scanner hands the
+		// buffered 1 MiB prefix back as a final token (split-at-EOF recovery)
+		// and it would be decoded as if it were a whole record. Drain the
+		// rest of the line and rebuild instead.
+		if !discardRestOfLine(br) {
+			return nil
+		}
+		scanner = bufio.NewScanner(br)
+		scanner.Buffer(*bufPtr, maxLineBytes)
 	}
 
 	out := make([]cli.EventEntry, 0, 16)
