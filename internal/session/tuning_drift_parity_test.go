@@ -49,18 +49,17 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	s.SetTuningEffort("low")
 	r.ss.sessions[key] = s
 
-	// Real spawn argv, exactly as spawnSession assembles it.
+	// Real spawn argv, exactly as spawnSession assembles it — through the
+	// production constructor. Hand-listing the fields here is what let the
+	// DebugFile regression through: this side omitted it, the drift side omitted
+	// it, and the comparison passed while production diverged.
 	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
-	realArgs := sp.Wrapper.Protocol.BuildArgs(cli.SpawnOptions{
-		Model:        sp.Model,
-		ExtraArgs:    sp.Args,
-		Effort:       sp.Effort,
-		SettingsFile: r.naozhiSettingsFile,
-	})
+	realArgs := sp.Wrapper.Protocol.BuildArgs(
+		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args))
 
 	// Drift-side reconstruction for the surviving shim of the same session.
 	wrapper, backendID := r.wrapperFor("kiro")
-	driftArgs := r.driftCompareArgs(wrapper, backendID, s)
+	driftArgs := r.driftCompareArgs(wrapper, backendID, key, s)
 
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("drift reconstruction diverges from real spawn — every naozhi "+
@@ -88,10 +87,10 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 	r.ss.sessions[key] = s
 
 	wrapper, backendID := r.wrapperFor("kiro")
-	storedArgs := r.driftCompareArgs(wrapper, backendID, s) // argv the shim recorded at spawn
+	storedArgs := r.driftCompareArgs(wrapper, backendID, key, s) // argv the shim recorded at spawn
 
 	s.SetTuningModel("claude-sonnet-4.6") // operator switches model, then naozhi restarts
-	newArgs := r.driftCompareArgs(wrapper, backendID, s)
+	newArgs := r.driftCompareArgs(wrapper, backendID, key, s)
 
 	if slices.Equal(storedArgs, newArgs) {
 		t.Fatal("changed override did not surface as drift — the respawn that " +
@@ -106,7 +105,7 @@ func TestTuningDriftParity_ChangedOverrideIsRealDrift(t *testing.T) {
 func TestTuningDriftParity_NilSessionFallsBack(t *testing.T) {
 	r := mkTuningRouter(t)
 	wrapper, backendID := r.wrapperFor("kiro")
-	args := r.driftCompareArgs(wrapper, backendID, nil)
+	args := r.driftCompareArgs(wrapper, backendID, "dash:direct:adopt:general", nil)
 	if !slices.Contains(args, "claude-fable-5") || !slices.Contains(args, "high") {
 		t.Errorf("nil-session drift args must carry backend defaults, got %v", args)
 	}
@@ -130,14 +129,12 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	s.SetTuningEffort("low")
 	r.ss.sessions[key] = s
 
-	// argv of the respawn, as spawnSession assembles it from the OLD entry.
+	// argv of the respawn, as spawnSession assembles it from the OLD entry —
+	// through the production constructor, so this side cannot silently omit a
+	// field the drift side sets (or vice versa).
 	sp := r.resolveSpawnParamsLocked(key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
-	realArgs := sp.Wrapper.Protocol.BuildArgs(cli.SpawnOptions{
-		Model:        sp.Model,
-		ExtraArgs:    sp.Args,
-		Effort:       sp.Effort,
-		SettingsFile: r.naozhiSettingsFile,
-	})
+	realArgs := sp.Wrapper.Protocol.BuildArgs(
+		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args))
 
 	// The spawn then replaces the entry, carrying the snapshotted overrides.
 	_, _, _, _, ov := snapshotOldSessionLocked(s)
@@ -147,7 +144,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	)
 
 	wrapper, backendID := r.wrapperFor("kiro")
-	driftArgs := r.driftCompareArgs(wrapper, backendID, fresh)
+	driftArgs := r.driftCompareArgs(wrapper, backendID, key, fresh)
 	if !slices.Equal(realArgs, driftArgs) {
 		t.Fatalf("post-respawn entry diverges from the argv it was spawned with — "+
 			"the next naozhi restart would rebuild this tuned session as default.\n"+
