@@ -67,7 +67,9 @@ func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 // gate (e.g. claude echoing a "[1m]" context-window suffix in its init frame,
 // or an out-of-set effort tier) must be skipped — falling back to the
 // registry default — rather than turning every later send into an
-// ErrInvalidModel failure.
+// ErrInvalidModel failure. The gate must be the router's own
+// (session.ValidateModelID), not a stricter one: Bedrock ARN / inference-
+// profile IDs carry ':' and '/' and must still be inherited.
 func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 	t.Parallel()
 	base := session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}}
@@ -88,7 +90,12 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 			want: session.AgentOpts{Model: "us.anthropic.claude-opus-5", Effort: "high", AccessProfile: "bedrock", ExtraArgs: []string{"--x"}},
 		},
 		{
-			name: "CLI-reported [1m] suffix fails the model gate and is skipped",
+			name: "Bedrock ARN / inference-profile model (':' '/') passes the router gate and is inherited",
+			snap: session.SessionSnapshot{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"},
+			want: session.AgentOpts{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}},
+		},
+		{
+			name: "CLI-reported [1m] suffix fails the router model gate and is skipped",
 			snap: session.SessionSnapshot{AccessProfile: "bedrock", Model: "us.anthropic.claude-fable-5-1[1m]"},
 			want: session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "bedrock", ExtraArgs: []string{"--x"}},
 		},

@@ -29,3 +29,32 @@ func toolResultText(raw json.RawMessage) string {
 	}
 	return b.String()
 }
+
+// decodeStringOrBlocks / toolResultText live together: the latter is the
+// only consumer that needs the block form beyond the flatten* callers, and
+// keeping both out of transcript.go holds that file under its size baseline.
+// decodeStringOrBlocks accepts either a JSON string or an array of
+// content blocks and returns (string-form, blocks-form). One of the
+// two is empty depending on what the input was.
+func decodeStringOrBlocks(raw json.RawMessage) (string, []claudeContentBlock) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	// Strings are a quoted JSON value starting with `"`.
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return "", nil
+		}
+		return s, nil
+	}
+	if raw[0] == '[' {
+		var blocks []claudeContentBlock
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			return "", nil
+		}
+		return "", blocks
+	}
+	// Object — uncommon; ignore.
+	return "", nil
+}
