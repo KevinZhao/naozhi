@@ -723,6 +723,11 @@ type SessionSnapshot struct {
 	// MeteringUsage carries backend-reported per-turn billing rows when
 	// available (kiro). Each entry is one billing dimension, e.g.
 	// {value: 0.024, unit: "credit"}.
+	//
+	// READ-ONLY, shared across snapshots: while the process's MeteringGen is
+	// unchanged every Snapshot returns the same backing array (meteringCache,
+	// #2345). Consumers — SnapshotEnricher hooks included — must not modify
+	// elements in place; copy first if a mutated view is needed.
 	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
 	// Effort is the backend's thinking-effort tier for the latest turn
 	// ("low" / "medium" / "high" / "xhigh" / "max" on kiro). Empty for
