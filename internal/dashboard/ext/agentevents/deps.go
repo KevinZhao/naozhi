@@ -12,7 +12,7 @@ import (
 )
 
 // NodeAccessor is the subset of internal/server.NodeAccessor the agent
-// events handlers use. server's *nodeAccessor satisfies this shape; we
+// events handlers use. server's *nodeRegistry satisfies this shape; we
 // accept the interface so the sub-package doesn't reverse-import server.
 type NodeAccessor interface {
 	HasNodes() bool

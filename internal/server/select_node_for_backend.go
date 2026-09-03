@@ -44,7 +44,7 @@ const maxBackendIDLen = backendid.MaxLen
 func isValidBackendID(s string) bool { return backendid.IsValid(s) }
 
 // nodeLookup is the minimal surface selectNodeForBackend needs to find
-// an active reverse-node connection by id. Server's nodeAccess and
+// an active reverse-node connection by id. Server's *nodeRegistry and
 // Hub's hubNodeLookup adapter both satisfy this; defining the
 // interface locally keeps the helper free of an upward dependency on
 // either.
@@ -166,15 +166,14 @@ func gateRemoteAccessProfile(resolver accessProfileResolver, targetNode, key str
 	return nil
 }
 
-// hubNodeLookup adapts Hub.nodes (with its shared mutex) to the
-// nodeLookup interface so handleRemoteSend can call
-// selectNodeForBackend without needing access to Server's nodeAccess.
-// Locking is done per-call (read lock); the cost is negligible vs the
-// downstream RPC.
+// hubNodeLookup adapts the Hub's shared *nodeRegistry to the nodeLookup
+// interface so handleRemoteSend can call selectNodeForBackend without
+// needing access to Server.nodes. Locking is done per-call inside the
+// registry (read lock); the cost is negligible vs the downstream RPC.
 type hubNodeLookup struct{ h *Hub }
 
 func (l hubNodeLookup) NodeByID(id string) (node.Conn, bool) {
 	// ARCH4 (#384): defer to Hub.lookupNode so every by-ID read of the
-	// Server-shared nodes map goes through the single mutex-access helper.
+	// Server-shared node table goes through the single Hub-side seam.
 	return l.h.lookupNode(id)
 }

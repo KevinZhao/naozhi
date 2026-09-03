@@ -48,7 +48,7 @@ type CacheView interface {
 
 // NodeAccessor is the same subset of server.NodeAccessor used by
 // DiscoveryHandlers — duplicated locally so we don't reverse-import server.
-// The two interfaces stay structurally identical; nodeAccessor in server
+// The two interfaces stay structurally identical; *nodeRegistry in server
 // satisfies both.
 type NodeAccessor interface {
 	HasNodes() bool

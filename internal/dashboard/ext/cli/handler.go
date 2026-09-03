@@ -13,7 +13,7 @@ import (
 
 // NodeAccessor is the subset of internal/server.NodeAccessor this handler
 // uses to proxy /api/cli/backends?node=<id> to a remote node. server's
-// *nodeAccessor satisfies this shape; we accept the interface so the
+// *nodeRegistry satisfies this shape; we accept the interface so the
 // sub-package doesn't reverse-import server (mirrors dashboard/session's
 // NodeAccessor). Nil is allowed — single-node deployments never set it and
 // the ?node= branch stays unreachable.

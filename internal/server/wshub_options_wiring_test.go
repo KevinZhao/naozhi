@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/session"
@@ -20,14 +19,12 @@ func TestNewHub_SchedulerAndScratchPoolFromOptions(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	pool := session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	var sched CronView = fakeCronSessions{}
 
 	hub := NewHub(HubOptions{
 		Router:      router,
 		Guard:       guard,
-		NodesMu:     &nodesMu,
 		Scheduler:   sched,
 		ScratchPool: pool,
 	})

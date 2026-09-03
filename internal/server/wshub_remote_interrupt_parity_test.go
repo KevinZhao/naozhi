@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,21 +20,18 @@ func (f *failInterruptNode) ProxyInterruptSession(_ context.Context, _ string) (
 	return false, errors.New("node offline")
 }
 
-// newTestHubWithNodes builds a Hub wired with a static node map so the
+// newTestHubWithNodes builds a Hub wired with a static node table so the
 // remote-* handlers can resolve a peer without a real reverse connection.
-func newTestHubWithNodes(nodes map[string]node.Conn) (*Hub, *sync.RWMutex) {
+func newTestHubWithNodes(nodes map[string]node.Conn) *Hub {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{
+	return NewHub(HubOptions{
 		Router:    router,
 		Guard:     guard,
-		Nodes:     nodes,
-		NodesMu:   &nodesMu,
+		Nodes:     newNodeRegistry(nodes),
 		DashToken: "tok",
 		CookieMAC: testCookieMAC("tok"),
 	})
-	return hub, &nodesMu
 }
 
 // TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers verifies R176-ARCH-NX
@@ -45,7 +41,7 @@ func newTestHubWithNodes(nodes map[string]node.Conn) (*Hub, *sync.RWMutex) {
 func TestHandleRemoteInterrupt_FailureBroadcastsToSubscribers(t *testing.T) {
 	const key = "node1:p2p:carol"
 	nodes := map[string]node.Conn{"node1": &failInterruptNode{fakeCapNode{id: "node1"}}}
-	hub, _ := newTestHubWithNodes(nodes)
+	hub := newTestHubWithNodes(nodes)
 	t.Cleanup(hub.Shutdown)
 
 	// Originating client (issues the interrupt) and a separate watcher that

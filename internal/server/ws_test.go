@@ -37,16 +37,14 @@ func testCookieMAC(token string) string {
 func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
+	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
 	return hub, router
 }
 
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
+	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
 	return hub, router
 }
 

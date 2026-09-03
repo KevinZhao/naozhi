@@ -15,7 +15,7 @@ import (
 
 // NodeAccessor is the subset of internal/server.NodeAccessor that this
 // package needs. Defined locally as a small interface (per "accept
-// interfaces" idiom) so server's *nodeAccessor (which already satisfies
+// interfaces" idiom) so server's *nodeRegistry (which already satisfies
 // this shape) can be passed in via Deps without reverse-importing server.
 type NodeAccessor interface {
 	HasNodes() bool
