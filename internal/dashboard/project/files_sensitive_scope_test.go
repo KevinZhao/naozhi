@@ -94,8 +94,10 @@ func TestHandleFilesList_RootNamedSecrets_NotHidden(t *testing.T) {
 
 func TestHandleFileGet_RootNamedSecrets_Served(t *testing.T) {
 	h, _ := newNamedProjectHandlersForTest(t, "secrets", map[string]string{
-		"app.go":          "package main\n",
-		"secrets/db.yaml": "pw: 1\n",
+		"app.go":            "package main\n",
+		"page.html":         "<html><body>ok</body></html>\n",
+		"secrets/db.yaml":   "pw: 1\n",
+		"secrets/page.html": "<html>pw</html>\n",
 	})
 	get := func(path, mode string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet,
@@ -104,10 +106,14 @@ func TestHandleFileGet_RootNamedSecrets_Served(t *testing.T) {
 		h.HandleFileGet(w, req)
 		return w
 	}
-	for _, mode := range []string{"preview", "raw", "download"} {
-		w := get("app.go", mode)
+	for _, mode := range []string{"preview", "raw", "render", "download"} {
+		path := "app.go"
+		if mode == "render" { // render only accepts HTML/SVG
+			path = "page.html"
+		}
+		w := get(path, mode)
 		if w.Code != http.StatusOK {
-			t.Fatalf("mode=%s: want 200 for app.go under a root named secrets, got %d body=%s", mode, w.Code, w.Body.String())
+			t.Fatalf("mode=%s: want 200 for %s under a root named secrets, got %d body=%s", mode, path, w.Code, w.Body.String())
 		}
 		if mode == "preview" {
 			var resp map[string]any
@@ -124,6 +130,9 @@ func TestHandleFileGet_RootNamedSecrets_Served(t *testing.T) {
 		if w := get("secrets/db.yaml", mode); w.Code != http.StatusForbidden {
 			t.Errorf("mode=%s: secrets/db.yaml inside the workspace must be 403, got %d", mode, w.Code)
 		}
+	}
+	if w := get("secrets/page.html", "render"); w.Code != http.StatusForbidden {
+		t.Errorf("mode=render: secrets/page.html inside the workspace must be 403, got %d", w.Code)
 	}
 	w := get("secrets/db.yaml", "preview")
 	var resp map[string]any

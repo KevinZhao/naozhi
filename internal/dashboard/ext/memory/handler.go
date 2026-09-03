@@ -387,7 +387,7 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 		Slug:        slug,
 		Name:        sanitizeWireText(meta.name),
 		Description: sanitizeWireText(meta.description),
-		Type:        meta.typ,
+		Type:        sanitizeWireText(meta.typ),
 		Body:        sanitizeWireText(body),
 		Truncated:   truncated,
 	}

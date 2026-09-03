@@ -14,6 +14,11 @@ import (
 // — are still scanned in full, and abs is expected to be symlink-resolved so
 // an in-workspace `pub -> secrets` alias is caught by its real path.
 //
+// Reach: Manager.Scan auto-registers every non-hidden subdirectory of the
+// workspace root as a project, so a root named `secrets` / `credentials` is
+// now browsable without any operator action; dot-prefixed roots (`.aws`,
+// `.ssh`) are only reachable when an operator configures them explicitly.
+//
 // Falls back to abs when the relative form cannot be computed or would
 // escape the root (different volume, empty root, prefix guard not yet run):
 // the scan must never become weaker than the absolute-path behaviour.
