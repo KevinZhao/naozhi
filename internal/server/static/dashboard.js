@@ -9754,6 +9754,11 @@ function runKatex() {
 //      reject because they lack both a math hint and a function-call shape.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
+  // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
+  // operator, or call shape to hint on, but the outer `$` guard already
+  // rejected the alphanumeric-adjacent prose case, so accept it (#2428).
+  // 3+ letters (`$USD$`) still fall through to the hint check below.
+  if (/^[a-zA-Z]{1,2}$/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
   if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
   if (!/[\d+\-*/=<>]|[a-zA-Z]\(|\)[a-zA-Z]/.test(tex)) return false;
@@ -9858,12 +9863,17 @@ const _MD_CACHE_MAX = 500;
 // covers >95% of stable IM-style replies on naozhi without paying
 // hash-the-string cost on streaming-storm responses.
 const _MD_CACHE_INPUT_MAX = 2000;
+// Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
+// via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending
+// span keeps a `ktx-N` id whose katexPending entry is deleted on first
+// flush, so later cache hits would show raw TeX forever (#2428). Every
+// alternative in BLOCK_SPLIT_RE plus inlineMd's inline math triggers is
+// mirrored here; keep them in sync.
+const _MD_UNCACHEABLE_RE = /```|\$|\\\[|\\\(|\\begin\{/;
 
 function renderMd(s) {
   if (!s) return '';
-  // Only cache when the input has no constructs that mint unique DOM ids
-  // (mermaid-N / ktx-N), otherwise cached HTML would collide across messages.
-  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !/```|\$|\\\[|\\\(/.test(s);
+  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !_MD_UNCACHEABLE_RE.test(s);
   if (cacheable) {
     const hit = _mdCache.get(s);
     if (hit !== undefined) return hit;
@@ -10968,9 +10978,17 @@ function renderMdUncached(s) {
     // processes one line at a time, which would otherwise truncate multi-line
     // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
     // get swapped back in after list/heading/table rendering completes.
+    // Alternation puts single-line `code` spans first so a `\(...\)` written
+    // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
+    // reaches inlineMd intact, where the code-span pass claims it before the
+    // math pass (#2428). Code spans are returned verbatim — no placeholder —
+    // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
+    // inlineMd's per-line code-span scope; a stray backtick pair spanning
+    // lines is not a code span there either.
     const inlineMathTokens = [];
     if (part.indexOf('\\(') !== -1) {
-      part = part.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
+      part = part.replace(/`[^`\n]+`|\\\(([\s\S]+?)\\\)/g, function(m, tex) {
+        if (tex === undefined) return m;
         inlineMathTokens.push(renderKatex(tex.trim(), false));
         return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
       });
