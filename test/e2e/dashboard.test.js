@@ -743,6 +743,66 @@ test.describe('New session creation', () => {
     await ctx.close();
   });
 
+  // Regression: the palette opens underneath a stationary pointer (the New
+  // Session button sits where the list renders). Chrome dispatches mouseenter
+  // to the row that lands under the cursor without any pointer motion; when
+  // hover wrote state.activeIdx (#2447) that made Enter open the project row
+  // under the mouse -> resumed the folder's existing stable session instead of
+  // creating a quick/new one. Only real pointer motion may move the cursor.
+  test('palette opening under a stationary pointer keeps Enter on row 0', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+
+    // First open: learn where the 'myproject' row renders, then close.
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    const box = await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().boundingBox();
+    // Palette keys are handled on #cp-input, which is focused asynchronously.
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    // Park the pointer exactly where that row will appear, then open the
+    // palette via a JS click so the pointer does not move.
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.$eval('.hdr-btn[title="New Session"]', el => el.click());
+    await page.waitForSelector('.cmd-palette-item');
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.waitForTimeout(50); // let any synthetic mouseenter land
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    // Row 0 is 快速新建 -> key slug is the default workspace basename, not the
+    // project under the pointer.
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toContain('-workspace:');
+    expect(key).not.toContain('-myproject:');
+    await ctx.close();
+  });
+
+  test('palette real pointer motion still moves the Enter target', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    const row = page.locator('.cmd-palette-item', { hasText: 'otherproject' }).first();
+    const box = await row.boundingBox();
+    // Two moves so a mousemove is dispatched inside the row.
+    await page.mouse.move(box.x + 5, box.y + 5);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(row).toHaveClass(/active/);
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toContain('-otherproject:');
+    await ctx.close();
+  });
+
   test('project picker lists available projects', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
