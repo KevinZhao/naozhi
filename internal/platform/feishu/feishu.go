@@ -78,7 +78,7 @@ const (
 	// Real Feishu tokens are ~32 bytes; 512 leaves wide headroom while
 	// preventing a 64 KiB body from forcing an attacker-controlled SHA-256
 	// over the entire token field on every request (small CPU DoS lever
-	// otherwise multiplied by hookSem concurrency).
+	// otherwise multiplied by dispatch semaphore concurrency).
 	maxWebhookTokenLen = 512
 
 	// maxWebhookSigLen bounds the X-Lark-Signature header length before it
@@ -254,10 +254,13 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
-	wg      sync.WaitGroup // tracks in-flight message handler goroutines
-	hookSem chan struct{}  // limits concurrent webhook handler goroutines
-	startMu sync.Mutex
-	started bool
+	// dispatch bounds concurrent inbound handler goroutines (webhook and
+	// websocket transports, shared platform.DefaultHandlerConcurrency cap)
+	// and tracks them plus the bot-info self-heal so Stop() can drain
+	// in-flight work. #2254.
+	dispatch platform.BoundedDispatch
+	startMu  sync.Mutex
+	started  bool
 
 	// cleanupWg tracks the cleanupNonces goroutine so Stop() can wait it out.
 	cleanupWg sync.WaitGroup
@@ -338,7 +341,7 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 		mode = "websocket"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20), stopCtx: ctx, stopCancel: cancel}
+	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, dispatch: platform.BoundedDispatch{Name: "feishu"}, stopCtx: ctx, stopCancel: cancel}
 	f.cleanupWg.Add(1)
 	go func() {
 		defer f.cleanupWg.Done()
@@ -747,7 +750,7 @@ const botInfoRefreshCooldown = time.Minute
 // degraded "any @" fallback (open_id unknown). Non-blocking: the inbound
 // message handler returns immediately on the loose match for this delivery,
 // and a *subsequent* group mention benefits from the now-populated open_id
-// (strict matching). Tracked on f.wg so Stop() waits for the in-flight fetch.
+// (strict matching). Tracked on f.dispatch so Stop() waits for the in-flight fetch.
 // R229-ARCH-19 (#1009).
 func (f *Feishu) maybeRefreshBotInfo() {
 	// stopCtx is nil only for directly-constructed test fixtures (the
@@ -769,8 +772,8 @@ func (f *Feishu) maybeRefreshBotInfo() {
 		// Another goroutine won the CAS and is already (re)fetching.
 		return
 	}
-	// R20260531-CR-003: Stop() cancels stopCtx (735) then blocks on
-	// f.wg.Wait() (751). If we win the CAS concurrently with that Wait,
+	// R20260531-CR-003: Stop() cancels stopCtx then blocks on
+	// f.dispatch.Wait(). If we win the CAS concurrently with that Wait,
 	// calling wg.Add(1) after the counter already drained to 0 — followed
 	// by the goroutine's defer wg.Done() — would drive the counter negative
 	// and panic. Re-check the cancellation here, after the CAS and before
@@ -780,9 +783,7 @@ func (f *Feishu) maybeRefreshBotInfo() {
 	if f.stopCtx.Err() != nil {
 		return
 	}
-	f.wg.Add(1)
-	go func() {
-		defer f.wg.Done()
+	f.dispatch.Go("feishu bot info refresh", func() {
 		// singleflight collapses overlapping re-fetches; the key is constant
 		// because there's a single bot identity per adapter.
 		_, _, _ = f.botInfoSF.Do("bot_info", func() (any, error) {
@@ -796,7 +797,7 @@ func (f *Feishu) maybeRefreshBotInfo() {
 			slog.Info("feishu bot open_id self-healed via lazy re-fetch — group mentions now matched strictly")
 			return nil, nil
 		})
-	}()
+	})
 }
 
 // Stop implements RunnablePlatform. Stops WebSocket connection.
@@ -823,7 +824,7 @@ func (f *Feishu) Stop() error {
 			slog.Warn("feishu websocket stop timed out")
 		}
 	}
-	f.wg.Wait()        // always wait for in-flight message handlers to finish
+	f.dispatch.Wait()  // always wait for in-flight message handlers to finish
 	f.cleanupWg.Wait() // wait for cleanupNonces goroutine to exit
 	return nil
 }
