@@ -545,7 +545,7 @@ func TestWebhook_Challenge(t *testing.T) {
 // url_verification challenge replayed with the SAME ts:nonce is rejected on the
 // second delivery. Previously url_verification was exempt from seenNonces dedup,
 // so a captured challenge could be replayed for the full nonceTTL window in
-// token-only mode, repeatedly reflecting the challenge and consuming hookSem.
+// token-only mode, repeatedly reflecting the challenge and consuming handler semaphore slots.
 func TestWebhook_Challenge_ReplayRejected(t *testing.T) {
 	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
@@ -623,23 +623,24 @@ func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
 }
 
 // TestWebhook_URLVerification_HookSemFull asserts R218-SEC-1: the
-// url_verification branch acquires hookSem before reflecting the challenge,
+// url_verification branch acquires handler semaphore before reflecting the challenge,
 // so a flooded handler returns 503 instead of letting an attacker who
 // scraped verification_token DoS the challenge endpoint without ever
 // hitting the concurrent-handler cap. The other branches (card_action,
-// im.message.receive_v1) already gate on hookSem; without this guard
+// im.message.receive_v1) already gate on handler semaphore; without this guard
 // url_verification was the only authenticated path that ignored the cap.
 func TestWebhook_URLVerification_HookSemFull(t *testing.T) {
 	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	// Saturate the semaphore so the next acquire fails.
-	for i := 0; i < cap(f.hookSem); i++ {
-		f.hookSem <- struct{}{}
+	held := 0
+	for f.dispatch.TryAcquire() {
+		held++
 	}
 	t.Cleanup(func() {
 		// Drain so test does not leak into shared global cleanup paths.
-		for i := 0; i < cap(f.hookSem); i++ {
-			<-f.hookSem
+		for i := 0; i < held; i++ {
+			f.dispatch.Release()
 		}
 	})
 	mux := http.NewServeMux()
@@ -651,7 +652,7 @@ func TestWebhook_URLVerification_HookSemFull(t *testing.T) {
 	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503 (hookSem full must reject url_verification)", w.Code)
+		t.Errorf("status = %d, want 503 (handler semaphore full must reject url_verification)", w.Code)
 	}
 }
 
@@ -1262,7 +1263,7 @@ func TestMaybeRefreshBotInfo_RateLimited(t *testing.T) {
 		f.isBotMentioned(1, func(int) string { return "ou_x" })
 	}
 	// Let any spawned goroutines settle.
-	f.wg.Wait()
+	f.dispatch.Wait()
 
 	if n := atomic.LoadInt32(&calls); n > 1 {
 		t.Errorf("bot/v3/info called %d times, want ≤1 (cooldown should rate-limit)", n)

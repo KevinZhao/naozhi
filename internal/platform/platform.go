@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -264,15 +263,6 @@ type RunnablePlatform interface {
 	Platform
 	Start(handler MessageHandler) error
 	Stop() error
-}
-
-// RecoverHandler catches panics in platform message handler goroutines,
-// preventing a single malformed message from crashing the entire platform listener.
-func RecoverHandler(label string) {
-	if r := recover(); r != nil {
-		slog.Error("panic in platform handler (recovered)",
-			"handler", label, "panic", r, "stack", string(debug.Stack()))
-	}
 }
 
 // SplitText splits text into chunks of at most maxRunes runes, preferring

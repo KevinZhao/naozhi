@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/limits"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // runtimeSessionIDRe matches the production format produced by
@@ -428,29 +427,23 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		a.lg.Info("cron sandbox run canceled",
 			"err_class", string(errClass), "err", errMsg)
 	} else if state == RunStateFailed {
-		// R20260613-GOLANG-002: only count genuine failures as
-		// CronSandboxRunFailedTotal. RunStateTimedOut is already counted by
-		// bumpRunStateMetrics → CronRunTimedOutTotal inside finishRun; bumping
-		// this counter too would double-count timed-out runs and pollute alerts.
-		metrics.CronSandboxRunFailedTotal.Add(1)
 		a.lg.Error("cron sandbox run failed",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	} else if state == RunStateTimedOut {
-		// R20260614-LOGIC-9 (#2091): timed-out sandbox runs are deliberately
-		// kept out of CronSandboxRunFailedTotal (avoid double-counting against
-		// CronRunTimedOutTotal), but failure-only alerts would otherwise miss
-		// sandbox deadlines entirely. A dedicated counter lets operators alert
-		// on sandbox timeouts and isolate them from the path-mixed
-		// CronRunTimedOutTotal.
-		metrics.CronSandboxRunTimedOutTotal.Add(1)
 		a.lg.Error("cron sandbox run timed out",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	} else {
-		// Other non-success, non-canceled, non-failed terminal states: log at
-		// Info so operators can see it without double-counting metrics.
 		a.lg.Info("cron sandbox run ended with non-failure terminal state",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	}
+	// #2173: no metrics here. finishRun → bumpRunStateMetrics(state, sandbox=true)
+	// is the single owner of every per-state counter, including
+	// CronSandboxRun{Failed,TimedOut}Total — see scheduler_callbacks.go. The
+	// state passed in already encodes the R20260613-GOLANG-002 split: a ctx
+	// deadline is RunStateTimedOut (→ CronSandboxRunTimedOutTotal, #2091) and
+	// only genuine RunStateFailed reaches CronSandboxRunFailedTotal, so a
+	// timed-out run is never counted twice — and the caller no longer has to
+	// remember that rule.
 	s.finishRun(finishArgs{
 		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
@@ -459,6 +452,7 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		finalizer:   a.finalizer,
 		sandboxMeta: meta,
 		replayOf:    a.replayOf,
+		sandbox:     true,
 	})
 	// R20260613-CR-6 (#2059): a shutdown-cancel is not a user-visible failure —
 	// mirror the local path (scheduler_run.go), which delivers no notice when

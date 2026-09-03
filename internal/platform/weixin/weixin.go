@@ -63,13 +63,13 @@ type Weixin struct {
 	startMu   sync.Mutex
 	started   bool
 	cancel    context.CancelFunc
-	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
 	pollWg    sync.WaitGroup // tracks the pollLoop goroutine
 
-	// hookSem caps concurrent inbound message-handler goroutines.
-	// Mirrors feishu/slack/discord hookSem (20). R236-SEC-1.
-	hookSem chan struct{}
+	// dispatch bounds concurrent inbound message-handler goroutines (shared
+	// platform.DefaultHandlerConcurrency cap) and tracks them so Stop() can
+	// drain in-flight work. R236-SEC-1, #2254.
+	dispatch platform.BoundedDispatch
 
 	// contextTokens caches the latest context_token per user for reply.
 	// Value is *tokenEntry (token + last-updated unix seconds) so we can
@@ -106,10 +106,6 @@ const maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 // per record. Real iLink relays rarely emit more than a handful per poll.
 // R235-SEC-8.
 const maxWeixinMsgsPerPoll = 100
-
-// weixinHookConcurrency caps concurrent message handlers per Weixin adapter.
-// Mirrors feishu.hookSem / slack.slackHookConcurrency / discord.discordHookConcurrency.
-const weixinHookConcurrency = 20
 
 // validateBaseURLScheme enforces that the operator-supplied iLink base URL
 // uses HTTPS. Any loopback host (localhost, 127.0.0.0/8, ::1, IPv6 zone IDs,
@@ -162,9 +158,9 @@ func New(cfg Config) *Weixin {
 		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	return &Weixin{
-		cfg:     cfg,
-		api:     newAPIClient(cfg.BaseURL, cfg.Token),
-		hookSem: make(chan struct{}, weixinHookConcurrency),
+		cfg:      cfg,
+		api:      newAPIClient(cfg.BaseURL, cfg.Token),
+		dispatch: platform.BoundedDispatch{Name: "weixin"},
 	}
 }
 
@@ -258,7 +254,7 @@ func (w *Weixin) Stop() error {
 	}
 	cancel()
 	w.pollWg.Wait()
-	w.handlerWg.Wait()
+	w.dispatch.Wait()
 	w.cleanupWg.Wait()
 	return nil
 }
@@ -488,23 +484,11 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				MentionMe: true, // direct messages always mention the bot
 			}
 
-			// R236-SEC-1: cap concurrent handler goroutines (mirrors feishu/slack/discord).
-			// Non-blocking acquire — when saturated, drop the message + slog.Warn so a
-			// burst cannot spawn unbounded goroutines.
-			select {
-			case w.hookSem <- struct{}{}:
-			default:
-				slog.Warn("weixin: handler semaphore full, dropping message",
-					"user", osutil.SanitizeForLog(from, 128))
-				continue
-			}
-			w.handlerWg.Add(1)
-			go func() {
-				defer w.handlerWg.Done()
-				defer func() { <-w.hookSem }()
-				defer platform.RecoverHandler("weixin")
-				w.handler(ctx, incoming)
-			}()
+			// R236-SEC-1: cap concurrent handler goroutines. When saturated,
+			// drop the message + slog.Warn so a burst cannot spawn unbounded
+			// goroutines.
+			w.dispatch.TryGo("weixin", func() { w.handler(ctx, incoming) },
+				"user", osutil.SanitizeForLog(from, 128))
 		}
 	}
 }

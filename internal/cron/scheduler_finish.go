@@ -296,6 +296,11 @@ type finishArgs struct {
 	// SendResult.CostUSD (R202606e-ARCH-1 #2280). finishRun persists it onto
 	// CronRun.CostUSD; sandbox runs leave it 0 and carry cost via sandboxMeta.
 	costUSD float64
+	// sandbox marks a placement=sandbox run so bumpRunStateMetrics also
+	// advances the CronSandboxRun{Failed,TimedOut}Total buckets (#2173).
+	// Deliberately separate from sandboxMeta != nil: pre-invoke failures
+	// (unavailable / preflight) carry no receipt yet are still sandbox runs.
+	sandbox bool
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -386,8 +391,18 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// because by definition no Job rollback is possible — the metric is the
 	// only durable record those runs leave. Persist-attempted paths bump
 	// only when jobPersistOK == true.
+	//
+	// #2173: the sandbox-specific buckets (CronSandboxRun{Failed,TimedOut}Total)
+	// sit behind this SAME gate — a deliberate change from the pre-#2173
+	// finishSandboxRunWith, which bumped them unconditionally before calling
+	// finishRun. A persist failure (marshal error rollback / job deleted
+	// mid-flight) therefore no longer counts a sandbox failure while leaving
+	// CronRunFailedTotal untouched; the sandbox bucket is a strict subset of the
+	// generic one, so the two can never disagree. That path is still observable:
+	// recordTerminalResult logs "persist failed; in-memory result reverted" at
+	// Warn, and CronRunEndedTotal still advances (started/ended stay balanced).
 	if a.skipPersist || jobPersistOK {
-		s.bumpRunStateMetrics(a.state)
+		s.bumpRunStateMetrics(a.state, a.sandbox)
 	}
 
 	// CronRun history (P1). Conditions:

@@ -134,17 +134,39 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
-// transition. Mirrored in metrics.go and pinned by counter_wiring_contract_test.
-func (s *Scheduler) bumpRunStateMetrics(state RunState) {
+// transition. It is the SINGLE owner of every per-state counter — the generic
+// CronRun<State>Total family AND the sandbox-specific CronSandboxRun*Total
+// pair (gated by sandbox, i.e. finishArgs.sandbox). Callers must never bump
+// these counters directly; run_metrics_owner_contract_test.go pins that.
+//
+// #2173 (R202606-ARCH-4): the sandbox counters used to be bumped by the
+// callers of finishRun (finishSandboxRunWith + both reconcileOneSandboxOrphan
+// branches), each of which had to remember which states finishRun had already
+// counted. That split produced the timed-out double-count
+// (R20260613-GOLANG-002), the missing timed-out sandbox counter
+// (R20260614-LOGIC-9) and the undercounted orphan path (R20260614-GO-001).
+// Owning the whole state→counter mapping here makes those classes of drift
+// structurally impossible: a sandbox terminal state advances exactly the
+// generic bucket plus (for Failed / TimedOut) its dedicated sandbox bucket.
+func (s *Scheduler) bumpRunStateMetrics(state RunState, sandbox bool) {
 	switch state {
 	case RunStateSucceeded:
 		metrics.CronRunSucceededTotal.Add(1)
 	case RunStateFailed:
 		metrics.CronRunFailedTotal.Add(1)
+		if sandbox {
+			metrics.CronSandboxRunFailedTotal.Add(1)
+		}
 	case RunStateSkipped:
 		metrics.CronRunSkippedTotal.Add(1)
 	case RunStateTimedOut:
 		metrics.CronRunTimedOutTotal.Add(1)
+		if sandbox {
+			// #2091 / R20260614-LOGIC-9: a dedicated bucket so failure-only
+			// alerts still see sandbox deadlines, kept out of
+			// CronSandboxRunFailedTotal so a timeout is never double-counted.
+			metrics.CronSandboxRunTimedOutTotal.Add(1)
+		}
 	case RunStateCanceled:
 		metrics.CronRunCanceledTotal.Add(1)
 	}
