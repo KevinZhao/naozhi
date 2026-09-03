@@ -1811,9 +1811,14 @@ func TestDashboard_R110HistoryDrawerTimeFormat(t *testing.T) {
 	// the toLocaleDateString call must live *inside* historyDayLabel,
 	// not at the old inline site. Assert exactly one occurrence in
 	// the file (was at the inline site pre-Round-129).
-	count := strings.Count(js, "d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' })")
+	// #2429: the option bag is built as `opts` so a non-current year can
+	// append year:'numeric'; the single call site is toLocaleDateString(undefined, opts).
+	if !strings.Contains(js, "const opts = { month: 'short', day: 'numeric', weekday: 'short' };") {
+		t.Error("historyDayLabel must build the weekday+month+day option bag as `opts`")
+	}
+	count := strings.Count(js, "d.toLocaleDateString(undefined, opts)")
 	if count != 1 {
-		t.Errorf("toLocaleDateString with the weekday+month+day args should occur exactly 1 time (inside historyDayLabel); got %d — an inline caller may have resurfaced", count)
+		t.Errorf("toLocaleDateString(undefined, opts) should occur exactly 1 time (inside historyDayLabel); got %d — an inline caller may have resurfaced", count)
 	}
 }
 
@@ -4006,8 +4011,8 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		`if (!stats || typeof stats !== 'object') return [];`,
-		`'运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total`,
-		`if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;`,
+		`'运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total`,
+		`if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;`,
 		`if (stats.cli_name) {`,
 		`if (totalKills > 0) {`,
 		`kind: 'warn',`,
