@@ -8843,11 +8843,14 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   // picker before it is torn down (mirrors backend). "" = global default /
   // inherit project binding.
   const accessProfile = (opts.accessProfile !== undefined) ? opts.accessProfile : getSelectedAccessProfile();
-  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'continue'
-  // so a plain project click resumes the project-stable conversation
-  // (RFC docs/rfc/project-stable-session-key.md §4.4). The "+ 新会话" entry
-  // passes mode:'new' for an independent parallel session.
-  const mode = opts.mode || 'continue';
+  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'new':
+  // every current caller (palette project row, quick session, custom
+  // workspace) starts a fresh timestamp-keyed session. 'continue' (resume the
+  // backend-supplied dashboard:pj: stableKey, RFC §4.4) currently has no
+  // production caller — it is kept for a future explicit "继续对话" entry.
+  // Do NOT flip the default back: with stableKey present that resumes the
+  // folder's running session from the "New Session" button (#2476).
+  const mode = opts.mode || 'new';
   const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
