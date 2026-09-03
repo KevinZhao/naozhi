@@ -4640,12 +4640,17 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 	}
 	body := js[startIdx : startIdx+endIdx+2]
 
-	// 3) Early bail-out: fetchEvents must return when a prior invocation is
-	//    still in flight. The precise string `if (_fetchEventsInFlight) return;`
-	//    pins the gate so a refactor that inverts the flag or routes it
-	//    through a helper will trip this test.
-	if !strings.Contains(body, "if (_fetchEventsInFlight) return;") {
-		t.Error("fetchEvents must early-return when _fetchEventsInFlight is true — guards against overlapping polls")
+	// 3) Early bail-out: a tail poll must return when a prior invocation is
+	//    still in flight. The gate is scoped to `!full` (#2430): the session-
+	//    switch `full` fetch must never be coalesced away, it supersedes the
+	//    in-flight tail through _fetchEventsGen instead. The precise string
+	//    pins the gate so a refactor that inverts the flag, drops the `!full`
+	//    scope, or routes it through a helper will trip this test.
+	if !strings.Contains(body, "if (!full && _fetchEventsInFlight) return;") {
+		t.Error("fetchEvents must early-return tail polls (`!full`) when _fetchEventsInFlight is true — guards against overlapping polls without swallowing the full fetch")
+	}
+	if strings.Contains(body, "\n  if (_fetchEventsInFlight) return;") {
+		t.Error("fetchEvents must not gate `full` fetches on _fetchEventsInFlight (#2430)")
 	}
 
 	// 4) Dispatch-time capture of selectedKey/selectedNode. appendEvents
@@ -4675,8 +4680,12 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 
 	// 6) Stale-response bail-out after await. The snapshot captured in
 	//    step 4 must be re-checked once the fetch resolves, because
-	//    selectedKey could have flipped during the suspend.
-	if !strings.Contains(body, "if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;") {
+	//    selectedKey could have flipped during the suspend — and a newer
+	//    `full` fetch (generation bump) supersedes the response too.
+	if !strings.Contains(body, "const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;") {
+		t.Error("fetchEvents must define the stale() predicate over the dispatch-time snapshot AND the fetch generation")
+	}
+	if !strings.Contains(body, "if (stale()) return;") {
 		t.Error("fetchEvents must drop stale responses after await — prevents appendEvents from targeting the wrong session")
 	}
 
