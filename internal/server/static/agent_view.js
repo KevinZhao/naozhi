@@ -186,6 +186,8 @@
       turnState.collapsedByAuto = false;
     }
     stopHttpPoll();
+    state.pollAfterMS = 0;
+    state.pollSeenKeys = [];
     refreshBanner();
 
     var el = document.getElementById('events-scroll');
@@ -271,6 +273,13 @@
       .then(function (events) {
         if (!events || seq !== state.switchSeq) return;
         renderAgentEvents(events, /*reset=*/ true);
+        // Seed the HTTP-poll watermark from what is now on screen so a
+        // capacity-rejected WS subscribe does not replay this whole page on
+        // the first poll tick (after=0). dedupAgentPollBatch's bookkeeping
+        // (max real time + content keys at that ms) is exactly the seed.
+        var seed = dedupAgentPollBatch(events, 0, []);
+        state.pollAfterMS = seed.afterMS;
+        state.pollSeenKeys = seed.seenKeys;
         subscribeCurrent(taskID);
       })
       .catch(function (err) {
@@ -563,6 +572,9 @@
       var ev = events[j];
       if (!ev) continue;
       var t = typeof ev.time === 'number' ? ev.time : 0;
+      // Strictly older than the watermark: already on screen (mirrors the
+      // main transcript's appendEvents rule).
+      if (t && t < afterMS) continue;
       if (t && t === afterMS && seen[agentEventKey(ev)]) continue;
       out.push(ev);
       // Advance only on a real timestamp: time===0 predates the field and
@@ -578,10 +590,10 @@
   }
   // @contract-end dedupAgentPollBatch
 
+  // The watermark is NOT reset here: it was seeded by fetchAgentEventsInitial
+  // for this drill-in and cleared by switchTo for the next one.
   function startHttpPoll(taskID) {
     stopHttpPoll();
-    state.pollAfterMS = 0;
-    state.pollSeenKeys = [];
     state.pollTimer = setInterval(function () {
       if (taskID !== state.activeTaskID) {
         stopHttpPoll();

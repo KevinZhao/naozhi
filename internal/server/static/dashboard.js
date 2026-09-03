@@ -14913,6 +14913,32 @@ initSwipeBack();
     return 0;
   }
 
+  // @contract-begin scratchAdmitEvent
+  // scratchAdmitEvent is the same-ms replay gate for the drawer's HTTP poll.
+  // HandleEvents ?after= re-admits the watermark millisecond (#2456, so a
+  // same-ms sibling is never lost), which means every idle tick replays the
+  // entries AT st.lastEventTime. st.seenAtWM holds the uuids already
+  // processed (rendered OR echo-dropped) at that ms: the local optimistic
+  // user bubble carries no data-uuid and matchesPendingEcho consumes its
+  // entry on first sight, so a DOM lookup alone would re-render the echoed
+  // user event on the next tick. Returns false when e must be skipped;
+  // otherwise records it and advances the watermark. uuid-less (pre-uuid)
+  // events at the watermark are admitted — never swallow what we can't
+  // identify (losing history is worse than a duplicate bubble).
+  function scratchAdmitEvent(st, e) {
+    const t = (e && typeof e.time === 'number') ? e.time : 0;
+    if (t && t < st.lastEventTime) return false;
+    if (!st.seenAtWM) st.seenAtWM = new Set();
+    if (t && t === st.lastEventTime && e.uuid && st.seenAtWM.has(e.uuid)) return false;
+    if (t > st.lastEventTime) {
+      st.lastEventTime = t;
+      st.seenAtWM.clear();
+    }
+    if (t && t === st.lastEventTime && e.uuid) st.seenAtWM.add(e.uuid);
+    return true;
+  }
+  // @contract-end scratchAdmitEvent
+
   function renderNewEvents(events) {
     if (!Array.isArray(events) || events.length === 0) return;
     // Remember whether the user was reading the latest message BEFORE we
@@ -14929,11 +14955,10 @@ initSwipeBack();
     let sawUser = false;
     let prevT = asideLastTime();
     for (const e of events) {
+      // Same-ms replay / strictly-older guard; also owns the watermark.
+      if (!scratchAdmitEvent(state, e)) continue;
       // Drop server-echoed user messages that we already rendered locally.
-      if (matchesPendingEcho(e)) {
-        if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
-        continue;
-      }
+      if (matchesPendingEcho(e)) continue;
       // Reuse the main event renderer so aside bubbles match the transcript
       // style (markdown, code blocks, etc.) without duplicating logic.
       const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
@@ -14949,7 +14974,6 @@ initSwipeBack();
       tmp.innerHTML = h;
       while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
       if (t) prevT = t;
-      if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
       if (e.type === 'user') sawUser = true;
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
@@ -15064,6 +15088,7 @@ initSwipeBack();
         sourceMsgTime: sourceMsgTime || 0,
         quote,
         lastEventTime: 0,
+        seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
         // Bounded Set of user-message bodies that sendInScratch rendered
         // locally. Consumed by matchesPendingEcho when the server event
         // stream replays the same text as a `user` event. Set over array

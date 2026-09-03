@@ -18,7 +18,7 @@ func extractContractBlock(t *testing.T, src, name string) string {
 	i := strings.Index(src, begin)
 	j := strings.Index(src, end)
 	if i < 0 || j < 0 || j < i {
-		t.Fatalf("agent_view.js: missing %q / %q markers", begin, end)
+		t.Fatalf("contract block %q: missing %q / %q markers", name, begin, end)
 	}
 	return src[i+len(begin) : j]
 }
@@ -40,6 +40,15 @@ func TestAgentViewJS_DedupAgentPollBatch_SameMsReplay(t *testing.T) {
 		t.Fatalf("read agent_view.js: %v", err)
 	}
 	block := extractContractBlock(t, string(av), "dedupAgentPollBatch")
+	avStr := string(av)
+	if !strings.Contains(avStr, "var seed = dedupAgentPollBatch(events, 0, []);") {
+		t.Fatal("fetchAgentEventsInitial must seed state.pollAfterMS/pollSeenKeys from the rendered page (review P2)")
+	}
+	sp := avStr[strings.Index(avStr, "function startHttpPoll("):]
+	sp = sp[:strings.Index(sp, "function stopHttpPoll(")]
+	if strings.Contains(sp, "state.pollAfterMS = 0") {
+		t.Fatal("startHttpPoll must not reset the seeded watermark (would replay the initial page on the first tick)")
+	}
 
 	script := block + `
 function eq(a, b, msg) {
@@ -79,6 +88,13 @@ eq(b.events.length, 2, 'distinct same-ms siblings both render');
 b = dedupAgentPollBatch([{ type: 'text', summary: 'legacy' }], 3000, []);
 eq(b.afterMS, 3000, 'time 0 does not move watermark');
 eq(b.events.length, 1, 'time 0 entry still renders');
+// Review P2: the initial HTTP page seeds the poll watermark, so the first
+// fallback tick (which replays that page inclusively) renders nothing.
+const initialPage = [{ time: 100, type: 'user', summary: 'go' }, thinking, text];
+const seed = dedupAgentPollBatch(initialPage, 0, []);
+eq(seed.afterMS, 2000, 'seed watermark = newest real time on the page');
+b = dedupAgentPollBatch(initialPage, seed.afterMS, seed.seenKeys);
+eq(b.events.length, 0, 'first poll tick after seeding replays nothing');
 console.log('OK');
 `
 	dir := t.TempDir()
