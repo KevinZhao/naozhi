@@ -7642,13 +7642,27 @@ async function fetchCLIBackends(node) {
       // must NOT drive feature gates (the input controls operate on the
       // locally-selected session), so this stays inside the isLocal branch.
       if (typeof applyFeatureGates === 'function') applyFeatureGates();
-    } else {
+    } else if (manifest) {
       cliBackendsByNode[node] = { data: manifest, at: Date.now() };
+    } else {
+      // A null / malformed remote manifest must not be pinned for 60s —
+      // drop any stale entry so the next open refetches (#2429).
+      delete cliBackendsByNode[node];
     }
     return manifest;
   } catch (e) {
+    if (!isLocal) delete cliBackendsByNode[node];
     return null;
   }
+}
+
+// renderBackendFetchFailed is the picker-slot fallback when a REMOTE node's
+// backends manifest could not be fetched: a one-line notice plus a retry
+// button (wired by refreshBackendPicker) instead of silently showing no
+// picker as if the node had a single backend.
+function renderBackendFetchFailed(node) {
+  return '<span class="cp-backend-fail">' + esc(getNodeDisplayName(node)) + ' 后端清单获取失败 ' +
+    '<button type="button" class="settings-syslink-btn cp-backend-retry">重试</button></span>';
 }
 
 // fetchAccessProfiles caches /api/access-profiles for 60s (same policy as
@@ -7966,6 +7980,16 @@ function sanitizeKeySlug(s) {
   return safe || 'session';
 }
 
+// localDateStamp renders a Date as YYYY-MM-DD-HHMMSS in LOCAL time for
+// session-key timestamps. The previous toISOString (UTC date) +
+// toTimeString (local time) mix dated keys created 00:00–08:00 UTC+8 as
+// yesterday (#2429).
+function localDateStamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
 function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
   const slug = sanitizeKeySlug(projectOrFolder);
   const agent = agentID && String(agentID).trim() ? sanitizeKeySlug(agentID) : 'general';
@@ -8108,6 +8132,10 @@ function createNewSession() {
         }
         refreshBackendPicker('new-backend-slot');
       });
+      // First-open path: a failed REMOTE manifest arrives here as null and
+      // renderBackendPicker(null) painted an empty slot. Route through
+      // refreshBackendPicker so the retry notice shows on open too (#2429).
+      if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -8140,6 +8168,12 @@ function refreshBackendPicker(slotId) {
     if (!document.getElementById(slotId)) return;
     // Drop a stale response whose node no longer matches the selection.
     if (selectedNode !== reqNode) return;
+    if (!backendsData && reqNode && reqNode !== 'local') {
+      slot.innerHTML = renderBackendFetchFailed(reqNode);
+      const retry = slot.querySelector('.cp-backend-retry');
+      if (retry) retry.addEventListener('click', () => refreshBackendPicker(slotId));
+      return;
+    }
     slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
   });
 }
@@ -8197,6 +8231,9 @@ function openProjectPalette(backendsData, profilesData) {
     renderPaletteList(state, input.value);
     refreshBackendPicker('cp-backend-slot');
   });
+  // First-open path: see the no-projects modal above — a null remote
+  // manifest must surface the retry notice, not an empty slot (#2429).
+  if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -8395,8 +8432,17 @@ function buildProjectRow(s, idx) {
   return el;
 }
 
+// quickRowHint is the 「快速新建」 subtitle for the selected node. Only the
+// LOCAL default workspace is known client-side (stats.default_workspace);
+// a remote node resolves its own default on dispatch, so name the node
+// instead of echoing the local path (#2429).
+function quickRowHint(node) {
+  if (!node || node === 'local') return defaultWorkspace ? shortPath(defaultWorkspace) : '';
+  return getNodeDisplayName(node) + ' · 默认工作区';
+}
+
 function buildQuickRow(idx) {
-  const ws = defaultWorkspace || '';
+  const hint = quickRowHint(selectedNode || 'local');
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
@@ -8404,7 +8450,7 @@ function buildQuickRow(idx) {
     '<span class="cp-icon">⚡</span>' +
     '<div class="cp-main">' +
       '<div class="cp-name">快速新建</div>' +
-      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
+      (hint ? '<div class="cp-path">' + esc(hint) + '</div>' : '') +
     '</div>';
   el.addEventListener('click', () => pickPaletteQuick());
   return el;
@@ -8586,8 +8632,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // Continue → backend-provided stable key (precise continuation); new →
   // fresh timestamp key (independent parallel session). resolveSessionKey
   // also falls back to a timestamp key when no stableKey is available.
@@ -8632,8 +8677,7 @@ function doCreateSession() {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
@@ -8697,8 +8741,7 @@ function createQuickSession(initialText, onTextStranded) {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
   if (workspace) sessionWorkspaces[key] = workspace;
@@ -8946,8 +8989,8 @@ function buildHomeHealthLines(stats) {
   const running = typeof stats.running === 'number' ? stats.running : 0;
   const ready = typeof stats.ready === 'number' ? stats.ready : 0;
   const total = typeof stats.total === 'number' ? stats.total : 0;
-  let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
-  if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
+  let line1 = '运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
+  if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
   // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
   // /api/sessions stats static block already, so surface live-vs-capacity
@@ -9450,7 +9493,9 @@ function historyDayLabel(d) {
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
   if (diffDays === 0) return '\u4eca\u5929';
   if (diffDays === 1) return '\u6628\u5929';
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
+  const opts = { month: 'short', day: 'numeric', weekday: 'short' };
+  if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
 }
 
 // Sidebar relative-time ticker. While WS is connected renderSidebar only
@@ -9792,7 +9837,10 @@ function formatTimeShort(ms) {
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
   const isYesterday = d.getFullYear() === yesterday.getFullYear() && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
   if (isYesterday) return '昨天 ' + hm;
-  const diffDays = Math.floor((now - d) / 86400000);
+  // Local calendar-day difference (not floor(ms/24h)): an event 6d23.5h ago
+  // is the same weekday as today and must not get a weekday label (#2429).
+  const dayStart = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
   if (diffDays < 7 && diffDays >= 0) {
     const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
     return wk + ' ' + hm;
@@ -9864,7 +9912,7 @@ function loadMermaid() {
   s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
   s.crossOrigin = 'anonymous';
   s.onload = () => {
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+    mermaid.initialize(mermaidConfig());
     mermaidReady = true;
     mermaidLoading = false;
     runMermaid();
@@ -9885,7 +9933,28 @@ function runMermaid() {
     delete mermaidPending[id];
     hasNew = true;
   });
-  if (hasNew) mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  if (hasNew) {
+    // Re-initialise per run so diagrams rendered after a theme switch pick
+    // up the current theme (already-rendered SVGs are left as-is).
+    mermaid.initialize(mermaidConfig());
+    mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  }
+}
+
+// mermaidThemeName maps the resolved dashboard theme (data-theme, with
+// 'auto' following prefers-color-scheme) to a mermaid theme name (#2429).
+function mermaidThemeName() {
+  const t = document.documentElement.dataset.theme;
+  if (t === 'light') return 'default';
+  if (t === 'dark') return 'dark';
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'default';
+  } catch (_) {}
+  return 'dark';
+}
+
+function mermaidConfig() {
+  return { startOnLoad: false, theme: mermaidThemeName(), securityLevel: 'strict' };
 }
 
 let mermaidCounter = 0;
