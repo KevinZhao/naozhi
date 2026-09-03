@@ -201,6 +201,7 @@ function defaultGitStates() {
  * @param {Function} [overrides.onCronCreate] - Callback when POST /api/cron is called.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
+ * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -218,6 +219,8 @@ function startMockServer(overrides = {}) {
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = overrides.gitStates || defaultGitStates();
   const sessionRuns = overrides.sessionRuns || {};
+  const discoveredData = overrides.discovered || [];
+  let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
   // deleteStatus lets a test force DELETE /api/sessions to fail (e.g. 500)
@@ -491,7 +494,26 @@ function startMockServer(overrides = {}) {
     if (pathname === '/api/discovered' && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(discoveredData));
+      return;
+    }
+
+    if (pathname === '/api/discovered/preview' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('[]');
+      return;
+    }
+
+    if (pathname === '/api/discovered/close' && req.method === 'POST') {
+      if (!checkAuth()) return;
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        discoveredCloseCalls.push(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
 
@@ -669,6 +691,7 @@ function startMockServer(overrides = {}) {
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
         get labelCalls() { return labelCalls; },
+        get discoveredCloseCalls() { return discoveredCloseCalls; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.
@@ -694,7 +717,7 @@ function startMockServer(overrides = {}) {
           const s = (sessionsData.sessions || []).find(x => x.key === key);
           if (s) s.state = state;
         },
-        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; },
+        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; discoveredCloseCalls = []; },
       });
     });
   });
