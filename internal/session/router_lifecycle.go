@@ -1037,26 +1037,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	accessProfileID := sp.AccessProfileID
 	accessProfileEnv := sp.AccessProfileEnv
 
-	spawnOpts := cli.SpawnOptions{
-		Key:             key,
-		Model:           sp.Model,
-		Effort:          sp.Effort,
-		ResumeID:        resumeID,
-		ExtraArgs:       sp.Args,
-		WorkingDir:      workspace,
-		NoOutputTimeout: r.noOutputTimeout,
-		TotalTimeout:    r.totalTimeout,
-		// "" unless the operator opted into CLI debug capture via
-		// NAOZHI_CLI_DEBUG; only ClaudeProtocol acts on it (ACP ignores).
-		DebugFile: r.cliDebugFileFor(key),
-		// "" unless the operator opted into naozhi-owned isolated settings
-		// (RFC naozhi-owned-settings-v3); only ClaudeProtocol acts on it.
-		SettingsFile: r.naozhiSettingsFile,
-		// "" unless the operator configured cli.mcp_config (RFC
-		// cli-mcp-config); only ClaudeProtocol acts on it. Must stay mirrored
-		// in router_shim.go's arg-drift comparison — see the note there.
-		MCPConfigFile: r.mcpConfigFile,
-	}
+	// argv-bearing fields come from the shared constructor so this path and
+	// the arg-drift comparison cannot diverge (see argvSpawnOptions). DebugFile
+	// uses the side-effecting cliDebugFileFor here — the spawned CLI needs the
+	// log pre-created 0600 — where drift uses the read-only cliDebugPathFor.
+	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args)
+	// ResumeID is argv-bearing (BuildArgs emits --resume) but stays out of the
+	// shared constructor: it is session state, not config, and the drift side
+	// strips it from the stored argv (stripResumeArgs) precisely so a resumed
+	// session is not read as drift.
+	spawnOpts.ResumeID = resumeID
+	// Process wiring BuildArgs never reads.
+	spawnOpts.Key = key
+	spawnOpts.WorkingDir = workspace
+	spawnOpts.NoOutputTimeout = r.noOutputTimeout
+	spawnOpts.TotalTimeout = r.totalTimeout
 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
 	// We release r.mu to avoid holding it during I/O. pendingSpawns prevents
