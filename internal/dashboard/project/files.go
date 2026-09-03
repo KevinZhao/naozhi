@@ -757,7 +757,7 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 				// a symlink like `pub -> secrets` would otherwise let `rel`
 				// ("pub/db.yaml") evade the `secrets` segment match that `abs`
 				// ("…/secrets/db.yaml") catches.
-				if isSensitiveDownloadPath(abs) {
+				if isSensitiveDownloadPath(workspaceScanPath(rootResolved, abs)) {
 					entry = existsEntry{Exists: false}
 				} else if isPublicTmpDeniedName(abs) {
 					// R20260527122801-SEC-6 (#1330): also deny sensitive
@@ -1136,13 +1136,13 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 
 	switch mode {
 	case "preview":
-		h.servePreview(w, f, resolved, info)
+		h.servePreview(w, f, rootResolved, resolved, info)
 	case "raw":
-		h.serveRaw(w, r, f, resolved, info)
+		h.serveRaw(w, r, f, rootResolved, resolved, info)
 	case "render":
-		h.serveRender(w, r, f, resolved, info)
+		h.serveRender(w, r, f, rootResolved, resolved, info)
 	case "download":
-		h.serveDownload(w, r, f, resolved, info)
+		h.serveDownload(w, r, f, rootResolved, resolved, info)
 	}
 }
 
@@ -1193,7 +1193,7 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 // -html`, Playwright trace, pytest-html) and most SVG diagrams emit self-
 // contained single-file content and are unaffected. Relative-asset support is
 // B2, gated on actual user demand.
-func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, rootResolved, resolved string, info os.FileInfo) {
 	// R249-SEC-5: mirror servePreview / serveRaw / serveDownload — refuse
 	// credential-bearing names even when the bytes happen to sniff as
 	// text/html or image/svg+xml. Without this gate an attacker who can
@@ -1201,7 +1201,7 @@ func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.Fil
 	// could read it through render mode despite the other three modes
 	// blocking it. The sensitive list is full-path scanned so subtree
 	// stashes like `secrets/db.yaml` or `.ssh/known_hosts` are caught.
-	if isSensitiveDownloadPath(resolved) {
+	if isSensitiveDownloadPath(workspaceScanPath(rootResolved, resolved)) {
 		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "render blocked for sensitive file name"})
 		return
 	}
@@ -1297,7 +1297,7 @@ func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.Fil
 // tools create/edit files arbitrarily — so raw innerHTML would be a stored-XSS
 // sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
 // with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
-func (h *Handlers) servePreview(w http.ResponseWriter, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) servePreview(w http.ResponseWriter, f *os.File, rootResolved, resolved string, info os.FileInfo) {
 	// Mirror the serveDownload guard: a file like .netrc / .npmrc / id_rsa
 	// has a text MIME and would otherwise have its raw contents echoed in
 	// the JSON `content` field. The download path's credential allowlist
@@ -1306,7 +1306,7 @@ func (h *Handlers) servePreview(w http.ResponseWriter, f *os.File, resolved stri
 	// R247-SEC-10: now scans every path segment so subtree-style stashes
 	// like `secrets/db.yaml` or `.ssh/known_hosts` no longer slip past the
 	// basename-only check.
-	if isSensitiveDownloadPath(resolved) {
+	if isSensitiveDownloadPath(workspaceScanPath(rootResolved, resolved)) {
 		httputil.WriteJSON(w, map[string]any{
 			"content":   "",
 			"size":      info.Size(),
@@ -1409,14 +1409,14 @@ func (h *Handlers) servePreview(w http.ResponseWriter, f *os.File, resolved stri
 	})
 }
 
-func (h *Handlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, rootResolved, resolved string, info os.FileInfo) {
 	// R246-SEC-2: enforce the same sensitive-name guard as servePreview /
 	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
 	// and would otherwise pass the isTextMime check below, exposing
 	// credentials inline despite preview/download already refusing them.
 	// R247-SEC-10: full-path scan so e.g. `.ssh/foo` is rejected even when
 	// the basename is innocuous.
-	if isSensitiveDownloadPath(resolved) {
+	if isSensitiveDownloadPath(workspaceScanPath(rootResolved, resolved)) {
 		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "preview blocked for sensitive file name"})
 		return
 	}
@@ -1487,7 +1487,7 @@ func (h *Handlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, 
 		// through; serveDownload no longer re-opens, so we hand off the same
 		// *os.File directly. HandleFileGet's deferred Close stays the sole
 		// owner — serveDownload only reads, never closes.
-		h.serveDownload(w, r, f, resolved, info)
+		h.serveDownload(w, r, f, rootResolved, resolved, info)
 		return
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -1518,13 +1518,13 @@ func (h *Handlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
 
-func (h *Handlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, rootResolved, resolved string, info os.FileInfo) {
 	// SEC-009: deny credential-bearing files even on the explicit download
 	// path. servePreview already excludes .env via previewableByExt + the
 	// MIME guard, but download had no equivalent stop, letting authenticated
 	// users pull .env / .netrc / *.pem out of any workspace.
 	// R247-SEC-10: full-path scan blocks `secrets/db.yaml`, `.ssh/foo` etc.
-	if isSensitiveDownloadPath(resolved) {
+	if isSensitiveDownloadPath(workspaceScanPath(rootResolved, resolved)) {
 		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "file type not downloadable"})
 		return
 	}

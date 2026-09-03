@@ -265,12 +265,11 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 	fetch := turns * 3
 	if sourceMessageTime > 0 {
 		before = sess.EventEntriesBeforeCtx(ctx, sourceMessageTime, fetch)
-		// EventEntriesSince(t) returns entries with Time > t, so passing
-		// (sourceMessageTime - 1) yields entries with Time >= sourceMessageTime;
+		// cli.SinceInclusive yields entries with Time >= sourceMessageTime;
 		// the loop then skips the exact-match entry so the quoted message
 		// itself is not echoed into the context block (the quote already
 		// carries that content).
-		raw := sess.EventEntriesSince(sourceMessageTime - 1)
+		raw := sess.EventEntriesSince(cli.SinceInclusive(sourceMessageTime))
 		// Cap the pre-allocation at `fetch` so a long-running session
 		// that has emitted many events after the quote cannot force an
 		// arbitrarily large slice for what is ultimately a fetch-bounded

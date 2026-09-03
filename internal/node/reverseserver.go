@@ -253,6 +253,12 @@ type ReverseServer struct {
 
 	OnRegister   func(id string, conn *ReverseConn)
 	OnDeregister func(id string)
+
+	// testHookBeforeAck, when non-nil, runs after rc is installed into
+	// s.conns and before the "registered" ack is written. Tests only: it
+	// widens the insert→ack window so a concurrent re-registration can be
+	// interleaved deterministically (#2458).
+	testHookBeforeAck func(rc *ReverseConn)
 }
 
 // ReverseNodeAuth is the node-local, zero-dependency value shape that
@@ -432,17 +438,68 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// remoteLabel so meta.Hostname stays distinct from RemoteAddr —
 	// only the former survives `r.RemoteAddr` fallback above.
 	rc := newReverseConnWithMeta(msg.NodeID, displayName, remoteLabel, conn, msg.Capabilities, msg.Hostname)
+	// Install rc into s.conns BEFORE writing the "registered" ack (#2458).
+	// The client treats the ack as "I am registered" and may drop + redial
+	// immediately after receiving it. With the old order (ack first, insert
+	// second) a fast reconnect could complete a whole new handshake in the
+	// gap: conn2 lands in the map with no old to close, then conn1's handler
+	// resumes and overwrites conn2 — conn2 becomes an orphan whose close
+	// never fires OnDeregister (owns == false) and the dead conn1 sits in
+	// the registry until its read deadline expires ("online but invisible").
+	//
+	// Invariant: s.conns[id] is always the conn that most recently reached
+	// the insert point — i.e. the newest successfully acked conn or the one
+	// currently mid-ack. Any conn that reaches the insert point closes the
+	// previous owner; the previous owner's deregister goroutine (and its own
+	// ack-failure rollback below) sees owns == false and does not touch the
+	// map or fire OnDeregister, so the newest conn alone owns the id.
+	//
+	// Lock order: s.mu → ReverseConn.closeMu (inside old.Close). No callback
+	// runs under s.mu; OnRegister/OnDeregister are invoked with s.mu released.
+	s.mu.Lock()
+	old, displaced := s.conns[msg.NodeID]
+	if displaced {
+		old.Close()
+	}
+	s.conns[msg.NodeID] = rc
+	s.mu.Unlock()
+
+	// abortAck rolls the insert back when the ack cannot be delivered. Only
+	// remove the entry if it is still ours (identity check — a newer conn may
+	// already have displaced us, in which case it owns the id and we must not
+	// evict it). When we displaced an old conn its deregister path was
+	// suppressed by that same identity check, so the upper layer still holds
+	// the old (now closed) conn: emit OnDeregister on its behalf so a dead
+	// conn is never left registered. When nothing was displaced OnRegister
+	// never fired for this id and no deregister is owed.
+	abortAck := func() {
+		s.mu.Lock()
+		owns := s.conns[msg.NodeID] == rc
+		if owns {
+			delete(s.conns, msg.NodeID)
+		}
+		s.mu.Unlock()
+		rc.Close()
+		if owns && displaced && s.OnDeregister != nil {
+			s.OnDeregister(msg.NodeID)
+		}
+	}
+
+	if s.testHookBeforeAck != nil {
+		s.testHookBeforeAck(rc)
+	}
+
 	// Bound the register response write so a slow-read attacker can't
 	// park this goroutine indefinitely at the TCP window.
 	// newReverseConnWithMeta applies 10s per write thereafter; this
 	// pre-handoff write needs the same protection. If SetWriteDeadline fails (conn closed mid-handshake),
 	// abort before WriteJSON would block deadline-less on a dead socket.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		rc.Close()
+		abortAck()
 		return
 	}
 	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
-		rc.Close()
+		abortAck()
 		return
 	}
 	// R183-GO-M1: clearing the write deadline can only fail on a broken /
@@ -454,16 +511,9 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// "connection unusable", tear down, and bail.
 	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 		slog.Debug("ws-node: clear write deadline failed", "err", err)
-		rc.Close()
+		abortAck()
 		return
 	}
-
-	s.mu.Lock()
-	if old, exists := s.conns[msg.NodeID]; exists {
-		old.Close()
-	}
-	s.conns[msg.NodeID] = rc
-	s.mu.Unlock()
 
 	// R181-SEC-P2-1: authenticated node_id matched a config key, but those
 	// keys are never run through truncateLabelUTF8 on load — an operator
@@ -474,15 +524,25 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// remote advertises capability tags outside this binary's known set.
 	// Pure observability — the node is still registered normally.
 	logUnknownCaps(safeNodeID, msg.Capabilities)
-	// RNEW-SEC-006: symmetric with the auth-failed path above — log
-	// r.Host so operators can correlate registered nodes with the
-	// Host header they came in on.
-	slog.Info("reverse node registered",
-		"node_id", safeNodeID,
-		"ip", ip,
-		"host", osutil.SanitizeForLog(r.Host, 256))
 
-	if s.OnRegister != nil {
+	// If a newer conn displaced us between the insert and here, it has (or
+	// will have) called OnRegister itself and already closed rc; skipping
+	// avoids handing the upper layer a dead conn after the live one.
+	s.mu.RLock()
+	stillOwns := s.conns[msg.NodeID] == rc
+	s.mu.RUnlock()
+	if !stillOwns {
+		slog.Debug("reverse node superseded before register", "node_id", safeNodeID, "ip", ip)
+	} else {
+		// RNEW-SEC-006: symmetric with the auth-failed path above — log
+		// r.Host so operators can correlate registered nodes with the
+		// Host header they came in on.
+		slog.Info("reverse node registered",
+			"node_id", safeNodeID,
+			"ip", ip,
+			"host", osutil.SanitizeForLog(r.Host, 256))
+	}
+	if stillOwns && s.OnRegister != nil {
 		// msg.NodeID is kept verbatim here so downstream state
 		// (`s.conns[msg.NodeID]`, Server.nodes, knownNodes) is keyed with
 		// the authenticated-config id; OnDeregister below must pass the

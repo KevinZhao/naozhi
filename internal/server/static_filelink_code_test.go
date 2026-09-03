@@ -26,9 +26,9 @@ func TestDashboardJS_LocalFileLink_RendersAsCode(t *testing.T) {
 	}
 	js := string(data)
 
-	// Window on the inlineMd markdown-link replace block. Anchor on the regex
-	// literal so the test fails loudly if the link grammar is refactored.
-	linkIdx := strings.Index(js, `s.replace(/\[([^\]]+)\]\(([^)]+)\)/g`)
+	// Window on the inlineMd markdown-link replace block. Anchor on the named
+	// link regex so the test fails loudly if the link grammar is refactored.
+	linkIdx := strings.Index(js, `s.replace(MD_LINK_RE, function(`)
 	if linkIdx < 0 {
 		t.Fatal("markdown link replace block not found in dashboard.js — the local-file-link fix anchor is missing")
 	}
