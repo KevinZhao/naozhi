@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,32 +76,48 @@ func TestReadJSONWithRetry_missingFileNoRetry(t *testing.T) {
 	}
 }
 
-// TestReadJSONWithRetry_eventuallyValid simulates the race: first read sees a
-// truncated view, a concurrent writer finishes before the retry, second read
-// sees valid JSON.
+// TestReadJSONWithRetry_eventuallyValid simulates the race the retry exists
+// for: the first read sees a torn (truncated) view, a concurrent writer
+// finishes before the retry, and the second read sees valid JSON.
+//
+// #2473: the interleaving is pinned through the injected reader instead of a
+// sleeping writer goroutine. The old shape stored fixed=true only AFTER
+// os.WriteFile returned, so on a loaded runner the retry read could observe
+// the finished file before the goroutine reached the Store and the test
+// failed itself with "retry succeeded before writer ran". Here the writer
+// completes synchronously in the gap between attempt 1 and attempt 2, so
+// exactly one retry happens and no wall-clock assumption is involved.
 func TestReadJSONWithRetry_eventuallyValid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.json")
-	// Seed with invalid JSON.
+	// Seed with invalid JSON: the torn view attempt 1 must observe.
 	if err := os.WriteFile(path, []byte(`{"partial":`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Flip to valid JSON before second attempt. 50ms gives the first attempt
-	// room to run while still undercutting the 100ms retry sleep.
-	fixed := atomic.Bool{}
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		_ = os.WriteFile(path, []byte(`{"ok":true}`), 0600)
-		fixed.Store(true)
-	}()
-	data, err := readJSONWithRetry(context.Background(), path, 5, 100*time.Millisecond)
+	reads := 0
+	readFile := func(p string) ([]byte, error) {
+		reads++
+		data, err := os.ReadFile(p)
+		if reads == 1 {
+			// The "concurrent writer" lands after attempt 1 has taken its
+			// torn snapshot and before attempt 2 reads the file again.
+			if werr := os.WriteFile(p, []byte(`{"ok":true}`), 0600); werr != nil {
+				t.Fatalf("writer: %v", werr)
+			}
+		}
+		return data, err
+	}
+	data, err := readJSONWithRetryFn(context.Background(), path, 5, time.Millisecond, readFile)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !fixed.Load() {
-		t.Fatalf("test setup flake: retry succeeded before writer ran")
+	if reads != 2 {
+		t.Fatalf("reads = %d, want 2 (torn first read, then exactly one retry)", reads)
 	}
 	if !json.Valid(data) {
 		t.Fatalf("expected valid JSON, got %q", data)
+	}
+	if string(data) != `{"ok":true}` {
+		t.Fatalf("retry returned %q, want the writer's final content", data)
 	}
 }
 

@@ -1,16 +1,21 @@
 // Package envpolicy holds the shared, leaf-level env-filtering primitives used
 // by the Claude subprocess env policy: base-URL SSRF/redirect validation, AWS
-// profile-name validation, and the per-backend raw-credential matrix.
+// profile-name validation, the per-backend raw-credential matrix, and the
+// SSRF IP-range classifier (ipclass.go) shared with internal/shim and
+// internal/node.
 //
-// These were extracted (#891, RFC envpolicy-consolidation Phase 1) from
-// internal/sysession and cmd/naozhi, which each carried byte-identical copies.
-// The functions are pure (no side effects, no logging) — callers keep their own
-// logging at the rejection site. Behaviour is unchanged from the originals.
+// These were extracted (#891, RFC envpolicy-consolidation Phase 1; #2300
+// Phase 2) from internal/sysession, cmd/naozhi, internal/shim and
+// internal/node, which each carried hand-written copies. The functions are
+// pure (no side effects, no logging) — callers keep their own logging at the
+// rejection site. Behaviour is unchanged from the originals.
+//
+// This package MUST stay a leaf (no internal/* imports) — see
+// imports_test.go — because shim and node import it.
 package envpolicy
 
 import (
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -47,8 +52,8 @@ func ValidateBaseURLValue(v string) error {
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		host := u.Hostname()
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		if k, ok := ClassifyHost(host); ok {
+			if k.Any(IPLinkLocal) {
 				return fmt.Errorf("link-local host %q rejected (SSRF/IMDS guard)", host)
 			}
 			// RFC1918 / unique-local / loopback private ranges are rejected
@@ -56,7 +61,12 @@ func ValidateBaseURLValue(v string) error {
 			// internal HTTPS service for SSRF. Operators with a legitimate
 			// internal HTTPS gateway opt out via NAOZHI_ALLOW_PRIVATE_BASE_URL.
 			// R202606e-SEC-1 (#2278).
-			if (ip.IsPrivate() || ip.IsLoopback()) && !allowPrivateBaseURL() {
+			//
+			// Deliberately NOT rejected here: IPUnspecified (0.0.0.0 / ::).
+			// The shim endpoint guard (internal/shim) does reject it; whether
+			// this guard should follow is an owner policy decision tracked
+			// from #2300, not a refactor-time change.
+			if k.Any(IPPrivate|IPLoopback) && !allowPrivateBaseURL() {
 				return fmt.Errorf("private-range host %q rejected (SSRF guard); set NAOZHI_ALLOW_PRIVATE_BASE_URL=1 to allow", host)
 			}
 		}
@@ -66,11 +76,11 @@ func ValidateBaseURLValue(v string) error {
 		if strings.EqualFold(host, "localhost") {
 			return nil
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLoopback() {
+		if k, ok := ClassifyHost(host); ok {
+			if k.Has(IPLoopback) {
 				return nil
 			}
-			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			if k.Any(IPLinkLocal) {
 				return fmt.Errorf("link-local host %q rejected (SSRF/IMDS guard)", host)
 			}
 		}

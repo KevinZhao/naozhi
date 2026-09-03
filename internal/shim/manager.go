@@ -1679,7 +1679,20 @@ func shimEndpointEnvDropped(kv string) bool {
 
 // validateShimEndpointURL enforces https:// unless the host is loopback
 // (localhost / 127.0.0.0/8 / ::1), for which plain http is allowed so local
-// mock gateways still work. Mirrors filterClaudeEnv's validateClaudeBaseURLEnv.
+// mock gateways still work.
+//
+// Relationship to envpolicy.ValidateBaseURLValue (the parent-env / sysession
+// guard): both share the IP-range classifier envpolicy.ClassifyHost (#2300),
+// so "what is private / link-local / loopback" cannot drift between them.
+// The POLICIES intentionally differ, and this one is the stricter of the two:
+//
+//   - https:// to ANY non-loopback internal literal is rejected here with no
+//     escape hatch. envpolicy honours NAOZHI_ALLOW_PRIVATE_BASE_URL for
+//     RFC1918/ULA/loopback; the shim env is the last hop before a process
+//     that holds the API key, so no opt-out is offered at this boundary.
+//   - https:// to the unspecified address (0.0.0.0 / ::) is rejected here;
+//     envpolicy currently lets it through. Aligning that is an owner policy
+//     decision tracked from #2300, not a refactor-time change.
 //
 // R20260603150052-SEC-7 (#1713): even an https:// target must not point at a
 // literal internal IP (loopback excepted for local mocks). Without this, an
@@ -1695,7 +1708,10 @@ func validateShimEndpointURL(v string) error {
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		host := u.Hostname()
-		if ip := net.ParseIP(host); ip != nil && shimEndpointInternalIP(ip) && !ip.IsLoopback() {
+		// Deny-set = every internal class except loopback (local https
+		// mocks). The classes are disjoint (pinned in envpolicy tests), so
+		// clearing the loopback bit never un-denies another range.
+		if k, ok := envpolicy.ClassifyHost(host); ok && k&^envpolicy.IPLoopback != 0 {
 			return fmt.Errorf("https:// to internal IP %q rejected (SSRF/IMDS guard)", host)
 		}
 		return nil
@@ -1704,21 +1720,12 @@ func validateShimEndpointURL(v string) error {
 		if strings.EqualFold(host, "localhost") {
 			return nil
 		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if k, ok := envpolicy.ClassifyHost(host); ok && k.Has(envpolicy.IPLoopback) {
 			return nil
 		}
 		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
 	}
 	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
-}
-
-// shimEndpointInternalIP reports whether ip falls in the SSRF deny-set:
-// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or the
-// unspecified address. Mirrors weixin's rejectInternalIP deny-set.
-func shimEndpointInternalIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,
