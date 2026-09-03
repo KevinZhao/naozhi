@@ -5823,18 +5823,37 @@ let turnState = {
   timerId: null, justSent: false
 };
 
-function resetTurnState() {
-  if (turnState.timerId) clearInterval(turnState.timerId);
+// resetTurnState clears the per-turn banner state. opts.keepTimer preserves
+// the elapsed anchor (turnStartTime/timerId) and the justSent flag: used when
+// the server echoes back the user message this client just sent, so the
+// timer started at send time survives the turn-boundary reset instead of
+// being cleared and re-anchored at the first streamed event (#2435).
+function resetTurnState(opts) {
+  const keepTimer = !!(opts && opts.keepTimer);
+  const kept = keepTimer
+    ? { turnStartTime: turnState.turnStartTime, timerId: turnState.timerId, justSent: turnState.justSent }
+    : { turnStartTime: 0, timerId: null, justSent: false };
+  if (!keepTimer && turnState.timerId) clearInterval(turnState.timerId);
   turnState = {
     toolCount: 0, currentTool: null, agents: [], isThinking: false,
-    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-    timerId: null, justSent: false
+    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: kept.turnStartTime, isWriting: false,
+    timerId: kept.timerId, justSent: kept.justSent
   };
   // #2435: blank the elapsed chip so the next banner does not open showing
   // the previous turn's final time until its first 1s tick lands.
-  const elapsedEl = document.getElementById('rb-elapsed');
-  if (elapsedEl) elapsedEl.textContent = '';
+  if (!keepTimer) {
+    const elapsedEl = document.getElementById('rb-elapsed');
+    if (elapsedEl) elapsedEl.textContent = '';
+  }
   refreshBanner();
+}
+
+// resetTurnStateForUserEcho handles the turn boundary a `user` event marks.
+// If this client sent that message (justSent is still up — no real turn event
+// has arrived yet) the send-time timer is kept; a user turn started on another
+// surface (IM, another tab) gets the full reset and anchors at its first event.
+function resetTurnStateForUserEcho() {
+  resetTurnState(turnState.justSent ? { keepTimer: true } : undefined);
 }
 
 // paintTurnElapsed renders turnState.turnStartTime → "m:ss" into #rb-elapsed.
@@ -7154,6 +7173,15 @@ function releaseMicStream() {
 
 function toggleInputMode() {
   if (pendingMic) return;
+  // Mode switch abandons any in-flight recording/transcription and returns
+  // the lifecycle to idle so a hung transcription can never lock recording.
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceActive = false;
+    cleanupVoiceTouchListeners();
+    voiceCancelled = true;
+    mediaRecorder.stop();
+  }
+  hideVoiceOverlay();
   voiceInputMode = !voiceInputMode;
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
@@ -7179,7 +7207,6 @@ function toggleInputMode() {
 function voiceTouchStart(e) {
   e.preventDefault();
   voiceTouchStartY = e.touches[0].clientY;
-  voiceCancelled = false;
   voiceActive = true;
   document.addEventListener('touchmove', voiceTouchMove, {passive: false});
   document.addEventListener('touchend', voiceTouchEnd, {passive: false});
@@ -7243,7 +7270,6 @@ function cleanupVoiceTouchListeners() {
 
 function voiceMouseDown(e) {
   e.preventDefault();
-  voiceCancelled = false;
   voiceActive = true;
   startVoiceRecording();
   const startY = e.clientY;
@@ -7276,6 +7302,10 @@ function startVoiceRecording() {
   // A previous recording still transcribing owns the overlay; starting another
   // would let its completion hide the new recording's overlay mid-hold.
   if (pendingMic || voiceState === 'finalizing') return;
+  // Cleared only once a recording really starts: a press landing in the
+  // stop()→onstop window of a cancelled recording must not flip that
+  // recording's pending "cancel" into "send".
+  voiceCancelled = false;
   pendingMic = true;
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.add('active');
@@ -7416,19 +7446,27 @@ function updateVoiceTimer() {
   }
 }
 
+// TRANSCRIBE_TIMEOUT_MS bounds /api/transcribe: without it a stalled upload
+// left the overlay in "正在识别" and voiceState in finalizing forever.
+const TRANSCRIBE_TIMEOUT_MS = 30000;
+
 function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
   fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
   const headers = {};
   const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  const ac = new AbortController();
+  const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.
   fetch('/api/transcribe', {
     method: 'POST',
     headers: headers,
     credentials: 'same-origin',
-    body: fd
+    body: fd,
+    signal: ac.signal
   }).then(r => {
+    clearTimeout(timeoutId);
     if (!r.ok) return r.text().then(t => {
       const e = new Error(t || ('HTTP ' + r.status));
       e.status = r.status;
@@ -7461,6 +7499,7 @@ function transcribeAudio(blob, autoSend) {
       showToast(hint, 'warning', 5000);
     }
   }).catch(err => {
+    clearTimeout(timeoutId);
     hideVoiceOverlay();
     showToast(describeTranscribeError(err), 'error', 5000);
   });
@@ -7471,6 +7510,9 @@ function transcribeAudio(blob, autoSend) {
 // which surfaced internal strings like "transcribe rate limit exceeded".
 function describeTranscribeError(err) {
   if (!err) return '\u8f6c\u5199\u5931\u8d25';
+  if (err.name === 'AbortError') {
+    return '\u8f6c\u5199\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5';
+  }
   // fetch() rejects with TypeError on network failure; server errors have a status.
   if (!err.status) {
     return '\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5';
@@ -12739,7 +12781,7 @@ const wsm = {
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
         if (ev.type === 'user') {
-          resetTurnState();
+          resetTurnStateForUserEcho();
           const text = ev.detail || ev.summary || '';
           if (text) {
             const h2 = document.querySelector('.main-header h2');
@@ -12792,7 +12834,7 @@ const wsm = {
         const h2 = document.querySelector('.main-header h2');
         if (h2) h2.textContent = text;
       }
-      resetTurnState();
+      resetTurnStateForUserEcho();
       // A user message after an AskUserQuestion means it was answered on some
       // surface — lock the card before the bubble lands (#2430).
       lockRenderedAskCards(document.getElementById('events-scroll'));

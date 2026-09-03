@@ -157,3 +157,110 @@ func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 		t.Error("transcribeAudio must append the transcript to the draft instead of replacing it on auto-send")
 	}
 }
+
+// TestDashboardJS_TurnTimer_SurvivesOwnUserEcho pins review F1 on #2469: the
+// server echoes the just-sent user message as a `user` event, and both event
+// paths reset turn state on it. For this client's own send (justSent still
+// up) the send-time anchor and the chip must survive that reset; a user turn
+// from another surface still gets the full reset.
+func TestDashboardJS_TurnTimer_SurvivesOwnUserEcho(t *testing.T) {
+	t.Parallel()
+	js := readDashboardJS(t)
+	for _, marker := range []string{
+		"if (ev.type === 'user') {\n          resetTurnStateForUserEcho();",
+		"if (h2) h2.textContent = text;\n      }\n      resetTurnStateForUserEcho();",
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("user-echo turn boundary must call resetTurnStateForUserEcho, missing:\n%s", marker)
+		}
+	}
+	script := `const el = { textContent: '' };
+const document = { getElementById: (id) => id === 'rb-elapsed' ? el : null };
+let cleared = 0;
+const setInterval = () => 42;
+const clearInterval = () => { cleared++; };
+function refreshBanner() {}
+let turnState = { turnStartTime: 0, timerId: null, justSent: false, toolCount: 0 };
+` + extractJSFunction(t, js, "paintTurnElapsed") +
+		extractJSFunction(t, js, "startTurnTimer") +
+		extractJSFunction(t, js, "resetTurnState") +
+		extractJSFunction(t, js, "resetTurnStateForUserEcho") + `
+const out = {};
+turnState.justSent = true;
+startTurnTimer();
+turnState.toolCount = 3;
+const anchor = turnState.turnStartTime;
+resetTurnStateForUserEcho();
+out.anchorKept = turnState.turnStartTime === anchor && anchor > 0;
+out.timerKept = turnState.timerId === 42 && cleared === 0;
+out.justSentKept = turnState.justSent === true;
+out.chip = el.textContent;
+out.toolCountReset = turnState.toolCount === 0;
+// Foreign user turn (not sent by this client): full reset.
+turnState.justSent = false;
+resetTurnStateForUserEcho();
+out.foreignAnchorCleared = turnState.turnStartTime === 0 && turnState.timerId === null && cleared === 1;
+out.foreignChip = el.textContent;
+process.stdout.write(JSON.stringify(out));
+`
+	var got struct {
+		AnchorKept, TimerKept, JustSentKept, ToolCountReset, ForeignAnchorCleared bool
+		Chip, ForeignChip                                                         string
+	}
+	if err := json.Unmarshal([]byte(runNode(t, script)), &got); err != nil {
+		t.Fatalf("parse node output: %v", err)
+	}
+	if !got.AnchorKept {
+		t.Error("own user echo must keep turnStartTime")
+	}
+	if !got.TimerKept {
+		t.Error("own user echo must keep timerId and not clearInterval")
+	}
+	if !got.JustSentKept {
+		t.Error("own user echo must keep justSent until the first real turn event")
+	}
+	if got.Chip != "0:00" {
+		t.Errorf("own user echo must not blank #rb-elapsed, got %q", got.Chip)
+	}
+	if !got.ToolCountReset {
+		t.Error("own user echo must still reset the per-turn counters")
+	}
+	if !got.ForeignAnchorCleared || got.ForeignChip != "" {
+		t.Errorf("foreign user turn must fully reset (anchor cleared=%v chip=%q)", got.ForeignAnchorCleared, got.ForeignChip)
+	}
+}
+
+// TestDashboardJS_VoiceFinalizing_HasEscapeHatches pins review F2/F3 on
+// #2469: finalizing must not be terminal (transcribe timeout, mode toggle)
+// and the cancel flag is cleared only when a recording really starts.
+func TestDashboardJS_VoiceFinalizing_HasEscapeHatches(t *testing.T) {
+	t.Parallel()
+	js := readDashboardJS(t)
+	tr := extractJSFunction(t, js, "transcribeAudio")
+	for _, want := range []string{"new AbortController()", "ac.abort(), TRANSCRIBE_TIMEOUT_MS", "signal: ac.signal", "clearTimeout(timeoutId)"} {
+		if !strings.Contains(tr, want) {
+			t.Errorf("transcribeAudio must bound the fetch with an AbortController timeout, missing %q", want)
+		}
+	}
+	if !strings.Contains(extractJSFunction(t, js, "toggleInputMode"), "hideVoiceOverlay();") {
+		t.Error("toggleInputMode must return voiceState to idle via hideVoiceOverlay")
+	}
+	for _, fn := range []string{"voiceTouchStart", "voiceMouseDown"} {
+		body := extractJSFunction(t, js, fn)
+		call := strings.Index(body, "startVoiceRecording();")
+		if call < 0 {
+			t.Fatalf("%s must call startVoiceRecording", fn)
+		}
+		// Only the press path matters; voiceMouseDown's move closure legitimately
+		// toggles the flag while recording.
+		if strings.Contains(body[:call], "voiceCancelled = false;") {
+			t.Errorf("%s must not clear voiceCancelled before startVoiceRecording's guard (F3)", fn)
+		}
+	}
+	start := extractJSFunction(t, js, "startVoiceRecording")
+	guard := strings.Index(start, "voiceState === 'finalizing') return;")
+	clear := strings.Index(start, "voiceCancelled = false;")
+	if guard < 0 || clear < 0 || clear < guard {
+		t.Error("startVoiceRecording must clear voiceCancelled only after its early-return guard (F3)")
+	}
+}
