@@ -564,9 +564,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	}
 	// Phase C (#734/#945, RFC cron-sysession-merge §3.4): executeOpt is the
 	// orchestrator; the run pipeline is split into exec* helpers below. The
-	// finalizer defer and the spawn-ctx defer MUST stay registered in THIS
-	// frame — moving either into a helper would fire it at helper return
-	// instead of run end.
+	// finalizer defer (owned by runScaffold.run, wrapping the WHOLE
+	// executeAcquired body) and the spawn-ctx defer (in executeAcquired's
+	// frame) both fire at run end — moving either into a phase helper would
+	// fire it at helper return instead.
 	inflight, ok := s.execAcquireSlot(j, viaTriggerNow)
 	if !ok {
 		// CAS lost: execAcquireSlot already emitted the overlap-skip pair.
@@ -581,28 +582,31 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 已抢占的 *runInflight 字段——并发隔离来自 finalizer 的 per-run 身份，
 	// 不依赖 *runInflight 上的任何 atomic。R238-GO-2 + R246-GO-3 (#689).
 	finalizer := &runFinalizer{inflight: inflight}
-	defer func() {
-		// R246-GO-3 (#689) 取代了 R246-CR-017 (#759) 把 reset + CAS-release
-		// 抽到 inflight.releaseRun 的设计：那个共享 *runInflight 上的方法
-		// 无法防 run-A 的迟到 defer clobber run-B 已抢占的字段。改用
-		// per-run 栈局部 finalizer：done 标志保证 run-A 的 defer 只看到
-		// 自己的 finalizer，绝不会动到 run-B 的元数据。reset → CAS-release
-		// 的内部顺序（R238-GO-2）在 finalize() 内部保留。Gauge 的 -1 留在
-		// 这里与 executeOpt 入口的 +1 视觉配对。
-		finalizer.finalize()
-		metrics.CronRunInflight.Add(-1)
-	}()
-	// R242-CR-14 (#706): metrics.CronRunInflight semantically tracks "how
-	// many jobs hold the CAS slot right now", which is exactly the window
-	// the defer guards. The historical placement was after metadata
-	// population — fine when the only exit between defer and Add(+1) was
-	// success, but the generateRunID error branch (now inside
-	// execPopulateInflight) returns before reaching it, so the defer's
-	// Add(-1) would underflow the gauge. Keeping Add(+1) here — after the
-	// defer registration, before any early-return helper — pairs it with
-	// the defer's Add(-1) on every return path.
-	metrics.CronRunInflight.Add(1)
+	// R246-GO-3 (#689) 取代了 R246-CR-017 (#759) 把 reset + CAS-release
+	// 抽到 inflight.releaseRun 的设计：那个共享 *runInflight 上的方法
+	// 无法防 run-A 的迟到 defer clobber run-B 已抢占的字段。改用
+	// per-run 栈局部 finalizer：done 标志保证 run-A 的 defer 只看到
+	// 自己的 finalizer，绝不会动到 run-B 的元数据。reset → CAS-release
+	// 的内部顺序（R238-GO-2）在 finalize() 内部保留。
+	//
+	// R202606-ARCH-7 (#2174): the finalize defer + CronRunInflight ±1 pairing
+	// (R242-CR-14 / #706: +1 after the defer is registered, before any
+	// early-return helper) now live in runScaffold.run — the same envelope
+	// dispatchReplay uses — so the teardown contract has one home. No
+	// onPanic: this path keeps propagating to the caller's recover boundary
+	// (executeIfNotDeletedOrPaused / robfig Recover), exactly as before.
+	runScaffold{finalizer: finalizer, jobID: j.ID}.run(func() {
+		s.executeAcquired(j, viaTriggerNow, inflight, finalizer)
+	})
+}
 
+// executeAcquired is the post-admission body of executeOpt: everything that
+// runs once the CAS slot is held and the runScaffold envelope (finalizer
+// defer + inflight gauge) is armed. Every early `return` here lands in the
+// scaffold's defer, which releases the slot. Kept as the function directly
+// below executeOpt so the source-anchor tests' whole-file ordering
+// assumptions (reap-before-finishRun etc.) are unchanged.
+func (s *Scheduler) executeAcquired(j *Job, viaTriggerNow bool, inflight *runInflight, finalizer *runFinalizer) {
 	runID, startedAt, trigger, ok := s.execPopulateInflight(j, viaTriggerNow, inflight)
 	if !ok {
 		return
