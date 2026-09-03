@@ -127,8 +127,10 @@ func TestBoundedDispatch_TryGoDropsWhenSaturated(t *testing.T) {
 		t.Fatal("Wait did not return after handlers finished")
 	}
 	// Both slots must be back.
-	if !b.TryAcquire() || !b.TryAcquire() {
-		t.Fatal("slots not released after handlers exited")
+	for i := 0; i < 2; i++ {
+		if !b.TryAcquire() {
+			t.Fatalf("slot %d not released after handlers exited", i)
+		}
 	}
 	if b.TryAcquire() {
 		t.Fatal("acquired a third slot on a Cap=2 pool")
