@@ -23,7 +23,15 @@ import (
 // dominated the WS broadcast cost on a single hot session.
 //
 // Design: single-slot cache per session key. Entry holds a fingerprint of
-// (lastTime, latestEntryTime, count) plus the marshaled bytes. eventPushLoop
+// (lastTime, latestEntryTime, count, firstUUID, lastUUID) plus the marshaled
+// bytes. The UUID pair is what distinguishes two DIFFERENT same-millisecond
+// tails: #2432 — the ACP turn-end appends thinking/text/result in one
+// millisecond across three notify waves, so wave 2 `[e2(T)]` and wave 3
+// `[e3(T)]` share (watermark=T, latest=T, count=1) and the time-only
+// fingerprint served e2's bytes for e3, which then never reached any tab
+// (the dashboard dedups the replayed uuid). Entries are a chronological tail
+// of one append-only log, so equal (first, last) UUIDs + equal count imply an
+// identical slice. eventPushLoop
 // asks the cache via getOrMarshal; on hit the bytes are returned without a
 // second marshalPooled. On miss (or fingerprint mismatch from a slow
 // subscriber lagging behind the head) the caller marshals once and stores.
@@ -47,6 +55,8 @@ type marshalCacheEntry struct {
 	lastTime        int64
 	latestEntryTime int64
 	count           int
+	firstUUID       string
+	lastUUID        string
 	data            []byte
 }
 
@@ -107,6 +117,8 @@ func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 		candidate.lastTime = 0
 		candidate.latestEntryTime = 0
 		candidate.count = 0
+		candidate.firstUUID = ""
+		candidate.lastUUID = ""
 		candidate.data = nil
 		marshalCacheEntryPool.Put(candidate)
 	}
@@ -140,6 +152,8 @@ func (c *historyMarshalCache) getOrMarshal(
 	}
 	latest := entries[len(entries)-1].Time
 	count := len(entries)
+	firstUUID := entries[0].UUID
+	lastUUID := entries[len(entries)-1].UUID
 
 	e := c.slot(key)
 	e.mu.Lock()
@@ -148,7 +162,9 @@ func (c *historyMarshalCache) getOrMarshal(
 	if e.data != nil &&
 		e.lastTime == lastTime &&
 		e.latestEntryTime == latest &&
-		e.count == count {
+		e.count == count &&
+		e.firstUUID == firstUUID &&
+		e.lastUUID == lastUUID {
 		return e.data, true, nil
 	}
 
@@ -159,6 +175,8 @@ func (c *historyMarshalCache) getOrMarshal(
 	e.lastTime = lastTime
 	e.latestEntryTime = latest
 	e.count = count
+	e.firstUUID = firstUUID
+	e.lastUUID = lastUUID
 	e.data = data
 	return data, false, nil
 }

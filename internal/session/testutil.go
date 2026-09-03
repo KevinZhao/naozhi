@@ -151,6 +151,7 @@ func (p *TestProcess) Effort() string                     { return p.EffortVal }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.
+// A nil proc yields a detached (no-process / stub) session.
 func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -158,7 +159,9 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 		key:      key,
 		runStore: r.sessionRuns, // mirror production wiring so Send records runs
 	}
-	s.storeProcess(proc)
+	if proc != nil { // typed-nil *TestProcess must not become a non-nil iface
+		s.storeProcess(proc)
+	}
 	s.touchLastActive()
 	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
