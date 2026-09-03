@@ -136,4 +136,65 @@ test.describe('renderMd 行内数学 / 行内代码 / pending 缓存', () => {
     const src = '普通一句话 **粗体** 而已';
     expect(await render(src)).toBe(await render(src));
   });
+
+  // ---- 4. shell $$ 不是 display math（#2428 第 8 项） ----------------------
+  //
+  // BLOCK_SPLIT_RE 无条件把 `$$...$$` 切成 display math；shell 语境的 `$$`
+  // （当前 PID）成对出现时中间的散文被当公式。修复后 `$$` 块要过
+  // isMathDisplay 内容合理性门禁，不像公式的按字面回流普通文本。
+
+  test('shell：`echo $$ then kill $$` 按字面输出，不进 display math', async () => {
+    const html = await render('echo $$ then kill $$');
+    expect(html).not.toContain('md-math-display');
+    expect(html).not.toMatch(/katex|ktx-/);
+    // 整句连续出现 = 没有因为 split 后当独立 part 渲染而在句中插 <br>
+    expect(html).toContain('echo $$ then kill $$');
+    expect(html).not.toMatch(/echo <br>/);
+  });
+
+  test('shell：中文散文里的两个 $$ 按字面输出', async () => {
+    const html = await render('父进程 PID 是 $$，子 shell 里再看 $$ 会变');
+    expect(html).not.toContain('md-math-display');
+    expect(html).not.toMatch(/katex|ktx-/);
+    expect(html).toContain('父进程 PID 是 $$，子 shell 里再看 $$ 会变');
+  });
+
+  test('shell：整行只有 `$$ then kill $$`（首尾即 $$）同样按字面输出', async () => {
+    const html = await render('$$ then kill $$');
+    expect(html).not.toContain('md-math-display');
+    expect(html).not.toMatch(/katex|ktx-/);
+    expect(html).toContain('$$ then kill $$');
+  });
+
+  test('回归：真正的 $$ 公式仍渲染为 display math', async () => {
+    const cases = [
+      ['$$x^2 + y^2 = z^2$$', 'x^2 + y^2 = z^2'],
+      ['$$\n\\int_0^1 f(x)\\,dx\n$$', '\\int_0^1 f(x)\\,dx'],
+      ['$$E=mc^2$$', 'E=mc^2'],
+      ['$$ x $$', 'x'],
+      ['$$\\alpha$$', '\\alpha'],
+      ['$$a=b$$', 'a=b'],
+      ['$$ 1 $$', '1'],
+      ['$$ f(x) $$', 'f(x)'],
+      ['$$\nE=mc^2\n$$', 'E=mc^2'],
+      ['前文\n$$\nx\n$$\n后文', 'x'],
+    ];
+    for (const [src, tex] of cases) {
+      const html = await render(src);
+      expect(html, src).toContain('<div class="md-math-display">');
+      expect(html, src).toContain('class="katex-pending">' + tex + '</span>');
+    }
+  });
+
+  test('边界：`$$ area $$` 单个 3+ 字母单词无 hint → 字面输出（已知 trade-off）', async () => {
+    // 与行内 `$USD$` 一致：纯单词既无 LaTeX 字符也无数字/运算符，无法与
+    // shell `$$ word $$` 区分，宁可漏渲染一个裸单词公式，不误吞散文。
+    const html = await render('$$ area $$');
+    expect(html).not.toContain('md-math-display');
+    expect(html).toContain('$$ area $$');
+    // `$$ a b $$` 两个裸单字母同样无 hint → 字面输出，与行内 `$a b$` 一致
+    const ab = await render('$$ a b $$');
+    expect(ab).not.toContain('md-math-display');
+    expect(ab).toContain('$$ a b $$');
+  });
 });
