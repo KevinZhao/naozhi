@@ -149,9 +149,16 @@ func readClaudeSettingsRaw(ctx context.Context) ([]byte, error) {
 // The ctx parameter allows callers to abort a retry sleep early on shutdown or
 // timeout; ctx.Err() is returned when the context is cancelled mid-sleep.
 func readJSONWithRetry(ctx context.Context, path string, attempts int, sleep time.Duration) ([]byte, error) {
+	return readJSONWithRetryFn(ctx, path, attempts, sleep, os.ReadFile)
+}
+
+// readJSONWithRetryFn is readJSONWithRetry with the file reader injected, so
+// tests can pin the "torn first read, valid retry" interleaving without a
+// racing writer goroutine (#2473). Production always passes os.ReadFile.
+func readJSONWithRetryFn(ctx context.Context, path string, attempts int, sleep time.Duration, readFile func(string) ([]byte, error)) ([]byte, error) {
 	var lastParseErr error
 	for i := 0; i < attempts; i++ {
-		data, err := os.ReadFile(path)
+		data, err := readFile(path)
 		if err != nil {
 			return nil, err
 		}
