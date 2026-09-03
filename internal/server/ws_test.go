@@ -506,10 +506,15 @@ func TestWS_EventPush(t *testing.T) {
 
 	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 
-	// Read subscribed (no history since log is empty)
+	// Read subscribed, then the empty Initial history frame (#2432: every
+	// initial subscribe gets one, even when the log is empty).
 	resp := wsRead(t, conn)
 	if resp.Type != "subscribed" {
 		t.Fatalf("type = %q, want subscribed", resp.Type)
+	}
+	resp = wsRead(t, conn)
+	if resp.Type != "history" || !resp.Initial || len(resp.Events) != 0 {
+		t.Fatalf("initial frame = %+v, want empty Initial history", resp)
 	}
 
 	// Now append an event
@@ -579,6 +584,7 @@ func TestWS_Unsubscribe(t *testing.T) {
 
 	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn) // subscribed
+	_ = wsRead(t, conn) // empty Initial history (#2432)
 
 	wsWrite(t, conn, node.ClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
 	resp := wsRead(t, conn)
@@ -808,9 +814,11 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 	// Both subscribe
 	wsWrite(t, conn1, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn1) // subscribed
+	_ = wsRead(t, conn1) // empty Initial history (#2432)
 
 	wsWrite(t, conn2, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn2) // subscribed
+	_ = wsRead(t, conn2) // empty Initial history (#2432)
 
 	// Append event
 	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "shared event"})
