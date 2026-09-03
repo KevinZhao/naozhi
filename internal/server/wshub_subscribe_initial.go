@@ -23,9 +23,11 @@ func entriesSinceReconnect(sess *session.ManagedSession, after int64) []cli.Even
 // must still receive an empty Initial history frame. Every initial subscribe
 // (after==0) gets one (#2432: the dashboard renders its "暂无事件" placeholder
 // only from the Initial branch, so a stub / cleared-history session was left
-// blank); running sessions additionally get it on reconnect so the pane flips
-// to its loading placeholder. Reconnects with nothing new otherwise stay
-// silent so an incremental empty frame never wipes an existing placeholder.
+// blank). The running clause keeps the pre-#2432 semantics: a running session
+// also gets the empty frame on reconnect (after>0); the frontend has
+// _initialSubscribe=false there, so it is handled as an incremental frame
+// (placeholder is not re-rendered). Non-running reconnects with nothing new
+// stay silent so an incremental empty frame never wipes an existing placeholder.
 func emptyInitialHistoryWanted(msg node.ClientMsg, state string) bool {
 	return msg.After == 0 || state == "running"
 }
