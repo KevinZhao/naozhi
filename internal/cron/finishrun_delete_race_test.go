@@ -1,9 +1,10 @@
 package cron
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -12,86 +13,93 @@ import (
 // write is two-step and non-atomic. recordTerminalResult confirms the job
 // exists, bumps RunCounters, persists cron_jobs.json, then RELEASES s.mu and
 // returns jobPersistOK=true. appendRun then writes the physically-separate
-// runs/<jobID>/ store under only its own per-job jobLock (never s.mu), across
-// a marshal+fsync window.
+// runs/<jobID>/ store, which never takes s.mu.
 //
-// A concurrent DeleteJobByID in that window drops the job from s.jobs AND runs
+// A DeleteJobByID landing in that window drops the job from s.jobs AND runs
 // runStore.DeleteJob → RemoveAll(runs/<jobID>). Without the s.jobs re-check
-// added before appendRun, the stale snapshot's appendRun → ensureJobDir would
-// MkdirAll the directory back, resurrecting an orphaned runs/<jobID>/ subtree
-// for a job that no longer exists in cron_jobs.json (a bounded disk leak that
-// retention trimming never reclaims).
+// added before appendRun (#2058), the stale snapshot's appendRun →
+// ensureJobDir would MkdirAll the directory back, resurrecting an orphaned
+// runs/<jobID>/ subtree for a job that no longer exists in cron_jobs.json (a
+// bounded disk leak that retention trimming never reclaims).
 //
-// The invariant under test: after both finishRun and DeleteJobByID complete,
-// if the job is gone from cron_jobs.json then runs/<jobID>/ must NOT contain a
-// resurrected run record. Run under `go test -race` and many iterations to
-// exercise the interleaving window.
+// #2473: the original version raced two goroutines 200× per run and hoped
+// the scheduler would land the delete inside the window; on CI it
+// occasionally landed the delete AFTER the re-check instead (a residual
+// window finishRun documents as best-effort, tracked separately) and the
+// assertion fired. This version uses the finishRunPreAppendHook seam to run
+// the delete synchronously inside the exact window #2058 closed, so the
+// interleaving is fixed rather than sampled. Removing the jobStillExists
+// guard from finishRun makes this test fail deterministically.
 func TestFinishRun_DeleteRaceNoOrphanRunsDir(t *testing.T) {
-	const iters = 200
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron.json")
+	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
 
-	for i := 0; i < iters; i++ {
-		dir := t.TempDir()
-		storePath := filepath.Join(dir, "cron.json")
-		s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{})
-		if err := s.Start(); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
+	j := &Job{
+		Schedule: "@every 1h",
+		Prompt:   "ping",
+		Platform: "feishu",
+		ChatID:   "chat1",
+		ChatType: "direct",
+		Paused:   true, // no live cron entry
+	}
+	if err := s.AddJob(j); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	jobID := j.ID
+	jobRunDir := filepath.Join(dir, "runs", jobID)
 
-		j := &Job{
-			Schedule: "@every 1h",
-			Prompt:   "ping",
-			Platform: "feishu",
-			ChatID:   "chat1",
-			ChatType: "direct",
-			Paused:   true, // no live cron entry
+	// The hook fires after recordTerminalResult has persisted the Job and
+	// released s.mu, immediately before the runs/<jobID>/ existence re-check.
+	// Deleting synchronously here is the interleaving #2058 closes. Set before
+	// finishRun runs; nothing else touches s concurrently in this test.
+	hookCalls := 0
+	var deleteErr error
+	s.finishRunPreAppendHook = func(gotJobID string) {
+		hookCalls++
+		if gotJobID != jobID {
+			t.Errorf("hook job id = %q, want %q", gotJobID, jobID)
 		}
-		if err := s.AddJob(j); err != nil {
-			t.Fatalf("AddJob: %v", err)
-		}
-		jobID := j.ID
-		runsRoot := filepath.Join(dir, "runs")
+		_, deleteErr = s.DeleteJobByID(jobID)
+	}
 
-		inflight := s.jobInflight(jobID)
-		if !inflight.running.CompareAndSwap(false, true) {
-			t.Fatal("initial CAS must succeed")
-		}
-		finalizer := &runFinalizer{inflight: inflight}
+	inflight := s.jobInflight(jobID)
+	if !inflight.running.CompareAndSwap(false, true) {
+		t.Fatal("initial CAS must succeed")
+	}
+	s.finishRun(finishArgs{
+		job:       j,
+		runID:     "0123456789abcdef",
+		startedAt: time.Now(),
+		trigger:   TriggerScheduled,
+		state:     RunStateSucceeded,
+		sessionID: "sess-1",
+		result:    "ok",
+		finalizer: &runFinalizer{inflight: inflight},
+	})
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			s.finishRun(finishArgs{
-				job:       j,
-				runID:     "0123456789abcdef",
-				startedAt: time.Now(),
-				trigger:   TriggerScheduled,
-				state:     RunStateSucceeded,
-				sessionID: "sess-1",
-				result:    "ok",
-				finalizer: finalizer,
-			})
-		}()
-		go func() {
-			defer wg.Done()
-			_, _ = s.DeleteJobByID(jobID)
-		}()
-		wg.Wait()
-
-		// If the delete won (job gone from the live map AND on disk), the runs
-		// subtree must not have been resurrected behind it.
-		if !s.jobStillExists(jobID) {
-			jobRunDir := filepath.Join(runsRoot, jobID)
-			if entries, err := os.ReadDir(jobRunDir); err == nil {
-				for _, e := range entries {
-					if filepath.Ext(e.Name()) == ".json" {
-						s.Stop()
-						t.Fatalf("iter %d: orphaned runs subtree resurrected after job delete: "+
-							"found %q in %s (#2058)", i, e.Name(), jobRunDir)
-					}
-				}
-			}
+	if hookCalls != 1 {
+		t.Fatalf("finishRunPreAppendHook calls = %d, want 1", hookCalls)
+	}
+	if deleteErr != nil {
+		t.Fatalf("DeleteJobByID inside the window: %v", deleteErr)
+	}
+	if s.jobStillExists(jobID) {
+		t.Fatal("job must be gone from s.jobs after DeleteJobByID")
+	}
+	// The delete removed runs/<jobID>/ and nothing may bring it back: not
+	// the directory, and certainly not a run record for a deleted job.
+	if _, err := os.Stat(jobRunDir); !errors.Is(err, fs.ErrNotExist) {
+		entries, _ := os.ReadDir(jobRunDir)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
 		}
-		s.Stop()
+		t.Fatalf("orphaned runs subtree resurrected after job delete: %s exists (stat err=%v, entries=%v) (#2058)",
+			jobRunDir, err, names)
 	}
 }
