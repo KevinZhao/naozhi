@@ -2,6 +2,12 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// #2431: last (session, state) pushed through updateSendButton — the main-area
+// state that is actually on screen, whichever path (WS push, optimistic flip,
+// renderMainShell, REST reconcile) applied it. The fetchSessions reconcile
+// compares against this so a 5 s fallback poll only re-applies a state that
+// has actually changed. Cleared on session switch.
+let _lastAppliedMainState = null;
 // activeView is the root view-router state: which top-level view owns the
 // viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
 // 'cron' / 'settings' are full-screen peers driven by setActivityView() and
@@ -689,7 +695,14 @@ async function fetchSessions() {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
-        updateMainState(sd.state, sd.death_reason);
+        // #2431: updateSendButton is not idempotent ('running' re-seeds agent
+        // rows from the REST snapshot; 'ready' resets turn state + loading
+        // indicator + scroll) and this runs every 5 s under fallback — only
+        // re-apply when REST differs from what the main area last applied.
+        const applied = _lastAppliedMainState;
+        if (!(applied && applied.key === sKey && applied.state === sd.state)) {
+          updateMainState(sd.state, sd.death_reason);
+        }
       } else if (sd && wsConnected && sd.state === 'running') {
         // Self-heal a DROPPED 'running' session_state push. renderSidebar above
         // always paints the card from the REST snapshot, so the sidebar shows
@@ -2859,6 +2872,7 @@ function selectSession(key, node) {
   const prevNode = selectedNode;
   selectedKey = key;
   selectedNode = node;
+  _lastAppliedMainState = null; // #2431: new session → first poll must reconcile
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -6441,6 +6455,7 @@ function stopTurnWatchdog() {
 }
 
 function updateSendButton(state) {
+  if (selectedKey) _lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
   const stopBtn = document.getElementById('btn-stop');
@@ -14130,6 +14145,11 @@ wsm.connect();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
+      // #2431: a half-open socket (lid close / network switch) still reports
+      // CONNECTED, so no frames arrive and no fallback poll is armed below;
+      // the version gate would then short-circuit this one-shot fetch too.
+      // Zero lastVersion so returning to the tab always repaints once.
+      lastVersion = 0;
       fetchSessions(); // immediate refresh on resume so UI is not stale
       // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
       // socket session_state pushes already drive the sidebar; arming the

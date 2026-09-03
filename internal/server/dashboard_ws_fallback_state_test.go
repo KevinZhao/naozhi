@@ -161,3 +161,80 @@ func TestDashboardJS_StartPollersSkipsSessionsPollWhenWSConnected(t *testing.T) 
 		t.Fatalf("startPollers must still fetchSessions() once before arming (idx=%d)", fi)
 	}
 }
+
+// TestDashboardJS_FallbackReconcileComparesLastAppliedState pins the F1 follow-
+// up to #2431: with the version gate open, the fetchSessions reconcile runs every
+// 5 s under fallback, but updateSendButton is not idempotent ('running' re-seeds
+// agent rows from the REST snapshot, 'ready' resets turn state / swaps the
+// loading indicator / scrolls). The reconcile must therefore compare the REST
+// state against the last state the main area actually applied — recorded in
+// updateSendButton (the common sink for WS push, optimistic flip, renderMainShell
+// and REST reconcile) and cleared on session switch.
+func TestDashboardJS_FallbackReconcileComparesLastAppliedState(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read embedded dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	fetch := jsBlockBody(t, js, "async function fetchSessions() {")
+	const apply = "updateMainState(sd.state, sd.death_reason);"
+	ai := strings.Index(fetch, apply)
+	if ai < 0 {
+		t.Fatalf("expected %q in fetchSessions reconcile", apply)
+	}
+	// The comparison must sit between the reconcile branch head and the apply.
+	head := strings.LastIndex(fetch[:ai], "if (sd && (!wsConnected ||")
+	if head < 0 {
+		t.Fatal("reconcile branch head not found before updateMainState")
+	}
+	guard := fetch[head:ai]
+	if !strings.Contains(guard, "_lastAppliedMainState") || !strings.Contains(guard, "applied.state === sd.state") {
+		t.Fatalf("fetchSessions reconcile must compare sd.state with _lastAppliedMainState before updateMainState; got %q", guard)
+	}
+
+	// updateSendButton is the single recording point, keyed by the selected
+	// session so a stale record from another session can never suppress the
+	// first reconcile after a switch.
+	usb := jsBlockBody(t, js, "function updateSendButton(state) {")
+	if !strings.Contains(usb, "_lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };") {
+		t.Fatal("updateSendButton must record _lastAppliedMainState = {key, state} for the selected session")
+	}
+
+	// selectSession must clear the record so the new session's first poll
+	// reconciles unconditionally.
+	// selectSession has 2-space-indented inner closers, so bound it by the next
+	// top-level function declaration instead of jsBlockBody.
+	ss := strings.Index(js, "function selectSession(key, node) {")
+	if ss < 0 {
+		t.Fatal("selectSession not found")
+	}
+	se := strings.Index(js[ss+1:], "\nfunction ")
+	if se < 0 {
+		t.Fatal("could not bound selectSession")
+	}
+	sel := js[ss : ss+1+se]
+	if !strings.Contains(sel, "_lastAppliedMainState = null;") {
+		t.Fatal("selectSession must reset _lastAppliedMainState on session switch")
+	}
+}
+
+// TestDashboardJS_StartPollersForcesFullReconcileOnResume pins the F2 follow-up
+// to #2431: startPollers no longer arms the sessions poll over a CONNECTED
+// socket, but a half-open socket still reads CONNECTED and delivers nothing.
+// The one-shot resume fetch must bypass the version gate (lastVersion = 0) so
+// returning to the tab always repaints from REST at least once.
+func TestDashboardJS_StartPollersForcesFullReconcileOnResume(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read embedded dashboard.js: %v", err)
+	}
+	body := jsBlockBody(t, string(data), "  const startPollers = () => {")
+	zi := strings.Index(body, "lastVersion = 0;")
+	fi := strings.Index(body, "fetchSessions();")
+	if zi < 0 || fi < 0 || zi > fi {
+		t.Fatalf("startPollers must zero lastVersion before the one-shot fetchSessions() (zero=%d, fetch=%d)", zi, fi)
+	}
+}

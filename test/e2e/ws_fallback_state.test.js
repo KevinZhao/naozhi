@@ -57,9 +57,16 @@ test.describe('#2431 WS fallback state', () => {
       await page.evaluate(async () => { await eval('fetchSessions')(); });
       await expect(cardDot(page, KEY)).toHaveClass(/dot-running/);
 
-      // ...and the interval itself keeps it fresh: flip back, wait for the poll.
+      // ...and the 5 s interval itself keeps it fresh. Let the boot-time
+      // debounced fetch tail (scanDiscovered → debouncedFetchSessions, 300 ms)
+      // drain first so the repaint below can only come from the interval:
+      // require at least one more /api/sessions request AND the dot to flip.
+      await page.waitForTimeout(1000);
+      let polls = 0;
+      page.on('request', r => { if (new URL(r.url()).pathname === '/api/sessions') polls++; });
       mock.setSessionStateWithoutVersionBump(KEY, 'ready');
       await expect(cardDot(page, KEY)).toHaveClass(/dot-ready/, { timeout: 12000 });
+      expect(polls).toBeGreaterThan(0);
     } finally {
       await ctx.close();
       mock.server.close();
