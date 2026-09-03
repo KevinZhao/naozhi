@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -45,12 +46,22 @@ func extractJSFunction(t *testing.T, js, name string) string {
 // is unavailable.
 func runNode(t *testing.T, script string) string {
 	t.Helper()
+	return runNodeEnv(t, script, nil)
+}
+
+// runNodeEnv is runNode with extra KEY=VALUE environment entries (e.g. TZ)
+// appended to the inherited environment.
+func runNodeEnv(t *testing.T, script string, extraEnv []string) string {
+	t.Helper()
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not on PATH; skipping JS behavioural test")
 	}
 	cmd := exec.Command(nodeBin, "-")
 	cmd.Stdin = strings.NewReader(script)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	// Capture stdout alone: node prints warnings (e.g. ExperimentalWarning)
 	// on stderr, which would corrupt the JSON payload under CombinedOutput.
 	out, err := cmd.Output()

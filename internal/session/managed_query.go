@@ -196,6 +196,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)
+	// meteringCredits is the credit-unit sum of snap.MeteringUsage, computed
+	// once per metering generation alongside the cached rows (#2345).
+	var meteringCredits float64
 	// costSpent is the genuine cumulative spend (sum of per-turn deltas),
 	// monotonic across resume/restart. It is the authoritative session total.
 	// Fall back to sessCost only for legacy sessions whose store predates the
@@ -309,7 +312,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// zero today) and kiro (all fields populated).
 		snap.ContextUsagePercent = proc.ContextUsagePercent()
 		snap.TurnDurationMs = proc.TurnDurationMs()
-		snap.MeteringUsage = proc.MeteringUsage()
+		snap.MeteringUsage, meteringCredits = s.meteringView(proc)
 		// Effort stays inside the proc != nil branch (unlike CostUnit below):
 		// it is a runtime observation, not a static label derived from
 		// Backend, so an evicted session has no "current effort" to show.
@@ -333,19 +336,12 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	// not per-turn. claude path keeps snap.TotalCost from CLI's own
 	// running total (USD). For kiro we derive it from the accumulated
 	// MeteringUsage (Process.applyMetadata is now session-level).
-	if snap.CostUnit == "credits" && len(snap.MeteringUsage) > 0 {
-		var credits float64
-		for _, m := range snap.MeteringUsage {
-			if m.Unit == "credit" || m.Unit == "credits" {
-				credits += m.Value
-			}
-		}
-		// Only override when we found a credit-typed entry; if kiro ever
-		// emits a non-credit unit (token / cost) under cost_unit=credits,
-		// don't silently zero the running total.
-		if credits > 0 {
-			snap.TotalCost = credits
-		}
+	// Only override when a credit-typed entry exists; if kiro ever emits
+	// a non-credit unit (token / cost) under cost_unit=credits, don't
+	// silently zero the running total. The sum comes from meteringView's
+	// per-generation cache (#2345) — see sumMeteringCredits.
+	if snap.CostUnit == "credits" && meteringCredits > 0 {
+		snap.TotalCost = meteringCredits
 	}
 
 	// Read cached values instead of copying the full event log.
