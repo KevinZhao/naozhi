@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,11 +38,9 @@ func TestHubShutdown_WiredLinkersNiledAfterClientWGWait(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	hub := NewHub(HubOptions{
-		Router:  router,
-		Guard:   guard,
-		NodesMu: &nodesMu,
+		Router: router,
+		Guard:  guard,
 	})
 
 	hub.wiredLinkersMu.Lock()

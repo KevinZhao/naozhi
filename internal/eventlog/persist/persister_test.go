@@ -650,24 +650,58 @@ func TestPersister_Rotate(t *testing.T) {
 
 // TestKeyHash_StableStemAcrossPersisters guarantees two Persisters
 // rooted at the same dir see the same files for a given key.
+//
+// #2473: the original shared ONE 1s context across four fsync-bound calls
+// (p1.Flush, p1.Stop, p2.Flush, deferred Stops) and discarded every error.
+// A single slow fsync on a loaded CI runner exhausted the budget, after
+// which Flush returned ctx.Err() before even enqueuing the op, so p2's
+// record silently never reached disk ("expected records across both
+// persisters, got 2", wall time exactly 1.00s). Flush/Stop already block
+// on the writer goroutine's acknowledgement, so the synchronisation is
+// deterministic — the fix is to stop turning a hang-guard into a shared
+// performance budget and to fail loudly on the first error. t.Context()
+// is bounded only by go test's own -timeout, so a genuine wedge surfaces
+// as the standard timeout panic + goroutine dump.
 func TestKeyHash_StableStemAcrossPersisters(t *testing.T) {
 	dir := t.TempDir()
 	opts := Options{Dir: dir, FlushInterval: 10 * time.Millisecond}
-	p1, _ := NewPersister(opts)
-	p2, _ := NewPersister(opts)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	defer p1.Stop(ctx)
-	defer p2.Stop(ctx)
+	p1, err := NewPersister(opts)
+	if err != nil {
+		t.Fatalf("NewPersister p1: %v", err)
+	}
+	p2, err := NewPersister(opts)
+	if err != nil {
+		t.Fatalf("NewPersister p2: %v", err)
+	}
+	t.Cleanup(func() {
+		// Safety net for early Fatalf exits only; Stop is idempotent, so
+		// the explicit stops below make these no-ops on the happy path.
+		_ = p1.Stop(context.Background())
+		_ = p2.Stop(context.Background())
+	})
+	ctx := t.Context()
+	flush := func(p *Persister, name string) {
+		t.Helper()
+		if err := p.Flush(ctx); err != nil {
+			t.Fatalf("%s.Flush: %v", name, err)
+		}
+	}
+	stop := func(p *Persister, name string) {
+		t.Helper()
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("%s.Stop: %v", name, err)
+		}
+	}
 
-	// Each writes one record for the same key.
+	// Each writes one record for the same key. p1 is fully stopped (writer
+	// goroutine joined, fd closed) before p2 touches the shared log.
 	p1.SinkFor("k")([]Entry{entry(t, 1, "u1")}, false)
-	_ = p1.Flush(ctx)
-	// p1 closes its writer on Stop; simulate by dropping.
-	_ = p1.Stop(ctx)
+	flush(p1, "p1")
+	stop(p1, "p1")
 
 	p2.SinkFor("k")([]Entry{entry(t, 2, "u2")}, false)
-	_ = p2.Flush(ctx)
+	flush(p2, "p2")
+	stop(p2, "p2")
 
 	logPath := LogPath(dir, "k")
 	recs := readAllRecords(t, logPath)

@@ -78,6 +78,20 @@ var scanBufPool = sync.Pool{
 	},
 }
 
+// maxLineBytes is the longest jsonl record the forward scan accepts.
+// Assistant messages can be long, so this is well above bufio.Scanner's
+// 64 KiB default; anything longer (kiro ToolResults reach tens of MiB on
+// a single line) is skipped rather than aborting the scan (#2448).
+const maxLineBytes = 1 << 20
+
+// lineReaderPool recycles the bufio.Reader that sits between the file and
+// the scanner so an oversized record can be drained and the scan resumed
+// (see parseFile). Pooled for the same per-page churn reason as
+// scanBufPool (mirrors naozhilog/source.go's bufReaderPool).
+var lineReaderPool = sync.Pool{
+	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
+}
+
 // kindPromptMarker and kindAsstMarker are byte quick-filters: a jsonl line
 // that contains neither cannot decode into a Prompt or AssistantMessage
 // record, so decodeLine can skip it before paying for two json.Unmarshal
@@ -260,7 +274,13 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	// if it is '\n', the window begins exactly on a record boundary and the
 	// first line is a complete, valid JSONL record — dropping it would lose
 	// the oldest in-window turn (kirojsonl is that turn's only source).
+	// When it IS a partial, the head backscan below hands back the bytes
+	// before the seek point so the straddling record can be reassembled and
+	// parsed like any other line instead of being dropped.
 	skipPartialFirstLine := false
+	// anchor seeds the assistant-timestamp borrow state from the discarded
+	// head (#2332), see headPromptAnchor.
+	var anchor headAnchor
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
 		off := fi.Size() - maxFileBytes
 		// off > 0 here because Size() > maxFileBytes. Read the boundary byte
@@ -272,58 +292,56 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		}
 		if _, err := f.Seek(off, io.SeekStart); err == nil {
 			skipPartialFirstLine = !atBoundary
+			anchor = headPromptAnchor(ctx, f, off)
 		}
 	}
-	limited := io.LimitReader(f, maxFileBytes)
-	scanner := bufio.NewScanner(limited)
-	// Allow 1 MiB lines — assistant messages can be long. Default 64 KiB
-	// would silently truncate on token-rich replies. The initial buffer is
-	// pooled: bufio.Scanner only grows (never shrinks below) the slice we hand
-	// it, so returning it at zero length recycles the 64 KiB backing array.
+	// br sits between the file and the scanner so that an oversized record
+	// can be skipped (#2448): bufio.Scanner is unusable after ErrTooLong, so
+	// the rest of the line is drained from br and a fresh scanner resumes on
+	// br without losing any bytes already buffered past the long line.
+	br := lineReaderPool.Get().(*bufio.Reader)
+	br.Reset(io.LimitReader(f, maxFileBytes))
+	defer func() {
+		br.Reset(nil)
+		lineReaderPool.Put(br)
+	}()
+	// Allow maxLineBytes lines — bufio.Scanner's default 64 KiB would
+	// silently truncate on token-rich replies. The initial buffer is pooled:
+	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
+	// returning it at zero length recycles the 64 KiB backing array.
 	bufPtr := scanBufPool.Get().(*[]byte)
 	defer func() {
 		b := (*bufPtr)[:0]
 		*bufPtr = b
 		scanBufPool.Put(bufPtr)
 	}()
-	scanner.Buffer(*bufPtr, 1<<20)
-	if skipPartialFirstLine && scanner.Scan() {
-		// Discard the partial line straddling the seek boundary.
-	}
+	scanner := bufio.NewScanner(br)
+	scanner.Buffer(*bufPtr, maxLineBytes)
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
-	// State across lines for assistant-timestamp salvage.
-	var lastPromptMS int64
-	var asstOffset int64
-	for scanner.Scan() {
-		// Cooperative cancellation. Done lookups every ctxCheckEvery
-		// lines keep the cost negligible while still guaranteeing
-		// prompt return on shutdown / dashboard navigation.
-		if processed%ctxCheckEvery == 0 {
-			select {
-			case <-ctx.Done():
-				return out
-			default:
-			}
-		}
-		processed++
-
-		line := scanner.Bytes()
+	// State across lines for assistant-timestamp salvage. Starts from the
+	// head anchor so assistants that precede the first in-window Prompt
+	// (their own Prompt was cut off with the head) are not dropped, and
+	// from that Prompt's global assistant count so the borrowed ts does not
+	// depend on where the seek point happens to fall.
+	lastPromptMS := anchor.promptMS
+	asstOffset := anchor.asstOffset
+	processLine := func(line []byte) {
 		if len(line) == 0 {
-			continue
+			return
 		}
 		// Byte quick-filter (#2246): only Prompt / AssistantMessage records
 		// decode into an entry. Skipping everything else here avoids the two
 		// json.Unmarshal calls decodeLine would otherwise spend on tool_use,
 		// system, and other kinds that are unconditionally dropped anyway.
 		if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
-			continue
+			return
 		}
 
 		entry, ok := decodeLine(line, lastPromptMS, asstOffset)
 		if !ok {
-			continue
+			return
 		}
 		// Maintain the borrow state. A successful Prompt resets the
 		// per-prompt offset; a successful AssistantMessage ticks the
@@ -342,17 +360,197 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			}
 		}
 		if beforeMS > 0 && entry.Time >= beforeMS {
-			continue
+			return
 		}
 		out = append(out, entry)
 	}
-	if err := scanner.Err(); err != nil {
-		// Partial-write tails surface here as bufio errors. Treat as
-		// end-of-file so the merge layer doesn't lose the entries we
-		// already accumulated.
-		slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
+
+	if skipPartialFirstLine {
+		if scanner.Scan() {
+			// The first scanned line is the tail of the record straddling the
+			// seek boundary. Reassemble it with the head bytes the backscan
+			// kept so the record is parsed (and advances the borrow state)
+			// exactly as it would be in a whole-file read; with no fragment it
+			// stays dropped.
+			if len(anchor.fragment) > 0 {
+				processLine(append(anchor.fragment, scanner.Bytes()...))
+			}
+		} else if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+			// The straddling partial line is itself oversized. Never Scan this
+			// scanner again: with an error set, bufio.Scanner hands the
+			// buffered 1 MiB prefix back as a final token (split-at-EOF
+			// recovery) and it would reach processLine as if it were a whole
+			// record. Drain the rest of the line and rebuild instead.
+			if !discardRestOfLine(br) {
+				return out
+			}
+			scanner = bufio.NewScanner(br)
+			scanner.Buffer(*bufPtr, maxLineBytes)
+		}
 	}
-	return out
+	for {
+		for scanner.Scan() {
+			// Cooperative cancellation. Done lookups every ctxCheckEvery
+			// lines keep the cost negligible while still guaranteeing
+			// prompt return on shutdown / dashboard navigation.
+			if processed%ctxCheckEvery == 0 {
+				select {
+				case <-ctx.Done():
+					return out
+				default:
+				}
+			}
+			processed++
+			processLine(scanner.Bytes())
+		}
+		err := scanner.Err()
+		if !errors.Is(err, bufio.ErrTooLong) {
+			if err != nil {
+				// Partial-write tails surface here as bufio errors. Treat as
+				// end-of-file so the merge layer doesn't lose the entries we
+				// already accumulated.
+				slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
+			}
+			return out
+		}
+		// One record exceeds maxLineBytes (#2448). The scanner has consumed
+		// exactly its buffer's worth of the line (no '\n' in it, or it would
+		// have been a token); drop the remainder and resume with a fresh
+		// scanner so the records after it still surface. The oversized
+		// record itself is skipped, as headPromptAnchor skips an oversized
+		// carry. This also covers the partial first line of the tail window
+		// being oversized — the head fragment is simply never reassembled.
+		if !discardRestOfLine(br) {
+			return out
+		}
+		scanner = bufio.NewScanner(br)
+		scanner.Buffer(*bufPtr, maxLineBytes)
+	}
+}
+
+// discardRestOfLine drops bytes from br up to and including the next '\n'.
+// Returns false when the input ends (or fails) before a newline is seen, in
+// which case nothing further can be scanned.
+func discardRestOfLine(br *bufio.Reader) bool {
+	for {
+		_, err := br.ReadSlice('\n')
+		switch {
+		case err == nil:
+			return true
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		default:
+			return false
+		}
+	}
+}
+
+// headBackscanChunk is the read size for headPromptAnchor's reverse walk.
+const headBackscanChunk = 1 << 20 // 1 MiB
+
+// borrowProbeMS is a sentinel lastPromptMS handed to decodeLine while
+// counting head assistants: a record that comes back with exactly
+// borrowProbeMS+1 borrowed its ts (it has no meta.timestamp), which is the
+// only kind the forward scan's asstOffset counts. Real timestamps are unix
+// seconds ×1000, so they can never collide with the sentinel.
+const borrowProbeMS = 1
+
+// headAnchor is the borrow state headPromptAnchor recovers from the
+// discarded head of an oversized session file.
+type headAnchor struct {
+	promptMS   int64  // ts (ms) of the most recent complete Prompt before off; 0 = none
+	asstOffset int64  // borrowed-ts AssistantMessages between that Prompt and off
+	fragment   []byte // head bytes of the record straddling off; nil when none/unknown
+}
+
+// headPromptAnchor walks the discarded head [0, off) backwards and returns
+// the most recent complete Prompt's timestamp plus the number of
+// borrowed-ts assistants that follow it before off. Real kiro sessions write
+// one Prompt followed by many MiB of ToolResults/AssistantMessage, so the
+// tail window frequently holds no Prompt at all; without this anchor every
+// in-window AssistantMessage (which never carries meta.timestamp) would be
+// dropped (#2332). Seeding asstOffset with the global count keeps each
+// assistant's borrowed ts (and thus UUID) identical to a whole-file parse,
+// so it does not drift as kiro appends and off moves. Uses ReadAt so the
+// caller's seek position is untouched. Cancellation or a read error yields
+// the zero anchor — the pre-fix behaviour.
+func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
+	var a headAnchor
+	// buf is reused across passes: a chunk plus the carry (each ≤1 MiB).
+	buf := make([]byte, 0, 2*headBackscanChunk)
+	// carry holds the leading fragment of the previously scanned (later)
+	// region up to and including its first '\n', i.e. the tail of a line
+	// whose start lies in the bytes still to be read.
+	var carry []byte
+	var count int64
+	pos := off
+	for pos > 0 {
+		select {
+		case <-ctx.Done():
+			return headAnchor{}
+		default:
+		}
+		n := int64(headBackscanChunk)
+		if n > pos {
+			n = pos
+		}
+		chunkStart := pos - n
+		buf = buf[:n]
+		if _, err := f.ReadAt(buf, chunkStart); err != nil {
+			return headAnchor{}
+		}
+		buf = append(buf, carry...)
+		lastNL := bytes.LastIndexByte(buf, '\n')
+		if pos == off && (lastNL >= 0 || chunkStart == 0) {
+			// Bytes after the last newline are the head of the record that
+			// straddles the seek point; parseFile reassembles it. With no
+			// newline in the whole chunk the record's start is unknown, so
+			// the fragment could never form valid JSON — skip it.
+			a.fragment = append([]byte(nil), buf[lastNL+1:]...)
+		}
+		// Only complete lines are candidates, newest first.
+		region := buf[:lastNL+1]
+		for len(region) > 0 {
+			lineStart := bytes.LastIndexByte(region[:len(region)-1], '\n') + 1
+			if lineStart == 0 && chunkStart > 0 {
+				// The line begins in an earlier chunk; it becomes the carry
+				// and is evaluated whole on the next pass.
+				break
+			}
+			line := region[lineStart : len(region)-1]
+			region = region[:lineStart]
+			// Same quick-filter as the forward scan; the record kind is
+			// decided by decodeLine, not by which marker matched (an
+			// AssistantMessage may embed a {"kind":"Prompt"} chunk).
+			if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
+				continue
+			}
+			e, ok := decodeLine(line, borrowProbeMS, 0)
+			if !ok {
+				continue
+			}
+			switch {
+			case e.Type == "user":
+				a.promptMS = e.Time
+				a.asstOffset = count
+				return a
+			case e.Type == "text" && e.Time == borrowProbeMS+1:
+				count++
+			}
+		}
+		if firstNL := bytes.IndexByte(buf, '\n'); firstNL >= 0 {
+			carry = append(carry[:0], buf[:firstNL+1]...)
+		} else {
+			carry = append(carry[:0], buf...)
+		}
+		if len(carry) > maxLineBytes {
+			// Longer than any line the forward scanner accepts; the record
+			// would be rejected anyway, so stop growing the fragment.
+			carry = carry[:0]
+		}
+		pos = chunkStart
+	}
+	return a
 }
 
 // decodeLine parses one jsonl record into an EventEntry. Returns

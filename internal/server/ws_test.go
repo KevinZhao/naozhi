@@ -37,16 +37,14 @@ func testCookieMAC(token string) string {
 func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
+	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
 	return hub, router
 }
 
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
+	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard})
 	return hub, router
 }
 
@@ -493,6 +491,16 @@ func TestWS_SubscribeAfterOmitsHasMore(t *testing.T) {
 
 // ─── Event push tests ────────────────────────────────────────────────────────
 
+// wsReadEmptyInitialHistory asserts the next frame is the empty Initial
+// history every initial subscribe on a zero-event session receives (#2432).
+func wsReadEmptyInitialHistory(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	resp := wsRead(t, conn)
+	if resp.Type != "history" || !resp.Initial || len(resp.Events) != 0 {
+		t.Fatalf("frame = %+v, want empty Initial history (type=history, initial=true, 0 events)", resp)
+	}
+}
+
 func TestWS_EventPush(t *testing.T) {
 	hub, router := newTestHub("")
 	proc := session.NewTestProcess()
@@ -506,11 +514,13 @@ func TestWS_EventPush(t *testing.T) {
 
 	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 
-	// Read subscribed (no history since log is empty)
+	// Read subscribed, then the empty Initial history frame (#2432: every
+	// initial subscribe gets one, even when the log is empty).
 	resp := wsRead(t, conn)
 	if resp.Type != "subscribed" {
 		t.Fatalf("type = %q, want subscribed", resp.Type)
 	}
+	wsReadEmptyInitialHistory(t, conn)
 
 	// Now append an event
 	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning"})
@@ -579,6 +589,7 @@ func TestWS_Unsubscribe(t *testing.T) {
 
 	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn) // subscribed
+	wsReadEmptyInitialHistory(t, conn)
 
 	wsWrite(t, conn, node.ClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
 	resp := wsRead(t, conn)
@@ -808,9 +819,11 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 	// Both subscribe
 	wsWrite(t, conn1, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn1) // subscribed
+	wsReadEmptyInitialHistory(t, conn1)
 
 	wsWrite(t, conn2, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn2) // subscribed
+	wsReadEmptyInitialHistory(t, conn2)
 
 	// Append event
 	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "text", Summary: "shared event"})

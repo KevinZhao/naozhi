@@ -24,20 +24,15 @@ func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
 	t.Cleanup(hub.Shutdown)
 
 	stubs := make([]*recordingFanoutNode, 0, numNodes)
-	hub.nodesMu.Lock()
-	if hub.nodes == nil {
-		hub.nodes = map[string]node.Conn{}
-	}
 	for i := 0; i < numNodes; i++ {
 		s := &recordingFanoutNode{
 			fakeCapNode: fakeCapNode{id: "fanout"},
 			sleep:       perCallSleep,
 		}
 		stubs = append(stubs, s)
-		// Distinct keys so the map holds all N entries.
-		hub.nodes[stubKey(i)] = s
+		// Distinct keys so the registry holds all N entries.
+		hub.nodes.Add(stubKey(i), s)
 	}
-	hub.nodesMu.Unlock()
 
 	c := &wsClient{}
 	hub.mu.Lock()
@@ -81,12 +76,7 @@ func TestUnregister_RemoveClientSingleNode(t *testing.T) {
 	stub := &recordingFanoutNode{
 		fakeCapNode: fakeCapNode{id: "single"},
 	}
-	hub.nodesMu.Lock()
-	if hub.nodes == nil {
-		hub.nodes = map[string]node.Conn{}
-	}
-	hub.nodes["single"] = stub
-	hub.nodesMu.Unlock()
+	hub.nodes.Add("single", stub)
 
 	c := &wsClient{}
 	hub.mu.Lock()

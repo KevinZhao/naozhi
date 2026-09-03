@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -22,7 +23,7 @@ import (
 //
 //   GET /api/sessions/agent_events
 //     ?key=<session_key>&node=<node>&task_id=<t...>&after=<ms>&limit=<n>
-//   → 200 [EventEntry...]            chronological transcript slice
+//   → 200 [EventEntry...]            chronological transcript slice (Time >= after)
 //   → 202 {"status":"pending"}       SubagentLinker has not resolved yet
 //   → 404 "unknown task"             tombstone / no live linker
 //   → 400                            query param validation failure
@@ -154,7 +155,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		_ = entries
 		if err != nil {
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "unknown task", http.StatusNotFound)
 				return
 			}
@@ -205,7 +206,13 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 
 	reader := cli.NewTranscriptReader(info.JSONLPath)
 	defer reader.Close()
-	entries, err := reader.Read(after, limit)
+	// #2432 item 5: re-admit the `after` millisecond (same rule as
+	// /api/sessions/events). Transcript blocks of one assistant line and
+	// consecutive lines can share a timestamp, so a strict `>` cursor lost
+	// the sibling the previous poll's `limit` cut off. agent_view.js dedups
+	// the same-ms replay (transcript entries carry no uuid, so it keys on
+	// the full content tuple).
+	entries, err := reader.Read(cli.SinceInclusive(after), limit)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// CLI may have pruned the jsonl (e.g. /new issued on the parent

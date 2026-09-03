@@ -147,20 +147,25 @@
        drawer   (side/bottom panels: fv-drawer, aside, history sheet,
                  cj-menu — all share the blocking-surface tier)
        modal    (blocking dialog / cmd-palette — must clear the split-view
-                 front drawer, which lifts to literal 202)
-       toast    (transient status, must clear a docked drawer)
-       menu     (context menu — above toast so a right-click on a toast works)
+                 front drawer, which lifts to literal 202; #split-resizer sits
+                 at literal 203 so the seam is never occluded by either pane)
+       menu     (context menu; its click-away overlay sits one step below via
+                 calc(var(--nz-z-menu) - 1))
        overlay  (full-screen capture: voice, mem-popover)
-       lightbox (image viewer — the topmost surface; replaces the 9999 wild value)
+       lightbox (image viewer; replaces the 9999 wild value)
+       toast    (transient status — the TOPMOST tier. A toast is a
+                 pointer-events:none notification that must stay readable
+                 while the voice overlay or the lightbox is open, e.g. the
+                 "录音失败" / "下载失败" error it reports about them. #2434)
      Sub-steps (+1/+2) stay as literal offsets at the rule (e.g. ctx-menu sits
      one above its overlay) to avoid a token per micro-layer. */
   --nz-z-popover:100;
   --nz-z-drawer:200;
   --nz-z-modal:205;
-  --nz-z-toast:210;
   --nz-z-menu:211;
   --nz-z-overlay:300;
   --nz-z-lightbox:400;
+  --nz-z-toast:450;
   /* Blocking-modal scrim (R20260610-UI-3). modal / voice / cmd-palette each
      dimmed the background at a different opacity (.75 / .75 / .6), giving the
      same "a blocking layer is open" cue inconsistent weight. One token unifies
@@ -221,6 +226,18 @@
   --nz-memlink-user-fg:#7ad9a3;
   --nz-memlink-project-bg:#1a2a4a;      /* [[project]] memory chip */
   --nz-memlink-project-fg:#7aacf7;
+  --nz-memlink-feedback-bg:#3a2a14;     /* [[feedback]] memory chip */
+  --nz-memlink-feedback-fg:#f7c97a;
+  --nz-memlink-reference-bg:#3a1a3a;    /* [[reference]] memory chip */
+  --nz-memlink-reference-fg:#d97af7;
+  /* Backend / access-profile chip text on the inline chip_color fill: white +
+     shadow on dark; light swaps to dark text, no shadow (#2434). */
+  --nz-backend-chip-fg:#fff;
+  --nz-backend-chip-shadow:0 1px 1px rgba(0,0,0,.35);
+  --nz-backend-chip-border:rgba(0,0,0,.18);
+  /* Semantic status aliases (cj-placement-sandbox) — inherit the light remap
+     of green / amber / red, so no per-theme redefinition needed (#2434). */
+  --nz-ok:var(--nz-green);--nz-warn:var(--nz-amber);--nz-err:var(--nz-red);
   /* history-popover project label gold (R20260610-UI-1). Was a bare #d4a017 in
      the .hp-project rule with no light override; on a white surface the dark
      gold dropped below AA. Tokenised here (dark default preserves the original)
@@ -281,6 +298,9 @@
   --nz-row-active-running-bg:#dbeafe;
   --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
   --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+  --nz-memlink-feedback-bg:#fff8c5;--nz-memlink-feedback-fg:#7a5800;
+  --nz-memlink-reference-bg:#fbefff;--nz-memlink-reference-fg:#6639ba;
+  --nz-backend-chip-fg:#1a1a1a;--nz-backend-chip-shadow:none;--nz-backend-chip-border:rgba(0,0,0,.25);
   --nz-project-label-fg:#7a5800;        /* deeper gold, clears AA on white */
   /* Elevation on white: low-alpha near-black (GitHub-light convention) so
      floating surfaces read as gentle lift, not a black halo. The 1px border
@@ -322,6 +342,9 @@
     --nz-row-active-running-bg:#dbeafe;
     --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
     --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+    --nz-memlink-feedback-bg:#fff8c5;--nz-memlink-feedback-fg:#7a5800;
+    --nz-memlink-reference-bg:#fbefff;--nz-memlink-reference-fg:#6639ba;
+    --nz-backend-chip-fg:#1a1a1a;--nz-backend-chip-shadow:none;--nz-backend-chip-border:rgba(0,0,0,.25);
     --nz-project-label-fg:#7a5800;
     /* Elevation on white — mirror of the explicit light block. */
     --nz-shadow-1:0 1px 2px rgba(31,35,40,.06);
@@ -653,6 +676,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .main-header h2 .btn-rename{margin-left:6px;background:transparent;border:0;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-sm2);padding:2px 4px;border-radius:var(--nz-radius-xs);vertical-align:baseline;opacity:0;transition:opacity 120ms ease,color 120ms ease}
 .main-header:hover h2 .btn-rename,.main-header h2 .btn-rename:focus-visible{opacity:1}
 .main-header h2 .btn-rename:hover{color:var(--nz-text-strong);background:var(--nz-bg-2)}
+/* 触屏：rename 铅笔不能靠 hover 显现（同 .cj-run 兜底，#2434）*/
+@media (hover:none){
+  .main-header h2 .btn-rename{opacity:1}
+}
 .main-header .detail{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
 /* The cli/model label is the row's only shrinkable text: without min-width:0 a
@@ -662,6 +689,11 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    instead; the raw model id stays in the label's title. */
 .main-header .detail-left{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .main-header .detail-left>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* #2437: #header-cli is always emitted so updateHeaderCLI has an in-place
+   target, but with no backend name yet it is empty — collapse it like
+   .detail-git / .detail-effort / .detail-runstats so the 6px flex gap
+   doesn't open a hole before the "· model" label. */
+.main-header .detail-left #header-cli:empty{display:none}
 /* session-run-metrics header overview: the run-history stats ("N 轮 · 均 X ·
    最长 X") promoted from the panel summary into the header's right edge. Pushed
    to the right with margin-left:auto; truncates rather than wrapping so it
@@ -677,10 +709,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    comes inline from BackendInfo.chip_color; the rules below provide layout,
    contrast (the chip uses dark text on light backgrounds via color-mix),
    and the always-on outline so dark mode keeps it readable. */
-.sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.35);border:1px solid rgba(0,0,0,.18);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media (prefers-color-scheme:light){
-  .sc-backend-chip,.sc-access-profile-chip{color:#1a1a1a;text-shadow:none;border-color:rgba(0,0,0,.25)}
-}
+.sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-backend-chip-fg);text-shadow:var(--nz-backend-chip-shadow);border:1px solid var(--nz-backend-chip-border);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* RFC §8.3 D6 — context usage bar. Three thresholds: <80% green
    (--nz-text-mute fill), <95% amber (--nz-amber), >=95% red. Width
@@ -842,6 +871,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    keyboard users back into scope. */
 .event-copy-btn.hover-only{opacity:0}
 .event:hover .event-copy-btn.hover-only,.event-copy-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-copy-btn.hover-only{opacity:1}
+}
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
 .event.system .event-icon,.event.init .event-icon{display:none}
@@ -1018,7 +1050,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .fv-body .fv-truncated{padding:8px 12px;background:rgba(210,153,34,.1);border-left:3px solid var(--nz-amber);color:var(--nz-amber);font-size:var(--nz-fs-sm);margin-bottom:10px;border-radius:var(--nz-radius-xs)}
 .fv-body .fv-loading,.fv-body .fv-error{padding:24px;text-align:center;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2)}
 .fv-body .fv-error{color:var(--nz-red)}
-@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw}.fv-body iframe{height:calc(100vh - 100px)}}
+/* Phone: full-width, and follow the visualViewport vars like .main / .sidebar
+   do so the iOS soft keyboard shrinks the drawer instead of covering its
+   bottom (#2434). */
+@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}.fv-body iframe{height:calc(100vh - 100px)}}
 
 /* ===== Split view (desktop) =====
    When a preview / 追问 drawer opens, instead of overlaying the transcript we
@@ -1053,9 +1088,13 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
      the class on each open. A subtle shadow on the front pane hints depth. */
   body.nz-split-open .fv-drawer.nz-split-front,
   body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:var(--nz-shadow-drawer)}
-  /* Draggable seam. Sits exactly on the left edge of the reserved strip,
-     above the drawer (z-index 200) so the hit area is never occluded. */
-  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}
+  /* Draggable seam. Sits exactly on the left edge of the reserved strip;
+     the 6px hit area straddles the seam (margin-right:-3px), so it must paint
+     above BOTH panes — including the .nz-split-front one at 202 — or the 3px
+     overlapping the front drawer are swallowed and the drag target halves
+     (#2434). Background stays transparent until hover, so the higher z-index
+     has no visual cost. */
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:203;background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
 }
 
@@ -1145,7 +1184,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    feedback (errors, "copied", cron results) stays visible while a preview /
    追问 pane occupies the right strip; still below ctx-menu (211). */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:var(--nz-z-toast);opacity:0;pointer-events:none;transition:opacity .3s}
-.toast.show{opacity:1;pointer-events:auto}
+/* Stays pointer-events:none while shown: the toast is the topmost layer
+   (--nz-z-toast) and has no click handler, so taps must fall through to the
+   lightbox toolbar / voice overlay underneath instead of being swallowed. */
+.toast.show{opacity:1}
 /* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
    pick it up but sighted users never see it. Display:none would suppress
@@ -1226,12 +1268,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* R110-P1 long-press context menu: surfaces session-card actions (rename /
    delete / copy key) on touch devices where hover-only buttons are invisible.
    Rendered as an overlay + positioned menu pair so click-outside-to-close is
-   cheap to implement. z-index 210 sits above .modal-overlay (200) so the
-   menu can opt to layer on top of a confirm dialog mid-flight without
-   swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
+   cheap to implement. The overlay sits one step below --nz-z-menu (211),
+   above .modal-overlay (205), so the menu can opt to layer on top of a
+   confirm dialog mid-flight without swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
    perceived latency on the long-press target state that already takes 500ms
    to trigger. */
-.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}
+.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:calc(var(--nz-z-menu) - 1)}
 .ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:var(--nz-shadow-2);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
 .ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--nz-radius-ms);cursor:pointer;color:var(--nz-text);font-size:var(--nz-fs-base);min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
 .ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
@@ -1261,6 +1303,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .cmd-palette-item.active{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .cmd-palette-item .cp-main{flex:1;min-width:0}
 .cmd-palette-item .cp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-backend-fail{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
 .cmd-palette-item .cp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
 .cmd-palette-item .cp-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0}
 .cmd-palette-item .cp-icon{color:var(--nz-text-mute);font-size:var(--nz-fs-base);flex-shrink:0;width:16px;text-align:center}
@@ -1340,6 +1383,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .md-code-wrap{position:relative;max-width:100%}
 .md-code-actions{position:absolute;top:6px;right:6px;display:flex;gap:4px;opacity:0;transition:opacity .15s}
 .md-code-wrap:hover .md-code-actions{opacity:1}
+@media (hover:none){
+  .md-code-actions{opacity:1}
+}
 .md-code-btn{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-mute);font-size:var(--nz-fs-xs);padding:2px 8px;cursor:pointer;line-height:1.6;font-family:inherit;transition:color .15s,border-color .15s,background .15s}
 .md-code-btn:hover{background:var(--nz-border);color:var(--nz-text);border-color:var(--nz-accent)}
 .md-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green)}
@@ -1354,6 +1400,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:var(--nz-text-strong);margin:8px 0 4px}
 .md-h1{font-size:var(--nz-fs-md)}.md-h2{font-size:15px}.md-h3{font-size:var(--nz-fs-base)}
 .md-ul{margin:6px 0 6px 16px;padding:0;list-style:disc}
+.md-quote{margin:6px 0;padding:2px 0 2px 10px;border-left:3px solid var(--nz-border);color:var(--nz-text-mute)}
+.md-task{margin:0 4px 0 0;vertical-align:middle}
 .md-ul li{margin:2px 0;line-height:1.6}
 .md-ol{margin:6px 0 6px 16px;padding:0;list-style:decimal}
 .md-ol li{margin:2px 0;line-height:1.6}
@@ -2455,7 +2503,7 @@ body.kbd-open .input-hints{display:none}
 /* Drawer history (override timeline panel for in-drawer use) */
 .cron-drawer-history{padding:14px 20px;flex:1 1 auto}
 .cron-drawer-history .cron-timeline-panel{padding:0;background:transparent;border:none;max-height:none;overflow:visible}
-.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:0;background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
+.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:var(--nz-cron-drawer-header-h,0);background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
 /* Drawer empty state (jobId set but job not in cronJobs) */
 .cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);text-align:center;line-height:1.6}
 /* List row selection (cj-row.is-active) */
@@ -2571,8 +2619,15 @@ body.kbd-open .input-hints{display:none}
 @media(max-width:768px){
   .cron-detail-body{padding:12px}
   .cron-new-btn{min-height:40px}
-  /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard */
-  .modal{max-height:85dvh;display:flex;flex-direction:column}
+  /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard.
+     overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
+     dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
+     onboarding / cheatsheet …): their content would otherwise spill past the
+     85dvh cap with no scroll container, leaving .modal-btns unreachable
+     (#2434). Cron modals keep a .modal-body scroller: it shrinks to fit (a
+     scroll container's min-height:auto resolves to 0), so the outer box never
+     overflows and no second scrollbar appears. */
+  .modal{max-height:85dvh;display:flex;flex-direction:column;overflow-y:auto}
   .modal-body{overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch}
   .modal .modal-btns{flex-shrink:0;background:var(--nz-bg-1);padding-top:8px;margin-top:8px;border-top:1px solid var(--nz-bg-2)}
   /* Hit-area boost inside modal on mobile */
@@ -2807,7 +2862,9 @@ body.kbd-open .sidebar-footer{display:none}
    same safe-area handling the main .input-area uses so the composer doesn't
    disappear behind the notch / home indicator. */
 @media (max-width: 768px){
-  .aside-drawer{width:100%;max-width:100vw;border-left:none}
+  /* top/height follow --vv-* like .main so the soft keyboard shrinks the
+     drawer instead of covering .ad-input-area (#2434). */
+  .aside-drawer{width:100%;max-width:100vw;border-left:none;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
   .aside-drawer .ad-header{padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left))}
   .aside-drawer .ad-messages .event{padding:6px 20px}
   .aside-drawer .ad-input-area{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(10px,env(safe-area-inset-bottom))}
@@ -2815,6 +2872,13 @@ body.kbd-open .sidebar-footer{display:none}
      under ≤768 and to min 44×44 under pointer:coarse. Mirror here so the
      send key on phones is the same size as the main composer's. */
   .aside-drawer .ad-send{width:40px;height:40px}
+}
+/* Landscape phones (769–950px, coarse pointer) are above the ≤768 breakpoint
+   but still get the soft keyboard; mirror the .main/.sidebar landscape block
+   so both drawers follow --vv-* there too (#2434). Sits after both drawers'
+   base rules so it wins the same-specificity cascade. */
+@media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
+  .fv-drawer,.aside-drawer{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
 }
 @media (pointer: coarse){
   .aside-drawer .ad-send,.aside-drawer .ad-close,.aside-drawer .ad-save-btn{min-width:44px;min-height:44px}
@@ -2829,6 +2893,9 @@ body.kbd-open .sidebar-footer{display:none}
    together on hover / keyboard focus and stay hidden otherwise. */
 .event-ask-btn.hover-only{opacity:0}
 .event:hover .event-ask-btn.hover-only,.event-ask-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-ask-btn.hover-only{opacity:1}
+}
 @media (pointer: coarse){
   .event-ask-btn,.event-copy-btn{font-size:var(--nz-fs-sm);padding:4px 10px;min-height:32px}
 }
@@ -2898,10 +2965,10 @@ body.kbd-open .sidebar-footer{display:none}
   filter:saturate(.9)}
 .md-memlink-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11.5px;letter-spacing:.01em}
-.md-memlink[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
+.md-memlink[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
 .md-memlink[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
 .md-memlink[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
-.md-memlink[data-type="reference"]{background:#3a1a3a;color:#d97af7}
+.md-memlink[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
 .md-memlink[data-type="memory"]{background:var(--nz-bg-2);color:var(--nz-text)}
 .md-memlink-broken,.md-memlink-broken[data-type]{
   background:transparent !important;color:var(--nz-text-mute) !important;
@@ -2922,10 +2989,10 @@ body.kbd-open .sidebar-footer{display:none}
 .mem-pop-type{padding:1px 8px;background:var(--nz-bg-2);border-radius:10px;
   font-size:var(--nz-fs-xs);text-transform:uppercase;letter-spacing:.04em;
   color:var(--nz-text-strong)}
-.mem-pop-type[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
+.mem-pop-type[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
 .mem-pop-type[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
 .mem-pop-type[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
-.mem-pop-type[data-type="reference"]{background:#3a1a3a;color:#d97af7}
+.mem-pop-type[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
 .mem-pop-scope{color:var(--nz-text-faint)}
 .mem-pop-slug{font-family:ui-monospace,Menlo,monospace;color:var(--nz-text-strong);
   font-size:var(--nz-fs-sm2);font-weight:500;margin-bottom:4px;word-break:break-all}

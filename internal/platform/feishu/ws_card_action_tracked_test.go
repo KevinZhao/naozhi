@@ -44,10 +44,11 @@ func TestDispatchCardActionTracked(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f := &Feishu{}
-			sem := make(chan struct{}, tt.semCap)
+			f := &Feishu{dispatch: platform.BoundedDispatch{Cap: tt.semCap}}
 			for i := 0; i < tt.preFill; i++ {
-				sem <- struct{}{}
+				if !f.dispatch.TryAcquire() {
+					t.Fatalf("prefill %d failed", i)
+				}
 			}
 
 			var called atomic.Int32
@@ -59,7 +60,7 @@ func TestDispatchCardActionTracked(t *testing.T) {
 
 			// messageID empty so the cosmetic EditMessage goroutine is skipped
 			// (it requires a configured client); we only assert tracking + sem.
-			f.dispatchCardActionTracked(context.Background(), sem, payload,
+			f.dispatchCardActionTracked(context.Background(), payload,
 				"oc_123", "", "group", "ou_user", handler)
 
 			if called.Load() != tt.wantCalled {
@@ -79,7 +80,7 @@ func TestDispatchCardActionTracked(t *testing.T) {
 			// before returning. wg.Wait() returning promptly proves no leak.
 			waitDone := make(chan struct{})
 			go func() {
-				f.wg.Wait()
+				f.dispatch.Wait()
 				close(waitDone)
 			}()
 			select {
@@ -90,8 +91,13 @@ func TestDispatchCardActionTracked(t *testing.T) {
 
 			// The semaphore slot used by a successful dispatch must be released
 			// (released in defer); the pre-filled slot in the drop case stays.
-			if len(sem) != tt.preFill {
-				t.Errorf("sem occupancy = %d, want %d (slot not released)", len(sem), tt.preFill)
+			// Free slots = semCap - preFill in both cases.
+			free := 0
+			for f.dispatch.TryAcquire() {
+				free++
+			}
+			if free != tt.semCap-tt.preFill {
+				t.Errorf("free slots = %d, want %d (slot not released)", free, tt.semCap-tt.preFill)
 			}
 		})
 	}
@@ -104,7 +110,6 @@ func TestDispatchCardActionTracked(t *testing.T) {
 func TestDispatchCardActionTracked_StopDrainsInFlight(t *testing.T) {
 	t.Parallel()
 	f := &Feishu{}
-	sem := make(chan struct{}, 20)
 
 	release := make(chan struct{})
 	started := make(chan struct{})
@@ -119,7 +124,7 @@ func TestDispatchCardActionTracked_StopDrainsInFlight(t *testing.T) {
 	dispatchWG.Add(1)
 	go func() {
 		defer dispatchWG.Done()
-		f.dispatchCardActionTracked(context.Background(), sem,
+		f.dispatchCardActionTracked(context.Background(),
 			cardActionPayload{Kind: "ask_answer", Label: "L"},
 			"oc_1", "", "group", "ou_1", handler)
 	}()
@@ -128,7 +133,7 @@ func TestDispatchCardActionTracked_StopDrainsInFlight(t *testing.T) {
 
 	drained := make(chan struct{})
 	go func() {
-		f.wg.Wait() // mirrors Feishu.Stop()'s wg.Wait()
+		f.dispatch.Wait() // mirrors Feishu.Stop()'s dispatch.Wait()
 		close(drained)
 	}()
 

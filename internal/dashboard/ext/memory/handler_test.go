@@ -641,3 +641,41 @@ func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
 		t.Error("expected an error when opening a symlink path, got nil")
 	}
 }
+
+// #2433 item 6: memory files written by Claude Code use a top-level `type:`
+// key (not `metadata:\n  type:`); it must be recognised, with the nested
+// metadata form taking precedence when both are present.
+func TestParseMemoryFrontmatter_TopLevelType(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "top-level only",
+			input: "---\nname: n\ndescription: d\ntype: feedback\noriginSessionId: abc\n---\nbody\n",
+			want:  "feedback",
+		},
+		{
+			name:  "metadata wins when after top-level",
+			input: "---\ntype: feedback\nmetadata:\n  type: project\n---\nbody\n",
+			want:  "project",
+		},
+		{
+			name:  "metadata wins when before top-level",
+			input: "---\nmetadata:\n  type: project\ntype: feedback\n---\nbody\n",
+			want:  "project",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta, body := parseMemoryFrontmatter([]byte(tc.input))
+			if meta.typ != tc.want {
+				t.Errorf("type = %q, want %q", meta.typ, tc.want)
+			}
+			if body != "body\n" {
+				t.Errorf("body = %q", body)
+			}
+		})
+	}
+}

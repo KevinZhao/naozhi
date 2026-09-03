@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -110,6 +111,17 @@ type runStore struct {
 	// production; set only from tests, before the store is shared across
 	// goroutines.
 	cacheGetPostWarmHook func(jobID string)
+
+	// appendPreWriteHook is a test-only seam invoked by Append after the
+	// record has been marshalled and immediately before ensureJobDir +
+	// WriteFileAtomic touch the disk. Lets tests deterministically land a
+	// DeleteJob (RemoveAll + jobLocks.Delete) inside the window between
+	// finishRun's pre-write jobStillExists re-check (#2058) and the actual
+	// runs/<jobID>/<runID>.json write — the residual resurrection window
+	// #2479 closes with a post-write re-check + dropOrphanRun. Always nil in
+	// production (one nil-compare per Append); set only from tests before
+	// the store is shared across goroutines. Mirrors cacheGetPostWarmHook.
+	appendPreWriteHook func(jobID string)
 
 	// writeFailedTotal counts CronRun WriteFileAtomic failures (disk full,
 	// permission denied, ENOSPC, etc.). R20260527122801-CR-18 (#1338): Append
@@ -607,6 +619,9 @@ func (s *runStore) Append(run *CronRun) {
 			"job_id", run.JobID, "run_id", run.RunID)
 		return
 	}
+	if s.appendPreWriteHook != nil {
+		s.appendPreWriteHook(run.JobID)
+	}
 	if err := s.ensureJobDir(run.JobID, dir); err != nil {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
 		return
@@ -905,4 +920,54 @@ func (s *runStore) DeleteJob(jobID string) {
 	// Append on the same ID" edge the godoc already documents (and which is
 	// benign because the runs/ subtree is gone and the job left s.jobs).
 	s.jobLocks.Delete(jobID)
+}
+
+// dropOrphanRun undoes ONE run-record write that lost the race against
+// DeleteJob (#2479). finishRun calls it when its post-Append re-check finds
+// the job gone from s.jobs: the record at runs/<jobID>/<runID>.json was
+// written after DeleteJob's RemoveAll and would otherwise survive as an
+// orphan that trimAll (which only walks known jobs) never reclaims.
+//
+// Why this is safe without a generation / tombstone:
+//
+//   - It removes exactly the file this finishRun wrote (<runID>.json), never
+//     the subtree. If a job with the same ID were re-created and had already
+//     appended its own runs, those files are untouched.
+//   - The directory is removed with a non-recursive os.Remove, which fails
+//     with ENOTEMPTY when anything else lives there; that failure is the
+//     expected "someone else owns this dir now" signal and is ignored.
+//   - jobDirEnsured is dropped so a later legitimate Append re-runs MkdirAll
+//     instead of trusting a cached "dir exists" for a dir we just removed.
+//   - The whole sequence runs under jobLock(jobID) so it serialises with any
+//     concurrent Append's cacheHeadPush/trim on the same ID (a fresh mutex if
+//     DeleteJob already reclaimed the old one — see jobLock godoc).
+//
+// Job IDs are 8 random bytes (crypto/rand, 2^64 space; see generateID), so a
+// same-ID rebuild racing this call is not a practical concern, but the
+// file-scoped delete + rmdir-if-empty shape keeps it correct even then.
+// Errors are logged, never returned: cron must not block on history failure.
+func (s *runStore) dropOrphanRun(jobID, runID string) {
+	if s == nil || s.disabled || !IsValidID(jobID) || !IsValidID(runID) {
+		return
+	}
+	lock := s.jobLock(jobID)
+	lock.Lock()
+	defer lock.Unlock()
+	dir := filepath.Join(s.root, jobID)
+	path := filepath.Join(dir, runID+".json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("cron run: drop orphan run record failed", "path", path, "err", err)
+	}
+	s.jobDirEnsured.Delete(jobID)
+	s.cacheInvalidate(jobID)
+	// Non-recursive on purpose: ENOTEMPTY means another writer owns the dir.
+	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) && !isDirNotEmpty(err) {
+		slog.Warn("cron run: drop orphan runs dir failed", "dir", dir, "err", err)
+	}
+}
+
+// isDirNotEmpty reports whether err is the rmdir-on-non-empty-directory
+// failure (ENOTEMPTY on Linux/macOS; some platforms report EEXIST).
+func isDirNotEmpty(err error) bool {
+	return errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST)
 }

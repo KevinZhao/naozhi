@@ -103,10 +103,9 @@ const (
 //	                     agentCmds                     wshub.go (ctor); via wsclient
 //	                     dashToken                     wshub_upgrade.go
 //	                     guard                         wshub.go (ctor); via wsclient
-//	                     nodes                         wshub.go, wshub_send.go,
-//	                                                   wshub_subscribe.go
-//	                     nodesMu                       wshub.go, wshub_send.go,
-//	                                                   wshub_subscribe.go
+//	                     nodes                         wshub.go, wshub_send.go
+//	                                                   (*nodeRegistry == Server.nodes,
+//	                                                   G2 #2192; subscribe via lookupNode)
 //	                     projectMgr                    wshub.go (ctor); via wsclient
 //	                     resolver                      wshub.go (ctor); via wsclient
 //	                     scheduler                     wshub.go, wshub_subscribe.go
@@ -328,9 +327,11 @@ type Hub struct {
 	// satisfies it implicitly (var _ binding in wshub_types.go). NewHub guards
 	// the assignment so a nil concrete Queue stays a nil interface — the
 	// `h.queue == nil` legacy-fallback gate in send.go must keep working.
-	queue      MessageEnqueuer // per-key FIFO queue for dashboard sends
-	nodes      map[string]node.Conn
-	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	queue MessageEnqueuer // per-key FIFO queue for dashboard sends
+	// nodes is the *same* registry instance Server.nodes points at (pinned by
+	// hub_shared_state_test.go); the registry owns the mutex, so the Hub has
+	// no raw map or lock to misuse. G2 / #2192.
+	nodes      *nodeRegistry
 	projectMgr *project.Manager
 	// resolver centralises session key → opts derivation; used by
 	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
@@ -550,9 +551,10 @@ type HubOptions struct {
 	CookieMACFn func() string
 	Guard       *session.Guard
 	Queue       *dispatch.MessageQueue
-	Nodes       map[string]node.Conn
-	NodesMu     *sync.RWMutex
-	ProjectMgr  *project.Manager
+	// Nodes is the Server-owned node registry. Nil (bare test Hubs) gets a
+	// private empty registry so every nodes access stays nil-safe.
+	Nodes      *nodeRegistry
+	ProjectMgr *project.Manager
 	// Resolver, when non-nil, centralises session-key → opts derivation
 	// for sessionOptsFor / buildSessionOpts. Wired by server.Start so
 	// WS subscribe / send paths share the same planner-binding
@@ -616,6 +618,10 @@ func NewHub(opts HubOptions) *Hub {
 		staticMAC := opts.CookieMAC
 		cookieMACFn = func() string { return staticMAC }
 	}
+	nodes := opts.Nodes
+	if nodes == nil {
+		nodes = newNodeRegistry(nil)
+	}
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
 		authClients:      make(map[*wsClient]struct{}),
@@ -628,8 +634,7 @@ func NewHub(opts HubOptions) *Hub {
 		dashToken:        opts.DashToken,
 		cookieMAC:        cookieMACFn,
 		guard:            opts.Guard,
-		nodes:            opts.Nodes,
-		nodesMu:          opts.NodesMu,
+		nodes:            nodes,
 		projectMgr:       opts.ProjectMgr,
 		resolver:         opts.Resolver,
 		scheduler:        opts.Scheduler,
@@ -935,30 +940,29 @@ func (h *Hub) unregister(c *wsClient) {
 		}
 	}
 
-	// Snapshot nodes under nodesMu to avoid data race. Single-node deployments
-	// (no remote nodes configured) are the common case, so short-circuit on an
-	// empty map to skip a per-disconnect `[]node.Conn{}` allocation. Mobile
-	// clients that reconnect frequently made this visible in heap profiles.
+	// Snapshot nodes under the registry read lock. Single-node deployments
+	// (no remote nodes) are the common case, so appendConns short-circuits on
+	// an empty table (alloc never runs, nodesPtr stays nil) to skip the
+	// per-disconnect pool round-trip / `[]node.Conn{}` allocation that
+	// frequently-reconnecting mobile clients made visible in heap profiles.
 	// R46-PERF-UNREGISTER-NODES-ALLOC.
 	//
 	// R249-PERF-6 (#927): for multi-node deployments the snapshot slice is
-	// reused across disconnects via unregisterNodesPool so the steady-state
-	// reconnect path drops the per-disconnect `make([]node.Conn, 0, n)`
-	// allocation visible in heap profiles.
-	h.nodesMu.RLock()
-	if len(h.nodes) == 0 {
-		h.nodesMu.RUnlock()
+	// reused across disconnects via unregisterNodesPool. The pool borrow runs
+	// inside alloc so count check + fill stay under one lock acquisition,
+	// exactly as before the registry extraction (G2 / #2192).
+	var nodesPtr *[]node.Conn
+	nodes := h.nodes.appendConns(func(n int) []node.Conn {
+		nodesPtr = unregisterNodesPool.Get().(*[]node.Conn)
+		buf := (*nodesPtr)[:0]
+		if cap(buf) < n {
+			buf = make([]node.Conn, 0, n)
+		}
+		return buf
+	})
+	if nodesPtr == nil {
 		return
 	}
-	nodesPtr := unregisterNodesPool.Get().(*[]node.Conn)
-	nodes := (*nodesPtr)[:0]
-	if cap(nodes) < len(h.nodes) {
-		nodes = make([]node.Conn, 0, len(h.nodes))
-	}
-	for _, conn := range h.nodes {
-		nodes = append(nodes, conn)
-	}
-	h.nodesMu.RUnlock()
 
 	// R260528-PERF-11 (#1356): fan-out RemoveClient across nodes in
 	// parallel so a 5-node deployment pays max(RTT) instead of sum(RTT)
@@ -998,7 +1002,7 @@ func (h *Hub) unregister(c *wsClient) {
 }
 
 // unregisterNodesPool reuses the []node.Conn snapshot slice that
-// Hub.unregister builds while holding nodesMu so the multi-node disconnect
+// Hub.unregister builds under the registry read lock so the multi-node disconnect
 // path drops one heap allocation per disconnect. The pool stores pointers
 // rather than slices directly so Pool.Put avoids the *[]T → []T copy that
 // makes go vet's "Put argument allocates" warning fire. R249-PERF-6 (#927).
@@ -1366,16 +1370,10 @@ func (h *Hub) Shutdown() {
 	// would race with a late Add that escapes the Wait.
 	h.sendWG.Wait()
 
-	// Close node connections under nodesMu after client pumps and send
-	// goroutines have exited, so unregister → RemoveClient and in-flight
-	// RPCs cannot race a closed node.
-	h.nodesMu.RLock()
-	nodeConns := make([]node.Conn, 0, len(h.nodes))
-	for _, conn := range h.nodes {
-		nodeConns = append(nodeConns, conn)
-	}
-	h.nodesMu.RUnlock()
-	for _, conn := range nodeConns {
+	// Snapshot node connections from the registry after client pumps and
+	// send goroutines have exited, so unregister → RemoveClient and
+	// in-flight RPCs cannot race a closed node.
+	for _, conn := range h.nodes.Conns() {
 		conn.Close()
 	}
 }

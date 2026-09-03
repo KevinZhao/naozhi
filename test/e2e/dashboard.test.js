@@ -18,8 +18,10 @@ test.describe('Sidebar & session list', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
-    // Should show project section headers
-    const headers = await page.$$eval('.section-header', els => els.map(e => e.textContent));
+    // Should show project section headers. Read the name span rather than the
+    // whole header: since PR #2359 (376f3ba1, project settings gear) the header
+    // also carries ⭐ / ⚙ / GitHub buttons, so textContent is "myproject⚙".
+    const headers = await page.$$eval('.section-header .sh-name', els => els.map(e => e.textContent));
     expect(headers).toContain('myproject');
     expect(headers).toContain('otherproject');
 
@@ -63,7 +65,12 @@ test.describe('Sidebar & session list', () => {
     const myprojectCards = await page.$$eval(
       '.section-header',
       (headers) => {
-        const h = headers.find(el => el.textContent === 'myproject');
+        // Match on .sh-name — header textContent also contains the ⭐/⚙
+        // button glyphs since PR #2359 (376f3ba1).
+        const h = headers.find(el => {
+          const n = el.querySelector('.sh-name');
+          return n && n.textContent === 'myproject';
+        });
         if (!h) return [];
         const cards = [];
         let sibling = h.nextElementSibling;
@@ -121,9 +128,10 @@ test.describe('Sidebar & session list', () => {
     const dismissBtns = await page.$$('.session-card .btn-dismiss');
     expect(dismissBtns.length).toBe(3);
 
-    // Verify dismiss buttons have correct title
+    // Verify dismiss buttons have correct title. Localized "remove" → "移除"
+    // in PR #2040 (080e1eb0, dashboard UI consistency batch 6).
     const title = await page.$eval('.session-card .btn-dismiss', el => el.title);
-    expect(title).toBe('remove');
+    expect(title).toBe('移除');
 
     await ctx.close();
   });
@@ -149,18 +157,12 @@ test.describe('Sidebar & session list', () => {
     emptyMock.server.close();
   });
 
-  test('status bar shows WebSocket connection info', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('#sidebar-status');
-
-    // Status bar should exist and have content
-    const statusBar = await page.$eval('#sidebar-status', el => el.textContent);
-    expect(statusBar.length).toBeGreaterThan(0);
-
-    await ctx.close();
-  });
+  // The '#sidebar-status' WebSocket status bar test was removed: the node was
+  // deleted when the sidebar foot gave way to the session list (already absent
+  // at the history-squash commit a274e0cc; dashboard.js updateStatusBar()
+  // early-returns with the comment "#sidebar-status 节点已在'底部让位给 session
+  // 列表'的迭代中删除"). Local WS state now only surfaces via getNodeStatus()
+  // in the New Session connection picker.
 });
 
 // ─── Session Selection & Events Display ────────────────────────────────────────
@@ -206,8 +208,11 @@ test.describe('Session selection & events', () => {
     await ctx.close();
   });
 
-  test('user event rendered with blue color', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
+  test('user event rendered with blue-tinted bubble', async ({ browser }) => {
+    // THEME-1 (#453, landed via #1431 5a7f04aa): default theme is 'auto' and
+    // follows the OS scheme; Playwright defaults to light. Pin dark so the
+    // token values below are deterministic.
+    const ctx = await browser.newContext({ ...desktop, colorScheme: 'dark' });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
@@ -215,11 +220,15 @@ test.describe('Session selection & events', () => {
     await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
     await page.waitForSelector('.event.user');
 
-    const color = await page.$eval('.event.user .event-content', el =>
-      getComputedStyle(el).color
-    );
-    // #58a6ff = rgb(88, 166, 255)
-    expect(color).toBe('rgb(88, 166, 255)');
+    const { color, bg } = await page.$eval('.event.user .event-content', el => {
+      const cs = getComputedStyle(el);
+      return { color: cs.color, bg: cs.backgroundColor };
+    });
+    // The user bubble is body text (--nz-event-user-fg = #e6edf3 in dark,
+    // tokenised by 91354043 light-theme parity sweep) on a translucent
+    // #58a6ff tint — the blue moved from the text to the bubble background.
+    expect(color).toBe('rgb(230, 237, 243)');
+    expect(bg).toBe('rgba(88, 166, 255, 0.1)');
 
     await ctx.close();
   });
@@ -637,11 +646,13 @@ test.describe('Auth modal & login', () => {
     // Enter wrong token
     await page.fill('#token-input', 'wrong-token');
     await page.click('.modal-btns button.primary');
-    await page.waitForTimeout(300);
 
-    // Input should be cleared and placeholder changed
-    const placeholder = await page.$eval('#token-input', el => el.placeholder);
-    expect(placeholder).toContain('invalid token');
+    // Input should be cleared and placeholder changed. Poll instead of a fixed
+    // 300ms sleep — under a parallel worker load the 401 round-trip
+    // occasionally landed after the sleep (observed 1/3 runs; #2454).
+    const tokenInput = page.locator('#token-input');
+    await expect(tokenInput).toHaveAttribute('placeholder', /invalid token/);
+    await expect(tokenInput).toHaveValue('');
 
     // Modal should still be open
     const modal = await page.$('.modal-overlay');
@@ -702,7 +713,13 @@ test.describe('New session creation', () => {
   test.beforeAll(async () => { mock = await startMockServer(); });
   test.afterAll(() => mock.server.close());
 
-  test('new session button opens project picker modal', async ({ browser }) => {
+  // With projects configured, "New Session" opens the command palette
+  // (openProjectPalette → .cmd-palette-overlay) instead of the old
+  // .modal-overlay/.proj-pick list. The palette was already the picker at the
+  // history-squash commit a274e0cc; the modal only survives for the
+  // no-projects path (see createNewSession in dashboard.js).
+
+  test('new session button opens project picker palette', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -710,17 +727,104 @@ test.describe('New session creation', () => {
 
     // Click new session button
     await page.click('.hdr-btn[title="New Session"]');
-    await page.waitForSelector('.modal-overlay');
+    await page.waitForSelector('.cmd-palette-overlay');
 
-    // Modal should show project list
-    const modalTitle = await page.$eval('.modal h3', el => el.textContent);
-    expect(modalTitle).toBe('New Session');
+    const dialogLabel = await page.$eval('.cmd-palette', el => el.getAttribute('aria-label'));
+    expect(dialogLabel).toBe('新建会话');
 
-    // Should have project list items
-    const projects = await page.$$('.proj-pick li');
-    // 2 projects + 1 "Custom workspace" toggle = 3
-    expect(projects.length).toBe(3);
+    // Rows: quick-create + one per project + custom-workspace entry.
+    const names = await page.$$eval('.cmd-palette-item .cp-name', els => els.map(e => e.textContent));
+    expect(names[0]).toBe('快速新建');
+    expect(names).toContain('myproject');
+    expect(names).toContain('otherproject');
+    expect(names).toContain('pinned-empty');
+    expect(names[names.length - 1]).toMatch(/^打开自定义工作目录/);
 
+    await ctx.close();
+  });
+
+  // Regression: the palette opens underneath a stationary pointer (the New
+  // Session button sits where the list renders). Chrome dispatches mouseenter
+  // to the row that lands under the cursor without any pointer motion; when
+  // hover wrote state.activeIdx (#2447) that made Enter open the project row
+  // under the mouse -> resumed the folder's existing stable session instead of
+  // creating a quick/new one. Only real pointer motion may move the cursor.
+  test('palette opening under a stationary pointer keeps Enter on row 0', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+
+    // First open: learn where the 'myproject' row renders, then close.
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    const box = await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().boundingBox();
+    // Palette keys are handled on #cp-input, which is focused asynchronously.
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    // Park the pointer exactly where that row will appear, then open the
+    // palette via a JS click so the pointer does not move.
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.$eval('.hdr-btn[title="New Session"]', el => el.click());
+    await page.waitForSelector('.cmd-palette-item');
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.waitForTimeout(50); // let any synthetic mouseenter land
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    // Row 0 is 快速新建 -> key slug is the default workspace basename, not the
+    // project under the pointer.
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toContain('-workspace:');
+    expect(key).not.toContain('-myproject:');
+    await ctx.close();
+  });
+
+  test('palette real pointer motion still moves the Enter target', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    const row = page.locator('.cmd-palette-item', { hasText: 'otherproject' }).first();
+    const box = await row.boundingBox();
+    // Two moves so a mousemove is dispatched inside the row.
+    await page.mouse.move(box.x + 5, box.y + 5);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(row).toHaveClass(/active/);
+    await page.waitForFunction(() => document.activeElement && document.activeElement.id === 'cp-input');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toContain('-otherproject:');
+    await ctx.close();
+  });
+
+  // #2476: the New Session palette must start a fresh session even when the
+  // backend supplies a project stableKey (stats.projects carries it since
+  // v0.0.78). Resuming the stable dashboard:pj: session is the sidebar card's
+  // job; clicking a project row here must never land on the folder's existing
+  // (possibly running) session.
+  test('palette project row starts a fresh session, not the project-stable one', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const hasStable = await page.evaluate(() => (projectsData.find(p => p.name === 'myproject') || {}).stableKey);
+    expect(hasStable).toBe('dashboard:pj:0123456789abcdef:general');
+
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-item');
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    const key = await page.evaluate(() => selectedKey);
+    expect(key).toMatch(/^dashboard:direct:/);
+    expect(key).toContain('-myproject:');
+    expect(key).not.toContain('dashboard:pj:');
     await ctx.close();
   });
 
@@ -731,68 +835,71 @@ test.describe('New session creation', () => {
     await page.waitForSelector('.session-card');
 
     await page.click('.hdr-btn[title="New Session"]');
-    await page.waitForSelector('.proj-pick');
+    await page.waitForSelector('.cmd-palette-item');
 
-    const names = await page.$$eval('.proj-pick .pp-name', els => els.map(e => e.textContent));
+    const names = await page.$$eval('.cmd-palette-item .cp-name', els => els.map(e => e.textContent));
     expect(names).toContain('myproject');
     expect(names).toContain('otherproject');
 
     await ctx.close();
   });
 
-  test('clicking project creates session and closes modal', async ({ browser }) => {
+  test('clicking project creates session and closes palette', async ({ browser }) => {
+    mock.resetCalls();
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
     await page.click('.hdr-btn[title="New Session"]');
-    await page.waitForSelector('.proj-pick');
+    await page.waitForSelector('.cmd-palette-item');
 
-    // Click first project
-    await page.click('.proj-pick li:first-child');
-    await page.waitForTimeout(200);
+    // Pick a project row
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
 
-    // Modal should close
-    const modal = await page.$('.modal-overlay');
-    expect(modal).toBeNull();
+    // Palette closes and the workspace is eagerly bound (doCreateInProject)
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    await expect.poll(() => mock.bindCalls.length).toBeGreaterThan(0);
 
     await ctx.close();
   });
 
-  test('custom workspace toggle shows input field', async ({ browser }) => {
+  test('custom workspace row opens the workspace input modal', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
     await page.click('.hdr-btn[title="New Session"]');
-    await page.waitForSelector('.proj-pick');
+    await page.waitForSelector('.cmd-palette-item');
 
-    // Click "Custom workspace"
-    await page.click('#pp-custom-toggle');
+    // Click "打开自定义工作目录…" (pickPaletteCustom)
+    await page.locator('.cmd-palette-item', { hasText: '打开自定义工作目录' }).click();
 
-    // Custom form should appear
-    const customForm = page.locator('#pp-custom-form');
-    await expect(customForm).toBeVisible();
-
-    // Input should be focused
-    const wsInput = page.locator('#new-workspace');
-    await expect(wsInput).toBeVisible();
+    // Palette is replaced by the custom-workspace modal with the path input
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+    await expect(page.locator('.modal-overlay')).toBeVisible();
+    await expect(page.locator('#new-workspace')).toBeVisible();
 
     await ctx.close();
   });
 
-  test('cancel button closes new session modal', async ({ browser }) => {
+  test('Esc closes palette; cancel closes custom workspace modal', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
+    // Palette has no cancel button — footer advertises "Esc 关闭".
     await page.click('.hdr-btn[title="New Session"]');
+    await page.waitForSelector('.cmd-palette-overlay');
+    await page.press('#cp-input', 'Escape');
+    await page.waitForSelector('.cmd-palette-overlay', { state: 'detached' });
+
+    // The custom-workspace modal keeps a 取消 button.
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.locator('.cmd-palette-item', { hasText: '打开自定义工作目录' }).click();
     await page.waitForSelector('.modal-overlay');
-
-    // Click cancel
     await page.click('.modal-btns button:not(.primary)');
     await page.waitForSelector('.modal-overlay', { state: 'detached' });
 
@@ -813,12 +920,21 @@ test.describe('New session creation', () => {
     await page.goto(noProjectMock.url + '/dashboard');
     await page.waitForLoadState('networkidle');
 
+    // First visit with no sessions/projects shows the one-time onboarding
+    // overlay (maybeShowOnboarding, present since squash a274e0cc). Dismiss
+    // it before reaching the header button it would otherwise intercept.
+    const onboarding = page.locator('.modal-overlay.onboarding-overlay');
+    await expect(onboarding).toBeVisible();
+    await onboarding.locator('.modal-btns button:not(.primary)').click();
+    await expect(onboarding).toHaveCount(0);
+
     await page.click('.hdr-btn[title="New Session"]');
     await page.waitForSelector('.modal-overlay');
 
-    // Should show workspace input directly (no proj-pick list)
+    // Should show workspace input directly (no palette)
     const wsInput = page.locator('#new-workspace');
     await expect(wsInput).toBeVisible();
+    expect(await page.$('.cmd-palette-overlay')).toBeNull();
 
     await ctx.close();
     noProjectMock.server.close();
@@ -843,9 +959,11 @@ test.describe('Cron panel', () => {
     await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
-    // Should show "Cron Jobs" heading
+    // Heading is "定时任务" (Chinese since the cron_view.js extraction #1874
+    // fa001adf, already so at squash a274e0cc) followed by a hidden
+    // "· 运行中 N · 需关注 N" summary chip (b435ecbf), so match the prefix.
     const heading = await page.$eval('.cron-detail h3', el => el.textContent);
-    expect(heading).toBe('Cron Jobs');
+    expect(heading).toMatch(/^定时任务/);
 
     await ctx.close();
   });
@@ -862,9 +980,12 @@ test.describe('Cron panel', () => {
     // Wait for cron data to load and render
     await page.waitForTimeout(500);
 
-    // Should show job data
-    const mainText = await page.$eval('#main', el => el.textContent);
-    expect(mainText).toContain('Cron Jobs');
+    // Cron is its own top-level view (#cron-main, cron_view.js extraction
+    // #1874 fa001adf) — it no longer renders inside #main.
+    const mainText = await page.$eval('#cron-main', el => el.textContent);
+    expect(mainText).toContain('定时任务');
+    expect(mainText).toContain('check server status');
+    expect(mainText).toContain('daily report');
 
     await ctx.close();
   });
@@ -879,10 +1000,17 @@ test.describe('Cron panel', () => {
     await page.waitForSelector('.cron-detail');
     await page.waitForTimeout(500);
 
-    // Check badges exist in main area
-    const mainText = await page.$eval('#main', el => el.textContent);
-    expect(mainText).toContain('active');
-    expect(mainText).toContain('paused');
+    // Rows carry state as a class + localized label (cron_view.js
+    // renderCronRow: paused → .cj-row.paused / "已暂停"; active rows get the
+    // colloquial next-run time and dot label "已启用"). The English
+    // active/paused badges were dropped with the cron-v2-polish 中文化.
+    await expect(page.locator('#cron-main .cj-row.paused')).toHaveCount(1);
+    await expect(page.locator('#cron-main .cj-row:not(.paused)')).toHaveCount(1);
+    const mainText = await page.$eval('#cron-main', el => el.textContent);
+    expect(mainText).toContain('已暂停');
+    const dotLabels = await page.$$eval('#cron-main .cj-row .cj-dot', els => els.map(e => e.title));
+    expect(dotLabels).toContain('已启用');
+    expect(dotLabels).toContain('已暂停');
 
     await ctx.close();
   });
@@ -896,8 +1024,9 @@ test.describe('Cron panel', () => {
     await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
 
-    // Click "New" button in cron panel
-    await page.click('.cron-detail button');
+    // Click "新建" button in cron panel (.cron-new-btn — `.cron-detail button`
+    // now matches the hidden mobile back arrow first).
+    await page.click('.cron-detail .cron-new-btn');
     await page.waitForSelector('.modal-overlay');
 
     const title = await page.$eval('.modal h3', el => el.textContent);
@@ -906,7 +1035,15 @@ test.describe('Cron panel', () => {
     await ctx.close();
   });
 
-  test('cron creation modal shows frequency picker tabs', async ({ browser }) => {
+  // cron-v2-polish (docs/rfc/cron-v2-polish.md; cron_view.js
+  // buildFreqPickerHtml): the 4-tab picker (间隔/每天/每周/每月) + advanced raw
+  // cron disclosure were replaced by a single Frequency <select> with
+  // Hourly / Daily / Weekdays / Weekly / Monthly and per-mode auxiliary
+  // controls. `.freq-tabs` was already gone at the history-squash commit
+  // a274e0cc. The "advanced cron expression disclosure toggles" test was
+  // dropped with the feature ("高级 raw cron 输入全部删除").
+
+  test('cron creation modal shows frequency mode select', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -914,21 +1051,24 @@ test.describe('Cron panel', () => {
 
     await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
-    await page.click('.cron-detail button');
-    await page.waitForSelector('.freq-tabs');
+    await page.click('.cron-detail .cron-new-btn');
+    await page.waitForSelector('#freq-mode-select');
 
-    // Picker exposes four frequency modes — no cron syntax visible by default.
-    const labels = await page.$$eval('.freq-tabs .freq-tab', els => els.map(e => e.textContent));
-    expect(labels).toEqual(['间隔', '每天', '每周', '每月']);
+    // Five frequency modes — no cron syntax visible by default.
+    const labels = await page.$$eval('#freq-mode-select option', els => els.map(e => e.textContent));
+    expect(labels).toEqual(['Hourly', 'Daily', 'Weekdays', 'Weekly', 'Monthly']);
+    expect(await page.$('#freq-advanced-input')).toBeNull();
 
-    // Default tab is "interval" with "每隔 1 小时".
-    const activeMode = await page.$eval('.freq-tabs .freq-tab.active', el => el.getAttribute('data-mode'));
-    expect(activeMode).toBe('interval');
+    // Create flow defaults to hourly (openCronCreateModal → { mode: 'hourly' }),
+    // which needs no time-of-day input.
+    const activeMode = await page.$eval('#freq-mode-select', el => el.value);
+    expect(activeMode).toBe('hourly');
+    await expect(page.locator('#freq-time')).toBeHidden();
 
     await ctx.close();
   });
 
-  test('selecting a frequency tab switches the body', async ({ browser }) => {
+  test('selecting a frequency mode toggles the auxiliary controls', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -936,39 +1076,25 @@ test.describe('Cron panel', () => {
 
     await page.click('#abnav-cron');
     await page.waitForSelector('.cron-detail');
-    await page.waitForTimeout(300);
-    await page.click('.cron-detail button');
-    await page.waitForSelector('.freq-tabs');
+    await page.click('.cron-detail .cron-new-btn');
+    await page.waitForSelector('#freq-mode-select');
 
-    // Switch to "每天" — the daily body should become visible.
-    await page.click('.freq-tabs .freq-tab[data-mode="daily"]');
-    const visibleMode = await page.$eval('.freq-body[data-mode="daily"]', el => getComputedStyle(el).display);
-    expect(visibleMode).not.toBe('none');
-    // Interval body should be hidden.
-    const hiddenMode = await page.$eval('.freq-body[data-mode="interval"]', el => getComputedStyle(el).display);
-    expect(hiddenMode).toBe('none');
+    // Daily → time-of-day shown, weekday / day-of-month pickers hidden.
+    await page.selectOption('#freq-mode-select', 'daily');
+    await expect(page.locator('#freq-time')).toBeVisible();
+    await expect(page.locator('#freq-weekly-dow')).toBeHidden();
+    await expect(page.locator('#freq-monthly-day')).toBeHidden();
 
-    await ctx.close();
-  });
+    // Weekly → weekday picker joins the time input.
+    await page.selectOption('#freq-mode-select', 'weekly');
+    await expect(page.locator('#freq-time')).toBeVisible();
+    await expect(page.locator('#freq-weekly-dow')).toBeVisible();
+    await expect(page.locator('#freq-monthly-day')).toBeHidden();
 
-  test('advanced cron expression disclosure toggles', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('#abnav-cron');
-    await page.waitForSelector('.cron-detail');
-    await page.click('.cron-detail button');
-    await page.waitForSelector('.freq-advanced-toggle');
-
-    // Starts hidden.
-    const initiallyHidden = await page.$eval('#freq-advanced-body', el => getComputedStyle(el).display);
-    expect(initiallyHidden).toBe('none');
-
-    await page.click('.freq-advanced-toggle');
-    const nowVisible = await page.$eval('#freq-advanced-body', el => getComputedStyle(el).display);
-    expect(nowVisible).not.toBe('none');
+    // Monthly → day-of-month picker instead.
+    await page.selectOption('#freq-mode-select', 'monthly');
+    await expect(page.locator('#freq-weekly-dow')).toBeHidden();
+    await expect(page.locator('#freq-monthly-day')).toBeVisible();
 
     await ctx.close();
   });
@@ -1046,12 +1172,19 @@ test.describe('History popover', () => {
     await page.click('#btn-history');
     await page.waitForSelector('.history-popover');
 
-    // Close
-    await page.click('#btn-history');
-    await page.waitForTimeout(200);
+    // Close: since #1800 (f6b9f9ce) a .history-backdrop covers the page while
+    // the popover is open, so a click on the button's position lands on the
+    // backdrop (closeHistoryPopover). Use a raw mouse click at the button —
+    // Playwright's actionability check would otherwise refuse the intercepted
+    // element click. toggleHistory() still toggles for the keyboard path.
+    await expect(page.locator('.history-backdrop')).toHaveCount(1);
+    const box = await page.locator('#btn-history').boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForSelector('.history-popover', { state: 'detached' });
 
     const popover = await page.$('.history-popover');
     expect(popover).toBeNull();
+    expect(await page.$('.history-backdrop')).toBeNull();
 
     await ctx.close();
   });
@@ -1271,8 +1404,10 @@ test.describe('File upload UI', () => {
     await page.waitForSelector('#input-area');
     await page.waitForSelector('#file-input', { state: 'attached' });
 
+    // PDF attachments are accepted alongside images (accept list already
+    // "image/*,application/pdf" at squash a274e0cc; touched again in #2329).
     const accept = await page.$eval('#file-input', el => el.accept);
-    expect(accept).toBe('image/*');
+    expect(accept).toBe('image/*,application/pdf');
 
     const isHidden = await page.$eval('#file-input', el => el.style.display);
     expect(isHidden).toBe('none');
@@ -1385,8 +1520,9 @@ test.describe('PWA & manifest', () => {
     expect(response.status()).toBe(200);
 
     const body = await response.json();
-    expect(body.name).toBe('naozhi dashboard');
-    expect(body.short_name).toBe('naozhi');
+    // Brand prompt ">_naozhi" unified in #1982 (8a8e00a8).
+    expect(body.name).toBe('>_naozhi dashboard');
+    expect(body.short_name).toBe('>_naozhi');
     expect(body.display).toBe('standalone');
     expect(body.start_url).toBe('/dashboard');
     expect(body.background_color).toBe('#0d1117');
@@ -1611,17 +1747,27 @@ test.describe('Theme & styling', () => {
   test.beforeAll(async () => { mock = await startMockServer(); });
   test.afterAll(() => mock.server.close());
 
-  test('body has dark background color', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForLoadState('networkidle');
-
-    const bg = await page.$eval('body', el => getComputedStyle(el).backgroundColor);
+  test('body background follows the OS colour scheme (auto theme)', async ({ browser }) => {
+    // THEME-1 (#453, landed via #1431 5a7f04aa): default theme is 'auto', so
+    // the body tokens resolve from prefers-color-scheme. Dark OS → #0d1117,
+    // light OS → #ffffff (:root[data-theme="light"] parity tokens).
+    const darkCtx = await browser.newContext({ ...desktop, colorScheme: 'dark' });
+    const darkPage = await darkCtx.newPage();
+    await darkPage.goto(mock.url + '/dashboard');
+    await darkPage.waitForLoadState('networkidle');
+    expect(await darkPage.$eval('html', el => el.getAttribute('data-theme'))).toBe('auto');
+    const darkBg = await darkPage.$eval('body', el => getComputedStyle(el).backgroundColor);
     // #0d1117 = rgb(13, 17, 23)
-    expect(bg).toBe('rgb(13, 17, 23)');
+    expect(darkBg).toBe('rgb(13, 17, 23)');
+    await darkCtx.close();
 
-    await ctx.close();
+    const lightCtx = await browser.newContext({ ...desktop, colorScheme: 'light' });
+    const lightPage = await lightCtx.newPage();
+    await lightPage.goto(mock.url + '/dashboard');
+    await lightPage.waitForLoadState('networkidle');
+    const lightBg = await lightPage.$eval('body', el => getComputedStyle(el).backgroundColor);
+    expect(lightBg).toBe('rgb(255, 255, 255)');
+    await lightCtx.close();
   });
 
   test('page title is correct', async ({ browser }) => {
@@ -1629,8 +1775,9 @@ test.describe('Theme & styling', () => {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
 
+    // Brand prompt ">_naozhi" unified in #1982 (8a8e00a8).
     const title = await page.title();
-    expect(title).toBe('naozhi dashboard');
+    expect(title).toBe('>_naozhi · dashboard');
 
     await ctx.close();
   });

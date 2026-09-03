@@ -1,7 +1,6 @@
 package server
 
 import (
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,11 +31,9 @@ func TestHubShutdown_UnsubInvokedOutsideHubMu(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	hub := NewHub(HubOptions{
-		Router:  router,
-		Guard:   guard,
-		NodesMu: &nodesMu,
+		Router: router,
+		Guard:  guard,
 	})
 
 	// Build a fake wsClient with a subscription map. The unsub closure

@@ -259,215 +259,352 @@ func (s *Scheduler) reconcileSandboxPending() {
 	wg.Wait()
 }
 
+// orphanDecision is what reconcile owes a single §6.5 orphan once the Stop
+// and the terminal-record probe have been observed. It is the output of the
+// pure classifier classifyOrphanPending; reconcileOneSandboxOrphan only
+// executes it. Centralising the five historical keep/remove early returns
+// here (#2172 / R202606-ARCH-3) turns the §6.2 containment state machine
+// from five inline comments into one table-tested function.
+type orphanDecision uint8
+
+const (
+	// orphanKeepPending: the microVM's fate is unknown (§6.2 not satisfied)
+	// or cannot be confirmed from this process — leave the pending file so
+	// the NEXT start retries. Nothing else is touched.
+	orphanKeepPending orphanDecision = iota
+	// orphanRemoveOnly: the Stop confirmed but the run is ALREADY terminal
+	// on disk (an in-process transport failure whose Stop had not confirmed
+	// drove finishRun before the process died, #2054). Only the microVM Stop
+	// and the pending file were owed — a second finish would double-count
+	// RunCounters + metrics and broadcast a phantom lifecycle.
+	orphanRemoveOnly
+	// orphanRemoveAfterFinish: Stop confirmed and no terminal record exists
+	// (or the record is unparseable and can never be confirmed terminal) —
+	// close the run as failed-transport, then drop the file.
+	orphanRemoveAfterFinish
+)
+
+// orphanReason explains an orphanDecision so the orchestrator can log the
+// exact line operators already grep for. Only Keep/RemoveOnly carry one.
+type orphanReason uint8
+
+const (
+	orphanReasonNone orphanReason = iota
+	// orphanReasonSandboxUnconfigured: cron.sandbox removed between restarts
+	// — no Stop primitive exists this boot (review §6.5 F1).
+	orphanReasonSandboxUnconfigured
+	// orphanReasonInvalidSessionID: RuntimeSessionID read from an operator-
+	// writable file fails the production-format check (R20260613-SEC-2). An
+	// empty id is folded in here too: without a handle §6.2 cannot be
+	// satisfied, so keeping the file is the only containment-preserving move
+	// (reconcileSandboxPending already drops "" as corrupt upstream, COR-002).
+	orphanReasonInvalidSessionID
+	// orphanReasonStopFailed: StopSession returned an error — fate unknown.
+	orphanReasonStopFailed
+	// orphanReasonAlreadyTerminal: runs/<job>/<run>.json has EndedAt set.
+	orphanReasonAlreadyTerminal
+	// orphanReasonProbeTransient: s.Run failed with something other than
+	// fs.ErrNotExist / ErrCorruptRun (EIO / ESTALE / EACCES …, #2149) — the
+	// record may be terminal, so finishing now could double-count.
+	orphanReasonProbeTransient
+)
+
+// orphanVerdict pairs the decision with its reason.
+type orphanVerdict struct {
+	decision orphanDecision
+	reason   orphanReason
+}
+
+// orphanProbe is every fact classifyOrphanPending consumes: two static facts
+// from the pending record + the outcome of the two I/O steps, gathered in
+// order by probeOrphan. Fields for steps that were never attempted stay at
+// their zero value; the classifier's rule order guarantees they are never
+// consulted in that case (an earlier rule already decided Keep).
+type orphanProbe struct {
+	sandboxConfigured bool
+	runtimeSessionID  string
+	// stopErr is StopSession's result. Only meaningful when orphanStopBlocked
+	// reports false for the two static facts above.
+	stopErr error
+	// rec / recErr are s.Run(jobID, runID)'s result. Only meaningful when
+	// stopErr == nil.
+	rec    *CronRun
+	recErr error
+}
+
+// orphanStopBlocked reports whether the Stop must NOT be attempted for this
+// record and why. Shared by probeOrphan (to skip the I/O) and
+// classifyOrphanPending (rules 1–2) so the two cannot drift.
+func orphanStopBlocked(sandboxConfigured bool, runtimeSessionID string) (orphanReason, bool) {
+	if !sandboxConfigured {
+		return orphanReasonSandboxUnconfigured, true
+	}
+	if !isValidRuntimeSessionID(runtimeSessionID) {
+		return orphanReasonInvalidSessionID, true
+	}
+	return orphanReasonNone, false
+}
+
+// classifyOrphanPending is the pure §6.2/§6.5 containment state machine for
+// one orphan. Rules, in order (first match wins):
+//
+//  1. sandbox not configured            → Keep   (F1: retry handle must survive)
+//  2. RuntimeSessionID invalid or empty → Keep   (SEC-2: cannot confirm fate)
+//  3. Stop returned an error            → Keep   (§6.2 rule 1 unsatisfied)
+//  4. run record present and EndedAt≠0 → RemoveOnly (#2054: already finished)
+//  5. record probe failed transiently   → Keep   (#2149: may be terminal)
+//  6. otherwise                         → RemoveAfterFinish
+//
+// Rule 5 deliberately lets fs.ErrNotExist (no record) and ErrCorruptRun
+// (record can never be confirmed terminal) fall through to rule 6.
+// No I/O, no locks: TestClassifyOrphanPending covers every branch.
+func classifyOrphanPending(pr orphanProbe) orphanVerdict {
+	if reason, blocked := orphanStopBlocked(pr.sandboxConfigured, pr.runtimeSessionID); blocked {
+		return orphanVerdict{orphanKeepPending, reason}
+	}
+	if pr.stopErr != nil {
+		return orphanVerdict{orphanKeepPending, orphanReasonStopFailed}
+	}
+	if pr.recErr == nil && pr.rec != nil && !pr.rec.EndedAt.IsZero() {
+		return orphanVerdict{orphanRemoveOnly, orphanReasonAlreadyTerminal}
+	}
+	if pr.recErr != nil && !errors.Is(pr.recErr, fs.ErrNotExist) && !errors.Is(pr.recErr, ErrCorruptRun) {
+		return orphanVerdict{orphanKeepPending, orphanReasonProbeTransient}
+	}
+	return orphanVerdict{orphanRemoveAfterFinish, orphanReasonNone}
+}
+
+// probeOrphan gathers the orphanProbe for classifyOrphanPending: Stop the
+// microVM (unless orphanStopBlocked), then — only after a confirmed Stop —
+// probe the durable run record. The ordering is load-bearing: the record
+// probe is meaningless while the microVM's fate is unknown, and a failed
+// Stop must short-circuit before any local read.
+func (s *Scheduler) probeOrphan(p sandboxPending) orphanProbe {
+	pr := orphanProbe{sandboxConfigured: s.sandbox != nil, runtimeSessionID: p.RuntimeSessionID}
+	if _, blocked := orphanStopBlocked(pr.sandboxConfigured, pr.runtimeSessionID); blocked {
+		return pr
+	}
+	ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
+	pr.stopErr = s.sandbox.StopSession(ctx, p.RuntimeSessionID)
+	cancel()
+	if pr.stopErr != nil {
+		return pr
+	}
+	pr.rec, pr.recErr = s.Run(p.JobID, p.RunID)
+	return pr
+}
+
+// logOrphanVerdict emits the operator-facing line for a Keep / RemoveOnly
+// verdict at the historical level for that reason. RemoveAfterFinish has no
+// line of its own — finishRun's own logging covers it.
+func logOrphanVerdict(lg *slog.Logger, v orphanVerdict, pr orphanProbe) {
+	switch v.reason {
+	case orphanReasonSandboxUnconfigured:
+		lg.Warn("cron sandbox: orphaned run found but sandbox not configured; keeping pending record until config returns")
+	case orphanReasonInvalidSessionID:
+		lg.Warn("cron sandbox: orphan pending record has invalid RuntimeSessionID format; keeping for manual inspection",
+			"runtime_session_id", pr.runtimeSessionID)
+	case orphanReasonStopFailed:
+		lg.Error("cron sandbox: orphan Stop failed; keeping pending record for next start", "err", pr.stopErr)
+	case orphanReasonAlreadyTerminal:
+		lg.Info("cron sandbox: orphan already finished in-process; skipping duplicate finish",
+			"state", pr.rec.State)
+	case orphanReasonProbeTransient:
+		lg.Warn("cron sandbox: orphan terminal-state probe failed transiently; keeping pending record for next start", "err", pr.recErr)
+	}
+}
+
 // reconcileOneSandboxOrphan handles a single §6.5 orphan: Stop, terminal
-// record, file removal. Stop failure keeps the file so the NEXT start
-// retries — until a Stop is confirmed the microVM's fate is unknown and
-// the §6.2 containment is not satisfied.
+// record, file removal. It is orchestration only — probeOrphan performs the
+// I/O, classifyOrphanPending decides, finishOrphanRun closes the record.
+// Stop failure keeps the file so the NEXT start retries — until a Stop is
+// confirmed the microVM's fate is unknown and §6.2 containment is not
+// satisfied.
 func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	lg := slog.With("job_id", p.JobID, "run_id", p.RunID)
 	lg.Warn("cron sandbox: reconciling orphaned run from previous process")
 
-	if s.sandbox == nil {
-		// Sandbox config absent at reconcile time (removed between
-		// restarts). KEEP the file: the §6.2 retry handle must survive
-		// until a boot where the Stop primitive exists and confirms —
-		// removing it here would orphan the microVM with no future
-		// containment (review §6.5 F1). Re-warns each boot by design.
-		lg.Warn("cron sandbox: orphaned run found but sandbox not configured; keeping pending record until config returns")
+	pr := s.probeOrphan(p)
+	v := classifyOrphanPending(pr)
+	logOrphanVerdict(lg, v, pr)
+	switch v.decision {
+	case orphanKeepPending:
 		return
-	}
-	if p.RuntimeSessionID != "" {
-		// R20260613-SEC-2: validate before use — this value was read from an
-		// operator-writable disk file; a malformed id is rejected and the
-		// pending file is kept for the next start (same as a Stop failure),
-		// because we cannot confirm the microVM's fate without a valid id.
-		if !isValidRuntimeSessionID(p.RuntimeSessionID) {
-			lg.Warn("cron sandbox: orphan pending record has invalid RuntimeSessionID format; keeping for manual inspection",
-				"runtime_session_id", p.RuntimeSessionID)
-			return
-		}
-		ctx, cancel := context.WithTimeout(s.stopCtx, sandboxStopTimeout)
-		err := s.sandbox.StopSession(ctx, p.RuntimeSessionID)
-		cancel()
-		if err != nil {
-			lg.Error("cron sandbox: orphan Stop failed; keeping pending record for next start", "err", err)
-			return
-		}
-	}
-
-	// #2054: an in-process transport failure whose Stop did NOT confirm
-	// (sandbox.go default branch) ALREADY drove finishRun → addRun +
-	// metrics + a durable runs/{jobID}/{runID}.json terminal record, yet
-	// deliberately KEEPS the pending file so this reconcile can retry the
-	// Stop. If we re-finish that same runID here we double-count the durable
-	// RunCounters, re-bump CronRunEnded/Failed/StartedTotal, and emit a
-	// phantom started→ended lifecycle to subscribers. So once the Stop has
-	// been (re-)confirmed above, check whether the run is already terminal on
-	// disk; if so, only the microVM Stop + pending-file removal were owed —
-	// skip the second finishRun entirely.
-	rec, err := s.Run(p.JobID, p.RunID)
-	if err == nil && rec != nil && !rec.EndedAt.IsZero() {
-		lg.Info("cron sandbox: orphan already finished in-process; skipping duplicate finish",
-			"state", rec.State)
-		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
-			lg.Warn("cron sandbox: reconciled pending remove failed", "err", rmErr)
-		}
-		return
-	}
-	// #2149: the dedup guard above only fires on err==nil. A *transient* read
-	// error (EIO / ESTALE / EACCES from a FUSE/NFS backend, or the brief
-	// post-upgrade `-rw-------` window) makes s.Run return a non-nil error that
-	// is NEITHER fs.ErrNotExist (record truly absent) NOR ErrCorruptRun (file
-	// present but unparseable). Falling through to the second finishRun below
-	// would double-count an already-terminal record + emit a phantom
-	// started→ended lifecycle. Treat such "fate unknown" reads conservatively:
-	// keep the pending file and retry on the next reconcile (same posture as
-	// the Stop-unconfirmed branch and the #2119 attention probe). fs.ErrNotExist
-	// (genuinely no terminal record) and ErrCorruptRun (record exists but
-	// cannot be confirmed terminal, and would never become parseable) both fall
-	// through to finish the orphan as before.
-	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, ErrCorruptRun) {
-		lg.Warn("cron sandbox: orphan terminal-state probe failed transiently; keeping pending record for next start", "err", err)
+	case orphanRemoveOnly:
+		removeReconciledPending(path, lg)
 		return
 	}
 
-	// Terminal record. The job may have been deleted while we were down —
-	// finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops the
-	// persist; the broadcast pair still closes subscriber timelines.
-	//
-	// R20260613-GOLANG-001: snapshot every field we need while holding
-	// RLock, then release — UpdateJob mutates the *Job fields in place
-	// under s.mu.Lock(), so any read outside the lock is a data race.
-	// finishRun itself re-locks (recordTerminalResult re-checks s.jobs[id])
-	// so passing j is safe; only THIS function's lock-free field reads need
-	// to become snapshots.
-	s.mu.RLock()
-	j := s.jobs[p.JobID]
-	var (
-		jSideEffects  bool
-		jLabel        string
-		jFreshContext bool
-		jPrompt       string
-		jWorkDir      string
-	)
-	if j != nil {
-		jSideEffects = j.SideEffects != nil && *j.SideEffects
-		jLabel = jobTitleOrFallback(j)
-		jFreshContext = j.FreshContext
-		jPrompt = j.Prompt
-		jWorkDir = j.WorkDir
-	}
-	s.mu.RUnlock()
-	startedAt := time.UnixMilli(p.StartedAtMS)
-	msg := "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
+	// orphanRemoveAfterFinish. The job may have been deleted while we were
+	// down — finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops
+	// the persist; the broadcast pair still closes subscriber timelines.
+	js, j := s.snapshotOrphanJob(p.JobID)
 	// R20260615-030459-COR-001 / R202606-CR-001 (#2156): re-check job existence
-	// under RLock ONCE before any subscriber-visible write. The snapshot (j
-	// above) was taken before RUnlock; a concurrent DeleteJobByID that ran in
-	// the gap can delete the job + sweep the attention queue. Without this
-	// re-check we'd (a) leave a ghost attention card whose replay ErrJobNotFound,
-	// and (b) broadcast a phantom cron_run_started/ended pair for a job the
-	// dashboard no longer shows. Consume the same boolean at BOTH sites so the
-	// attention write and the started/finish lifecycle agree on whether the job
-	// still exists. j!=nil but jobStillExists==false ⇒ deleted in the gap: fall
-	// through to the metrics-only path (counters stay balanced, nothing broadcast).
-	jobStillExists := j != nil
-	if j != nil {
-		s.mu.RLock()
-		jobStillExists = s.jobs[p.JobID] != nil
-		s.mu.RUnlock()
+	// under RLock ONCE before any subscriber-visible write. The snapshot was
+	// taken under a lock we have since released; a concurrent DeleteJobByID
+	// that ran in the gap deletes the job + sweeps the attention queue.
+	// Without this re-check we would (a) leave a ghost attention card whose
+	// replay ErrJobNotFound's, and (b) broadcast a phantom
+	// cron_run_started/ended pair for a job the dashboard no longer shows.
+	// The SAME boolean feeds the attention write and finishOrphanRun so the
+	// two agree on whether the job still exists. j!=nil but
+	// jobExists==false ⇒ deleted in the gap: metrics-only path (counters
+	// stay balanced, nothing broadcast).
+	jobExists := j != nil && s.jobExists(p.JobID)
+	if jobExists {
+		s.maybeEnqueueOrphanAttention(p, js, lg)
 	}
-	if j != nil && jobStillExists {
-		// §6.2 rule 3 + §7.4: a side-effecting orphan enters the human
-		// confirmation queue. The microVM was Stopped above, but it may have
-		// completed and produced its side effect (PR push, etc.) before naozhi
-		// died — only a human can tell. A side-effect-free orphan is safe to
-		// leave as a plain failed-transport record (it re-runs next tick).
-		// RuntimeSessionID is already spent (we Stopped it); kept on the record
-		// for symmetry — the queue's replay action re-Stops idempotently.
-		if jSideEffects {
-			// #2119: an in-process transport failure may have ALREADY enqueued
-			// an attention record for this runID (reason=transport) before the
-			// process died (sandbox.go enqueueSandboxTransportAttention keeps the
-			// pending file so this reconcile can retry the Stop). writeSandboxAttention
-			// uses WriteFileAtomic to the same <runID>.json path, so an
-			// unconditional write here would CLOBBER the existing record and
-			// downgrade its reason from "transport" (stream lost) to "orphaned"
-			// (restart) — misleading the operator about what actually happened.
-			// Probe first; only write the orphaned record when none exists yet.
-			// A read error (qerr) is treated as "may exist" → skip, preserving
-			// any prior reason (the run's failed-transport CronRun still warns).
-			if rec, qok, qerr := s.getSandboxAttention(p.RunID); qerr == nil && !qok && rec == nil {
-				s.writeSandboxAttention(sandboxAttention{
-					JobID:            p.JobID,
-					RunID:            p.RunID,
-					RuntimeSessionID: p.RuntimeSessionID,
-					Reason:           attentionReasonOrphaned,
-					JobLabel:         jLabel,
-					StartedAtMS:      p.StartedAtMS,
-					CreatedAtMS:      s.attentionNowMS(),
-				}, lg)
-			} else if qerr != nil {
-				lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
-			}
-		}
-		// Synthetic started so subscribers get a paired lifecycle (the real
-		// started frame belonged to the previous process's broadcaster).
-		s.emitRunStarted(RunStartedEvent{
-			JobID:     p.JobID,
-			RunID:     p.RunID,
-			StartedAt: startedAt,
-			Trigger:   runtelemetry.TriggerScheduled,
-			Fresh:     jFreshContext,
-		})
-		// finalizer carries a NIL inflight deliberately: the orphan belongs
-		// to the PREVIOUS process — this process's CAS gate was never taken
-		// for it. The reconcile goroutine runs after cron.Start(), so the
-		// same job's run-B may be live RIGHT NOW holding the gate; a
-		// finalizer bound to s.jobInflight(jobID) would reset run-B's view
-		// and Store(false) its gate, letting a third tick double-run.
-		// finalize() no-ops on nil inflight, which is exactly right here.
-		//
-		// R20260614-GO-001: this branch calls finishRun directly (not via
-		// finishSandboxRunWith, the only other RunStateFailed→sandbox path),
-		// so it must bump CronSandboxRunFailedTotal itself — otherwise an
-		// orphaned sandbox run closed here is invisible to the
-		// naozhi_cron_sandbox_run_failed_total alert. State is RunStateFailed
-		// by construction here, matching finishSandboxRunWith's gate.
-		metrics.CronSandboxRunFailedTotal.Add(1)
-		s.finishRun(finishArgs{
-			job: j, runID: p.RunID, startedAt: startedAt,
-			trigger: runtelemetry.TriggerScheduled,
-			state:   RunStateFailed, errClass: ErrClassSandboxTransport,
-			errMsg: msg,
-			prompt: jPrompt, workDir: jWorkDir, fresh: jFreshContext,
-			finalizer: &runFinalizer{},
-		})
-	} else {
-		// Reached when the job is gone: either it was deleted while naozhi was
-		// down (j==nil, R20260613-GOLANG-004) OR a concurrent DeleteJobByID
-		// deleted it in the gap between the RUnlock snapshot and here
-		// (j!=nil && !jobStillExists, R202606-CR-001 / #2156). In both cases
-		// finishRun must NOT run — there is no live job to attach the record to,
-		// and broadcasting a started/ended pair for a job the dashboard already
-		// dropped would be a phantom lifecycle. The run did start and end
-		// (failed), so bump the same counters that the live-job path would have
-		// incremented via emitRunStarted + finishRun/bumpRunStateMetrics so
-		// dashboards, alerts, and the started/ended balance (used by /health
-		// and runstore.go to gauge in-flight counts) stay accurate.
-		// R20260613-CR-2: Started must be bumped here too — the j!=nil path
-		// bumps it via emitRunStarted (scheduler_callbacks.go:100) but the
-		// nil-job path skipped it, leaving Started/Ended counters imbalanced.
-		metrics.CronRunStartedTotal.Add(1)
-		metrics.CronRunEndedTotal.Add(1)
-		metrics.CronRunFailedTotal.Add(1)
-		// R20260614-GO-001: this orphan is a sandbox-placement run that failed
-		// (transport) just like the j!=nil branch — bump the sandbox-specific
-		// counter too so naozhi_cron_sandbox_run_failed_total stays consistent
-		// whether or not the job survived the restart.
-		metrics.CronSandboxRunFailedTotal.Add(1)
-		lg.Info("cron sandbox: orphan's job no longer exists; closing record file only")
-	}
+	s.finishOrphanRun(p, js, j, jobExists, lg)
+	removeReconciledPending(path, lg)
+}
 
+// orphanJobSnapshot is the subset of *Job the orphan finish needs, copied
+// under s.mu.RLock (R20260613-GOLANG-001: UpdateJob mutates *Job fields in
+// place under s.mu.Lock, so any lock-free read is a data race).
+type orphanJobSnapshot struct {
+	sideEffects  bool
+	label        string
+	freshContext bool
+	prompt       string
+	workDir      string
+}
+
+// snapshotOrphanJob returns the lock-safe field snapshot plus the *Job
+// pointer (nil when the job no longer exists). Passing j on to finishRun is
+// safe: finishRun re-locks (recordTerminalResult re-checks s.jobs[id]) —
+// only THIS file's lock-free reads need to be snapshots.
+func (s *Scheduler) snapshotOrphanJob(jobID string) (orphanJobSnapshot, *Job) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j := s.jobs[jobID]
+	if j == nil {
+		return orphanJobSnapshot{}, nil
+	}
+	return orphanJobSnapshot{
+		sideEffects:  j.SideEffects != nil && *j.SideEffects,
+		label:        jobTitleOrFallback(j),
+		freshContext: j.FreshContext,
+		prompt:       j.Prompt,
+		workDir:      j.WorkDir,
+	}, j
+}
+
+// jobExists re-checks s.jobs[jobID] under RLock (the COR-001 TOCTOU guard).
+func (s *Scheduler) jobExists(jobID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jobs[jobID] != nil
+}
+
+// maybeEnqueueOrphanAttention applies §6.2 rule 3 + §7.4 to a live-job
+// orphan: a side-effecting job enters the human confirmation queue. The
+// microVM was Stopped, but it may have completed and produced its side
+// effect (PR push, etc.) before naozhi died — only a human can tell. A
+// side-effect-free orphan is safe to leave as a plain failed-transport
+// record (it re-runs next tick). RuntimeSessionID is already spent (we
+// Stopped it); kept on the record for symmetry — the queue's replay action
+// re-Stops idempotently.
+//
+// #2119: an in-process transport failure may have ALREADY enqueued an
+// attention record for this runID (reason=transport) before the process
+// died. writeSandboxAttention uses WriteFileAtomic to the same <runID>.json
+// path, so an unconditional write would CLOBBER it and downgrade the reason
+// from "transport" (stream lost) to "orphaned" (restart) — misleading the
+// operator about what actually happened. Probe first; write only when no
+// record exists. A read error (qerr) is treated as "may exist" → skip,
+// preserving any prior reason (the failed-transport CronRun still warns).
+func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxPending, js orphanJobSnapshot, lg *slog.Logger) {
+	if !js.sideEffects {
+		return
+	}
+	rec, qok, qerr := s.getSandboxAttention(p.RunID)
+	if qerr != nil {
+		lg.Warn("cron sandbox: attention probe failed; keeping any existing record, skipping orphaned write", "err", qerr)
+		return
+	}
+	if qok || rec != nil {
+		return
+	}
+	s.writeSandboxAttention(sandboxAttention{
+		JobID:            p.JobID,
+		RunID:            p.RunID,
+		RuntimeSessionID: p.RuntimeSessionID,
+		Reason:           attentionReasonOrphaned,
+		JobLabel:         js.label,
+		StartedAtMS:      p.StartedAtMS,
+		CreatedAtMS:      s.attentionNowMS(),
+	}, lg)
+}
+
+// Every reconciled orphan closes with the same terminal classification; both
+// finishOrphanRun branches read these so they cannot disagree on which
+// per-state buckets advance.
+const (
+	orphanTerminalState    = RunStateFailed
+	orphanTerminalErrClass = ErrClassSandboxTransport
+	orphanTerminalErrMsg   = "naozhi restarted while the run was in flight; microVM terminated by startup reconcile"
+)
+
+// finishOrphanRun is the SINGLE convergence point for the orphan's terminal
+// accounting (#2172: the former j!=nil vs nil-job metrics paths had to be
+// mirrored by hand and drifted — R20260613-CR-2, R20260614-GO-001).
+//
+// jobExists=true — full protocol: synthetic started frame + finishRun
+// (persist → bumpRunStateMetrics → broadcast → CronRunEndedTotal).
+//
+// jobExists=false — metrics-only mirror of that protocol with the broadcast
+// halves removed, in the SAME order the live path produces them:
+// CronRunStartedTotal (what emitRunStarted would bump) → per-state buckets
+// via bumpRunStateMetrics (what finishRun bumps after persist settles; no
+// persist is attempted here, so no gate — same as finishRun's skipPersist
+// branch) → CronRunEndedTotal (finishRun's final statement). The job was
+// deleted while naozhi was down (j==nil, R20260613-GOLANG-004) or in the
+// snapshot→finish gap (#2156): there is no live job to attach a record to,
+// and a started/ended pair for a job the dashboard already dropped would be
+// a phantom lifecycle. The run did start and end (failed), so the
+// Started/Ended balance (/health, runstore.go in-flight gauge) and the
+// per-state buckets must still advance by one — never by hand-writing the
+// per-state Add. TestReconcileOrphan_TerminalCounterParity pins that both
+// branches move every counter identically.
+func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *Job, jobExists bool, lg *slog.Logger) {
+	startedAt := time.UnixMilli(p.StartedAtMS)
+	if !jobExists {
+		metrics.CronRunStartedTotal.Add(1)               // 1. emitRunStarted's bump
+		s.bumpRunStateMetrics(orphanTerminalState, true) // 2. finishRun's per-state bump
+		metrics.CronRunEndedTotal.Add(1)                 // 3. finishRun's final bump
+		lg.Info("cron sandbox: orphan's job no longer exists; closing record file only")
+		return
+	}
+	// Synthetic started so subscribers get a paired lifecycle (the real
+	// started frame belonged to the previous process's broadcaster).
+	s.emitRunStarted(RunStartedEvent{
+		JobID:     p.JobID,
+		RunID:     p.RunID,
+		StartedAt: startedAt,
+		Trigger:   runtelemetry.TriggerScheduled,
+		Fresh:     js.freshContext,
+	})
+	// finalizer carries a NIL inflight deliberately: the orphan belongs to
+	// the PREVIOUS process — this process's CAS gate was never taken for it.
+	// The reconcile goroutine runs after cron.Start(), so the same job's
+	// run-B may be live RIGHT NOW holding the gate; a finalizer bound to
+	// s.jobInflight(jobID) would reset run-B's view and Store(false) its
+	// gate, letting a third tick double-run. finalize() no-ops on nil
+	// inflight, which is exactly right here.
+	s.finishRun(finishArgs{
+		job: j, runID: p.RunID, startedAt: startedAt,
+		trigger: runtelemetry.TriggerScheduled,
+		state:   orphanTerminalState, errClass: orphanTerminalErrClass,
+		errMsg: orphanTerminalErrMsg,
+		prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext,
+		finalizer: &runFinalizer{},
+		sandbox:   true,
+	})
+}
+
+// removeReconciledPending drops the pending file once reconcile has
+// discharged everything it owed for the orphan.
+func removeReconciledPending(path string, lg *slog.Logger) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		lg.Warn("cron sandbox: reconciled pending remove failed", "err", err)
 	}

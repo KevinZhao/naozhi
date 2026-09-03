@@ -131,6 +131,12 @@ func validateModel(model string) error {
 	return nil
 }
 
+// ValidateModelID is the exported form of validateModel for callers that
+// pre-flight a model identifier before handing it to GetOrCreate (e.g. the
+// scratch handler inheriting a CLI-reported model, #2433). Same modelRe /
+// byte cap — a value accepted here will not fail the router's own gate.
+func ValidateModelID(model string) error { return validateModel(model) }
+
 // ErrInvalidModel is returned when AgentOpts.Model fails validateModel.
 // Callers should map it to an HTTP 400 or IM error reply.
 var ErrInvalidModel = errors.New("invalid model identifier")

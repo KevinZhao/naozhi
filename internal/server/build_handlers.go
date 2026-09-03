@@ -32,7 +32,7 @@ const defaultUploadQuotaBytes int64 = 4 << 30
 // reads as a contents-of-Server outline rather than a 358-line wall.
 //
 // Naming: build<Domain>Handlers returns the handler pointer. When the
-// helper needs already-constructed Server fields (e.g. nodeAccess) the
+// helper needs already-constructed Server fields (e.g. nodes) the
 // caller passes them as explicit parameters — no helper accepts a
 // partially-constructed *Server, which keeps initialization order
 // inspectable at the buildServer call site.
@@ -175,7 +175,7 @@ func buildDiscoveryHandlers(
 	opts ServerOptions,
 	claudeDir string,
 	cache *discoveryCache,
-	nodeAccess *nodeAccessor,
+	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
 	broadcast func(),
 ) *dashdiscovery.Handlers {
@@ -233,7 +233,7 @@ func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd
 func buildProjectHandlers(
 	opts ServerOptions,
 	resolver *session.KeyResolver,
-	nodeAccess *nodeAccessor,
+	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
 ) *dashproject.Handlers {
 	return dashproject.New(dashproject.Deps{

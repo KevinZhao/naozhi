@@ -256,16 +256,14 @@ func TestSelectNodeForBackend_AllRequiredCapsChecked(t *testing.T) {
 var multiCapOnce sync.Once
 
 // TestHubNodeLookup_Adapter asserts the Hub-bound lookup adapter
-// finds connected nodes via the existing Hub.nodes map under
-// nodesMu. Trivial wiring, but missing it would silently break the
-// WS handleRemoteSend path.
+// finds connected nodes via the shared Hub.nodes registry. Trivial
+// wiring, but missing it would silently break the WS handleRemoteSend
+// path.
 func TestHubNodeLookup_Adapter(t *testing.T) {
 	withDefaultBackends(t)
 	acp := &fakeCapNode{id: "acp", caps: map[string]bool{"acp": true}}
-	var nodesMu sync.RWMutex
 	h := &Hub{
-		nodes:   map[string]node.Conn{"acp": acp},
-		nodesMu: &nodesMu,
+		nodes: newNodeRegistry(map[string]node.Conn{"acp": acp}),
 	}
 	lookup := hubNodeLookup{h: h}
 	got, ok := lookup.NodeByID("acp")

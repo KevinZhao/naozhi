@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/node"
@@ -102,7 +103,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			// returned err.Error() on the opposite node.
 			return nil, fmt.Errorf("session not found: %q", p.Key)
 		}
-		return marshalResult(sess.EventEntriesSince(p.After))
+		// #2456: re-admit the watermark ms (same rule as the WS subscribe
+		// catch-up) so a same-ms sibling is not lost across the relay.
+		return marshalResult(sess.EventEntriesSince(cli.SinceInclusive(p.After)))
 
 	case "fetch_backends":
 		// No params. Return THIS node's backend manifest so the primary's

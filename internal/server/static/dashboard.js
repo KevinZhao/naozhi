@@ -2,6 +2,12 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// #2431: last (session, state) pushed through updateSendButton — the main-area
+// state that is actually on screen, whichever path (WS push, optimistic flip,
+// renderMainShell, REST reconcile) applied it. The fetchSessions reconcile
+// compares against this so a 5 s fallback poll only re-applies a state that
+// has actually changed. Cleared on session switch.
+let _lastAppliedMainState = null;
 // activeView is the root view-router state: which top-level view owns the
 // viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
 // 'cron' / 'settings' are full-screen peers driven by setActivityView() and
@@ -512,7 +518,16 @@ async function fetchSessions() {
     // earlier revision of this code sat and silently never fired.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selectedKey) setHeaderEffortChip(data.sessions);
-    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
+    // #2431: under WS-fallback polling this REST poll is the ONLY state source,
+    // and process state transitions (running↔ready, last_response, sc-time)
+    // never advance stats.version — storeGen moves on add/remove/rename/reset
+    // only, and with the socket down no session_state push zeroes lastVersion.
+    // The version short-circuit would therefore freeze the sidebar and the
+    // "WS disconnected → always reconcile" block further down never ran. Skip
+    // the gate while disconnected; renderSidebar is idempotent so the 5 s
+    // repaint is the intended fallback cost.
+    const wsConnected = wsm.state === WS_STATES.CONNECTED;
+    if (wsConnected && version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
     lastNodesJSON = nodesHash;
     lastHistoryJSON = historyHash;
@@ -540,7 +555,12 @@ async function fetchSessions() {
         sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
       });
     }
-    (data.sessions || []).forEach(s => {
+    // #2431: map (not forEach) so the optimistic 'running' copy below lands in
+    // the payload handed to renderSidebar / stashed as _lastSidebarData — the
+    // original objects still say 'ready', so a re-render from the cached
+    // payload (toggleProjectCollapsed, sidebar search) painted the card idle
+    // while the main banner showed running.
+    const sessions = (data.sessions || []).map(s => {
       const n = s.node || 'local';
       const sKey = sid(s.key, n);
       // Preserve the optimistic 'running' flip when the REST snapshot is still
@@ -559,7 +579,9 @@ async function fetchSessions() {
       }
       sessionsData[sKey] = s;
       backendKeys.add(s.key);
+      return s;
     });
+    data = Object.assign({}, data, { sessions });
 
     // Remove pending sessions that now exist in backend, then persist ONCE.
     // The durable localStorage blob must drop the now-real keys so a stale
@@ -621,12 +643,18 @@ async function fetchSessions() {
           const pendingCLIVersion = isDefaultBackend
             ? (defaultCLIVersion || backendDisplayVersion(pendingBackend))
             : (backendDisplayVersion(pendingBackend) || defaultCLIVersion);
+          // #2431: mirror the server's project/project_fallback shape so an
+          // unregistered workspace groups under its basename from the first
+          // paint instead of sitting in 未分组 until the first send promotes it.
+          const pendingWS = sessionWorkspaces[key];
+          const pendingProject = matchProject(pendingWS);
+          const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
           data.sessions.push({
             key: key,
             state: 'new',
             platform: parts[0] || 'dashboard',
             agent: pendingAgent,
-            workspace: sessionWorkspaces[key],
+            workspace: pendingWS,
             // Stamp the pending card with "now" so the sidebar sort (oldest
             // top, newest bottom — see renderSidebar) lands it at the bottom
             // immediately. Leaving created_at/last_active at 0 sorts it to the
@@ -638,7 +666,8 @@ async function fetchSessions() {
             last_prompt: '',
             last_response: '',
             node: sessionNodes[key] || 'local',
-            project: matchProject(sessionWorkspaces[key]),
+            project: pendingProject || pendingFallback,
+            project_fallback: !!pendingFallback,
             backend: pendingBackend,
             access_profile: sessionAccessProfiles[key] || '',
             cli_name: pendingCLIName,
@@ -672,9 +701,15 @@ async function fetchSessions() {
     if (selectedKey) {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
-      const wsConnected = wsm.state === WS_STATES.CONNECTED;
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
-        updateMainState(sd.state, sd.death_reason);
+        // #2431: updateSendButton is not idempotent ('running' re-seeds agent
+        // rows from the REST snapshot; 'ready' resets turn state + loading
+        // indicator + scroll) and this runs every 5 s under fallback — only
+        // re-apply when REST differs from what the main area last applied.
+        const applied = _lastAppliedMainState;
+        if (!(applied && applied.key === sKey && applied.state === sd.state)) {
+          updateMainState(sd.state, sd.death_reason);
+        }
       } else if (sd && wsConnected && sd.state === 'running') {
         // Self-heal a DROPPED 'running' session_state push. renderSidebar above
         // always paints the card from the REST snapshot, so the sidebar shows
@@ -734,7 +769,7 @@ function renderSidebar(data) {
   });
   discoveredItems.forEach(d => {
     allItemsUnfiltered.push({
-      key: '_discovered:' + d.pid,
+      key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
       entrypoint: d.entrypoint || '',
@@ -988,6 +1023,17 @@ function projectDisplayPrefix(p) {
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
+// workspaceFallbackName mirrors internal/dashboard/session/handlers.go's
+// workspaceFallbackName: the folder basename used as a sidebar group label
+// when the workspace is not a registered project. '' for empty, "/" and ".".
+function workspaceFallbackName(ws) {
+  if (!ws) return '';
+  const trimmed = ws.replace(/\/+$/, '');
+  if (!trimmed) return '';
+  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
+  return (!base || base === '.') ? '' : base;
+}
+
 function matchProject(workspace) {
   if (!workspace || !projectsData || projectsData.length === 0) return '';
   const ws = workspace.endsWith('/') ? workspace : workspace + '/';
@@ -2060,8 +2106,10 @@ function applyHistoryFilter(merged, query) {
   if (countEl) {
     // "Filtered" count uses the x/total shape so the user knows the
     // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
-    // the query is empty keep the compact "(47)" form.
-    countEl.textContent = query
+    // the query is empty keep the compact "(47)" form. Decide on the same
+    // trimmed query filterHistoryEntries matches on (#2431: whitespace-only
+    // input is not a filter, so no "(N / N)").
+    countEl.textContent = (query || '').trim()
       ? '(' + filtered.length + ' / ' + merged.length + ')'
       : '(' + merged.length + ')';
   }
@@ -2826,10 +2874,13 @@ function selectSession(key, node) {
     // 同时快照当前会话的滚动位置，回来时恢复
     saveScrollPos(selectedKey, selectedNode);
   }
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (d) {
+      // #2431: same as the managed path below — leave assets/cron/settings
+      // first, or the preview panel is written into a hidden #main while the
+      // previous session has already been unsubscribed.
+      if (activeView !== 'chat') setActivityView('chat');
       previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.cli_name || 'cli', d.entrypoint || '');
       return;
     }
@@ -2844,6 +2895,7 @@ function selectSession(key, node) {
   const prevNode = selectedNode;
   selectedKey = key;
   selectedNode = node;
+  _lastAppliedMainState = null; // #2431: new session → first poll must reconcile
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -3466,7 +3518,9 @@ function invalidateGitState(key, node) {
 // longer mounted and the next (identical) render would never bring it back
 // — e.g. after a failed DELETE whose .finally re-fetches the list.
 function removeSidebarCard(key) {
-  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  // Escape like setActiveSessionCard: discovered keys embed the node name, so
+  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
+  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
   _lastSidebarHtml = null;
 }
@@ -3529,9 +3583,8 @@ async function dismissSession(key, node, opts) {
   }
 
   // Discovered session — kill external process via /api/discovered/close
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (!d) { showToast('未找到该外部会话', 'warning'); return; }
     try {
       const headers = {'Content-Type': 'application/json'};
@@ -3548,8 +3601,8 @@ async function dismissSession(key, node, opts) {
         else showNetworkError('关闭外部会话', err);
         return;
       }
-      discoveredItems = discoveredItems.filter(x => x.pid !== pid);
-      if (pendingDiscovered && pendingDiscovered.pid === pid) {
+      dropDiscovered(d.pid, d.node);
+      if (pendingDiscovered && sameDiscovered(pendingDiscovered, d.pid, d.node)) {
         pendingDiscovered = null;
         stopPreviewPolling();
         document.getElementById('main').innerHTML = mainEmptyHtml();
@@ -3757,34 +3810,114 @@ function formatSessionMarkdown(meta, events) {
   return lines.join('\n');
 }
 
+// Export pager bounds (#2430). A bare `/api/sessions/events?key=` only returns
+// the in-memory ring (server default 500), so a long session's export silently
+// dropped its early history while the toast claimed "已导出 N 条". The pager
+// walks backward with the same `before=` cursor loadEarlierEvents uses (which
+// falls through to the on-disk JSONL when the ring is exhausted).
+// EXPORT_PAGE_LIMIT mirrors the server's maxEventsPageLimit; EXPORT_MAX_PAGES
+// is the hard stop (20k events) so a runaway session can't hang the tab.
+const EXPORT_PAGE_LIMIT = 500;
+const EXPORT_MAX_PAGES = 40;
+let _exportInFlight = false;
+
+// exportEventKey identifies an entry across overlapping pages: the backend's
+// uuid when present, else (time,type,detail) for pre-uuid synthetic entries.
+function exportEventKey(e) {
+  if (e && e.uuid) return 'u:' + e.uuid;
+  return 'k:' + ((e && e.time) || 0) + '|' + ((e && e.type) || '') + '|' + ((e && e.detail) || '');
+}
+
+// fetchAllSessionEvents returns { events, truncated } (or { status } on a
+// non-2xx first page). `truncated` is set whenever the export is known or
+// suspected to be incomplete — page cap hit, a later page failed or was
+// malformed, a full page yielded nothing new, or a remote node (whose relay
+// ignores before/limit and so can only ever serve the ring) returned a
+// ring-sized slice — so the caller must warn rather than claim a full export.
+//
+// Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
+// (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
+// same-millisecond sibling group (one CLI frame's blocks) split by the ring
+// edge or a 500-entry page edge would lose its older members for good under a
+// strict cursor. Re-admitting the watermark millisecond and dropping what we
+// already hold by exportEventKey keeps every sibling; progress is measured by
+// "new entries after dedup", not by the cursor moving.
+async function fetchAllSessionEvents(key, node, headers) {
+  const remote = !!(node && node !== 'local');
+  const base = '/api/sessions/events?key=' + encodeURIComponent(key) +
+    (remote ? '&node=' + encodeURIComponent(node) : '');
+  const r = await fetch(base, { headers });
+  if (!r.ok) return { status: r.status };
+  let events = await r.json();
+  if (!Array.isArray(events)) events = [];
+  if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
+  if (events.length === 0) return { events, truncated: false };
+
+  const seen = new Set(events.map(exportEventKey));
+  let truncated = false;
+  let oldest = (events[0] && events[0].time) || 0;
+  for (let pages = 0; oldest > 0; pages++) {
+    if (pages >= EXPORT_MAX_PAGES) { truncated = true; break; }
+    const pr = await fetch(base + '&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT, { headers });
+    if (!pr.ok) { truncated = true; break; }
+    const page = await pr.json();
+    if (!Array.isArray(page)) { truncated = true; break; }
+    if (page.length === 0) break;
+    const fresh = page.filter(e => {
+      const k = exportEventKey(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (fresh.length === 0) {
+      // A full page of entries we already hold can't be told apart from a
+      // same-ms flood wider than one page — stop and warn. A short page of
+      // known entries just means the history is exhausted.
+      if (page.length >= EXPORT_PAGE_LIMIT) truncated = true;
+      break;
+    }
+    events = fresh.concat(events);
+    const pageOldest = (fresh[0] && fresh[0].time) || 0;
+    if (!pageOldest) break; // untimed head reached; nothing older to cursor on
+    oldest = pageOldest;
+  }
+  return { events, truncated };
+}
+
 async function downloadSessionMarkdown() {
   if (!selectedKey) return;
+  if (_exportInFlight) return;
+  _exportInFlight = true;
+  // Capture identity up front: the pager may take several round trips and
+  // the operator can switch sessions meanwhile — the export still belongs to
+  // the session whose button was clicked.
+  const key = selectedKey;
+  const node = selectedNode;
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
-    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(url, { headers });
-    if (!r.ok) {
-      showAPIError('导出会话', r.status, '');
+    const res = await fetchAllSessionEvents(key, node, headers);
+    if (res.status) {
+      showAPIError('导出会话', res.status, '');
       return;
     }
-    const events = await r.json();
+    const events = res.events;
+    const truncated = res.truncated;
     if (!Array.isArray(events) || events.length === 0) {
       showToast('会话无可导出内容', 'warning');
       return;
     }
-    const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-    const keyParts = (selectedKey || '').split(':');
+    const s = sessionsData[sid(key, node)] || {};
+    const keyParts = (key || '').split(':');
     const title = s.user_label || s.summary || s.last_prompt ||
-      keyTailDisplay(keyParts) || selectedKey || '';
+      keyTailDisplay(keyParts) || key || '';
     const md = formatSessionMarkdown({
       title: title,
-      key: selectedKey,
-      node: selectedNode,
+      key: key,
+      node: node,
       cli: s.cli_name ? (s.cli_name + (s.cli_version ? ' v' + s.cli_version : '')) : '',
-      workspace: s.workspace || sessionWorkspaces[selectedKey] || '',
+      workspace: s.workspace || sessionWorkspaces[key] || '',
       cost: (typeof s.total_cost === 'number' ? s.total_cost : null),
     }, events);
 
@@ -3800,9 +3933,15 @@ async function downloadSessionMarkdown() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(href), 60000);
-    showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    if (truncated) {
+      showToast('已导出 ' + events.length + ' 条事件（历史过长，更早的事件已截断）', 'warning', 5000);
+    } else {
+      showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    }
   } catch (e) {
     showNetworkError('导出会话', e);
+  } finally {
+    _exportInFlight = false;
   }
 }
 
@@ -3827,9 +3966,7 @@ function mainHeaderHtml(s) {
   // ui-polish-light-theme D5: the version string is debug info an operator
   // needs rarely — keep it in the hover title, show just the backend name.
   // (The settings 关于 section lists versions permanently.)
-  const cliLabel = effCLIName
-    ? '<span' + (effCLIVersion ? ' title="' + escAttr(effCLIName + ' v' + effCLIVersion) + '"' : '') + '>' + esc(effCLIName) + '</span>'
-    : '';
+  const cliLabel = headerCLILabelHtml(effCLIName, effCLIVersion);
   // UI Round 5 R5-3: model display for all backends.
   //   - claude path: SessionView.model is auto-populated from the
   //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
@@ -3881,7 +4018,7 @@ function mainHeaderHtml(s) {
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
   // with no backend label storage, and we intentionally hide the control there.
-  const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
+  const canRename = selectedKey && !isDiscoveredKey(selectedKey);
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
@@ -3940,6 +4077,16 @@ function renderMainHeader() {
   repaintGitChip();
   setHeaderEffortChip();
   fetchSessionRuns(selectedKey, selectedNode);
+}
+
+// #2437: the cli label carries a fixed id so updateHeaderCLI can refresh it
+// in place. It used to rewrite .detail-left wholesale, which wiped the
+// sibling #header-model span (the tuning popover anchor) on every poll that
+// passed fetchSessions' version short-circuit. The span is always emitted
+// (empty when no backend name is known yet) so a later poll has a target.
+function headerCLILabelHtml(name, version) {
+  const title = (name && version) ? ' title="' + escAttr(name + ' v' + version) + '"' : '';
+  return '<span id="header-cli"' + title + '>' + esc(name || '') + '</span>';
 }
 
 function renderMainShell() {
@@ -4039,12 +4186,21 @@ function renderMainShell() {
 // simpler in-flight flag (mirroring `_earlierLoading` on
 // `loadEarlierEvents`) skips overlapping polls — a missed tick is cheap
 // because the next tick will pick up any accumulated events via `after=`
-// anyway. A full fetch while a tail fetch is in flight is also coalesced;
-// the next tick finishes rendering the backlog.
+// anyway.
+//
+// A `full` fetch must NOT be coalesced (#2430): it is the session-switch
+// render. Dropping it left the new session to the next tick, which ran with
+// lastEventTime=0 and no `limit` → the server's legacy default branch handed
+// back the whole ring, appendEvents grafted ≤500 bubbles in one shot, and
+// neither "load earlier" nor the saved scroll position was restored. Instead
+// a full fetch bumps _fetchEventsGen so the tail still in flight becomes
+// stale: it can neither append into the new render nor release the in-flight
+// flag the full fetch now owns.
 let _fetchEventsInFlight = false;
+let _fetchEventsGen = 0;
 async function fetchEvents(full) {
   if (!selectedKey) return;
-  if (_fetchEventsInFlight) return;
+  if (!full && _fetchEventsInFlight) return;
   // Capture session identity at dispatch time so a mid-flight switch doesn't
   // apply stale events to the new session's DOM. `selectedKey` can flip
   // synchronously from `pickSession`/`dismiss` callbacks while `await`
@@ -4052,6 +4208,9 @@ async function fetchEvents(full) {
   // prior session's tail into the newly-opened session's scroller.
   const dispatchKey = selectedKey;
   const dispatchNode = selectedNode;
+  if (full) _fetchEventsGen++;
+  const gen = _fetchEventsGen;
+  const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;
   _fetchEventsInFlight = true;
   try {
     let url = '/api/sessions/events?key=' + encodeURIComponent(dispatchKey);
@@ -4090,10 +4249,10 @@ async function fetchEvents(full) {
       throw err;              // timeout / network — surface via outer catch
     }
     if (!events || events.length === 0) return;
-    // Drop stale responses whose selection has since moved. Clearing
-    // `lastEventTime` is the caller's job at switch time, so we don't touch
-    // it here.
-    if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
+    // Drop stale responses whose selection has since moved, or that a newer
+    // `full` fetch has superseded. Clearing `lastEventTime` is the caller's
+    // job at switch time, so we don't touch it here.
+    if (stale()) return;
 
     if (full) {
       // Pass the server's authoritative hasMore when the header was present;
@@ -4108,7 +4267,9 @@ async function fetchEvents(full) {
   } catch (e) {
     console.error('fetch events:', e);
   } finally {
-    _fetchEventsInFlight = false;
+    // Only the newest generation owns the flag (mirrors loadEarlierEvents /
+    // _earlierGen): a superseded tail must not free it under the full fetch.
+    if (gen === _fetchEventsGen) _fetchEventsInFlight = false;
   }
 }
 
@@ -4261,12 +4422,26 @@ function prependEvents(events) {
   // changes arbitrarily.
   const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
 
+  // The DOM's leading divider was emitted for prevTime=0 ("always divide
+  // before the first visible bubble"). Once older bubbles sit above it, it is
+  // only legitimate when the gap to the newest prepended bubble is a real
+  // divider gap — otherwise the pagination seam shows two stacked dividers
+  // (#2430).
+  const oldLeadDivider = leadingTimeDivider(el);
   const frag = document.createElement('div');
   frag.innerHTML = html;
+  const newestPrependedTime = lastDividerTime(frag);
   // Move children one-by-one to preserve DOM structure; innerHTML replace
-  // would wipe the existing event bubbles.
+  // would wipe the existing event bubbles. Anchor on the pre-insert first
+  // child once: inserting each child before a moving el.firstChild reversed
+  // the prepended page (newest-first) under the seam.
+  const anchor = el.firstChild;
   while (frag.firstChild) {
-    el.insertBefore(frag.firstChild, el.firstChild);
+    el.insertBefore(frag.firstChild, anchor);
+  }
+  if (oldLeadDivider && newestPrependedTime) {
+    const leadT = Number(oldLeadDivider.getAttribute('data-time') || 0);
+    if (leadT && leadT - newestPrependedTime < EVENT_DIVIDER_GAP_MS) oldLeadDivider.remove();
   }
 
   // Re-insert the button at the top.
@@ -4346,6 +4521,9 @@ function renderEvents(events, hasMore) {
       return;
     }
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
+  // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
+  // answered-set so replayed AskUserQuestion cards render locked (#2430).
+  hydrateAskAnsweredFromHistory(events);
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   // Decide whether "load earlier" will mount BEFORE rendering the all-internal
@@ -4431,6 +4609,9 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
+  // An ask_question followed by a user event inside this same batch must
+  // render already locked (mirrors onHistory's pre-render hydrate).
+  hydrateAskAnsweredFromHistory(events);
   // Force-bottom when a "user" event arrives: either the local operator just
   // hit send, or a teammate posted through the IM channel — in both cases the
   // message must be visible, even if the viewport was scrolled up.
@@ -4442,6 +4623,21 @@ function appendEvents(events) {
     // dropped when their uuid is already on screen — same rule as onHistory.
     if (e.time && e.time < lastRenderedEventTime) return;
     if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+    if (e.type === 'user') {
+      // Same rules as the WS paths (onEvent / onHistory): a user bubble whose
+      // uuid is already on screen is a replay, and the first arrival of the
+      // real user event replaces the optimistic bubble the send rendered.
+      // Without this a send that left over WS and was echoed by the poll
+      // (socket dropped in between) painted the message twice (#2430).
+      if (eventAlreadyRendered(el, e.uuid)) {
+        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+        return;
+      }
+      const opt = el.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
+      // Lock cards already on screen before this user bubble is appended.
+      lockRenderedAskCards(el);
+    }
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -4560,6 +4756,38 @@ function hydrateAskAnsweredFromHistory(events) {
       }
     }
   }
+}
+
+// lockRenderedAskCards applies hydrateAskAnsweredFromHistory's rule to the
+// live DOM: a `user` event landing incrementally (WS onEvent, onHistory
+// backfill, poll appendEvents) means every AskUserQuestion card already on
+// screen was answered on some surface (Feishu, the input box, another tab), so
+// it must lock now — not only after a reload replays history. Without this the
+// stale card stayed submittable and pushed an out-of-date answer into the
+// next turn (#2430). Idempotent: cards onAskSubmit already locked are skipped
+// via the existing .ask-status marker.
+function lockRenderedAskCards(scrollEl) {
+  if (!scrollEl) return;
+  scrollEl.querySelectorAll('.event.ask_question[data-tool-use-id]').forEach(card => {
+    const tuid = card.getAttribute('data-tool-use-id') || '';
+    if (!tuid) return;
+    _askAnswered.add(tuid);
+    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    const content = card.querySelector('.event-content');
+    if (!content) return;
+    const status = content.querySelector('.ask-status');
+    if (!status) {
+      const div = document.createElement('div');
+      div.className = 'ask-status';
+      div.textContent = '已回答';
+      content.appendChild(div);
+    } else if (status.textContent.indexOf('发送失败') === 0) {
+      // onAskSubmit's failure rollback left the card actionable; a user event
+      // from another surface has since answered it, so the failure copy is
+      // stale — replace it rather than leave a locked card saying "failed".
+      status.textContent = '已回答';
+    }
+  });
 }
 
 function renderAskQuestionCard(e) {
@@ -5101,6 +5329,36 @@ function lastDividerTime(el) {
   return 0;
 }
 
+// leadingTimeDivider returns the scroller's first time divider when it
+// precedes every rendered bubble (the divider renderEventsWithDividers emits
+// for prevTime=0); null when a bubble comes first or nothing is rendered.
+function leadingTimeDivider(el) {
+  if (!el) return null;
+  for (const c of el.children) {
+    if (!c.classList) continue;
+    if (c.classList.contains('event-time-divider')) return c;
+    if (c.classList.contains('event')) return null;
+  }
+  return null;
+}
+
+// removeOptimisticMsg drops the optimistic user bubble a send rendered. With
+// a send id (the WS send_ack echoes the `id` the send frame carried) only that
+// send's bubble goes — a busy/error ack for the second of two in-flight sends
+// must not eat the first one's bubble (#2430). Without an id (legacy servers,
+// HTTP-path send_error) fall back to the oldest bubble on screen.
+function removeOptimisticMsg(sendId) {
+  const root = document.getElementById('events-scroll') || document;
+  let opt;
+  if (sendId) {
+    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(sendId) : sendId;
+    opt = root.querySelector('.optimistic-msg[data-send-id="' + sel + '"]');
+  } else {
+    opt = root.querySelector('.optimistic-msg');
+  }
+  if (opt) opt.remove();
+}
+
 // --- Send message ---
 
 // Esc in the input: first press arms, second press (within 600ms) actually
@@ -5218,9 +5476,9 @@ async function sendMessage() {
         return;
       }
       // Remove from discoveredItems so renderSidebar won't re-create the card
-      discoveredItems = discoveredItems.filter(d => d.pid !== pd.pid);
+      dropDiscovered(pd.pid, pd.node);
       // Remove the discovered card from sidebar
-      removeSidebarCard('_discovered:' + pd.pid);
+      removeSidebarCard(discoveredKey(pd.pid, pd.node));
       pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
@@ -5375,7 +5633,7 @@ async function sendComposerTurn(targetKey, targetNode) {
       delete sessionAccessProfiles[selectedKey];
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
-      renderOptimisticUserMsg(text);
+      renderOptimisticUserMsg(text, id);
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
@@ -5486,9 +5744,8 @@ async function sendComposerTurn(targetKey, targetNode) {
       // Optimistic bubble parity with the WS path — but ONLY while WS is
       // connected: the live event stream (onHistory/onEvent) is what removes
       // .optimistic-msg when the real "user" event arrives. The WS-down
-      // fallback keeps its legacy no-bubble behaviour because the polling
-      // path (appendEvents) has no optimistic-removal logic and would leave
-      // a duplicate bubble.
+      // fallback keeps its legacy no-bubble behaviour (appendEvents also
+      // replaces the bubble now, but the poll echo lags up to a tick).
       if (wsm.isConnected()) renderOptimisticUserMsg(text);
     }
 
@@ -5518,8 +5775,9 @@ async function sendComposerTurn(targetKey, targetNode) {
 // for file-bearing sends (owner-divergence fix) — both run under a live WS
 // subscription, which is what guarantees the removal side fires. No-op when
 // text is empty (image-only sends have no text to echo; the thumbnails
-// arrive with the real user event).
-function renderOptimisticUserMsg(text) {
+// arrive with the real user event). `sendId` (WS path) is stamped on the
+// bubble so a busy/error send_ack can roll back exactly this send.
+function renderOptimisticUserMsg(text, sendId) {
   const el = document.getElementById('events-scroll');
   if (!el || !text) return;
   const now = Date.now();
@@ -5531,6 +5789,7 @@ function renderOptimisticUserMsg(text) {
   }
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
+  if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
   // Always force-bottom after a send: the user just posted something and
   // expects to see it, even if they had scrolled up to browse earlier
   // history. stickEventsBottom handles async layout changes from input-area
@@ -5613,6 +5872,7 @@ function markSessionOptimisticRunning(key, node) {
     // distinct "received, starting up" signal during CLI spawn rather than a
     // generic static "处理中…".
     turnState.justSent = true;
+    startTurnTimer();
     updateSendButton('running');
   }
 }
@@ -5645,25 +5905,58 @@ let turnState = {
   timerId: null, justSent: false
 };
 
-function resetTurnState() {
-  if (turnState.timerId) clearInterval(turnState.timerId);
+// resetTurnState clears the per-turn banner state. opts.keepTimer preserves
+// the elapsed anchor (turnStartTime/timerId) and the justSent flag: used when
+// the server echoes back the user message this client just sent, so the
+// timer started at send time survives the turn-boundary reset instead of
+// being cleared and re-anchored at the first streamed event (#2435).
+function resetTurnState(opts) {
+  const keepTimer = !!(opts && opts.keepTimer);
+  const kept = keepTimer
+    ? { turnStartTime: turnState.turnStartTime, timerId: turnState.timerId, justSent: turnState.justSent }
+    : { turnStartTime: 0, timerId: null, justSent: false };
+  if (!keepTimer && turnState.timerId) clearInterval(turnState.timerId);
   turnState = {
     toolCount: 0, currentTool: null, agents: [], isThinking: false,
-    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-    timerId: null, justSent: false
+    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: kept.turnStartTime, isWriting: false,
+    timerId: kept.timerId, justSent: kept.justSent
   };
+  // #2435: blank the elapsed chip so the next banner does not open showing
+  // the previous turn's final time until its first 1s tick lands.
+  if (!keepTimer) {
+    const elapsedEl = document.getElementById('rb-elapsed');
+    if (elapsedEl) elapsedEl.textContent = '';
+  }
   refreshBanner();
 }
 
+// resetTurnStateForUserEcho handles the turn boundary a `user` event marks.
+// If this client sent that message (justSent is still up — no real turn event
+// has arrived yet) the send-time timer is kept; a user turn started on another
+// surface (IM, another tab) gets the full reset and anchors at its first event.
+function resetTurnStateForUserEcho() {
+  resetTurnState(turnState.justSent ? { keepTimer: true } : undefined);
+}
+
+// paintTurnElapsed renders turnState.turnStartTime → "m:ss" into #rb-elapsed.
+// Shared by startTurnTimer and the history-rebuild path so both paint
+// immediately instead of waiting for the first interval tick.
+function paintTurnElapsed() {
+  const el = document.getElementById('rb-elapsed');
+  if (!el || !turnState.turnStartTime) return;
+  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
+  el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+// startTurnTimer anchors the elapsed chip. Called from
+// markSessionOptimisticRunning at send time (#2435: the anchor used to be the
+// first streamed event, so CLI spawn latency was silently excluded) and
+// idempotently from every subsequent turn event.
 function startTurnTimer() {
   if (turnState.turnStartTime) return;
   turnState.turnStartTime = Date.now();
-  turnState.timerId = setInterval(function() {
-    const el = document.getElementById('rb-elapsed');
-    if (!el || !turnState.turnStartTime) return;
-    const s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
-    el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-  }, 1000);
+  paintTurnElapsed();
+  turnState.timerId = setInterval(paintTurnElapsed, 1000);
 }
 
 function trackTool(name) {
@@ -5703,6 +5996,20 @@ function toolVerb(tool, summary) {
   const verb = toolVerbs[tool] || ('使用 ' + tool);
   if (!summary || summary === tool) return verb + '...';
   return verb + ' ' + summary;
+}
+
+// toolSummaryLine derives the banner's one-line tool summary from a tool_use
+// event's detail. FormatToolInput on the server prefixes the detail with the
+// tool name ("Bash ls", "mcp__x__y: {...}"), and toolVerb already leads with
+// the (localized) tool name, so the prefix is dropped here — otherwise MCP
+// tools render as "使用 mcp__x__y mcp__x__y: {...}" (#2435).
+function toolSummaryLine(tool, detail) {
+  if (!detail) return '';
+  let line = detail.split('\n')[0];
+  if (tool && line.indexOf(tool) === 0) {
+    line = line.slice(tool.length).replace(/^[:\s]+/, '');
+  }
+  return line.substring(0, 60);
 }
 
 function refreshBanner() {
@@ -5810,7 +6117,7 @@ function applyEventToTurnState(ev) {
     case 'tool_use':
       turnState.toolCount++;
       trackTool(ev.tool || ev.summary);
-      turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+      turnState.currentTool = { tool: ev.tool || ev.summary, summary: toolSummaryLine(ev.tool || ev.summary, ev.detail) };
       turnState.isThinking = false;
       turnState.isWriting = false;
       turnState.thinkingSummary = '';
@@ -6426,6 +6733,7 @@ function stopTurnWatchdog() {
 }
 
 function updateSendButton(state) {
+  if (selectedKey) _lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
   const stopBtn = document.getElementById('btn-stop');
@@ -6841,16 +7149,6 @@ function onThumbKeyDown(ev, idx) {
   if (next) next.focus();
 }
 
-// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
-// Only used for PDF chips where we want to surface size to the user; images
-// still show the thumbnail itself, so size is not rendered for them.
-function formatFileSize(n) {
-  if (!n || n < 0) return '';
-  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  if (n >= 1024) return Math.round(n / 1024) + ' KB';
-  return n + ' B';
-}
-
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -6908,6 +7206,13 @@ let voiceInputMode = false;
 let voiceTouchStartY = 0;
 let voiceCancelled = false;
 let voiceActive = false; // true while hold gesture is in progress
+// voiceState is the recording lifecycle, independent of the finger gesture
+// (voiceActive): 'idle' → 'recording' (MediaRecorder started) → 'finalizing'
+// (recorder stopped, onstop / transcription pending) → 'idle'. #2435: the
+// 30s cap stops the recorder while the finger is still down; without this
+// state the trailing swipe/lift re-ran the send/cancel logic against a
+// recorder that was already finalized.
+let voiceState = 'idle';
 let persistentMicStream = null; // keep mic stream alive to avoid repeated permission prompts
 
 window.addEventListener('pagehide', () => {
@@ -6940,6 +7245,15 @@ function releaseMicStream() {
 
 function toggleInputMode() {
   if (pendingMic) return;
+  // Mode switch abandons any in-flight recording/transcription and returns
+  // the lifecycle to idle so a hung transcription can never lock recording.
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceActive = false;
+    cleanupVoiceTouchListeners();
+    voiceCancelled = true;
+    mediaRecorder.stop();
+  }
+  hideVoiceOverlay();
   voiceInputMode = !voiceInputMode;
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
@@ -6965,7 +7279,6 @@ function toggleInputMode() {
 function voiceTouchStart(e) {
   e.preventDefault();
   voiceTouchStartY = e.touches[0].clientY;
-  voiceCancelled = false;
   voiceActive = true;
   document.addEventListener('touchmove', voiceTouchMove, {passive: false});
   document.addEventListener('touchend', voiceTouchEnd, {passive: false});
@@ -6976,6 +7289,7 @@ function voiceTouchStart(e) {
 function voiceTouchMove(e) {
   if (!voiceActive) return;
   e.preventDefault();
+  if (voiceState !== 'recording') return; // cap already finalized: gesture can no longer cancel
   const touch = e.touches[0];
   if (!touch) return;
   const dy = voiceTouchStartY - touch.clientY;
@@ -6997,13 +7311,27 @@ function voiceTouchEnd(e) {
   e.preventDefault();
   voiceActive = false;
   cleanupVoiceTouchListeners();
-  stopVoiceRecording(!voiceCancelled);
+  finishVoiceGesture(!voiceCancelled);
 }
 
 function voiceTouchCancel() {
   voiceActive = false;
   cleanupVoiceTouchListeners();
-  stopVoiceRecording(false);
+  finishVoiceGesture(false);
+}
+
+// finishVoiceGesture ends the hold gesture. While recording (or still waiting
+// on the mic) it stops the recorder, sending or cancelling per the gesture.
+// Once the recording was already finalized by the MAX_REC_SECS cap it only
+// clears the pressed look: the "正在识别" overlay stays up until transcription
+// settles, and the lift/swipe can neither cancel nor re-send it (#2435).
+function finishVoiceGesture(shouldSend) {
+  if (voiceState !== 'finalizing') {
+    stopVoiceRecording(shouldSend);
+    return;
+  }
+  const holdBtn = document.getElementById('btn-hold-talk');
+  if (holdBtn) holdBtn.classList.remove('active');
 }
 
 function cleanupVoiceTouchListeners() {
@@ -7014,11 +7342,11 @@ function cleanupVoiceTouchListeners() {
 
 function voiceMouseDown(e) {
   e.preventDefault();
-  voiceCancelled = false;
   voiceActive = true;
   startVoiceRecording();
   const startY = e.clientY;
   const onMove = (me) => {
+    if (voiceState !== 'recording') return;
     const dy = startY - me.clientY;
     const overlay = document.getElementById('voice-overlay');
     const hint = document.getElementById('vo-hint');
@@ -7036,14 +7364,20 @@ function voiceMouseDown(e) {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     voiceActive = false;
-    stopVoiceRecording(!voiceCancelled);
+    finishVoiceGesture(!voiceCancelled);
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
 }
 
 function startVoiceRecording() {
-  if (pendingMic) return;
+  // A previous recording still transcribing owns the overlay; starting another
+  // would let its completion hide the new recording's overlay mid-hold.
+  if (pendingMic || voiceState === 'finalizing') return;
+  // Cleared only once a recording really starts: a press landing in the
+  // stop()→onstop window of a cancelled recording must not flip that
+  // recording's pending "cancel" into "send".
+  voiceCancelled = false;
   pendingMic = true;
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.add('active');
@@ -7061,7 +7395,9 @@ function startVoiceRecording() {
     mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
+      voiceState = 'finalizing';
       clearInterval(voiceRecTimer);
+      voiceRecTimer = null;
       // Do NOT stop persistent stream tracks — keep them alive for next recording
       if (holdBtn) holdBtn.classList.remove('active');
       if (isUnloading) return;
@@ -7088,6 +7424,7 @@ function startVoiceRecording() {
       transcribeAudio(blob, true);
     };
     mediaRecorder.start();
+    voiceState = 'recording';
     voiceRecStart = Date.now();
     voiceRecTimer = setInterval(updateVoiceTimer, 200);
     updateVoiceTimer();
@@ -7132,10 +7469,16 @@ function describeMicError(err) {
 }
 
 function stopVoiceRecording(shouldSend) {
+  // Already stopped (MAX_REC_SECS cap or an earlier lift): onstop /
+  // transcription own the overlay now, and a later gesture must not flip
+  // voiceCancelled or hide the "正在识别" overlay underneath it.
+  if (voiceState === 'finalizing') return;
   if (!shouldSend) voiceCancelled = true;
+  if (voiceRecTimer) { clearInterval(voiceRecTimer); voiceRecTimer = null; }
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.remove('active');
   if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceState = 'finalizing';
     mediaRecorder.stop(); // triggers onstop handler
   } else {
     hideVoiceOverlay();
@@ -7143,6 +7486,7 @@ function stopVoiceRecording(shouldSend) {
 }
 
 function hideVoiceOverlay() {
+  voiceState = 'idle';
   const overlay = document.getElementById('voice-overlay');
   if (overlay) overlay.classList.remove('show', 'cancel', 'transcribing');
 }
@@ -7166,11 +7510,17 @@ function updateVoiceTimer() {
   if (!el) return;
   const secs = Math.floor((Date.now() - voiceRecStart) / 1000);
   el.textContent = secs + 's';
-  if (secs >= MAX_REC_SECS) {
+  if (secs >= MAX_REC_SECS && voiceState === 'recording') {
+    // stopVoiceRecording clears voiceRecTimer, so this toast fires once
+    // instead of on every 200ms tick until onstop lands (#2435).
     stopVoiceRecording(true);
     showToast('\u5df2\u8fbe\u6700\u957f' + MAX_REC_SECS + '\u79d2');
   }
 }
+
+// TRANSCRIBE_TIMEOUT_MS bounds /api/transcribe: without it a stalled upload
+// left the overlay in "正在识别" and voiceState in finalizing forever.
+const TRANSCRIBE_TIMEOUT_MS = 30000;
 
 function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
@@ -7178,13 +7528,17 @@ function transcribeAudio(blob, autoSend) {
   const headers = {};
   const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  const ac = new AbortController();
+  const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.
   fetch('/api/transcribe', {
     method: 'POST',
     headers: headers,
     credentials: 'same-origin',
-    body: fd
+    body: fd,
+    signal: ac.signal
   }).then(r => {
+    clearTimeout(timeoutId);
     if (!r.ok) return r.text().then(t => {
       const e = new Error(t || ('HTTP ' + r.status));
       e.status = r.status;
@@ -7196,8 +7550,11 @@ function transcribeAudio(blob, autoSend) {
     hideVoiceOverlay();
     const input = document.getElementById('msg-input');
     if (input && data.text) {
+      // Append to (never replace) whatever is in the composer: in voice mode
+      // the textarea is hidden, so an auto-sent transcript used to silently
+      // overwrite a typed draft (#2435).
       const cur = getMsgValue(input);
-      setMsgValue(input, autoSend ? data.text : (cur ? cur + ' ' + data.text : data.text));
+      setMsgValue(input, cur ? cur + ' ' + data.text : data.text);
       if (autoSend) {
         sendMessage();
       } else {
@@ -7214,6 +7571,7 @@ function transcribeAudio(blob, autoSend) {
       showToast(hint, 'warning', 5000);
     }
   }).catch(err => {
+    clearTimeout(timeoutId);
     hideVoiceOverlay();
     showToast(describeTranscribeError(err), 'error', 5000);
   });
@@ -7224,6 +7582,9 @@ function transcribeAudio(blob, autoSend) {
 // which surfaced internal strings like "transcribe rate limit exceeded".
 function describeTranscribeError(err) {
   if (!err) return '\u8f6c\u5199\u5931\u8d25';
+  if (err.name === 'AbortError') {
+    return '\u8f6c\u5199\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5';
+  }
   // fetch() rejects with TypeError on network failure; server errors have a status.
   if (!err.status) {
     return '\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5';
@@ -7474,13 +7835,27 @@ async function fetchCLIBackends(node) {
       // must NOT drive feature gates (the input controls operate on the
       // locally-selected session), so this stays inside the isLocal branch.
       if (typeof applyFeatureGates === 'function') applyFeatureGates();
-    } else {
+    } else if (manifest) {
       cliBackendsByNode[node] = { data: manifest, at: Date.now() };
+    } else {
+      // A null / malformed remote manifest must not be pinned for 60s —
+      // drop any stale entry so the next open refetches (#2429).
+      delete cliBackendsByNode[node];
     }
     return manifest;
   } catch (e) {
+    if (!isLocal) delete cliBackendsByNode[node];
     return null;
   }
+}
+
+// renderBackendFetchFailed is the picker-slot fallback when a REMOTE node's
+// backends manifest could not be fetched: a one-line notice plus a retry
+// button (wired by refreshBackendPicker) instead of silently showing no
+// picker as if the node had a single backend.
+function renderBackendFetchFailed(node) {
+  return '<span class="cp-backend-fail">' + esc(getNodeDisplayName(node)) + ' 后端清单获取失败 ' +
+    '<button type="button" class="settings-syslink-btn cp-backend-retry">重试</button></span>';
 }
 
 // fetchAccessProfiles caches /api/access-profiles for 60s (same policy as
@@ -7775,20 +8150,37 @@ function sanitizeKeySlug(s) {
   // PRESENTATION FORM U+FE13, MODIFIER LETTER U+A789, RATIO U+2236) so a
   // project folder containing e.g. 'foo：bar' cannot survive as a
   // colon-like byte into the 4-segment key that strings.SplitN(":",4)
-  // relies on server-side. Also strips bidi override / embedding /
-  // directional isolate characters (U+202A–U+202E, U+2066–U+2069) and
-  // Unicode line separators (U+2028/U+2029) that bypass the
-  // ASCII-control-only filter below and can corrupt log output. Then
+  // relies on server-side. Also strips every non-ASCII codepoint the
+  // server-side session.ValidateSessionKey rejects (#2429): C1 controls
+  // (U+0080-U+009F), zero-width / LTR-RTL marks (U+200B-U+200F), bidi
+  // override / embedding (U+202A-U+202E), Unicode line separators
+  // (U+2028/U+2029) and the BOM (U+FEFF), plus the directional isolates
+  // (U+2066-U+2069) the IM-path sanitizer drops. A project directory
+  // whose name carries a zero-width space would otherwise produce a key
+  // the server 400s on first send, leaving a pending card that can never
+  // send. The class is written with \uXXXX escapes ONLY - the Go contract
+  // test TestDashboardJS_SanitizeKeySlug_CoversServerDenySet parses it
+  // and asserts it is a superset of session.DeniedKeyRuneRanges. Then
   // collapse runs of filesystem-hostile chars into single dashes so the
   // key stays short and readable. Cap at 64 bytes to leave plenty of
   // headroom under the 128-byte sanitizeKeyComponent cap.
   let safe = String(s)
     .replace(/[:：︓꞉∶]/g, '-')
-    .replace(/[‪-‮⁦-⁩\u2028\u2029]/g, '')
+    .replace(/[\u0080-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
     .replace(/[\s/\\?*<>|"\x00-\x1f\x7f]+/g, '-');
   safe = safe.replace(/-+/g, '-').replace(/^-|-$/g, '');
   if (safe.length > 64) safe = safe.slice(0, 64);
   return safe || 'session';
+}
+
+// localDateStamp renders a Date as YYYY-MM-DD-HHMMSS in LOCAL time for
+// session-key timestamps. The previous toISOString (UTC date) +
+// toTimeString (local time) mix dated keys created 00:00–08:00 UTC+8 as
+// yesterday (#2429).
+function localDateStamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
 }
 
 function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
@@ -7933,6 +8325,10 @@ function createNewSession() {
         }
         refreshBackendPicker('new-backend-slot');
       });
+      // First-open path: a failed REMOTE manifest arrives here as null and
+      // renderBackendPicker(null) painted an empty slot. Route through
+      // refreshBackendPicker so the retry notice shows on open too (#2429).
+      if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -7965,6 +8361,12 @@ function refreshBackendPicker(slotId) {
     if (!document.getElementById(slotId)) return;
     // Drop a stale response whose node no longer matches the selection.
     if (selectedNode !== reqNode) return;
+    if (!backendsData && reqNode && reqNode !== 'local') {
+      slot.innerHTML = renderBackendFetchFailed(reqNode);
+      const retry = slot.querySelector('.cp-backend-retry');
+      if (retry) retry.addEventListener('click', () => refreshBackendPicker(slotId));
+      return;
+    }
     slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
   });
 }
@@ -8022,6 +8424,9 @@ function openProjectPalette(backendsData, profilesData) {
     renderPaletteList(state, input.value);
     refreshBackendPicker('cp-backend-slot');
   });
+  // First-open path: see the no-projects modal above — a null remote
+  // manifest must surface the retry notice, not an empty slot (#2429).
+  if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -8051,6 +8456,22 @@ function fuzzyMatch(query, text) {
   return {score: 100 - ranges.length, ranges};
 }
 
+// matchProjectPath fuzzy-matches the query against the path AS RENDERED
+// (shortPath: home prefix collapsed to ~, long paths truncated) so the
+// returned ranges index into the same string buildProjectRow highlights.
+// Matching the raw path and then painting the ranges onto the short path
+// shifted every <mark> by the collapsed prefix length (and could run past
+// the end of the string) - #2429. If the visible text does not match but
+// the full path does (e.g. the user typed the collapsed /home/<user>
+// prefix), the row still qualifies with the full-path score but no
+// highlight, so the result set is never narrower than before.
+function matchProjectPath(query, path) {
+  const shown = fuzzyMatch(query, shortPath(path));
+  if (shown) return shown;
+  const full = fuzzyMatch(query, path);
+  return full ? {score: full.score, ranges: []} : null;
+}
+
 function highlight(text, ranges) {
   if (!ranges || !ranges.length) return esc(text);
   let out = '';
@@ -8077,7 +8498,7 @@ function renderPaletteList(state, query) {
       return;
     }
     const nameM = fuzzyMatch(q, p.name);
-    const pathM = fuzzyMatch(q, p.path);
+    const pathM = matchProjectPath(q, p.path);
     if (!nameM && !pathM) return;
     const score = Math.max(nameM ? nameM.score + 500 : 0, pathM ? pathM.score : 0);
     scored.push({
@@ -8130,6 +8551,16 @@ function renderPaletteList(state, query) {
   state.items = items;
   state.activeIdx = 0;
 
+  // Hover must move the keyboard cursor too (#2429), but only on a REAL
+  // pointer move. Chrome re-dispatches mouseenter to whatever row lands under
+  // a stationary pointer whenever the list re-renders (palette opening under
+  // the cursor, every keystroke re-filtering). Binding activeIdx to
+  // mouseenter therefore made Enter open the project row that happened to
+  // sit under the mouse instead of row 0 (快速新建), which surfaced as
+  // "new session resumes the folder's existing session". mousemove is only
+  // fired for actual pointer motion, so drive the cursor from it instead.
+  wirePaletteHover(list, state);
+
   if (!scored.length && q) {
     list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
     // Still render custom row below.
@@ -8142,15 +8573,37 @@ function renderPaletteList(state, query) {
 
   list.innerHTML = '';
   items.forEach((it, i) => {
+    let row;
     if (it.type === 'quick') {
-      list.appendChild(buildQuickRow(i));
+      row = buildQuickRow(i);
     } else if (it.type === 'project') {
-      list.appendChild(buildProjectRow(it.data, i));
+      row = buildProjectRow(it.data, i);
     } else {
-      list.appendChild(buildCustomRow(it.query, i));
+      row = buildCustomRow(it.query, i);
     }
+    list.appendChild(row);
   });
   updateActiveRow(state);
+}
+
+// wirePaletteHover installs (once per list element) a delegated mousemove
+// handler that moves the keyboard cursor to the row under the pointer. It is
+// deliberately NOT mouseenter: see the comment in renderPaletteList. Idempotent
+// so renderPaletteList can call it on every re-render without stacking
+// listeners; the handler reads `state` through the list element so a later
+// render that swaps state objects keeps working.
+function wirePaletteHover(list, state) {
+  list._paletteState = state;
+  if (list._paletteHoverWired) return;
+  list._paletteHoverWired = true;
+  list.addEventListener('mousemove', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('.cmd-palette-item') : null;
+    if (!row || !list.contains(row)) return;
+    const idx = Number(row.dataset.idx);
+    const st = list._paletteState;
+    if (!st || !Number.isInteger(idx) || idx === st.activeIdx) return;
+    setActiveIdx(st, idx);
+  });
 }
 
 function buildProjectRow(s, idx) {
@@ -8192,12 +8645,20 @@ function buildProjectRow(s, idx) {
       '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
     '</div>' + nodeBadge;
   el.addEventListener('click', () => pickPaletteProject(p));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
+// quickRowHint is the 「快速新建」 subtitle for the selected node. Only the
+// LOCAL default workspace is known client-side (stats.default_workspace);
+// a remote node resolves its own default on dispatch, so name the node
+// instead of echoing the local path (#2429).
+function quickRowHint(node) {
+  if (!node || node === 'local') return defaultWorkspace ? shortPath(defaultWorkspace) : '';
+  return getNodeDisplayName(node) + ' · 默认工作区';
+}
+
 function buildQuickRow(idx) {
-  const ws = defaultWorkspace || '';
+  const hint = quickRowHint(selectedNode || 'local');
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
@@ -8205,10 +8666,9 @@ function buildQuickRow(idx) {
     '<span class="cp-icon">⚡</span>' +
     '<div class="cp-main">' +
       '<div class="cp-name">快速新建</div>' +
-      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
+      (hint ? '<div class="cp-path">' + esc(hint) + '</div>' : '') +
     '</div>';
   el.addEventListener('click', () => pickPaletteQuick());
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
@@ -8237,11 +8697,14 @@ function buildCustomRow(query, idx) {
     '<span class="cp-icon">+</span>' +
     '<div class="cp-main"><div class="cp-name" style="color:var(--nz-text-mute)">' + label + '</div></div>';
   el.addEventListener('click', () => pickPaletteCustom(query));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
-function setActiveIdx(idx) {
+// setActiveIdx is the single writer for the palette cursor: it records the
+// index in state (what Enter reads) and repaints the .active class (what
+// the user sees). Keyboard navigation and hover both route through it.
+function setActiveIdx(state, idx) {
+  state.activeIdx = idx;
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   overlay.querySelectorAll('.cmd-palette-item').forEach(el => {
@@ -8250,7 +8713,7 @@ function setActiveIdx(idx) {
 }
 
 function updateActiveRow(state) {
-  setActiveIdx(state.activeIdx);
+  setActiveIdx(state, state.activeIdx);
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   const active = overlay.querySelector('.cmd-palette-item.active');
@@ -8289,11 +8752,16 @@ function pickPaletteProject(p) {
   const backend = getSelectedBackend();
   const accessProfile = getSelectedAccessProfile();
   const agent = getSelectedAgent();
-  // Default project open = continue the project-stable conversation. p.stableKey
-  // is supplied by /api/projects when the feature is enabled (empty otherwise,
-  // in which case resolveSessionKey falls back to a timestamp key).
+  // The palette is the "New Session" entry point, so a project row always
+  // starts a fresh timestamp-keyed session (mode:'new'). Continuing the
+  // project-stable conversation (dashboard:pj:<hash>) is what the sidebar
+  // card for that session is for. Until v0.0.78 stats.projects carried no
+  // stableKey, so this path always fell back to a fresh key in practice;
+  // when the field appeared the row silently started resuming the folder's
+  // existing (often running) session — exactly the opposite of what a user
+  // clicking "New Session" asked for (#2476).
   doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
-    { mode: 'continue', stableKey: p.stableKey || '', accessProfile: accessProfile });
+    { mode: 'new', accessProfile: accessProfile });
 }
 
 function pickPaletteCustom(initialValue) {
@@ -8375,18 +8843,20 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   // picker before it is torn down (mirrors backend). "" = global default /
   // inherit project binding.
   const accessProfile = (opts.accessProfile !== undefined) ? opts.accessProfile : getSelectedAccessProfile();
-  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'continue'
-  // so a plain project click resumes the project-stable conversation
-  // (RFC docs/rfc/project-stable-session-key.md §4.4). The "+ 新会话" entry
-  // passes mode:'new' for an independent parallel session.
-  const mode = opts.mode || 'continue';
+  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'new':
+  // every current caller (palette project row, quick session, custom
+  // workspace) starts a fresh timestamp-keyed session. 'continue' (resume the
+  // backend-supplied dashboard:pj: stableKey, RFC §4.4) currently has no
+  // production caller — it is kept for a future explicit "继续对话" entry.
+  // Do NOT flip the default back: with stableKey present that resumes the
+  // folder's running session from the "New Session" button (#2476).
+  const mode = opts.mode || 'new';
   const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // Continue → backend-provided stable key (precise continuation); new →
   // fresh timestamp key (independent parallel session). resolveSessionKey
   // also falls back to a timestamp key when no stableKey is available.
@@ -8431,8 +8901,7 @@ function doCreateSession() {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
@@ -8496,8 +8965,7 @@ function createQuickSession(initialText, onTextStranded) {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
   if (workspace) sessionWorkspaces[key] = workspace;
@@ -8745,8 +9213,8 @@ function buildHomeHealthLines(stats) {
   const running = typeof stats.running === 'number' ? stats.running : 0;
   const ready = typeof stats.ready === 'number' ? stats.ready : 0;
   const total = typeof stats.total === 'number' ? stats.total : 0;
-  let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
-  if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
+  let line1 = '运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
+  if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
   // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
   // /api/sessions stats static block already, so surface live-vs-capacity
@@ -9249,7 +9717,9 @@ function historyDayLabel(d) {
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
   if (diffDays === 0) return '\u4eca\u5929';
   if (diffDays === 1) return '\u6628\u5929';
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
+  const opts = { month: 'short', day: 'numeric', weekday: 'short' };
+  if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
 }
 
 // Sidebar relative-time ticker. While WS is connected renderSidebar only
@@ -9591,7 +10061,10 @@ function formatTimeShort(ms) {
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
   const isYesterday = d.getFullYear() === yesterday.getFullYear() && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
   if (isYesterday) return '昨天 ' + hm;
-  const diffDays = Math.floor((now - d) / 86400000);
+  // Local calendar-day difference (not floor(ms/24h)): an event 6d23.5h ago
+  // is the same weekday as today and must not get a weekday label (#2429).
+  const dayStart = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
   if (diffDays < 7 && diffDays >= 0) {
     const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
     return wk + ' ' + hm;
@@ -9663,7 +10136,7 @@ function loadMermaid() {
   s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
   s.crossOrigin = 'anonymous';
   s.onload = () => {
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+    mermaid.initialize(mermaidConfig());
     mermaidReady = true;
     mermaidLoading = false;
     runMermaid();
@@ -9684,7 +10157,28 @@ function runMermaid() {
     delete mermaidPending[id];
     hasNew = true;
   });
-  if (hasNew) mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  if (hasNew) {
+    // Re-initialise per run so diagrams rendered after a theme switch pick
+    // up the current theme (already-rendered SVGs are left as-is).
+    mermaid.initialize(mermaidConfig());
+    mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  }
+}
+
+// mermaidThemeName maps the resolved dashboard theme (data-theme, with
+// 'auto' following prefers-color-scheme) to a mermaid theme name (#2429).
+function mermaidThemeName() {
+  const t = document.documentElement.dataset.theme;
+  if (t === 'light') return 'default';
+  if (t === 'dark') return 'dark';
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'default';
+  } catch (_) {}
+  return 'dark';
+}
+
+function mermaidConfig() {
+  return { startOnLoad: false, theme: mermaidThemeName(), securityLevel: 'strict' };
 }
 
 let mermaidCounter = 0;
@@ -9754,10 +10248,33 @@ function runKatex() {
 //      reject because they lack both a math hint and a function-call shape.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
+  // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
+  // operator, or call shape to hint on, but the outer `$` guard already
+  // rejected the alphanumeric-adjacent prose case, so accept it (#2428).
+  // 3+ letters (`$USD$`) still fall through to the hint check below.
+  if (/^[a-zA-Z]{1,2}$/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
   if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
   if (!/[\d+\-*/=<>]|[a-zA-Z]\(|\)[a-zA-Z]/.test(tex)) return false;
   return true;
+}
+
+// isMathDisplay — content sanity gate for a `$$...$$` block captured by
+// BLOCK_SPLIT_RE (`tex` is the inner text, `$$` already stripped). Shell
+// prose uses `$$` for the current PID, so two of them on one line
+// (`echo $$ then kill $$`) form a syntactically valid display-math pair
+// whose "formula" is the prose in between (#2428). Accept when:
+//   1) an unambiguous LaTeX / equation char is present (\ ^ _ { } =)
+//   2) the block spans multiple lines — a deliberately fenced formula block
+//   3) otherwise the same heuristic as inline `$...$` (isMathInline)
+// Trade-off: a bare 3+ letter word (`$$ area $$`) has no hint and renders
+// literally, same as inline `$USD$`.
+function isMathDisplay(tex) {
+  const t = tex.trim();
+  if (t === '') return false;
+  if (/[\\^_{}=]/.test(t)) return true;
+  if (t.indexOf('\n') !== -1) return true;
+  return isMathInline(t);
 }
 
 function renderKatex(tex, displayMode) {
@@ -9858,12 +10375,17 @@ const _MD_CACHE_MAX = 500;
 // covers >95% of stable IM-style replies on naozhi without paying
 // hash-the-string cost on streaming-storm responses.
 const _MD_CACHE_INPUT_MAX = 2000;
+// Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
+// via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending
+// span keeps a `ktx-N` id whose katexPending entry is deleted on first
+// flush, so later cache hits would show raw TeX forever (#2428). Every
+// alternative in BLOCK_SPLIT_RE plus inlineMd's inline math triggers is
+// mirrored here; keep them in sync.
+const _MD_UNCACHEABLE_RE = /```|\$|\\\[|\\\(|\\begin\{/;
 
 function renderMd(s) {
   if (!s) return '';
-  // Only cache when the input has no constructs that mint unique DOM ids
-  // (mermaid-N / ktx-N), otherwise cached HTML would collide across messages.
-  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !/```|\$|\\\[|\\\(/.test(s);
+  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !_MD_UNCACHEABLE_RE.test(s);
   if (cacheable) {
     const hit = _mdCache.get(s);
     if (hit !== undefined) return hit;
@@ -9898,8 +10420,10 @@ function renderMd(s) {
 // resolved to project-relative form by resolveProjectForAbsPath before the
 // server call — server still rejects absolute paths for defence in depth.
 // Rejects spaces (breaks on prose) and leading URL schemes.
-const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
-const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?$/;
+// Line suffix accepts `:L`, `:L-L2` (range) and `:L:C` (go build / eslint
+// `file:line:col`); splitPathLine keeps only the line for the preview jump.
+const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+|:\d+)?)?$/;
+const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+|:\d+)?$/;
 function isFileRefCandidate(text) {
   return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
 }
@@ -10041,7 +10565,8 @@ function resolveActiveProject() {
 
 // Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
 function splitPathLine(cand) {
-  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)$/);
+  // Optional trailing `:col` is dropped: the preview only scrolls to a line.
+  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)(?::\d+)?$/);
   if (m) return { path: m[1], line: m[2] };
   return { path: cand, line: '' };
 }
@@ -10636,12 +11161,19 @@ function scrollToPreviewLine(body, line) {
   pre.parentElement.scrollTop = Math.max(0, (line - 3) * 18);
 }
 
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Single declaration on purpose: a second hoisted `function formatFileSize`
+// used to shadow this one silently. Promotion checks the *rounded* value so
+// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
 function formatFileSize(bytes) {
   if (!bytes || bytes <= 0) return '';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = bytes, i = 0;
+  while (i < units.length - 1 && (i === 0 ? v >= 1024 : Number(v.toFixed(1)) >= 1024)) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
 }
 
 function inferLang(path, mime) {
@@ -10833,12 +11365,12 @@ const MAX_LIST_DEPTH = 6;
 // stays in sync with the captured prefix; a Unicode-`\s*` would consume
 // NBSP/U+2028/etc. while leadingColumns counted only space+tab, producing
 // cols=0 for a visually-indented bullet.
-const LIST_ITEM_RE = /^([ \t]*)(?:([-*])|(\d+)\.)[ \t]+(.*?)\r?$/;
+const LIST_ITEM_RE = /^([ \t]*)(?:([-*+])|(\d+)\.)[ \t]+(.*?)\r?$/;
 // Cheap shape check used by the lazy-continuation guard. Treats both digit
 // shapes (any length) — the digit-cap reject path in parseListItem returns
 // null, but for lazy-continuation purposes "this looks like a list bullet"
 // is exactly what we want: refuse to fold such lines into the previous <li>.
-const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
+const LIST_SHAPE_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+/;
 // Reject anything > 3 digits as a list start: real ordinals max out around
 // dozens; 4+ digit prefixes are year/version/issue tokens ("2024. 关于...",
 // "1234. xxx") that the user does not want rendered as <ol start="2024">.
@@ -10846,6 +11378,9 @@ const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
 // chars but value 100) is accepted while "2024." (4 chars, value 2024) is
 // rejected — symmetric vs. the documented intent.
 const OL_START_MAX = 999;
+// `> quote` line: marker at column 0 (up to 3 leading spaces per GFM), one
+// optional space after it is eaten.
+const BLOCKQUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
 
 function leadingColumns(s) {
   let cols = 0;
@@ -10856,6 +11391,17 @@ function leadingColumns(s) {
     else break;
   }
   return cols;
+}
+
+// GFM task-list marker at the head of a bullet's content. Rendered as a
+// disabled checkbox (display only — the dashboard has no write-back path).
+// The rest of the content still goes through inlineMd (esc + inline passes).
+const TASK_ITEM_RE = /^\[([ xX])\][ \t]+(.*)$/;
+function listItemHtml(content) {
+  const tm = TASK_ITEM_RE.exec(content);
+  if (!tm) return inlineMd(content);
+  const checked = tm[1] === ' ' ? '' : ' checked';
+  return '<input type="checkbox" class="md-task" disabled' + checked + '> ' + inlineMd(tm[2]);
 }
 
 function parseListItem(line, baselineCols) {
@@ -10874,6 +11420,29 @@ function parseListItem(line, baselineCols) {
   return { kind: 'ol', depth, cols, startNum, content: m[4] };
 }
 
+// mergeProseDollarBlocks — post-process `s.split(BLOCK_SPLIT_RE)`. The split
+// with a capturing group alternates text / block / text / ...; odd indexes
+// are matched blocks. A `$$...$$` block whose content fails isMathDisplay
+// (shell `echo $$ then kill $$`, #2428) is folded back into the surrounding
+// text so the line keeps flowing as one prose part. Rendering it as its own
+// part would inject a spurious <br> mid-sentence and re-run the block
+// heuristics on the fragment. Fenced code / \[ \] / \begin{} blocks are
+// untouched.
+function mergeProseDollarBlocks(parts) {
+  if (parts.length < 3) return parts;
+  const out = [parts[0]];
+  for (let i = 1; i < parts.length; i += 2) {
+    const block = parts[i];
+    const text = parts[i + 1] || '';
+    if (block.startsWith('$$') && !isMathDisplay(block.slice(2, -2))) {
+      out[out.length - 1] += block + text;
+    } else {
+      out.push(block, text);
+    }
+  }
+  return out;
+}
+
 function renderMdUncached(s) {
   // Normalize CRLF/CR to LF up front. Source can be Windows-pasted text or
   // IM payloads carrying \r\n. Without this every per-line regex below
@@ -10882,7 +11451,7 @@ function renderMdUncached(s) {
   if (s.indexOf('\r') !== -1) s = s.replace(/\r\n?/g, '\n');
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
-  const parts = s.split(BLOCK_SPLIT_RE);
+  const parts = mergeProseDollarBlocks(s.split(BLOCK_SPLIT_RE));
   return parts.map(part => {
     if (part.startsWith('```')) {
       // Single-line fence (```ls -la```) carries no info string — everything
@@ -10953,7 +11522,10 @@ function renderMdUncached(s) {
         '</div>' +
         '</div>';
     }
-    if (part.startsWith('$$') && part.endsWith('$$')) {
+    // isMathDisplay re-checked here: mergeProseDollarBlocks folds a rejected
+    // `$$...$$` back into its neighbouring text, and when both neighbours are
+    // empty the merged prose part itself still starts/ends with `$$`.
+    if (part.startsWith('$$') && part.endsWith('$$') && isMathDisplay(part.slice(2, -2))) {
       return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
     }
     if (part.startsWith('\\[') && part.endsWith('\\]')) {
@@ -10968,9 +11540,17 @@ function renderMdUncached(s) {
     // processes one line at a time, which would otherwise truncate multi-line
     // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
     // get swapped back in after list/heading/table rendering completes.
+    // Alternation puts single-line `code` spans first so a `\(...\)` written
+    // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
+    // reaches inlineMd intact, where the code-span pass claims it before the
+    // math pass (#2428). Code spans are returned verbatim — no placeholder —
+    // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
+    // inlineMd's per-line code-span scope; a stray backtick pair spanning
+    // lines is not a code span there either.
     const inlineMathTokens = [];
     if (part.indexOf('\\(') !== -1) {
-      part = part.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
+      part = part.replace(/`[^`\n]+`|\\\(([\s\S]+?)\\\)/g, function(m, tex) {
+        if (tex === undefined) return m;
         inlineMathTokens.push(renderKatex(tex.trim(), false));
         return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
       });
@@ -11026,7 +11606,7 @@ function renderMdUncached(s) {
           if (f.cols === li.cols && f.kind === li.kind) {
             // Close everything strictly above this frame, then sibling-emit.
             closeTo(f.depth);
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             // We did NOT mutate the frame's depth, so no extra book-keeping.
             // Skip the rest of the dispatch.
             li.handled = true;
@@ -11064,7 +11644,7 @@ function renderMdUncached(s) {
         }
         if (top2 && top2.depth === li.depth) {
           if (top2.kind === li.kind) {
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             continue;
           }
           chunks.push('</li>');
@@ -11081,7 +11661,7 @@ function renderMdUncached(s) {
         // source column rather than the (possibly promoted) depth — promotion
         // mutates depth but not the user's actual indent.
         listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
-        chunks.push('<li>' + inlineMd(li.content));
+        chunks.push('<li>' + listItemHtml(li.content));
         continue;
       }
       // Treat all-whitespace lines as blanks: LLM/IM pipelines occasionally
@@ -11133,6 +11713,18 @@ function renderMdUncached(s) {
         }
       }
       closeAll();
+      // Blockquote: consecutive `>` lines merge into one <blockquote>; the
+      // marker is stripped BEFORE inlineMd so the remaining text still goes
+      // through esc(). Nested `> >` is not unwrapped (renders as literal &gt;).
+      const qm = BLOCKQUOTE_RE.exec(line);
+      if (qm) {
+        const q = [qm[1]];
+        while (i + 1 < lines.length && BLOCKQUOTE_RE.test(lines[i + 1])) {
+          q.push(BLOCKQUOTE_RE.exec(lines[++i])[1]);
+        }
+        chunks.push('<blockquote class="md-quote">' + q.map(inlineMd).join('<br>') + '</blockquote>');
+        continue;
+      }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
@@ -11156,6 +11748,14 @@ function renderMdUncached(s) {
 }
 
 /* Inline markdown: bold, italic, code, links, math */
+// `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
+// at most one nested `(...)` group; the title group is optional; CommonMark
+// permits whitespace padding on both sides of the body.
+const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\s*\)/g;
+// Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
+// so a URL inside a link's label never becomes a nested anchor.
+const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
+const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
 function inlineMd(s) {
   // Extract `code` spans FIRST — before math/bold/italic — so KaTeX does not
   // peek inside them. Previously `$NVIDIA_DEVICE_PLUGIN_IMAGE$` written inside
@@ -11250,18 +11850,38 @@ function inlineMd(s) {
   // turns into `2 <em> 3 </em> 4`. Lookbehind is already relied upon by the
   // inline-math pass above.
   s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
+  // `__bold__`: both delimiters must sit at a word boundary (not touching
+  // [A-Za-z0-9_]) so `snake_case_name` / `foo__bar__baz` stay literal —
+  // mirrors GFM's flanking rule for `_`. The opener additionally rejects a
+  // preceding `/` or `.` because these passes run BEFORE the link/autolink
+  // passes: `https://x/pkg/__init__.py`, `pkg/__init__.py` (local-file
+  // rescue) and `foo.__init__()` must survive verbatim, while `a __bold__ b`
+  // and `__all__ = []` still bold. `~~del~~` gets the same opener guard so
+  // `https://x.com/a~~b~~c` is not sliced; `~/.config` and a lone ` ~~ ` are
+  // untouched by construction. Body is capped at 300 chars: an unbounded
+  // `.+?` rescans to end-of-line from every opener (quadratic on inputs like
+  // `' __a'.repeat(10000)`). Same post-esc() contract as the passes above.
+  s = s.replace(/(?<![A-Za-z0-9_\/.])__(?!\s)(.{1,300}?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
+  s = s.replace(/(?<![A-Za-z0-9_\/.])~~(?!\s)(.{1,300}?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
   // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
   // blocks remote images, so an <img> would only ever render broken. Drop the
   // `!` and let the link pass below handle the target: remote → clickable
   // md-link labelled with the alt text; local path → the fileRefCode rescue
   // below, which is the existing image-preview path (preview/download buttons).
   s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, urlEsc) {
+  // Destination grammar: one level of balanced parens is allowed inside the
+  // URL (`https://x/a_(b)`) and an optional `"title"` / `'title'` may follow
+  // after whitespace (GFM link title). The title never reaches the href; it
+  // is emitted as a title attribute through escAttr. `"` survives esc() (only
+  // & < > are encoded) so the quote delimiters match literally.
+  s = s.replace(MD_LINK_RE, function(_, text, urlEsc, titleDq, titleSq) {
+    const title = titleDq !== undefined ? titleDq : titleSq;
     // `urlEsc` is the esc()'d capture (`&` → `&amp;`). Decode esc's entities
     // before the scheme check + escAttr so the href is encoded exactly once —
     // previously `?a=1&b=2` shipped as `?a=1&amp;amp;b=2`.
     const url = decodeEscEntities(urlEsc);
     const safe = safeUrl(url);
+    const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     // `text` is the already-esc()'d+partially-transformed capture — it may
     // legitimately contain <strong>/<em>/<code> spans from prior passes.
     // When the URL is rejected we still want to render the label, but
@@ -11312,7 +11932,7 @@ function inlineMd(s) {
       }
       return text;
     }
-    return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+    return '<a href="' + escAttr(safe) + '" class="md-link"' + titleAttr + ' target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
   // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
@@ -11327,14 +11947,24 @@ function inlineMd(s) {
   // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
   // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
   // emitted for `<https://…>` so the closing bracket stays out of the href.
-  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g, function(_, prefix, url) {
-    // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
-    // the decoded URL for the href (escAttr re-encodes it exactly once).
-    var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
-    var trail = url.slice(shown.length);
-    var clean = decodeEscEntities(shown);
-    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
-  });
+  // Odd segments of the split are the <a>…</a> runs emitted by the link pass
+  // above (esc() turned every authored `<` into &lt;, so `<a ` can only be
+  // ours); they are passed through untouched.
+  const autolinkSeg = function(seg) {
+    return seg.replace(MD_AUTOLINK_RE, function(_, prefix, url) {
+      // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
+      // the decoded URL for the href (escAttr re-encodes it exactly once).
+      var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
+      var trail = url.slice(shown.length);
+      var clean = decodeEscEntities(shown);
+      return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
+    });
+  };
+  if (s.indexOf('https://') !== -1 || s.indexOf('http://') !== -1) {
+    s = s.indexOf('<a ') === -1
+      ? autolinkSeg(s)
+      : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
+  }
   // Restore math tokens after escaping
   if (mathTokens.length > 0) {
     s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
@@ -11776,6 +12406,24 @@ function renderSystemView() {
 // (remote removed server-side while the dashboard is open) we snap it back to
 // 'local'. Kept as a single entry point so the many call sites (poll, session
 // switch, session create) don't each need to re-derive the same guard.
+// deselectNodeSession clears the main pane after the node hosting the
+// selected session disconnected (PurgeNodeSubscriptions → error{node, "node
+// disconnected"}). Mirrors dismissSession's deselect: the draft is kept for
+// when the node comes back, the caller already dropped the WS bookkeeping,
+// and the sidebar refetch removes the node's cards.
+function deselectNodeSession(nodeID) {
+  const inp = document.getElementById('msg-input');
+  const draft = inp ? getMsgValue(inp) : '';
+  if (draft) sessionDrafts[selectedKey] = draft;
+  selectedKey = null;
+  const main = document.getElementById('main');
+  if (main) {
+    main.innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
+  }
+  showToast('节点 ' + nodeID + ' 已断开，已退出该节点上的会话', 'warning');
+}
+
 function reconcileSelectedNode() {
   if (selectedNode && selectedNode !== 'local' && !nodesData[selectedNode]) {
     selectedNode = 'local';
@@ -11976,6 +12624,13 @@ const wsm = {
           }
         }
         break;
+      case 'unsubscribed':
+        // Server ack for an explicit unsubscribe (wshub_subscribe.go, three
+        // emit sites incl. the relayed remote ack). wsm.unsubscribe() already
+        // cleared subscribedKey/Node synchronously and a relayed ack may name
+        // a key this tab no longer tracks — nothing to reconcile. Listed so
+        // the frame is a documented no-op rather than an unhandled type.
+        break;
       case 'error':
         // cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
         if (msg.key && this.cronLive.pendingJobId && msg.key === ('cron:' + this.cronLive.pendingJobId)) {
@@ -11998,6 +12653,20 @@ const wsm = {
           if (this._pendingSubscribeNode === msg.node) {
             this._pendingSubscribeKey = null;
             this._pendingSubscribeNode = null;
+          }
+          // The selected session lived on the dead node: no pushes can reach
+          // it any more and its key means nothing under the `local` node
+          // reconcileSelectedNode snaps to, so deselect it (the backend's
+          // "deselect stale sessions" contract) before selectedNode moves.
+          // Ownership comes from the session store, NOT from selectedNode:
+          // that global is the dispatch target and wireNodePicker rewrites
+          // it the moment the new-session picker changes node, so a local
+          // session with the picker on n1 must survive n1 going away.
+          // Pending (never-sent) sessions are only a draft target — they stay
+          // selected and are neither cleared nor deleted here.
+          if (selectedKey && sessionWorkspaces[selectedKey] === undefined &&
+              (sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)) {
+            deselectNodeSession(msg.node);
           }
           nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
           reconcileSelectedNode();
@@ -12390,6 +13059,7 @@ const wsm = {
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
           sawUser = true;
+          lockRenderedAskCards(el);
         }
         const h = eventHtml(e);
         if (h) {
@@ -12429,12 +13099,8 @@ const wsm = {
       // Anchor timer to the actual turn start time, not Date.now()
       if (turnStart < events.length && events[turnStart].time) {
         turnState.turnStartTime = events[turnStart].time;
-        turnState.timerId = setInterval(function() {
-          var el = document.getElementById('rb-elapsed');
-          if (!el || !turnState.turnStartTime) return;
-          var s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
-          el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-        }, 1000);
+        paintTurnElapsed();
+        turnState.timerId = setInterval(paintTurnElapsed, 1000);
       }
       for (let i = turnStart; i < events.length; i++) {
         applyEventToTurnState(events[i]);
@@ -12444,7 +13110,7 @@ const wsm = {
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
         if (ev.type === 'user') {
-          resetTurnState();
+          resetTurnStateForUserEcho();
           const text = ev.detail || ev.summary || '';
           if (text) {
             const h2 = document.querySelector('.main-header h2');
@@ -12497,7 +13163,10 @@ const wsm = {
         const h2 = document.querySelector('.main-header h2');
         if (h2) h2.textContent = text;
       }
-      resetTurnState();
+      resetTurnStateForUserEcho();
+      // A user message after an AskUserQuestion means it was answered on some
+      // surface — lock the card before the bubble lands (#2430).
+      lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       if (ev.cost) {
         const sKey = sid(selectedKey, selectedNode);
@@ -12644,8 +13313,7 @@ const wsm = {
       // enqueued. Roll back the optimistic bubble and tell the operator
       // to retry — otherwise the UI silently eats the message.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。
@@ -12655,9 +13323,8 @@ const wsm = {
       // but treat the server-supplied `error` string the same way as an
       // HTTP 500 body: truncate + prefix with "发送消息失败：".
       showAPIError('发送消息', 500, msg.error || '');
-      // Remove optimistic message on send failure
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      // Remove this send's optimistic message on send failure
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
@@ -12964,20 +13631,25 @@ const wsm = {
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
       // Reduce discovered scan frequency
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+      // #2431: a hidden tab has had its pollers suspended by stopPollers;
+      // re-arming here would undo that. startPollers re-arms on return.
+      if (!document.hidden) discoveredPollTimer = setInterval(scanDiscovered, 30000);
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
       // RNEW-UX-010 — announce only on real transitions from connected, so
       // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
       if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-      // WS lost: start fallback polling
-      if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
+      // WS lost: start fallback polling — unless the tab is hidden (#2431):
+      // stopPollers already suspended everything and startPollers re-arms on
+      // visibilitychange from the then-current WS state.
+      const visible = !document.hidden;
+      if (visible && !sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 5000);
+      if (visible) discoveredPollTimer = setInterval(scanDiscovered, 5000);
       if (selectedKey && !eventTimer) {
         lastEventTime = this.lastEventTimeWs;
-        eventTimer = setInterval(() => fetchEvents(false), 1000);
+        if (visible) eventTimer = setInterval(() => fetchEvents(false), 1000);
       }
     }
   },
@@ -12995,15 +13667,23 @@ function updateMainState(state, reason) {
 
 function updateHeaderCLI() {
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const el = document.querySelector('.main-header .detail-left');
+  // #2437: only touch the #header-cli span painted by headerCLILabelHtml.
+  // Never rewrite the whole left container — #header-model lives next door.
+  const el = document.getElementById('header-cli');
   if (!el) return;
   // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
   // for why pending sessions need the sessionBackends lookup before the
   // global defaultCLIName fallback.
   const name = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
   const version = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
-  const label = name ? esc(name) + (version ? ' v' + esc(version) : '') : '';
-  if (el.innerHTML !== label) el.innerHTML = label;
+  // Same display rule as renderMainShell (D5): version lives in the hover
+  // title only, the text is just the backend name.
+  const text = name || '';
+  const title = (name && version) ? name + ' v' + version : '';
+  if (el.textContent !== text) el.textContent = text;
+  if (title !== (el.getAttribute('title') || '')) {
+    if (title) el.setAttribute('title', title); else el.removeAttribute('title');
+  }
 }
 
 function flashSendBtn() {
@@ -13027,6 +13707,28 @@ function stopPreviewPolling() {
 }
 
 /* ===== Discovery & Takeover ===== */
+
+// Discovered-card identity is (pid, node): pids repeat across nodes, so every
+// key/lookup/removal goes through these helpers (#2431). Key shape is
+// '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
+function discoveredKey(pid, node) {
+  return '_discovered:' + pid + ':' + (node || 'local');
+}
+function isDiscoveredKey(key) {
+  return typeof key === 'string' && key.startsWith('_discovered:');
+}
+function parseDiscoveredPid(key) {
+  return parseInt(key.split(':')[1], 10);
+}
+function sameDiscovered(d, pid, node) {
+  return d.pid === pid && (d.node || 'local') === (node || 'local');
+}
+function findDiscovered(pid, node) {
+  return discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
+}
+function dropDiscovered(pid, node) {
+  discoveredItems = discoveredItems.filter(d => !sameDiscovered(d, pid, node));
+}
 
 async function scanDiscovered() {
   try {
@@ -13078,7 +13780,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   mobileEnterChat();
 
   // Highlight the discovered card
-  setActiveSessionCard('_discovered:' + pid, node || 'local');
+  setActiveSessionCard(discoveredKey(pid, node), node || 'local');
 
   const base = cwd.split('/').pop() || cwd;
   const main = document.getElementById('main');
@@ -13234,9 +13936,9 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     const data = await r.json();
     showToast('已接管会话', 'success');
     // Remove from discoveredItems so renderSidebar won't re-create the card
-    discoveredItems = discoveredItems.filter(d => d.pid !== pid);
+    dropDiscovered(pid, node);
     // Immediately remove the discovered card from DOM
-    removeSidebarCard('_discovered:' + pid);
+    removeSidebarCard(discoveredKey(pid, node));
     // Force refresh (clear cache so renderSidebar runs)
     lastVersion = 0;
     await fetchSessions();
@@ -13266,21 +13968,33 @@ mobileQuery.addEventListener('change', e => {
 
 function mobileEnterChat() {
   if (!isMobile()) return;
-  history.pushState({ view: 'chat' }, '');
+  // #2431: switching sessions while already in chat view must not stack
+  // another entry — replace ours so a single back press leaves chat.
+  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
+  else history.pushState({ view: 'chat' }, '');
   document.body.classList.remove('mobile-list-view');
   document.body.classList.add('mobile-chat-view');
 }
 
-function mobileBack() {
+function mobileShowList() {
   document.body.classList.remove('mobile-chat-view');
   document.body.classList.add('mobile-list-view');
   if (document.activeElement) document.activeElement.blur();
 }
 
+// In-app back button / swipe-back. Flips the view synchronously, then pops
+// the history entry mobileEnterChat pushed so the browser stack stays in
+// step (#2431); the popstate below sees list view already and no-ops.
+function mobileBack() {
+  const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
+  mobileShowList();
+  if (ownsEntry) history.back();
+}
+
 // Handle Android back button and iOS swipe-back gesture
 window.addEventListener('popstate', () => {
   if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
-    mobileBack();
+    mobileShowList();
   }
 });
 
@@ -14110,8 +14824,18 @@ wsm.connect();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
+      // #2431: a half-open socket (lid close / network switch) still reports
+      // CONNECTED, so no frames arrive and no fallback poll is armed below;
+      // the version gate would then short-circuit this one-shot fetch too.
+      // Zero lastVersion so returning to the tab always repaints once.
+      lastVersion = 0;
       fetchSessions(); // immediate refresh on resume so UI is not stale
-      sessionPollTimer = setInterval(fetchSessions, 5000);
+      // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
+      // socket session_state pushes already drive the sidebar; arming the
+      // interval here made it run alongside WS until the next reconnect.
+      if (!(wsm && wsm.state === WS_STATES.CONNECTED)) {
+        sessionPollTimer = setInterval(fetchSessions, 5000);
+      }
     }
     // Same rationale as the turn-boundary refresh in onSessionState: the branch
     // can change without the workspace path changing, and an operator switching
@@ -14657,6 +15381,32 @@ initSwipeBack();
     return 0;
   }
 
+  // @contract-begin scratchAdmitEvent
+  // scratchAdmitEvent is the same-ms replay gate for the drawer's HTTP poll.
+  // HandleEvents ?after= re-admits the watermark millisecond (#2456, so a
+  // same-ms sibling is never lost), which means every idle tick replays the
+  // entries AT st.lastEventTime. st.seenAtWM holds the uuids already
+  // processed (rendered OR echo-dropped) at that ms: the local optimistic
+  // user bubble carries no data-uuid and matchesPendingEcho consumes its
+  // entry on first sight, so a DOM lookup alone would re-render the echoed
+  // user event on the next tick. Returns false when e must be skipped;
+  // otherwise records it and advances the watermark. uuid-less (pre-uuid)
+  // events at the watermark are admitted — never swallow what we can't
+  // identify (losing history is worse than a duplicate bubble).
+  function scratchAdmitEvent(st, e) {
+    const t = (e && typeof e.time === 'number') ? e.time : 0;
+    if (t && t < st.lastEventTime) return false;
+    if (!st.seenAtWM) st.seenAtWM = new Set();
+    if (t && t === st.lastEventTime && e.uuid && st.seenAtWM.has(e.uuid)) return false;
+    if (t > st.lastEventTime) {
+      st.lastEventTime = t;
+      st.seenAtWM.clear();
+    }
+    if (t && t === st.lastEventTime && e.uuid) st.seenAtWM.add(e.uuid);
+    return true;
+  }
+  // @contract-end scratchAdmitEvent
+
   function renderNewEvents(events) {
     if (!Array.isArray(events) || events.length === 0) return;
     // Remember whether the user was reading the latest message BEFORE we
@@ -14673,11 +15423,10 @@ initSwipeBack();
     let sawUser = false;
     let prevT = asideLastTime();
     for (const e of events) {
+      // Same-ms replay / strictly-older guard; also owns the watermark.
+      if (!scratchAdmitEvent(state, e)) continue;
       // Drop server-echoed user messages that we already rendered locally.
-      if (matchesPendingEcho(e)) {
-        if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
-        continue;
-      }
+      if (matchesPendingEcho(e)) continue;
       // Reuse the main event renderer so aside bubbles match the transcript
       // style (markdown, code blocks, etc.) without duplicating logic.
       const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
@@ -14693,7 +15442,6 @@ initSwipeBack();
       tmp.innerHTML = h;
       while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
       if (t) prevT = t;
-      if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
       if (e.type === 'user') sawUser = true;
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
@@ -14808,6 +15556,7 @@ initSwipeBack();
         sourceMsgTime: sourceMsgTime || 0,
         quote,
         lastEventTime: 0,
+        seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
         // Bounded Set of user-message bodies that sendInScratch rendered
         // locally. Consumed by matchesPendingEcho when the server event
         // stream replays the same text as a `user` event. Set over array

@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
 // Handler serves the /api/scratch/* endpoints used by the dashboard
@@ -126,6 +127,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if h.agents != nil {
 		base = h.agents[agentID]
 	}
+	base = inheritSourceTuning(base, snap)
 	// Inherit per-session backend override the source was using (dashboard
 	// "pick backend" flow). snap.Backend is empty when the source is using
 	// the router default; leaving BaseOpts.Backend empty lets the router
@@ -194,6 +196,52 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// inheritSourceTuning layers the source session's spawn-time identity onto
+// the agent-registry defaults so the aside runs on the same access profile,
+// model and effort tier as the conversation it quotes (#2433; the aside
+// contract is "inherit the source's agent settings", but only Agent /
+// Backend / Workspace were carried before).
+//
+// Snapshot values are CLI-*reported*, not operator input: claude's init
+// frame can echo a context-window suffix ("…-fable-5-1[1m]") that the
+// router's per-request model gate rejects, which would turn every later
+// send on the scratch into ErrInvalidModel. Model is therefore pre-flighted
+// with session.ValidateModelID — the SAME gate GetOrCreate applies (so
+// Bedrock ARNs / inference-profile IDs with ':' '/' pass, "[1m]" does not) —
+// and Effort with the closed tuningspec tier set that BuildArgs relies on.
+// A value that fails is skipped (logged at Info so operators can see why an
+// aside did not follow its source) and the scratch keeps the registry
+// default — exactly today's behaviour. AccessProfile needs no gate here: it
+// is the ID the router itself resolved at spawn, and an unknown ID degrades
+// to the global default inside resolveSpawnParamsLocked.
+//
+// Returns a new AgentOpts; base is not mutated.
+func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) session.AgentOpts {
+	out := base
+	if snap.AccessProfile != "" {
+		out.AccessProfile = snap.AccessProfile
+	}
+	if snap.Model != "" {
+		if err := session.ValidateModelID(snap.Model); err != nil {
+			slog.Info("scratch: not inheriting source model",
+				"source_key", session.SanitizeLogAttr(snap.Key),
+				"model", session.SanitizeLogAttr(snap.Model), "err", err)
+		} else {
+			out.Model = snap.Model
+		}
+	}
+	if snap.Effort != "" {
+		if err := tuningspec.ValidateEffort("scratch inherited effort", snap.Effort); err != nil {
+			slog.Info("scratch: not inheriting source effort",
+				"source_key", session.SanitizeLogAttr(snap.Key),
+				"effort", session.SanitizeLogAttr(snap.Effort), "err", err)
+		} else {
+			out.Effort = snap.Effort
+		}
+	}
+	return out
+}
+
 // collectScratchContext pulls up to `turns` eligible event entries from each
 // side of the quoted message. When sourceMessageTime is 0 we fall back to
 // the tail of the log on the before-side (no after context is available).
@@ -217,12 +265,11 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 	fetch := turns * 3
 	if sourceMessageTime > 0 {
 		before = sess.EventEntriesBeforeCtx(ctx, sourceMessageTime, fetch)
-		// EventEntriesSince(t) returns entries with Time > t, so passing
-		// (sourceMessageTime - 1) yields entries with Time >= sourceMessageTime;
+		// cli.SinceInclusive yields entries with Time >= sourceMessageTime;
 		// the loop then skips the exact-match entry so the quoted message
 		// itself is not echoed into the context block (the quote already
 		// carries that content).
-		raw := sess.EventEntriesSince(sourceMessageTime - 1)
+		raw := sess.EventEntriesSince(cli.SinceInclusive(sourceMessageTime))
 		// Cap the pre-allocation at `fetch` so a long-running session
 		// that has emitted many events after the quote cannot force an
 		// arbitrarily large slice for what is ultimately a fetch-bounded

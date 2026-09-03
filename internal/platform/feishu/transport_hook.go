@@ -90,7 +90,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// a defense-in-depth measure. Exception: url_verification handshakes
 		// are a one-shot Feishu bootstrap that historically may arrive without
 		// the X-Lark-Request-Timestamp header on some legacy app versions; we
-		// still gate them behind token equality (below) and the hookSem cap
+		// still gate them behind token equality (below) and the dispatch semaphore cap
 		// (challenge branch), and they cannot dispatch to handlers (the
 		// branch only reflects the challenge). When a url_verification DOES
 		// supply a timestamp we still reject if it is stale/malformed —
@@ -269,7 +269,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				// gap: in token-only mode (allowInsecureWebhook), a captured
 				// url_verification challenge with a fixed ts:nonce could otherwise
 				// be replayed for the full nonceTTL window, repeatedly reflecting
-				// the challenge and consuming hookSem with no nonce-level
+				// the challenge and consuming dispatch semaphore slots with no nonce-level
 				// backpressure. Format checks above still run regardless.
 				{
 					// Global cap: refuse new nonces once the map hits maxSeenNonces
@@ -278,7 +278,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					// insert; decrement on duplicate or over-cap. Without this,
 					// a concurrent burst of N webhooks could each pass the Load()
 					// guard before any Add(1) fires, letting count overshoot the
-					// cap by up to N (bounded by hookSem but still observable).
+					// cap by up to N (bounded by the dispatch semaphore but still observable).
 					//
 					// R20260527122801-SEC-8 (#1332): when the cap is hit, evict
 					// the oldest nonceEvictionBatch entries before refusing the
@@ -357,21 +357,21 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// short opaque tokens (typically <=32 chars); cap at 1 KiB so a malicious
 		// verified request cannot force us to reflect a multi-MB body back.
 		if envelope.Type == "url_verification" {
-			// R218-SEC-1: gate url_verification through hookSem like every
-			// other branch below. Without this, a leaked verification_token
-			// lets an attacker flood challenge endpoints (each request still
-			// passes auth) without ever hitting the concurrent-handler cap;
-			// since challenges run synchronously on the HTTP goroutine this
-			// only bounds in-flight challenge replies, but matches the
-			// semaphore contract the rest of the handler relies on.
-			select {
-			case f.hookSem <- struct{}{}:
-			default:
+			// R218-SEC-1: gate url_verification through the dispatch
+			// semaphore like every other branch below. Without this, a
+			// leaked verification_token lets an attacker flood challenge
+			// endpoints (each request still passes auth) without ever
+			// hitting the concurrent-handler cap; since challenges run
+			// synchronously on the HTTP goroutine this only bounds in-flight
+			// challenge replies, but matches the semaphore contract the rest
+			// of the handler relies on. Unlike the message branches this is
+			// the only drop that reports back to the caller (503).
+			if !f.dispatch.TryAcquire() {
 				slog.Warn("feishu webhook: handler semaphore full, dropping url_verification")
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			defer func() { <-f.hookSem }()
+			defer f.dispatch.Release()
 			if len(envelope.Challenge) > 1024 {
 				slog.Warn("feishu challenge too long", "len", len(envelope.Challenge))
 				w.WriteHeader(http.StatusBadRequest)
@@ -426,25 +426,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// it through the card_action branch instead of dropping it; on
 		// success the handler synthesises an IncomingMessage whose Text is
 		// the chosen option so the answer flows through the same dispatch
-		// path as a regular chat reply. Run on hookSem + f.wg like other
+		// path as a regular chat reply. Run on f.dispatch like other
 		// message types so a burst of card clicks cannot exhaust HTTP
 		// server goroutines, and graceful shutdown can wait for in-flight
 		// dispatch. R218-SEC-P1.
 		if eventType == "card.action.trigger" || eventType == "im.card.action.v1_trigger" {
-			select {
-			case f.hookSem <- struct{}{}:
-			default:
-				slog.Warn("feishu webhook: handler semaphore full, dropping card action")
-				return
-			}
-			f.wg.Add(1)
 			rawEvent := envelope.Event
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-f.hookSem }()
-				defer platform.RecoverHandler("feishu card_action")
+			f.dispatch.TryGo("feishu card_action", func() {
 				f.handleCardActionWebhook(f.stopCtx, rawEvent, handler)
-			}()
+			})
 			return
 		}
 		if eventType != "im.message.receive_v1" {
@@ -581,19 +571,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			}
 			msg.Text = text
 			// Limit concurrent webhook handlers to avoid unbounded goroutine growth.
-			select {
-			case f.hookSem <- struct{}{}:
-			default:
-				slog.Warn("feishu webhook: handler semaphore full, dropping text message")
-				return
-			}
-			f.wg.Add(1)
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-f.hookSem }()
-				defer platform.RecoverHandler("feishu text")
-				handler(f.stopCtx, msg)
-			}()
+			f.dispatch.TryGo("feishu text", func() { handler(f.stopCtx, msg) })
 
 		case "image":
 			var content struct {
@@ -612,17 +590,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
-			select {
-			case f.hookSem <- struct{}{}:
-			default:
-				slog.Warn("feishu webhook: handler semaphore full, dropping image message")
-				return
-			}
-			f.wg.Add(1)
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-f.hookSem }()
-				defer platform.RecoverHandler("feishu image")
+			f.dispatch.TryGo("feishu image", func() {
 				imgMsg := msg
 				data, mime, err := f.DownloadImage(f.stopCtx, event.Message.MessageID, content.ImageKey)
 				if err != nil {
@@ -636,7 +604,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				}
 				imgMsg.Images = []platform.Image{{Data: data, MimeType: mime}}
 				handler(f.stopCtx, imgMsg)
-			}()
+			})
 
 		case "audio":
 			var content struct {
@@ -655,20 +623,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
-			select {
-			case f.hookSem <- struct{}{}:
-			default:
-				slog.Warn("feishu webhook: handler semaphore full, dropping audio message")
-				return
-			}
-			f.wg.Add(1)
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-f.hookSem }()
-				defer platform.RecoverHandler("feishu audio")
+			f.dispatch.TryGo("feishu audio", func() {
 				audioMsg := msg
 				f.handleAudio(f.stopCtx, handler, audioMsg, event.Message.MessageID, content.FileKey)
-			}()
+			})
 		}
 	})
 }

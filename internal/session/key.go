@@ -177,6 +177,21 @@ func plannerNameFromKey(key string) string {
 	return sessionkey.PlannerNameFromKey(key)
 }
 
+// DeniedKeyRuneRanges returns the inclusive [lo, hi] codepoint ranges that
+// ValidateSessionKey rejects, as a fresh slice so callers cannot mutate the
+// table. Exposed for cross-layer contract tests (dashboard sanitizeKeySlug
+// parity); production code should call ValidateSessionKey.
+//
+// R202606f-ARCH-6 (#2301): the table itself is owned by internal/sessionkey
+// (denyset.go) so shim.validateKeyForShim, sanitizeKeyComponent and
+// SanitizeQuote share one deny-set instead of four hand copies. The
+// dashboard's client-side sanitizeKeySlug must strip the same set (#2429) —
+// the Go contract test in internal/server parses its regex against this
+// accessor, so growing the sessionkey table tells you to update dashboard.js.
+func DeniedKeyRuneRanges() [][2]rune {
+	return sessionkey.DeniedKeyRuneRanges()
+}
+
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
 // sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate
 // enforced by sanitizeKeyComponent for IM-originated keys — the IM path
@@ -198,21 +213,10 @@ func ValidateSessionKey(k string) error {
 		return errors.New("session key invalid utf-8")
 	}
 	for _, r := range k {
-		// Reject C0 (U+0000..U+001F including tab), DEL (U+007F), and the
-		// C1 control range (U+0080..U+009F). Keys travel directly into
-		// slog.TextHandler attrs and sessions.json — a tab fragments a
-		// log attr into two, \n injects fake log lines, and C1 codepoints
-		// are interpreted as control functions by some terminal emulators.
-		// Also reject the Unicode bidi / zero-width classes that
-		// sanitizeKeyComponent drops on the IM path.
-		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			return errors.New("session key contains control character")
-		}
 		switch {
-		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
-			r >= 0x202A && r <= 0x202E, // bidi embedding / override
-			r == 0x2028, r == 0x2029,   // line / paragraph separator
-			r == 0xFEFF: // BOM
+		case sessionkey.IsControlKeyRune(r):
+			return errors.New("session key contains control character")
+		case sessionkey.IsInvisibleKeyRune(r):
 			return errors.New("session key contains invisible control character")
 		}
 	}

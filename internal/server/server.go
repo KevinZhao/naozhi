@@ -77,13 +77,13 @@ const (
 //
 //	HTTP entry           — addr / mux / startedAt / onReady / appCtx / logger
 //	core deps            — router / scheduler / hub / projectMgr
-//	multi-node           — nodes / reverseNodeServer / nodesMu
+//	multi-node           — nodes / reverseNodeServer
 //	handler groups       — auth + the *xHandler dashboard/API handlers
 //	send / dispatch      — dedup / sessionGuard / msgQueue / agents / tokens / timeouts
 //	paths / caches       — claudeDir / discoveryCache / scratchPool / sysessionMgr / …
 //	modes / resolver     — debugMode / headless / resolver / nodeCache
 //	watchdog / shutdown  — watchdog counters / shutdownComplete
-//	platforms            — platforms / knownNodes
+//	platforms            — platforms
 //
 // Verification rule:
 //
@@ -121,15 +121,13 @@ type Server struct {
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
 	// ── multi-node ─────────────────────────────────────
-	nodes             map[string]node.Conn // 读写: server.go, dashboard.go
-	reverseNodeServer *node.ReverseServer  // 读写: server.go, dashboard.go
-	nodesMu           sync.RWMutex         // 读写: server.go, dashboard.go (shared with Hub.nodesMu)
+	nodes             *nodeRegistry       // 读写: server.go, routes.go (single owner of the node table; same instance as Hub.nodes — RFC godstruct-extraction G2 / #2192)
+	reverseNodeServer *node.ReverseServer // 读写: server.go, dashboard.go
 
 	// ── dashboard / API handler groups ─────────────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	cronH        *dashcron.Handlers    // 读写: server.go, dashboard.go
 	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
-	nodeAccess   *nodeAccessor         // 读写: server.go, dashboard.go
 	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
 	projectH     *dashproject.Handlers // 读写: server.go, dashboard.go
 	sessionH     *dashsession.Handlers // 读写: server.go, dashboard.go
@@ -212,13 +210,12 @@ type Server struct {
 	shutdownComplete chan struct{}
 
 	// platforms is read at routes-registration time (server.go) to wire each
-	// IM channel's webhook + outbound sender; knownNodes maps configured node
-	// IDs → display names (read at server.go:433/553). R20260603-ARCH-1: the
-	// former sibling `backendTag` field was write-only (ctor-only, no receiver
+	// IM channel's webhook + outbound sender. R20260603-ARCH-1: the former
+	// sibling `backendTag` field was write-only (ctor-only, no receiver
 	// read) and has been removed — the live reply tag flows through the local
-	// `tag` var into SessionHandlers.BackendTag (server.go ctor).
-	platforms  map[string]platform.Platform
-	knownNodes map[string]string
+	// `tag` var into SessionHandlers.BackendTag (server.go ctor). The former
+	// `knownNodes` sibling moved into *nodeRegistry (G2 / #2192).
+	platforms map[string]platform.Platform
 }
 
 // Workspace 验证 helpers (validateWorkspace / classifyWorkspaceErr /
@@ -358,14 +355,10 @@ func buildServer(opts ServerOptions) *Server {
 	// claudeDir before joining or reading.
 	claudeDir := resolveClaudeDir()
 
-	nodes := opts.Nodes
-	if nodes == nil {
-		nodes = make(map[string]node.Conn)
-	}
-	knownNodes := make(map[string]string)
-	for id, nc := range nodes {
-		knownNodes[id] = nc.DisplayName()
-	}
+	// nodeRegistry is the single owner of the live node table + configured
+	// display names; nil opts.Nodes is normalised to an empty table and
+	// every configured node is seeded as known (G2 / #2192).
+	nodes := newNodeRegistry(opts.Nodes)
 
 	// allowed_root is the one directory-traversal guard for dashboard /cd,
 	// cron WorkDir, and handleTakeover CWD. Empty means "no restriction",
@@ -453,7 +446,6 @@ func buildServer(opts ServerOptions) *Server {
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,
 		nodes:           nodes,
-		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
 		updateStatus:    opts.UpdateStatus,
 		updateChecker:   opts.UpdateChecker,
@@ -514,8 +506,6 @@ func buildServer(opts ServerOptions) *Server {
 		slog.Warn("retired store load failed (degrades to last_active sort)", "err", retiredErr)
 	}
 
-	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
-
 	hubBroadcast := func() {
 		if s.hub != nil {
 			s.hub.BroadcastSessionsUpdate()
@@ -524,22 +514,22 @@ func buildServer(opts ServerOptions) *Server {
 
 	s.nodeCache = node.NewCacheManager(
 		func() map[string]node.Conn {
-			return s.nodeAccess.NodesSnapshot()
+			return s.nodes.NodesSnapshot()
 		},
 		hubBroadcast,
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
-	// Wire extracted handler groups that depend on nodeAccess/nodeCache
+	// Wire extracted handler groups that depend on the node registry/nodeCache
 	// (literals live in build_handlers.go; #738).
-	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodeAccess, s.nodeCache, hubBroadcast)
+	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, hubBroadcast)
 	// R247-ARCH-15 (#650): no closure here — ProjectHandlers stores
 	// baseCtx as a plain field that registerDashboard wires via
 	// SetBaseContext once `s.hub` exists. The two-phase construction
 	// is unchanged (Hub still doesn't exist at this point); only the
 	// DI shape moved from a captured closure to a direct field assign.
-	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache)
+	s.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache)
 	agentIDs := agentIDList(agents)
 	s.sessionH = dashsession.New(dashsession.Deps{
 		Router:        router,
@@ -551,7 +541,7 @@ func buildServer(opts ServerOptions) *Server {
 		AllowedRoot:   opts.AllowedRoot,
 		Agents:        agents,
 		AgentIDs:      agentIDs,
-		NodeAccess:    s.nodeAccess,
+		NodeAccess:    s.nodes,
 		NodeCache:     s.nodeCache,
 		StartedAt:     s.startedAt,
 		BackendTag:    tag,
@@ -589,7 +579,7 @@ func buildServer(opts ServerOptions) *Server {
 	})
 	s.agentEventsH = agentevents.New(agentevents.Deps{
 		Router:     router,
-		NodeAccess: s.nodeAccess,
+		NodeAccess: s.nodes,
 	})
 
 	// Scratch pool (ephemeral aside sessions). Bound to the same router so
@@ -610,9 +600,9 @@ func buildServer(opts ServerOptions) *Server {
 	}
 	s.cliH = cli.NewCLIBackendsHandlerCtx(startupCtx, router)
 	// Wire node routing so /api/cli/backends?node=<id> proxies the manifest
-	// to a remote node — the picker node-aware fix. nodeAccess is already
-	// constructed above; *nodeAccessor satisfies cli.NodeAccessor.
-	s.cliH.SetNodeAccess(s.nodeAccess)
+	// to a remote node — the picker node-aware fix. *nodeRegistry satisfies
+	// cli.NodeAccessor.
+	s.cliH.SetNodeAccess(s.nodes)
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,
@@ -627,7 +617,7 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeoutStr:    opts.TotalTimeout.String(),
 		watchdogNoOut:      s.watchdog.noOutPtr(),
 		watchdogTotal:      s.watchdog.totalPtr(),
-		nodeAccess:         s.nodeAccess,
+		nodeAccess:         s.nodes,
 		platforms:          platNames,
 		platformsStatus:    platformStatusMap(platNames),
 		hubDropped: func() int64 {
@@ -642,18 +632,14 @@ func buildServer(opts ServerOptions) *Server {
 	if opts.ReverseNodeServer != nil {
 		s.reverseNodeServer = opts.ReverseNodeServer
 		for id, displayName := range opts.ReverseNodeServer.AllNodes() {
-			s.knownNodes[id] = displayName
+			s.nodes.SetKnown(id, displayName)
 		}
 		opts.ReverseNodeServer.OnRegister = func(id string, rc *node.ReverseConn) {
-			s.nodesMu.Lock()
-			s.nodes[id] = rc
-			s.nodesMu.Unlock()
+			s.nodes.Add(id, rc)
 			go s.nodeCache.RefreshFor(id) // RefreshFor calls onChange → BroadcastSessionsUpdate
 		}
 		opts.ReverseNodeServer.OnDeregister = func(id string) {
-			s.nodesMu.Lock()
-			delete(s.nodes, id)
-			s.nodesMu.Unlock()
+			s.nodes.Remove(id)
 			s.nodeCache.PurgeNode(id)
 			if s.hub != nil {
 				s.hub.PurgeNodeSubscriptions(id)

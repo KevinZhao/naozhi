@@ -1811,9 +1811,14 @@ func TestDashboard_R110HistoryDrawerTimeFormat(t *testing.T) {
 	// the toLocaleDateString call must live *inside* historyDayLabel,
 	// not at the old inline site. Assert exactly one occurrence in
 	// the file (was at the inline site pre-Round-129).
-	count := strings.Count(js, "d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' })")
+	// #2429: the option bag is built as `opts` so a non-current year can
+	// append year:'numeric'; the single call site is toLocaleDateString(undefined, opts).
+	if !strings.Contains(js, "const opts = { month: 'short', day: 'numeric', weekday: 'short' };") {
+		t.Error("historyDayLabel must build the weekday+month+day option bag as `opts`")
+	}
+	count := strings.Count(js, "d.toLocaleDateString(undefined, opts)")
 	if count != 1 {
-		t.Errorf("toLocaleDateString with the weekday+month+day args should occur exactly 1 time (inside historyDayLabel); got %d — an inline caller may have resurfaced", count)
+		t.Errorf("toLocaleDateString(undefined, opts) should occur exactly 1 time (inside historyDayLabel); got %d — an inline caller may have resurfaced", count)
 	}
 }
 
@@ -4006,8 +4011,8 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		`if (!stats || typeof stats !== 'object') return [];`,
-		`'运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total`,
-		`if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;`,
+		`'运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total`,
+		`if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;`,
 		`if (stats.cli_name) {`,
 		`if (totalKills > 0) {`,
 		`kind: 'warn',`,
@@ -4640,12 +4645,17 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 	}
 	body := js[startIdx : startIdx+endIdx+2]
 
-	// 3) Early bail-out: fetchEvents must return when a prior invocation is
-	//    still in flight. The precise string `if (_fetchEventsInFlight) return;`
-	//    pins the gate so a refactor that inverts the flag or routes it
-	//    through a helper will trip this test.
-	if !strings.Contains(body, "if (_fetchEventsInFlight) return;") {
-		t.Error("fetchEvents must early-return when _fetchEventsInFlight is true — guards against overlapping polls")
+	// 3) Early bail-out: a tail poll must return when a prior invocation is
+	//    still in flight. The gate is scoped to `!full` (#2430): the session-
+	//    switch `full` fetch must never be coalesced away, it supersedes the
+	//    in-flight tail through _fetchEventsGen instead. The precise string
+	//    pins the gate so a refactor that inverts the flag, drops the `!full`
+	//    scope, or routes it through a helper will trip this test.
+	if !strings.Contains(body, "if (!full && _fetchEventsInFlight) return;") {
+		t.Error("fetchEvents must early-return tail polls (`!full`) when _fetchEventsInFlight is true — guards against overlapping polls without swallowing the full fetch")
+	}
+	if strings.Contains(body, "\n  if (_fetchEventsInFlight) return;") {
+		t.Error("fetchEvents must not gate `full` fetches on _fetchEventsInFlight (#2430)")
 	}
 
 	// 4) Dispatch-time capture of selectedKey/selectedNode. appendEvents
@@ -4675,8 +4685,12 @@ func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
 
 	// 6) Stale-response bail-out after await. The snapshot captured in
 	//    step 4 must be re-checked once the fetch resolves, because
-	//    selectedKey could have flipped during the suspend.
-	if !strings.Contains(body, "if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;") {
+	//    selectedKey could have flipped during the suspend — and a newer
+	//    `full` fetch (generation bump) supersedes the response too.
+	if !strings.Contains(body, "const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;") {
+		t.Error("fetchEvents must define the stale() predicate over the dispatch-time snapshot AND the fetch generation")
+	}
+	if !strings.Contains(body, "if (stale()) return;") {
 		t.Error("fetchEvents must drop stale responses after await — prevents appendEvents from targeting the wrong session")
 	}
 
@@ -5033,12 +5047,14 @@ func TestDashboardHTML_R110P1_ContextMenuStyles(t *testing.T) {
 	}
 
 	// z-index contract: menu above its overlay, both above .modal-overlay.
-	// R20260610-UI-2 routed these through the --nz-z-* scale: the overlay sits
-	// at --nz-z-toast (210, above the drawer/modal tier 200) and the menu at
-	// --nz-z-menu (211, above its overlay). If the menu drops below modal-overlay
-	// a stray confirmDialog would hide it.
-	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}") {
-		t.Error(".ctx-menu-overlay must use z-index:var(--nz-z-toast) to sit above the modal/drawer tier")
+	// R20260610-UI-2 routed these through the --nz-z-* scale: the menu sits at
+	// --nz-z-menu (211) and its overlay one step below (calc(menu - 1) = 210,
+	// above the drawer/modal tier 200/205). #2434 moved --nz-z-toast to the
+	// top of the scale, so the overlay can no longer borrow the toast token
+	// (it would then cover the menu). If the menu drops below modal-overlay a
+	// stray confirmDialog would hide it.
+	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:calc(var(--nz-z-menu) - 1)}") {
+		t.Error(".ctx-menu-overlay must use z-index:calc(var(--nz-z-menu) - 1) to sit above the modal/drawer tier yet below the menu")
 	}
 	if !strings.Contains(html, "z-index:var(--nz-z-menu)") {
 		t.Error(".ctx-menu must use z-index:var(--nz-z-menu) so it renders above its overlay")

@@ -49,7 +49,7 @@ func TestMaybeRefreshBotInfo_SkipsAfterStop(t *testing.T) {
 	// wg must be 0: a launched goroutine would be parked in the busy
 	// singleflight, so wg.Wait would block and trip the timeout.
 	done := make(chan struct{})
-	go func() { f.wg.Wait(); close(done) }()
+	go func() { f.dispatch.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -85,5 +85,5 @@ func TestMaybeRefreshBotInfo_RunsWhenLive(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("live stopCtx: self-heal fetch was never issued")
 	}
-	f.wg.Wait()
+	f.dispatch.Wait()
 }

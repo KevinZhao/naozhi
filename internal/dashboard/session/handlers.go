@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -210,18 +211,6 @@ type sessionListMultiResp struct {
 	Stats           sessionStats               `json:"stats"`
 	Nodes           map[string]nodeStatusEntry `json:"nodes"`
 	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
-}
-
-// isUnknownRPCMethodErr reports whether a remote-proxy error came from the
-// peer node rejecting the RPC method name. That happens when the peer is
-// running an older naozhi binary that predates remove_session /
-// interrupt_session — surfacing a bespoke 409 lets the dashboard show a
-// precise "upgrade the remote node" toast instead of a generic 502. The
-// match is on error text because the reverse-RPC error is wrapped via
-// fmt.Errorf in multiple layers and carries the literal "unknown method: "
-// prefix from internal/upstream/connector.go's default switch branch.
-func isUnknownRPCMethodErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
 // CronView is the consolidated narrow consumer interface the server
@@ -950,12 +939,26 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 // 500 matches maxPersistedHistory — the upper bound of anything useful.
 const maxEventsPageLimit = 500
 
+// eventsBefore returns the entries strictly older than the `before` cursor
+// (unix ms), preserving the input's chronological order. Always returns a
+// non-nil slice so an exhausted page serialises as [] rather than null.
+func eventsBefore(entries []cli.EventEntry, before int64) []cli.EventEntry {
+	out := make([]cli.EventEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Time < before {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // GET /api/sessions/events
 //
 // Query parameters:
 //   - key       (required): session key
 //   - node      (optional): remote node ID (proxy to that node)
-//   - after     (optional, ms): incremental fetch — entries with Time > after
+//   - after     (optional, ms): incremental fetch — entries with Time >= after
+//     (re-admits the watermark ms, #2456; client dedups by uuid)
 //   - before    (optional, ms): pagination fetch — entries with Time < before,
 //     returning up to `limit` newest-first-then-
 //     reversed (chronological) entries
@@ -1022,9 +1025,10 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy — forward after only (the remote protocol predates
-	// before/limit). If/when FetchEventsPaginated exists, we can extend here
-	// without breaking older peer binaries.
+	// Remote node proxy — the node RPC only carries `after` (it predates
+	// before/limit), so pagination is emulated here: fetch what the peer has
+	// and apply the `before` cursor locally. Not a protocol change, so older
+	// peer binaries keep working.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
@@ -1035,6 +1039,31 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if beforeStr != "" && afterStr == "" {
+			// #2433: "load earlier" page. Previously `before` was ignored
+			// and the tail-`limit` slice below re-served the NEWEST page on
+			// every click, so prependEvents (no dedup) stacked duplicates
+			// and the button never reached "done". Mirror the local branch:
+			// strictly older than the cursor, newest `limit` of those, plus
+			// an authoritative has-more flag. An empty page is the client's
+			// stop signal, so it must come back as [] with has-more=0.
+			pageLimit := limit
+			if pageLimit == 0 {
+				pageLimit = maxEventsPageLimit
+			}
+			page := eventsBefore(entries, before)
+			hasMore := len(page) > pageLimit
+			if hasMore {
+				page = page[len(page)-pageLimit:]
+			}
+			if hasMore {
+				w.Header().Set("X-Events-Has-More", "1")
+			} else {
+				w.Header().Set("X-Events-Has-More", "0")
+			}
+			httputil.WriteJSON(w, page)
 			return
 		}
 		// Apply page cap on the returned entries so the dashboard gets a
@@ -1062,7 +1091,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	var entries []cli.EventEntry
 	switch {
 	case afterStr != "":
-		entries = sess.EventEntriesSince(after)
+		entries = sess.EventEntriesSince(cli.SinceInclusive(after))
 		if limit > 0 && len(entries) > limit {
 			// Preserve the newest on a full catch-up so the client doesn't
 			// miss events it just streamed through.
@@ -1176,7 +1205,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		removed, err := nc.ProxyRemoveSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				// Peer is running an older binary without remove_session
 				// support; return 409 + explicit body so the dashboard can
 				// show a specific "upgrade needed" message instead of the
@@ -1268,7 +1297,7 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 				"node", sessionpkg.SanitizeLogAttr(req.Node),
 				"key", sessionpkg.SanitizeLogAttr(req.Key),
 				"err", sessionpkg.SanitizeLogAttr(err.Error()))
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
 			}
@@ -1428,7 +1457,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 		interrupted, err := nc.ProxyInterruptSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote interrupt session failed", "node", req.Node, "key", req.Key, "err", err)
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
 			}

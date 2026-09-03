@@ -8,15 +8,11 @@
 // RFC docs/rfc/cc-asset-browser.md §3.3.
 package ccassets
 
-import "net/http"
+import "github.com/naozhi/naozhi/internal/dashboard/contracts"
 
-// IPLimiter is the subset of internal/server.ipLimiter this handler uses.
-// server's *ipLimiter satisfies this shape; accepting the interface keeps the
-// dependency one-way (mirrors ext/memory/deps.go).
-type IPLimiter interface {
-	Allow(remoteAddr string) bool
-	AllowRequest(r *http.Request) bool
-}
+// IPLimiter aliases the shared dashboard contract (#2285); server's
+// *ipLimiter is injected without a reverse import.
+type IPLimiter = contracts.IPLimiter
 
 // Rate-limit defaults for the asset endpoints. Asset listing is heavier than a
 // memory hover (a cold scan walks many dirs) but still cheap once cached;
