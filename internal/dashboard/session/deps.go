@@ -4,22 +4,11 @@
 // internal/server.
 package session
 
-import (
-	"net/http"
+import "github.com/naozhi/naozhi/internal/dashboard/contracts"
 
-	"github.com/naozhi/naozhi/internal/node"
-)
-
-// NodeAccessor is the subset of internal/server.NodeAccessor the session
-// handlers use. server's *nodeAccessor satisfies this shape; we accept
-// the interface so the sub-package doesn't reverse-import server.
-type NodeAccessor interface {
-	HasNodes() bool
-	NodesSnapshot() map[string]node.Conn
-	NodeByID(id string) (node.Conn, bool)
-	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
-	KnownNodes() map[string]string
-}
+// NodeAccessor aliases the shared dashboard contract (#2285); server's
+// *nodeAccessor is injected via Deps without a reverse import.
+type NodeAccessor = contracts.NodeAccessor
 
 // strOrFallback is a small map[string]any helper duplicated from
 // internal/server/dashboard.go. Used by HandleEvents/HandleList to read
