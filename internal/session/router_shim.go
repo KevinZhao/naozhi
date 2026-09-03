@@ -189,10 +189,9 @@ func shutdownShimViaReconnect(
 // store save) — no session, no tuning, backend defaults apply.
 // docs/rfc/dashboard-model-effort-control.md §4.5.
 //
-// Effort must be mirrored for the same reason SettingsFile is: BuildArgs
-// emits `--effort` for ACP backends, so omitting it would make every restart
-// read the surviving kiro shims as arg-drift and restart sessions that were
-// fine.
+// The config-derived argv fields (SettingsFile, MCPConfigFile, DebugFile, and
+// effort) are supplied by argvSpawnOptions rather than spelled out here — see
+// that function for why mirroring them by hand kept regressing.
 //
 // KNOWN LIMITATION (pre-existing, widened not introduced): this comparison
 // only sees backend-level defaults + session tuning, so any per-AGENT
@@ -204,7 +203,7 @@ func shutdownShimViaReconnect(
 // stays out of scope. docs/rfc/kiro-effort-control.md §4.5.1. Session tuning
 // does NOT share that limitation: the ManagedSession is available right here,
 // so there is no excuse to leave the same trap twice.
-func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID string, sess *ManagedSession) []string {
+func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string, sess *ManagedSession) []string {
 	bd := r.backendDefaultsFor(backendID)
 	model, effort := bd.Model, bd.Effort
 	if sess != nil {
@@ -215,22 +214,12 @@ func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID string, ses
 			effort = te
 		}
 	}
-	return recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
-		Model:     model,
-		ExtraArgs: bd.Args,
-		Effort:    effort,
-		// Must mirror the real spawn (lifecycle) so a session started
-		// with `--settings <naozhi file>` is not misread as arg-drift
-		// (which would trigger an unnecessary restart). RFC
-		// naozhi-owned-settings-v3.
-		SettingsFile: r.naozhiSettingsFile,
-		// Same reason as SettingsFile directly above: BuildArgs emits
-		// `--mcp-config` for it, so omitting it here would make every
-		// surviving shim read as arg-drift after an upgrade that turns
-		// cli.mcp_config on — restarting sessions that were fine.
-		// RFC cli-mcp-config G4.
-		MCPConfigFile: r.mcpConfigFile,
-	})
+	// Every argv-bearing field is mirrored by construction — see
+	// argvSpawnOptions for why this is a shared function and not another
+	// hand-copied struct literal. cliDebugPathFor (not cliDebugFileFor) keeps
+	// the comparison read-only: this runs for every surviving shim at startup.
+	return recWrapper.Protocol.BuildArgs(
+		r.argvSpawnOptions(model, effort, r.cliDebugPathFor(key), bd.Args))
 }
 
 // firstArgvDivergence returns the first differing token of two argv slices as
@@ -361,7 +350,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		var storedBase, currentArgs []string
 		if recWrapper != nil {
 			storedBase = stripResumeArgs(state.CLIArgs)
-			currentArgs = r.driftCompareArgs(recWrapper, recBackendID, sess)
+			currentArgs = r.driftCompareArgs(recWrapper, recBackendID, state.Key, sess)
 			argsDrift = len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs)
 		}
 
