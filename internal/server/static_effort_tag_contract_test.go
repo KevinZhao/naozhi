@@ -70,7 +70,7 @@ func TestDashboardJS_EffortTagWiring(t *testing.T) {
 	if !strings.Contains(js, pollSite) {
 		t.Errorf("fetchSessions must repaint the effort tag: missing %q", pollSite)
 	}
-	shortCircuit := strings.Index(js, `if (version === lastVersion && version > 0`)
+	shortCircuit := strings.Index(js, `if (wsConnected && version === lastVersion && version > 0`)
 	poll := strings.Index(js, pollSite)
 	switch {
 	case shortCircuit < 0:

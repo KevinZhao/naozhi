@@ -512,7 +512,16 @@ async function fetchSessions() {
     // earlier revision of this code sat and silently never fired.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selectedKey) setHeaderEffortChip(data.sessions);
-    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
+    // #2431: under WS-fallback polling this REST poll is the ONLY state source,
+    // and process state transitions (running↔ready, last_response, sc-time)
+    // never advance stats.version — storeGen moves on add/remove/rename/reset
+    // only, and with the socket down no session_state push zeroes lastVersion.
+    // The version short-circuit would therefore freeze the sidebar and the
+    // "WS disconnected → always reconcile" block further down never ran. Skip
+    // the gate while disconnected; renderSidebar is idempotent so the 5 s
+    // repaint is the intended fallback cost.
+    const wsConnected = wsm.state === WS_STATES.CONNECTED;
+    if (wsConnected && version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
     lastNodesJSON = nodesHash;
     lastHistoryJSON = historyHash;
@@ -540,7 +549,12 @@ async function fetchSessions() {
         sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
       });
     }
-    (data.sessions || []).forEach(s => {
+    // #2431: map (not forEach) so the optimistic 'running' copy below lands in
+    // the payload handed to renderSidebar / stashed as _lastSidebarData — the
+    // original objects still say 'ready', so a re-render from the cached
+    // payload (toggleProjectCollapsed, sidebar search) painted the card idle
+    // while the main banner showed running.
+    const sessions = (data.sessions || []).map(s => {
       const n = s.node || 'local';
       const sKey = sid(s.key, n);
       // Preserve the optimistic 'running' flip when the REST snapshot is still
@@ -559,7 +573,9 @@ async function fetchSessions() {
       }
       sessionsData[sKey] = s;
       backendKeys.add(s.key);
+      return s;
     });
+    data = Object.assign({}, data, { sessions });
 
     // Remove pending sessions that now exist in backend, then persist ONCE.
     // The durable localStorage blob must drop the now-real keys so a stale
@@ -672,7 +688,6 @@ async function fetchSessions() {
     if (selectedKey) {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
-      const wsConnected = wsm.state === WS_STATES.CONNECTED;
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
         updateMainState(sd.state, sd.death_reason);
       } else if (sd && wsConnected && sd.state === 'running') {
@@ -12964,20 +12979,25 @@ const wsm = {
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
       // Reduce discovered scan frequency
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+      // #2431: a hidden tab has had its pollers suspended by stopPollers;
+      // re-arming here would undo that. startPollers re-arms on return.
+      if (!document.hidden) discoveredPollTimer = setInterval(scanDiscovered, 30000);
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
       // RNEW-UX-010 — announce only on real transitions from connected, so
       // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
       if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-      // WS lost: start fallback polling
-      if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
+      // WS lost: start fallback polling — unless the tab is hidden (#2431):
+      // stopPollers already suspended everything and startPollers re-arms on
+      // visibilitychange from the then-current WS state.
+      const visible = !document.hidden;
+      if (visible && !sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 5000);
+      if (visible) discoveredPollTimer = setInterval(scanDiscovered, 5000);
       if (selectedKey && !eventTimer) {
         lastEventTime = this.lastEventTimeWs;
-        eventTimer = setInterval(() => fetchEvents(false), 1000);
+        if (visible) eventTimer = setInterval(() => fetchEvents(false), 1000);
       }
     }
   },
@@ -14111,7 +14131,12 @@ wsm.connect();
   const startPollers = () => {
     if (!sessionPollTimer) {
       fetchSessions(); // immediate refresh on resume so UI is not stale
-      sessionPollTimer = setInterval(fetchSessions, 5000);
+      // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
+      // socket session_state pushes already drive the sidebar; arming the
+      // interval here made it run alongside WS until the next reconnect.
+      if (!(wsm && wsm.state === WS_STATES.CONNECTED)) {
+        sessionPollTimer = setInterval(fetchSessions, 5000);
+      }
     }
     // Same rationale as the turn-boundary refresh in onSessionState: the branch
     // can change without the workspace path changing, and an operator switching

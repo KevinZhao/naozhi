@@ -655,6 +655,12 @@ function startMockServer(overrides = {}) {
           const s = (sessionsData.sessions || []).find(x => x.key === key);
           if (s) s.effort = effort;
         },
+        // Same contract for process state (#2431): running↔ready flips never
+        // bump storeGen, so a WS-fallback poll must repaint the card anyway.
+        setSessionStateWithoutVersionBump(key, state) {
+          const s = (sessionsData.sessions || []).find(x => x.key === key);
+          if (s) s.state = state;
+        },
         resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; },
       });
     });
