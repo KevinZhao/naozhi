@@ -1,58 +1,32 @@
 package session
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"slices"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// TestSpawnOptionsLiteral_CarriesMCPConfigFile is the spawn-side half of the
-// parity pair for RFC cli-mcp-config (the drift-side half is the extended
-// `required` list in TestEffortDriftCheck_MirrorsSpawn).
+// TestSpawnArgvConstructor_CarriesMCPConfigFile is the RFC cli-mcp-config half
+// of the parity pair (the full field list lives in
+// TestEffortDriftCheck_MirrorsSpawn).
 //
 // Source-level rather than behavioural for the same reason its Effort twin is:
-// deleting `MCPConfigFile: r.mcpConfigFile` from the SpawnOptions literal
-// compiles and passes every behavioural test — the configured MCP set just
-// silently stops reaching the CLI, and the operator sees "cli.mcp_config does
-// nothing" with no failing test anywhere.
-func TestSpawnOptionsLiteral_CarriesMCPConfigFile(t *testing.T) {
+// deleting `MCPConfigFile: r.mcpConfigFile` from argvSpawnOptions compiles and
+// passes every behavioural test — the configured MCP set just silently stops
+// reaching the CLI, and the operator sees "cli.mcp_config does nothing" with no
+// failing test anywhere.
+func TestSpawnArgvConstructor_CarriesMCPConfigFile(t *testing.T) {
 	t.Parallel()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "router_lifecycle.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse router_lifecycle.go: %v", err)
+	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
+	if literals == 0 {
+		t.Fatalf("no cli.SpawnOptions literal found in %s — if the argv "+
+			"constructor moved, move this test with it", argvConstructorFile)
 	}
-
-	var found bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		sel, ok := lit.Type.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "SpawnOptions" {
-			return true
-		}
-		found = true
-		for _, elt := range lit.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "MCPConfigFile" {
-					return false
-				}
-			}
-		}
-		t.Error("the cli.SpawnOptions literal in router_lifecycle.go does not set " +
-			"MCPConfigFile — a configured cli.mcp_config would never reach the CLI, " +
-			"and no behavioural test would notice")
-		return false
-	})
-	if !found {
-		t.Fatal("no cli.SpawnOptions literal found in router_lifecycle.go — " +
-			"if spawn assembly moved, move this test with it")
+	if !slices.Contains(got, "MCPConfigFile") {
+		t.Errorf("argvSpawnOptions does not set MCPConfigFile (sets %v) — a configured "+
+			"cli.mcp_config would never reach the CLI, and no behavioural test "+
+			"would notice", got)
 	}
 }
 
@@ -81,13 +55,19 @@ func TestMCPConfigFileAffectsArgv(t *testing.T) {
 // misread as arg-drift.
 //
 // This is the failure the AST tests exist to prevent, asserted end-to-end on the
-// values rather than on the source: without the mirror in router_shim.go, every
-// live session gets restarted the first time naozhi restarts after the operator
-// turns cli.mcp_config on. RFC cli-mcp-config G4.
+// values rather than on the source: without the mirror, every live session gets
+// restarted the first time naozhi restarts after the operator turns
+// cli.mcp_config on. RFC cli-mcp-config G4.
+//
+// Both sides run the PRODUCTION constructor. They used to be two identical
+// hand-written SpawnOptions literals, which made this assertion vacuous — it
+// compared the test's own copies, so no production divergence could ever fail it
+// (the DebugFile regression lived through it untouched).
 func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	t.Parallel()
 	const mcpPath = "/data/naozhi/mcp.json"
 
+	key := "dashboard:direct:mcp-parity:general"
 	r := &Router{}
 	r.bkStore.model = "opus"
 	r.mcpConfigFile = mcpPath
@@ -95,23 +75,14 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 
 	bd := r.backendDefaultsFor("claude")
 
-	// What classifyShimState's drift check builds (router_shim.go).
-	driftArgs := proto.BuildArgs(cli.SpawnOptions{
-		Model:         bd.Model,
-		ExtraArgs:     bd.Args,
-		Effort:        bd.Effort,
-		SettingsFile:  r.naozhiSettingsFile,
-		MCPConfigFile: r.mcpConfigFile,
-	})
+	// What classifyShimState's drift check builds (driftCompareArgs → read-only
+	// debug path).
+	driftArgs := proto.BuildArgs(
+		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugPathFor(key), bd.Args))
 	// What spawnSession builds for a session on backend defaults
-	// (router_lifecycle.go).
-	spawnArgs := proto.BuildArgs(cli.SpawnOptions{
-		Model:         bd.Model,
-		ExtraArgs:     bd.Args,
-		Effort:        bd.Effort,
-		SettingsFile:  r.naozhiSettingsFile,
-		MCPConfigFile: r.mcpConfigFile,
-	})
+	// (router_lifecycle.go → side-effecting debug path).
+	spawnArgs := proto.BuildArgs(
+		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), bd.Args))
 
 	if !slices.Equal(stripResumeArgs(spawnArgs), stripResumeArgs(driftArgs)) {
 		t.Errorf("drift check disagrees with the real spawn:\n spawn = %v\n drift = %v",

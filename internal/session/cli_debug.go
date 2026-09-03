@@ -75,17 +75,31 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 	return dir
 }
 
-// cliDebugFileFor returns the per-session debug-file path, or "" when CLI
-// debug capture is off (cliDebugDir empty). The file name reuses the
-// event-log key-hash stem so operators can line a session's debug log up with
-// its <stem>.log event file. The path is regenerated (overwritten) on every
-// spawn — debug capture is a live-tail diagnostic, not an audit trail, so the
-// latest spawn's log is the one that matters.
-func (r *Router) cliDebugFileFor(key string) string {
+// cliDebugPathFor returns the per-session debug-file path WITHOUT touching the
+// filesystem, or "" when CLI debug capture is off (cliDebugDir empty). The file
+// name reuses the event-log key-hash stem so operators can line a session's
+// debug log up with its <stem>.log event file.
+//
+// Split out of cliDebugFileFor so the arg-drift comparison (driftCompareArgs)
+// can reproduce the spawn-side argv without the pre-create side effect: drift
+// runs over every surviving shim at startup, including sessions that will never
+// respawn, and must not conjure debug logs for them.
+func (r *Router) cliDebugPathFor(key string) string {
 	if r.cliDebugDir == "" {
 		return ""
 	}
-	path := filepath.Join(r.cliDebugDir, persist.KeyHash(key)+".log")
+	return filepath.Join(r.cliDebugDir, persist.KeyHash(key)+".log")
+}
+
+// cliDebugFileFor returns cliDebugPathFor's path after pre-creating and
+// hardening the file, for the spawn path. The path is regenerated
+// (overwritten) on every spawn — debug capture is a live-tail diagnostic, not
+// an audit trail, so the latest spawn's log is the one that matters.
+func (r *Router) cliDebugFileFor(key string) string {
+	path := r.cliDebugPathFor(key)
+	if path == "" {
+		return ""
+	}
 	// SEC (#2171): the spawned claude child creates --debug-file under its own
 	// umask, so the log (which may contain API keys) can land 0644 / world-
 	// readable even though the parent dir is 0700. Pre-create and harden to
