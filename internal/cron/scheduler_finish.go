@@ -448,9 +448,23 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// runIDs mean the same-ID job rarely rebuilds to reclaim it, and the empty
 	// dir survives age/count trimming). Re-check existence under s.mu right
 	// before the write so a job deleted in the window does not get a resurrected
-	// record. Best-effort: a delete landing AFTER this check but before the
-	// disk write is the same crash-recovery contract already documented above
-	// (over-report, self-heals) — this just closes the wide, observable window.
+	// record.
+	//
+	// #2479: the pre-write check alone is not enough. Append's ensureJobDir +
+	// WriteFileAtomic run OUTSIDE jobLock (#1335) and DeleteJob reclaims the
+	// jobLock entry after its RemoveAll, so a delete landing AFTER the
+	// pre-write check cannot be serialised against the write: the record is
+	// written back into a directory cron_jobs.json no longer knows about.
+	// Unlike the crash window documented above (runs/ is short one record,
+	// self-heals on the next run), this direction leaves a permanent orphan.
+	// Closure is a double check: (1) pre-write jobStillExists gate below
+	// (#2058) skips the write in the common case; (2) post-write
+	// jobStillExists after appendRun returns, and when the job is gone
+	// runStore.dropOrphanRun removes exactly the <runID>.json we wrote plus
+	// rmdir-if-empty of runs/<jobID>/. Any delete is either before (1) —
+	// nothing written — or before (2) — written then dropped — so no
+	// interleaving leaves the orphan behind. CI hit the residual window for
+	// real; TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir pins it.
 	if s.finishRunPreAppendHook != nil {
 		s.finishRunPreAppendHook(a.job.ID)
 	}
@@ -487,6 +501,12 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			// which report cost via SandboxMeta instead).
 			CostUSD: a.costUSD,
 		})
+		// #2479 (2): post-write re-check. See the block comment above.
+		if !s.jobStillExists(a.job.ID) {
+			s.runStore.dropOrphanRun(a.job.ID, a.runID)
+			slog.Info("cron run: job deleted during history write; dropped orphan run record",
+				"job_id", a.job.ID, "run_id", a.runID)
+		}
 		// R250-PERF-7: a new run record may introduce a SessionID the
 		// cache does not know about; drop the snapshot so the next
 		// KnownSessionIDs() call rebuilds.
