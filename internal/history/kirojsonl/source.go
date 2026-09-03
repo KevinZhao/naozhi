@@ -45,7 +45,7 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 // SessionIDFunc returns the kiro session ID for the bound session, or
@@ -428,30 +428,9 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bo
 		return cli.EventEntry{}, false
 	}
 
-	// Truncate to the same caps the claude path uses (history_tail.go): a
-	// 120-rune Summary and a 16000-rune Detail. Without this the full message
-	// (up to the 1 MiB/line scanner limit) flows verbatim across the WS
-	// boundary, and the dashboard renders an unbounded mega-bubble.
-	summary, detail := textutil.TruncateRunesPair(fullText, 120, 16000)
-
-	// Derive a deterministic UUID so MergedSource can dedup overlapping
-	// pages. Without it the entry carries an empty UUID, which
-	// merged.Source bypasses entirely (see internal/history/merged/source.go)
-	// — so on LoadBefore overlap windows the same kiro line would surface
-	// twice at the merge boundary. The Claude JSONL reader does the same via
-	// textutil.DeriveLegacyUUID (internal/discovery/history_tail.go). Fold the
-	// real detail (not "") into the hash so two turns sharing the same
-	// wall-clock second and same 120-rune summary but differing only in the
-	// detail tail (runes 120..16000) derive distinct UUIDs; otherwise the
-	// second turn collides and MergedSource's UUID-first dedup silently drops
-	// it before the detail-aware contentKey check.
-	return cli.EventEntry{
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
-		Time:    timeMS,
-		Type:    entryType,
-		Summary: summary,
-		Detail:  detail,
-	}, true
+	// Truncation caps and the deterministic dedup UUID (#2336) come from the
+	// shared recipe — see history.NewDerivedEntry for why both matter.
+	return history.NewDerivedEntry(timeMS, entryType, fullText), true
 }
 
 // extractTimestampMS converts a kiro Prompt/AssistantMessage timestamp

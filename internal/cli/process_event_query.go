@@ -89,7 +89,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		// R225-CR-10: cap description (matches process_readloop hot path)
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
-		desc = textutil.TruncateRunes(desc, eventDetailMaxRunes)
+		desc = textutil.TruncateRunes(desc, EventDetailMaxRunes)
 		// R214-PERF-6 (#415): use the linker's bounded dispatch pool
 		// rather than spawning a per-event goroutine. InjectHistory's
 		// replay can fan in dozens of task_started entries on shim

@@ -44,7 +44,7 @@ func buildUserEntry(text string, images []Attachment) EventEntry {
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
 		Summary: textutil.TruncateRunes(text, 120),
-		Detail:  textutil.TruncateRunes(text, eventDetailMaxRunes),
+		Detail:  textutil.TruncateRunes(text, EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
