@@ -26,6 +26,7 @@ import (
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // shimReadyMsg carries the result of the shim's ready-line scan back to
@@ -36,13 +37,11 @@ type shimReadyMsg struct {
 }
 
 // validateKeyForShim rejects keys that would leak control bytes into the
-// shim argv / socket path. Mirrors session.ValidateSessionKey; we keep a
-// local copy here because session → shim is a one-way import and the
-// shim package must remain a leaf. Keep this rule set in sync with
-// session.ValidateSessionKey — the byte cap below matches
-// session.MaxSessionKeyBytes (4*128+3=515), and the rune filter mirrors
-// that function verbatim. If either side grows new rune classes, update
-// both together.
+// shim argv / socket path. Mirrors session.ValidateSessionKey; session →
+// shim is a one-way import so we cannot call it directly, but the rune
+// deny-set is shared through the zero-dep internal/sessionkey leaf
+// (R202606f-ARCH-6, #2301) — only the byte cap below is still a local copy
+// of session.MaxSessionKeyBytes (4*128+3=515). Keep that cap in sync.
 //
 // R237-CR-12 (#719): the "keep in sync" guarantee is no longer comment-only.
 // TestValidateKeyForShim_Contract pins this validator's behaviour against
@@ -64,14 +63,10 @@ func validateKeyForShim(k string) error {
 		return errors.New("key invalid utf-8")
 	}
 	for _, r := range k {
-		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			return errors.New("key contains control character")
-		}
 		switch {
-		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
-			r >= 0x202A && r <= 0x202E, // bidi embedding / override
-			r == 0x2028, r == 0x2029,   // line / paragraph separator
-			r == 0xFEFF: // BOM
+		case sessionkey.IsControlKeyRune(r):
+			return errors.New("key contains control character")
+		case sessionkey.IsInvisibleKeyRune(r):
 			return errors.New("key contains invisible control character")
 		}
 	}
