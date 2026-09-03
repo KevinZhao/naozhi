@@ -3827,9 +3827,7 @@ function mainHeaderHtml(s) {
   // ui-polish-light-theme D5: the version string is debug info an operator
   // needs rarely — keep it in the hover title, show just the backend name.
   // (The settings 关于 section lists versions permanently.)
-  const cliLabel = effCLIName
-    ? '<span' + (effCLIVersion ? ' title="' + escAttr(effCLIName + ' v' + effCLIVersion) + '"' : '') + '>' + esc(effCLIName) + '</span>'
-    : '';
+  const cliLabel = headerCLILabelHtml(effCLIName, effCLIVersion);
   // UI Round 5 R5-3: model display for all backends.
   //   - claude path: SessionView.model is auto-populated from the
   //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
@@ -3940,6 +3938,16 @@ function renderMainHeader() {
   repaintGitChip();
   setHeaderEffortChip();
   fetchSessionRuns(selectedKey, selectedNode);
+}
+
+// #2437: the cli label carries a fixed id so updateHeaderCLI can refresh it
+// in place. It used to rewrite .detail-left wholesale, which wiped the
+// sibling #header-model span (the tuning popover anchor) on every poll that
+// passed fetchSessions' version short-circuit. The span is always emitted
+// (empty when no backend name is known yet) so a later poll has a target.
+function headerCLILabelHtml(name, version) {
+  const title = (name && version) ? ' title="' + escAttr(name + ' v' + version) + '"' : '';
+  return '<span id="header-cli"' + title + '>' + esc(name || '') + '</span>';
 }
 
 function renderMainShell() {
@@ -13028,15 +13036,23 @@ function updateMainState(state, reason) {
 
 function updateHeaderCLI() {
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const el = document.querySelector('.main-header .detail-left');
+  // #2437: only touch the #header-cli span painted by headerCLILabelHtml.
+  // Never rewrite the whole left container — #header-model lives next door.
+  const el = document.getElementById('header-cli');
   if (!el) return;
   // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
   // for why pending sessions need the sessionBackends lookup before the
   // global defaultCLIName fallback.
   const name = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
   const version = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
-  const label = name ? esc(name) + (version ? ' v' + esc(version) : '') : '';
-  if (el.innerHTML !== label) el.innerHTML = label;
+  // Same display rule as renderMainShell (D5): version lives in the hover
+  // title only, the text is just the backend name.
+  const text = name || '';
+  const title = (name && version) ? name + ' v' + version : '';
+  if (el.textContent !== text) el.textContent = text;
+  if (title !== (el.getAttribute('title') || '')) {
+    if (title) el.setAttribute('title', title); else el.removeAttribute('title');
+  }
 }
 
 function flashSendBtn() {
