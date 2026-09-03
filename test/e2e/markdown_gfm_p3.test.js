@@ -99,6 +99,42 @@ test.describe('renderMd GFM P3 (#2428)', () => {
     expect(html).toContain('snake_case_name foo__bar__baz');
   });
 
+  test('链接目标 / 裸 URL / 本地路径中的 __x__ 不被加粗（F1）', async () => {
+    const a = await render('[src](https://github.com/o/r/blob/main/pkg/__init__.py)');
+    expect(a).toContain('href="https://github.com/o/r/blob/main/pkg/__init__.py"');
+    expect(a).not.toContain('<strong>');
+    const b = await render('see https://x.com/pkg/__init__.py now');
+    expect(b).toContain('href="https://x.com/pkg/__init__.py"');
+    expect(b).toContain('>https://x.com/pkg/__init__.py</a> now');
+    const c = await render('[init](pkg/__init__.py)');
+    expect(c).toContain('<code class="md-code">pkg/__init__.py</code>');
+  });
+
+  test('foo.__init__() 保持字面，__all__ = [] 仍加粗', async () => {
+    expect(await render('foo.__init__()')).toContain('foo.__init__()');
+    expect(await render('foo.__init__()')).not.toContain('<strong>');
+    expect(await render('__all__ = []')).toContain('<strong>all</strong> = []');
+  });
+
+  test('__ 最坏输入不二次扫描（F2）', async () => {
+    const ms = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      const inputs = [' __a'.repeat(10000), ' __a__b'.repeat(10000), ' ~~a'.repeat(10000)];
+      let worst = 0;
+      for (const src of inputs) {
+        let best = Infinity;
+        for (let k = 0; k < 3; k++) {
+          const t0 = performance.now();
+          w.renderMd(src + String(k)); // vary input to defeat the render cache
+          best = Math.min(best, performance.now() - t0);
+        }
+        worst = Math.max(worst, best);
+      }
+      return worst;
+    });
+    expect(ms).toBeLessThan(50);
+  });
+
   // ===== 5c. ~~del~~ =====
 
   test('~~del~~ 渲染为 <del>', async () => {
@@ -110,6 +146,12 @@ test.describe('renderMd GFM P3 (#2428)', () => {
     const html = await render('~/.config and a ~~ b');
     expect(html).not.toContain('<del>');
     expect(html).toContain('~/.config and a ~~ b');
+  });
+
+  test('URL 中的 a~~b~~c 不被删除线截断（F1）', async () => {
+    const html = await render('see https://x.com/a~~b~~c now');
+    expect(html).toContain('href="https://x.com/a~~b~~c"');
+    expect(html).not.toContain('<del>');
   });
 
   // ===== 5d. `+ ` 列表 =====
@@ -165,6 +207,15 @@ test.describe('renderMd GFM P3 (#2428)', () => {
     const html = await render("[t](https://x.com/a 'a<b')");
     expect(html).toContain('href="https://x.com/a"');
     expect(html).toContain('title="a&lt;b"');
+  });
+
+  test('[t]( url ) / [t](url "t" ) 允许两侧空白填充（F3）', async () => {
+    const a = await render('[t]( https://x.com )');
+    expect(a).toContain('href="https://x.com"');
+    expect(a).toMatch(/>t<\/a><br>$/);
+    const b = await render('[t](https://x.com "tt" )');
+    expect(b).toContain('href="https://x.com"');
+    expect(b).toContain('title="tt"');
   });
 
   // ===== 6c. 链接文本含 URL 不嵌套 <a> =====

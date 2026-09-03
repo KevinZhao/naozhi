@@ -11411,9 +11411,10 @@ function renderMdUncached(s) {
 }
 
 /* Inline markdown: bold, italic, code, links, math */
-// `[text](dest "title")` — dest is a run of non-space/non-paren chars with
-// at most one nested `(...)` group; the title group is optional.
-const MD_LINK_RE = /\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\)/g;
+// `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
+// at most one nested `(...)` group; the title group is optional; CommonMark
+// permits whitespace padding on both sides of the body.
+const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\s*\)/g;
 // Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
 // so a URL inside a link's label never becomes a nested anchor.
 const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
@@ -11514,11 +11515,17 @@ function inlineMd(s) {
   s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
   // `__bold__`: both delimiters must sit at a word boundary (not touching
   // [A-Za-z0-9_]) so `snake_case_name` / `foo__bar__baz` stay literal —
-  // mirrors GFM's flanking rule for `_`. `~~del~~` needs the doubled tilde so
-  // `~/.config` and a lone ` ~~ ` are untouched. Same post-esc() contract as
-  // the bold/italic passes above.
-  s = s.replace(/(?<![A-Za-z0-9_])__(?!\s)(.+?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
-  s = s.replace(/~~(?!\s)(.+?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
+  // mirrors GFM's flanking rule for `_`. The opener additionally rejects a
+  // preceding `/` or `.` because these passes run BEFORE the link/autolink
+  // passes: `https://x/pkg/__init__.py`, `pkg/__init__.py` (local-file
+  // rescue) and `foo.__init__()` must survive verbatim, while `a __bold__ b`
+  // and `__all__ = []` still bold. `~~del~~` gets the same opener guard so
+  // `https://x.com/a~~b~~c` is not sliced; `~/.config` and a lone ` ~~ ` are
+  // untouched by construction. Body is capped at 300 chars: an unbounded
+  // `.+?` rescans to end-of-line from every opener (quadratic on inputs like
+  // `' __a'.repeat(10000)`). Same post-esc() contract as the passes above.
+  s = s.replace(/(?<![A-Za-z0-9_\/.])__(?!\s)(.{1,300}?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
+  s = s.replace(/(?<![A-Za-z0-9_\/.])~~(?!\s)(.{1,300}?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
   // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
   // blocks remote images, so an <img> would only ever render broken. Drop the
   // `!` and let the link pass below handle the target: remote → clickable
