@@ -330,12 +330,15 @@ function humanizeCron(expr) {
     // 但可以 humanize 成人类可读标签，保留给列表和 legacy hint 显示：
     //   "*/N * * * *"  → 每 N 分钟（humanizeCronStepValue）
     //   "0 */N * * *"  → 每 N 小时
+    //   "M * * * *"    → 每小时 :MM（humanizeCronHourlyMinute，#2435）
     //   "@every 30m"   → 每 30 分钟  (v1 interval shape)
     //   "@every 2h"    → 每 2 小时
     //   "m h * * 1,3,5" / "m h * * 0,6" → 多选 weekly / 周末
     //     （v2 picker 的 Weekly 单选不再 round-trip 这些 shape）
     const step = humanizeCronStepValue(expr);
     if (step) return step;
+    const hourlyAt = humanizeCronHourlyMinute(expr);
+    if (hourlyAt) return hourlyAt;
     const legacy = humanizeCronLegacyEvery(expr);
     if (legacy) return legacy;
     const multiDow = humanizeCronMultiDow(expr);
@@ -426,6 +429,21 @@ function humanizeCronStepValue(expr) {
     if (n >= 2 && n <= 23) return '每 ' + n + ' 小时';
   }
   return '';
+}
+
+// humanizeCronHourlyMinute recognizes "M * * * *" (hourly at minute M,
+// M in 1..59) → "每小时 :MM". "0 * * * *" is the picker's Hourly mode and is
+// already handled by parseCronToFreq; display-only like the other fallbacks.
+function humanizeCronHourlyMinute(expr) {
+  if (!expr) return '';
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return '';
+  const [mm, hh, dom, mon, dow] = parts;
+  if (hh !== '*' || dom !== '*' || mon !== '*' || dow !== '*') return '';
+  if (!/^\d+$/.test(mm)) return '';
+  const n = parseInt(mm, 10);
+  if (n < 1 || n > 59) return '';
+  return '每小时 :' + pad2(n);
 }
 
 // DOW_LABELS mirrors robfig/cron DOW indexing (0=Sunday). The picker renders
@@ -4104,11 +4122,12 @@ async function fetchCronJobs() {
     cronTimezone = data.timezone || '';
     cronTimezoneAbbr = data.timezone_abbr || '';
     cronTimezoneLabel = data.timezone_label || '';
-    // Badge surfaces jobs needing attention (paused or last run errored),
-    // not the raw total — avoids a persistent red dot on healthy setups.
-    // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
-    // 纳入 attention，与 filterCronJobs 判定对齐。
-    const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
+    // Badge surfaces jobs needing intervention (last run errored, or a
+    // scheduled run was missed across a restart), not the raw total — avoids
+    // a persistent red dot on healthy setups. #2435: manually paused jobs are
+    // a deliberate operator state, so they no longer light the rail dot; the
+    // in-view 需关注 filter / header chip still include paused for context.
+    const attention = cronJobs.filter(j => j.last_error || j.missed).length;
     // Surface the attention dot on the rail's 自动化 icon so the alert is
     // visible from any view. (The legacy header cron-badge was removed once
     // the sidebar 定时任务 quick-button folded into the rail's 自动化 entry.)
@@ -4658,8 +4677,14 @@ document.addEventListener('keydown', function(e) {
   if (!cronExpandedRunId || !cronExpandedRunId.runId) return;
   if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  // #2435: the expanded run survives leaving the cron view / opening a modal,
+  // so gate on the live view + no overlay, or ↑↓ would preventDefault and
+  // silently switch an invisible run. activeView is dashboard.js top-level
+  // state (same pattern as renderCronPanel's guard above).
+  if (activeView !== 'cron') return;
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
   const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
   e.preventDefault();
   navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next');
 });
