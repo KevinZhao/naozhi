@@ -30,6 +30,10 @@ func (s *ManagedSession) loadProcess() processIface {
 // function only handles the atomic publication, not the lifecycle
 // invariant that only one process is attached at a time.
 func (s *ManagedSession) storeProcess(p processIface) {
+	// Drop the metering view built for the outgoing process so a detached
+	// session does not pin it (the cache is also keyed by process identity,
+	// so this is GC hygiene, not correctness — see meteringView).
+	s.meteringCache.Store(nil)
 	if p == nil {
 		s.process.Store(nil)
 	} else {

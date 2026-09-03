@@ -263,6 +263,12 @@ type processIface interface {
 	ContextUsagePercent() float64
 	TurnDurationMs() int64
 	MeteringUsage() []cli.MeteringEntry
+	// MeteringGen versions MeteringUsage: it advances on every metering
+	// write and stays 0 while the backend has reported none. Snapshot caches
+	// its MeteringUsage copy per (process, gen) so an unchanged gen skips the
+	// defensive copy (#2345). Implementations that do not version their
+	// rows must return 0, which disables the cache.
+	MeteringGen() uint64
 	// Effort returns the backend-reported thinking-effort tier (kiro:
 	// low/medium/high/xhigh/max), "" when unreported.
 	Effort() string
@@ -397,9 +403,12 @@ type ManagedSession struct {
 	keyChatID   string
 	keyAgentID  string
 
-	process   atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
-	sendMu    sync.Mutex                 // serializes messages to the same session
-	historyMu sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
+	process atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	// meteringCache is Snapshot's last MeteringUsage view keyed by
+	// (process, MeteringGen); see managed_metering_cache.go (#2345).
+	meteringCache atomic.Pointer[meteringCache]
+	sendMu        sync.Mutex   // serializes messages to the same session
+	historyMu     sync.RWMutex // protects persistedHistory reads/writes (independent of sendMu)
 	// costMu serializes the read-modify-write of costSpent/lastCumulativeCost
 	// in finishRun. finishRun runs OUTSIDE sendMu on both paths (Send releases
 	// sendMu before returning, and the passthrough path is lock-free), so this

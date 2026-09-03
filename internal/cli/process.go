@@ -283,6 +283,13 @@ type Process struct {
 	// + pre-metering kiro turns, the dominant deployment) allocation-free.
 	meteringIdx map[string]int
 	meteringLen atomic.Int32
+	// meteringGen counts metering writes (#2345). Bumped under meteringMu
+	// after every applyMetadata merge that touched meteringUsage, so a
+	// reader that samples MeteringGen BEFORE calling MeteringUsage never
+	// pairs a gen with rows older than it. ManagedSession.Snapshot keys
+	// its per-session copy cache on this so the 1 Hz × N tabs poll stops
+	// paying make+copy for rows that only change once per turn.
+	meteringGen atomic.Uint64
 	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
 	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
 	// readLoop starts. Empty string means "operator did not configure
@@ -907,6 +914,14 @@ func (p *Process) MeteringUsage() []MeteringEntry {
 	return out
 }
 
+// MeteringGen returns the number of metering writes applied so far: 0 until
+// the first metering-bearing metadata frame, then +1 per frame. Rows returned
+// by MeteringUsage are unchanged while this value is unchanged, which lets
+// pollers cache the copy (#2345). Wait-free.
+func (p *Process) MeteringGen() uint64 {
+	return p.meteringGen.Load()
+}
+
 // applyMetadata stores normalized metadata observed on a Type:"metadata"
 // event. Called from readLoop. Cheap; ContextUsagePercent, TurnDurationMs and
 // Effort are atomically stored, MeteringUsage replaces the whole slice under
@@ -984,6 +999,7 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 		// read-side atomic Load sees the same length the slice actually
 		// has after Unlock.
 		p.meteringLen.Store(int32(len(p.meteringUsage)))
+		p.meteringGen.Add(1)
 		p.meteringMu.Unlock()
 	}
 }
