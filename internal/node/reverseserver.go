@@ -524,13 +524,6 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// remote advertises capability tags outside this binary's known set.
 	// Pure observability — the node is still registered normally.
 	logUnknownCaps(safeNodeID, msg.Capabilities)
-	// RNEW-SEC-006: symmetric with the auth-failed path above — log
-	// r.Host so operators can correlate registered nodes with the
-	// Host header they came in on.
-	slog.Info("reverse node registered",
-		"node_id", safeNodeID,
-		"ip", ip,
-		"host", osutil.SanitizeForLog(r.Host, 256))
 
 	// If a newer conn displaced us between the insert and here, it has (or
 	// will have) called OnRegister itself and already closed rc; skipping
@@ -538,6 +531,17 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	stillOwns := s.conns[msg.NodeID] == rc
 	s.mu.RUnlock()
+	if !stillOwns {
+		slog.Debug("reverse node superseded before register", "node_id", safeNodeID, "ip", ip)
+	} else {
+		// RNEW-SEC-006: symmetric with the auth-failed path above — log
+		// r.Host so operators can correlate registered nodes with the
+		// Host header they came in on.
+		slog.Info("reverse node registered",
+			"node_id", safeNodeID,
+			"ip", ip,
+			"host", osutil.SanitizeForLog(r.Host, 256))
+	}
 	if stillOwns && s.OnRegister != nil {
 		// msg.NodeID is kept verbatim here so downstream state
 		// (`s.conns[msg.NodeID]`, Server.nodes, knownNodes) is keyed with
