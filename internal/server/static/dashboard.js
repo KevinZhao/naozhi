@@ -643,12 +643,18 @@ async function fetchSessions() {
           const pendingCLIVersion = isDefaultBackend
             ? (defaultCLIVersion || backendDisplayVersion(pendingBackend))
             : (backendDisplayVersion(pendingBackend) || defaultCLIVersion);
+          // #2431: mirror the server's project/project_fallback shape so an
+          // unregistered workspace groups under its basename from the first
+          // paint instead of sitting in 未分组 until the first send promotes it.
+          const pendingWS = sessionWorkspaces[key];
+          const pendingProject = matchProject(pendingWS);
+          const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
           data.sessions.push({
             key: key,
             state: 'new',
             platform: parts[0] || 'dashboard',
             agent: pendingAgent,
-            workspace: sessionWorkspaces[key],
+            workspace: pendingWS,
             // Stamp the pending card with "now" so the sidebar sort (oldest
             // top, newest bottom — see renderSidebar) lands it at the bottom
             // immediately. Leaving created_at/last_active at 0 sorts it to the
@@ -660,7 +666,8 @@ async function fetchSessions() {
             last_prompt: '',
             last_response: '',
             node: sessionNodes[key] || 'local',
-            project: matchProject(sessionWorkspaces[key]),
+            project: pendingProject || pendingFallback,
+            project_fallback: !!pendingFallback,
             backend: pendingBackend,
             access_profile: sessionAccessProfiles[key] || '',
             cli_name: pendingCLIName,
@@ -762,7 +769,7 @@ function renderSidebar(data) {
   });
   discoveredItems.forEach(d => {
     allItemsUnfiltered.push({
-      key: '_discovered:' + d.pid,
+      key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
       entrypoint: d.entrypoint || '',
@@ -1016,6 +1023,17 @@ function projectDisplayPrefix(p) {
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
+// workspaceFallbackName mirrors internal/dashboard/session/handlers.go's
+// workspaceFallbackName: the folder basename used as a sidebar group label
+// when the workspace is not a registered project. '' for empty, "/" and ".".
+function workspaceFallbackName(ws) {
+  if (!ws) return '';
+  const trimmed = ws.replace(/\/+$/, '');
+  if (!trimmed) return '';
+  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
+  return (!base || base === '.') ? '' : base;
+}
+
 function matchProject(workspace) {
   if (!workspace || !projectsData || projectsData.length === 0) return '';
   const ws = workspace.endsWith('/') ? workspace : workspace + '/';
@@ -2088,8 +2106,10 @@ function applyHistoryFilter(merged, query) {
   if (countEl) {
     // "Filtered" count uses the x/total shape so the user knows the
     // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
-    // the query is empty keep the compact "(47)" form.
-    countEl.textContent = query
+    // the query is empty keep the compact "(47)" form. Decide on the same
+    // trimmed query filterHistoryEntries matches on (#2431: whitespace-only
+    // input is not a filter, so no "(N / N)").
+    countEl.textContent = (query || '').trim()
       ? '(' + filtered.length + ' / ' + merged.length + ')'
       : '(' + merged.length + ')';
   }
@@ -2854,10 +2874,13 @@ function selectSession(key, node) {
     // 同时快照当前会话的滚动位置，回来时恢复
     saveScrollPos(selectedKey, selectedNode);
   }
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (d) {
+      // #2431: same as the managed path below — leave assets/cron/settings
+      // first, or the preview panel is written into a hidden #main while the
+      // previous session has already been unsubscribed.
+      if (activeView !== 'chat') setActivityView('chat');
       previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.cli_name || 'cli', d.entrypoint || '');
       return;
     }
@@ -3495,7 +3518,9 @@ function invalidateGitState(key, node) {
 // longer mounted and the next (identical) render would never bring it back
 // — e.g. after a failed DELETE whose .finally re-fetches the list.
 function removeSidebarCard(key) {
-  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  // Escape like setActiveSessionCard: discovered keys embed the node name, so
+  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
+  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
   _lastSidebarHtml = null;
 }
@@ -3558,9 +3583,8 @@ async function dismissSession(key, node, opts) {
   }
 
   // Discovered session — kill external process via /api/discovered/close
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (!d) { showToast('未找到该外部会话', 'warning'); return; }
     try {
       const headers = {'Content-Type': 'application/json'};
@@ -3577,8 +3601,8 @@ async function dismissSession(key, node, opts) {
         else showNetworkError('关闭外部会话', err);
         return;
       }
-      discoveredItems = discoveredItems.filter(x => x.pid !== pid);
-      if (pendingDiscovered && pendingDiscovered.pid === pid) {
+      dropDiscovered(d.pid, d.node);
+      if (pendingDiscovered && sameDiscovered(pendingDiscovered, d.pid, d.node)) {
         pendingDiscovered = null;
         stopPreviewPolling();
         document.getElementById('main').innerHTML = mainEmptyHtml();
@@ -3994,7 +4018,7 @@ function mainHeaderHtml(s) {
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
   // with no backend label storage, and we intentionally hide the control there.
-  const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
+  const canRename = selectedKey && !isDiscoveredKey(selectedKey);
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
@@ -4398,12 +4422,26 @@ function prependEvents(events) {
   // changes arbitrarily.
   const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
 
+  // The DOM's leading divider was emitted for prevTime=0 ("always divide
+  // before the first visible bubble"). Once older bubbles sit above it, it is
+  // only legitimate when the gap to the newest prepended bubble is a real
+  // divider gap — otherwise the pagination seam shows two stacked dividers
+  // (#2430).
+  const oldLeadDivider = leadingTimeDivider(el);
   const frag = document.createElement('div');
   frag.innerHTML = html;
+  const newestPrependedTime = lastDividerTime(frag);
   // Move children one-by-one to preserve DOM structure; innerHTML replace
-  // would wipe the existing event bubbles.
+  // would wipe the existing event bubbles. Anchor on the pre-insert first
+  // child once: inserting each child before a moving el.firstChild reversed
+  // the prepended page (newest-first) under the seam.
+  const anchor = el.firstChild;
   while (frag.firstChild) {
-    el.insertBefore(frag.firstChild, el.firstChild);
+    el.insertBefore(frag.firstChild, anchor);
+  }
+  if (oldLeadDivider && newestPrependedTime) {
+    const leadT = Number(oldLeadDivider.getAttribute('data-time') || 0);
+    if (leadT && leadT - newestPrependedTime < EVENT_DIVIDER_GAP_MS) oldLeadDivider.remove();
   }
 
   // Re-insert the button at the top.
@@ -4585,8 +4623,21 @@ function appendEvents(events) {
     // dropped when their uuid is already on screen — same rule as onHistory.
     if (e.time && e.time < lastRenderedEventTime) return;
     if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
-    // Lock cards already on screen before this user bubble is appended.
-    if (e.type === 'user') lockRenderedAskCards(el);
+    if (e.type === 'user') {
+      // Same rules as the WS paths (onEvent / onHistory): a user bubble whose
+      // uuid is already on screen is a replay, and the first arrival of the
+      // real user event replaces the optimistic bubble the send rendered.
+      // Without this a send that left over WS and was echoed by the poll
+      // (socket dropped in between) painted the message twice (#2430).
+      if (eventAlreadyRendered(el, e.uuid)) {
+        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+        return;
+      }
+      const opt = el.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
+      // Lock cards already on screen before this user bubble is appended.
+      lockRenderedAskCards(el);
+    }
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -5278,6 +5329,36 @@ function lastDividerTime(el) {
   return 0;
 }
 
+// leadingTimeDivider returns the scroller's first time divider when it
+// precedes every rendered bubble (the divider renderEventsWithDividers emits
+// for prevTime=0); null when a bubble comes first or nothing is rendered.
+function leadingTimeDivider(el) {
+  if (!el) return null;
+  for (const c of el.children) {
+    if (!c.classList) continue;
+    if (c.classList.contains('event-time-divider')) return c;
+    if (c.classList.contains('event')) return null;
+  }
+  return null;
+}
+
+// removeOptimisticMsg drops the optimistic user bubble a send rendered. With
+// a send id (the WS send_ack echoes the `id` the send frame carried) only that
+// send's bubble goes — a busy/error ack for the second of two in-flight sends
+// must not eat the first one's bubble (#2430). Without an id (legacy servers,
+// HTTP-path send_error) fall back to the oldest bubble on screen.
+function removeOptimisticMsg(sendId) {
+  const root = document.getElementById('events-scroll') || document;
+  let opt;
+  if (sendId) {
+    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(sendId) : sendId;
+    opt = root.querySelector('.optimistic-msg[data-send-id="' + sel + '"]');
+  } else {
+    opt = root.querySelector('.optimistic-msg');
+  }
+  if (opt) opt.remove();
+}
+
 // --- Send message ---
 
 // Esc in the input: first press arms, second press (within 600ms) actually
@@ -5395,9 +5476,9 @@ async function sendMessage() {
         return;
       }
       // Remove from discoveredItems so renderSidebar won't re-create the card
-      discoveredItems = discoveredItems.filter(d => d.pid !== pd.pid);
+      dropDiscovered(pd.pid, pd.node);
       // Remove the discovered card from sidebar
-      removeSidebarCard('_discovered:' + pd.pid);
+      removeSidebarCard(discoveredKey(pd.pid, pd.node));
       pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
@@ -5552,7 +5633,7 @@ async function sendComposerTurn(targetKey, targetNode) {
       delete sessionAccessProfiles[selectedKey];
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
-      renderOptimisticUserMsg(text);
+      renderOptimisticUserMsg(text, id);
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
@@ -5663,9 +5744,8 @@ async function sendComposerTurn(targetKey, targetNode) {
       // Optimistic bubble parity with the WS path — but ONLY while WS is
       // connected: the live event stream (onHistory/onEvent) is what removes
       // .optimistic-msg when the real "user" event arrives. The WS-down
-      // fallback keeps its legacy no-bubble behaviour because the polling
-      // path (appendEvents) has no optimistic-removal logic and would leave
-      // a duplicate bubble.
+      // fallback keeps its legacy no-bubble behaviour (appendEvents also
+      // replaces the bubble now, but the poll echo lags up to a tick).
       if (wsm.isConnected()) renderOptimisticUserMsg(text);
     }
 
@@ -5695,8 +5775,9 @@ async function sendComposerTurn(targetKey, targetNode) {
 // for file-bearing sends (owner-divergence fix) — both run under a live WS
 // subscription, which is what guarantees the removal side fires. No-op when
 // text is empty (image-only sends have no text to echo; the thumbnails
-// arrive with the real user event).
-function renderOptimisticUserMsg(text) {
+// arrive with the real user event). `sendId` (WS path) is stamped on the
+// bubble so a busy/error send_ack can roll back exactly this send.
+function renderOptimisticUserMsg(text, sendId) {
   const el = document.getElementById('events-scroll');
   if (!el || !text) return;
   const now = Date.now();
@@ -5708,6 +5789,7 @@ function renderOptimisticUserMsg(text) {
   }
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
+  if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
   // Always force-bottom after a send: the user just posted something and
   // expects to see it, even if they had scrolled up to browse earlier
   // history. stickEventsBottom handles async layout changes from input-area
@@ -7067,16 +7149,6 @@ function onThumbKeyDown(ev, idx) {
   if (next) next.focus();
 }
 
-// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
-// Only used for PDF chips where we want to surface size to the user; images
-// still show the thumbnail itself, so size is not rendered for them.
-function formatFileSize(n) {
-  if (!n || n < 0) return '';
-  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  if (n >= 1024) return Math.round(n / 1024) + ' KB';
-  return n + ' B';
-}
-
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -7763,13 +7835,27 @@ async function fetchCLIBackends(node) {
       // must NOT drive feature gates (the input controls operate on the
       // locally-selected session), so this stays inside the isLocal branch.
       if (typeof applyFeatureGates === 'function') applyFeatureGates();
-    } else {
+    } else if (manifest) {
       cliBackendsByNode[node] = { data: manifest, at: Date.now() };
+    } else {
+      // A null / malformed remote manifest must not be pinned for 60s —
+      // drop any stale entry so the next open refetches (#2429).
+      delete cliBackendsByNode[node];
     }
     return manifest;
   } catch (e) {
+    if (!isLocal) delete cliBackendsByNode[node];
     return null;
   }
+}
+
+// renderBackendFetchFailed is the picker-slot fallback when a REMOTE node's
+// backends manifest could not be fetched: a one-line notice plus a retry
+// button (wired by refreshBackendPicker) instead of silently showing no
+// picker as if the node had a single backend.
+function renderBackendFetchFailed(node) {
+  return '<span class="cp-backend-fail">' + esc(getNodeDisplayName(node)) + ' 后端清单获取失败 ' +
+    '<button type="button" class="settings-syslink-btn cp-backend-retry">重试</button></span>';
 }
 
 // fetchAccessProfiles caches /api/access-profiles for 60s (same policy as
@@ -8087,6 +8173,16 @@ function sanitizeKeySlug(s) {
   return safe || 'session';
 }
 
+// localDateStamp renders a Date as YYYY-MM-DD-HHMMSS in LOCAL time for
+// session-key timestamps. The previous toISOString (UTC date) +
+// toTimeString (local time) mix dated keys created 00:00–08:00 UTC+8 as
+// yesterday (#2429).
+function localDateStamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
 function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
   const slug = sanitizeKeySlug(projectOrFolder);
   const agent = agentID && String(agentID).trim() ? sanitizeKeySlug(agentID) : 'general';
@@ -8229,6 +8325,10 @@ function createNewSession() {
         }
         refreshBackendPicker('new-backend-slot');
       });
+      // First-open path: a failed REMOTE manifest arrives here as null and
+      // renderBackendPicker(null) painted an empty slot. Route through
+      // refreshBackendPicker so the retry notice shows on open too (#2429).
+      if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
     }
@@ -8261,6 +8361,12 @@ function refreshBackendPicker(slotId) {
     if (!document.getElementById(slotId)) return;
     // Drop a stale response whose node no longer matches the selection.
     if (selectedNode !== reqNode) return;
+    if (!backendsData && reqNode && reqNode !== 'local') {
+      slot.innerHTML = renderBackendFetchFailed(reqNode);
+      const retry = slot.querySelector('.cp-backend-retry');
+      if (retry) retry.addEventListener('click', () => refreshBackendPicker(slotId));
+      return;
+    }
     slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
   });
 }
@@ -8318,6 +8424,9 @@ function openProjectPalette(backendsData, profilesData) {
     renderPaletteList(state, input.value);
     refreshBackendPicker('cp-backend-slot');
   });
+  // First-open path: see the no-projects modal above — a null remote
+  // manifest must surface the retry notice, not an empty slot (#2429).
+  if (!backendsData && (selectedNode || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
 }
@@ -8516,8 +8625,17 @@ function buildProjectRow(s, idx) {
   return el;
 }
 
+// quickRowHint is the 「快速新建」 subtitle for the selected node. Only the
+// LOCAL default workspace is known client-side (stats.default_workspace);
+// a remote node resolves its own default on dispatch, so name the node
+// instead of echoing the local path (#2429).
+function quickRowHint(node) {
+  if (!node || node === 'local') return defaultWorkspace ? shortPath(defaultWorkspace) : '';
+  return getNodeDisplayName(node) + ' · 默认工作区';
+}
+
 function buildQuickRow(idx) {
-  const ws = defaultWorkspace || '';
+  const hint = quickRowHint(selectedNode || 'local');
   const el = document.createElement('div');
   el.className = 'cmd-palette-item';
   el.dataset.idx = String(idx);
@@ -8525,7 +8643,7 @@ function buildQuickRow(idx) {
     '<span class="cp-icon">⚡</span>' +
     '<div class="cp-main">' +
       '<div class="cp-name">快速新建</div>' +
-      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
+      (hint ? '<div class="cp-path">' + esc(hint) + '</div>' : '') +
     '</div>';
   el.addEventListener('click', () => pickPaletteQuick());
   return el;
@@ -8707,8 +8825,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // Continue → backend-provided stable key (precise continuation); new →
   // fresh timestamp key (independent parallel session). resolveSessionKey
   // also falls back to a timestamp key when no stableKey is available.
@@ -8753,8 +8870,7 @@ function doCreateSession() {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
@@ -8818,8 +8934,7 @@ function createQuickSession(initialText, onTextStranded) {
 
   sessionCounter++;
   const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const ts = localDateStamp(now) + '-' + sessionCounter;
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
   if (workspace) sessionWorkspaces[key] = workspace;
@@ -9067,8 +9182,8 @@ function buildHomeHealthLines(stats) {
   const running = typeof stats.running === 'number' ? stats.running : 0;
   const ready = typeof stats.ready === 'number' ? stats.ready : 0;
   const total = typeof stats.total === 'number' ? stats.total : 0;
-  let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
-  if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
+  let line1 = '运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
+  if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
   // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
   // /api/sessions stats static block already, so surface live-vs-capacity
@@ -9571,7 +9686,9 @@ function historyDayLabel(d) {
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
   if (diffDays === 0) return '\u4eca\u5929';
   if (diffDays === 1) return '\u6628\u5929';
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
+  const opts = { month: 'short', day: 'numeric', weekday: 'short' };
+  if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
 }
 
 // Sidebar relative-time ticker. While WS is connected renderSidebar only
@@ -9913,7 +10030,10 @@ function formatTimeShort(ms) {
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
   const isYesterday = d.getFullYear() === yesterday.getFullYear() && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
   if (isYesterday) return '昨天 ' + hm;
-  const diffDays = Math.floor((now - d) / 86400000);
+  // Local calendar-day difference (not floor(ms/24h)): an event 6d23.5h ago
+  // is the same weekday as today and must not get a weekday label (#2429).
+  const dayStart = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
   if (diffDays < 7 && diffDays >= 0) {
     const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
     return wk + ' ' + hm;
@@ -9985,7 +10105,7 @@ function loadMermaid() {
   s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
   s.crossOrigin = 'anonymous';
   s.onload = () => {
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+    mermaid.initialize(mermaidConfig());
     mermaidReady = true;
     mermaidLoading = false;
     runMermaid();
@@ -10006,7 +10126,28 @@ function runMermaid() {
     delete mermaidPending[id];
     hasNew = true;
   });
-  if (hasNew) mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  if (hasNew) {
+    // Re-initialise per run so diagrams rendered after a theme switch pick
+    // up the current theme (already-rendered SVGs are left as-is).
+    mermaid.initialize(mermaidConfig());
+    mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+  }
+}
+
+// mermaidThemeName maps the resolved dashboard theme (data-theme, with
+// 'auto' following prefers-color-scheme) to a mermaid theme name (#2429).
+function mermaidThemeName() {
+  const t = document.documentElement.dataset.theme;
+  if (t === 'light') return 'default';
+  if (t === 'dark') return 'dark';
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'default';
+  } catch (_) {}
+  return 'dark';
+}
+
+function mermaidConfig() {
+  return { startOnLoad: false, theme: mermaidThemeName(), securityLevel: 'strict' };
 }
 
 let mermaidCounter = 0;
@@ -10230,8 +10371,10 @@ function renderMd(s) {
 // resolved to project-relative form by resolveProjectForAbsPath before the
 // server call — server still rejects absolute paths for defence in depth.
 // Rejects spaces (breaks on prose) and leading URL schemes.
-const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
-const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?$/;
+// Line suffix accepts `:L`, `:L-L2` (range) and `:L:C` (go build / eslint
+// `file:line:col`); splitPathLine keeps only the line for the preview jump.
+const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+|:\d+)?)?$/;
+const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+|:\d+)?$/;
 function isFileRefCandidate(text) {
   return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
 }
@@ -10373,7 +10516,8 @@ function resolveActiveProject() {
 
 // Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
 function splitPathLine(cand) {
-  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)$/);
+  // Optional trailing `:col` is dropped: the preview only scrolls to a line.
+  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)(?::\d+)?$/);
   if (m) return { path: m[1], line: m[2] };
   return { path: cand, line: '' };
 }
@@ -10968,12 +11112,19 @@ function scrollToPreviewLine(body, line) {
   pre.parentElement.scrollTop = Math.max(0, (line - 3) * 18);
 }
 
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Single declaration on purpose: a second hoisted `function formatFileSize`
+// used to shadow this one silently. Promotion checks the *rounded* value so
+// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
 function formatFileSize(bytes) {
   if (!bytes || bytes <= 0) return '';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = bytes, i = 0;
+  while (i < units.length - 1 && (i === 0 ? v >= 1024 : Number(v.toFixed(1)) >= 1024)) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
 }
 
 function inferLang(path, mime) {
@@ -11165,12 +11316,12 @@ const MAX_LIST_DEPTH = 6;
 // stays in sync with the captured prefix; a Unicode-`\s*` would consume
 // NBSP/U+2028/etc. while leadingColumns counted only space+tab, producing
 // cols=0 for a visually-indented bullet.
-const LIST_ITEM_RE = /^([ \t]*)(?:([-*])|(\d+)\.)[ \t]+(.*?)\r?$/;
+const LIST_ITEM_RE = /^([ \t]*)(?:([-*+])|(\d+)\.)[ \t]+(.*?)\r?$/;
 // Cheap shape check used by the lazy-continuation guard. Treats both digit
 // shapes (any length) — the digit-cap reject path in parseListItem returns
 // null, but for lazy-continuation purposes "this looks like a list bullet"
 // is exactly what we want: refuse to fold such lines into the previous <li>.
-const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
+const LIST_SHAPE_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+/;
 // Reject anything > 3 digits as a list start: real ordinals max out around
 // dozens; 4+ digit prefixes are year/version/issue tokens ("2024. 关于...",
 // "1234. xxx") that the user does not want rendered as <ol start="2024">.
@@ -11178,6 +11329,9 @@ const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
 // chars but value 100) is accepted while "2024." (4 chars, value 2024) is
 // rejected — symmetric vs. the documented intent.
 const OL_START_MAX = 999;
+// `> quote` line: marker at column 0 (up to 3 leading spaces per GFM), one
+// optional space after it is eaten.
+const BLOCKQUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
 
 function leadingColumns(s) {
   let cols = 0;
@@ -11188,6 +11342,17 @@ function leadingColumns(s) {
     else break;
   }
   return cols;
+}
+
+// GFM task-list marker at the head of a bullet's content. Rendered as a
+// disabled checkbox (display only — the dashboard has no write-back path).
+// The rest of the content still goes through inlineMd (esc + inline passes).
+const TASK_ITEM_RE = /^\[([ xX])\][ \t]+(.*)$/;
+function listItemHtml(content) {
+  const tm = TASK_ITEM_RE.exec(content);
+  if (!tm) return inlineMd(content);
+  const checked = tm[1] === ' ' ? '' : ' checked';
+  return '<input type="checkbox" class="md-task" disabled' + checked + '> ' + inlineMd(tm[2]);
 }
 
 function parseListItem(line, baselineCols) {
@@ -11366,7 +11531,7 @@ function renderMdUncached(s) {
           if (f.cols === li.cols && f.kind === li.kind) {
             // Close everything strictly above this frame, then sibling-emit.
             closeTo(f.depth);
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             // We did NOT mutate the frame's depth, so no extra book-keeping.
             // Skip the rest of the dispatch.
             li.handled = true;
@@ -11404,7 +11569,7 @@ function renderMdUncached(s) {
         }
         if (top2 && top2.depth === li.depth) {
           if (top2.kind === li.kind) {
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             continue;
           }
           chunks.push('</li>');
@@ -11421,7 +11586,7 @@ function renderMdUncached(s) {
         // source column rather than the (possibly promoted) depth — promotion
         // mutates depth but not the user's actual indent.
         listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
-        chunks.push('<li>' + inlineMd(li.content));
+        chunks.push('<li>' + listItemHtml(li.content));
         continue;
       }
       // Treat all-whitespace lines as blanks: LLM/IM pipelines occasionally
@@ -11473,6 +11638,18 @@ function renderMdUncached(s) {
         }
       }
       closeAll();
+      // Blockquote: consecutive `>` lines merge into one <blockquote>; the
+      // marker is stripped BEFORE inlineMd so the remaining text still goes
+      // through esc(). Nested `> >` is not unwrapped (renders as literal &gt;).
+      const qm = BLOCKQUOTE_RE.exec(line);
+      if (qm) {
+        const q = [qm[1]];
+        while (i + 1 < lines.length && BLOCKQUOTE_RE.test(lines[i + 1])) {
+          q.push(BLOCKQUOTE_RE.exec(lines[++i])[1]);
+        }
+        chunks.push('<blockquote class="md-quote">' + q.map(inlineMd).join('<br>') + '</blockquote>');
+        continue;
+      }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
@@ -11496,6 +11673,14 @@ function renderMdUncached(s) {
 }
 
 /* Inline markdown: bold, italic, code, links, math */
+// `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
+// at most one nested `(...)` group; the title group is optional; CommonMark
+// permits whitespace padding on both sides of the body.
+const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\s*\)/g;
+// Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
+// so a URL inside a link's label never becomes a nested anchor.
+const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
+const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
 function inlineMd(s) {
   // Extract `code` spans FIRST — before math/bold/italic — so KaTeX does not
   // peek inside them. Previously `$NVIDIA_DEVICE_PLUGIN_IMAGE$` written inside
@@ -11590,18 +11775,38 @@ function inlineMd(s) {
   // turns into `2 <em> 3 </em> 4`. Lookbehind is already relied upon by the
   // inline-math pass above.
   s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
+  // `__bold__`: both delimiters must sit at a word boundary (not touching
+  // [A-Za-z0-9_]) so `snake_case_name` / `foo__bar__baz` stay literal —
+  // mirrors GFM's flanking rule for `_`. The opener additionally rejects a
+  // preceding `/` or `.` because these passes run BEFORE the link/autolink
+  // passes: `https://x/pkg/__init__.py`, `pkg/__init__.py` (local-file
+  // rescue) and `foo.__init__()` must survive verbatim, while `a __bold__ b`
+  // and `__all__ = []` still bold. `~~del~~` gets the same opener guard so
+  // `https://x.com/a~~b~~c` is not sliced; `~/.config` and a lone ` ~~ ` are
+  // untouched by construction. Body is capped at 300 chars: an unbounded
+  // `.+?` rescans to end-of-line from every opener (quadratic on inputs like
+  // `' __a'.repeat(10000)`). Same post-esc() contract as the passes above.
+  s = s.replace(/(?<![A-Za-z0-9_\/.])__(?!\s)(.{1,300}?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
+  s = s.replace(/(?<![A-Za-z0-9_\/.])~~(?!\s)(.{1,300}?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
   // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
   // blocks remote images, so an <img> would only ever render broken. Drop the
   // `!` and let the link pass below handle the target: remote → clickable
   // md-link labelled with the alt text; local path → the fileRefCode rescue
   // below, which is the existing image-preview path (preview/download buttons).
   s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, urlEsc) {
+  // Destination grammar: one level of balanced parens is allowed inside the
+  // URL (`https://x/a_(b)`) and an optional `"title"` / `'title'` may follow
+  // after whitespace (GFM link title). The title never reaches the href; it
+  // is emitted as a title attribute through escAttr. `"` survives esc() (only
+  // & < > are encoded) so the quote delimiters match literally.
+  s = s.replace(MD_LINK_RE, function(_, text, urlEsc, titleDq, titleSq) {
+    const title = titleDq !== undefined ? titleDq : titleSq;
     // `urlEsc` is the esc()'d capture (`&` → `&amp;`). Decode esc's entities
     // before the scheme check + escAttr so the href is encoded exactly once —
     // previously `?a=1&b=2` shipped as `?a=1&amp;amp;b=2`.
     const url = decodeEscEntities(urlEsc);
     const safe = safeUrl(url);
+    const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     // `text` is the already-esc()'d+partially-transformed capture — it may
     // legitimately contain <strong>/<em>/<code> spans from prior passes.
     // When the URL is rejected we still want to render the label, but
@@ -11652,7 +11857,7 @@ function inlineMd(s) {
       }
       return text;
     }
-    return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+    return '<a href="' + escAttr(safe) + '" class="md-link"' + titleAttr + ' target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
   // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
@@ -11667,14 +11872,24 @@ function inlineMd(s) {
   // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
   // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
   // emitted for `<https://…>` so the closing bracket stays out of the href.
-  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g, function(_, prefix, url) {
-    // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
-    // the decoded URL for the href (escAttr re-encodes it exactly once).
-    var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
-    var trail = url.slice(shown.length);
-    var clean = decodeEscEntities(shown);
-    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
-  });
+  // Odd segments of the split are the <a>…</a> runs emitted by the link pass
+  // above (esc() turned every authored `<` into &lt;, so `<a ` can only be
+  // ours); they are passed through untouched.
+  const autolinkSeg = function(seg) {
+    return seg.replace(MD_AUTOLINK_RE, function(_, prefix, url) {
+      // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
+      // the decoded URL for the href (escAttr re-encodes it exactly once).
+      var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
+      var trail = url.slice(shown.length);
+      var clean = decodeEscEntities(shown);
+      return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
+    });
+  };
+  if (s.indexOf('https://') !== -1 || s.indexOf('http://') !== -1) {
+    s = s.indexOf('<a ') === -1
+      ? autolinkSeg(s)
+      : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
+  }
   // Restore math tokens after escaping
   if (mathTokens.length > 0) {
     s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
@@ -12116,6 +12331,24 @@ function renderSystemView() {
 // (remote removed server-side while the dashboard is open) we snap it back to
 // 'local'. Kept as a single entry point so the many call sites (poll, session
 // switch, session create) don't each need to re-derive the same guard.
+// deselectNodeSession clears the main pane after the node hosting the
+// selected session disconnected (PurgeNodeSubscriptions → error{node, "node
+// disconnected"}). Mirrors dismissSession's deselect: the draft is kept for
+// when the node comes back, the caller already dropped the WS bookkeeping,
+// and the sidebar refetch removes the node's cards.
+function deselectNodeSession(nodeID) {
+  const inp = document.getElementById('msg-input');
+  const draft = inp ? getMsgValue(inp) : '';
+  if (draft) sessionDrafts[selectedKey] = draft;
+  selectedKey = null;
+  const main = document.getElementById('main');
+  if (main) {
+    main.innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
+  }
+  showToast('节点 ' + nodeID + ' 已断开，已退出该节点上的会话', 'warning');
+}
+
 function reconcileSelectedNode() {
   if (selectedNode && selectedNode !== 'local' && !nodesData[selectedNode]) {
     selectedNode = 'local';
@@ -12316,6 +12549,13 @@ const wsm = {
           }
         }
         break;
+      case 'unsubscribed':
+        // Server ack for an explicit unsubscribe (wshub_subscribe.go, three
+        // emit sites incl. the relayed remote ack). wsm.unsubscribe() already
+        // cleared subscribedKey/Node synchronously and a relayed ack may name
+        // a key this tab no longer tracks — nothing to reconcile. Listed so
+        // the frame is a documented no-op rather than an unhandled type.
+        break;
       case 'error':
         // cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
         if (msg.key && this.cronLive.pendingJobId && msg.key === ('cron:' + this.cronLive.pendingJobId)) {
@@ -12338,6 +12578,20 @@ const wsm = {
           if (this._pendingSubscribeNode === msg.node) {
             this._pendingSubscribeKey = null;
             this._pendingSubscribeNode = null;
+          }
+          // The selected session lived on the dead node: no pushes can reach
+          // it any more and its key means nothing under the `local` node
+          // reconcileSelectedNode snaps to, so deselect it (the backend's
+          // "deselect stale sessions" contract) before selectedNode moves.
+          // Ownership comes from the session store, NOT from selectedNode:
+          // that global is the dispatch target and wireNodePicker rewrites
+          // it the moment the new-session picker changes node, so a local
+          // session with the picker on n1 must survive n1 going away.
+          // Pending (never-sent) sessions are only a draft target — they stay
+          // selected and are neither cleared nor deleted here.
+          if (selectedKey && sessionWorkspaces[selectedKey] === undefined &&
+              (sessionsData[sid(selectedKey, msg.node)] || sessionNodes[selectedKey] === msg.node)) {
+            deselectNodeSession(msg.node);
           }
           nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
           reconcileSelectedNode();
@@ -12984,8 +13238,7 @@ const wsm = {
       // enqueued. Roll back the optimistic bubble and tell the operator
       // to retry — otherwise the UI silently eats the message.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。
@@ -12995,9 +13248,8 @@ const wsm = {
       // but treat the server-supplied `error` string the same way as an
       // HTTP 500 body: truncate + prefix with "发送消息失败：".
       showAPIError('发送消息', 500, msg.error || '');
-      // Remove optimistic message on send failure
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      // Remove this send's optimistic message on send failure
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
@@ -13381,6 +13633,28 @@ function stopPreviewPolling() {
 
 /* ===== Discovery & Takeover ===== */
 
+// Discovered-card identity is (pid, node): pids repeat across nodes, so every
+// key/lookup/removal goes through these helpers (#2431). Key shape is
+// '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
+function discoveredKey(pid, node) {
+  return '_discovered:' + pid + ':' + (node || 'local');
+}
+function isDiscoveredKey(key) {
+  return typeof key === 'string' && key.startsWith('_discovered:');
+}
+function parseDiscoveredPid(key) {
+  return parseInt(key.split(':')[1], 10);
+}
+function sameDiscovered(d, pid, node) {
+  return d.pid === pid && (d.node || 'local') === (node || 'local');
+}
+function findDiscovered(pid, node) {
+  return discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
+}
+function dropDiscovered(pid, node) {
+  discoveredItems = discoveredItems.filter(d => !sameDiscovered(d, pid, node));
+}
+
 async function scanDiscovered() {
   try {
     const headers = {};
@@ -13431,7 +13705,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   mobileEnterChat();
 
   // Highlight the discovered card
-  setActiveSessionCard('_discovered:' + pid, node || 'local');
+  setActiveSessionCard(discoveredKey(pid, node), node || 'local');
 
   const base = cwd.split('/').pop() || cwd;
   const main = document.getElementById('main');
@@ -13587,9 +13861,9 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     const data = await r.json();
     showToast('已接管会话', 'success');
     // Remove from discoveredItems so renderSidebar won't re-create the card
-    discoveredItems = discoveredItems.filter(d => d.pid !== pid);
+    dropDiscovered(pid, node);
     // Immediately remove the discovered card from DOM
-    removeSidebarCard('_discovered:' + pid);
+    removeSidebarCard(discoveredKey(pid, node));
     // Force refresh (clear cache so renderSidebar runs)
     lastVersion = 0;
     await fetchSessions();
@@ -13619,21 +13893,33 @@ mobileQuery.addEventListener('change', e => {
 
 function mobileEnterChat() {
   if (!isMobile()) return;
-  history.pushState({ view: 'chat' }, '');
+  // #2431: switching sessions while already in chat view must not stack
+  // another entry — replace ours so a single back press leaves chat.
+  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
+  else history.pushState({ view: 'chat' }, '');
   document.body.classList.remove('mobile-list-view');
   document.body.classList.add('mobile-chat-view');
 }
 
-function mobileBack() {
+function mobileShowList() {
   document.body.classList.remove('mobile-chat-view');
   document.body.classList.add('mobile-list-view');
   if (document.activeElement) document.activeElement.blur();
 }
 
+// In-app back button / swipe-back. Flips the view synchronously, then pops
+// the history entry mobileEnterChat pushed so the browser stack stays in
+// step (#2431); the popstate below sees list view already and no-ops.
+function mobileBack() {
+  const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
+  mobileShowList();
+  if (ownsEntry) history.back();
+}
+
 // Handle Android back button and iOS swipe-back gesture
 window.addEventListener('popstate', () => {
   if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
-    mobileBack();
+    mobileShowList();
   }
 });
 
@@ -15020,6 +15306,32 @@ initSwipeBack();
     return 0;
   }
 
+  // @contract-begin scratchAdmitEvent
+  // scratchAdmitEvent is the same-ms replay gate for the drawer's HTTP poll.
+  // HandleEvents ?after= re-admits the watermark millisecond (#2456, so a
+  // same-ms sibling is never lost), which means every idle tick replays the
+  // entries AT st.lastEventTime. st.seenAtWM holds the uuids already
+  // processed (rendered OR echo-dropped) at that ms: the local optimistic
+  // user bubble carries no data-uuid and matchesPendingEcho consumes its
+  // entry on first sight, so a DOM lookup alone would re-render the echoed
+  // user event on the next tick. Returns false when e must be skipped;
+  // otherwise records it and advances the watermark. uuid-less (pre-uuid)
+  // events at the watermark are admitted — never swallow what we can't
+  // identify (losing history is worse than a duplicate bubble).
+  function scratchAdmitEvent(st, e) {
+    const t = (e && typeof e.time === 'number') ? e.time : 0;
+    if (t && t < st.lastEventTime) return false;
+    if (!st.seenAtWM) st.seenAtWM = new Set();
+    if (t && t === st.lastEventTime && e.uuid && st.seenAtWM.has(e.uuid)) return false;
+    if (t > st.lastEventTime) {
+      st.lastEventTime = t;
+      st.seenAtWM.clear();
+    }
+    if (t && t === st.lastEventTime && e.uuid) st.seenAtWM.add(e.uuid);
+    return true;
+  }
+  // @contract-end scratchAdmitEvent
+
   function renderNewEvents(events) {
     if (!Array.isArray(events) || events.length === 0) return;
     // Remember whether the user was reading the latest message BEFORE we
@@ -15036,11 +15348,10 @@ initSwipeBack();
     let sawUser = false;
     let prevT = asideLastTime();
     for (const e of events) {
+      // Same-ms replay / strictly-older guard; also owns the watermark.
+      if (!scratchAdmitEvent(state, e)) continue;
       // Drop server-echoed user messages that we already rendered locally.
-      if (matchesPendingEcho(e)) {
-        if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
-        continue;
-      }
+      if (matchesPendingEcho(e)) continue;
       // Reuse the main event renderer so aside bubbles match the transcript
       // style (markdown, code blocks, etc.) without duplicating logic.
       const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
@@ -15056,7 +15367,6 @@ initSwipeBack();
       tmp.innerHTML = h;
       while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
       if (t) prevT = t;
-      if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
       if (e.type === 'user') sawUser = true;
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
@@ -15171,6 +15481,7 @@ initSwipeBack();
         sourceMsgTime: sourceMsgTime || 0,
         quote,
         lastEventTime: 0,
+        seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
         // Bounded Set of user-message bodies that sendInScratch rendered
         // locally. Consumed by matchesPendingEcho when the server event
         // stream replays the same text as a `user` event. Set over array
