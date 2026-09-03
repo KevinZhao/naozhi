@@ -185,9 +185,10 @@ func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
 	for _, de := range dirents {
 		name := de.Name()
 		// Omit credential-named children entirely — they must not even be
-		// enumerable. Scans the full child path so a sensitive *segment*
-		// (e.g. the dir is named ".ssh") is caught too.
-		if isSensitiveDownloadPath(filepath.Join(dirResolved, name)) {
+		// enumerable. Scans the workspace-relative child path so a sensitive
+		// *segment* inside the workspace (e.g. the dir is named ".ssh") is
+		// caught, while a root itself named e.g. "secrets" is not (#2433).
+		if isSensitiveDownloadPath(filepath.Join(workspaceScanPath(rootResolved, dirResolved), name)) {
 			continue
 		}
 		// Hide dotfiles and well-known noise directories unless the caller
@@ -273,7 +274,12 @@ func sortEntries(entries []listEntry) {
 		if paired[i].entry.IsDir != paired[j].entry.IsDir {
 			return paired[i].entry.IsDir
 		}
-		return paired[i].lower < paired[j].lower
+		if paired[i].lower != paired[j].lower {
+			return paired[i].lower < paired[j].lower
+		}
+		// Case-fold ties (Makefile / makefile): break on the original name so
+		// the order is independent of ReadDir order (#2433).
+		return paired[i].entry.Name < paired[j].entry.Name
 	})
 	for i := range paired {
 		entries[i] = paired[i].entry
