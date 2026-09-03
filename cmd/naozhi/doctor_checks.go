@@ -85,7 +85,7 @@ func (d *doctor) checkHealth() {
 		d.add("http /health", "fail", "request build: "+err.Error())
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := d.httpClient().Do(req)
 	if err != nil {
 		d.add("http /health", "fail", fmt.Sprintf("%s unreachable: %v", url, err))
 		return
@@ -117,7 +117,7 @@ func (d *doctor) checkAuth() {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := d.httpClient().Do(req)
 	if err != nil {
 		d.add("auth", "fail", "request failed: "+err.Error())
 		return
@@ -147,7 +147,7 @@ func (d *doctor) checkPprof() {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := d.httpClient().Do(req)
 	if err != nil {
 		d.add("pprof", "fail", "request failed: "+err.Error())
 		return
@@ -181,7 +181,7 @@ func (d *doctor) checkExpvar() {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := d.httpClient().Do(req)
 	if err != nil {
 		d.add("expvar", "fail", "request failed: "+err.Error())
 		return

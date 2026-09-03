@@ -11,12 +11,13 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// NodeAccessor is the subset of internal/server.NodeAccessor this handler
-// uses to proxy /api/cli/backends?node=<id> to a remote node. server's
-// *nodeRegistry satisfies this shape; we accept the interface so the
-// sub-package doesn't reverse-import server (mirrors dashboard/session's
-// NodeAccessor). Nil is allowed — single-node deployments never set it and
-// the ?node= branch stays unreachable.
+// NodeAccessor is the 1-method subset of contracts.NodeAccessor this handler
+// uses to proxy /api/cli/backends?node=<id> to a remote node. Kept narrow
+// (rather than aliasing the shared contract, #2285) because the package's
+// test doubles implement only LookupNode; contracts'
+// TestDashboardContractsDeclaredOnce asserts it stays a strict subset.
+// server's *nodeAccessor satisfies this shape. Nil is allowed — single-node
+// deployments never set it and the ?node= branch stays unreachable.
 type NodeAccessor interface {
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 }

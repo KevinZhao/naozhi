@@ -341,7 +341,7 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	// prompt); 64 KB is well above legitimate payloads and keeps both
 	// paths consistent so a remote proxy cannot be used to smuggle a
 	// larger body than the local handler would accept.
-	r = withMaxBytes(w, r, 64*1024)
+	r = httputil.WithMaxBytes(w, r, 64*1024)
 
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")

@@ -8,18 +8,14 @@
 package cron
 
 import (
-	"net/http"
-
 	"github.com/naozhi/naozhi/internal/backendid"
+	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 )
 
-// IPLimiter is the subset of internal/server.ipLimiter the cron handlers use.
-// server's *ipLimiter satisfies this shape; we accept the interface so the
-// sub-package doesn't reverse-import server.
-type IPLimiter interface {
-	Allow(remoteAddr string) bool
-	AllowRequest(r *http.Request) bool
-}
+// IPLimiter aliases the shared dashboard contract (#2285) so server's
+// *ipLimiter is injected without a reverse import and the cron package keeps
+// its local name for Deps fields and tests.
+type IPLimiter = contracts.IPLimiter
 
 // maxBackendIDLen / isValidBackendID alias the shared backendid leaf package's
 // length+charset gate so this package and internal/server enforce one contract

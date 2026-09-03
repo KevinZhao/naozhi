@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -154,7 +155,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		_ = entries
 		if err != nil {
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "unknown task", http.StatusNotFound)
 				return
 			}
