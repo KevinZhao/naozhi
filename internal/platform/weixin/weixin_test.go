@@ -406,7 +406,8 @@ func TestPollLoop_SemaphoreFullDropSanitizesUser(t *testing.T) {
 	// blocking handlers it lands on the semaphore-full drop path.
 	const poisonFrom = "evil\x00\x07\x1b\nuser"
 
-	// Block the first weixinHookConcurrency handlers so the sem saturates.
+	// Block the first DefaultHandlerConcurrency handlers so the sem saturates.
+	const weixinHookConcurrency = platform.DefaultHandlerConcurrency
 	release := make(chan struct{})
 	var startedHandlers atomic.Int32
 

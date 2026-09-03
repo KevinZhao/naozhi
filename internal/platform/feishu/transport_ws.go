@@ -45,10 +45,10 @@ func (f *Feishu) startWebSocket() error {
 
 	handler := f.handler
 
-	// Limit concurrent message handlers to avoid unbounded goroutine growth
-	// when Feishu delivers bursts of messages (e.g., group chat floods).
-	msgSem := make(chan struct{}, 20)
-
+	// f.dispatch limits concurrent message handlers to avoid unbounded
+	// goroutine growth when Feishu delivers bursts of messages (e.g., group
+	// chat floods). Only one transport (ws or webhook) is active per adapter,
+	// so sharing the pool with the webhook path changes nothing.
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -57,25 +57,13 @@ func (f *Feishu) startWebSocket() error {
 			return nil
 		}
 
-		// R184-CONCUR-H1: wg.Add(1) MUST precede the msgSem select, so a
-		// concurrent Stop()/wg.Wait() cannot observe counter=0 between the
-		// goroutine being dispatched and wg.Add running. The drop branch
-		// must balance with wg.Done(). Mirrors the wshub.go invariant
-		// where clientWG.Add(2) precedes register().
+		// R184-CONCUR-H1: BoundedDispatch.TryGo runs wg.Add(1) on this
+		// goroutine before `go`, so a concurrent Stop()/Wait() cannot
+		// observe counter=0 between the SDK dispatching us and the handler
+		// goroutine being tracked; the drop branch never touches the wg.
 		switch pe.MediaType {
 		case "image":
-			f.wg.Add(1)
-			select {
-			case msgSem <- struct{}{}:
-			default:
-				f.wg.Done()
-				slog.Warn("feishu ws: handler semaphore full, dropping image message")
-				return nil
-			}
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-msgSem }()
-				defer platform.RecoverHandler("feishu ws image")
+			f.dispatch.TryGo("feishu ws image", func() {
 				msg := pe.Msg
 				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
@@ -88,40 +76,16 @@ func (f *Feishu) startWebSocket() error {
 				}
 				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
 				handler(ctx, msg)
-			}()
+			})
 
 		case "audio":
-			f.wg.Add(1)
-			select {
-			case msgSem <- struct{}{}:
-			default:
-				f.wg.Done()
-				slog.Warn("feishu ws: handler semaphore full, dropping audio message")
-				return nil
-			}
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-msgSem }()
-				defer platform.RecoverHandler("feishu ws audio")
+			f.dispatch.TryGo("feishu ws audio", func() {
 				msg := pe.Msg
 				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
-			}()
+			})
 
 		default:
-			f.wg.Add(1)
-			select {
-			case msgSem <- struct{}{}:
-			default:
-				f.wg.Done()
-				slog.Warn("feishu ws: handler semaphore full, dropping message")
-				return nil
-			}
-			go func() {
-				defer f.wg.Done()
-				defer func() { <-msgSem }()
-				defer platform.RecoverHandler("feishu ws text")
-				handler(ctx, pe.Msg)
-			}()
+			f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
 		}
 		return nil
 	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -174,10 +138,10 @@ func (f *Feishu) startWebSocket() error {
 		// (transport_hook.go:367-383). The larkws SDK requires this callback to
 		// return its response synchronously (the SDK acks the frame on return),
 		// so we cannot simply spawn — dispatchCardActionTracked brackets the
-		// synchronous dispatch with wg.Add/Done + msgSem so Stop()'s wg.Wait()
+		// synchronous dispatch with f.dispatch.TryRun so Stop()'s Wait()
 		// drains in-flight card dispatches and a burst of clicks can't exceed
-		// the shared 20-slot cap.
-		f.dispatchCardActionTracked(cardCtx, msgSem, val, chatID, messageID, chatType, operatorID, handler)
+		// the shared cap.
+		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
@@ -199,39 +163,29 @@ func (f *Feishu) startWebSocket() error {
 }
 
 // dispatchCardActionTracked runs f.dispatchCardAction under the same wg +
-// semaphore discipline the WS message branches use, while preserving the
-// synchronous return the larkws SDK callback contract requires (the SDK acks
-// the frame only after OnP2CardActionTrigger returns, so the dispatch cannot
-// be detached into a fire-and-forget goroutine). R20260608-133914-LB-4 (#1964):
+// semaphore discipline the WS message branches use (f.dispatch.TryRun), while
+// preserving the synchronous return the larkws SDK callback contract requires
+// (the SDK acks the frame only after OnP2CardActionTrigger returns, so the
+// dispatch cannot be detached into a fire-and-forget goroutine).
+// R20260608-133914-LB-4 (#1964):
 //
-//   - wg.Add(1) precedes the sem select so a concurrent Stop()/wg.Wait()
-//     cannot observe counter=0 mid-dispatch (same invariant as the message
-//     branches). The drop branch balances with wg.Done().
-//   - sem (the WS handler's shared 20-slot msgSem) bounds concurrency so a
-//     burst of card clicks cannot spawn unbounded work; on a full sem the
-//     click is dropped best-effort (the user can re-click) rather than
-//     blocking the SDK read loop.
-//   - RecoverHandler keeps a panic in the dispatch from escaping into the SDK
+//   - TryRun tracks the in-flight dispatch on f.dispatch so a concurrent
+//     Stop()/Wait() drains it; the drop branch never touches the counter.
+//   - The shared semaphore bounds concurrency so a burst of card clicks
+//     cannot spawn unbounded work; on a full pool the click is dropped
+//     best-effort (the user can re-click) rather than blocking the SDK read
+//     loop.
+//   - Panic recovery keeps a panic in the dispatch from escaping into the SDK
 //     read loop and gives the same structured log the other branches emit.
 func (f *Feishu) dispatchCardActionTracked(
 	ctx context.Context,
-	sem chan struct{},
 	val cardActionPayload,
 	chatID, messageID, chatType, operatorID string,
 	handler platform.MessageHandler,
 ) {
-	f.wg.Add(1)
-	select {
-	case sem <- struct{}{}:
-	default:
-		f.wg.Done()
-		slog.Warn("feishu ws: handler semaphore full, dropping card action")
-		return
-	}
-	defer f.wg.Done()
-	defer func() { <-sem }()
-	defer platform.RecoverHandler("feishu ws card_action")
-	f.dispatchCardAction(ctx, val, chatID, messageID, chatType, operatorID, handler)
+	f.dispatch.TryRun("feishu ws card_action", func() {
+		f.dispatchCardAction(ctx, val, chatID, messageID, chatType, operatorID, handler)
+	})
 }
 
 // handleAudio downloads and transcribes audio, then calls handler with the text.

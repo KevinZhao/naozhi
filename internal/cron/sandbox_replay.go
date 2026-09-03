@@ -186,10 +186,11 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 
 // dispatchReplay drives one replay run through the same CAS-admission +
 // finalizer + gauge protocol as executeOpt, but injects the SNAPSHOT payload
-// (prompt/model) and tags the run replay_of=origRunID. It mirrors executeOpt's
-// frame-local defer discipline exactly: the finalizer + gauge-decrement defers
-// MUST live in the goroutine frame that owns the run, so executeSandbox's
-// finishRun (which calls finalize()) and the defer cooperate the same way.
+// (prompt/model) and tags the run replay_of=origRunID. The run goroutine body
+// executes inside the same runScaffold envelope executeOpt uses (finalizer +
+// gauge defers, completed-guarded panic recover), so executeSandbox's
+// finishRun (which calls finalize()) and the scaffold defer cooperate the
+// same way on both paths.
 //
 // Returns (newRunID, nil) once the run goroutine is spawned; (–, err) on a
 // pre-spawn failure (CAS lost, run-id generation) so the caller can undo its
@@ -251,65 +252,51 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 
 	go func() {
 		defer s.triggerWG.Done()
-		defer func() {
-			finalizer.finalize()
-			metrics.CronRunInflight.Add(-1)
-		}()
-		// completed flips true only when executeSandbox returns normally —
-		// at which point it has already driven finishSandboxRun → emitRunEnded.
-		completed := false
-		defer func() {
-			if r := recover(); r != nil {
-				recordTriggerNowPanic(snap.jobID, r)
+		// R202606-ARCH-7 (#2174): the finalizer/gauge defers and the
+		// completed-guarded panic recover are owned by runScaffold (shared with
+		// executeOpt). onPanic runs only when executeSandbox panicked before
+		// reaching finishSandboxRun → emitRunEnded, and only AFTER the scaffold
+		// has finalized (finalize-before-broadcast, R20260614-032346-LB-replay /
+		// #2094).
+		runScaffold{
+			finalizer: finalizer,
+			jobID:     snap.jobID,
+			onPanic: func(any) {
 				// #2064: emitRunStarted fired synchronously in the caller frame
 				// above, so a panic that aborts executeSandbox BEFORE it reaches
 				// finishSandboxRun → emitRunEnded would leave subscribers with a
 				// started(queued) frame and no matching ended frame — the run
 				// hangs in "queued" forever. Close the lifecycle here so the
-				// dashboard timeline always pairs. Guarded by `completed` so a
-				// (practically impossible) panic AFTER a normal finish can never
-				// double-emit an ended frame.
-				if !completed {
-					// R20260614-032346-LB-replay (#2094): honor the
-					// finalize-before-broadcast contract (scheduler_finish.go
-					// R246-GO-3 / #689). Defers run LIFO, so this recover defer
-					// fires BEFORE the outer finalize defer — if we broadcast
-					// emitRunEnded here first, a concurrent dashboard list could
-					// observe a cron_run_ended frame while CurrentRun(jobID) is
-					// still running (inflight not yet released). Finalize first;
-					// the outer defer's finalize() is then an idempotent no-op.
-					finalizer.finalize()
-					s.emitRunEnded(RunEndedEvent{
-						JobID:      snap.jobID,
-						RunID:      runID,
-						State:      RunStateFailed,
-						StartedAt:  startedAt,
-						EndedAt:    s.now(),
-						Trigger:    TriggerManual,
-						ErrorClass: ErrClassSandboxFailed,
-						ErrorMsg:   "sandbox replay panicked before terminal record",
-					})
-					metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
-					// #2223: this panic path bypasses finishSandboxRunWith +
-					// finishRun → bumpRunStateMetrics, so it must bump the
-					// per-state + sandbox failure counters itself (mirrors the
-					// orphan branch in sandbox_pending.go). State is RunStateFailed
-					// by construction; without this CronRunFailedTotal /
-					// CronSandboxRunFailedTotal undercount vs CronRunEndedTotal.
-					metrics.CronRunFailedTotal.Add(1)
-					metrics.CronSandboxRunFailedTotal.Add(1)
-				}
-			}
-		}()
-		metrics.CronRunInflight.Add(1)
-		s.executeSandbox(sandboxExecArgs{
-			job: j, snap: replaySnap, runID: runID, startedAt: startedAt,
-			trigger: TriggerManual, prompt: prompt, model: model,
-			notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
-			lg:       lg,
-			replayOf: origRunID,
+				// dashboard timeline always pairs.
+				s.emitRunEnded(RunEndedEvent{
+					JobID:      snap.jobID,
+					RunID:      runID,
+					State:      RunStateFailed,
+					StartedAt:  startedAt,
+					EndedAt:    s.now(),
+					Trigger:    TriggerManual,
+					ErrorClass: ErrClassSandboxFailed,
+					ErrorMsg:   "sandbox replay panicked before terminal record",
+				})
+				metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
+				// #2223: this panic path bypasses finishSandboxRunWith +
+				// finishRun → bumpRunStateMetrics, so it must bump the
+				// per-state + sandbox failure counters itself (mirrors the
+				// orphan branch in sandbox_pending.go). State is RunStateFailed
+				// by construction; without this CronRunFailedTotal /
+				// CronSandboxRunFailedTotal undercount vs CronRunEndedTotal.
+				metrics.CronRunFailedTotal.Add(1)
+				metrics.CronSandboxRunFailedTotal.Add(1)
+			},
+		}.run(func() {
+			s.executeSandbox(sandboxExecArgs{
+				job: j, snap: replaySnap, runID: runID, startedAt: startedAt,
+				trigger: TriggerManual, prompt: prompt, model: model,
+				notifyTo: notifyTo, inflight: inflight, finalizer: finalizer,
+				lg:       lg,
+				replayOf: origRunID,
+			})
 		})
-		completed = true
 	}()
 	return runID, nil
 }

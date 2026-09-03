@@ -74,7 +74,7 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid multipart form", http.StatusBadRequest)
 		return
 	}
-	if rejectIfTooManyFields(w, r) {
+	if httputil.RejectIfTooManyFields(w, r) {
 		return
 	}
 

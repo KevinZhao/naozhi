@@ -27,11 +27,6 @@ type Config struct {
 	MaxReplyLen int
 }
 
-// discordHookConcurrency caps the number of in-flight inbound message
-// goroutines. Mirrors feishu.hookSem (20) and slack.slackHookConcurrency.
-// R235-SEC-3.
-const discordHookConcurrency = 20
-
 // discordBotHealCooldown rate-limits the lazy bot-identity self-heal so a
 // sustained stream of group messages while botID is unknown can't hammer the
 // REST API. Mirrors slackBotHealCooldown. #2009.
@@ -60,13 +55,13 @@ type Discord struct {
 
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
-	handlerWg  sync.WaitGroup
-	// hookSem caps concurrent inbound message-handler goroutines to bound
-	// memory + file descriptors under burst load. Each goroutine may also
-	// download up to maxDiscordAttachmentsPerMessage × 10 MB of attachments
-	// serially, so without this cap a high-traffic guild could pin many GB.
-	// Mirrors feishu.hookSem / slack.hookSem. R235-SEC-3.
-	hookSem chan struct{}
+	// dispatch bounds concurrent inbound message-handler goroutines (shared
+	// platform.DefaultHandlerConcurrency cap) to bound memory + file
+	// descriptors under burst load — each goroutine may download up to
+	// maxDiscordAttachmentsPerMessage × 10 MB of attachments serially, so
+	// without the cap a high-traffic guild could pin many GB. Also tracks
+	// the bot-identity self-heal goroutine for Stop(). R235-SEC-3, #2254.
+	dispatch platform.BoundedDispatch
 }
 
 // New creates a Discord platform adapter.
@@ -74,7 +69,7 @@ func New(cfg Config) *Discord {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = platform.DiscordMaxReplyLen // Discord's actual API limit
 	}
-	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
+	return &Discord{cfg: cfg, dispatch: platform.BoundedDispatch{Name: "discord"}}
 }
 
 // getBotID returns the connected bot's user ID, or "" before the gateway
@@ -119,10 +114,7 @@ func (d *Discord) maybeHealBotID() {
 	if sess == nil {
 		return
 	}
-	d.handlerWg.Add(1)
-	go func() {
-		defer d.handlerWg.Done()
-		defer platform.RecoverHandler("discord bot heal")
+	d.dispatch.Go("discord bot heal", func() {
 		u, err := sess.User("@me")
 		if err != nil || u == nil {
 			slog.Warn("discord bot identity self-heal failed; staying fail-open", "err", err)
@@ -132,7 +124,7 @@ func (d *Discord) maybeHealBotID() {
 		slog.Info("discord bot identity recovered",
 			"bot_id", u.ID,
 			"bot_name", osutil.SanitizeForLog(u.Username, 128))
-	}()
+	})
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -236,7 +228,7 @@ func (d *Discord) Stop() error {
 		}
 	}
 	done := make(chan struct{})
-	go func() { d.handlerWg.Wait(); close(done) }()
+	go func() { d.dispatch.Wait(); close(done) }()
 	// NewTimer + Stop: fast path (handlers exit cleanly) must not leave a
 	// 30s timer goroutine parked until the timeout elapses.
 	timer := time.NewTimer(30 * time.Second)
@@ -452,23 +444,11 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		MentionMe: mentionMe,
 	}
 
-	// R235-SEC-3: cap concurrent handler goroutines (mirrors feishu/slack).
-	// Non-blocking acquire — when saturated, drop the message + slog.Warn so
-	// a flood cannot spawn unbounded goroutines, each of which may sequentially
-	// download up to 5 × 10 MB of attachments.
-	select {
-	case d.hookSem <- struct{}{}:
-	default:
-		slog.Warn("discord: handler semaphore full, dropping message",
-			"channel", m.ChannelID, "user", m.Author.ID)
-		return
-	}
+	// R235-SEC-3: cap concurrent handler goroutines. When saturated, drop the
+	// message + slog.Warn so a flood cannot spawn unbounded goroutines, each
+	// of which may sequentially download up to 5 × 10 MB of attachments.
 	// Download images in the async goroutine, not in discordgo's event dispatch.
-	d.handlerWg.Add(1)
-	go func() {
-		defer d.handlerWg.Done()
-		defer func() { <-d.hookSem }()
-		defer platform.RecoverHandler("discord")
+	d.dispatch.TryGo("discord", func() {
 		var total int
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)
@@ -490,7 +470,7 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
 		}
 		d.handler(d.stopCtx, msg)
-	}()
+	}, "channel", m.ChannelID, "user", m.Author.ID)
 }
 
 // maxDiscordTotalAttachmentBytes caps the aggregate downloaded bytes per
