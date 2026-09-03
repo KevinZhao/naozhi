@@ -51,9 +51,15 @@ func runNode(t *testing.T, script string) string {
 	}
 	cmd := exec.Command(nodeBin, "-")
 	cmd.Stdin = strings.NewReader(script)
-	out, err := cmd.CombinedOutput()
+	// Capture stdout alone: node prints warnings (e.g. ExperimentalWarning)
+	// on stderr, which would corrupt the JSON payload under CombinedOutput.
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("node failed: %v\n%s", err, out)
+		var stderr []byte
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = exitErr.Stderr
+		}
+		t.Fatalf("node failed: %v\n%s", err, stderr)
 	}
 	return string(out)
 }
