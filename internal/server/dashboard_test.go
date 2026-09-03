@@ -936,8 +936,8 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro")
-	srv.knownNodes["macbook"] = "MacBook Pro"
+	srv.nodes.Add("macbook", node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro"))
+	srv.nodes.SetKnown("macbook", "MacBook Pro")
 
 	// Populate the cache synchronously
 	srv.nodeCache.RefreshAll()
@@ -1154,8 +1154,8 @@ func TestHandleSetLabel_RemoteProxy(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro")
-	srv.knownNodes["macbook"] = "MacBook Pro"
+	srv.nodes.Add("macbook", node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro"))
+	srv.nodes.SetKnown("macbook", "MacBook Pro")
 
 	body := `{"key":"feishu:direct:alice:general","node":"macbook","label":"remote-label"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))

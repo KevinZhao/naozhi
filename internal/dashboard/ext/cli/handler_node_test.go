@@ -74,7 +74,7 @@ func (f *fakeConn) RefreshSubscription(_ string)                  {}
 func (f *fakeConn) RemoveClient(_ node.EventSink)                 {}
 
 // fakeNodeAccess resolves a single node id to conn. When conn is nil,
-// LookupNode writes a 404 (mirroring the real nodeAccessor's "unknown node"
+// LookupNode writes a 404 (mirroring the real nodeRegistry's "unknown node"
 // response) and returns false.
 type fakeNodeAccess struct {
 	wantID string

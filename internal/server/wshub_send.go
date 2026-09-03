@@ -34,19 +34,16 @@ const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后�
 // of being a bare `10*time.Second` literal duplicated across the proxy sites.
 const remoteNodeProxyTimeout = 10 * time.Second
 
-// lookupNode resolves a node ID to its Conn under the shared nodes mutex.
-// R176-ARCH-M3 / ARCH4 (#384): the Hub's only access to the Server-shared
-// nodes map is this single read-locked by-ID lookup, repeated verbatim at the
-// remote interrupt / subscribe / unsubscribe sites. Funnelling all three
-// through one helper keeps the raw `h.nodesMu.RLock(); h.nodes[id]; RUnlock()`
-// triple in exactly one place — the prerequisite shape for swapping the shared
-// *sync.RWMutex for a real node-registry abstraction without re-touching every
-// call site. Callers MUST still validate the ID with isValidNodeID first.
+// lookupNode resolves a node ID to its Conn via the shared node registry.
+// R176-ARCH-M3 / ARCH4 (#384): the Hub's only by-ID access to the
+// Server-shared node table is this helper, used by the remote interrupt /
+// subscribe / unsubscribe sites and the hubNodeLookup adapter. G2 (#2192)
+// swapped the raw `nodesMu.RLock(); nodes[id]; RUnlock()` triple for the
+// registry method, so the helper survives purely as the single seam those
+// call sites share. Callers MUST still validate the ID with isValidNodeID
+// first.
 func (h *Hub) lookupNode(id string) (node.Conn, bool) {
-	h.nodesMu.RLock()
-	nc, ok := h.nodes[id]
-	h.nodesMu.RUnlock()
-	return nc, ok
+	return h.nodes.NodeByID(id)
 }
 
 // File: wshub_send.go

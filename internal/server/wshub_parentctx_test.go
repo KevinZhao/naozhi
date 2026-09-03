@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -26,11 +25,9 @@ func TestNewHub_ParentCtxCancelPropagates(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	hub := NewHub(HubOptions{
 		Router:    router,
 		Guard:     guard,
-		NodesMu:   &nodesMu,
 		ParentCtx: parent,
 	})
 
@@ -78,11 +75,9 @@ func TestNewHub_NilParentCtxFallsBackToBackground(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	hub := NewHub(HubOptions{
-		Router:  router,
-		Guard:   guard,
-		NodesMu: &nodesMu,
+		Router: router,
+		Guard:  guard,
 		// ParentCtx intentionally omitted.
 	})
 

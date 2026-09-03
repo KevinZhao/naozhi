@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -93,9 +92,8 @@ func newAnonTestHub(t *testing.T) *Hub {
 	t.Helper()
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	return NewHub(HubOptions{
-		Router: router, DashToken: "", Guard: guard, NodesMu: &nodesMu,
+		Router: router, DashToken: "", Guard: guard,
 		Auth: &auth.Handlers{},
 	})
 }

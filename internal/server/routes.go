@@ -71,7 +71,6 @@ func (s *Server) registerDashboard() {
 		Guard:       s.sessionGuard,
 		Queue:       s.msgQueue,
 		Nodes:       s.nodes,
-		NodesMu:     &s.nodesMu,
 		ProjectMgr:  s.projectMgr,
 		Resolver:    s.resolver,
 		// R176-ARCH-M3 (#431): Scheduler/ScratchPool wired at construction
@@ -129,7 +128,7 @@ func (s *Server) registerDashboard() {
 	uploads.StartCleanup(cleanupCtx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
-		nodeAccess: s.nodeAccess,
+		nodeAccess: s.nodes,
 		hub:        s.hub,
 		// router: SendRouter consumer-interface view of *session.Router.
 		// Closes the R215-ARCH-P1-4 (#566) Phase-2.5 cleanup so the handler

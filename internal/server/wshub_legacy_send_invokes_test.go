@@ -1,7 +1,6 @@
 package server
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -24,9 +23,8 @@ func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
 	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
-	withQueue := NewHub(HubOptions{Router: router, Guard: guard, NodesMu: &nodesMu, Queue: q})
+	withQueue := NewHub(HubOptions{Router: router, Guard: guard, Queue: q})
 	t.Cleanup(withQueue.Shutdown)
 	if withQueue.queue == nil {
 		t.Fatal("Hub built with a real Queue: h.queue is nil, want non-nil interface")

@@ -223,8 +223,8 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
-	srv.knownNodes["macbook"] = "MacBook"
+	srv.nodes.Add("macbook", node.NewHTTPClient("macbook", remote.URL, "", "MacBook"))
+	srv.nodes.SetKnown("macbook", "MacBook")
 	// Pre-populate cache
 	srv.nodeCache.RefreshAll()
 
@@ -271,8 +271,8 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["bad-node"] = node.NewHTTPClient("bad-node", remote.URL, "", "Bad")
-	srv.knownNodes["bad-node"] = "Bad"
+	srv.nodes.Add("bad-node", node.NewHTTPClient("bad-node", remote.URL, "", "Bad"))
+	srv.nodes.SetKnown("bad-node", "Bad")
 	// Pre-populate cache
 	srv.nodeCache.RefreshAll()
 
@@ -307,7 +307,7 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
+	srv.nodes.Add("macbook", node.NewHTTPClient("macbook", remote.URL, "", "MacBook"))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=macbook", nil)
 	w := httptest.NewRecorder()
@@ -358,7 +358,7 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
+	srv.nodes.Add("macbook", node.NewHTTPClient("macbook", remote.URL, "", "MacBook"))
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"macbook"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -443,8 +443,7 @@ func TestHub_RemoteSend(t *testing.T) {
 	}
 	router := session.NewRouter(session.RouterConfig{})
 	guard := session.NewGuard()
-	var nodesMu sync.RWMutex
-	hub := NewHub(HubOptions{Router: router, Guard: guard, Nodes: nodes, NodesMu: &nodesMu})
+	hub := NewHub(HubOptions{Router: router, Guard: guard, Nodes: newNodeRegistry(nodes)})
 	defer hub.Shutdown()
 
 	client := newTestWSClient()
