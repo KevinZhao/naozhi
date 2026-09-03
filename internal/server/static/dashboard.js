@@ -643,12 +643,18 @@ async function fetchSessions() {
           const pendingCLIVersion = isDefaultBackend
             ? (defaultCLIVersion || backendDisplayVersion(pendingBackend))
             : (backendDisplayVersion(pendingBackend) || defaultCLIVersion);
+          // #2431: mirror the server's project/project_fallback shape so an
+          // unregistered workspace groups under its basename from the first
+          // paint instead of sitting in 未分组 until the first send promotes it.
+          const pendingWS = sessionWorkspaces[key];
+          const pendingProject = matchProject(pendingWS);
+          const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
           data.sessions.push({
             key: key,
             state: 'new',
             platform: parts[0] || 'dashboard',
             agent: pendingAgent,
-            workspace: sessionWorkspaces[key],
+            workspace: pendingWS,
             // Stamp the pending card with "now" so the sidebar sort (oldest
             // top, newest bottom — see renderSidebar) lands it at the bottom
             // immediately. Leaving created_at/last_active at 0 sorts it to the
@@ -660,7 +666,8 @@ async function fetchSessions() {
             last_prompt: '',
             last_response: '',
             node: sessionNodes[key] || 'local',
-            project: matchProject(sessionWorkspaces[key]),
+            project: pendingProject || pendingFallback,
+            project_fallback: !!pendingFallback,
             backend: pendingBackend,
             access_profile: sessionAccessProfiles[key] || '',
             cli_name: pendingCLIName,
@@ -762,7 +769,7 @@ function renderSidebar(data) {
   });
   discoveredItems.forEach(d => {
     allItemsUnfiltered.push({
-      key: '_discovered:' + d.pid,
+      key: discoveredKey(d.pid, d.node),
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
       entrypoint: d.entrypoint || '',
@@ -1016,6 +1023,17 @@ function projectDisplayPrefix(p) {
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
+// workspaceFallbackName mirrors internal/dashboard/session/handlers.go's
+// workspaceFallbackName: the folder basename used as a sidebar group label
+// when the workspace is not a registered project. '' for empty, "/" and ".".
+function workspaceFallbackName(ws) {
+  if (!ws) return '';
+  const trimmed = ws.replace(/\/+$/, '');
+  if (!trimmed) return '';
+  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
+  return (!base || base === '.') ? '' : base;
+}
+
 function matchProject(workspace) {
   if (!workspace || !projectsData || projectsData.length === 0) return '';
   const ws = workspace.endsWith('/') ? workspace : workspace + '/';
@@ -2088,8 +2106,10 @@ function applyHistoryFilter(merged, query) {
   if (countEl) {
     // "Filtered" count uses the x/total shape so the user knows the
     // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
-    // the query is empty keep the compact "(47)" form.
-    countEl.textContent = query
+    // the query is empty keep the compact "(47)" form. Decide on the same
+    // trimmed query filterHistoryEntries matches on (#2431: whitespace-only
+    // input is not a filter, so no "(N / N)").
+    countEl.textContent = (query || '').trim()
       ? '(' + filtered.length + ' / ' + merged.length + ')'
       : '(' + merged.length + ')';
   }
@@ -2854,10 +2874,13 @@ function selectSession(key, node) {
     // 同时快照当前会话的滚动位置，回来时恢复
     saveScrollPos(selectedKey, selectedNode);
   }
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (d) {
+      // #2431: same as the managed path below — leave assets/cron/settings
+      // first, or the preview panel is written into a hidden #main while the
+      // previous session has already been unsubscribed.
+      if (activeView !== 'chat') setActivityView('chat');
       previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '', d.cli_name || 'cli', d.entrypoint || '');
       return;
     }
@@ -3558,9 +3581,8 @@ async function dismissSession(key, node, opts) {
   }
 
   // Discovered session — kill external process via /api/discovered/close
-  if (key.startsWith('_discovered:')) {
-    const pid = parseInt(key.split(':')[1]);
-    const d = discoveredItems.find(x => x.pid === pid);
+  if (isDiscoveredKey(key)) {
+    const d = findDiscovered(parseDiscoveredPid(key), node);
     if (!d) { showToast('未找到该外部会话', 'warning'); return; }
     try {
       const headers = {'Content-Type': 'application/json'};
@@ -3577,8 +3599,8 @@ async function dismissSession(key, node, opts) {
         else showNetworkError('关闭外部会话', err);
         return;
       }
-      discoveredItems = discoveredItems.filter(x => x.pid !== pid);
-      if (pendingDiscovered && pendingDiscovered.pid === pid) {
+      dropDiscovered(d.pid, d.node);
+      if (pendingDiscovered && sameDiscovered(pendingDiscovered, d.pid, d.node)) {
         pendingDiscovered = null;
         stopPreviewPolling();
         document.getElementById('main').innerHTML = mainEmptyHtml();
@@ -3994,7 +4016,7 @@ function mainHeaderHtml(s) {
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
   // with no backend label storage, and we intentionally hide the control there.
-  const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
+  const canRename = selectedKey && !isDiscoveredKey(selectedKey);
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
@@ -5395,9 +5417,9 @@ async function sendMessage() {
         return;
       }
       // Remove from discoveredItems so renderSidebar won't re-create the card
-      discoveredItems = discoveredItems.filter(d => d.pid !== pd.pid);
+      dropDiscovered(pd.pid, pd.node);
       // Remove the discovered card from sidebar
-      removeSidebarCard('_discovered:' + pd.pid);
+      removeSidebarCard(discoveredKey(pd.pid, pd.node));
       pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
@@ -13274,6 +13296,28 @@ function stopPreviewPolling() {
 
 /* ===== Discovery & Takeover ===== */
 
+// Discovered-card identity is (pid, node): pids repeat across nodes, so every
+// key/lookup/removal goes through these helpers (#2431). Key shape is
+// '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
+function discoveredKey(pid, node) {
+  return '_discovered:' + pid + ':' + (node || 'local');
+}
+function isDiscoveredKey(key) {
+  return typeof key === 'string' && key.startsWith('_discovered:');
+}
+function parseDiscoveredPid(key) {
+  return parseInt(key.split(':')[1], 10);
+}
+function sameDiscovered(d, pid, node) {
+  return d.pid === pid && (d.node || 'local') === (node || 'local');
+}
+function findDiscovered(pid, node) {
+  return discoveredItems.find(d => sameDiscovered(d, pid, node)) || null;
+}
+function dropDiscovered(pid, node) {
+  discoveredItems = discoveredItems.filter(d => !sameDiscovered(d, pid, node));
+}
+
 async function scanDiscovered() {
   try {
     const headers = {};
@@ -13324,7 +13368,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   mobileEnterChat();
 
   // Highlight the discovered card
-  setActiveSessionCard('_discovered:' + pid, node || 'local');
+  setActiveSessionCard(discoveredKey(pid, node), node || 'local');
 
   const base = cwd.split('/').pop() || cwd;
   const main = document.getElementById('main');
@@ -13480,9 +13524,9 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     const data = await r.json();
     showToast('已接管会话', 'success');
     // Remove from discoveredItems so renderSidebar won't re-create the card
-    discoveredItems = discoveredItems.filter(d => d.pid !== pid);
+    dropDiscovered(pid, node);
     // Immediately remove the discovered card from DOM
-    removeSidebarCard('_discovered:' + pid);
+    removeSidebarCard(discoveredKey(pid, node));
     // Force refresh (clear cache so renderSidebar runs)
     lastVersion = 0;
     await fetchSessions();
@@ -13512,21 +13556,33 @@ mobileQuery.addEventListener('change', e => {
 
 function mobileEnterChat() {
   if (!isMobile()) return;
-  history.pushState({ view: 'chat' }, '');
+  // #2431: switching sessions while already in chat view must not stack
+  // another entry — replace ours so a single back press leaves chat.
+  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
+  else history.pushState({ view: 'chat' }, '');
   document.body.classList.remove('mobile-list-view');
   document.body.classList.add('mobile-chat-view');
 }
 
-function mobileBack() {
+function mobileShowList() {
   document.body.classList.remove('mobile-chat-view');
   document.body.classList.add('mobile-list-view');
   if (document.activeElement) document.activeElement.blur();
 }
 
+// In-app back button / swipe-back. Flips the view synchronously, then pops
+// the history entry mobileEnterChat pushed so the browser stack stays in
+// step (#2431); the popstate below sees list view already and no-ops.
+function mobileBack() {
+  const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
+  mobileShowList();
+  if (ownsEntry) history.back();
+}
+
 // Handle Android back button and iOS swipe-back gesture
 window.addEventListener('popstate', () => {
   if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
-    mobileBack();
+    mobileShowList();
   }
 });
 
