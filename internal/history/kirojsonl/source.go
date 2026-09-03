@@ -261,6 +261,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	// first line is a complete, valid JSONL record — dropping it would lose
 	// the oldest in-window turn (kirojsonl is that turn's only source).
 	skipPartialFirstLine := false
+	// headAnchorMS seeds the assistant-timestamp borrow state from the most
+	// recent Prompt in the discarded head (#2332), see headPromptAnchorMS.
+	var headAnchorMS int64
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
 		off := fi.Size() - maxFileBytes
 		// off > 0 here because Size() > maxFileBytes. Read the boundary byte
@@ -272,6 +275,7 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		}
 		if _, err := f.Seek(off, io.SeekStart); err == nil {
 			skipPartialFirstLine = !atBoundary
+			headAnchorMS = headPromptAnchorMS(f, off)
 		}
 	}
 	limited := io.LimitReader(f, maxFileBytes)
@@ -293,8 +297,10 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
-	// State across lines for assistant-timestamp salvage.
-	var lastPromptMS int64
+	// State across lines for assistant-timestamp salvage. Starts from the
+	// head anchor so assistants that precede the first in-window Prompt
+	// (their own Prompt was cut off with the head) are not dropped.
+	lastPromptMS := headAnchorMS
 	var asstOffset int64
 	for scanner.Scan() {
 		// Cooperative cancellation. Done lookups every ctxCheckEvery
@@ -353,6 +359,69 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
 	}
 	return out
+}
+
+// headBackscanChunk is the read size for headPromptAnchorMS' reverse walk.
+const headBackscanChunk = 1 << 20 // 1 MiB
+
+// headPromptAnchorMS walks the discarded head [0, off) backwards and returns
+// the timestamp (ms) of the most recent complete Prompt record before off, or
+// 0 when none decodes. Real kiro sessions write one Prompt followed by many
+// MiB of ToolResults/AssistantMessage, so the tail window frequently holds no
+// Prompt at all; without this anchor every in-window AssistantMessage (which
+// never carries meta.timestamp) would be dropped (#2332). Uses ReadAt so the
+// caller's seek position is untouched. Any read error ends the walk with the
+// best result so far — the worst case is the pre-fix behaviour.
+func headPromptAnchorMS(f *os.File, off int64) int64 {
+	// carry holds the leading fragment of the previously scanned (later)
+	// region up to and including its first '\n', i.e. the tail of a line
+	// whose start lies in the bytes still to be read.
+	var carry []byte
+	pos := off
+	for pos > 0 {
+		n := int64(headBackscanChunk)
+		if n > pos {
+			n = pos
+		}
+		chunkStart := pos - n
+		buf := make([]byte, n, n+int64(len(carry)))
+		if _, err := f.ReadAt(buf, chunkStart); err != nil {
+			return 0
+		}
+		buf = append(buf, carry...)
+		// Only complete lines are candidates: on the first pass the bytes
+		// after the last '\n' are the head of the line straddling off.
+		region := buf[:bytes.LastIndexByte(buf, '\n')+1]
+		for {
+			idx := bytes.LastIndex(region, kindPromptMarker)
+			if idx < 0 {
+				break
+			}
+			lineStart := bytes.LastIndexByte(region[:idx], '\n') + 1
+			lineEnd := idx + bytes.IndexByte(region[idx:], '\n')
+			if lineStart == 0 && chunkStart > 0 {
+				// The line begins in an earlier chunk; it becomes the carry
+				// and is evaluated whole on the next pass.
+				break
+			}
+			if e, ok := decodeLine(region[lineStart:lineEnd], 0, 0); ok && e.Type == "user" {
+				return e.Time
+			}
+			region = region[:lineStart]
+		}
+		if firstNL := bytes.IndexByte(buf, '\n'); firstNL >= 0 {
+			carry = append([]byte(nil), buf[:firstNL+1]...)
+		} else {
+			carry = append(buf[:0:0], buf...)
+		}
+		if len(carry) > 1<<20 {
+			// Longer than any line the forward scanner accepts; the record
+			// would be rejected anyway, so stop growing the fragment.
+			carry = nil
+		}
+		pos = chunkStart
+	}
+	return 0
 }
 
 // decodeLine parses one jsonl record into an EventEntry. Returns
