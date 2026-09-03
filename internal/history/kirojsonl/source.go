@@ -430,9 +430,11 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 		}
 		buf = append(buf, carry...)
 		lastNL := bytes.LastIndexByte(buf, '\n')
-		if pos == off {
+		if pos == off && (lastNL >= 0 || chunkStart == 0) {
 			// Bytes after the last newline are the head of the record that
-			// straddles the seek point; parseFile reassembles it.
+			// straddles the seek point; parseFile reassembles it. With no
+			// newline in the whole chunk the record's start is unknown, so
+			// the fragment could never form valid JSON — skip it.
 			a.fragment = append([]byte(nil), buf[lastNL+1:]...)
 		}
 		// Only complete lines are candidates, newest first.
@@ -446,17 +448,23 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 			}
 			line := region[lineStart : len(region)-1]
 			region = region[:lineStart]
+			// Same quick-filter as the forward scan; the record kind is
+			// decided by decodeLine, not by which marker matched (an
+			// AssistantMessage may embed a {"kind":"Prompt"} chunk).
+			if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
+				continue
+			}
+			e, ok := decodeLine(line, borrowProbeMS, 0)
+			if !ok {
+				continue
+			}
 			switch {
-			case bytes.Contains(line, kindPromptMarker):
-				if e, ok := decodeLine(line, 0, 0); ok && e.Type == "user" {
-					a.promptMS = e.Time
-					a.asstOffset = count
-					return a
-				}
-			case bytes.Contains(line, kindAsstMarker):
-				if e, ok := decodeLine(line, borrowProbeMS, 0); ok && e.Time == borrowProbeMS+1 {
-					count++
-				}
+			case e.Type == "user":
+				a.promptMS = e.Time
+				a.asstOffset = count
+				return a
+			case e.Type == "text" && e.Time == borrowProbeMS+1:
+				count++
 			}
 		}
 		if firstNL := bytes.IndexByte(buf, '\n'); firstNL >= 0 {

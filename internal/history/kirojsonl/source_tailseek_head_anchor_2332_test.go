@@ -1,6 +1,7 @@
 package kirojsonl
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -21,15 +22,31 @@ var toolResultsFiller = fmt.Sprintf(
 	strings.Repeat("x", 4096),
 )
 
-// promptMarkerDecoy is a ToolResults record whose payload embeds the Prompt
-// marker text with an alien timestamp. Only kind-aware decoding rejects it.
-const promptMarkerDecoy = `{"version":"v1","kind":"ToolResults","data":{"message_id":"decoy","content":[{"kind":"text","data":"{\"kind\":\"Prompt\",\"meta\":{\"timestamp\":1799999999}}"}]}}` + "\n"
+// decoyTS is the alien timestamp carried by the decoys below; no entry may
+// ever be anchored on it.
+const decoyTS int64 = 1_799_999_999
+
+// promptMarkerDecoy is a ToolResults record whose content holds a
+// structured {"kind":"Prompt"} chunk plus a meta.timestamp, so the byte
+// quick-filter matches the Prompt marker and only kind-aware decoding
+// rejects it as an anchor.
+var promptMarkerDecoy = fmt.Sprintf(
+	`{"version":"v1","kind":"ToolResults","data":{"message_id":"decoy","content":[{"kind":"Prompt","data":"x"}],"meta":{"timestamp":%d}}}`+"\n", decoyTS)
 
 // orphanAssistantLine is an AssistantMessage with no meta.timestamp whose
 // text is "<prefix>-<i>".
 func orphanAssistantLine(prefix string, i int) string {
 	return fmt.Sprintf(
 		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%s-%d","content":[{"kind":"text","data":"%s-%d"}]}}`+"\n",
+		prefix, i, prefix, i)
+}
+
+// promptChunkAssistantLine is an AssistantMessage (no meta.timestamp) whose
+// content embeds a {"kind":"Prompt"} chunk before its text. Both byte
+// markers match; it must still be counted as a borrowed-ts assistant.
+func promptChunkAssistantLine(prefix string, i int) string {
+	return fmt.Sprintf(
+		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%s-%d","content":[{"kind":"Prompt","data":"x"},{"kind":"text","data":"%s-%d"}]}}`+"\n",
 		prefix, i, prefix, i)
 }
 
@@ -60,6 +77,15 @@ func parseSessionFile(t *testing.T, dir, path string) []cli.EventEntry {
 	return s.parseFile(context.Background(), f, 0)
 }
 
+func assertNoDecoyAnchor(t *testing.T, got []cli.EventEntry) {
+	t.Helper()
+	for _, e := range got {
+		if e.Time >= decoyTS*1000 && e.Time < (decoyTS+1)*1000 {
+			t.Errorf("entry anchored on the decoy timestamp: %+v", e)
+		}
+	}
+}
+
 // TestParseFile_TailSeekAnchorsAssistantsFromDroppedHead pins #2332: in a
 // >maxFileBytes kiro session the tail window can begin long after the most
 // recent Prompt (real sessions here have a single Prompt followed by ~100 MiB
@@ -69,20 +95,22 @@ func parseSessionFile(t *testing.T, dir, path string) []cli.EventEntry {
 // returned nothing at all. parseFile must scan the head backwards for the
 // anchoring Prompt and seed the borrow state from it.
 //
-// Layout (offsets approximate): [0] ANCHOR Prompt · 5 head assistants ·
-// [~0.5 MiB] decoy · filler to 17 MiB · 3 in-window orphan assistants. The
-// decoy sits inside the discarded head so the backscan meets it (and must
-// reject it) before reaching the real Prompt.
+// Layout (offsets approximate): [0] ANCHOR Prompt · 5 plain head assistants
+// + 1 assistant embedding a {"kind":"Prompt"} chunk · [~0.5 MiB] decoy ·
+// filler to 17 MiB · 3 in-window orphan assistants. The decoy sits inside
+// the discarded head so the backscan meets it (and must reject it) before
+// reaching the real Prompt.
 func TestParseFile_TailSeekAnchorsAssistantsFromDroppedHead(t *testing.T) {
 	t.Parallel()
 	const anchorTS int64 = 1_700_000_000
-	const headAssistants = 5
+	const headAssistants = 6
 
 	var sb strings.Builder
 	sb.WriteString(promptLine("ANCHOR prompt in dropped head", anchorTS) + "\n")
-	for i := 1; i <= headAssistants; i++ {
+	for i := 1; i < headAssistants; i++ {
 		sb.WriteString(orphanAssistantLine("HEAD", i))
 	}
+	sb.WriteString(promptChunkAssistantLine("HEAD", headAssistants))
 	padWith(&sb, toolResultsFiller, 512<<10)
 	decoyOff := sb.Len()
 	sb.WriteString(promptMarkerDecoy)
@@ -95,6 +123,7 @@ func TestParseFile_TailSeekAnchorsAssistantsFromDroppedHead(t *testing.T) {
 	}
 
 	got := parseTempSession(t, sb.String())
+	assertNoDecoyAnchor(t, got)
 
 	var orphans []string
 	for _, e := range got {
@@ -103,8 +132,8 @@ func TestParseFile_TailSeekAnchorsAssistantsFromDroppedHead(t *testing.T) {
 		}
 		if strings.HasPrefix(e.Summary, "ORPHAN-") {
 			orphans = append(orphans, e.Summary)
-			// Global sequence: the 5 head assistants come first, so the
-			// in-window ones are anchor+1+5, +6, +7 — identical to a
+			// Global sequence: the 6 head assistants come first, so the
+			// in-window ones are anchor+1+6, +7, +8 — identical to a
 			// whole-file parse.
 			want := anchorTS*1000 + headAssistants + int64(len(orphans))
 			if e.Type != "text" || e.Time != want {
@@ -156,24 +185,50 @@ func TestParseFile_TailSeekAnchorSkipsTimestamplessPrompt(t *testing.T) {
 // were numbered from 0 at the window start, the same record would get a
 // smaller ts and a different UUID on the next LoadBefore, and the dashboard's
 // load-older pagination (before = oldest visible ts) would render it twice.
+//
+// It also asserts the record straddling the seek point is recovered from the
+// backscan fragment rather than dropped (its presence or absence would
+// otherwise shift every later sequence number by one as off slides).
+//
+// Layout: ANCHOR Prompt · ToolResults filler to ~0.9 MiB · 600 assistants
+// (4 KiB each, spanning ~0.9–3.3 MiB) · ToolResults filler to 17 MiB · 3
+// tail assistants. The seek point (~1 MiB) lands inside the assistant block,
+// so the window opens on a cut assistant with ~25 more already in the head.
 func TestParseFile_TailSeekAnchorStableAcrossAppend(t *testing.T) {
 	t.Parallel()
 	const anchorTS int64 = 1_700_000_000
+	pad := strings.Repeat("y", 4096)
+	asstLine := func(n int) string {
+		return fmt.Sprintf(
+			`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%d","content":[{"kind":"text","data":"ASST-%d %s"}]}}`+"\n", n, n, pad)
+	}
 
 	var sb strings.Builder
 	sb.WriteString(promptLine("ANCHOR", anchorTS) + "\n")
-	// Assistants only: every one borrows anchor+1+k where k is its global
-	// index. 4 KiB payloads make the seek point cut through them.
-	pad := strings.Repeat("y", 4096)
+	padWith(&sb, toolResultsFiller, 900<<10)
 	n := 0
-	for sb.Len() < (17 << 20) {
-		n++
-		sb.WriteString(fmt.Sprintf(
-			`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%d","content":[{"kind":"text","data":"ASST-%d %s"}]}}`+"\n", n, n, pad))
+	for ; n < 600; n++ {
+		sb.WriteString(asstLine(n + 1))
 	}
+	padWith(&sb, toolResultsFiller, 17<<20)
+	for i := 0; i < 3; i++ {
+		n++
+		sb.WriteString(asstLine(n))
+	}
+	body := sb.String()
+
+	// Locate the record cut by the seek point and its global index.
+	off := len(body) - maxFileBytes
+	lineStart := bytes.LastIndexByte([]byte(body[:off]), '\n') + 1
+	lineEnd := lineStart + bytes.IndexByte([]byte(body[lineStart:]), '\n')
+	var straddleIdx int64
+	if _, err := fmt.Sscanf(body[lineStart:lineEnd], `{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%d"`, &straddleIdx); err != nil || lineStart >= off {
+		t.Fatalf("fixture: seek point %d must cut an assistant record (line %d..%d): %v", off, lineStart, lineEnd, err)
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
-	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
 
@@ -198,15 +253,21 @@ func TestParseFile_TailSeekAnchorStableAcrossAppend(t *testing.T) {
 			t.Errorf("%s time=%d; want %d (global index, independent of window start)", key, e.Time, want)
 		}
 	}
+	straddleKey := fmt.Sprintf("ASST-%d", straddleIdx)
+	if e, ok := before[straddleKey]; !ok {
+		t.Errorf("record straddling the seek point (%s) was dropped; want it reassembled from the head fragment", straddleKey)
+	} else if want := anchorTS*1000 + straddleIdx; e.Time != want {
+		t.Errorf("%s (straddling) time=%d; want %d", straddleKey, e.Time, want)
+	}
 
 	// Append a few more turns so off moves past the first in-window records.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("open append: %v", err)
 	}
-	for i := 1; i <= 3; i++ {
+	for i := 0; i < 3; i++ {
 		n++
-		fmt.Fprintf(f, `{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%d","content":[{"kind":"text","data":"ASST-%d %s"}]}}`+"\n", n, n, pad)
+		fmt.Fprint(f, asstLine(n))
 	}
 	f.Close()
 	after := snapshot()
