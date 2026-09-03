@@ -2,6 +2,12 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// #2431: last (session, state) pushed through updateSendButton — the main-area
+// state that is actually on screen, whichever path (WS push, optimistic flip,
+// renderMainShell, REST reconcile) applied it. The fetchSessions reconcile
+// compares against this so a 5 s fallback poll only re-applies a state that
+// has actually changed. Cleared on session switch.
+let _lastAppliedMainState = null;
 // activeView is the root view-router state: which top-level view owns the
 // viewport. 'chat' is the default (session sidebar + chat main). 'assets' /
 // 'cron' / 'settings' are full-screen peers driven by setActivityView() and
@@ -512,7 +518,16 @@ async function fetchSessions() {
     // earlier revision of this code sat and silently never fired.
     // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selectedKey) setHeaderEffortChip(data.sessions);
-    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
+    // #2431: under WS-fallback polling this REST poll is the ONLY state source,
+    // and process state transitions (running↔ready, last_response, sc-time)
+    // never advance stats.version — storeGen moves on add/remove/rename/reset
+    // only, and with the socket down no session_state push zeroes lastVersion.
+    // The version short-circuit would therefore freeze the sidebar and the
+    // "WS disconnected → always reconcile" block further down never ran. Skip
+    // the gate while disconnected; renderSidebar is idempotent so the 5 s
+    // repaint is the intended fallback cost.
+    const wsConnected = wsm.state === WS_STATES.CONNECTED;
+    if (wsConnected && version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
     lastNodesJSON = nodesHash;
     lastHistoryJSON = historyHash;
@@ -540,7 +555,12 @@ async function fetchSessions() {
         sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
       });
     }
-    (data.sessions || []).forEach(s => {
+    // #2431: map (not forEach) so the optimistic 'running' copy below lands in
+    // the payload handed to renderSidebar / stashed as _lastSidebarData — the
+    // original objects still say 'ready', so a re-render from the cached
+    // payload (toggleProjectCollapsed, sidebar search) painted the card idle
+    // while the main banner showed running.
+    const sessions = (data.sessions || []).map(s => {
       const n = s.node || 'local';
       const sKey = sid(s.key, n);
       // Preserve the optimistic 'running' flip when the REST snapshot is still
@@ -559,7 +579,9 @@ async function fetchSessions() {
       }
       sessionsData[sKey] = s;
       backendKeys.add(s.key);
+      return s;
     });
+    data = Object.assign({}, data, { sessions });
 
     // Remove pending sessions that now exist in backend, then persist ONCE.
     // The durable localStorage blob must drop the now-real keys so a stale
@@ -672,9 +694,15 @@ async function fetchSessions() {
     if (selectedKey) {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
-      const wsConnected = wsm.state === WS_STATES.CONNECTED;
       if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
-        updateMainState(sd.state, sd.death_reason);
+        // #2431: updateSendButton is not idempotent ('running' re-seeds agent
+        // rows from the REST snapshot; 'ready' resets turn state + loading
+        // indicator + scroll) and this runs every 5 s under fallback — only
+        // re-apply when REST differs from what the main area last applied.
+        const applied = _lastAppliedMainState;
+        if (!(applied && applied.key === sKey && applied.state === sd.state)) {
+          updateMainState(sd.state, sd.death_reason);
+        }
       } else if (sd && wsConnected && sd.state === 'running') {
         // Self-heal a DROPPED 'running' session_state push. renderSidebar above
         // always paints the card from the REST snapshot, so the sidebar shows
@@ -2844,6 +2872,7 @@ function selectSession(key, node) {
   const prevNode = selectedNode;
   selectedKey = key;
   selectedNode = node;
+  _lastAppliedMainState = null; // #2431: new session → first poll must reconcile
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -3757,34 +3786,114 @@ function formatSessionMarkdown(meta, events) {
   return lines.join('\n');
 }
 
+// Export pager bounds (#2430). A bare `/api/sessions/events?key=` only returns
+// the in-memory ring (server default 500), so a long session's export silently
+// dropped its early history while the toast claimed "已导出 N 条". The pager
+// walks backward with the same `before=` cursor loadEarlierEvents uses (which
+// falls through to the on-disk JSONL when the ring is exhausted).
+// EXPORT_PAGE_LIMIT mirrors the server's maxEventsPageLimit; EXPORT_MAX_PAGES
+// is the hard stop (20k events) so a runaway session can't hang the tab.
+const EXPORT_PAGE_LIMIT = 500;
+const EXPORT_MAX_PAGES = 40;
+let _exportInFlight = false;
+
+// exportEventKey identifies an entry across overlapping pages: the backend's
+// uuid when present, else (time,type,detail) for pre-uuid synthetic entries.
+function exportEventKey(e) {
+  if (e && e.uuid) return 'u:' + e.uuid;
+  return 'k:' + ((e && e.time) || 0) + '|' + ((e && e.type) || '') + '|' + ((e && e.detail) || '');
+}
+
+// fetchAllSessionEvents returns { events, truncated } (or { status } on a
+// non-2xx first page). `truncated` is set whenever the export is known or
+// suspected to be incomplete — page cap hit, a later page failed or was
+// malformed, a full page yielded nothing new, or a remote node (whose relay
+// ignores before/limit and so can only ever serve the ring) returned a
+// ring-sized slice — so the caller must warn rather than claim a full export.
+//
+// Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
+// (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
+// same-millisecond sibling group (one CLI frame's blocks) split by the ring
+// edge or a 500-entry page edge would lose its older members for good under a
+// strict cursor. Re-admitting the watermark millisecond and dropping what we
+// already hold by exportEventKey keeps every sibling; progress is measured by
+// "new entries after dedup", not by the cursor moving.
+async function fetchAllSessionEvents(key, node, headers) {
+  const remote = !!(node && node !== 'local');
+  const base = '/api/sessions/events?key=' + encodeURIComponent(key) +
+    (remote ? '&node=' + encodeURIComponent(node) : '');
+  const r = await fetch(base, { headers });
+  if (!r.ok) return { status: r.status };
+  let events = await r.json();
+  if (!Array.isArray(events)) events = [];
+  if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
+  if (events.length === 0) return { events, truncated: false };
+
+  const seen = new Set(events.map(exportEventKey));
+  let truncated = false;
+  let oldest = (events[0] && events[0].time) || 0;
+  for (let pages = 0; oldest > 0; pages++) {
+    if (pages >= EXPORT_MAX_PAGES) { truncated = true; break; }
+    const pr = await fetch(base + '&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT, { headers });
+    if (!pr.ok) { truncated = true; break; }
+    const page = await pr.json();
+    if (!Array.isArray(page)) { truncated = true; break; }
+    if (page.length === 0) break;
+    const fresh = page.filter(e => {
+      const k = exportEventKey(e);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (fresh.length === 0) {
+      // A full page of entries we already hold can't be told apart from a
+      // same-ms flood wider than one page — stop and warn. A short page of
+      // known entries just means the history is exhausted.
+      if (page.length >= EXPORT_PAGE_LIMIT) truncated = true;
+      break;
+    }
+    events = fresh.concat(events);
+    const pageOldest = (fresh[0] && fresh[0].time) || 0;
+    if (!pageOldest) break; // untimed head reached; nothing older to cursor on
+    oldest = pageOldest;
+  }
+  return { events, truncated };
+}
+
 async function downloadSessionMarkdown() {
   if (!selectedKey) return;
+  if (_exportInFlight) return;
+  _exportInFlight = true;
+  // Capture identity up front: the pager may take several round trips and
+  // the operator can switch sessions meanwhile — the export still belongs to
+  // the session whose button was clicked.
+  const key = selectedKey;
+  const node = selectedNode;
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
-    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(url, { headers });
-    if (!r.ok) {
-      showAPIError('导出会话', r.status, '');
+    const res = await fetchAllSessionEvents(key, node, headers);
+    if (res.status) {
+      showAPIError('导出会话', res.status, '');
       return;
     }
-    const events = await r.json();
+    const events = res.events;
+    const truncated = res.truncated;
     if (!Array.isArray(events) || events.length === 0) {
       showToast('会话无可导出内容', 'warning');
       return;
     }
-    const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-    const keyParts = (selectedKey || '').split(':');
+    const s = sessionsData[sid(key, node)] || {};
+    const keyParts = (key || '').split(':');
     const title = s.user_label || s.summary || s.last_prompt ||
-      keyTailDisplay(keyParts) || selectedKey || '';
+      keyTailDisplay(keyParts) || key || '';
     const md = formatSessionMarkdown({
       title: title,
-      key: selectedKey,
-      node: selectedNode,
+      key: key,
+      node: node,
       cli: s.cli_name ? (s.cli_name + (s.cli_version ? ' v' + s.cli_version : '')) : '',
-      workspace: s.workspace || sessionWorkspaces[selectedKey] || '',
+      workspace: s.workspace || sessionWorkspaces[key] || '',
       cost: (typeof s.total_cost === 'number' ? s.total_cost : null),
     }, events);
 
@@ -3800,9 +3909,15 @@ async function downloadSessionMarkdown() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(href), 60000);
-    showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    if (truncated) {
+      showToast('已导出 ' + events.length + ' 条事件（历史过长，更早的事件已截断）', 'warning', 5000);
+    } else {
+      showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    }
   } catch (e) {
     showNetworkError('导出会话', e);
+  } finally {
+    _exportInFlight = false;
   }
 }
 
@@ -3827,9 +3942,7 @@ function mainHeaderHtml(s) {
   // ui-polish-light-theme D5: the version string is debug info an operator
   // needs rarely — keep it in the hover title, show just the backend name.
   // (The settings 关于 section lists versions permanently.)
-  const cliLabel = effCLIName
-    ? '<span' + (effCLIVersion ? ' title="' + escAttr(effCLIName + ' v' + effCLIVersion) + '"' : '') + '>' + esc(effCLIName) + '</span>'
-    : '';
+  const cliLabel = headerCLILabelHtml(effCLIName, effCLIVersion);
   // UI Round 5 R5-3: model display for all backends.
   //   - claude path: SessionView.model is auto-populated from the
   //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
@@ -3942,6 +4055,16 @@ function renderMainHeader() {
   fetchSessionRuns(selectedKey, selectedNode);
 }
 
+// #2437: the cli label carries a fixed id so updateHeaderCLI can refresh it
+// in place. It used to rewrite .detail-left wholesale, which wiped the
+// sibling #header-model span (the tuning popover anchor) on every poll that
+// passed fetchSessions' version short-circuit. The span is always emitted
+// (empty when no backend name is known yet) so a later poll has a target.
+function headerCLILabelHtml(name, version) {
+  const title = (name && version) ? ' title="' + escAttr(name + ' v' + version) + '"' : '';
+  return '<span id="header-cli"' + title + '>' + esc(name || '') + '</span>';
+}
+
 function renderMainShell() {
   const main = document.getElementById('main');
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
@@ -4039,12 +4162,21 @@ function renderMainShell() {
 // simpler in-flight flag (mirroring `_earlierLoading` on
 // `loadEarlierEvents`) skips overlapping polls — a missed tick is cheap
 // because the next tick will pick up any accumulated events via `after=`
-// anyway. A full fetch while a tail fetch is in flight is also coalesced;
-// the next tick finishes rendering the backlog.
+// anyway.
+//
+// A `full` fetch must NOT be coalesced (#2430): it is the session-switch
+// render. Dropping it left the new session to the next tick, which ran with
+// lastEventTime=0 and no `limit` → the server's legacy default branch handed
+// back the whole ring, appendEvents grafted ≤500 bubbles in one shot, and
+// neither "load earlier" nor the saved scroll position was restored. Instead
+// a full fetch bumps _fetchEventsGen so the tail still in flight becomes
+// stale: it can neither append into the new render nor release the in-flight
+// flag the full fetch now owns.
 let _fetchEventsInFlight = false;
+let _fetchEventsGen = 0;
 async function fetchEvents(full) {
   if (!selectedKey) return;
-  if (_fetchEventsInFlight) return;
+  if (!full && _fetchEventsInFlight) return;
   // Capture session identity at dispatch time so a mid-flight switch doesn't
   // apply stale events to the new session's DOM. `selectedKey` can flip
   // synchronously from `pickSession`/`dismiss` callbacks while `await`
@@ -4052,6 +4184,9 @@ async function fetchEvents(full) {
   // prior session's tail into the newly-opened session's scroller.
   const dispatchKey = selectedKey;
   const dispatchNode = selectedNode;
+  if (full) _fetchEventsGen++;
+  const gen = _fetchEventsGen;
+  const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;
   _fetchEventsInFlight = true;
   try {
     let url = '/api/sessions/events?key=' + encodeURIComponent(dispatchKey);
@@ -4090,10 +4225,10 @@ async function fetchEvents(full) {
       throw err;              // timeout / network — surface via outer catch
     }
     if (!events || events.length === 0) return;
-    // Drop stale responses whose selection has since moved. Clearing
-    // `lastEventTime` is the caller's job at switch time, so we don't touch
-    // it here.
-    if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
+    // Drop stale responses whose selection has since moved, or that a newer
+    // `full` fetch has superseded. Clearing `lastEventTime` is the caller's
+    // job at switch time, so we don't touch it here.
+    if (stale()) return;
 
     if (full) {
       // Pass the server's authoritative hasMore when the header was present;
@@ -4108,7 +4243,9 @@ async function fetchEvents(full) {
   } catch (e) {
     console.error('fetch events:', e);
   } finally {
-    _fetchEventsInFlight = false;
+    // Only the newest generation owns the flag (mirrors loadEarlierEvents /
+    // _earlierGen): a superseded tail must not free it under the full fetch.
+    if (gen === _fetchEventsGen) _fetchEventsInFlight = false;
   }
 }
 
@@ -4346,6 +4483,9 @@ function renderEvents(events, hasMore) {
       return;
     }
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
+  // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
+  // answered-set so replayed AskUserQuestion cards render locked (#2430).
+  hydrateAskAnsweredFromHistory(events);
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   // Decide whether "load earlier" will mount BEFORE rendering the all-internal
@@ -4431,6 +4571,9 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
+  // An ask_question followed by a user event inside this same batch must
+  // render already locked (mirrors onHistory's pre-render hydrate).
+  hydrateAskAnsweredFromHistory(events);
   // Force-bottom when a "user" event arrives: either the local operator just
   // hit send, or a teammate posted through the IM channel — in both cases the
   // message must be visible, even if the viewport was scrolled up.
@@ -4442,6 +4585,8 @@ function appendEvents(events) {
     // dropped when their uuid is already on screen — same rule as onHistory.
     if (e.time && e.time < lastRenderedEventTime) return;
     if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+    // Lock cards already on screen before this user bubble is appended.
+    if (e.type === 'user') lockRenderedAskCards(el);
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -4560,6 +4705,38 @@ function hydrateAskAnsweredFromHistory(events) {
       }
     }
   }
+}
+
+// lockRenderedAskCards applies hydrateAskAnsweredFromHistory's rule to the
+// live DOM: a `user` event landing incrementally (WS onEvent, onHistory
+// backfill, poll appendEvents) means every AskUserQuestion card already on
+// screen was answered on some surface (Feishu, the input box, another tab), so
+// it must lock now — not only after a reload replays history. Without this the
+// stale card stayed submittable and pushed an out-of-date answer into the
+// next turn (#2430). Idempotent: cards onAskSubmit already locked are skipped
+// via the existing .ask-status marker.
+function lockRenderedAskCards(scrollEl) {
+  if (!scrollEl) return;
+  scrollEl.querySelectorAll('.event.ask_question[data-tool-use-id]').forEach(card => {
+    const tuid = card.getAttribute('data-tool-use-id') || '';
+    if (!tuid) return;
+    _askAnswered.add(tuid);
+    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    const content = card.querySelector('.event-content');
+    if (!content) return;
+    const status = content.querySelector('.ask-status');
+    if (!status) {
+      const div = document.createElement('div');
+      div.className = 'ask-status';
+      div.textContent = '已回答';
+      content.appendChild(div);
+    } else if (status.textContent.indexOf('发送失败') === 0) {
+      // onAskSubmit's failure rollback left the card actionable; a user event
+      // from another surface has since answered it, so the failure copy is
+      // stale — replace it rather than leave a locked card saying "failed".
+      status.textContent = '已回答';
+    }
+  });
 }
 
 function renderAskQuestionCard(e) {
@@ -6426,6 +6603,7 @@ function stopTurnWatchdog() {
 }
 
 function updateSendButton(state) {
+  if (selectedKey) _lastAppliedMainState = { key: sid(selectedKey, selectedNode), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
   const stopBtn = document.getElementById('btn-stop');
@@ -7775,16 +7953,23 @@ function sanitizeKeySlug(s) {
   // PRESENTATION FORM U+FE13, MODIFIER LETTER U+A789, RATIO U+2236) so a
   // project folder containing e.g. 'foo：bar' cannot survive as a
   // colon-like byte into the 4-segment key that strings.SplitN(":",4)
-  // relies on server-side. Also strips bidi override / embedding /
-  // directional isolate characters (U+202A–U+202E, U+2066–U+2069) and
-  // Unicode line separators (U+2028/U+2029) that bypass the
-  // ASCII-control-only filter below and can corrupt log output. Then
+  // relies on server-side. Also strips every non-ASCII codepoint the
+  // server-side session.ValidateSessionKey rejects (#2429): C1 controls
+  // (U+0080-U+009F), zero-width / LTR-RTL marks (U+200B-U+200F), bidi
+  // override / embedding (U+202A-U+202E), Unicode line separators
+  // (U+2028/U+2029) and the BOM (U+FEFF), plus the directional isolates
+  // (U+2066-U+2069) the IM-path sanitizer drops. A project directory
+  // whose name carries a zero-width space would otherwise produce a key
+  // the server 400s on first send, leaving a pending card that can never
+  // send. The class is written with \uXXXX escapes ONLY - the Go contract
+  // test TestDashboardJS_SanitizeKeySlug_CoversServerDenySet parses it
+  // and asserts it is a superset of session.DeniedKeyRuneRanges. Then
   // collapse runs of filesystem-hostile chars into single dashes so the
   // key stays short and readable. Cap at 64 bytes to leave plenty of
   // headroom under the 128-byte sanitizeKeyComponent cap.
   let safe = String(s)
     .replace(/[:：︓꞉∶]/g, '-')
-    .replace(/[‪-‮⁦-⁩\u2028\u2029]/g, '')
+    .replace(/[\u0080-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
     .replace(/[\s/\\?*<>|"\x00-\x1f\x7f]+/g, '-');
   safe = safe.replace(/-+/g, '-').replace(/^-|-$/g, '');
   if (safe.length > 64) safe = safe.slice(0, 64);
@@ -8051,6 +8236,22 @@ function fuzzyMatch(query, text) {
   return {score: 100 - ranges.length, ranges};
 }
 
+// matchProjectPath fuzzy-matches the query against the path AS RENDERED
+// (shortPath: home prefix collapsed to ~, long paths truncated) so the
+// returned ranges index into the same string buildProjectRow highlights.
+// Matching the raw path and then painting the ranges onto the short path
+// shifted every <mark> by the collapsed prefix length (and could run past
+// the end of the string) - #2429. If the visible text does not match but
+// the full path does (e.g. the user typed the collapsed /home/<user>
+// prefix), the row still qualifies with the full-path score but no
+// highlight, so the result set is never narrower than before.
+function matchProjectPath(query, path) {
+  const shown = fuzzyMatch(query, shortPath(path));
+  if (shown) return shown;
+  const full = fuzzyMatch(query, path);
+  return full ? {score: full.score, ranges: []} : null;
+}
+
 function highlight(text, ranges) {
   if (!ranges || !ranges.length) return esc(text);
   let out = '';
@@ -8077,7 +8278,7 @@ function renderPaletteList(state, query) {
       return;
     }
     const nameM = fuzzyMatch(q, p.name);
-    const pathM = fuzzyMatch(q, p.path);
+    const pathM = matchProjectPath(q, p.path);
     if (!nameM && !pathM) return;
     const score = Math.max(nameM ? nameM.score + 500 : 0, pathM ? pathM.score : 0);
     scored.push({
@@ -8134,6 +8335,7 @@ function renderPaletteList(state, query) {
     list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
     // Still render custom row below.
     const customEl = buildCustomRow(q, 0);
+    customEl.addEventListener('mouseenter', () => setActiveIdx(state, 0));
     list.appendChild(customEl);
     state.items = [{type: 'custom', query: q}];
     updateActiveRow(state);
@@ -8142,13 +8344,21 @@ function renderPaletteList(state, query) {
 
   list.innerHTML = '';
   items.forEach((it, i) => {
+    let row;
     if (it.type === 'quick') {
-      list.appendChild(buildQuickRow(i));
+      row = buildQuickRow(i);
     } else if (it.type === 'project') {
-      list.appendChild(buildProjectRow(it.data, i));
+      row = buildProjectRow(it.data, i);
     } else {
-      list.appendChild(buildCustomRow(it.query, i));
+      row = buildCustomRow(it.query, i);
     }
+    // Hover must move the keyboard cursor too (#2429): the row builders
+    // only know their index, so wire mouseenter here where `state` is in
+    // scope and route through setActiveIdx so state.activeIdx and the
+    // .active class never disagree - otherwise Enter opens the row the
+    // arrow keys last touched, not the one under the pointer.
+    row.addEventListener('mouseenter', () => setActiveIdx(state, i));
+    list.appendChild(row);
   });
   updateActiveRow(state);
 }
@@ -8192,7 +8402,6 @@ function buildProjectRow(s, idx) {
       '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
     '</div>' + nodeBadge;
   el.addEventListener('click', () => pickPaletteProject(p));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
@@ -8208,7 +8417,6 @@ function buildQuickRow(idx) {
       (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
     '</div>';
   el.addEventListener('click', () => pickPaletteQuick());
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
@@ -8237,11 +8445,14 @@ function buildCustomRow(query, idx) {
     '<span class="cp-icon">+</span>' +
     '<div class="cp-main"><div class="cp-name" style="color:var(--nz-text-mute)">' + label + '</div></div>';
   el.addEventListener('click', () => pickPaletteCustom(query));
-  el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
 }
 
-function setActiveIdx(idx) {
+// setActiveIdx is the single writer for the palette cursor: it records the
+// index in state (what Enter reads) and repaints the .active class (what
+// the user sees). Keyboard navigation and hover both route through it.
+function setActiveIdx(state, idx) {
+  state.activeIdx = idx;
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   overlay.querySelectorAll('.cmd-palette-item').forEach(el => {
@@ -8250,7 +8461,7 @@ function setActiveIdx(idx) {
 }
 
 function updateActiveRow(state) {
-  setActiveIdx(state.activeIdx);
+  setActiveIdx(state, state.activeIdx);
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (!overlay) return;
   const active = overlay.querySelector('.cmd-palette-item.active');
@@ -9754,6 +9965,11 @@ function runKatex() {
 //      reject because they lack both a math hint and a function-call shape.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
+  // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
+  // operator, or call shape to hint on, but the outer `$` guard already
+  // rejected the alphanumeric-adjacent prose case, so accept it (#2428).
+  // 3+ letters (`$USD$`) still fall through to the hint check below.
+  if (/^[a-zA-Z]{1,2}$/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
   if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
   if (!/[\d+\-*/=<>]|[a-zA-Z]\(|\)[a-zA-Z]/.test(tex)) return false;
@@ -9858,12 +10074,17 @@ const _MD_CACHE_MAX = 500;
 // covers >95% of stable IM-style replies on naozhi without paying
 // hash-the-string cost on streaming-storm responses.
 const _MD_CACHE_INPUT_MAX = 2000;
+// Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
+// via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending
+// span keeps a `ktx-N` id whose katexPending entry is deleted on first
+// flush, so later cache hits would show raw TeX forever (#2428). Every
+// alternative in BLOCK_SPLIT_RE plus inlineMd's inline math triggers is
+// mirrored here; keep them in sync.
+const _MD_UNCACHEABLE_RE = /```|\$|\\\[|\\\(|\\begin\{/;
 
 function renderMd(s) {
   if (!s) return '';
-  // Only cache when the input has no constructs that mint unique DOM ids
-  // (mermaid-N / ktx-N), otherwise cached HTML would collide across messages.
-  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !/```|\$|\\\[|\\\(/.test(s);
+  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !_MD_UNCACHEABLE_RE.test(s);
   if (cacheable) {
     const hit = _mdCache.get(s);
     if (hit !== undefined) return hit;
@@ -10968,9 +11189,17 @@ function renderMdUncached(s) {
     // processes one line at a time, which would otherwise truncate multi-line
     // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
     // get swapped back in after list/heading/table rendering completes.
+    // Alternation puts single-line `code` spans first so a `\(...\)` written
+    // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
+    // reaches inlineMd intact, where the code-span pass claims it before the
+    // math pass (#2428). Code spans are returned verbatim — no placeholder —
+    // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
+    // inlineMd's per-line code-span scope; a stray backtick pair spanning
+    // lines is not a code span there either.
     const inlineMathTokens = [];
     if (part.indexOf('\\(') !== -1) {
-      part = part.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
+      part = part.replace(/`[^`\n]+`|\\\(([\s\S]+?)\\\)/g, function(m, tex) {
+        if (tex === undefined) return m;
         inlineMathTokens.push(renderKatex(tex.trim(), false));
         return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
       });
@@ -12390,6 +12619,7 @@ const wsm = {
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
           sawUser = true;
+          lockRenderedAskCards(el);
         }
         const h = eventHtml(e);
         if (h) {
@@ -12498,6 +12728,9 @@ const wsm = {
         if (h2) h2.textContent = text;
       }
       resetTurnState();
+      // A user message after an AskUserQuestion means it was answered on some
+      // surface — lock the card before the bubble lands (#2430).
+      lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       if (ev.cost) {
         const sKey = sid(selectedKey, selectedNode);
@@ -12964,20 +13197,25 @@ const wsm = {
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
       // Reduce discovered scan frequency
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+      // #2431: a hidden tab has had its pollers suspended by stopPollers;
+      // re-arming here would undo that. startPollers re-arms on return.
+      if (!document.hidden) discoveredPollTimer = setInterval(scanDiscovered, 30000);
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
       // RNEW-UX-010 — announce only on real transitions from connected, so
       // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
       if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-      // WS lost: start fallback polling
-      if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
+      // WS lost: start fallback polling — unless the tab is hidden (#2431):
+      // stopPollers already suspended everything and startPollers re-arms on
+      // visibilitychange from the then-current WS state.
+      const visible = !document.hidden;
+      if (visible && !sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
-      discoveredPollTimer = setInterval(scanDiscovered, 5000);
+      if (visible) discoveredPollTimer = setInterval(scanDiscovered, 5000);
       if (selectedKey && !eventTimer) {
         lastEventTime = this.lastEventTimeWs;
-        eventTimer = setInterval(() => fetchEvents(false), 1000);
+        if (visible) eventTimer = setInterval(() => fetchEvents(false), 1000);
       }
     }
   },
@@ -12995,15 +13233,23 @@ function updateMainState(state, reason) {
 
 function updateHeaderCLI() {
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const el = document.querySelector('.main-header .detail-left');
+  // #2437: only touch the #header-cli span painted by headerCLILabelHtml.
+  // Never rewrite the whole left container — #header-model lives next door.
+  const el = document.getElementById('header-cli');
   if (!el) return;
   // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
   // for why pending sessions need the sessionBackends lookup before the
   // global defaultCLIName fallback.
   const name = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
   const version = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
-  const label = name ? esc(name) + (version ? ' v' + esc(version) : '') : '';
-  if (el.innerHTML !== label) el.innerHTML = label;
+  // Same display rule as renderMainShell (D5): version lives in the hover
+  // title only, the text is just the backend name.
+  const text = name || '';
+  const title = (name && version) ? name + ' v' + version : '';
+  if (el.textContent !== text) el.textContent = text;
+  if (title !== (el.getAttribute('title') || '')) {
+    if (title) el.setAttribute('title', title); else el.removeAttribute('title');
+  }
 }
 
 function flashSendBtn() {
@@ -14110,8 +14356,18 @@ wsm.connect();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
+      // #2431: a half-open socket (lid close / network switch) still reports
+      // CONNECTED, so no frames arrive and no fallback poll is armed below;
+      // the version gate would then short-circuit this one-shot fetch too.
+      // Zero lastVersion so returning to the tab always repaints once.
+      lastVersion = 0;
       fetchSessions(); // immediate refresh on resume so UI is not stale
-      sessionPollTimer = setInterval(fetchSessions, 5000);
+      // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
+      // socket session_state pushes already drive the sidebar; arming the
+      // interval here made it run alongside WS until the next reconnect.
+      if (!(wsm && wsm.state === WS_STATES.CONNECTED)) {
+        sessionPollTimer = setInterval(fetchSessions, 5000);
+      }
     }
     // Same rationale as the turn-boundary refresh in onSessionState: the branch
     // can change without the workspace path changing, and an operator switching

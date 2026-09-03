@@ -177,6 +177,42 @@ func plannerNameFromKey(key string) string {
 	return sessionkey.PlannerNameFromKey(key)
 }
 
+// deniedKeyRune is one inclusive codepoint range ValidateSessionKey rejects.
+type deniedKeyRune struct {
+	lo, hi rune
+	reason string
+}
+
+// deniedKeyRunes is the single source of truth for the codepoints a session
+// key may not contain. Keys travel directly into slog.TextHandler attrs and
+// sessions.json — a tab fragments a log attr into two, \n injects fake log
+// lines, C1 codepoints are interpreted as control functions by some
+// terminal emulators, and the Unicode bidi / zero-width classes are what
+// sanitizeKeyComponent drops on the IM path. The dashboard's client-side
+// sanitizeKeySlug must strip the same set (#2429) — the Go contract test
+// in internal/server parses its regex against DeniedKeyRuneRanges, so add
+// new rows here and the test tells you to update dashboard.js.
+var deniedKeyRunes = []deniedKeyRune{
+	{0x0000, 0x001F, "control character"},           // C0 incl. tab / newline
+	{0x007F, 0x009F, "control character"},           // DEL + C1 controls
+	{0x200B, 0x200F, "invisible control character"}, // zero-width / LTR-RTL marks
+	{0x2028, 0x2029, "invisible control character"}, // line / paragraph separator
+	{0x202A, 0x202E, "invisible control character"}, // bidi embedding / override
+	{0xFEFF, 0xFEFF, "invisible control character"}, // BOM
+}
+
+// DeniedKeyRuneRanges returns the inclusive [lo, hi] codepoint ranges that
+// ValidateSessionKey rejects, as a fresh slice so callers cannot mutate the
+// table. Exposed for cross-layer contract tests (dashboard sanitizeKeySlug
+// parity); production code should call ValidateSessionKey.
+func DeniedKeyRuneRanges() [][2]rune {
+	out := make([][2]rune, 0, len(deniedKeyRunes))
+	for _, dr := range deniedKeyRunes {
+		out = append(out, [2]rune{dr.lo, dr.hi})
+	}
+	return out
+}
+
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
 // sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate
 // enforced by sanitizeKeyComponent for IM-originated keys — the IM path
@@ -198,22 +234,10 @@ func ValidateSessionKey(k string) error {
 		return errors.New("session key invalid utf-8")
 	}
 	for _, r := range k {
-		// Reject C0 (U+0000..U+001F including tab), DEL (U+007F), and the
-		// C1 control range (U+0080..U+009F). Keys travel directly into
-		// slog.TextHandler attrs and sessions.json — a tab fragments a
-		// log attr into two, \n injects fake log lines, and C1 codepoints
-		// are interpreted as control functions by some terminal emulators.
-		// Also reject the Unicode bidi / zero-width classes that
-		// sanitizeKeyComponent drops on the IM path.
-		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
-			return errors.New("session key contains control character")
-		}
-		switch {
-		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
-			r >= 0x202A && r <= 0x202E, // bidi embedding / override
-			r == 0x2028, r == 0x2029,   // line / paragraph separator
-			r == 0xFEFF: // BOM
-			return errors.New("session key contains invisible control character")
+		for _, dr := range deniedKeyRunes {
+			if r >= dr.lo && r <= dr.hi {
+				return errors.New("session key contains " + dr.reason)
+			}
 		}
 	}
 	// Note: ValidateSessionKey does NOT enforce that the key has exactly 4

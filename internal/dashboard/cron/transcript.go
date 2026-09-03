@@ -885,7 +885,7 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 			continue
 		}
 		parsed = true
-		outStr, _ := decodeStringOrBlocks(b.Content)
+		outStr := toolResultText(b.Content)
 		// ANSI escapes are rare in agent tool_result text; skip the regex
 		// (NFA traversal of every byte) when the ESC byte 0x1b is absent,
 		// which is the common case.
@@ -1050,32 +1050,6 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 		Text:  sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
 	}}
 	return out, tok, 0, true
-}
-
-// decodeStringOrBlocks accepts either a JSON string or an array of
-// content blocks and returns (string-form, blocks-form). One of the
-// two is empty depending on what the input was.
-func decodeStringOrBlocks(raw json.RawMessage) (string, []claudeContentBlock) {
-	if len(raw) == 0 {
-		return "", nil
-	}
-	// Strings are a quoted JSON value starting with `"`.
-	if raw[0] == '"' {
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			return "", nil
-		}
-		return s, nil
-	}
-	if raw[0] == '[' {
-		var blocks []claudeContentBlock
-		if err := json.Unmarshal(raw, &blocks); err != nil {
-			return "", nil
-		}
-		return "", blocks
-	}
-	// Object — uncommon; ignore.
-	return "", nil
 }
 
 // toolInputProbe is the partial schema used by summariseToolInput to pick

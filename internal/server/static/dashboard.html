@@ -662,6 +662,11 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    instead; the raw model id stays in the label's title. */
 .main-header .detail-left{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .main-header .detail-left>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* #2437: #header-cli is always emitted so updateHeaderCLI has an in-place
+   target, but with no backend name yet it is empty — collapse it like
+   .detail-git / .detail-effort / .detail-runstats so the 6px flex gap
+   doesn't open a hole before the "· model" label. */
+.main-header .detail-left #header-cli:empty{display:none}
 /* session-run-metrics header overview: the run-history stats ("N 轮 · 均 X ·
    最长 X") promoted from the panel summary into the header's right edge. Pushed
    to the right with margin-left:auto; truncates rather than wrapping so it

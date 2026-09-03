@@ -229,7 +229,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		var hasMore bool
 		switch {
 		case msg.After > 0:
-			entries = sess.EventEntriesSince(msg.After)
+			entries = entriesSinceReconnect(sess, msg.After)
 		case msg.Limit > 0:
 			// Visible-aware initial page: a suspended session whose persisted
 			// tail is all internal events (parallel agent team) would otherwise
@@ -238,8 +238,8 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		default:
 			entries = sess.EventLastN(0)
 		}
-		if len(entries) > 0 {
-			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
+		if len(entries) > 0 || emptyInitialHistoryWanted(msg, snap.State) { // #2432
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: nonNilEntries(entries), HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
 		}
 		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries), "has_more", hasMore)
 		return
@@ -332,7 +332,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	var hasMore bool
 	switch {
 	case msg.After > 0:
-		entries = sess.EventEntriesSince(msg.After)
+		entries = entriesSinceReconnect(sess, msg.After)
 	case msg.Limit > 0:
 		// Initial subscribe asks for the last `limit` events only — this is
 		// the dashboard pagination fast path. Clients walk further back via
@@ -369,12 +369,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries, HasMore: hm, Initial: true})
 		}
 		csr.Advance(entries)
-	} else if snap.State == "running" {
-		// Always send an (empty) history for running sessions so the client's
-		// _initialSubscribe flag is consumed. Without this, the client shows a
-		// blank events area until eventPushLoop delivers the first batch, which
-		// can be a noticeable delay if the process just started.
-		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}, Initial: true})
+	} else if emptyInitialHistoryWanted(msg, snap.State) {
+		// Empty Initial frame consumes the client's _initialSubscribe flag so
+		// the pane shows a placeholder instead of staying blank (#2432).
+		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
 	}
 
 	spawned = true

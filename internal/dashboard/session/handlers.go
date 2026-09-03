@@ -950,6 +950,19 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 // 500 matches maxPersistedHistory — the upper bound of anything useful.
 const maxEventsPageLimit = 500
 
+// eventsBefore returns the entries strictly older than the `before` cursor
+// (unix ms), preserving the input's chronological order. Always returns a
+// non-nil slice so an exhausted page serialises as [] rather than null.
+func eventsBefore(entries []cli.EventEntry, before int64) []cli.EventEntry {
+	out := make([]cli.EventEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Time < before {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // GET /api/sessions/events
 //
 // Query parameters:
@@ -1022,9 +1035,10 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy — forward after only (the remote protocol predates
-	// before/limit). If/when FetchEventsPaginated exists, we can extend here
-	// without breaking older peer binaries.
+	// Remote node proxy — the node RPC only carries `after` (it predates
+	// before/limit), so pagination is emulated here: fetch what the peer has
+	// and apply the `before` cursor locally. Not a protocol change, so older
+	// peer binaries keep working.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
@@ -1035,6 +1049,31 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if beforeStr != "" && afterStr == "" {
+			// #2433: "load earlier" page. Previously `before` was ignored
+			// and the tail-`limit` slice below re-served the NEWEST page on
+			// every click, so prependEvents (no dedup) stacked duplicates
+			// and the button never reached "done". Mirror the local branch:
+			// strictly older than the cursor, newest `limit` of those, plus
+			// an authoritative has-more flag. An empty page is the client's
+			// stop signal, so it must come back as [] with has-more=0.
+			pageLimit := limit
+			if pageLimit == 0 {
+				pageLimit = maxEventsPageLimit
+			}
+			page := eventsBefore(entries, before)
+			hasMore := len(page) > pageLimit
+			if hasMore {
+				page = page[len(page)-pageLimit:]
+			}
+			if hasMore {
+				w.Header().Set("X-Events-Has-More", "1")
+			} else {
+				w.Header().Set("X-Events-Has-More", "0")
+			}
+			httputil.WriteJSON(w, page)
 			return
 		}
 		// Apply page cap on the returned entries so the dashboard gets a
