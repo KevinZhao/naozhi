@@ -577,7 +577,7 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
 	// Same SHA-256 pre-digest trick as IsAuthenticated so a timing probe
