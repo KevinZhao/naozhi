@@ -18,6 +18,10 @@
 //
 // 因此进入 narrow 的确定性路径是：wide 下先开 drawer（list-pane 被钉到 380），
 // 再缩视口触发 ResizeObserver → 重新按 lpW=380 分档 → narrow → list-pane 320。
+// 这是当前产品里唯一能在 desktop-chrome 上确定性进入 narrow 的路径：≥769px 时
+// 首绘 lpW ≥ 713 必为 wide；≤768px 时 has-drawer 直接把 list-pane display:none，
+// cj-row 无从测量。观察 body 尺寸而非 list-pane 是 observer 的实现细节，若产品
+// 改为观察 list-pane（开 drawer 即重分档），本用例只需去掉 setViewportSize 一步。
 //
 // 跑法：cd test/e2e && npx playwright test cj_row_narrow.test.js --project=desktop-chrome
 
