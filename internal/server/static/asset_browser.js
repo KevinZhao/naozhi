@@ -107,7 +107,7 @@
       grp.items.forEach(function (a, i) {
         var d = a.description ? '<div class="asset-rdesc">' + esc(a.description) + '</div>'
           : '<div class="asset-rdesc asset-nodesc">（无描述信息，名称取自目录名）</div>';
-        html += '<div class="asset-row' + (state.sel === a ? ' active' : '') + '" data-g="' + esc(g) + '" data-i="' + i + '">' +
+        html += '<div class="asset-row' + (state.sel === a ? ' active' : '') + '" role="listitem" data-g="' + esc(g) + '" data-i="' + i + '">' +
           '<div class="asset-rname">' + esc(a.name) + '</div>' + d + '</div>';
       });
       html += '</div>';

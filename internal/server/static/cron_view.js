@@ -3330,6 +3330,7 @@ function renderCronDrawer() {
   _cronDrawerFetchedFor.delete(cronDetailJobId);
   host.classList.add('is-open');
   host.innerHTML = cronDrawerHtml(job);
+  syncCronDrawerHeaderHeight(host);
   // Re-mount timeline content. The drawer's history section embeds the
   // existing #cron-timeline-panel host, so the same renderer (and the
   // refreshHead / loadMore reconcilers) keep working without rewrites.
@@ -3340,6 +3341,24 @@ function renderCronDrawer() {
   // 双保险。
   if (typeof ensureCronLiveSubscription === 'function') ensureCronLiveSubscription();
   if (typeof repaintCronLive === 'function') repaintCronLive();
+}
+
+// syncCronDrawerHeaderHeight publishes the sticky drawer header's measured
+// height as --nz-cron-drawer-header-h on the scroll container so the 执行历史
+// .ct-head (also sticky) can stick just below it instead of at top:0 where
+// the z-index:2 header covers it (#2434). The header height isn't fixed —
+// .cdh-row2 wraps and the coarse-pointer media bumps the icon buttons to
+// 44px — so a ResizeObserver keeps the value honest. Idempotent per host.
+function syncCronDrawerHeaderHeight(host) {
+  const header = host.querySelector('.cron-drawer-header');
+  if (!header) return;
+  const apply = () => host.style.setProperty('--nz-cron-drawer-header-h', header.offsetHeight + 'px');
+  apply();
+  if (host._cronDrawerHeaderObs) host._cronDrawerHeaderObs.disconnect();
+  if (typeof ResizeObserver !== 'function') return;
+  const obs = new ResizeObserver(apply);
+  obs.observe(header);
+  host._cronDrawerHeaderObs = obs;
 }
 
 // cronDrawerHtml builds the per-job drawer body. Returns an HTML string from
