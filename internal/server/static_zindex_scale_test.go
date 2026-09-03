@@ -3,14 +3,16 @@
 // Overlays previously each picked an ad-hoc z-index; the lightbox shipped a
 // wild 9999 that sat orders of magnitude above every other layer, so stacking
 // order across overlays was unpredictable and impossible to reason about. The
-// UI-2 fix introduced an ordered --nz-z-* scale (popover < drawer < toast <
-// menu < overlay < lightbox) and routed every full-screen / blocking overlay
-// through it.
+// UI-2 fix introduced an ordered --nz-z-* scale (popover < drawer < modal <
+// menu < overlay < lightbox < toast) and routed every full-screen / blocking
+// overlay through it. #2434 moved toast to the top: it is a pointer-events:none
+// notification (also while .show — no click handler, taps fall through) and
+// must stay readable over the voice overlay / lightbox.
 //
 // This guard pins two invariants so the scale can't silently erode:
 //  1. No rule re-introduces the wild 9999 literal (or any z-index ≥ 1000).
 //  2. The seven scale tokens are defined in :root in strictly ascending order,
-//     so the documented layering (lightbox on top) holds.
+//     so the documented layering (toast on top) holds.
 package server
 
 import (
@@ -47,9 +49,11 @@ func TestDashboardHTML_ZIndexScale(t *testing.T) {
 	// (2) The scale tokens exist and ascend in the documented order. A token
 	// defined out of order would invert layering (e.g. a popover painting over
 	// the lightbox).
-	// modal sits between drawer and toast: it must clear the split-view front
-	// drawer (literal 202) yet stay under toasts.
-	want := []string{"popover", "drawer", "modal", "toast", "menu", "overlay", "lightbox"}
+	// modal sits between drawer and menu: it must clear the split-view front
+	// drawer (literal 202) yet stay under the context menu. toast is last:
+	// a notification must not hide behind the voice overlay or the lightbox
+	// (#2434).
+	want := []string{"popover", "drawer", "modal", "menu", "overlay", "lightbox", "toast"}
 	got := map[string]int{}
 	for _, m := range reZIndexToken.FindAllStringSubmatch(html, -1) {
 		v, _ := strconv.Atoi(m[2])

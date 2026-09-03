@@ -147,20 +147,25 @@
        drawer   (side/bottom panels: fv-drawer, aside, history sheet,
                  cj-menu — all share the blocking-surface tier)
        modal    (blocking dialog / cmd-palette — must clear the split-view
-                 front drawer, which lifts to literal 202)
-       toast    (transient status, must clear a docked drawer)
-       menu     (context menu — above toast so a right-click on a toast works)
+                 front drawer, which lifts to literal 202; #split-resizer sits
+                 at literal 203 so the seam is never occluded by either pane)
+       menu     (context menu; its click-away overlay sits one step below via
+                 calc(var(--nz-z-menu) - 1))
        overlay  (full-screen capture: voice, mem-popover)
-       lightbox (image viewer — the topmost surface; replaces the 9999 wild value)
+       lightbox (image viewer; replaces the 9999 wild value)
+       toast    (transient status — the TOPMOST tier. A toast is a
+                 pointer-events:none notification that must stay readable
+                 while the voice overlay or the lightbox is open, e.g. the
+                 "录音失败" / "下载失败" error it reports about them. #2434)
      Sub-steps (+1/+2) stay as literal offsets at the rule (e.g. ctx-menu sits
      one above its overlay) to avoid a token per micro-layer. */
   --nz-z-popover:100;
   --nz-z-drawer:200;
   --nz-z-modal:205;
-  --nz-z-toast:210;
   --nz-z-menu:211;
   --nz-z-overlay:300;
   --nz-z-lightbox:400;
+  --nz-z-toast:450;
   /* Blocking-modal scrim (R20260610-UI-3). modal / voice / cmd-palette each
      dimmed the background at a different opacity (.75 / .75 / .6), giving the
      same "a blocking layer is open" cue inconsistent weight. One token unifies
@@ -1045,7 +1050,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .fv-body .fv-truncated{padding:8px 12px;background:rgba(210,153,34,.1);border-left:3px solid var(--nz-amber);color:var(--nz-amber);font-size:var(--nz-fs-sm);margin-bottom:10px;border-radius:var(--nz-radius-xs)}
 .fv-body .fv-loading,.fv-body .fv-error{padding:24px;text-align:center;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2)}
 .fv-body .fv-error{color:var(--nz-red)}
-@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw}.fv-body iframe{height:calc(100vh - 100px)}}
+/* Phone: full-width, and follow the visualViewport vars like .main / .sidebar
+   do so the iOS soft keyboard shrinks the drawer instead of covering its
+   bottom (#2434). */
+@media(max-width:768px){.fv-drawer{width:100%;max-width:100vw;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}.fv-body iframe{height:calc(100vh - 100px)}}
 
 /* ===== Split view (desktop) =====
    When a preview / 追问 drawer opens, instead of overlaying the transcript we
@@ -1080,9 +1088,13 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
      the class on each open. A subtle shadow on the front pane hints depth. */
   body.nz-split-open .fv-drawer.nz-split-front,
   body.nz-split-open .aside-drawer.nz-split-front{z-index:202;box-shadow:var(--nz-shadow-drawer)}
-  /* Draggable seam. Sits exactly on the left edge of the reserved strip,
-     above the drawer (z-index 200) so the hit area is never occluded. */
-  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}
+  /* Draggable seam. Sits exactly on the left edge of the reserved strip;
+     the 6px hit area straddles the seam (margin-right:-3px), so it must paint
+     above BOTH panes — including the .nz-split-front one at 202 — or the 3px
+     overlapping the front drawer are swallowed and the drag target halves
+     (#2434). Background stays transparent until hover, so the higher z-index
+     has no visual cost. */
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:203;background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
 }
 
@@ -1172,7 +1184,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    feedback (errors, "copied", cron results) stays visible while a preview /
    追问 pane occupies the right strip; still below ctx-menu (211). */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:var(--nz-z-toast);opacity:0;pointer-events:none;transition:opacity .3s}
-.toast.show{opacity:1;pointer-events:auto}
+/* Stays pointer-events:none while shown: the toast is the topmost layer
+   (--nz-z-toast) and has no click handler, so taps must fall through to the
+   lightbox toolbar / voice overlay underneath instead of being swallowed. */
+.toast.show{opacity:1}
 /* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
    pick it up but sighted users never see it. Display:none would suppress
@@ -1253,12 +1268,12 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 /* R110-P1 long-press context menu: surfaces session-card actions (rename /
    delete / copy key) on touch devices where hover-only buttons are invisible.
    Rendered as an overlay + positioned menu pair so click-outside-to-close is
-   cheap to implement. z-index 210 sits above .modal-overlay (200) so the
-   menu can opt to layer on top of a confirm dialog mid-flight without
-   swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
+   cheap to implement. The overlay sits one step below --nz-z-menu (211),
+   above .modal-overlay (205), so the menu can opt to layer on top of a
+   confirm dialog mid-flight without swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
    perceived latency on the long-press target state that already takes 500ms
    to trigger. */
-.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}
+.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:calc(var(--nz-z-menu) - 1)}
 .ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-md);padding:4px;min-width:160px;box-shadow:var(--nz-shadow-2);z-index:var(--nz-z-menu);user-select:none;-webkit-user-select:none}
 .ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--nz-radius-ms);cursor:pointer;color:var(--nz-text);font-size:var(--nz-fs-base);min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
 .ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
@@ -2604,8 +2619,15 @@ body.kbd-open .input-hints{display:none}
 @media(max-width:768px){
   .cron-detail-body{padding:12px}
   .cron-new-btn{min-height:40px}
-  /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard */
-  .modal{max-height:85dvh;display:flex;flex-direction:column}
+  /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard.
+     overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
+     dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
+     onboarding / cheatsheet …): their content would otherwise spill past the
+     85dvh cap with no scroll container, leaving .modal-btns unreachable
+     (#2434). Cron modals keep a .modal-body scroller: it shrinks to fit (a
+     scroll container's min-height:auto resolves to 0), so the outer box never
+     overflows and no second scrollbar appears. */
+  .modal{max-height:85dvh;display:flex;flex-direction:column;overflow-y:auto}
   .modal-body{overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch}
   .modal .modal-btns{flex-shrink:0;background:var(--nz-bg-1);padding-top:8px;margin-top:8px;border-top:1px solid var(--nz-bg-2)}
   /* Hit-area boost inside modal on mobile */
@@ -2840,7 +2862,9 @@ body.kbd-open .sidebar-footer{display:none}
    same safe-area handling the main .input-area uses so the composer doesn't
    disappear behind the notch / home indicator. */
 @media (max-width: 768px){
-  .aside-drawer{width:100%;max-width:100vw;border-left:none}
+  /* top/height follow --vv-* like .main so the soft keyboard shrinks the
+     drawer instead of covering .ad-input-area (#2434). */
+  .aside-drawer{width:100%;max-width:100vw;border-left:none;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
   .aside-drawer .ad-header{padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left))}
   .aside-drawer .ad-messages .event{padding:6px 20px}
   .aside-drawer .ad-input-area{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(10px,env(safe-area-inset-bottom))}
@@ -2848,6 +2872,13 @@ body.kbd-open .sidebar-footer{display:none}
      under ≤768 and to min 44×44 under pointer:coarse. Mirror here so the
      send key on phones is the same size as the main composer's. */
   .aside-drawer .ad-send{width:40px;height:40px}
+}
+/* Landscape phones (769–950px, coarse pointer) are above the ≤768 breakpoint
+   but still get the soft keyboard; mirror the .main/.sidebar landscape block
+   so both drawers follow --vv-* there too (#2434). Sits after both drawers'
+   base rules so it wins the same-specificity cascade. */
+@media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
+  .fv-drawer,.aside-drawer{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
 }
 @media (pointer: coarse){
   .aside-drawer .ad-send,.aside-drawer .ad-close,.aside-drawer .ad-save-btn{min-width:44px;min-height:44px}

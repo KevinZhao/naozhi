@@ -5047,12 +5047,14 @@ func TestDashboardHTML_R110P1_ContextMenuStyles(t *testing.T) {
 	}
 
 	// z-index contract: menu above its overlay, both above .modal-overlay.
-	// R20260610-UI-2 routed these through the --nz-z-* scale: the overlay sits
-	// at --nz-z-toast (210, above the drawer/modal tier 200) and the menu at
-	// --nz-z-menu (211, above its overlay). If the menu drops below modal-overlay
-	// a stray confirmDialog would hide it.
-	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:var(--nz-z-toast)}") {
-		t.Error(".ctx-menu-overlay must use z-index:var(--nz-z-toast) to sit above the modal/drawer tier")
+	// R20260610-UI-2 routed these through the --nz-z-* scale: the menu sits at
+	// --nz-z-menu (211) and its overlay one step below (calc(menu - 1) = 210,
+	// above the drawer/modal tier 200/205). #2434 moved --nz-z-toast to the
+	// top of the scale, so the overlay can no longer borrow the toast token
+	// (it would then cover the menu). If the menu drops below modal-overlay a
+	// stray confirmDialog would hide it.
+	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:calc(var(--nz-z-menu) - 1)}") {
+		t.Error(".ctx-menu-overlay must use z-index:calc(var(--nz-z-menu) - 1) to sit above the modal/drawer tier yet below the menu")
 	}
 	if !strings.Contains(html, "z-index:var(--nz-z-menu)") {
 		t.Error(".ctx-menu must use z-index:var(--nz-z-menu) so it renders above its overlay")
