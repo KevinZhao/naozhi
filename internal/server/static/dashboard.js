@@ -7019,16 +7019,6 @@ function onThumbKeyDown(ev, idx) {
   if (next) next.focus();
 }
 
-// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
-// Only used for PDF chips where we want to surface size to the user; images
-// still show the thumbnail itself, so size is not rendered for them.
-function formatFileSize(n) {
-  if (!n || n < 0) return '';
-  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  if (n >= 1024) return Math.round(n / 1024) + ' KB';
-  return n + ' B';
-}
-
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -10119,8 +10109,10 @@ function renderMd(s) {
 // resolved to project-relative form by resolveProjectForAbsPath before the
 // server call — server still rejects absolute paths for defence in depth.
 // Rejects spaces (breaks on prose) and leading URL schemes.
-const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
-const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?$/;
+// Line suffix accepts `:L`, `:L-L2` (range) and `:L:C` (go build / eslint
+// `file:line:col`); splitPathLine keeps only the line for the preview jump.
+const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+|:\d+)?)?$/;
+const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+|:\d+)?$/;
 function isFileRefCandidate(text) {
   return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
 }
@@ -10262,7 +10254,8 @@ function resolveActiveProject() {
 
 // Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
 function splitPathLine(cand) {
-  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)$/);
+  // Optional trailing `:col` is dropped: the preview only scrolls to a line.
+  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)(?::\d+)?$/);
   if (m) return { path: m[1], line: m[2] };
   return { path: cand, line: '' };
 }
@@ -10857,12 +10850,19 @@ function scrollToPreviewLine(body, line) {
   pre.parentElement.scrollTop = Math.max(0, (line - 3) * 18);
 }
 
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Single declaration on purpose: a second hoisted `function formatFileSize`
+// used to shadow this one silently. Promotion checks the *rounded* value so
+// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
 function formatFileSize(bytes) {
   if (!bytes || bytes <= 0) return '';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = bytes, i = 0;
+  while (i < units.length - 1 && (i === 0 ? v >= 1024 : Number(v.toFixed(1)) >= 1024)) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
 }
 
 function inferLang(path, mime) {
@@ -11054,12 +11054,12 @@ const MAX_LIST_DEPTH = 6;
 // stays in sync with the captured prefix; a Unicode-`\s*` would consume
 // NBSP/U+2028/etc. while leadingColumns counted only space+tab, producing
 // cols=0 for a visually-indented bullet.
-const LIST_ITEM_RE = /^([ \t]*)(?:([-*])|(\d+)\.)[ \t]+(.*?)\r?$/;
+const LIST_ITEM_RE = /^([ \t]*)(?:([-*+])|(\d+)\.)[ \t]+(.*?)\r?$/;
 // Cheap shape check used by the lazy-continuation guard. Treats both digit
 // shapes (any length) — the digit-cap reject path in parseListItem returns
 // null, but for lazy-continuation purposes "this looks like a list bullet"
 // is exactly what we want: refuse to fold such lines into the previous <li>.
-const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
+const LIST_SHAPE_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+/;
 // Reject anything > 3 digits as a list start: real ordinals max out around
 // dozens; 4+ digit prefixes are year/version/issue tokens ("2024. 关于...",
 // "1234. xxx") that the user does not want rendered as <ol start="2024">.
@@ -11067,6 +11067,9 @@ const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
 // chars but value 100) is accepted while "2024." (4 chars, value 2024) is
 // rejected — symmetric vs. the documented intent.
 const OL_START_MAX = 999;
+// `> quote` line: marker at column 0 (up to 3 leading spaces per GFM), one
+// optional space after it is eaten.
+const BLOCKQUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
 
 function leadingColumns(s) {
   let cols = 0;
@@ -11077,6 +11080,17 @@ function leadingColumns(s) {
     else break;
   }
   return cols;
+}
+
+// GFM task-list marker at the head of a bullet's content. Rendered as a
+// disabled checkbox (display only — the dashboard has no write-back path).
+// The rest of the content still goes through inlineMd (esc + inline passes).
+const TASK_ITEM_RE = /^\[([ xX])\][ \t]+(.*)$/;
+function listItemHtml(content) {
+  const tm = TASK_ITEM_RE.exec(content);
+  if (!tm) return inlineMd(content);
+  const checked = tm[1] === ' ' ? '' : ' checked';
+  return '<input type="checkbox" class="md-task" disabled' + checked + '> ' + inlineMd(tm[2]);
 }
 
 function parseListItem(line, baselineCols) {
@@ -11255,7 +11269,7 @@ function renderMdUncached(s) {
           if (f.cols === li.cols && f.kind === li.kind) {
             // Close everything strictly above this frame, then sibling-emit.
             closeTo(f.depth);
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             // We did NOT mutate the frame's depth, so no extra book-keeping.
             // Skip the rest of the dispatch.
             li.handled = true;
@@ -11293,7 +11307,7 @@ function renderMdUncached(s) {
         }
         if (top2 && top2.depth === li.depth) {
           if (top2.kind === li.kind) {
-            chunks.push('</li><li>' + inlineMd(li.content));
+            chunks.push('</li><li>' + listItemHtml(li.content));
             continue;
           }
           chunks.push('</li>');
@@ -11310,7 +11324,7 @@ function renderMdUncached(s) {
         // source column rather than the (possibly promoted) depth — promotion
         // mutates depth but not the user's actual indent.
         listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
-        chunks.push('<li>' + inlineMd(li.content));
+        chunks.push('<li>' + listItemHtml(li.content));
         continue;
       }
       // Treat all-whitespace lines as blanks: LLM/IM pipelines occasionally
@@ -11362,6 +11376,18 @@ function renderMdUncached(s) {
         }
       }
       closeAll();
+      // Blockquote: consecutive `>` lines merge into one <blockquote>; the
+      // marker is stripped BEFORE inlineMd so the remaining text still goes
+      // through esc(). Nested `> >` is not unwrapped (renders as literal &gt;).
+      const qm = BLOCKQUOTE_RE.exec(line);
+      if (qm) {
+        const q = [qm[1]];
+        while (i + 1 < lines.length && BLOCKQUOTE_RE.test(lines[i + 1])) {
+          q.push(BLOCKQUOTE_RE.exec(lines[++i])[1]);
+        }
+        chunks.push('<blockquote class="md-quote">' + q.map(inlineMd).join('<br>') + '</blockquote>');
+        continue;
+      }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
@@ -11385,6 +11411,13 @@ function renderMdUncached(s) {
 }
 
 /* Inline markdown: bold, italic, code, links, math */
+// `[text](dest "title")` — dest is a run of non-space/non-paren chars with
+// at most one nested `(...)` group; the title group is optional.
+const MD_LINK_RE = /\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\)/g;
+// Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
+// so a URL inside a link's label never becomes a nested anchor.
+const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
+const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
 function inlineMd(s) {
   // Extract `code` spans FIRST — before math/bold/italic — so KaTeX does not
   // peek inside them. Previously `$NVIDIA_DEVICE_PLUGIN_IMAGE$` written inside
@@ -11479,18 +11512,32 @@ function inlineMd(s) {
   // turns into `2 <em> 3 </em> 4`. Lookbehind is already relied upon by the
   // inline-math pass above.
   s = s.replace(/\*(?!\s)(.+?)(?<!\s)\*/g, (_, c) => '<em>' + c + '</em>');
+  // `__bold__`: both delimiters must sit at a word boundary (not touching
+  // [A-Za-z0-9_]) so `snake_case_name` / `foo__bar__baz` stay literal —
+  // mirrors GFM's flanking rule for `_`. `~~del~~` needs the doubled tilde so
+  // `~/.config` and a lone ` ~~ ` are untouched. Same post-esc() contract as
+  // the bold/italic passes above.
+  s = s.replace(/(?<![A-Za-z0-9_])__(?!\s)(.+?)(?<!\s)__(?![A-Za-z0-9_])/g, (_, c) => '<strong>' + c + '</strong>');
+  s = s.replace(/~~(?!\s)(.+?)(?<!\s)~~/g, (_, c) => '<del>' + c + '</del>');
   // `![alt](url)` image syntax. The dashboard CSP (img-src 'self' data: blob:)
   // blocks remote images, so an <img> would only ever render broken. Drop the
   // `!` and let the link pass below handle the target: remote → clickable
   // md-link labelled with the alt text; local path → the fileRefCode rescue
   // below, which is the existing image-preview path (preview/download buttons).
   s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, urlEsc) {
+  // Destination grammar: one level of balanced parens is allowed inside the
+  // URL (`https://x/a_(b)`) and an optional `"title"` / `'title'` may follow
+  // after whitespace (GFM link title). The title never reaches the href; it
+  // is emitted as a title attribute through escAttr. `"` survives esc() (only
+  // & < > are encoded) so the quote delimiters match literally.
+  s = s.replace(MD_LINK_RE, function(_, text, urlEsc, titleDq, titleSq) {
+    const title = titleDq !== undefined ? titleDq : titleSq;
     // `urlEsc` is the esc()'d capture (`&` → `&amp;`). Decode esc's entities
     // before the scheme check + escAttr so the href is encoded exactly once —
     // previously `?a=1&b=2` shipped as `?a=1&amp;amp;b=2`.
     const url = decodeEscEntities(urlEsc);
     const safe = safeUrl(url);
+    const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     // `text` is the already-esc()'d+partially-transformed capture — it may
     // legitimately contain <strong>/<em>/<code> spans from prior passes.
     // When the URL is rejected we still want to render the label, but
@@ -11541,7 +11588,7 @@ function inlineMd(s) {
       }
       return text;
     }
-    return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+    return '<a href="' + escAttr(safe) + '" class="md-link"' + titleAttr + ' target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
   // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
@@ -11556,14 +11603,24 @@ function inlineMd(s) {
   // sentence, while 々〆〇 and halfwidth katakana (U+FF61–FF9F) stay legal so
   // Japanese paths survive. It also stops at the `&lt;`/`&gt;` entities esc()
   // emitted for `<https://…>` so the closing bracket stays out of the href.
-  s = s.replace(/(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g, function(_, prefix, url) {
-    // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
-    // the decoded URL for the href (escAttr re-encodes it exactly once).
-    var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
-    var trail = url.slice(shown.length);
-    var clean = decodeEscEntities(shown);
-    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
-  });
+  // Odd segments of the split are the <a>…</a> runs emitted by the link pass
+  // above (esc() turned every authored `<` into &lt;, so `<a ` can only be
+  // ours); they are passed through untouched.
+  const autolinkSeg = function(seg) {
+    return seg.replace(MD_AUTOLINK_RE, function(_, prefix, url) {
+      // `shown` is still esc()'d — safe to emit as the anchor's text. `clean` is
+      // the decoded URL for the href (escAttr re-encodes it exactly once).
+      var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
+      var trail = url.slice(shown.length);
+      var clean = decodeEscEntities(shown);
+      return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
+    });
+  };
+  if (s.indexOf('https://') !== -1 || s.indexOf('http://') !== -1) {
+    s = s.indexOf('<a ') === -1
+      ? autolinkSeg(s)
+      : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
+  }
   // Restore math tokens after escaping
   if (mathTokens.length > 0) {
     s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
