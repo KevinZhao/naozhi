@@ -366,8 +366,11 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		// renders twice whenever a LoadBefore `beforeMS` cursor straddles a
 		// previously-returned entry. claude (via discovery.history_tail) and
 		// kiro (kirojsonl) both set this; codex must match the contract.
-		// Derivation uses an empty detail arg to match kiro's pinned key.
-		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, ""),
+		// Fold the real detail (not "") into the hash, as kiro does: two
+		// lines sharing the same ms timestamp and 120-rune summary but
+		// differing in the detail tail must not collide, or merged.Source's
+		// UUID-first dedup silently drops the second one (#2336).
+		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
 		Summary: summary,
 		Detail:  detail,
 	}, true
