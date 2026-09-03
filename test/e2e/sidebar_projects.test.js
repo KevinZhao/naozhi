@@ -30,17 +30,40 @@ test('GitHub icon renders for github-hosted project only', async ({ page }) => {
   await expect(ghOnOther).toHaveCount(0);
 });
 
-test('clicking GitHub icon shows remote URL toast', async ({ page }) => {
+// showGitRemote (dashboard.js) opens http(s)/git remotes in a new tab and
+// only falls back to the "GitHub remote: …" toast for schemes it refuses to
+// open (ssh / git@ — could embed credentials). Both branches were already in
+// place at the history-squash commit a274e0cc.
+test('clicking GitHub icon opens https remote in a new tab', async ({ page, context }) => {
+  // Keep the popup offline — github.com must not be hit from the test runner.
+  await context.route('https://github.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>stub</title>' }));
   const ghBtn = page.locator('.section-header', { hasText: 'myproject' }).locator('.sh-btn.github-on');
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    ghBtn.click(),
+  ]);
+  await popup.waitForLoadState();
+  expect(popup.url()).toBe('https://github.com/acme/myproject.git');
+  // No toast for the opened-in-tab path.
+  await expect(page.locator('#toast.show')).toHaveCount(0);
+  await popup.close();
+});
+
+test('clicking GitHub icon on an ssh remote shows the URL toast fallback', async ({ page }) => {
+  // pinned-empty's remote is git@github.com:… — not openable, so the toast
+  // surfaces the (truncated) URL instead.
+  const ghBtn = page.locator('.section-header', { hasText: 'pinned-empty' }).locator('.sh-btn.github-on');
   await ghBtn.click();
   const toast = page.locator('#toast.show');
   await expect(toast).toContainText('GitHub remote:');
-  await expect(toast).toContainText('github.com/acme/myproject.git');
+  await expect(toast).toContainText('git@github.com:acme/pinned.git');
 });
 
 test('favorite star toggles and triggers API call', async ({ page }) => {
   const header = page.locator('.section-header', { hasText: 'otherproject' });
-  const star = header.locator('.sh-btn').first();
+  // The header's first .sh-btn is the collapse chevron (sh-collapse); target
+  // the favorite button by its data-action instead of position.
+  const star = header.locator('.sh-btn[data-action="project-favorite"]');
   // Initial: not favorited.
   await expect(star).not.toHaveClass(/star-on/);
   await star.click();
@@ -69,8 +92,9 @@ test('favorited project with no sessions still renders header without per-projec
 test('favorited groups sort before non-favorite groups', async ({ page }) => {
   // Record the full order of section headers.
   const names = await page.locator('.section-header .sh-name').allTextContents();
-  // Collect favorite-state from star buttons; favorites must precede non-favorites.
-  const stars = await page.locator('.section-header .sh-btn').evaluateAll(
+  // Collect favorite-state from the star buttons only (headers also carry
+  // collapse / GitHub / ⚙ .sh-btn siblings); favorites must precede non-favorites.
+  const stars = await page.locator('.section-header .sh-btn[data-action="project-favorite"]').evaluateAll(
     (els) => els.map((e) => e.classList.contains('star-on'))
   );
   let seenNonFav = false;
