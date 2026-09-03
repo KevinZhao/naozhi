@@ -221,6 +221,18 @@
   --nz-memlink-user-fg:#7ad9a3;
   --nz-memlink-project-bg:#1a2a4a;      /* [[project]] memory chip */
   --nz-memlink-project-fg:#7aacf7;
+  --nz-memlink-feedback-bg:#3a2a14;     /* [[feedback]] memory chip */
+  --nz-memlink-feedback-fg:#f7c97a;
+  --nz-memlink-reference-bg:#3a1a3a;    /* [[reference]] memory chip */
+  --nz-memlink-reference-fg:#d97af7;
+  /* Backend / access-profile chip text on the inline chip_color fill: white +
+     shadow on dark; light swaps to dark text, no shadow (#2434). */
+  --nz-backend-chip-fg:#fff;
+  --nz-backend-chip-shadow:0 1px 1px rgba(0,0,0,.35);
+  --nz-backend-chip-border:rgba(0,0,0,.18);
+  /* Semantic status aliases (cj-placement-sandbox) — inherit the light remap
+     of green / amber / red, so no per-theme redefinition needed (#2434). */
+  --nz-ok:var(--nz-green);--nz-warn:var(--nz-amber);--nz-err:var(--nz-red);
   /* history-popover project label gold (R20260610-UI-1). Was a bare #d4a017 in
      the .hp-project rule with no light override; on a white surface the dark
      gold dropped below AA. Tokenised here (dark default preserves the original)
@@ -281,6 +293,9 @@
   --nz-row-active-running-bg:#dbeafe;
   --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
   --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+  --nz-memlink-feedback-bg:#fff8c5;--nz-memlink-feedback-fg:#7a5800;
+  --nz-memlink-reference-bg:#fbefff;--nz-memlink-reference-fg:#6639ba;
+  --nz-backend-chip-fg:#1a1a1a;--nz-backend-chip-shadow:none;--nz-backend-chip-border:rgba(0,0,0,.25);
   --nz-project-label-fg:#7a5800;        /* deeper gold, clears AA on white */
   /* Elevation on white: low-alpha near-black (GitHub-light convention) so
      floating surfaces read as gentle lift, not a black halo. The 1px border
@@ -322,6 +337,9 @@
     --nz-row-active-running-bg:#dbeafe;
     --nz-memlink-user-bg:#dafbe1;--nz-memlink-user-fg:#1a7f37;
     --nz-memlink-project-bg:#ddf4ff;--nz-memlink-project-fg:#0550ae;
+    --nz-memlink-feedback-bg:#fff8c5;--nz-memlink-feedback-fg:#7a5800;
+    --nz-memlink-reference-bg:#fbefff;--nz-memlink-reference-fg:#6639ba;
+    --nz-backend-chip-fg:#1a1a1a;--nz-backend-chip-shadow:none;--nz-backend-chip-border:rgba(0,0,0,.25);
     --nz-project-label-fg:#7a5800;
     /* Elevation on white — mirror of the explicit light block. */
     --nz-shadow-1:0 1px 2px rgba(31,35,40,.06);
@@ -653,6 +671,10 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .main-header h2 .btn-rename{margin-left:6px;background:transparent;border:0;color:var(--nz-text-mute);cursor:pointer;font-size:var(--nz-fs-sm2);padding:2px 4px;border-radius:var(--nz-radius-xs);vertical-align:baseline;opacity:0;transition:opacity 120ms ease,color 120ms ease}
 .main-header:hover h2 .btn-rename,.main-header h2 .btn-rename:focus-visible{opacity:1}
 .main-header h2 .btn-rename:hover{color:var(--nz-text-strong);background:var(--nz-bg-2)}
+/* 触屏：rename 铅笔不能靠 hover 显现（同 .cj-run 兜底，#2434）*/
+@media (hover:none){
+  .main-header h2 .btn-rename{opacity:1}
+}
 .main-header .detail{font-size:var(--nz-fs-sm);color:var(--nz-text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
 /* The cli/model label is the row's only shrinkable text: without min-width:0 a
@@ -682,10 +704,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    comes inline from BackendInfo.chip_color; the rules below provide layout,
    contrast (the chip uses dark text on light backgrounds via color-mix),
    and the always-on outline so dark mode keeps it readable. */
-.sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.35);border:1px solid rgba(0,0,0,.18);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media (prefers-color-scheme:light){
-  .sc-backend-chip,.sc-access-profile-chip{color:#1a1a1a;text-shadow:none;border-color:rgba(0,0,0,.25)}
-}
+.sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-backend-chip-fg);text-shadow:var(--nz-backend-chip-shadow);border:1px solid var(--nz-backend-chip-border);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* RFC §8.3 D6 — context usage bar. Three thresholds: <80% green
    (--nz-text-mute fill), <95% amber (--nz-amber), >=95% red. Width
@@ -847,6 +866,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    keyboard users back into scope. */
 .event-copy-btn.hover-only{opacity:0}
 .event:hover .event-copy-btn.hover-only,.event-copy-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-copy-btn.hover-only{opacity:1}
+}
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
 .event.system .event-icon,.event.init .event-icon{display:none}
@@ -1266,6 +1288,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .cmd-palette-item.active{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .cmd-palette-item .cp-main{flex:1;min-width:0}
 .cmd-palette-item .cp-name{font-size:var(--nz-fs-sm2);color:var(--nz-text-strong);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-backend-fail{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);white-space:nowrap}
 .cmd-palette-item .cp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
 .cmd-palette-item .cp-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0}
 .cmd-palette-item .cp-icon{color:var(--nz-text-mute);font-size:var(--nz-fs-base);flex-shrink:0;width:16px;text-align:center}
@@ -1345,6 +1368,9 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .md-code-wrap{position:relative;max-width:100%}
 .md-code-actions{position:absolute;top:6px;right:6px;display:flex;gap:4px;opacity:0;transition:opacity .15s}
 .md-code-wrap:hover .md-code-actions{opacity:1}
+@media (hover:none){
+  .md-code-actions{opacity:1}
+}
 .md-code-btn{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);color:var(--nz-text-mute);font-size:var(--nz-fs-xs);padding:2px 8px;cursor:pointer;line-height:1.6;font-family:inherit;transition:color .15s,border-color .15s,background .15s}
 .md-code-btn:hover{background:var(--nz-border);color:var(--nz-text);border-color:var(--nz-accent)}
 .md-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green)}
@@ -2460,7 +2486,7 @@ body.kbd-open .input-hints{display:none}
 /* Drawer history (override timeline panel for in-drawer use) */
 .cron-drawer-history{padding:14px 20px;flex:1 1 auto}
 .cron-drawer-history .cron-timeline-panel{padding:0;background:transparent;border:none;max-height:none;overflow:visible}
-.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:0;background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
+.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:var(--nz-cron-drawer-header-h,0);background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
 /* Drawer empty state (jobId set but job not in cronJobs) */
 .cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);text-align:center;line-height:1.6}
 /* List row selection (cj-row.is-active) */
@@ -2834,6 +2860,9 @@ body.kbd-open .sidebar-footer{display:none}
    together on hover / keyboard focus and stay hidden otherwise. */
 .event-ask-btn.hover-only{opacity:0}
 .event:hover .event-ask-btn.hover-only,.event-ask-btn.hover-only:focus-visible{opacity:1}
+@media (hover:none){
+  .event-ask-btn.hover-only{opacity:1}
+}
 @media (pointer: coarse){
   .event-ask-btn,.event-copy-btn{font-size:var(--nz-fs-sm);padding:4px 10px;min-height:32px}
 }
@@ -2903,10 +2932,10 @@ body.kbd-open .sidebar-footer{display:none}
   filter:saturate(.9)}
 .md-memlink-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11.5px;letter-spacing:.01em}
-.md-memlink[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
+.md-memlink[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
 .md-memlink[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
 .md-memlink[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
-.md-memlink[data-type="reference"]{background:#3a1a3a;color:#d97af7}
+.md-memlink[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
 .md-memlink[data-type="memory"]{background:var(--nz-bg-2);color:var(--nz-text)}
 .md-memlink-broken,.md-memlink-broken[data-type]{
   background:transparent !important;color:var(--nz-text-mute) !important;
@@ -2927,10 +2956,10 @@ body.kbd-open .sidebar-footer{display:none}
 .mem-pop-type{padding:1px 8px;background:var(--nz-bg-2);border-radius:10px;
   font-size:var(--nz-fs-xs);text-transform:uppercase;letter-spacing:.04em;
   color:var(--nz-text-strong)}
-.mem-pop-type[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
+.mem-pop-type[data-type="feedback"]{background:var(--nz-memlink-feedback-bg);color:var(--nz-memlink-feedback-fg)}
 .mem-pop-type[data-type="user"]{background:var(--nz-memlink-user-bg);color:var(--nz-memlink-user-fg)}
 .mem-pop-type[data-type="project"]{background:var(--nz-memlink-project-bg);color:var(--nz-memlink-project-fg)}
-.mem-pop-type[data-type="reference"]{background:#3a1a3a;color:#d97af7}
+.mem-pop-type[data-type="reference"]{background:var(--nz-memlink-reference-bg);color:var(--nz-memlink-reference-fg)}
 .mem-pop-scope{color:var(--nz-text-faint)}
 .mem-pop-slug{font-family:ui-monospace,Menlo,monospace;color:var(--nz-text-strong);
   font-size:var(--nz-fs-sm2);font-weight:500;margin-bottom:4px;word-break:break-all}
