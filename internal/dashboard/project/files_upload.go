@@ -32,8 +32,8 @@ const maxUploadFileBytes = 256 << 20
 const uploadBodyOverhead = 2 << 20
 
 // maxUploadMultipartFields caps non-file form values to stop a padded body
-// from inflating the in-memory Value map. Mirrors the server-side
-// rejectIfTooManyFields policy (maxMultipartFields=32).
+// from inflating the in-memory Value map. Mirrors the shared
+// httputil.RejectIfTooManyFields policy (httputil.MaxMultipartFields=32).
 const maxUploadMultipartFields = 32
 
 // uploadMemThreshold is the in-memory spill threshold for ParseMultipartForm:

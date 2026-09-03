@@ -23,7 +23,7 @@ func TestDoctor_HealthSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 	var buf bytes.Buffer
-	d := &doctor{addr: srv.URL, timeout: 2 * time.Second, out: &buf}
+	d := &doctor{addr: srv.URL, client: srv.Client(), timeout: 2 * time.Second, out: &buf}
 	d.checkHealth()
 	d.render()
 	got := buf.String()
@@ -82,7 +82,7 @@ func TestDoctor_AuthStatusBranches(t *testing.T) {
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()
-			d := &doctor{addr: srv.URL, token: "T", timeout: 2 * time.Second, out: io.Discard}
+			d := &doctor{addr: srv.URL, client: srv.Client(), token: "T", timeout: 2 * time.Second, out: io.Discard}
 			d.checkAuth()
 			if len(d.findings) == 0 {
 				t.Fatal("checkAuth produced no finding")
@@ -133,7 +133,7 @@ func TestDoctor_PprofLoopbackGate(t *testing.T) {
 				w.WriteHeader(tc.status)
 			}))
 			defer srv.Close()
-			d := &doctor{addr: srv.URL, token: "T", timeout: 2 * time.Second, out: io.Discard}
+			d := &doctor{addr: srv.URL, client: srv.Client(), token: "T", timeout: 2 * time.Second, out: io.Discard}
 			d.checkPprof()
 			if d.findings[0].Level != tc.wantLevel {
 				t.Errorf("status %d → level %q, want %q", tc.status, d.findings[0].Level, tc.wantLevel)
@@ -168,7 +168,7 @@ func TestDoctor_ExpvarLoopbackGate(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			d := &doctor{addr: srv.URL, token: "T", timeout: 2 * time.Second, out: io.Discard}
+			d := &doctor{addr: srv.URL, client: srv.Client(), token: "T", timeout: 2 * time.Second, out: io.Discard}
 			d.checkExpvar()
 			if d.findings[0].Level != tc.wantLevel {
 				t.Errorf("status %d body=%q → level %q, want %q",
@@ -393,7 +393,7 @@ func TestDoctor_CheckAuth_NonLoopbackWarning(t *testing.T) {
 	if err := validateDoctorAddr(srv.URL); err != nil {
 		t.Fatalf("loopback server URL failed validation: %v", err)
 	}
-	d := &doctor{addr: srv.URL, token: "tok", timeout: 2 * time.Second, out: io.Discard}
+	d := &doctor{addr: srv.URL, client: srv.Client(), token: "tok", timeout: 2 * time.Second, out: io.Discard}
 	d.checkAuth()
 	if d.findings[0].Level != "pass" {
 		t.Errorf("auth finding level = %q, want pass", d.findings[0].Level)

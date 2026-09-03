@@ -47,20 +47,14 @@ type Slack struct {
 	// allowed to run, rate-limiting the re-auth burst while botID is unknown.
 	// Guarded by botIDMu. #1947.
 	botHealAt time.Time
-	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
-	// hookSem caps concurrent inbound message-handler goroutines to bound
-	// memory under burst load. Mirrors feishu.Feishu.hookSem (cap=20). Without
-	// this, a single noisy workspace (legit or attacker-controlled) can spawn
-	// unbounded goroutines via Socket Mode message events, each holding any
-	// downstream Send/Reply state until the CLI finishes — eventually OOMing
-	// naozhi. R226-SEC-4.
-	hookSem chan struct{}
+	// dispatch bounds concurrent inbound message-handler goroutines (shared
+	// platform.DefaultHandlerConcurrency cap) and tracks them so Stop() can
+	// drain in-flight work. Without the cap a single noisy workspace (legit
+	// or attacker-controlled) could spawn unbounded goroutines via Socket
+	// Mode message events, each holding downstream Send/Reply state until
+	// the CLI finishes — eventually OOMing naozhi. R226-SEC-4, #2254.
+	dispatch platform.BoundedDispatch
 }
-
-// slackHookConcurrency caps concurrent message handlers per Slack adapter.
-// 20 mirrors feishu.hookSem; raise per-deployment via config only after
-// observing handler queue depth in production.
-const slackHookConcurrency = 20
 
 // slackHTTPClient is shared by all Slack adapter instances for Web API calls
 // (auth.test / chat.postMessage / files.upload etc). Two defences in one:
@@ -97,9 +91,9 @@ func New(cfg Config) *Slack {
 		slack.OptionHTTPClient(slackHTTPClient),
 	)
 	return &Slack{
-		cfg:     cfg,
-		api:     api,
-		hookSem: make(chan struct{}, slackHookConcurrency),
+		cfg:      cfg,
+		api:      api,
+		dispatch: platform.BoundedDispatch{Name: "slack"},
 	}
 }
 
@@ -208,7 +202,7 @@ func (s *Slack) Stop() error {
 	}
 	cancel()
 	<-done
-	s.handlerWg.Wait()
+	s.dispatch.Wait()
 	return nil
 }
 
@@ -395,9 +389,7 @@ func (s *Slack) maybeHealBotID() {
 	s.botHealAt = time.Now().Add(slackBotHealCooldown)
 	s.botIDMu.Unlock()
 
-	s.handlerWg.Add(1)
-	go func() {
-		defer s.handlerWg.Done()
+	s.dispatch.Go("slack bot heal", func() {
 		authResp, err := s.api.AuthTest()
 		if err != nil {
 			slog.Warn("slack auth test self-heal failed; staying fail-open", "err", err)
@@ -409,7 +401,7 @@ func (s *Slack) maybeHealBotID() {
 		slog.Info("slack bot identity recovered",
 			"user_id", authResp.UserID,
 			"team", osutil.SanitizeForLog(authResp.Team, 128))
-	}()
+	})
 }
 
 func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
@@ -489,19 +481,6 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	// Socket Mode messages cannot spawn unbounded goroutines. When the
 	// semaphore is saturated, drop the message + slog.Warn — preferable to
 	// OOM since the dispatcher already has its own queue + retry semantics.
-	// Non-blocking acquire mirrors feishu's pattern.
-	select {
-	case s.hookSem <- struct{}{}:
-	default:
-		slog.Warn("slack: handler semaphore full, dropping message",
-			"chat", msg.ChatID, "user", msg.UserID)
-		return
-	}
-	s.handlerWg.Add(1)
-	go func() {
-		defer s.handlerWg.Done()
-		defer func() { <-s.hookSem }()
-		defer platform.RecoverHandler("slack")
-		s.handler(s.ctx, msg)
-	}()
+	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
+		"chat", msg.ChatID, "user", msg.UserID)
 }

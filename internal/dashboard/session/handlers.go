@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -210,18 +211,6 @@ type sessionListMultiResp struct {
 	Stats           sessionStats               `json:"stats"`
 	Nodes           map[string]nodeStatusEntry `json:"nodes"`
 	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
-}
-
-// isUnknownRPCMethodErr reports whether a remote-proxy error came from the
-// peer node rejecting the RPC method name. That happens when the peer is
-// running an older naozhi binary that predates remove_session /
-// interrupt_session — surfacing a bespoke 409 lets the dashboard show a
-// precise "upgrade the remote node" toast instead of a generic 502. The
-// match is on error text because the reverse-RPC error is wrapped via
-// fmt.Errorf in multiple layers and carries the literal "unknown method: "
-// prefix from internal/upstream/connector.go's default switch branch.
-func isUnknownRPCMethodErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
 // CronView is the consolidated narrow consumer interface the server
@@ -1216,7 +1205,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		removed, err := nc.ProxyRemoveSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				// Peer is running an older binary without remove_session
 				// support; return 409 + explicit body so the dashboard can
 				// show a specific "upgrade needed" message instead of the
@@ -1308,7 +1297,7 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 				"node", sessionpkg.SanitizeLogAttr(req.Node),
 				"key", sessionpkg.SanitizeLogAttr(req.Key),
 				"err", sessionpkg.SanitizeLogAttr(err.Error()))
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
 			}
@@ -1468,7 +1457,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 		interrupted, err := nc.ProxyInterruptSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote interrupt session failed", "node", req.Node, "key", req.Key, "err", err)
-			if isUnknownRPCMethodErr(err) {
+			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
 			}
