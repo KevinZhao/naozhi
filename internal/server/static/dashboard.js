@@ -5872,6 +5872,7 @@ function markSessionOptimisticRunning(key, node) {
     // distinct "received, starting up" signal during CLI spawn rather than a
     // generic static "处理中…".
     turnState.justSent = true;
+    startTurnTimer();
     updateSendButton('running');
   }
 }
@@ -5904,25 +5905,58 @@ let turnState = {
   timerId: null, justSent: false
 };
 
-function resetTurnState() {
-  if (turnState.timerId) clearInterval(turnState.timerId);
+// resetTurnState clears the per-turn banner state. opts.keepTimer preserves
+// the elapsed anchor (turnStartTime/timerId) and the justSent flag: used when
+// the server echoes back the user message this client just sent, so the
+// timer started at send time survives the turn-boundary reset instead of
+// being cleared and re-anchored at the first streamed event (#2435).
+function resetTurnState(opts) {
+  const keepTimer = !!(opts && opts.keepTimer);
+  const kept = keepTimer
+    ? { turnStartTime: turnState.turnStartTime, timerId: turnState.timerId, justSent: turnState.justSent }
+    : { turnStartTime: 0, timerId: null, justSent: false };
+  if (!keepTimer && turnState.timerId) clearInterval(turnState.timerId);
   turnState = {
     toolCount: 0, currentTool: null, agents: [], isThinking: false,
-    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-    timerId: null, justSent: false
+    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: kept.turnStartTime, isWriting: false,
+    timerId: kept.timerId, justSent: kept.justSent
   };
+  // #2435: blank the elapsed chip so the next banner does not open showing
+  // the previous turn's final time until its first 1s tick lands.
+  if (!keepTimer) {
+    const elapsedEl = document.getElementById('rb-elapsed');
+    if (elapsedEl) elapsedEl.textContent = '';
+  }
   refreshBanner();
 }
 
+// resetTurnStateForUserEcho handles the turn boundary a `user` event marks.
+// If this client sent that message (justSent is still up — no real turn event
+// has arrived yet) the send-time timer is kept; a user turn started on another
+// surface (IM, another tab) gets the full reset and anchors at its first event.
+function resetTurnStateForUserEcho() {
+  resetTurnState(turnState.justSent ? { keepTimer: true } : undefined);
+}
+
+// paintTurnElapsed renders turnState.turnStartTime → "m:ss" into #rb-elapsed.
+// Shared by startTurnTimer and the history-rebuild path so both paint
+// immediately instead of waiting for the first interval tick.
+function paintTurnElapsed() {
+  const el = document.getElementById('rb-elapsed');
+  if (!el || !turnState.turnStartTime) return;
+  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
+  el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+// startTurnTimer anchors the elapsed chip. Called from
+// markSessionOptimisticRunning at send time (#2435: the anchor used to be the
+// first streamed event, so CLI spawn latency was silently excluded) and
+// idempotently from every subsequent turn event.
 function startTurnTimer() {
   if (turnState.turnStartTime) return;
   turnState.turnStartTime = Date.now();
-  turnState.timerId = setInterval(function() {
-    const el = document.getElementById('rb-elapsed');
-    if (!el || !turnState.turnStartTime) return;
-    const s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
-    el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-  }, 1000);
+  paintTurnElapsed();
+  turnState.timerId = setInterval(paintTurnElapsed, 1000);
 }
 
 function trackTool(name) {
@@ -5962,6 +5996,20 @@ function toolVerb(tool, summary) {
   const verb = toolVerbs[tool] || ('使用 ' + tool);
   if (!summary || summary === tool) return verb + '...';
   return verb + ' ' + summary;
+}
+
+// toolSummaryLine derives the banner's one-line tool summary from a tool_use
+// event's detail. FormatToolInput on the server prefixes the detail with the
+// tool name ("Bash ls", "mcp__x__y: {...}"), and toolVerb already leads with
+// the (localized) tool name, so the prefix is dropped here — otherwise MCP
+// tools render as "使用 mcp__x__y mcp__x__y: {...}" (#2435).
+function toolSummaryLine(tool, detail) {
+  if (!detail) return '';
+  let line = detail.split('\n')[0];
+  if (tool && line.indexOf(tool) === 0) {
+    line = line.slice(tool.length).replace(/^[:\s]+/, '');
+  }
+  return line.substring(0, 60);
 }
 
 function refreshBanner() {
@@ -6069,7 +6117,7 @@ function applyEventToTurnState(ev) {
     case 'tool_use':
       turnState.toolCount++;
       trackTool(ev.tool || ev.summary);
-      turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+      turnState.currentTool = { tool: ev.tool || ev.summary, summary: toolSummaryLine(ev.tool || ev.summary, ev.detail) };
       turnState.isThinking = false;
       turnState.isWriting = false;
       turnState.thinkingSummary = '';
@@ -7158,6 +7206,13 @@ let voiceInputMode = false;
 let voiceTouchStartY = 0;
 let voiceCancelled = false;
 let voiceActive = false; // true while hold gesture is in progress
+// voiceState is the recording lifecycle, independent of the finger gesture
+// (voiceActive): 'idle' → 'recording' (MediaRecorder started) → 'finalizing'
+// (recorder stopped, onstop / transcription pending) → 'idle'. #2435: the
+// 30s cap stops the recorder while the finger is still down; without this
+// state the trailing swipe/lift re-ran the send/cancel logic against a
+// recorder that was already finalized.
+let voiceState = 'idle';
 let persistentMicStream = null; // keep mic stream alive to avoid repeated permission prompts
 
 window.addEventListener('pagehide', () => {
@@ -7190,6 +7245,15 @@ function releaseMicStream() {
 
 function toggleInputMode() {
   if (pendingMic) return;
+  // Mode switch abandons any in-flight recording/transcription and returns
+  // the lifecycle to idle so a hung transcription can never lock recording.
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceActive = false;
+    cleanupVoiceTouchListeners();
+    voiceCancelled = true;
+    mediaRecorder.stop();
+  }
+  hideVoiceOverlay();
   voiceInputMode = !voiceInputMode;
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
@@ -7215,7 +7279,6 @@ function toggleInputMode() {
 function voiceTouchStart(e) {
   e.preventDefault();
   voiceTouchStartY = e.touches[0].clientY;
-  voiceCancelled = false;
   voiceActive = true;
   document.addEventListener('touchmove', voiceTouchMove, {passive: false});
   document.addEventListener('touchend', voiceTouchEnd, {passive: false});
@@ -7226,6 +7289,7 @@ function voiceTouchStart(e) {
 function voiceTouchMove(e) {
   if (!voiceActive) return;
   e.preventDefault();
+  if (voiceState !== 'recording') return; // cap already finalized: gesture can no longer cancel
   const touch = e.touches[0];
   if (!touch) return;
   const dy = voiceTouchStartY - touch.clientY;
@@ -7247,13 +7311,27 @@ function voiceTouchEnd(e) {
   e.preventDefault();
   voiceActive = false;
   cleanupVoiceTouchListeners();
-  stopVoiceRecording(!voiceCancelled);
+  finishVoiceGesture(!voiceCancelled);
 }
 
 function voiceTouchCancel() {
   voiceActive = false;
   cleanupVoiceTouchListeners();
-  stopVoiceRecording(false);
+  finishVoiceGesture(false);
+}
+
+// finishVoiceGesture ends the hold gesture. While recording (or still waiting
+// on the mic) it stops the recorder, sending or cancelling per the gesture.
+// Once the recording was already finalized by the MAX_REC_SECS cap it only
+// clears the pressed look: the "正在识别" overlay stays up until transcription
+// settles, and the lift/swipe can neither cancel nor re-send it (#2435).
+function finishVoiceGesture(shouldSend) {
+  if (voiceState !== 'finalizing') {
+    stopVoiceRecording(shouldSend);
+    return;
+  }
+  const holdBtn = document.getElementById('btn-hold-talk');
+  if (holdBtn) holdBtn.classList.remove('active');
 }
 
 function cleanupVoiceTouchListeners() {
@@ -7264,11 +7342,11 @@ function cleanupVoiceTouchListeners() {
 
 function voiceMouseDown(e) {
   e.preventDefault();
-  voiceCancelled = false;
   voiceActive = true;
   startVoiceRecording();
   const startY = e.clientY;
   const onMove = (me) => {
+    if (voiceState !== 'recording') return;
     const dy = startY - me.clientY;
     const overlay = document.getElementById('voice-overlay');
     const hint = document.getElementById('vo-hint');
@@ -7286,14 +7364,20 @@ function voiceMouseDown(e) {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     voiceActive = false;
-    stopVoiceRecording(!voiceCancelled);
+    finishVoiceGesture(!voiceCancelled);
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
 }
 
 function startVoiceRecording() {
-  if (pendingMic) return;
+  // A previous recording still transcribing owns the overlay; starting another
+  // would let its completion hide the new recording's overlay mid-hold.
+  if (pendingMic || voiceState === 'finalizing') return;
+  // Cleared only once a recording really starts: a press landing in the
+  // stop()→onstop window of a cancelled recording must not flip that
+  // recording's pending "cancel" into "send".
+  voiceCancelled = false;
   pendingMic = true;
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.add('active');
@@ -7311,7 +7395,9 @@ function startVoiceRecording() {
     mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
+      voiceState = 'finalizing';
       clearInterval(voiceRecTimer);
+      voiceRecTimer = null;
       // Do NOT stop persistent stream tracks — keep them alive for next recording
       if (holdBtn) holdBtn.classList.remove('active');
       if (isUnloading) return;
@@ -7338,6 +7424,7 @@ function startVoiceRecording() {
       transcribeAudio(blob, true);
     };
     mediaRecorder.start();
+    voiceState = 'recording';
     voiceRecStart = Date.now();
     voiceRecTimer = setInterval(updateVoiceTimer, 200);
     updateVoiceTimer();
@@ -7382,10 +7469,16 @@ function describeMicError(err) {
 }
 
 function stopVoiceRecording(shouldSend) {
+  // Already stopped (MAX_REC_SECS cap or an earlier lift): onstop /
+  // transcription own the overlay now, and a later gesture must not flip
+  // voiceCancelled or hide the "正在识别" overlay underneath it.
+  if (voiceState === 'finalizing') return;
   if (!shouldSend) voiceCancelled = true;
+  if (voiceRecTimer) { clearInterval(voiceRecTimer); voiceRecTimer = null; }
   const holdBtn = document.getElementById('btn-hold-talk');
   if (holdBtn) holdBtn.classList.remove('active');
   if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceState = 'finalizing';
     mediaRecorder.stop(); // triggers onstop handler
   } else {
     hideVoiceOverlay();
@@ -7393,6 +7486,7 @@ function stopVoiceRecording(shouldSend) {
 }
 
 function hideVoiceOverlay() {
+  voiceState = 'idle';
   const overlay = document.getElementById('voice-overlay');
   if (overlay) overlay.classList.remove('show', 'cancel', 'transcribing');
 }
@@ -7416,11 +7510,17 @@ function updateVoiceTimer() {
   if (!el) return;
   const secs = Math.floor((Date.now() - voiceRecStart) / 1000);
   el.textContent = secs + 's';
-  if (secs >= MAX_REC_SECS) {
+  if (secs >= MAX_REC_SECS && voiceState === 'recording') {
+    // stopVoiceRecording clears voiceRecTimer, so this toast fires once
+    // instead of on every 200ms tick until onstop lands (#2435).
     stopVoiceRecording(true);
     showToast('\u5df2\u8fbe\u6700\u957f' + MAX_REC_SECS + '\u79d2');
   }
 }
+
+// TRANSCRIBE_TIMEOUT_MS bounds /api/transcribe: without it a stalled upload
+// left the overlay in "正在识别" and voiceState in finalizing forever.
+const TRANSCRIBE_TIMEOUT_MS = 30000;
 
 function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
@@ -7428,13 +7528,17 @@ function transcribeAudio(blob, autoSend) {
   const headers = {};
   const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  const ac = new AbortController();
+  const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.
   fetch('/api/transcribe', {
     method: 'POST',
     headers: headers,
     credentials: 'same-origin',
-    body: fd
+    body: fd,
+    signal: ac.signal
   }).then(r => {
+    clearTimeout(timeoutId);
     if (!r.ok) return r.text().then(t => {
       const e = new Error(t || ('HTTP ' + r.status));
       e.status = r.status;
@@ -7446,8 +7550,11 @@ function transcribeAudio(blob, autoSend) {
     hideVoiceOverlay();
     const input = document.getElementById('msg-input');
     if (input && data.text) {
+      // Append to (never replace) whatever is in the composer: in voice mode
+      // the textarea is hidden, so an auto-sent transcript used to silently
+      // overwrite a typed draft (#2435).
       const cur = getMsgValue(input);
-      setMsgValue(input, autoSend ? data.text : (cur ? cur + ' ' + data.text : data.text));
+      setMsgValue(input, cur ? cur + ' ' + data.text : data.text);
       if (autoSend) {
         sendMessage();
       } else {
@@ -7464,6 +7571,7 @@ function transcribeAudio(blob, autoSend) {
       showToast(hint, 'warning', 5000);
     }
   }).catch(err => {
+    clearTimeout(timeoutId);
     hideVoiceOverlay();
     showToast(describeTranscribeError(err), 'error', 5000);
   });
@@ -7474,6 +7582,9 @@ function transcribeAudio(blob, autoSend) {
 // which surfaced internal strings like "transcribe rate limit exceeded".
 function describeTranscribeError(err) {
   if (!err) return '\u8f6c\u5199\u5931\u8d25';
+  if (err.name === 'AbortError') {
+    return '\u8f6c\u5199\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5';
+  }
   // fetch() rejects with TypeError on network failure; server errors have a status.
   if (!err.status) {
     return '\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5';
@@ -12913,12 +13024,8 @@ const wsm = {
       // Anchor timer to the actual turn start time, not Date.now()
       if (turnStart < events.length && events[turnStart].time) {
         turnState.turnStartTime = events[turnStart].time;
-        turnState.timerId = setInterval(function() {
-          var el = document.getElementById('rb-elapsed');
-          if (!el || !turnState.turnStartTime) return;
-          var s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
-          el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-        }, 1000);
+        paintTurnElapsed();
+        turnState.timerId = setInterval(paintTurnElapsed, 1000);
       }
       for (let i = turnStart; i < events.length; i++) {
         applyEventToTurnState(events[i]);
@@ -12928,7 +13035,7 @@ const wsm = {
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
         if (ev.type === 'user') {
-          resetTurnState();
+          resetTurnStateForUserEcho();
           const text = ev.detail || ev.summary || '';
           if (text) {
             const h2 = document.querySelector('.main-header h2');
@@ -12981,7 +13088,7 @@ const wsm = {
         const h2 = document.querySelector('.main-header h2');
         if (h2) h2.textContent = text;
       }
-      resetTurnState();
+      resetTurnStateForUserEcho();
       // A user message after an AskUserQuestion means it was answered on some
       // surface — lock the card before the bubble lands (#2430).
       lockRenderedAskCards(document.getElementById('events-scroll'));
