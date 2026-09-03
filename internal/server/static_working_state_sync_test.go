@@ -155,7 +155,9 @@ func TestDashboardJS_PollReconcilesDroppedRunningPush(t *testing.T) {
 	if anchor < 0 {
 		t.Fatal("fetchSessions reconcile block not found")
 	}
-	end := anchor + 2600
+	// Window sized to span the whole block including the #2431 last-applied
+	// guard that now precedes the finished-direction updateMainState.
+	end := anchor + 3200
 	if end > len(js) {
 		end = len(js)
 	}
