@@ -3757,34 +3757,85 @@ function formatSessionMarkdown(meta, events) {
   return lines.join('\n');
 }
 
+// Export pager bounds (#2430). A bare `/api/sessions/events?key=` only returns
+// the in-memory ring (server default 500), so a long session's export silently
+// dropped its early history while the toast claimed "已导出 N 条". The pager
+// walks backward with the same `before=` cursor loadEarlierEvents uses (which
+// falls through to the on-disk JSONL when the ring is exhausted).
+// EXPORT_PAGE_LIMIT mirrors the server's maxEventsPageLimit; EXPORT_MAX_PAGES
+// is the hard stop (20k events) so a runaway session can't hang the tab.
+const EXPORT_PAGE_LIMIT = 500;
+const EXPORT_MAX_PAGES = 40;
+let _exportInFlight = false;
+
+// fetchAllSessionEvents returns { events, truncated } (or { status } on a
+// non-2xx first page). `truncated` is set whenever the export is known or
+// suspected to be incomplete — page cap hit, a later page failed, or the
+// cursor made no progress — so the caller must warn rather than claim a full
+// export. Remote nodes skip the pager: the reverse-RPC relay predates
+// before/limit and would replay the same tail forever.
+async function fetchAllSessionEvents(key, node, headers) {
+  const remote = !!(node && node !== 'local');
+  const base = '/api/sessions/events?key=' + encodeURIComponent(key) +
+    (remote ? '&node=' + encodeURIComponent(node) : '');
+  const r = await fetch(base, { headers });
+  if (!r.ok) return { status: r.status };
+  let events = await r.json();
+  if (!Array.isArray(events)) events = [];
+  if (remote || events.length === 0) return { events, truncated: false };
+
+  let truncated = false;
+  let oldest = (events[0] && events[0].time) || 0;
+  for (let pages = 0; oldest > 0; pages++) {
+    if (pages >= EXPORT_MAX_PAGES) { truncated = true; break; }
+    const pr = await fetch(base + '&before=' + oldest + '&limit=' + EXPORT_PAGE_LIMIT, { headers });
+    if (!pr.ok) { truncated = true; break; }
+    const page = await pr.json();
+    if (!Array.isArray(page) || page.length === 0) break;
+    const pageOldest = (page[0] && page[0].time) || 0;
+    // Strict `before` guarantees progress; anything else means the server
+    // handed back a slice we can't trust to terminate — stop and warn.
+    if (!pageOldest || pageOldest >= oldest) { truncated = true; break; }
+    events = page.concat(events);
+    oldest = pageOldest;
+  }
+  return { events, truncated };
+}
+
 async function downloadSessionMarkdown() {
   if (!selectedKey) return;
+  if (_exportInFlight) return;
+  _exportInFlight = true;
+  // Capture identity up front: the pager may take several round trips and
+  // the operator can switch sessions meanwhile — the export still belongs to
+  // the session whose button was clicked.
+  const key = selectedKey;
+  const node = selectedNode;
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
-    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(url, { headers });
-    if (!r.ok) {
-      showAPIError('导出会话', r.status, '');
+    const res = await fetchAllSessionEvents(key, node, headers);
+    if (res.status) {
+      showAPIError('导出会话', res.status, '');
       return;
     }
-    const events = await r.json();
+    const events = res.events;
+    const truncated = res.truncated;
     if (!Array.isArray(events) || events.length === 0) {
       showToast('会话无可导出内容', 'warning');
       return;
     }
-    const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-    const keyParts = (selectedKey || '').split(':');
+    const s = sessionsData[sid(key, node)] || {};
+    const keyParts = (key || '').split(':');
     const title = s.user_label || s.summary || s.last_prompt ||
-      keyTailDisplay(keyParts) || selectedKey || '';
+      keyTailDisplay(keyParts) || key || '';
     const md = formatSessionMarkdown({
       title: title,
-      key: selectedKey,
-      node: selectedNode,
+      key: key,
+      node: node,
       cli: s.cli_name ? (s.cli_name + (s.cli_version ? ' v' + s.cli_version : '')) : '',
-      workspace: s.workspace || sessionWorkspaces[selectedKey] || '',
+      workspace: s.workspace || sessionWorkspaces[key] || '',
       cost: (typeof s.total_cost === 'number' ? s.total_cost : null),
     }, events);
 
@@ -3800,9 +3851,15 @@ async function downloadSessionMarkdown() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(href), 60000);
-    showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    if (truncated) {
+      showToast('已导出 ' + events.length + ' 条事件（历史过长，更早的事件已截断）', 'warning', 5000);
+    } else {
+      showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+    }
   } catch (e) {
     showNetworkError('导出会话', e);
+  } finally {
+    _exportInFlight = false;
   }
 }
 
@@ -4039,12 +4096,21 @@ function renderMainShell() {
 // simpler in-flight flag (mirroring `_earlierLoading` on
 // `loadEarlierEvents`) skips overlapping polls — a missed tick is cheap
 // because the next tick will pick up any accumulated events via `after=`
-// anyway. A full fetch while a tail fetch is in flight is also coalesced;
-// the next tick finishes rendering the backlog.
+// anyway.
+//
+// A `full` fetch must NOT be coalesced (#2430): it is the session-switch
+// render. Dropping it left the new session to the next tick, which ran with
+// lastEventTime=0 and no `limit` → the server's legacy default branch handed
+// back the whole ring, appendEvents grafted ≤500 bubbles in one shot, and
+// neither "load earlier" nor the saved scroll position was restored. Instead
+// a full fetch bumps _fetchEventsGen so the tail still in flight becomes
+// stale: it can neither append into the new render nor release the in-flight
+// flag the full fetch now owns.
 let _fetchEventsInFlight = false;
+let _fetchEventsGen = 0;
 async function fetchEvents(full) {
   if (!selectedKey) return;
-  if (_fetchEventsInFlight) return;
+  if (!full && _fetchEventsInFlight) return;
   // Capture session identity at dispatch time so a mid-flight switch doesn't
   // apply stale events to the new session's DOM. `selectedKey` can flip
   // synchronously from `pickSession`/`dismiss` callbacks while `await`
@@ -4052,6 +4118,9 @@ async function fetchEvents(full) {
   // prior session's tail into the newly-opened session's scroller.
   const dispatchKey = selectedKey;
   const dispatchNode = selectedNode;
+  if (full) _fetchEventsGen++;
+  const gen = _fetchEventsGen;
+  const stale = () => selectedKey !== dispatchKey || selectedNode !== dispatchNode || gen !== _fetchEventsGen;
   _fetchEventsInFlight = true;
   try {
     let url = '/api/sessions/events?key=' + encodeURIComponent(dispatchKey);
@@ -4090,10 +4159,10 @@ async function fetchEvents(full) {
       throw err;              // timeout / network — surface via outer catch
     }
     if (!events || events.length === 0) return;
-    // Drop stale responses whose selection has since moved. Clearing
-    // `lastEventTime` is the caller's job at switch time, so we don't touch
-    // it here.
-    if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
+    // Drop stale responses whose selection has since moved, or that a newer
+    // `full` fetch has superseded. Clearing `lastEventTime` is the caller's
+    // job at switch time, so we don't touch it here.
+    if (stale()) return;
 
     if (full) {
       // Pass the server's authoritative hasMore when the header was present;
@@ -4108,7 +4177,9 @@ async function fetchEvents(full) {
   } catch (e) {
     console.error('fetch events:', e);
   } finally {
-    _fetchEventsInFlight = false;
+    // Only the newest generation owns the flag (mirrors loadEarlierEvents /
+    // _earlierGen): a superseded tail must not free it under the full fetch.
+    if (gen === _fetchEventsGen) _fetchEventsInFlight = false;
   }
 }
 
@@ -4346,6 +4417,9 @@ function renderEvents(events, hasMore) {
       return;
     }
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
+  // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
+  // answered-set so replayed AskUserQuestion cards render locked (#2430).
+  hydrateAskAnsweredFromHistory(events);
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   // Decide whether "load earlier" will mount BEFORE rendering the all-internal
@@ -4431,6 +4505,9 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
+  // An ask_question followed by a user event inside this same batch must
+  // render already locked (mirrors onHistory's pre-render hydrate).
+  hydrateAskAnsweredFromHistory(events);
   // Force-bottom when a "user" event arrives: either the local operator just
   // hit send, or a teammate posted through the IM channel — in both cases the
   // message must be visible, even if the viewport was scrolled up.
@@ -4442,6 +4519,8 @@ function appendEvents(events) {
     // dropped when their uuid is already on screen — same rule as onHistory.
     if (e.time && e.time < lastRenderedEventTime) return;
     if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+    // Lock cards already on screen before this user bubble is appended.
+    if (e.type === 'user') lockRenderedAskCards(el);
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -4560,6 +4639,31 @@ function hydrateAskAnsweredFromHistory(events) {
       }
     }
   }
+}
+
+// lockRenderedAskCards applies hydrateAskAnsweredFromHistory's rule to the
+// live DOM: a `user` event landing incrementally (WS onEvent, onHistory
+// backfill, poll appendEvents) means every AskUserQuestion card already on
+// screen was answered on some surface (Feishu, the input box, another tab), so
+// it must lock now — not only after a reload replays history. Without this the
+// stale card stayed submittable and pushed an out-of-date answer into the
+// next turn (#2430). Idempotent: cards onAskSubmit already locked are skipped
+// via the existing .ask-status marker.
+function lockRenderedAskCards(scrollEl) {
+  if (!scrollEl) return;
+  scrollEl.querySelectorAll('.event.ask_question[data-tool-use-id]').forEach(card => {
+    const tuid = card.getAttribute('data-tool-use-id') || '';
+    if (!tuid) return;
+    _askAnswered.add(tuid);
+    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    const content = card.querySelector('.event-content');
+    if (content && !content.querySelector('.ask-status')) {
+      const div = document.createElement('div');
+      div.className = 'ask-status';
+      div.textContent = '已回答';
+      content.appendChild(div);
+    }
+  });
 }
 
 function renderAskQuestionCard(e) {
@@ -12390,6 +12494,7 @@ const wsm = {
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
           sawUser = true;
+          lockRenderedAskCards(el);
         }
         const h = eventHtml(e);
         if (h) {
@@ -12498,6 +12603,9 @@ const wsm = {
         if (h2) h2.textContent = text;
       }
       resetTurnState();
+      // A user message after an AskUserQuestion means it was answered on some
+      // surface — lock the card before the bubble lands (#2430).
+      lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       if (ev.cost) {
         const sKey = sid(selectedKey, selectedNode);

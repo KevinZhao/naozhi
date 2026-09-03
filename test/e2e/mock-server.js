@@ -187,6 +187,11 @@ function defaultGitStates() {
  * @param {object} [overrides] - Override specific route handlers.
  * @param {object} [overrides.sessions] - Custom sessions response.
  * @param {object[]} [overrides.events] - Custom events response.
+ * @param {object} [overrides.eventsByKey] - session key → events array; keys not listed fall back to `events`.
+ * @param {number} [overrides.eventsTailDelayMs] - Hold `after=` (tail poll) responses this long so a test can
+ *   race a session switch against an in-flight poll (#2430 fetchEvents(full) gate).
+ * @param {number} [overrides.eventsRingSize] - Bare `?key=` (no after/before/limit) returns only the last N
+ *   events, mirroring the server's in-memory ring (EventEntries, default 500).
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -204,6 +209,10 @@ function startMockServer(overrides = {}) {
 
   const sessionsData = overrides.sessions || defaultSessions();
   const eventsData = overrides.events || defaultEvents();
+  const eventsByKey = overrides.eventsByKey || {};
+  const eventsTailDelayMs = overrides.eventsTailDelayMs || 0;
+  const eventsRingSize = overrides.eventsRingSize || 500;
+  const eventsCalls = [];
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
   // 与后端 cronListResp 对齐：recent_runs_cap 恒为 recentRunsPerJob(5)；时区字段按需注入。
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
@@ -320,10 +329,33 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
       // 1 s poll never re-delivers the watermark millisecond.
+      const evKey = url.searchParams.get('key') || '';
+      const all = eventsByKey[evKey] || eventsData;
       const after = Number(url.searchParams.get('after') || 0);
-      const out = after > 0 ? eventsData.filter(e => !e.time || e.time > after) : eventsData;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(out));
+      const before = Number(url.searchParams.get('before') || 0);
+      const limit = Number(url.searchParams.get('limit') || 0);
+      eventsCalls.push(url.search);
+      const headers = { 'Content-Type': 'application/json' };
+      let out;
+      if (after > 0) {
+        out = all.filter(e => !e.time || e.time > after);
+        if (limit > 0 && out.length > limit) out = out.slice(-limit);
+      } else if (before > 0) {
+        // handlers.go `before` branch: strictly older, newest `limit` of them,
+        // chronological.
+        out = all.filter(e => e.time && e.time < before);
+        if (limit > 0 && out.length > limit) out = out.slice(-limit);
+      } else if (limit > 0) {
+        // handlers.go initial-page branch: tail N + authoritative has-more header.
+        out = all.slice(-limit);
+        headers['X-Events-Has-More'] = all.length > out.length ? '1' : '0';
+      } else {
+        // handlers.go default branch: the in-memory ring only.
+        out = all.slice(-eventsRingSize);
+      }
+      const reply = () => { res.writeHead(200, headers); res.end(JSON.stringify(out)); };
+      if (after > 0 && eventsTailDelayMs > 0) setTimeout(reply, eventsTailDelayMs);
+      else reply();
       return;
     }
 
@@ -631,6 +663,7 @@ function startMockServer(overrides = {}) {
         port,
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
+        get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
         get loginCalls() { return loginCalls; },
