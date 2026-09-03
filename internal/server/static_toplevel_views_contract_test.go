@@ -151,7 +151,8 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 }
 
 // TestDashboardJS_CronAttentionSingleFilter pins R20260606-CODE-1: within
-// fetchCronJobs, the attention count (paused/errored/missed jobs) must be
+// fetchCronJobs, the attention count (errored/missed jobs; paused excluded
+// since #2435) must be
 // computed exactly once and shared by both cronBadge and railBadge.
 func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
 	t.Parallel()
@@ -189,7 +190,7 @@ func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
 	}
 	fnBody := body[:end+1]
 
-	const filterExpr = `cronJobs.filter(j => j.paused || j.last_error || j.missed).length`
+	const filterExpr = `cronJobs.filter(j => j.last_error || j.missed).length`
 	// Within fetchCronJobs the expression must appear exactly once — a second
 	// occurrence would recompute on potentially stale data and is the defect we fixed.
 	first := strings.Index(fnBody, filterExpr)
