@@ -3518,7 +3518,9 @@ function invalidateGitState(key, node) {
 // longer mounted and the next (identical) render would never bring it back
 // — e.g. after a failed DELETE whose .finally re-fetches the list.
 function removeSidebarCard(key) {
-  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  // Escape like setActiveSessionCard: discovered keys embed the node name, so
+  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
+  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
   if (card) card.remove();
   _lastSidebarHtml = null;
 }
