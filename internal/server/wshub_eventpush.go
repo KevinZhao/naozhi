@@ -77,7 +77,7 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 // per notify wave on payloads that were byte-identical between tabs.
 //
 // The cache is keyed by session key; the per-key fingerprint
-// (lastTime, latest entry Time, count) detects out-of-lockstep subscribers
+// (lastTime, latest entry Time, count, first/last UUID) detects out-of-lockstep subscribers
 // (e.g. a slow tab that fell behind the head and is now catching up) and
 // forces a fresh marshal rather than handing back stale bytes.
 //
@@ -105,7 +105,7 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 	// scan was pure waste on hits). Push the redaction INSIDE both marshal
 	// closures — the single-subscriber fast path and the getOrMarshal closure —
 	// so the scan fires only when bytes are actually produced (cache miss), not
-	// on every fan-out hit. The cache fingerprint (lastTime, latest Time, count)
+	// on every fan-out hit. The cache fingerprint (lastTime, latest Time, count, UUIDs)
 	// is computed from the un-redacted entries, and redactEntrySecrets is
 	// copy-on-write and never touches Time, so moving it below the fingerprint
 	// is fingerprint-neutral.

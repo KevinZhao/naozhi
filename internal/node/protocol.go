@@ -100,7 +100,7 @@ type ClientMsg struct {
 	Key       string `json:"key,omitempty"`       // session key
 	Text      string `json:"text,omitempty"`      // message text (send)
 	ID        string `json:"id,omitempty"`        // client-generated correlation ID
-	After     int64  `json:"after,omitempty"`     // unix ms timestamp for subscribe history
+	After     int64  `json:"after,omitempty"`     // unix ms watermark for subscribe history; the after-ms itself is re-admitted (#2432), client dedups by uuid
 	Before    int64  `json:"before,omitempty"`    // unix ms timestamp; history page < Before (pagination)
 	Limit     int    `json:"limit,omitempty"`     // max events to return from initial / paginated history
 	Node      string `json:"node,omitempty"`      // target node (empty = local)
