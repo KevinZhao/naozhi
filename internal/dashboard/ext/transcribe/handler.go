@@ -116,7 +116,9 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		"audio/amr", "audio/webm", "audio/aac", "audio/x-m4a",
 		"video/mp4", "video/webm": // some browsers tag voice memos as video
 	default:
-		http.Error(w, "unsupported audio format", http.StatusBadRequest)
+		// 415: the dashboard maps this status to its "unsupported audio
+		// format" message; 400 is reserved for malformed requests (#2433).
+		http.Error(w, "unsupported audio format", http.StatusUnsupportedMediaType)
 		return
 	}
 	// Step 2: magic-byte validation. http.DetectContentType returns
@@ -127,7 +129,7 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(detected, "audio/") &&
 		!strings.HasPrefix(detected, "video/") &&
 		detected != "application/ogg" {
-		http.Error(w, "file content is not audio", http.StatusBadRequest)
+		http.Error(w, "file content is not audio", http.StatusUnsupportedMediaType)
 		return
 	}
 	// Use the sniffed MIME (not the client-supplied header) as the hint handed
