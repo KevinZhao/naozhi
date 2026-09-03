@@ -80,11 +80,10 @@ func backendWSFrameTypes(t *testing.T) []string {
 func TestDashboardJS_WSSwitchCoversBackendFrameTypes(t *testing.T) {
 	t.Parallel()
 	body := wsOnMessageBody(t, readDashboardJS(t))
-	ignored := map[string]string{
-		// Server reply to an explicit unsubscribe; the client already
-		// cleared its bookkeeping synchronously in wsm.unsubscribe().
-		"unsubscribed": "client-side state already reset before the ack arrives",
-	}
+	// Every frame type the hub emits currently has a case (`unsubscribed`
+	// became an explicit documented no-op, #2432). Add a type here only when
+	// the dashboard deliberately ignores it AND a `case` would be misleading.
+	ignored := map[string]string{}
 	for _, typ := range backendWSFrameTypes(t) {
 		if _, ok := ignored[typ]; ok {
 			continue

@@ -4398,12 +4398,26 @@ function prependEvents(events) {
   // changes arbitrarily.
   const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
 
+  // The DOM's leading divider was emitted for prevTime=0 ("always divide
+  // before the first visible bubble"). Once older bubbles sit above it, it is
+  // only legitimate when the gap to the newest prepended bubble is a real
+  // divider gap — otherwise the pagination seam shows two stacked dividers
+  // (#2430).
+  const oldLeadDivider = leadingTimeDivider(el);
   const frag = document.createElement('div');
   frag.innerHTML = html;
+  const newestPrependedTime = lastDividerTime(frag);
   // Move children one-by-one to preserve DOM structure; innerHTML replace
-  // would wipe the existing event bubbles.
+  // would wipe the existing event bubbles. Anchor on the pre-insert first
+  // child once: inserting each child before a moving el.firstChild reversed
+  // the prepended page (newest-first) under the seam.
+  const anchor = el.firstChild;
   while (frag.firstChild) {
-    el.insertBefore(frag.firstChild, el.firstChild);
+    el.insertBefore(frag.firstChild, anchor);
+  }
+  if (oldLeadDivider && newestPrependedTime) {
+    const leadT = Number(oldLeadDivider.getAttribute('data-time') || 0);
+    if (leadT && leadT - newestPrependedTime < EVENT_DIVIDER_GAP_MS) oldLeadDivider.remove();
   }
 
   // Re-insert the button at the top.
@@ -4585,8 +4599,21 @@ function appendEvents(events) {
     // dropped when their uuid is already on screen — same rule as onHistory.
     if (e.time && e.time < lastRenderedEventTime) return;
     if (e.time && e.time === lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
-    // Lock cards already on screen before this user bubble is appended.
-    if (e.type === 'user') lockRenderedAskCards(el);
+    if (e.type === 'user') {
+      // Same rules as the WS paths (onEvent / onHistory): a user bubble whose
+      // uuid is already on screen is a replay, and the first arrival of the
+      // real user event replaces the optimistic bubble the send rendered.
+      // Without this a send that left over WS and was echoed by the poll
+      // (socket dropped in between) painted the message twice (#2430).
+      if (eventAlreadyRendered(el, e.uuid)) {
+        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+        return;
+      }
+      const opt = el.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
+      // Lock cards already on screen before this user bubble is appended.
+      lockRenderedAskCards(el);
+    }
     const h = eventHtml(e); if (!h) return;
     const t = e.time || 0;
     if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
@@ -5278,6 +5305,36 @@ function lastDividerTime(el) {
   return 0;
 }
 
+// leadingTimeDivider returns the scroller's first time divider when it
+// precedes every rendered bubble (the divider renderEventsWithDividers emits
+// for prevTime=0); null when a bubble comes first or nothing is rendered.
+function leadingTimeDivider(el) {
+  if (!el) return null;
+  for (const c of el.children) {
+    if (!c.classList) continue;
+    if (c.classList.contains('event-time-divider')) return c;
+    if (c.classList.contains('event')) return null;
+  }
+  return null;
+}
+
+// removeOptimisticMsg drops the optimistic user bubble a send rendered. With
+// a send id (the WS send_ack echoes the `id` the send frame carried) only that
+// send's bubble goes — a busy/error ack for the second of two in-flight sends
+// must not eat the first one's bubble (#2430). Without an id (legacy servers,
+// HTTP-path send_error) fall back to the oldest bubble on screen.
+function removeOptimisticMsg(sendId) {
+  const root = document.getElementById('events-scroll') || document;
+  let opt;
+  if (sendId) {
+    const sel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(sendId) : sendId;
+    opt = root.querySelector('.optimistic-msg[data-send-id="' + sel + '"]');
+  } else {
+    opt = root.querySelector('.optimistic-msg');
+  }
+  if (opt) opt.remove();
+}
+
 // --- Send message ---
 
 // Esc in the input: first press arms, second press (within 600ms) actually
@@ -5552,7 +5609,7 @@ async function sendComposerTurn(targetKey, targetNode) {
       delete sessionAccessProfiles[selectedKey];
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
-      renderOptimisticUserMsg(text);
+      renderOptimisticUserMsg(text, id);
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
@@ -5663,9 +5720,8 @@ async function sendComposerTurn(targetKey, targetNode) {
       // Optimistic bubble parity with the WS path — but ONLY while WS is
       // connected: the live event stream (onHistory/onEvent) is what removes
       // .optimistic-msg when the real "user" event arrives. The WS-down
-      // fallback keeps its legacy no-bubble behaviour because the polling
-      // path (appendEvents) has no optimistic-removal logic and would leave
-      // a duplicate bubble.
+      // fallback keeps its legacy no-bubble behaviour (appendEvents also
+      // replaces the bubble now, but the poll echo lags up to a tick).
       if (wsm.isConnected()) renderOptimisticUserMsg(text);
     }
 
@@ -5695,8 +5751,9 @@ async function sendComposerTurn(targetKey, targetNode) {
 // for file-bearing sends (owner-divergence fix) — both run under a live WS
 // subscription, which is what guarantees the removal side fires. No-op when
 // text is empty (image-only sends have no text to echo; the thumbnails
-// arrive with the real user event).
-function renderOptimisticUserMsg(text) {
+// arrive with the real user event). `sendId` (WS path) is stamped on the
+// bubble so a busy/error send_ack can roll back exactly this send.
+function renderOptimisticUserMsg(text, sendId) {
   const el = document.getElementById('events-scroll');
   if (!el || !text) return;
   const now = Date.now();
@@ -5708,6 +5765,7 @@ function renderOptimisticUserMsg(text) {
   }
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
+  if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
   // Always force-bottom after a send: the user just posted something and
   // expects to see it, even if they had scrolled up to browse earlier
   // history. stickEventsBottom handles async layout changes from input-area
@@ -12005,6 +12063,24 @@ function renderSystemView() {
 // (remote removed server-side while the dashboard is open) we snap it back to
 // 'local'. Kept as a single entry point so the many call sites (poll, session
 // switch, session create) don't each need to re-derive the same guard.
+// deselectNodeSession clears the main pane after the node hosting the
+// selected session disconnected (PurgeNodeSubscriptions → error{node, "node
+// disconnected"}). Mirrors dismissSession's deselect: the draft is kept for
+// when the node comes back, the caller already dropped the WS bookkeeping,
+// and the sidebar refetch removes the node's cards.
+function deselectNodeSession(nodeID) {
+  const inp = document.getElementById('msg-input');
+  const draft = inp ? getMsgValue(inp) : '';
+  if (draft) sessionDrafts[selectedKey] = draft;
+  selectedKey = null;
+  const main = document.getElementById('main');
+  if (main) {
+    main.innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
+  }
+  showToast('节点 ' + nodeID + ' 已断开，已退出该节点上的会话', 'warning');
+}
+
 function reconcileSelectedNode() {
   if (selectedNode && selectedNode !== 'local' && !nodesData[selectedNode]) {
     selectedNode = 'local';
@@ -12205,6 +12281,13 @@ const wsm = {
           }
         }
         break;
+      case 'unsubscribed':
+        // Server ack for an explicit unsubscribe (wshub_subscribe.go, three
+        // emit sites incl. the relayed remote ack). wsm.unsubscribe() already
+        // cleared subscribedKey/Node synchronously and a relayed ack may name
+        // a key this tab no longer tracks — nothing to reconcile. Listed so
+        // the frame is a documented no-op rather than an unhandled type.
+        break;
       case 'error':
         // cron-live RFC §2.2: 错误命中 cron live pending → 单独清理
         if (msg.key && this.cronLive.pendingJobId && msg.key === ('cron:' + this.cronLive.pendingJobId)) {
@@ -12227,6 +12310,15 @@ const wsm = {
           if (this._pendingSubscribeNode === msg.node) {
             this._pendingSubscribeKey = null;
             this._pendingSubscribeNode = null;
+          }
+          // The selected session lived on the dead node: no pushes can reach
+          // it any more and its key means nothing under the `local` node
+          // reconcileSelectedNode snaps to, so deselect it (the backend's
+          // "deselect stale sessions" contract) before selectedNode moves.
+          // Pending (never-sent) sessions are only a draft target — they stay
+          // selected and are neither cleared nor deleted here.
+          if (selectedKey && selectedNode === msg.node && sessionWorkspaces[selectedKey] === undefined) {
+            deselectNodeSession(msg.node);
           }
           nodesData = Object.fromEntries(Object.entries(nodesData).filter(([id]) => id !== msg.node));
           reconcileSelectedNode();
@@ -12877,8 +12969,7 @@ const wsm = {
       // enqueued. Roll back the optimistic bubble and tell the operator
       // to retry — otherwise the UI silently eats the message.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。
@@ -12888,9 +12979,8 @@ const wsm = {
       // but treat the server-supplied `error` string the same way as an
       // HTTP 500 body: truncate + prefix with "发送消息失败：".
       showAPIError('发送消息', 500, msg.error || '');
-      // Remove optimistic message on send failure
-      const opt = document.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      // Remove this send's optimistic message on send failure
+      removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
       delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
