@@ -136,6 +136,7 @@
     retries: 0,        // 202 retry counter (bounded, §3.6.4)
     pollTimer: null,   // HTTP fallback interval ID
     pollAfterMS: 0,    // HTTP poll watermark
+    pollSeenKeys: [],  // content keys already rendered AT pollAfterMS (same-ms replay dedup)
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
@@ -538,9 +539,49 @@
 
   // ─── HTTP poll fallback (capacity rejected path) ───────────────────
 
+  // @contract-begin dedupAgentPollBatch
+  // agentEventKey identifies a transcript entry for same-ms replay dedup.
+  // Transcript entries carry no uuid (cli.mapAssistantLine), so the full
+  // content tuple is the identity.
+  function agentEventKey(ev) {
+    return [ev.time || 0, ev.type || '', ev.tool || '', ev.summary || '',
+      ev.detail || ''].join('\u0001');
+  }
+
+  // dedupAgentPollBatch consumes one HTTP poll page. The server re-admits the
+  // watermark millisecond (Time >= after, #2432 item 5) so a same-ms sibling
+  // cut off by the previous page's `limit` is not lost; entries already
+  // rendered at that ms are dropped here instead. Returns the events to
+  // render plus the next watermark and the content keys rendered at it.
+  function dedupAgentPollBatch(events, afterMS, seenKeys) {
+    var seen = {};
+    var prev = seenKeys || [];
+    for (var i = 0; i < prev.length; i++) seen[prev[i]] = true;
+    var out = [];
+    var maxT = afterMS;
+    for (var j = 0; j < events.length; j++) {
+      var ev = events[j];
+      if (!ev) continue;
+      var t = typeof ev.time === 'number' ? ev.time : 0;
+      if (t && t === afterMS && seen[agentEventKey(ev)]) continue;
+      out.push(ev);
+      // Advance only on a real timestamp: time===0 predates the field and
+      // treating it as newest would pin after=0 forever.
+      if (t > maxT) maxT = t;
+    }
+    var keys = maxT === afterMS ? prev.slice() : [];
+    for (var m = 0; m < out.length; m++) {
+      var t2 = typeof out[m].time === 'number' ? out[m].time : 0;
+      if (t2 && t2 === maxT) keys.push(agentEventKey(out[m]));
+    }
+    return { events: out, afterMS: maxT, seenKeys: keys };
+  }
+  // @contract-end dedupAgentPollBatch
+
   function startHttpPoll(taskID) {
     stopHttpPoll();
     state.pollAfterMS = 0;
+    state.pollSeenKeys = [];
     state.pollTimer = setInterval(function () {
       if (taskID !== state.activeTaskID) {
         stopHttpPoll();
@@ -561,17 +602,12 @@
         })
         .then(function (events) {
           if (!events || !events.length) return;
-          for (var i = 0; i < events.length; i++) {
-            appendAgentEvent(events[i]);
+          var batch = dedupAgentPollBatch(events, state.pollAfterMS, state.pollSeenKeys);
+          for (var i = 0; i < batch.events.length; i++) {
+            appendAgentEvent(batch.events[i]);
           }
-          // Advance the watermark only when the server gave us a real
-          // timestamp. time===0 means the event predates the field; treating
-          // it as "newest" would pin after=0 forever and cause duplicate
-          // renders on every 3s tick.
-          var lastTime = events[events.length - 1].time;
-          if (typeof lastTime === 'number' && lastTime > state.pollAfterMS) {
-            state.pollAfterMS = lastTime;
-          }
+          state.pollAfterMS = batch.afterMS;
+          state.pollSeenKeys = batch.seenKeys;
         })
         .catch(function () { /* swallow; will retry */ });
     }, 3000);
