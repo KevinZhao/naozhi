@@ -8551,11 +8551,20 @@ function renderPaletteList(state, query) {
   state.items = items;
   state.activeIdx = 0;
 
+  // Hover must move the keyboard cursor too (#2429), but only on a REAL
+  // pointer move. Chrome re-dispatches mouseenter to whatever row lands under
+  // a stationary pointer whenever the list re-renders (palette opening under
+  // the cursor, every keystroke re-filtering). Binding activeIdx to
+  // mouseenter therefore made Enter open the project row that happened to
+  // sit under the mouse instead of row 0 (快速新建), which surfaced as
+  // "new session resumes the folder's existing session". mousemove is only
+  // fired for actual pointer motion, so drive the cursor from it instead.
+  wirePaletteHover(list, state);
+
   if (!scored.length && q) {
     list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
     // Still render custom row below.
     const customEl = buildCustomRow(q, 0);
-    customEl.addEventListener('mouseenter', () => setActiveIdx(state, 0));
     list.appendChild(customEl);
     state.items = [{type: 'custom', query: q}];
     updateActiveRow(state);
@@ -8572,15 +8581,29 @@ function renderPaletteList(state, query) {
     } else {
       row = buildCustomRow(it.query, i);
     }
-    // Hover must move the keyboard cursor too (#2429): the row builders
-    // only know their index, so wire mouseenter here where `state` is in
-    // scope and route through setActiveIdx so state.activeIdx and the
-    // .active class never disagree - otherwise Enter opens the row the
-    // arrow keys last touched, not the one under the pointer.
-    row.addEventListener('mouseenter', () => setActiveIdx(state, i));
     list.appendChild(row);
   });
   updateActiveRow(state);
+}
+
+// wirePaletteHover installs (once per list element) a delegated mousemove
+// handler that moves the keyboard cursor to the row under the pointer. It is
+// deliberately NOT mouseenter: see the comment in renderPaletteList. Idempotent
+// so renderPaletteList can call it on every re-render without stacking
+// listeners; the handler reads `state` through the list element so a later
+// render that swaps state objects keeps working.
+function wirePaletteHover(list, state) {
+  list._paletteState = state;
+  if (list._paletteHoverWired) return;
+  list._paletteHoverWired = true;
+  list.addEventListener('mousemove', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('.cmd-palette-item') : null;
+    if (!row || !list.contains(row)) return;
+    const idx = Number(row.dataset.idx);
+    const st = list._paletteState;
+    if (!st || !Number.isInteger(idx) || idx === st.activeIdx) return;
+    setActiveIdx(st, idx);
+  });
 }
 
 function buildProjectRow(s, idx) {

@@ -335,8 +335,23 @@ func TestDashboardJS_PaletteHover_MovesKeyboardCursor(t *testing.T) {
 		t.Error("row builders still call the DOM-only setActiveIdx(idx) on mouseenter — hover must also write state.activeIdx (#2429)")
 	}
 	render := extractJSFunction(t, js, "renderPaletteList")
-	if c := strings.Count(render, "'mouseenter', () => setActiveIdx(state, "); c < 2 {
-		t.Errorf("renderPaletteList must wire mouseenter -> setActiveIdx(state, i) for both the list rows and the empty-state custom row (found %d)", c)
+	// Hover is driven by a delegated mousemove handler (wirePaletteHover), NOT
+	// mouseenter: Chrome re-fires mouseenter on the row under a stationary
+	// pointer whenever the list re-renders (palette opening under the cursor /
+	// each keystroke), which made Enter open a project row instead of row 0
+	// and resumed the folder's existing session ("new session" regression
+	// after #2447). mousemove only fires for real pointer motion.
+	if strings.Contains(render, "'mouseenter'") {
+		t.Error("renderPaletteList must not bind activeIdx to mouseenter (re-fires on re-render under a stationary pointer); use wirePaletteHover/mousemove")
+	}
+	if !strings.Contains(render, "wirePaletteHover(list, state)") {
+		t.Error("renderPaletteList must call wirePaletteHover(list, state) so hover still moves the keyboard cursor (#2429)")
+	}
+	hover := extractJSFunction(t, js, "wirePaletteHover")
+	for _, want := range []string{"'mousemove'", ".closest('.cmd-palette-item')", "setActiveIdx(st, idx)", "_paletteHoverWired"} {
+		if !strings.Contains(hover, want) {
+			t.Errorf("wirePaletteHover missing %q:\n%s", want, hover)
+		}
 	}
 	setter := extractJSFunction(t, js, "setActiveIdx")
 	if !strings.HasPrefix(setter, "function setActiveIdx(state, idx)") || !strings.Contains(setter, "state.activeIdx = idx;") {
