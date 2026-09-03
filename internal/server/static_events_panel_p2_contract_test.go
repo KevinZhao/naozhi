@@ -63,9 +63,9 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		// so `before = oldest` would lose same-ms siblings split by a page edge.
 		"'&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT",
 		"const seen = new Set(events.map(exportEventKey));", // dedup across overlapping pages
-		"if (fresh.length === 0) {",                          // progress = new entries after dedup
-		"EXPORT_MAX_PAGES",                                   // hard upper bound
-		"truncated = true",                                   // cap / malformed / stalled full page flag truncation
+		"if (fresh.length === 0) {",                         // progress = new entries after dedup
+		"EXPORT_MAX_PAGES",                                  // hard upper bound
+		"truncated = true",                                  // cap / malformed / stalled full page flag truncation
 		"if (!Array.isArray(page)) { truncated = true; break; }",
 		// Remote relay ignores before/limit → ring-only; a ring-sized slice is
 		// probably incomplete and must not toast as a full export.
