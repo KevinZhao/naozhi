@@ -1,30 +1,13 @@
-// Package textutil — secrets.go: well-known token-prefix scrubbing for any
-// text that may echo plaintext credentials before persistence / broadcast /
-// IM reply.
+// secrets.go: well-known token-prefix scrubbing for any text that may echo
+// plaintext credentials before persistence / broadcast / IM reply (#1571).
 //
-// R20260602-091302-ARCH-1 (#1571): this redactor began life in
-// internal/cron (R234-SEC-7, #1006) to scrub CronRun.Result before disk +
-// WS broadcast. IM dispatch then started importing cron.RedactSecrets to
-// scrub Claude replies (R103901-CODE-1) — a security-critical path coupled
-// to a domain-unrelated package. The scan logic has zero cron semantics, so
-// it now lives in this leaf package; cron keeps a thin alias and dispatch
-// (and any future consumer: sysession / scratch / WS send_ack) imports
-// textutil directly.
-//
-// Design notes (preserved from the original cron implementation):
-//
-//   - Token-wise scan, NOT regex. Every cron tick + every IM reply flows
-//     through this path — a regex compile per call (or sync.Once'd globals)
-//     costs more than a direct byte scan over the small prefix table.
-//   - Prefix list is conservative: only patterns whose first 4-7 bytes are
-//     unambiguous secret markers (`sk-ant-`, `ghp_`, `AKIA`). Generic
-//     password-like patterns are out of scope — false positives on
-//     legitimate Claude output corrupt operator diagnostics more than the
-//     rare leak avoids.
-//   - Idempotent: a second pass over an already-redacted string finds no
-//     prefix because `[REDACTED]` does not start with any registered marker.
-//   - Empty / no-prefix inputs return the aliased input without any
-//     allocation.
+//   - Token-wise scan, not regex: every cron tick and IM reply flows through
+//     here, so a byte scan over a small prefix table beats a regex.
+//   - Prefix list is conservative — only unambiguous markers (`sk-ant-`,
+//     `ghp_`, `AKIA`); generic password-like patterns are out of scope because
+//     false positives corrupt operator diagnostics.
+//   - Idempotent: `[REDACTED]` starts with no registered marker.
+//   - Empty / no-prefix inputs return the aliased input without allocation.
 
 package textutil
 
@@ -34,28 +17,18 @@ import (
 )
 
 // secretPrefix names a well-known token prefix RedactSecrets recognises.
-// minTail is a sanity floor: if the post-prefix byte run is shorter than
-// minTail the prefix is treated as a literal substring rather than a secret
-// (avoids redacting "ghp_" appearing in prose / a doc URL).
+// minTail is a sanity floor: a shorter post-prefix run is treated as a
+// literal substring (avoids redacting "ghp_" in prose / a doc URL).
 type secretPrefix struct {
 	prefix  string
 	minTail int
 }
 
-// secretPrefixes are the patterns RedactSecrets scans for. Order is
-// irrelevant for the per-byte walk except that longer members of a family
-// (`sk-ant-`, `sk-proj-`) must precede the bare fallback (`sk-`) so the
-// longest match wins. Sourced from upstream issue tracker guidance (#1006)
-// and established external secret-scanner conventions (GitHub Advanced
-// Security, AWS Trusted Advisor).
-//
-// Covered providers: Anthropic (`sk-ant-`), OpenAI project + legacy
-// (`sk-proj-` / `sk-`), GitHub PAT/OAuth (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`),
-// GitHub fine-grained (`github_pat_`), GitLab (`glpat-`), AWS access keys
-// (`AKIA`/`ASIA`), Slack (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace
-// (`hf_`), npm (`npm_`), GCP / Google OAuth access tokens (`ya29.`),
-// Databricks (`dapi`), HashiCorp Vault (`hvs.`), Stripe secret + restricted
-// keys (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`).
+// secretPrefixes are the patterns RedactSecrets scans for. Longer members of
+// a family (`sk-ant-`, `sk-proj-`) must precede the bare fallback (`sk-`) so
+// the longest match wins. Covers Anthropic, OpenAI, GitHub, GitLab, AWS,
+// Slack, HuggingFace, npm, Google OAuth, Databricks, Vault, Stripe and PEM
+// headers, following common secret-scanner conventions (#1006).
 var secretPrefixes = []secretPrefix{
 	{prefix: "sk-ant-", minTail: 8},
 	{prefix: "sk-proj-", minTail: 16},
@@ -76,42 +49,29 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "xoxs-", minTail: 16},
 	{prefix: "hf_", minTail: 16},
 	{prefix: "ya29.", minTail: 16},
-	// Databricks personal-access tokens (`dapi…`). Always 32 hex chars
-	// following the 4-byte prefix.
+	// Databricks personal-access tokens: 32 hex chars after the prefix.
 	{prefix: "dapi", minTail: 16},
-	// HashiCorp Cloud Platform (HCP) Vault service tokens (`hvs.…`). The
-	// `.` is part of the prefix; the base64url body that follows may
-	// contain `-` and `_` which isSecretTokenByte handles.
+	// HCP Vault service tokens. The `.` is part of the prefix; the base64url
+	// body may contain `-` and `_`, which isSecretTokenByte handles.
 	{prefix: "hvs.", minTail: 16},
-	// Stripe live and test secret keys (`sk_live_…` / `sk_test_…`).
-	// Placed after the bare `sk-` family to avoid prefix-order confusion;
-	// these use underscores and are unambiguously Stripe-shaped.
+	// Stripe live/test secret keys.
 	{prefix: "sk_live_", minTail: 16},
 	{prefix: "sk_test_", minTail: 16},
-	// Stripe restricted keys (`rk_live_…` / `rk_test_…`). Restricted keys
-	// carry a scoped subset of secret-key permissions but can still initiate
-	// Stripe API calls, so leaking them is equally sensitive.
+	// Stripe restricted keys: scoped, but still able to call the Stripe API.
 	{prefix: "rk_live_", minTail: 16},
 	{prefix: "rk_test_", minTail: 16},
-	// PEM / PKCS private-key and certificate headers (`-----BEGIN …-----`).
-	// The tail scan stops at the first space (space is not an isSecretTokenByte
-	// char), so minTail=0: the prefix itself is unambiguous enough — any
-	// `-----BEGIN` in output signals PEM data. The redaction covers the
-	// `-----BEGIN` token; the remainder of the header line and base64 body
-	// lines are not redacted by this scanner (architecture limitation: the
-	// tail scanner is token-word based). Deliberately NOT adding `eyJ` (JWT):
-	// eyJ is base64(`{"`) and would false-positive on any base64-encoded JSON;
-	// JWT dots are not isSecretTokenByte chars so the tail scan would terminate
-	// immediately, making the match useless in practice.
+	// PEM headers. The tail scan stops at the first space, so minTail=0: the
+	// `-----BEGIN` token alone is unambiguous; the rest of the header line and
+	// the base64 body are not redacted by this token scanner. `eyJ` (JWT) is
+	// deliberately absent: it is base64(`{"`) and would false-positive on any
+	// base64 JSON, and JWT dots would end the tail scan immediately anyway.
 	{prefix: "-----BEGIN", minTail: 0},
 }
 
-// secretPrefixesByFirstByte indexes secretPrefixes by their first byte so the
-// RedactSecrets inner loop only probes the 1-3 candidates that can possibly
-// match the current byte instead of all 24 prefixes (R20260609-PERF-9 #1976).
-// Each bucket preserves secretPrefixes declaration order, so longest-match-wins
-// (`sk-ant-` before `sk-`) still holds within a bucket. Built once at package
-// init; never mutated afterwards so it is safe for concurrent reads.
+// secretPrefixesByFirstByte indexes secretPrefixes by first byte so the
+// RedactSecrets inner loop probes only the 1-3 candidates that can match
+// (#1976). Buckets keep declaration order so longest-match-wins holds.
+// Built once at init and never mutated, so concurrent reads are safe.
 var secretPrefixesByFirstByte = buildSecretPrefixIndex()
 
 func buildSecretPrefixIndex() map[byte][]secretPrefix {
@@ -127,72 +87,33 @@ func buildSecretPrefixIndex() map[byte][]secretPrefix {
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
-// `…[truncated]` so dashboard / SIEM filters can spot redactions
-// independently of length-truncation.
+// `…[truncated]` so dashboard / SIEM filters can tell redaction from truncation.
 const secretRedactedMarker = "[REDACTED]"
 
 // envAssignmentRe matches `KEY=value` (and `KEY = value`) assignments whose
-// KEY name carries a sensitive marker (SECRET/TOKEN/PASSWORD/…), capturing the
-// value run so RedactSecrets can mask it even when the value is NOT a
-// well-known token prefix (R202606-SEC-008b, #2165). A cron traceback failing
-// with `MY_CUSTOM_SECRET=hunter2` would otherwise transit verbatim to the
-// authenticated dashboard.
-//
-// Scope is deliberately narrow to honour the package-level false-positive
-// constraint: only keys NAMED like a credential match, so benign config such
-// as `LOG_LEVEL=debug`, `PATH=/usr/bin`, or a generic `KEY=foo` is left
-// untouched. The key name and `=` are kept for operator diagnostics; only the
-// value is masked. Idempotent: a re-scan re-matches the `[REDACTED]` value to
-// itself.
-//
-// Marker placement:
-//   - The unambiguous secret words (SECRET / PASSWORD / PASSWD / CREDENTIAL)
-//     match as an INFIX, so `SECRET_KEY_BASE`, `MY_DB_PASSWORD`, and run-on
-//     `MYSECRETKEY` are all covered. These words almost never appear inside a
-//     benign env name, so the rare over-mask (e.g. a hypothetical
-//     `SECRETARY_NAME`) is an acceptable trade for catching real carriers.
-//   - TOKEN / AUTH / the *_KEY families stay SUFFIX-anchored (must sit
-//     immediately before `=`) to avoid false positives on benign names like
-//     `TOKENIZER`, `AUTHOR`, or `KEYBOARD`.
-//
-// Value capture handles these forms: a double-quoted span, a single-quoted
-// span, a JSON-escaped double-quoted span (`\"…\"`, as seen when the
-// assignment sits inside a JSON string value), a run that merely opens with
-// a quote (unterminated, e.g. a multiline PEM dump), or a bare run. Quoted
-// spans are captured whole so a passphrase with spaces
-// (`PASSWORD="my long secret"`) is fully masked to `PASSWORD="[REDACTED]"`
-// rather than leaking everything after the first word.
-//
-// The bare run is `(?:[^\s"'\\]|\\[^"'\s])+`: any non-whitespace byte, where a
-// backslash is consumed TOGETHER with the byte it escapes (so Windows paths
-// `C:\Users\bob\pw`, `foo\bar`, `\x` are masked whole), and the run stops
-// only before an unescaped `"` / `'` or an escaped quote `\"` / `\'`. Those
-// are exactly the bytes that close a JSON string, so an assignment embedded
-// in raw JSON (`{"cmd":"export API_KEY=abc"}`) no longer swallows the
-// closing `"}` and produces unencodable output — the dashboard runs
-// RedactSecrets over raw tool_use.input / NDJSON lines and a JSON-breaking
-// substitution used to turn a 200 into an empty body (PR #2439). The
-// dashboard additionally falls back to per-string-value redaction
-// (cron.redactRawJSON), so this text-level rule is deliberately NOT narrowed
-// any further: IM replies, self-update notices and WS event pushes call
-// RedactSecrets on plain text and must keep masking whole values.
+// KEY carries a credential marker, so RedactSecrets masks values that are not
+// a known token prefix (`MY_CUSTOM_SECRET=hunter2`) (#2165). Only the value
+// is masked. SECRET/PASSWORD/PASSWD/CREDENTIAL match as an infix
+// (`SECRET_KEY_BASE`); TOKEN / AUTH / *_KEY are suffix-anchored to avoid
+// `TOKENIZER`, `AUTHOR`, `KEYBOARD`. Values may be double-/single-quoted,
+// JSON-escaped (`\"…\"`), quote-opened-but-unterminated, or a bare run; the
+// bare run consumes backslash-escaped bytes as pairs and stops before an
+// unescaped or escaped quote so an assignment inside a JSON string does not
+// swallow the closing `"}` and break the document (#2439). Idempotent.
 var envAssignmentRe = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:(?:SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH))\s*=\s*("[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*\\"|["'](?:[^\s"'\\]|\\[^"'\s])+|(?:[^\s"'\\]|\\[^"'\s])+)`)
 
-// RedactSecrets walks s once, swapping any occurrence of a well-known
-// secret-prefix pattern for `[REDACTED]`. Returns the original (aliased)
-// string when no prefix matched, so clean output pays only the single byte
-// scan over the prefix table. Idempotent.
+// RedactSecrets walks s once, swapping any well-known secret-prefix pattern
+// for `[REDACTED]`. Returns the original (aliased) string when nothing
+// matched, so clean output pays only the byte scan. Idempotent.
 func RedactSecrets(s string) string {
 	if s == "" {
 		return s
 	}
-	// KEY=value env-assignment masking runs first so that a sensitive value
-	// which is NOT a registered token prefix (e.g. `MY_SECRET=hunter2`) still
-	// gets scrubbed. Gated on a cheap IndexByte('=') so the common no-`=` path
-	// pays nothing (#2165).
+	// KEY=value masking runs first so a sensitive value that is NOT a known
+	// token prefix (`MY_SECRET=hunter2`) is still scrubbed; gated on a cheap
+	// IndexByte('=') so the common no-`=` path pays nothing (#2165).
 	s = redactEnvAssignments(s)
-	// Cheap early-bail: most output never contains a first byte of any
-	// prefix; in that case the function aliases the input without allocating.
+	// Most output contains no prefix first byte: alias the input, no allocation.
 	if !mayContainSecretPrefix(s) {
 		return s
 	}
@@ -201,11 +122,8 @@ func RedactSecrets(s string) string {
 	i := 0
 	for i < len(s) {
 		matched := false
-		// R20260609-PERF-9 (#1976): only the prefixes whose first byte equals
-		// s[i] can match here, so probe that bucket (typically 1-3 entries)
-		// instead of all 24 prefixes. A byte with no registered prefix (the
-		// common case for an IndexAny first-byte hit landing on prose) skips
-		// the inner loop entirely.
+		// Only prefixes whose first byte equals s[i] can match; a byte with no
+		// registered prefix skips the inner loop entirely (#1976).
 		for _, sp := range secretPrefixesByFirstByte[s[i]] {
 			if !strings.HasPrefix(s[i:], sp.prefix) {
 				continue
@@ -232,9 +150,8 @@ func RedactSecrets(s string) string {
 	return b.String()
 }
 
-// isSecretTokenByte reports whether b is a legal continuation byte of a
-// secret tail. Tokens we redact are alphanumerics + `-` + `_`; anything else
-// (whitespace, punctuation, control) terminates the run.
+// isSecretTokenByte reports whether b continues a secret tail: alphanumerics
+// plus `-` and `_`; anything else terminates the run.
 func isSecretTokenByte(b byte) bool {
 	switch {
 	case b >= '0' && b <= '9':
@@ -250,23 +167,16 @@ func isSecretTokenByte(b byte) bool {
 	}
 }
 
-// mayContainSecretPrefix is a fast pre-scan: returns false if no first byte
-// of any registered prefix appears in s. Lets the common no-secret path skip
-// the full prefix walk + string Builder allocation.
-//
-// First-byte set: 's' (sk-…/sk_live_/sk_test_), 'g' (ghp_/gho_/…/glpat-),
-// 'A' (AKIA/ASIA), 'x' (xoxb-/…), 'h' (hf_/hvs.), 'n' (npm_), 'y' (ya29.),
-// 'd' (dapi), 'r' (rk_live_/rk_test_), '-' (-----BEGIN). Keep in sync with
-// secretPrefixes. strings.ContainsAny uses a SIMD-backed byteset scan on
-// amd64/arm64.
+// mayContainSecretPrefix is a fast pre-scan: false if no first byte of any
+// registered prefix appears in s. First-byte set: 's' 'g' 'A' 'x' 'h' 'n'
+// 'y' 'd' 'r' '-' — keep in sync with secretPrefixes.
 func mayContainSecretPrefix(s string) bool {
 	return strings.ContainsAny(s, "sgAxhnydr-")
 }
 
-// redactEnvAssignments masks the value of any `KEY=value` assignment whose KEY
-// name looks like a credential (see envAssignmentRe). Returns the input
-// aliased without allocation when no `=` is present (the common case), so the
-// hot path stays zero-alloc. Idempotent. (R202606-SEC-008b, #2165).
+// redactEnvAssignments masks the value of any credential-named `KEY=value`
+// assignment (see envAssignmentRe). Aliases the input when no `=` is present
+// so the hot path stays zero-alloc. Idempotent (#2165).
 func redactEnvAssignments(s string) string {
 	if strings.IndexByte(s, '=') < 0 {
 		return s
@@ -276,32 +186,25 @@ func redactEnvAssignments(s string) string {
 		if idx < 0 {
 			return m
 		}
-		// Preserve `KEY` + any spaces + `=` + any spaces; mask only the value
-		// so operator diagnostics keep the (non-sensitive) key name.
+		// Keep `KEY` + spaces + `=` + spaces so diagnostics retain the key name.
 		valStart := idx + 1
 		for valStart < len(m) && (m[valStart] == ' ' || m[valStart] == '\t') {
 			valStart++
 		}
 		val := m[valStart:]
 		if len(val) >= 4 && strings.HasPrefix(val, `\"`) && strings.HasSuffix(val, `\"`) {
-			// JSON-escaped quoted span (assignment inside a JSON string
-			// value): keep both escaped delimiters so the enclosing JSON
-			// stays well-formed.
+			// JSON-escaped quoted span: keep both escaped delimiters so the
+			// enclosing JSON stays well-formed.
 			return m[:valStart] + `\"` + secretRedactedMarker + `\"`
 		}
 		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
-			// Properly quoted span: keep both delimiting quotes and mask the
-			// whole span (which may contain spaces), so `PASSWORD="my long
-			// secret"` becomes `PASSWORD="[REDACTED]"` instead of leaking the
-			// tail past the first word.
+			// Quoted span: keep both quotes, mask the whole span (may contain spaces).
 			q := string(val[0])
 			return m[:valStart] + q + secretRedactedMarker + q
 		}
 		if len(val) >= 1 && (val[0] == '"' || val[0] == '\'') {
-			// Bare run that merely starts with a quote (no matching close in
-			// this token, e.g. a multiline PEM dump): keep the leading quote,
-			// mask the rest. Preserves the downstream `-----BEGIN` scanner's
-			// view of the remaining line.
+			// Quote-opened but unterminated (e.g. a multiline PEM dump): keep the
+			// leading quote so the `-----BEGIN` scanner still sees the line.
 			return m[:valStart+1] + secretRedactedMarker
 		}
 		return m[:valStart] + secretRedactedMarker

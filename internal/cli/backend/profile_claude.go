@@ -6,15 +6,11 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// claudeProfile returns the Profile describing Anthropic's claude-code CLI.
-// It speaks the stream-json protocol over stdin/stdout and is the historical
-// default backend.
+// claudeProfile returns the Profile describing Anthropic's claude-code CLI
+// (stream-json over stdin/stdout, the default backend).
 //
-// DetectInProc deliberately excludes any cmdline mentioning "kiro": some
-// kiro-cli builds embed the string "claude" in their binary path or
-// help text, and we want kiro processes to be classified as kiro, not as
-// claude. The exclusion is cheap and tightens the predicate without
-// changing the legitimate match path.
+// DetectInProc excludes any cmdline mentioning "kiro": some kiro-cli builds
+// embed "claude" in their binary path or help text.
 func claudeProfile() Profile {
 	return Profile{
 		ID:            "claude",
@@ -28,22 +24,13 @@ func claudeProfile() Profile {
 		DetectInProc: func(cmdline string) bool {
 			return strings.Contains(cmdline, "claude") && !strings.Contains(cmdline, "kiro")
 		},
-		// Claude is the baseline backend; reverse-nodes do not need a
-		// special capability flag to host claude sessions.
+		// Baseline backend; reverse-nodes need no special capability flag.
 		RequiredNodeCaps: nil,
-		// claude-code persists session JSONL under ~/.claude/projects/.
-		// Display path stored with leading "~/" so doctor renders it
-		// verbatim; callers that need an absolute path expand it
-		// themselves via os.UserHomeDir.
+		// Session JSONL under ~/.claude/projects/ ("~/" kept for doctor display).
 		HistoryDir: "~/.claude/projects/",
-		// Process.TotalCost reports cumulative spend in USD via the CLI's
-		// own metering. Dashboard cost cells render with $ prefix.
+		// Process.TotalCost reports cumulative spend in USD.
 		CostUnit: "USD",
-		// Multi-Backend RFC §8.2 — claude supports the full naozhi UX
-		// surface: AskUserQuestion cards, passthrough multi-message
-		// queueing, @-mention embedded context, and image / audio input
-		// (the latter goes through Bedrock Transcribe before reaching
-		// the CLI). MCP servers connect over HTTP and SSE both.
+		// Full naozhi UX surface; audio goes through Transcribe before the CLI.
 		Features: map[string]bool{
 			"askuser":          true,
 			"passthrough":      true,

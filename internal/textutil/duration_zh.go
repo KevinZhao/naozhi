@@ -5,14 +5,10 @@ import (
 	"time"
 )
 
-// FormatChineseDuration formats a duration into a short Chinese string.
-// Mixed durations (90m → "1 小时 30 分钟", 90s → "1 分钟 30 秒") are
-// rendered with the largest meaningful unit pair; pure-round durations
-// collapse to a single unit for readability.
-//
-// Returns "未知" for zero or negative durations so callers (IM error
-// banners, cron notifications) get a deterministic placeholder rather
-// than empty / nonsensical output.
+// FormatChineseDuration formats a duration as a short Chinese string using
+// the largest meaningful unit pair (90m → "1 小时 30 分钟"); round values
+// collapse to a single unit. Returns "未知" for zero or negative durations
+// so IM banners / cron notices get a deterministic placeholder.
 func FormatChineseDuration(d time.Duration) string {
 	if d <= 0 {
 		return "未知"

@@ -1,11 +1,7 @@
 // connector_conn.go owns the WebSocket connection lifecycle for the
-// reverse-connect upstream: write-mutex serialisation, ping/pong, request
-// fan-out (with bounded reqSem worker pool + panic recovery), subscribe /
-// unsubscribe / ping case dispatch, and the wg drain budget that bounds
-// reconnect on a stuck downstream call. RPC method handlers (read by
-// handleRequest) live in connector_rpc.go; live event streaming lives in
-// connector_subscribe.go. All three files are package upstream — split is
-// purely organisational.
+// reverse-connect upstream: write serialisation, ping/pong, bounded request
+// fan-out, subscribe/unsubscribe dispatch, and the wg drain budget. RPC
+// handlers live in connector_rpc.go; event streaming in connector_subscribe.go.
 package upstream
 
 import (
@@ -27,10 +23,8 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	writeJSON := func(v any) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		// If SetWriteDeadline fails (conn half-closed / already closed),
-		// skip WriteJSON to avoid a deadline-less write that can block
-		// until TCP keepalive expires. Return the underlying error so the
-		// caller reconnects instead of silently hanging.
+		// A failed SetWriteDeadline means the conn is half-closed; skip
+		// WriteJSON so we don't block until TCP keepalive expires.
 		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 			return fmt.Errorf("set write deadline: %w", err)
 		}
@@ -45,43 +39,26 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
-	// activeSubs tracks local session subscriptions initiated by primary.
-	// subExited receives keys when streamEvents goroutines exit (channel closed),
-	// so the main loop can remove stale entries and allow re-subscription.
-	// A generation counter prevents late subExited notifications from deleting
-	// a freshly re-created subscription for the same key.
+	// activeSubs tracks subscriptions initiated by the primary. streamEvents
+	// goroutines report exit via subExited so stale entries can be removed;
+	// the generation counter keeps a late note from deleting a re-created
+	// subscription for the same key.
 	type subExitNote struct {
 		key string
 		gen uint64
 	}
 	activeSubs := map[string]func(){} // key → cancel func
 	subGen := map[string]uint64{}     // key → generation counter
-	// Capacity 256: streamEvents goroutines drop their subExited note
-	// non-blockingly, and the main loop drains between ReadJSON calls. A
-	// 64-slot channel could overflow during hub-wide resets (e.g. Router
-	// Cleanup sweeping >64 sessions at once while ReadJSON is blocked),
-	// leaving stale activeSubs entries. 256 covers realistic burst sizes
-	// for all deployments; the reqSem inflight cap is 16 so a 256-deep
-	// backlog is a generous safety margin. R71-GO-M1.
+	// 256 slots absorb hub-wide resets (Router Cleanup sweeping many sessions
+	// while ReadJSON is blocked) without dropping exit notes.
 	subExited := make(chan subExitNote, 256)
 
 	var wg sync.WaitGroup
-	// R51-REL-005: bound the shutdown-of-handleConn on a hard deadline so a
-	// stuck worker goroutine (typically a send-RPC blocked on sess.Send that
-	// can wait up to CLI watchdog timeout ≈ 5 min) cannot pin reconnect.
-	// #2222: cancel connCtx as the FIRST action of this defer so it fires
-	// before wg.Wait() below. The bare `defer connCancel()` at the top of
-	// handleConn runs LIFO — i.e. AFTER this drain defer returns — so on a
-	// plain ReadJSON-error disconnect (parent ctx still live) the ping
-	// goroutine (selects only on its 30s ticker / connCtx.Done) would stay
-	// parked, pinning wg.Wait() for the full drain budget and emitting a
-	// spurious "drain exceeded budget" WARN. Cancelling here lets every
-	// connCtx-observing participant (ping ticker, streamEvents) exit at once.
-	// Every wg participant either responds to connCtx or is inherently
-	// short-running (response writer), so the grace timer covers only the
-	// pathological case where a downstream Send refuses to honour ctx.
-	// Exceeding the budget leaks the stuck goroutine to process teardown,
-	// which is strictly better than blocking the whole upstream reconnect loop.
+	// Bound the drain on handleConnDrainBudget so a worker stuck in sess.Send
+	// (up to the CLI watchdog ≈5 min) cannot pin reconnect. connCancel must
+	// run FIRST here: the top-level `defer connCancel()` runs after this
+	// defer, so without it the ping goroutine would stay parked for the whole
+	// budget on a plain ReadJSON-error disconnect (#2222).
 	defer func() {
 		connCancel()
 		done := make(chan struct{})
@@ -89,11 +66,8 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			wg.Wait()
 			close(done)
 		}()
-		// R180-GO-P1 / R180-PERF-P2: use NewTimer + explicit Stop instead of
-		// time.After. time.After always arms a runtime timer; if wg.Wait()
-		// finishes fast (the common happy path) the timer goroutine leaks
-		// until handleConnDrainBudget (15s) expires. This pattern is already
-		// fixed in router.go:713 and shim/manager.go:264.
+		// NewTimer + Stop rather than time.After so the timer does not linger
+		// for the full budget on the fast path.
 		drainTimer := time.NewTimer(handleConnDrainBudget)
 		defer drainTimer.Stop()
 		select {
@@ -113,22 +87,9 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		for {
 			select {
 			case <-ticker.C:
-				// Hold writeMu across the Close on failure so conn.Close does
-				// not race with a concurrent writeJSON that has just entered
-				// the critical section. gorilla/websocket requires at most
-				// one writer at a time; closing under the lock serializes us
-				// against WriteJSON. Any writeJSON that then acquires the
-				// lock will see SetWriteDeadline fail (closed conn) and
-				// return its error cleanly. Force-close is what breaks the
-				// outer ReadJSON out of its 90s pong wait when the peer is
-				// dead — we want that to happen even if no Write failed
-				// yet, so emit the Close without unlocking first.
-				//
-				// pingOnce encapsulates the "lock → try write → close on
-				// failure" triad in a single scope so a single `defer
-				// writeMu.Unlock()` covers every exit. The boolean return
-				// lets the outer loop exit without keeping the lock live
-				// across the return.
+				// pingOnce holds writeMu across the Close so conn.Close does not
+				// race a concurrent writeJSON; the force-close is what breaks the
+				// outer ReadJSON out of its pong wait when the peer is dead.
 				if !pingOnce(conn, &writeMu) {
 					return
 				}
@@ -174,27 +135,17 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				defer wg.Done()
 				defer func() {
 					if r := recover(); r != nil {
-						// R180-SEC-H1 / R181-GO-P2-1: req.ReqID and req.Method
-						// come from the primary's JSON frame with no prior
-						// sanitization. A compromised / middleman-tampered
-						// primary can inject bidi/C1/newline bytes to forge
-						// log entries. SanitizeForLog keeps attrs as plain
-						// strings (strips unsafe runes → '_') instead of the
-						// Go-quoted form of %q which slog's JSON handler then
-						// double-escapes.
+						// req.ReqID / req.Method come unsanitized from the primary's
+						// frame; SanitizeForLog strips bidi/C1/newline bytes so a
+						// tampered primary cannot forge log entries.
 						slog.Error("connector request panic",
 							"req_id", osutil.SanitizeForLog(req.ReqID, 128),
 							"method", osutil.SanitizeForLog(req.Method, 64),
 							"panic", r, "stack", string(debug.Stack()))
 					}
 				}()
-				// Two-stage acquire to distinguish "got a slot immediately"
-				// from "had to block". The first non-blocking try keeps the
-				// happy path identical to the original select{acquire,
-				// ctx.Done} (no extra syscall, no extra allocation); only
-				// the contended path pays the WaitTotal increment + the
-				// outer blocking select. ctx.Done lives on the blocking
-				// branch so cancellation semantics are unchanged.
+				// Non-blocking try first so the uncontended path pays nothing;
+				// only the contended path counts WaitTotal.
 				select {
 				case reqSem <- struct{}{}:
 				default:
@@ -205,12 +156,8 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 						return
 					}
 				}
-				// R20260527122801-GO-007: register the release defer BEFORE
-				// reqSemReqInflight.Add(1) so a panic between the slot
-				// acquire and the inflight increment cannot leave the
-				// counter and the semaphore desynced. Both states then
-				// roll back together via the deferred release on any
-				// downstream panic in handleRequest.
+				// Register the release defer BEFORE the inflight increment so a
+				// panic between them cannot desync counter and semaphore.
 				defer func() {
 					<-reqSem
 					reqSemReqInflight.Add(-1)
@@ -230,32 +177,21 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 		case "subscribe":
 			key := msg.Key
-			// R180-SEC-M3: gate the subscribe path at the trust boundary.
-			// handleRequest's per-method branches all run ValidateSessionKey,
-			// but the subscribe/unsubscribe main-loop cases previously
-			// accepted any string and piped it straight into slog attrs +
-			// router.SessionFor map lookup. A compromised primary could
-			// inject bidi/C1/newline bytes via msg.Key.
+			// Trust-boundary gate: msg.Key flows into slog attrs and the
+			// router.SessionFor lookup; reject bidi/C1/newline bytes up front.
 			if err := session.ValidateSessionKey(key); err != nil {
 				slog.Debug("connector subscribe: invalid key", "err", err)
 				break
 			}
-			// #1822 (ARCH-3): if this connection is already draining (connCtx
-			// cancelled by connCancel / the parent shutdown cancel), do not spawn
-			// a new streamEvents goroutine. The spawnSession stopped gate covers
-			// the three reverse-RPC spawn paths but NOT this read-only subscribe,
-			// whose only leak is the streamEvents goroutine bounded by the 15s
-			// handleConn drain. Short-circuiting here keeps a late subscribe from
-			// adding a fresh goroutine that races shutdown. streamEvents itself
-			// also observes connCtx, but the wg.Add happens before it runs, so we
-			// must reject up front to avoid the wg participant entirely.
+			// Reject subscribes on a draining connection: the wg.Add below runs
+			// before streamEvents observes connCtx, so a late subscribe would add
+			// a fresh wg participant racing shutdown (#1822).
 			if connCtx.Err() != nil {
 				slog.Debug("connector subscribe: connection draining, rejecting", "key", key)
 				break
 			}
-			// Cancel stale subscription if the previous streamEvents goroutine
-			// exited (e.g. process died). This allows the hub to re-subscribe
-			// after a remote send so events flow for the new process.
+			// Cancel a stale subscription so the hub can re-subscribe after a
+			// remote send and events flow for the new process.
 			if cancel, already := activeSubs[key]; already {
 				cancel()
 				delete(activeSubs, key)
@@ -278,11 +214,8 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			go func(k string, n <-chan struct{}, g uint64) {
 				defer wg.Done()
 				c.streamEvents(connCtx, writeJSON, k, n)
-				// Signal that this subscription exited (session replaced/reset).
-				// A dropped notification leaves activeSubs[k] populated until
-				// the next explicit subscribe/unsubscribe for the same key
-				// clears it — not a correctness bug (cancel is idempotent),
-				// but observability for capacity tuning. R71-GO-M1.
+				// Signal exit so the main loop drops activeSubs[k]. A dropped note
+				// only delays cleanup until the next subscribe/unsubscribe for k.
 				select {
 				case subExited <- subExitNote{k, g}:
 				default:
@@ -292,7 +225,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 		case "unsubscribe":
 			key := msg.Key
-			// R180-SEC-M3: same trust-boundary guard as subscribe.
+			// Same trust-boundary guard as subscribe.
 			if err := session.ValidateSessionKey(key); err != nil {
 				slog.Debug("connector unsubscribe: invalid key", "err", err)
 				break

@@ -16,61 +16,31 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// tailChunkSize is the size of each reverse-read chunk. 256KB balances
-// syscall count against read-ahead amplification for typical SSD/NFS.
-// Most JSONL lines are 200-2000 bytes, so one chunk covers ~100-1000 lines.
+// tailChunkSize is the reverse-read chunk size. 256KB balances syscall count
+// against read-ahead amplification; most JSONL lines are 200-2000 bytes.
 const tailChunkSize = 256 * 1024
 
-// maxTailReadBytes caps how many trailing bytes parseTail will scan.
-// `stat.Size()` returns unbounded values on FUSE / /proc and other special
-// file systems; without a cap a malformed mount reporting size=TB would
-// drive parseTail to spin `size / tailChunkSize` iterations against a file
-// that may only yield a handful of real bytes per ReadAt. The tail-read
-// mode only ever needs the last ~limit JSONL entries (default 500 ×
-// ~4KB/entry = 2MB worst-case for the data we care about), so 128MB of
-// scan budget is already 60× the realistic need and leaves generous room
-// for lines that pad with huge tool-use payloads. Beyond this cap we seek
-// from (size - maxTailReadBytes) and log a warning so the operator sees
-// the truncation. R54-SEC-006 defence-in-depth.
-//
-// Declared var (not const) so the budget-bounds regression test can dial
-// it down without waiting for 512 chunks of io.EOF responses under -race.
+// maxTailReadBytes caps how many trailing bytes parseTail will scan, since
+// stat.Size() is untrustworthy on FUSE / /proc mounts and a size=TB report
+// would otherwise spin size/tailChunkSize iterations. The tail needs ~2MB
+// worst-case, so 128MB is generous; beyond it a warning notes the truncation.
+// A var (not const) so the budget-bounds regression test can dial it down.
 var maxTailReadBytes int64 = 128 * 1024 * 1024
 
-// LoadHistoryTailCtx reads up to `limit` recent user/assistant entries from
-// a session JSONL by seeking from EOF backward and parsing only the tail.
-// Stops as soon as the limit is reached or the file head is hit.
-//
-// Returns entries in chronological order (oldest → newest), matching
-// the shape of LoadHistory.
-//
-// Unlike LoadHistory which scans the whole file even when InjectHistory
-// will discard everything but the last 500 entries, this function touches
-// only the bytes needed. For a 50MB JSONL with limit=500, typical cost
-// drops from ~1-2s to ~30ms.
-//
-// `limit <= 0` falls back to the legacy full-file LoadHistory behaviour.
-//
-// Cancellation is checked between chunks and between parsed lines so a hung
-// NFS read can still be interrupted by Shutdown (subject to the underlying
-// ReadAt's own blocking). R222-GO-2 removed the non-ctx wrapper that hid
-// `context.Background()` from callers — every call site now threads the
-// router's historyCtx through, so shutdown actually stops in-flight tail
-// reads instead of waiting on the FS.
+// LoadHistoryTailCtx reads up to `limit` recent user/assistant entries from a
+// session JSONL by seeking from EOF backward and parsing only the tail (~30ms
+// for a 50MB file at limit=500 versus ~1-2s for LoadHistory), returned in
+// chronological order. `limit <= 0` falls back to LoadHistory. Cancellation
+// is checked between chunks and lines so Shutdown can interrupt a hung NFS read.
 func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
 	return LoadHistoryTailBeforeCtx(ctx, claudeDir, sessionID, cwd, 0, limit)
 }
 
 // LoadHistoryTailBeforeCtx returns up to `limit` entries strictly older than
 // `beforeMS` (unix ms) from the tail of the session JSONL, in chronological
-// order. Drives "load earlier" pagination when the in-memory ring no longer
-// contains the requested page.
-//
-// beforeMS <= 0 is treated as "no upper bound" and is equivalent to
-// LoadHistoryTailCtx — the function falls through to the plain tail read.
-//
-// limit <= 0 falls back to the full-file LoadHistory for parity with the
-// legacy LoadHistoryTailCtx contract.
+// order, driving "load earlier" pagination once the in-memory ring lacks the
+// page. beforeMS <= 0 means "no upper bound" (LoadHistoryTailCtx); limit <= 0
+// falls back to the full-file LoadHistory.
 func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return LoadHistory(claudeDir, sessionID, cwd)
@@ -95,12 +65,9 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 	if size == 0 {
 		return nil, nil
 	}
-	// Note the size when it exceeds maxTailReadBytes: parseTail's internal
-	// byte budget (see scanBudget variable) bounds total scan work even when
-	// stat.Size() returns an untrustworthy value (FUSE / /proc / corrupted
-	// mount). We still pass the real size so the reverse-read seeks from
-	// genuine EOF — the budget stops the loop before it can iterate 1TB /
-	// 256KB = 4M times against a misbehaving mount. R54-SEC-006.
+	// parseTail's scanBudget bounds the work even when stat.Size() lies
+	// (FUSE / /proc); the real size is still passed so the reverse read
+	// seeks from genuine EOF. Warn so the operator sees the truncation.
 	if size > maxTailReadBytes {
 		slog.Warn("history tail: capping scan window on oversize file",
 			"path", path, "size", size, "cap", maxTailReadBytes)
@@ -113,15 +80,11 @@ func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd str
 	return entries, nil
 }
 
-// resolveJSONLPath mirrors LoadHistory's path-resolution logic without
-// parsing the file. Exposed as a helper so both LoadHistory and
-// LoadHistoryTail share the exact same lookup semantics.
+// resolveJSONLPath mirrors LoadHistory's path resolution without parsing the
+// file, so both entry points share the same lookup semantics.
 //
-// Rejects non-UUID sessionIDs up front so a caller that threads
-// attacker-controlled prev-session-id chain values through this helper
-// cannot produce a `filepath.Join(..., "../etc/passwd.jsonl")` escape.
-// Production callers validate IDs before storage, but this defence-in-depth
-// prevents a regression from a future caller skipping validation.
+// Non-UUID sessionIDs are rejected up front so an attacker-controlled
+// prev-session-id cannot produce a `filepath.Join(..., "../etc/passwd.jsonl")` escape.
 func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 	if !IsValidSessionID(sessionID) {
 		return "", nil
@@ -139,23 +102,11 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 	return path, nil
 }
 
-// parseTail does the reverse chunked read + parse. It keeps accumulating
-// lines from newest to oldest until `limit` decoded entries are collected
-// or the file head is reached.
-//
-// When beforeMS > 0, entries whose Time >= beforeMS are skipped (newer than
-// the pagination cursor) without counting against `limit` or `target`. The
-// caller sees only strictly-older entries. A beforeMS of 0 disables the
-// filter.
-//
-// Internal structure:
-//   - `carry` holds bytes from the previous (newer) chunk that belong to
-//     a line spanning the chunk boundary; it is prepended to the current
-//     chunk before splitting.
-//   - lines inside a chunk are walked from newest to oldest; each decoded
-//     line becomes 0-N entries (user = 1, assistant = 0-N text blocks).
-//   - the final result is reversed in-place so callers see chronological
-//     order (oldest → newest), matching LoadHistory.
+// parseTail does the reverse chunked read + parse, accumulating lines from
+// newest to oldest until `limit` entries are collected or the file head is
+// reached; with beforeMS > 0, entries at Time >= beforeMS are skipped without
+// counting. `carry` holds a line spanning the chunk boundary and is prepended
+// to the next (older) chunk; the result is reversed so callers see chronology.
 func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	// Over-collect slightly: assistant lines may contribute 0 text blocks
 	// (tool_use / thinking filtered out), so a small cushion avoids a
@@ -166,22 +117,14 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 	}
 
 	var (
-		// Preallocate to `target` upper bound so the typical limit=200
-		// history-tail load fills entries without 1→2→4→…→256 doubling
-		// reallocs. Worst case the file is short and we waste a few hundred
-		// EventEntry slots; well-bounded vs the alloc churn this avoids on
-		// every dashboard sidebar history fetch. R247-PERF-19 family.
 		entries = make([]clievent.EventEntry, 0, target)
 		carry   []byte // unterminated head fragment from prior chunk
 		offset  = size
 		buf     = make([]byte, tailChunkSize)
 	)
-	// scanBudget bounds how many trailing bytes the reverse-read will touch.
-	// Normal paths terminate via `len(entries) >= target` long before this
-	// cap, so the budget only matters when stat.Size() lies (FUSE / /proc
-	// files claiming TB+ sizes) or parseHistoryLine rejects every line (file
-	// has no JSONL structure). Without it a misbehaving mount could pin this
-	// function on size / tailChunkSize = ~4M iterations. R54-SEC-006.
+	// scanBudget bounds the bytes touched when stat.Size() lies (FUSE / /proc)
+	// or every line is rejected; normal paths stop via len(entries) >= target
+	// long before an unbounded loop could spin ~4M iterations.
 	scanBudget := size
 	if scanBudget > maxTailReadBytes {
 		scanBudget = maxTailReadBytes
@@ -204,10 +147,9 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			return nil, fmt.Errorf("readAt offset=%d size=%d: %w", offset, chunkSize, err)
 		}
 
-		// Join this chunk with the fragment carried over from the newer chunk.
-		// When offset > 0, the first line of `chunk` is potentially a partial
-		// line (head of a line whose tail lives in an even older chunk); we
-		// stash it as the new carry for the next iteration.
+		// Join this chunk with the fragment carried from the newer chunk. When
+		// offset > 0 the first line of `chunk` may be partial (its head lives
+		// in an older chunk) and becomes the next carry.
 		chunk := readBuf
 		if len(carry) > 0 {
 			joined := make([]byte, 0, len(chunk)+len(carry))
@@ -217,11 +159,8 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			carry = nil
 		}
 
-		// Walk backward through chunk via LastIndexByte('\n'), avoiding the
-		// O(lines) slice allocation that bytes.Split would produce (each
-		// 256KB chunk holds 100-1000 lines; Split pre-allocates the full
-		// [][]byte header array even when we early-exit after the first
-		// few matches). Line bounds inside `chunk` are [lineStart, end).
+		// Walk backward via LastIndexByte('\n') rather than bytes.Split, which
+		// allocates a header for every line even when we exit after a few.
 		end := len(chunk)
 		for end > 0 {
 			if err := ctx.Err(); err != nil {
@@ -229,18 +168,13 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			}
 			nl := bytes.LastIndexByte(chunk[:end], '\n')
 			lineStart := nl + 1 // 0 when no newline left in remaining prefix
-			// If we haven't reached the file head yet, the prefix before the
-			// first '\n' is a partial line whose head lives in an older
-			// chunk — stash it as carry and stop walking this chunk.
+			// Before the file head, the prefix before the first '\n' is a partial
+			// line whose head lives in an older chunk: stash as carry, stop.
 			if nl < 0 && offset > 0 {
-				// Cap carry growth so a pathologically long single line
-				// (e.g. a corrupt JSONL file with no newlines across MBs
-				// of base64 output) cannot drive this function to O(N)
-				// RAM. When the cap is hit we treat the remaining prefix
-				// as unparseable and reset carry — the line would fail
-				// parseHistoryLine downstream anyway, so dropping it here
-				// is equivalent to discarding at parse time without the
-				// memory blow-up. R58-PERF-F5.
+				// Cap carry growth so a pathologically long line (corrupt JSONL
+				// with MBs of base64 and no newline) cannot drive this to O(N)
+				// RAM. Past the cap the prefix is dropped; it would fail
+				// parseHistoryLine anyway.
 				const maxCarryBytes = 4 * 1024 * 1024
 				if len(carry)+end > maxCarryBytes {
 					carry = nil
@@ -258,12 +192,9 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 			if !ok {
 				continue
 			}
-			// parseHistoryLine returns entries in chronological order for
-			// a single line (a single JSONL record). Since we're walking
-			// newest→oldest, prepend the batch by reversing internally.
-			// Entries with Time >= beforeMS are skipped silently (they're
-			// newer than the pagination cursor) without counting against
-			// the collection target. beforeMS == 0 disables the filter.
+			// parseHistoryLine returns a line's entries in chronological order;
+			// walking newest→oldest, append them reversed. Entries with
+			// Time >= beforeMS are newer than the cursor and skipped.
 			for j := len(lineEntries) - 1; j >= 0; j-- {
 				e := lineEntries[j]
 				if beforeMS > 0 && e.Time >= beforeMS {
@@ -284,7 +215,6 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 		return nil, nil
 	}
 
-	// Reverse to chronological order.
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 		entries[i], entries[j] = entries[j], entries[i]
 	}
@@ -296,22 +226,11 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 	return entries, nil
 }
 
-// userTypeGate / asstTypeGate are cheap byte substrings used to reject
-// lines that cannot be a "user" / "assistant" record before paying for a
-// json.Unmarshal. parseTail walks reverse over multi-MB run logs whose
-// bulk is tool_use / system / thinking records the switch below discards
-// anyway; gating those out avoids the outer historyLine unmarshal (and,
-// for assistant lines, the two further Message/Content unmarshals).
-// R202606d-PERF-001.
-//
-// The gate is a pure fast-negative: it only ever SKIPS a line when NEITHER
-// marker substring is present. Any line that still contains one of them
-// proceeds to the full unmarshal and the authoritative switch on hl.Type,
-// so a marker appearing inside an unrelated string (e.g. a tool_use input
-// that embeds the literal `"type":"user"`) costs at most a wasted unmarshal
-// — never a wrong result. Both compact and single-space-after-colon
-// variants are matched so a producer that pretty-prints the type field is
-// not silently dropped.
+// userTypeGate / asstTypeGate are cheap byte substrings that reject lines
+// which cannot be "user" / "assistant" records before paying for a
+// json.Unmarshal (most of a multi-MB run log is tool_use / system / thinking).
+// A pure fast-negative: a marker inside an unrelated string costs at most a
+// wasted unmarshal, never a wrong result. Compact and spaced forms both match.
 var (
 	userTypeGate       = []byte(`"type":"user"`)
 	userTypeGateSpaced = []byte(`"type": "user"`)
@@ -323,10 +242,7 @@ var (
 // values. Returns ok=false for malformed lines so callers can skip them
 // silently (matches parseJSONL's tolerance for partially-flushed tails).
 func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
-	// Fast-negative byte gate (R202606d-PERF-001): a record is only ever
-	// emitted from the "user"/"assistant" arms below, so a line carrying
-	// neither type marker cannot produce an entry. Skip it without the
-	// json.Unmarshal. Conservative by construction — see the var block.
+	// Fast-negative byte gate; see userTypeGate.
 	if !bytes.Contains(line, userTypeGate) && !bytes.Contains(line, userTypeGateSpaced) &&
 		!bytes.Contains(line, asstTypeGate) && !bytes.Contains(line, asstTypeGateSpaced) {
 		return nil, false
@@ -338,12 +254,10 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		return nil, false
 	}
 	ts := parseTimestamp(hl.Timestamp)
-	// Drop records whose timestamp is missing or unparseable. An emitted
-	// Time=0 entry survives the strict-< pagination filter (0 < beforeMS is
-	// always true), sorts to the head of the chunk, and pins the LoadBefore
-	// cursor at before=0 — which LoadHistoryChainBeforeCtx degrades to a
-	// newest-tail read, repeating already-seen entries. codexjsonl/kirojsonl
-	// drop ts<=0 for exactly this reason; the claude path must match.
+	// Drop records with a missing/unparseable timestamp: a Time=0 entry
+	// survives the strict-< pagination filter and pins the LoadBefore cursor
+	// at before=0, which degrades to a newest-tail read repeating seen
+	// entries. codexjsonl/kirojsonl drop ts<=0 for the same reason.
 	if ts <= 0 {
 		return nil, false
 	}
@@ -355,10 +269,8 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 			return nil, false
 		}
 		text, images := extractTextAndImages(msg.Content)
-		// Drop only when there is nothing to show at all. An image-only
-		// turn (no text) is still worth surfacing. IsClaudeSystemInjectedText
-		// is checked only when text exists, so it never rejects an
-		// image-only message.
+		// Drop only when there is nothing to show; an image-only turn is still
+		// surfaced, and the system-injected check only applies when text exists.
 		if (text == "" && len(images) == 0) || (text != "" && IsClaudeSystemInjectedText(text)) {
 			return nil, false
 		}
@@ -371,10 +283,9 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 			Summary: summary,
 			Detail:  detail,
 		}
-		// ImagePaths stays empty: the Claude JSONL carries no workspace
-		// relative path, so the dashboard lightbox falls back to the
-		// thumbnail data URI. UUID derivation is unchanged (Images is not
-		// part of the key), so MergedSource still prefers the local copy.
+		// ImagePaths stays empty: the Claude JSONL carries no workspace-relative
+		// path, so the lightbox falls back to the thumbnail data URI. Images are
+		// not part of the UUID key, so MergedSource still prefers the local copy.
 		if len(images) > 0 {
 			e.Images = images
 		}
@@ -412,25 +323,16 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 	return nil, false
 }
 
-// LoadHistoryChainTailCtx walks a prev-session-ID chain (in order oldest →
-// newest as stored) from newest to oldest and collects up to `limit` entries
-// total, stopping as soon as the budget is exhausted. Returns entries in
-// chronological order.
-//
-// Motivation: on long-lived chats the chain can be 32 IDs long. Loading
-// every JSONL only to discard all but the last 500 entries is wasteful.
-// Walking in reverse and stopping when the budget is met typically opens
-// only 1-2 files for a normal session.
-//
-// R222-GO-2 removed the non-ctx wrapper that hid `context.Background()` from
-// callers — every call site now threads the router's historyCtx through.
+// LoadHistoryChainTailCtx walks a prev-session-ID chain (stored oldest →
+// newest) from newest to oldest and collects up to `limit` entries total,
+// returning chronological order. A long-lived chat's chain can be 32 IDs;
+// the reverse walk typically opens only 1-2 files instead of loading every
+// JSONL to discard all but the last 500 entries.
 func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
 	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
 		return nil
 	}
 
-	// Collect per-ID entry slices in reverse-walk order. Concatenating all
-	// ids+flatten at the end is O(total) which matches the legacy behaviour.
 	type bucket struct {
 		id      string
 		entries []clievent.EventEntry
@@ -446,10 +348,8 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 		if id == "" {
 			continue
 		}
-		// Skip non-UUID IDs defensively — resolveJSONLPath also rejects
-		// them, but this saves an unnecessary file-open syscall path and
-		// keeps any future caller from accidentally widening the attack
-		// surface.
+		// Reject non-UUID IDs here too (resolveJSONLPath also does) to skip
+		// the file-open path and keep the attack surface narrow.
 		if !IsValidSessionID(id) {
 			continue
 		}
@@ -469,8 +369,7 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 		return nil
 	}
 
-	// Buckets are in reverse walk order (newest chain ID first). Flatten in
-	// the opposite direction so the final slice is chronological.
+	// Flatten buckets oldest-first so the result is chronological.
 	totalLen := 0
 	for _, b := range buckets {
 		totalLen += len(b.entries)
@@ -483,18 +382,11 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 }
 
 // LoadHistoryChainBeforeCtx walks the chain newest→oldest and collects up to
-// `limit` entries strictly older than beforeMS. Used by dashboard "load
-// earlier" pagination when the in-memory ring has been exhausted.
-//
-// beforeMS <= 0 degenerates to LoadHistoryChainTailCtx semantics (no upper
-// bound, return newest `limit`). limit <= 0 or empty ids yields nil.
-//
-// Returns entries in chronological order. Entries' Time values are not
-// re-sorted across bucket boundaries — the caller owns final ordering if
-// it merges results with other sources. Within a bucket, chronological
-// order is preserved by parseTail. Between buckets, the natural JSONL
-// timestamps typically already monotonically decrease toward older chain
-// IDs; tie-breaking across branched sessions is the caller's concern.
+// `limit` entries strictly older than beforeMS, for dashboard "load earlier"
+// pagination once the in-memory ring is exhausted. beforeMS <= 0 degenerates
+// to LoadHistoryChainTailCtx; limit <= 0 or empty ids yields nil. Entries are
+// chronological within a bucket and buckets are concatenated oldest chain ID
+// first; cross-bucket re-sorting across branched sessions is the caller's job.
 func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []string, cwd string, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
 		return nil

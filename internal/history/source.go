@@ -1,58 +1,22 @@
-// Package history defines a backend-agnostic interface for loading historical
-// EventEntry pages from persistent storage outside of the in-memory ring.
-//
-// The dashboard "load earlier" pagination walks the in-memory history first
-// (the 500-entry ring maintained by cli.EventLog / ManagedSession's
-// persistedHistory). When that ring is exhausted, the session falls back
-// through a Source to reach storage that long outlives the process —
-// for claude-code this is the ~/.claude/projects/**/{session-id}.jsonl
-// files; for other CLIs (kiro, gemini-acp, future backends) it may be a
-// different format or no durable source at all.
-//
-// Keeping this behind a small interface lets the session layer stay
-// backend-agnostic: it just asks "give me up to N entries strictly older
-// than T" and doesn't care whether the answer came from JSONL, a remote
-// API, or is empty.
+// Package history defines a backend-agnostic interface for loading older
+// EventEntry pages from storage that outlives the in-memory ring (claude-code:
+// ~/.claude/projects/**/{session-id}.jsonl; other CLIs: their own format or
+// nothing). The session layer only asks "up to N entries strictly older than T".
 package history
 
 import "github.com/naozhi/naozhi/internal/cli"
 
-// Source exposes a read-only view of a session's historical events backed
-// by persistent storage. Implementations must be safe for concurrent use —
-// the dashboard can fire pagination requests while the session is actively
-// appending new events on the write path.
+// Source exposes a read-only view of a session's past events. It is an
+// alias for cli.HistorySource so the two definitions cannot drift; cli owns
+// the canonical interface and does not import this package (#761).
 //
-// LoadBefore returns up to `limit` entries whose Time is strictly less than
-// `beforeMS`, in chronological order (oldest → newest). The contract mirrors
-// cli.EventLog.EntriesBefore so memory-tier and disk-tier results can be
-// concatenated without an ordering adapter.
-//
-// Semantics:
-//   - beforeMS <= 0 is treated as "no upper bound" (newest-`limit` tail).
-//   - limit <= 0 returns nil.
-//   - An empty result ([]entry, nil) means "no more history available" and
-//     must be distinguished from a transient error by the (nil, error)
-//     contract — errors are informational; the caller should log and treat
-//     them as end-of-history to avoid infinite retry loops.
-//   - ctx cancellation propagates into file I/O; implementations should
-//     return promptly on Done.
-//
-// R246-ARCH-1 (#761): Source is a type alias for cli.HistorySource so the
-// two definitions can no longer drift. Adding a method on cli.HistorySource
-// is now an immediate compile error across every history backend instead
-// of silent structural-satisfaction breakage. The cycle is broken in the
-// only direction that matters: cli/history.go does NOT import this
-// package (the cli package owns the canonical interface), and every
-// downstream history backend already imports cli.
+// Implementations must be safe for concurrent use. LoadBefore returns up to
+// `limit` entries with Time strictly less than `beforeMS`, oldest → newest,
+// mirroring cli.EventLog.EntriesBefore. beforeMS <= 0 means no upper bound;
+// limit <= 0 returns nil. Errors are informational: callers log and treat
+// them as end-of-history. ctx cancellation must propagate into file I/O.
 type Source = cli.HistorySource
 
-// Noop is a Source that always returns nil. Backends without a durable
-// history store (kiro today, any future CLI whose transcript isn't yet
-// introspectable) use this as a placeholder so the session layer can
-// treat Source as never-nil and skip defensive null checks at call sites.
-//
-// R246-ARCH-1 (#761): aliased onto cli.NoopHistorySource for the same
-// drift-prevention reason as Source above. Existing callers that write
-// `history.Noop{}` resolve to `cli.NoopHistorySource{}` at compile time;
-// behaviour is byte-identical.
+// Noop is a Source that always returns nil; backends without a durable history
+// store use it so the session layer can treat Source as never-nil (#761).
 type Noop = cli.NoopHistorySource

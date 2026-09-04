@@ -2,14 +2,9 @@ package osutil
 
 import "strings"
 
-// HasNoPathTrigger reports whether s contains none of the three bytes that can
-// begin a redactable path token: a POSIX slash, a Windows backslash, or a
-// tilde-home shorthand. Callers use it as a cheap pre-check to skip the scan
-// (and any Builder allocation) for path-free strings.
-//
-// R249-ARCH-17 (#983): promoted from internal/cron so other daemons
-// (sysession etc.) can reuse the same redaction trigger set without
-// duplicating the byte scan or risking drift between copies.
+// HasNoPathTrigger reports whether s contains none of the bytes that can begin
+// a redactable path token ('/', '\\', '~'). Cheap pre-check to skip the scan
+// and any Builder allocation for path-free strings.
 func HasNoPathTrigger(s string) bool {
 	return strings.IndexByte(s, '/') < 0 &&
 		strings.IndexByte(s, '\\') < 0 &&
@@ -17,20 +12,10 @@ func HasNoPathTrigger(s string) bool {
 }
 
 // RedactAbsolutePathsInto scans s for absolute filesystem paths and writes the
-// redacted result into b (each path token replaced by the literal "<path>").
-// Writing into a caller-provided Builder lets hot-path callers (cron's
-// per-run error sanitiser) reuse a pooled Builder so the only per-call
-// allocation is the final String() copy.
-//
-// Detection covers three forms — POSIX `/abs`, Windows drive `C:\…` / `C:/…`,
-// and home-relative `~/`. A bare root ("/", "/ ", "/\n") is treated as a
-// literal byte because it carries no per-host/per-user information. UNC paths
-// (`\\server\share`) are intentionally out of scope.
-//
-// R249-ARCH-17 (#983): promoted verbatim from internal/cron
-// redactPathsInCronError's inner scan so the path-redaction policy lives in
-// one cross-cutting place. The cron wrapper keeps its truncation + Builder
-// pool and delegates the scan here.
+// result into b with each path token replaced by "<path>", so hot-path callers
+// can reuse a pooled Builder. Detects POSIX `/abs`, Windows `C:\…` / `C:/…`
+// and home-relative `~/`. A bare root ("/", "/ ") is a literal; UNC paths are
+// out of scope.
 func RedactAbsolutePathsInto(b *strings.Builder, s string) {
 	i := 0
 	for i < len(s) {
@@ -66,13 +51,10 @@ func RedactAbsolutePathsInto(b *strings.Builder, s string) {
 				break
 			}
 			if cc == '\\' && !isWin && j+1 < len(s) && s[j+1] == '"' {
-				// `\"` inside raw JSON is the escaped quote that closes the
-				// string containing the path; consuming the backslash would
-				// leave `<path>""` and an unparseable document (PR #2439).
-				// Any other backslash (`/x\ y`, `\n`) stays part of the token
-				// as before — RedactAbsolutePaths also runs on plain IM text
-				// where over-splitting would leak the tail. Windows drive
-				// paths use `\` as the separator and keep consuming.
+				// `\"` in raw JSON is the escaped quote closing the string that
+				// holds the path; consuming the backslash would leave `<path>""`
+				// and an unparseable document (#2439). Other backslashes stay in
+				// the token; Windows drive paths use `\` as separator.
 				break
 			}
 			if cc == ':' && j+1 < len(s) && (s[j+1] == ' ' || s[j+1] == '\n') {

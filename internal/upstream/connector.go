@@ -24,86 +24,45 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// handleConnDrainBudget is the hard deadline applied to the deferred
-// wg.Wait() at the end of handleConn. Every worker goroutine is expected
-// to honour connCtx, which is cancelled the moment handleConn returns; the
-// budget covers the pathological case where a stuck downstream call (most
-// notably sess.Send blocked on CLI watchdog timeout ≈ 5 min) refuses to
-// unblock. Hit-budget leaks the stuck goroutine to process teardown —
-// strictly better than pinning the whole upstream reconnect loop on one
-// slow session. R51-REL-005. Package-level var (not const) so tests can
-// shorten it without wall-clock waits.
+// handleConnDrainBudget bounds the deferred wg.Wait() at the end of
+// handleConn. Workers honour connCtx; the budget covers a downstream call
+// (e.g. sess.Send blocked on the CLI watchdog, ≈5 min) that refuses to
+// unblock — the stuck goroutine leaks to process teardown rather than
+// pinning the reconnect loop. Package-level var so tests can shorten it.
 var handleConnDrainBudget = 15 * time.Second
 
 // circuitBreakerThreshold is the number of consecutive runOnce failures
-// that triggers the circuit breaker. With the 1s→30s backoff schedule
-// (doubling: 1, 2, 4, 8, 16, 30), 6 failures cover ≈ 1 minute of wall
-// time before the longer breaker backoff kicks in.
-//
-// ARCH-D6 (Round 177): prior to this, a mis-configured primary (wrong URL,
-// wrong token, network partition) would reconnect forever at a fixed 30s
-// ceiling — a steady log firehose and constant CPU on both sides with no
-// signal that "this has been failing for a while now". The breaker trades
-// a longer-but-finite recovery delay for a single sharp WARN when things
-// are clearly broken.
+// that trips the circuit breaker. With the 1s→30s doubling schedule, 6
+// failures cover ≈1 minute before the longer breaker backoff kicks in.
 var circuitBreakerThreshold = 6
 
-// reconnectBackoffCeiling is the upper bound for the doubling
-// reconnect backoff (1s → 2s → 4s → 8s → 16s → 30s, all jittered).
-// Was a hard-coded 30*time.Second literal at the doubling site, which
-// made the relationship between this ceiling and circuitBreakerBackoff
-// invisible at a glance — the breaker is what kicks in *past* this
-// ceiling, so they need to stay readable as a pair. R230C-CR-cleanup
-// adjacency: extracted as a const to anchor the godoc that
-// circuitBreakerBackoff references ("the 30s ceiling"). Pinned as a
-// package-level var (not const) so existing tests can shorten the
-// ceiling in the same idiom that handleConnDrainBudget /
-// circuitBreakerBackoff already use without wall-clock waits.
+// reconnectBackoffCeiling caps the doubling reconnect backoff
+// (1s → 2s → 4s → 8s → 16s → 30s, jittered). The breaker kicks in past
+// this ceiling, so keep it readable next to circuitBreakerBackoff.
+// Package-level var so tests can shorten it.
 var reconnectBackoffCeiling = 30 * time.Second
 
-// circuitBreakerBackoff is the backoff floor applied once the breaker
-// trips. 5 minutes is short enough that transient outages (DNS hiccup,
-// primary restart, cert rollover) still auto-recover without operator
-// intervention, but long enough to cut log noise dramatically versus the
-// reconnectBackoffCeiling (30s) ceiling.
-//
-// NEEDS-DESIGN (R246-ARCH-4): handleConnDrainBudget /
-// circuitBreakerThreshold / circuitBreakerBackoff are package-level
-// `var` only so existing tests can shorten them without wall-clock
-// waits, but the drift cost is that production code path reads
-// global mutable state. Plan: migrate all three into UpstreamConfig
-// fields (default values via config defaults pass), and expose a
-// testutil.WithUpstreamThresholds(t, ...) shim that swaps in a
-// reduced-budget *Config for the test-local Connector. Deferred
-// until UpstreamConfig overhaul (separate RFC) — flipping these
-// now requires touching every test that depends on the package-
-// level shortcut, plus a rebuild of the connector's New() signature.
+// circuitBreakerBackoff is the backoff floor once the breaker trips. 5 min
+// is short enough that transient outages (DNS hiccup, primary restart, cert
+// rollover) still auto-recover, but long enough to cut log noise versus the
+// 30s reconnectBackoffCeiling. Package-level var so tests can shorten it.
 var circuitBreakerBackoff = 5 * time.Minute
 
-// reasonSessionReset is the Reason value emitted for the terminal
-// session_state message in streamEvents when the router has already dropped
-// the session (Reset raced ahead of the notify-close path). Centralised so
-// downstream consumers (reverseconn.go, dashboard.js) have one literal to
-// match on, not a scatter of stringly-typed tokens. RNEW-005.
+// reasonSessionReset is the Reason on the terminal session_state message
+// streamEvents emits when the router has already dropped the session.
+// Downstream consumers (reverseconn.go, dashboard.js) match this literal.
 const reasonSessionReset = "session_reset"
 
-// discoverFn is the signature stored behind Connector.discoverFunc.
-// Aliased to a named type so atomic.Pointer can box it (Go does not
-// allow `atomic.Pointer[func(...)]` without an intermediate name) and
-// to give SetDiscoverFunc / loadDiscoverFunc a single source of truth
-// for the contract.
+// discoverFn is the callback type behind Connector.discoverFunc; a named
+// type so atomic.Pointer can box it.
 type discoverFn func() (json.RawMessage, error)
 
-// previewFn is the signature stored behind Connector.previewFunc.
-// Same atomic.Pointer rationale as discoverFn above.
+// previewFn is the callback type behind Connector.previewFunc.
 type previewFn func(sessionID string) (json.RawMessage, error)
 
-// Config is the upstream-local, zero-dependency value shape that New
-// consumes. It mirrors the fields this package actually reads from the
-// upstream config block so internal/upstream no longer imports
-// internal/config — a config.yaml schema change no longer ripples down into
-// this bottom-of-DAG package (R040034-ARCH-1 / #1411). The cmd boundary
-// translates config.UpstreamConfig → upstream.Config.
+// Config is the upstream-local value shape New consumes. The cmd boundary
+// translates config.UpstreamConfig → upstream.Config so this bottom-of-DAG
+// package does not import internal/config (#1411).
 type Config struct {
 	URL         string
 	NodeID      string
@@ -117,37 +76,22 @@ type Config struct {
 type Connector struct {
 	cfg *Config
 	// router is the SessionRouter subset used by Connector (consumer.go).
-	// *session.Router satisfies this interface implicitly. Kept as an
-	// interface so future Router sub-aggregation and connector tests
-	// can swap implementations without touching upstream internals.
 	router  SessionRouter
 	projMgr *project.Manager // may be nil
-	// resolver centralises planner-view opts derivation for
-	// reverse-RPC restart_planner (#7). Nil keeps the legacy literal
-	// AgentOpts construction for headless/test callers that don't wire
-	// a resolver. docs/rfc/key-resolver.md Phase 5.
+	// resolver derives planner-view opts for reverse-RPC restart_planner
+	// (docs/rfc/key-resolver.md Phase 5); nil falls back to inline AgentOpts.
 	resolver         *session.KeyResolver
 	claudeDir        string
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
-	// R246-ARCH-6: discoverFunc / previewFunc were plain function fields
-	// previously, with the wiring contract that "main.go is single-
-	// threaded so no reader/writer race exists". Storing under
-	// atomic.Pointer instead removes the load-bearing comment and lets
-	// the race detector enforce the invariant — any future caller that
-	// resets the hook from a goroutine post-Run is now well-defined
-	// instead of UB. Read path is loadDiscoverFunc / loadPreviewFunc;
-	// nil-safe because atomic.Pointer.Load returns the zero value (nil
-	// *T) when never stored.
+	// discoverFunc / previewFunc are atomic so SetDiscoverFunc and
+	// handleRequest may run concurrently; Load returns nil when never set.
 	discoverFunc atomic.Pointer[discoverFn]
 	previewFunc  atomic.Pointer[previewFn]
 }
 
-// New creates a Connector. projMgr may be nil if projects are not configured.
-// Callers that want the KeyResolver-backed planner restart path should
-// pass a non-nil resolver (built from session.NewKeyResolver +
-// project.NewDataSource). Nil resolver keeps the legacy inlined merge
-// for backward compatibility with existing tests.
+// New creates a Connector. projMgr may be nil if projects are not configured;
+// resolver may be nil (restart_planner then uses the inline AgentOpts path).
 func New(cfg *Config, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -170,22 +114,8 @@ func New(cfg *Config, router *session.Router, projMgr *project.Manager, resolver
 }
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
-//
-// Originally this was a plain field write with the wiring contract that
-// "main.go startup is single-threaded so no reader/writer race exists";
-// R246-ARCH-6 promoted the field to atomic.Pointer so the race detector
-// enforces the invariant rather than relying on a load-bearing comment.
-// Concurrent SetDiscoverFunc / handleRequest sequences are now well-
-// defined: the most recent Store wins, the read path always sees a
-// fully-published function value (or nil if never set).
-//
-// Calling with a nil fn clears the callback (loadDiscoverFunc returns
-// nil and the RPC fast-path returns an empty array). Tests that rebuild
-// a Connector per case are unaffected. R233B-ARCH-9 archive anchor:
-// when this hook eventually moves out of upstream into a server-
-// supplied handler map, drop both setters and let the constructor
-// accept the funcs directly so the wiring contract is enforced by the
-// type system.
+// Safe to call concurrently with handleRequest; nil clears the callback
+// (the RPC then returns an empty array).
 func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
 	if fn == nil {
 		c.discoverFunc.Store(nil)
@@ -196,9 +126,7 @@ func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
 }
 
 // SetPreviewFunc sets a callback that returns conversation history for a discovered session.
-//
-// Same atomic.Pointer wiring shape as SetDiscoverFunc — see SetDiscoverFunc
-// godoc. Calling with nil clears the callback.
+// Same semantics as SetDiscoverFunc; nil clears the callback.
 func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, error)) {
 	if fn == nil {
 		c.previewFunc.Store(nil)
@@ -208,9 +136,7 @@ func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, e
 	c.previewFunc.Store(&boxed)
 }
 
-// loadDiscoverFunc returns the current discover callback, or nil if
-// none was installed. Read path is lock-free; pair with SetDiscoverFunc
-// for race-free wiring.
+// loadDiscoverFunc returns the current discover callback, or nil if none was installed.
 func (c *Connector) loadDiscoverFunc() discoverFn {
 	if p := c.discoverFunc.Load(); p != nil {
 		return *p
@@ -218,9 +144,7 @@ func (c *Connector) loadDiscoverFunc() discoverFn {
 	return nil
 }
 
-// loadPreviewFunc returns the current preview callback, or nil if
-// none was installed. Read path is lock-free; pair with SetPreviewFunc
-// for race-free wiring.
+// loadPreviewFunc returns the current preview callback, or nil if none was installed.
 func (c *Connector) loadPreviewFunc() previewFn {
 	if p := c.previewFunc.Load(); p != nil {
 		return *p
@@ -231,18 +155,11 @@ func (c *Connector) loadPreviewFunc() previewFn {
 // Run connects to the primary and serves requests. Reconnects on disconnect.
 // Blocks until ctx is cancelled.
 //
-// Reconnect schedule: 1s → 2s → 4s → 8s → 16s → reconnectBackoffCeiling
-// (30s by default), all jittered in [0.75x, 1.25x). Any successful session
-// resets backoff to 1s.
-//
-// ARCH-D6 (Round 177) circuit breaker: once runOnce fails consecutively
-// circuitBreakerThreshold times with no intervening success, the backoff
-// floor jumps to circuitBreakerBackoff (5 min) and a single breaker-tripped
-// WARN is emitted. Subsequent failures stay at the 5 min floor with no
-// repeated WARN — this cuts log noise on mis-configured primaries from
-// every ~30s to every 5 min while still auto-recovering on the first
-// success. The per-attempt "connector disconnected" WARN continues to
-// fire so operators can still see each failure reason.
+// Reconnect schedule: 1s → 2s → … → reconnectBackoffCeiling, all jittered in
+// [0.75x, 1.25x); any successful session resets backoff to 1s. After
+// circuitBreakerThreshold consecutive failures the floor jumps to
+// circuitBreakerBackoff with a single breaker-tripped WARN; the first
+// success clears it. The per-attempt "connector disconnected" WARN still fires.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
 	connectorBackoffMillis.Set(backoff.Milliseconds())
@@ -256,18 +173,14 @@ func (c *Connector) Run(ctx context.Context) {
 		if err != nil {
 			slog.Warn("connector disconnected", "url", c.cfg.URL, "err", err)
 		}
-		// Track consecutive failures for the circuit breaker. A
-		// "successful session" here means we connected and stayed up
-		// long enough that runOnce returned connected=true, even if the
-		// eventual disconnect surfaced an error.
+		// A "successful session" means runOnce returned connected=true, even
+		// if the eventual disconnect surfaced an error.
 		if connected {
 			consecutiveFailures = 0
 			if circuitTripped {
 				slog.Info("connector circuit breaker reset after successful connection", "url", c.cfg.URL)
 				circuitTripped = false
 			}
-			// Reset backoff after a successful session so reconnect
-			// after sleep/restart is fast (1s) rather than up to 30s.
 			backoff = time.Second
 			connectorBackoffMillis.Set(backoff.Milliseconds())
 		} else {
@@ -286,19 +199,16 @@ func (c *Connector) Run(ctx context.Context) {
 				}
 			}
 		}
-		// Jitter the sleep so many connectors restarted together (e.g. fleet
-		// SIGHUP) don't hammer the primary on aligned deadlines. backoff
-		// still doubles deterministically; we only scatter wall-time.
+		// Jitter so many connectors restarted together (e.g. fleet SIGHUP)
+		// don't hammer the primary on aligned deadlines.
 		timer := time.NewTimer(osutil.JitterBackoff(backoff))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
-			// Only double within the normal 1s→30s ceiling. Once the
-			// breaker has tripped, backoff stays pinned at
-			// circuitBreakerBackoff until the next successful connect
-			// clears it.
+			// Double only within the normal ceiling; once tripped, backoff stays
+			// pinned at circuitBreakerBackoff until the next successful connect.
 			if backoff < circuitBreakerBackoff {
 				backoff = min(backoff*2, reconnectBackoffCeiling)
 				connectorBackoffMillis.Set(backoff.Milliseconds())
@@ -307,14 +217,10 @@ func (c *Connector) Run(ctx context.Context) {
 	}
 }
 
-// connectorTLSConfig builds the TLS config used for the wss:// dial. The TLS
-// floor (1.2) is always pinned so a compromised segment cannot force a weaker
-// protocol. When insecure is true the operator has explicitly opted out of
-// certificate verification (config validation requires upstream.insecure=true
-// to even reach a ws:// / self-signed wss:// host), so we honour the flag by
-// setting InsecureSkipVerify. Previously the flag was carried through config
-// and copied into Config.Insecure but never consumed here, silently violating
-// the operator's contract. R20260603150052-GO-3 (#1711).
+// connectorTLSConfig builds the TLS config for the wss:// dial. The 1.2 floor
+// is always pinned so a compromised segment cannot force a weaker protocol;
+// insecure (operator opt-in via upstream.insecure=true) skips certificate
+// verification only (#1711).
 func connectorTLSConfig(insecure bool) *tls.Config {
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS12,
@@ -325,42 +231,29 @@ func connectorTLSConfig(insecure bool) *tls.Config {
 func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
-		// Pin TLS floor so downgraded clients can't be forced onto a weaker
-		// protocol via a compromised network segment. wss:// is already
-		// required by config validation. When operators opt into insecure
-		// mode the floor is kept but certificate verification is skipped —
-		// see connectorTLSConfig. R20260603150052-GO-3 (#1711).
+		// TLS 1.2 floor pinned; insecure mode only skips cert verification (see connectorTLSConfig).
 		TLSClientConfig: connectorTLSConfig(c.cfg.Insecure),
 	}
 	conn, _, dialErr := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if dialErr != nil {
 		return false, fmt.Errorf("dial: %w", dialErr)
 	}
-	// R188-SEC-L2: surface operator signal when tokens are transmitted
-	// over plaintext ws:// (requires config.upstream.insecure=true to pass
-	// validation). A single warn per successful dial is enough for ops
-	// dashboards to catch forgotten insecure mode without spamming the
-	// journal on reconnect loops.
+	// Surface operator signal when the token goes over plaintext ws://
+	// (requires upstream.insecure=true). One warn per successful dial.
 	if strings.HasPrefix(c.cfg.URL, "ws://") {
 		slog.Warn("upstream connector: transmitting token over plaintext ws:// — set upstream.insecure=false and use wss:// for production")
 	}
-	// R20260603150052-GO-3 (#1711): when insecure mode skips certificate
-	// verification on a wss:// dial, surface it the same way as the ws://
-	// warning so a forgotten insecure flag is visible in ops journals.
+	// Same signal for a wss:// dial with certificate verification disabled (#1711).
 	if c.cfg.Insecure && strings.HasPrefix(c.cfg.URL, "wss://") {
 		slog.Warn("upstream connector: TLS certificate verification disabled (upstream.insecure=true) — set upstream.insecure=false for production")
 	}
-	// Bound inbound frame size so a malicious or buggy primary cannot
-	// exhaust memory with a single huge message. Matches the primary side's
-	// ReverseConn limit (reverseserver.go) via the shared cap (#2084).
+	// Bound inbound frame size so a malicious or buggy primary cannot exhaust
+	// memory; matches the primary side's ReverseConn limit (#2084).
 	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
-	// gorilla/websocket's Conn.Close is documented for one concurrent
-	// reader and one concurrent writer but not for concurrent Close calls.
-	// The cancel-watchdog goroutine below calls conn.Close on ctx.Done, and
-	// the deferred close on function exit would race with it. Serialize
-	// both paths through a sync.Once so exactly one Close ever fires.
-	// R60-GO-M5.
+	// gorilla/websocket does not document concurrent Close calls; the
+	// cancel-watchdog goroutine below and the deferred close would race, so
+	// serialize both through a sync.Once.
 	var closeOnce sync.Once
 	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
 	defer closeConn()
@@ -376,13 +269,9 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		}
 	}()
 
-	// Register. Sprint 6b of the multi-backend RFC: auto-derive
-	// Capabilities from the locally-registered backend.Profile set so
-	// the primary's selectNodeForBackend can answer "does this node
-	// host kiro?" without operator-supplied YAML caps. Each enabled
-	// profile contributes its RequiredNodeCaps; we union and sort for
-	// deterministic on-the-wire output (eases packet capture review
-	// and primary-side log diffing).
+	// Register. Capabilities are derived from the locally-registered
+	// backend.Profile set (union of RequiredNodeCaps, sorted for deterministic
+	// wire output) so the primary's selectNodeForBackend needs no operator caps.
 	reg := node.ReverseMsg{
 		Type:         "register",
 		NodeID:       c.cfg.NodeID,
@@ -395,10 +284,8 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("register write: %w", err)
 	}
 
-	// SetReadDeadline error means the underlying net.Conn is already torn
-	// down — returning early is correct because ReadJSON below would block
-	// forever without a deadline. The same applies to the clear below and
-	// the pong-path deadlines downstream.
+	// A SetReadDeadline error means the net.Conn is already torn down;
+	// ReadJSON would block forever without a deadline.
 	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return false, fmt.Errorf("set register read deadline: %w", err)
 	}
@@ -421,9 +308,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// ReadDeadline resets on any pong response from the primary.
 	const wsReadTimeout = 90 * time.Second
 	conn.SetPongHandler(func(string) error {
-		// SetReadDeadline error here means the conn was torn down between
-		// the pong arrival and our refresh; surface it so the outer
-		// ReadJSON loop exits via its error path instead of blocking.
+		// Surface the error so the outer ReadJSON loop exits instead of blocking.
 		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 	})
 	if err := conn.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
@@ -433,12 +318,8 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	return true, c.handleConn(ctx, conn)
 }
 
-// pingOnce runs a single WebSocket-level ping under writeMu and closes the
-// conn on any failure. Returns true if the ping succeeded (caller keeps the
-// ticker running), false if the conn was torn down (caller returns).
-// Extracted from the ping-loop body so defer writeMu.Unlock() covers every
-// exit path — the inline form had three separate manual Unlock sites that
-// were easy to miss when adding a new failure branch.
+// pingOnce sends one WebSocket-level ping under writeMu and closes the conn
+// on any failure. Returns false if the conn was torn down (caller returns).
 func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -453,17 +334,10 @@ func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	return true
 }
 
-// marshalResultBufPool reuses bytes.Buffer + json.Encoder pairs so the
-// reflect-based encodeState scratch is not freshly allocated for every
-// reverse-RPC reply. Each handleRequest path (ListSessions / Discover /
-// Preview / EventEntriesSince / Status maps / etc.) calls marshalResult
-// at least once, and a busy primary fans out 5-50 calls/s; pooling the
-// scratch buffer cuts ~1 alloc/call at this rate. R246-PERF-10.
-//
-// Buffers larger than marshalResultMaxRetainBytes are dropped on Put so
-// a one-off megabyte payload (e.g. a large EventEntriesSince response)
-// can't pin retained heap forever for steady-state callers that only
-// ever marshal small status maps.
+// marshalResultBufPool reuses bytes.Buffer + json.Encoder scratch across
+// reverse-RPC replies (a busy primary fans out 5-50 calls/s). Buffers above
+// marshalResultMaxRetainBytes are dropped on Put so one large payload cannot
+// pin retained heap for steady-state small replies.
 var marshalResultBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
@@ -471,29 +345,15 @@ var marshalResultBufPool = sync.Pool{
 const marshalResultMaxRetainBytes = 64 * 1024
 
 // sanitizeWorkspacePath validates and canonicalises a remote-supplied
-// workspace / cwd path. It centralises the EvalSymlinks + Clean + IsAbs
-// + allowed-root prefix gate that previously lived inline in the "send",
-// "takeover", and "close_discovered" reverse-RPC branches. R237-CR-6 (#709).
+// workspace / cwd path: EvalSymlinks + Clean + IsAbs + allowed-root prefix
+// gate shared by the send / takeover / close_discovered branches (#709).
+// kind labels error messages; tolerateMissing downgrades fs.ErrNotExist from
+// EvalSymlinks to the cleaned syntactic path (close_discovered runs after
+// the CLI exited and its CWD may be gone).
 //
-// Contract:
-//   - raw is the remote-supplied path (already non-empty by caller).
-//   - kind is the human-readable label used in error messages, e.g.
-//     "workspace", "takeover cwd", "close_discovered cwd".
-//   - tolerateMissing controls whether fs.ErrNotExist from EvalSymlinks
-//     is downgraded to "use the cleaned syntactic path". close_discovered
-//     sets this true because the CWD frequently vanishes after the Claude
-//     CLI has exited; send/takeover keep it false because they expect the
-//     directory to still exist.
-//
-// Caller responsibility: invoke session.ValidateRemoteWorkspacePath(raw)
-// FIRST so syntactic traversal / control-byte / non-absolute inputs are
-// rejected before they hit filepath.Clean (which silently folds
-// `/home/../etc` into `/etc`). Caller must also enforce the empty-
-// defaultWorkspace policy (refuse vs. fall back) since send/takeover
-// refuse but close_discovered tolerates — that policy lives at the call
-// site, not here. R68-SEC-M2.
-//
-// Returns the canonical absolute path on success.
+// Callers must run session.ValidateRemoteWorkspacePath(raw) FIRST so
+// traversal / control-byte / relative inputs are rejected before Clean folds
+// `/home/../etc` into `/etc`, and must apply their own empty-defaultWorkspace policy.
 func (c *Connector) sanitizeWorkspacePath(raw, kind string, tolerateMissing bool) (string, error) {
 	cleaned := filepath.Clean(raw)
 	resolved, err := filepath.EvalSymlinks(cleaned)
@@ -518,14 +378,10 @@ func marshalResult(v any) (json.RawMessage, error) {
 	buf := marshalResultBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	enc := json.NewEncoder(buf)
-	// json.Encoder.Encode appends a trailing '\n' the upstream RPC reader
-	// does not expect; trim before returning so the wire format matches
-	// the prior json.Marshal output exactly.
+	// Encode appends a trailing '\n' the RPC reader does not expect; trimmed below.
 	if err := enc.Encode(v); err != nil {
-		// On error, Reset clears any partially-written bytes (no poison can
-		// survive), so return the original buffer to the pool instead of
-		// discarding it — discarding shrinks the pool's effective size by one
-		// on every error. Mirror the happy-path oversized-drop policy.
+		// Reset clears partial output, so the buffer is safe to return to the
+		// pool (same oversized-drop policy as the happy path).
 		buf.Reset()
 		if buf.Cap() <= marshalResultMaxRetainBytes {
 			marshalResultBufPool.Put(buf)
@@ -544,8 +400,6 @@ func marshalResult(v any) (json.RawMessage, error) {
 	if buf.Cap() <= marshalResultMaxRetainBytes {
 		marshalResultBufPool.Put(buf)
 	} else {
-		// Drop oversized buffers so a single huge response doesn't pin
-		// retained heap for the lifetime of the pool.
 		marshalResultBufPool.Put(new(bytes.Buffer))
 	}
 	return cp, nil

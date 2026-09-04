@@ -1,42 +1,26 @@
-// Package runtelemetry owns the cross-subsystem run lifecycle event types
-// shared between cron, sysession, and (future) planner / system schedulers.
-//
-// Why a dedicated package: cron and sysession historically each defined
-// their own RunState / ErrorClass / TriggerKind / *RunStartedEvent /
-// *RunEndedEvent. The dashboard hub then exposed two parallel broadcast
-// methods (BroadcastCronRun* / BroadcastDaemonRun*) that did 95% the same
-// thing. Centralising the event vocabulary lets both producers register a
-// single Broadcaster, and lets new subsystems plug in without growing the
-// hub surface.
+// Package runtelemetry owns the run lifecycle event vocabulary shared by
+// cron, sysession and future schedulers, so all producers register a single
+// Broadcaster instead of growing the hub surface per subsystem.
 //
 // Wire compatibility — IMPORTANT: every constant's string value IS the WS
-// payload "state" / "error_class" / "trigger" field. There is no encoding
-// step. Values are deliberately chosen to match the pre-merge cron and
-// sysession wires verbatim, so existing dashboard.js handlers keep working
-// without a coordinated frontend rev.
+// payload "state" / "error_class" / "trigger" field; there is no encoding
+// step, and dashboard.js keys off these literals.
 //
-// This package MUST NOT import any other internal/* package; it is a
-// leaf-level vocabulary package.
+// This package MUST NOT import any other internal/* package.
 package runtelemetry
 
 // Subsystem identifies the producer of a run event so a single broadcaster
-// can route to the right per-subsystem WS payload (cron_run_* vs
-// daemon_run_*) and select the right OwnerID sanitiser.
+// can route to the right WS payload and OwnerID sanitiser.
 type Subsystem string
 
 const (
 	SubsystemCron      Subsystem = "cron"
 	SubsystemSysession Subsystem = "sysession"
-	// Reserved (not yet emitted by any producer):
-	//   SubsystemPlanner  — future planner-auto-start scheduler
-	//   SubsystemSystem   — future system-session daemon orchestrator
+	// Reserved, not yet emitted: SubsystemPlanner, SubsystemSystem.
 )
 
-// RunState is the terminal classification of a single run.
-//
-// Values are wire-stable; both cron and sysession already use these
-// strings on the wire pre-merge. New states require a coordinated wire
-// schema bump and dashboard.js update.
+// RunState is the terminal classification of a single run. Values are
+// wire-stable; new states need a coordinated dashboard.js update.
 type RunState string
 
 const (
@@ -47,20 +31,11 @@ const (
 	RunStateCanceled  RunState = "canceled"
 )
 
-// ErrorClass is the machine-readable failure dimension. Each constant's
-// string value IS the WS payload `error_class` field — no encoding step.
-//
-// Naming convention:
-//   - Cross-subsystem (shared semantics): no prefix.
-//     ("canceled", "deadline_exceeded", "panic", "")
-//   - Subsystem-specific: value mirrors the existing pre-merge wire string
-//     verbatim. "session_error" stays "session_error", NOT
-//     "cron.session_error" — the dashboard JS already keys off these
-//     literals and changing the wire is out-of-scope for this RFC.
-//
-// Adding a new ErrorClass MUST update wire_stability_test.go to re-pin
-// the freeze. Two constants with the same wire string is a test failure
-// (enforced by wire_stability_test).
+// ErrorClass is the machine-readable failure dimension (wire value).
+// Cross-subsystem classes carry no prefix; subsystem-specific ones keep
+// their wire string verbatim ("session_error", NOT "cron.session_error").
+// Adding a class MUST update wire_stability_test.go; two constants with the
+// same wire string is a test failure.
 type ErrorClass string
 
 const (
@@ -69,40 +44,32 @@ const (
 	ErrClassCanceled         ErrorClass = "canceled"
 	ErrClassPanic            ErrorClass = "panic"
 
-	// cron-specific (wire values match current cron package).
+	// cron-specific.
 	ErrClassCronSessionError       ErrorClass = "session_error"
 	ErrClassCronSendError          ErrorClass = "send_error"
 	ErrClassCronWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassCronWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassCronOverlapSkipped     ErrorClass = "overlap_skipped"
 
-	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): the two
-	// failure shapes of a run-once cloud job. Distinct classes because they
-	// differ in replay safety — "sandbox_failed" is the CLI's own attested
-	// failure (failed-clean, replay reasonably safe); "sandbox_transport"
-	// means the stream broke without attestation (failed-transport, §6.2
-	// containment applies and the dashboard badge goes red, RFC §7.2).
-	// success needs no class. RunState stays within the existing wire set
-	// (failed) — the three-state badge derives from error_class, avoiding
-	// a coordinated RunState wire bump.
+	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): distinct
+	// because they differ in replay safety — "sandbox_failed" is the CLI's
+	// attested failure (replay reasonably safe); "sandbox_transport" means
+	// the stream broke without attestation (§6.2 containment, red badge).
+	// RunState stays "failed"; the badge derives from error_class.
 	ErrClassCronSandboxFailed    ErrorClass = "sandbox_failed"
 	ErrClassCronSandboxTransport ErrorClass = "sandbox_transport"
-	// ErrClassCronSandboxUnavailable: job declared placement=sandbox but
-	// the scheduler has no sandbox executor wired (config missing /
-	// disabled). Permanent config error, not a transient failure.
+	// ErrClassCronSandboxUnavailable: placement=sandbox but no sandbox
+	// executor wired. Permanent config error, not a transient failure.
 	ErrClassCronSandboxUnavailable ErrorClass = "sandbox_unavailable"
 
-	// sysession-specific (wire values match current sysession package).
+	// sysession-specific.
 	ErrClassSysessionUpstream   ErrorClass = "upstream"
 	ErrClassSysessionValidation ErrorClass = "validation"
 )
 
-// TriggerKind names how a run was initiated.
-//
-// TriggerCatchup is reserved for a future missed-schedule replay path
-// (cron P3); no production code emits it today. Consumers must treat
-// unknown trigger strings as forward-compatible and not assume the set
-// is closed.
+// TriggerKind names how a run was initiated. TriggerCatchup is reserved for
+// a future missed-schedule replay path; consumers must treat unknown
+// trigger strings as forward-compatible.
 type TriggerKind string
 
 const (

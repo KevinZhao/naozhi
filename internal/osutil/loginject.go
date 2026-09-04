@@ -5,32 +5,16 @@ import (
 	"unicode/utf8"
 )
 
-// IsLogInjectionRune reports whether r is a Unicode codepoint that would
-// corrupt structured log output or terminal rendering when embedded in a
-// user-supplied attribute. Covers:
+// IsLogInjectionRune reports whether r is a Unicode codepoint that corrupts
+// structured log output or terminal rendering when embedded in a
+// user-supplied attribute: C1 controls (U+0080..U+009F, which a byte-level
+// `r < 0x20` filter misses because they encode as two UTF-8 bytes), bidi
+// override/embedding (U+202A..U+202E) and isolate (U+2066..U+2069) marks that
+// can reorder a log line under `tail -f` / `journalctl`, and LS/PS
+// (U+2028/U+2029), which some JSON log consumers treat as line terminators.
 //
-//   - C1 controls (U+0080..U+009F). These encode as 2-byte UTF-8 starting
-//     with 0xC2 (first byte >= 0x80), so a byte-level `r < 0x20 || r == 0x7f`
-//     loop never catches them. Some terminals still interpret the legacy
-//     ANSI C1 semantics (NEL, CSI, etc) and flip output.
-//   - Bidi override / embedding (U+202A..U+202E). Let an attacker flip the
-//     on-screen order of a log line under `tail -f` / `journalctl`, masking
-//     fabricated content under the real entry. Also folded into
-//     terminal emulators that render bidi.
-//   - Bidi isolate (U+2066..U+2069). Same class as the overrides but newer
-//     (Unicode 6.3). Ship-worthy log sanitizers must cover both.
-//   - LS/PS (U+2028 / U+2029). Some JSON log consumers treat these as line
-//     terminators → a single chat-ID or error string can split into two log
-//     entries.
-//
-// Callers that also need to reject C0 controls (< 0x20) should gate on
-// `r < 0x20 || r == 0x7f` separately — this helper intentionally targets
-// only the class that byte-level filters miss.
-//
-// The policy mirrors internal/server/dashboard_cron.go (the original home
-// of this function) and is the canonical source for any new code that
-// needs to sanitize an attacker-influenced string before it reaches a
-// slog attr or EventLog entry.
+// C0 controls are NOT covered; callers gate `r < 0x20 || r == 0x7f`
+// separately. Canonical policy for sanitizing attacker-influenced strings.
 func IsLogInjectionRune(r rune) bool {
 	switch {
 	case r >= 0x80 && r <= 0x9F: // C1 controls
@@ -46,34 +30,20 @@ func IsLogInjectionRune(r rune) bool {
 }
 
 // SanitizeForLog returns a copy of s with every byte or rune that would
-// corrupt structured log output or terminal rendering replaced by the
-// single-byte literal "_". Caps the result at maxLen bytes; pass 0 to
-// disable the cap.
+// corrupt structured log output or terminal rendering replaced by "_":
+// C0 controls and DEL (including tab, slog.TextHandler's key/value
+// separator) and everything IsLogInjectionRune flags. Caps the result at
+// maxLen bytes; 0 disables the cap.
 //
-// Rules:
-//
-//   - C0 controls and DEL: `< 0x20` or `== 0x7f` → "_". Includes tab (0x09)
-//     because slog.TextHandler uses tab as the key/value separator; an
-//     embedded tab would split one attr into two.
-//   - Any rune flagged by IsLogInjectionRune → "_" (C1 / bidi / LS/PS).
-//
-// Intentionally lossy: this function is not for storing user-visible
-// display content — it is for taking attacker-influenced strings (err.Error,
-// chat-ID fragments, remote RPC error bodies) and rendering them safe as
-// slog attribute values, EventLog system-event summaries, and similar log
-// sinks. For display-quality sanitization that preserves CJK / emoji,
-// call sites should continue to use their own policy.
-//
-// Fast path: when the input is already ASCII-clean and within the cap,
-// returns s unchanged (no allocation). This is the common case — error
-// messages from Go stdlib / our own `fmt.Errorf` wrappers are pure ASCII.
+// Intentionally lossy: for attacker-influenced strings (err.Error, chat-ID
+// fragments, remote RPC error bodies) headed to slog attrs / EventLog, not
+// for user-visible display. ASCII-clean input within the cap is returned
+// unchanged without allocation.
 func SanitizeForLog(s string, maxLen int) string {
 	if s == "" {
 		return s
 	}
-	// Fast path: scan bytes. If every byte is ASCII-printable (0x20..0x7E)
-	// return unchanged or — when oversized — slice directly. This covers
-	// every error string produced by Go stdlib or our own Errorf wrappers.
+	// Fast path: ASCII-printable input needs no rewriting.
 	clean := true
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -83,18 +53,13 @@ func SanitizeForLog(s string, maxLen int) string {
 		}
 	}
 	if clean {
-		// R243-GO-9: ASCII-clean superlong used to fall to strings.Map
-		// just to truncate, walking every byte through the slow-path
-		// mapper. Slice directly — every byte is single-rune ASCII so
-		// the cap lands on a rune boundary without the rune-walk-back
-		// the slow path needs (utf8.RuneStart loop below).
+		// Every byte is single-rune ASCII, so a byte cap lands on a rune boundary.
 		if maxLen > 0 && len(s) > maxLen {
 			return s[:maxLen]
 		}
 		return s
 	}
-	// Slow path: rewrite unsafe bytes/runes. Use strings.Map so we get
-	// correct UTF-8 decoding for the bidi / LS/PS class.
+	// Slow path: strings.Map decodes UTF-8 correctly for the bidi / LS/PS class.
 	mapped := strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return '_'
@@ -105,28 +70,16 @@ func SanitizeForLog(s string, maxLen int) string {
 		return r
 	}, s)
 	if maxLen > 0 && len(mapped) > maxLen {
-		// Byte-level truncate, then walk back to the nearest rune
-		// boundary so a multi-byte CJK character isn't split mid-rune
-		// (which would emit an invalid-UTF-8 sequence into structured
-		// log sinks).  The cap itself is a defense against oversized
-		// attack strings.
-		// Walk back to the nearest rune-start byte instead of calling
-		// utf8.ValidString in a loop — utf8.ValidString is O(n) per call,
-		// turning the truncation into O(n²) for adversarial multi-byte
-		// suffixes. utf8.RuneStart(b) ↔ b&0xC0 != 0x80 identifies a UTF-8
-		// continuation byte; at most 3 continuation bytes precede a rune
-		// start, so this loop is O(1)…O(4). R244-GO-P3.
+		// Byte-level truncate, then walk back over UTF-8 continuation bytes so a
+		// multi-byte rune is not split (utf8.RuneStart is O(1)..O(4) per cap;
+		// utf8.ValidString in a loop would be O(n²) on adversarial input).
 		mapped = mapped[:maxLen]
 		for len(mapped) > 0 && !utf8.RuneStart(mapped[len(mapped)-1]) {
 			mapped = mapped[:len(mapped)-1]
 		}
-		// The walk-back above only strips continuation bytes (0x80..0xBF).
-		// If the cap lands right after a multi-byte lead byte but before its
-		// continuation bytes, the loop stops on that isolated lead byte
-		// (utf8.RuneStart is true for lead bytes), leaving an incomplete rune
-		// that is invalid UTF-8. Detect that case via DecodeLastRuneInString —
-		// an incomplete trailing rune decodes to (RuneError, 1) — and drop the
-		// dangling lead byte too. R20260608-LB-1 (#1943).
+		// The walk-back stops on a lead byte (RuneStart is true for leads), which
+		// leaves an incomplete rune if the cap fell right after it; an incomplete
+		// trailing rune decodes as (RuneError, 1), so drop that byte too (#1943).
 		if r, size := utf8.DecodeLastRuneInString(mapped); r == utf8.RuneError && size == 1 {
 			mapped = mapped[:len(mapped)-1]
 		}

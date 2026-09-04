@@ -1,13 +1,8 @@
 // Package kirojsonl implements history.Source on top of the kiro CLI's
-// per-session JSONL transcripts under ~/.kiro/sessions/cli.
+// per-session JSONL transcripts, ~/.kiro/sessions/cli/<sessionId>.jsonl.
 //
-// Unlike Claude Code, kiro persists exactly one .jsonl per session keyed
-// by the session UUID with no project-slug subdirectory:
-//
-//	~/.kiro/sessions/cli/<sessionId>.jsonl
-//
-// Each line is a self-describing v1 record with a "kind" tag. Sprint 1c
-// only consumes the two kinds that map cleanly to a chat history view:
+// Each line is a v1 record with a "kind" tag; only Prompt and
+// AssistantMessage are consumed:
 //
 //	{"version":"v1","kind":"Prompt","data":{"message_id":"...",
 //	  "content":[{"kind":"text","data":"..."}],
@@ -15,18 +10,10 @@
 //	{"version":"v1","kind":"AssistantMessage","data":{"message_id":"...",
 //	  "content":[{"kind":"text","data":"..."}]}}
 //
-// Other kinds (tool_use, agent_message variants, etc.) are silently
-// skipped so the schema can evolve without breaking pagination — a
-// future sprint can extend the type-mapping without touching call sites.
-//
-// Why a callback for the session ID instead of a snapshot:
-//
-//	Like claudejsonl, the session ID can change mid-pagination (kiro
-//	`session/load` followed by a fresh `session/new` swap, etc.). The
-//	callback is re-invoked on every LoadBefore call so the next page
-//	always reads from the latest jsonl path. Empty string ("") means
-//	"no kiro session bound yet" — LoadBefore short-circuits to nil
-//	rather than guessing a path.
+// Other kinds are skipped so the schema can evolve without breaking
+// pagination. The session ID comes from a callback re-invoked on every
+// LoadBefore so a session/load swap mid-pagination is seen by the next page;
+// "" means no kiro session bound yet.
 package kirojsonl
 
 import (
@@ -49,29 +36,17 @@ import (
 	"github.com/naozhi/naozhi/internal/history"
 )
 
-// SessionIDFunc returns the kiro session ID for the bound session, or
-// "" when no session has been negotiated yet. Re-evaluated on every
-// LoadBefore call so a session/load transition is observed by the next
-// page request.
+// SessionIDFunc returns the kiro session ID for the bound session, or "" when
+// none is negotiated yet. Re-evaluated on every LoadBefore call.
 type SessionIDFunc func() string
 
-// maxFileBytes caps how many bytes LoadBefore reads from a single
-// session jsonl. The default mirrors claudejsonl's per-session safety
-// limit so a runaway transcript can't OOM the dashboard. Picked at
-// package level so tests can shrink it without exporting state.
+// maxFileBytes caps how many bytes LoadBefore reads from one session jsonl.
 const maxFileBytes = 16 << 20 // 16 MiB
 
-// ctxCheckEvery is how many parsed lines elapse between context.Done
-// checks during LoadBefore. Trades a tiny constant overhead for prompt
-// cancellation on large jsonl files. 100 mirrors the kiro chunk-rate
-// observation in V5 (≈15 chunks/sec → ~7s of transcript per check).
+// ctxCheckEvery is how many parsed lines elapse between context.Done checks.
 const ctxCheckEvery = 100
 
-// scanBufPool recycles the 64 KiB initial line buffer that bufio.Scanner
-// would otherwise heap-allocate on every LoadBefore call. The dashboard
-// paginates a session by issuing one LoadBefore per page, so a fresh 64 KiB
-// alloc per page is pure churn (mirrors discovery/scanner.go's
-// scanUserPromptBufPool and naozhilog/source.go's bufReaderPool).
+// scanBufPool recycles the 64 KiB initial bufio.Scanner buffer across pages.
 var scanBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 64*1024)
@@ -79,26 +54,19 @@ var scanBufPool = sync.Pool{
 	},
 }
 
-// maxLineBytes is the longest jsonl record the forward scan accepts.
-// Assistant messages can be long, so this is well above bufio.Scanner's
-// 64 KiB default; anything longer (kiro ToolResults reach tens of MiB on
-// a single line) is skipped rather than aborting the scan (#2448).
+// maxLineBytes is the longest jsonl record the scan accepts; longer records
+// (kiro ToolResults reach tens of MiB) are skipped, not fatal (#2448).
 const maxLineBytes = 1 << 20
 
-// lineReaderPool recycles the bufio.Reader that sits between the file and
-// the scanner so an oversized record can be drained and the scan resumed
-// (see parseFile). Pooled for the same per-page churn reason as
-// scanBufPool (mirrors naozhilog/source.go's bufReaderPool).
+// lineReaderPool recycles the bufio.Reader between file and scanner that lets
+// an oversized record be drained and the scan resumed (see parseFile).
 var lineReaderPool = sync.Pool{
 	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
 }
 
-// kindPromptMarker and kindAsstMarker are byte quick-filters: a jsonl line
-// that contains neither cannot decode into a Prompt or AssistantMessage
-// record, so decodeLine can skip it before paying for two json.Unmarshal
-// calls. Hoisted to package scope so the []byte literals do not allocate on
-// every line of the hot scan loop (mirrors discovery/scanner.go's
-// userTypeMarker).
+// kindPromptMarker / kindAsstMarker are byte quick-filters so decodeLine can
+// skip lines that cannot be a Prompt or AssistantMessage before paying for
+// json.Unmarshal. Package scope avoids allocating the literals per line.
 var (
 	kindPromptMarker = []byte(`"kind":"Prompt"`)
 	kindAsstMarker   = []byte(`"kind":"AssistantMessage"`)
@@ -106,31 +74,23 @@ var (
 
 // Source is the kiro JSONL-backed history.Source.
 type Source struct {
-	rootDir   string        // ~/.kiro/sessions/cli — empty disables the source
-	sessionID SessionIDFunc // produces the current kiro session ID
+	rootDir   string // ~/.kiro/sessions/cli — empty disables the source
+	sessionID SessionIDFunc
 }
 
-// New constructs a Source. If rootDir is empty or sessionIDFn is nil,
-// the Source degrades to a zero-result implementation (equivalent to
-// history.Noop) so misconfiguration never produces a nil-pointer panic
-// at call time. Callers always get a non-nil *Source and can rely on
-// LoadBefore to return (nil, nil) in degraded states.
+// New constructs a Source. Empty rootDir or nil sessionIDFn yields a
+// zero-result Source (LoadBefore returns (nil, nil)) rather than a panic.
 func New(rootDir string, sessionIDFn SessionIDFunc) *Source {
 	return &Source{rootDir: rootDir, sessionID: sessionIDFn}
 }
 
-// init registers this backend's factory with cli.Wrapper so any
-// *cli.Wrapper constructed with BackendID="kiro" picks up the kiro
-// jsonl history source automatically. Importing this package anywhere
-// (cmd-level wireup or session.NewRouter side-effect) triggers the
-// registration via Go's init order.
+// init registers the kiro history factory with cli.
 func init() {
 	cli.RegisterHistoryFactory("kiro", factory)
 }
 
-// factory is the cli.HistoryFactoryFn for kiro. Returns
-// cli.NoopHistorySource when the wiring lacks a KiroSessionsDir so
-// misconfig at the router level still yields a non-nil source.
+// factory returns cli.NoopHistorySource when the wiring lacks a
+// KiroSessionsDir so a router-level misconfig still yields a non-nil source.
 func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
 	if deps.KiroSessionsDir == "" {
 		return cli.NoopHistorySource{}
@@ -138,58 +98,40 @@ func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource
 	return New(deps.KiroSessionsDir, s.SessionID)
 }
 
-// kiroRecord is the on-disk wrapper. data is held as RawMessage so the
-// Prompt/AssistantMessage payloads can be decoded into kind-specific
-// shapes without committing to a single schema for every record kind.
+// kiroRecord is the on-disk wrapper; data stays raw for kind-specific decode.
 type kiroRecord struct {
 	Version string          `json:"version"`
 	Kind    string          `json:"kind"`
 	Data    json.RawMessage `json:"data"`
 }
 
-// kiroContentChunk is one element inside a Prompt or AssistantMessage's
-// content array. Only kind=="text" is rendered in the dashboard transcript;
-// thinking / toolUse / toolResult / image chunks are silently dropped to
-// match the Claude Code chat view contract (cc's discovery/history_tail.go
-// assistant arm only surfaces b.Type == "text").
-//
-// Data is held as RawMessage rather than string because non-text chunks
-// carry object payloads ("thinking" → {text, signature, redactedContent},
-// "toolUse" → {toolUseId, name, input}). A `string` field would fail
-// json.Unmarshal on the *whole* content array and silently drop every
-// AssistantMessage that contained a tool_use or thinking block — which is
-// nearly every record in a real kiro session.
+// kiroContentChunk is one element of a Prompt/AssistantMessage content array.
+// Only kind=="text" is rendered; thinking / toolUse / toolResult / image are
+// dropped to match the Claude Code chat view. Data is RawMessage because
+// non-text chunks carry object payloads — a string field would fail the whole
+// content array and drop nearly every real AssistantMessage.
 type kiroContentChunk struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
 }
 
-// kiroMessageData is the shared shape of Prompt.data and
-// AssistantMessage.data. message_id is recorded but unused — the
-// dashboard's UUID dedup uses the synthesised stamp from MergedSource.
+// kiroMessageData is the shared shape of Prompt.data and AssistantMessage.data.
+// message_id is unused; dedup uses the derived UUID.
 type kiroMessageData struct {
 	MessageID string             `json:"message_id"`
 	Content   []kiroContentChunk `json:"content"`
 	Meta      *kiroMessageMeta   `json:"meta,omitempty"`
 }
 
-// kiroMessageMeta carries the per-message timestamp. Only Prompt
-// records observed with meta in V2; AssistantMessage records may omit
-// meta and their entries are skipped because we cannot fabricate a
-// time the way naozhilog can.
+// kiroMessageMeta carries the per-message timestamp. AssistantMessage records
+// typically omit meta; see parseFile for how their time is borrowed.
 type kiroMessageMeta struct {
 	Timestamp int64 `json:"timestamp"` // unix seconds
 }
 
-// LoadBefore returns up to `limit` entries strictly older than beforeMS
-// from the kiro session's jsonl file, in chronological order
-// (oldest → newest). When beforeMS <= 0 the upper bound is dropped and
-// callers receive the newest `limit` entries.
-//
-// Errors are returned to the caller as informational signals: the
-// underlying contract treats them as end-of-history (history.Source
-// godoc), so an unreadable jsonl falls through to MergedSource's
-// non-fatal logging path rather than aborting pagination.
+// LoadBefore returns up to `limit` entries strictly older than beforeMS from
+// the kiro session's jsonl, oldest → newest; beforeMS <= 0 drops the bound.
+// Errors are informational (history.Source treats them as end-of-history).
 func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -202,14 +144,9 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 		return nil, nil
 	}
 
-	// Defence-in-depth: SessionIDFunc is exported, so a future caller
-	// (or a test) might supply a path-traversal sid like "../etc/passwd"
-	// that filepath.Join would happily resolve outside rootDir. Today the
-	// only producer is ManagedSession.SessionID, but the public API
-	// contract has no validation — reject any sid containing a path
-	// separator or "..". Treat the bad sid as "no session" rather than an
-	// error so callers paginate to the noop tail without surfacing the
-	// internal validation failure to dashboard users.
+	// SessionIDFunc is exported and filepath.Join would resolve a traversal
+	// sid outside rootDir: reject any sid containing a path separator or "..".
+	// A bad sid is "no session", not an error.
 	if strings.ContainsAny(sid, `/\`) || strings.Contains(sid, "..") {
 		slog.Warn("kirojsonl: refusing sid containing path separator or '..'",
 			"sid_len", len(sid))
@@ -226,66 +163,43 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	}
 	defer f.Close()
 
-	// Read sequentially with a per-file byte cap. Kiro appends in
-	// chronological order so we collect all entries that satisfy the
-	// upper bound, then trim to the newest `limit` after sort. A reverse
-	// reader would be marginally cheaper for huge files but adds risk
-	// against partial-write tails (the writer is still appending while
-	// we read); a forward stream that silently drops the last malformed
-	// record is the simpler robust approach.
+	// Forward stream with a per-file byte cap; a reverse reader would be
+	// cheaper on huge files but is fragile against partial-write tails.
 	entries := s.parseFile(ctx, f, beforeMS)
 
-	// parseFile already returns chronological order; sort defensively in
-	// case kiro ever interleaves out-of-order timestamps (currently it
-	// does not).
+	// parseFile returns chronological order; sort defensively.
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].Time < entries[j].Time
 	})
 
 	if len(entries) > limit {
-		// Keep the newest `limit` entries — pagination is a tail read.
 		entries = entries[len(entries)-limit:]
 	}
 	return entries, nil
 }
 
-// parseFile streams the jsonl file, decoding each line into an
-// EventEntry that satisfies the beforeMS upper bound. Unknown kinds,
-// blank lines, malformed JSON, and missing timestamps are all
-// individually skipped — a bad single line never poisons the rest of
-// the file. Returns entries in arrival order (chronological per kiro's
-// append contract).
+// parseFile streams the jsonl file, decoding each line into an EventEntry that
+// satisfies the beforeMS bound. Unknown kinds, blank lines, malformed JSON and
+// missing timestamps are skipped individually. Returns arrival order.
 //
-// Real-world kiro AssistantMessage records do not carry meta.timestamp
-// at all (only the originating Prompt does). To surface them in the
-// dashboard, parseFile remembers the most recent Prompt ts and grants
-// each subsequent AssistantMessage that ts plus a monotonic 1 ms
-// offset. The offset stays well under 1000 (kiro Prompt timestamps are
-// unix seconds, so adjacent prompts are ≥1000 ms apart) so chronology
-// across prompts is preserved.
+// Real kiro AssistantMessage records carry no meta.timestamp (only the Prompt
+// does), so parseFile remembers the most recent Prompt ts and grants each
+// following AssistantMessage that ts plus a monotonic 1 ms offset. Prompt
+// timestamps are unix seconds, so the offset never crosses into the next
+// prompt.
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []clievent.EventEntry {
-	// Read the LAST maxFileBytes, not the first. kiro appends chronologically
-	// to a single rotation-free file, so a long session can exceed the cap;
-	// reading from offset 0 would surface only the oldest prompts and the
-	// newest messages would never be parsed. Seek to the tail window and drop
-	// the first (likely partial) line so the cap covers recent bytes.
-	//
-	// Only drop the first line when it is genuinely a half-record straddling
-	// the seek boundary. Probe the byte immediately before the window start:
-	// if it is '\n', the window begins exactly on a record boundary and the
-	// first line is a complete, valid JSONL record — dropping it would lose
-	// the oldest in-window turn (kirojsonl is that turn's only source).
-	// When it IS a partial, the head backscan below hands back the bytes
-	// before the seek point so the straddling record can be reassembled and
-	// parsed like any other line instead of being dropped.
+	// Read the LAST maxFileBytes: kiro appends chronologically to a single
+	// rotation-free file, so reading from 0 would never reach the newest
+	// turns. The first line is dropped only when the byte before the window
+	// is not '\n' (a genuine half-record); the head backscan then hands back
+	// the bytes before the seek point so that record can be reassembled.
 	skipPartialFirstLine := false
 	// anchor seeds the assistant-timestamp borrow state from the discarded
 	// head (#2332), see headPromptAnchor.
 	var anchor headAnchor
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
 		off := fi.Size() - maxFileBytes
-		// off > 0 here because Size() > maxFileBytes. Read the boundary byte
-		// at off-1; if it is not a newline the first line is a partial.
+		// Size() > maxFileBytes so off > 0; a non-'\n' byte at off-1 means a partial first line.
 		var b [1]byte
 		atBoundary := false
 		if _, err := f.ReadAt(b[:], off-1); err == nil {
@@ -296,20 +210,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			anchor = headPromptAnchor(ctx, f, off)
 		}
 	}
-	// br sits between the file and the scanner so that an oversized record
-	// can be skipped (#2448): bufio.Scanner is unusable after ErrTooLong, so
-	// the rest of the line is drained from br and a fresh scanner resumes on
-	// br without losing any bytes already buffered past the long line.
+	// br lets an oversized record be drained and a fresh scanner resume without
+	// losing buffered bytes (bufio.Scanner is unusable after ErrTooLong) (#2448).
 	br := lineReaderPool.Get().(*bufio.Reader)
 	br.Reset(io.LimitReader(f, maxFileBytes))
 	defer func() {
 		br.Reset(nil)
 		lineReaderPool.Put(br)
 	}()
-	// Allow maxLineBytes lines — bufio.Scanner's default 64 KiB would
-	// silently truncate on token-rich replies. The initial buffer is pooled:
-	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
-	// returning it at zero length recycles the 64 KiB backing array.
+	// The initial buffer is pooled: bufio.Scanner only grows the slice we hand
+	// it, so returning it at zero length recycles the backing array.
 	bufPtr := scanBufPool.Get().(*[]byte)
 	defer func() {
 		b := (*bufPtr)[:0]
@@ -321,21 +231,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 
 	out := make([]clievent.EventEntry, 0, 16)
 	processed := 0
-	// State across lines for assistant-timestamp salvage. Starts from the
-	// head anchor so assistants that precede the first in-window Prompt
-	// (their own Prompt was cut off with the head) are not dropped, and
-	// from that Prompt's global assistant count so the borrowed ts does not
-	// depend on where the seek point happens to fall.
+	// Borrow state starts from the head anchor so assistants preceding the
+	// first in-window Prompt are kept and their borrowed ts matches a
+	// whole-file parse regardless of where the seek point falls.
 	lastPromptMS := anchor.promptMS
 	asstOffset := anchor.asstOffset
 	processLine := func(line []byte) {
 		if len(line) == 0 {
 			return
 		}
-		// Byte quick-filter (#2246): only Prompt / AssistantMessage records
-		// decode into an entry. Skipping everything else here avoids the two
-		// json.Unmarshal calls decodeLine would otherwise spend on tool_use,
-		// system, and other kinds that are unconditionally dropped anyway.
+		// Byte quick-filter: only Prompt / AssistantMessage decode into an entry (#2246).
 		if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
 			return
 		}
@@ -344,13 +249,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		if !ok {
 			return
 		}
-		// Maintain the borrow state. A successful Prompt resets the
-		// per-prompt offset; a successful AssistantMessage ticks the
-		// offset so the next assistant in the same prompt window stays
-		// strictly later. Assistants that fall back to their own
-		// meta.timestamp (rare today, but the schema permits it) are
-		// detected by ts != lastPromptMS+1+asstOffset and don't
-		// advance the offset.
+		// A Prompt resets the per-prompt offset; an AssistantMessage that
+		// borrowed its ts ticks it. Assistants with their own meta.timestamp
+		// don't advance the offset.
 		switch entry.Type {
 		case "user":
 			lastPromptMS = entry.Time
@@ -368,20 +269,16 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 
 	if skipPartialFirstLine {
 		if scanner.Scan() {
-			// The first scanned line is the tail of the record straddling the
-			// seek boundary. Reassemble it with the head bytes the backscan
-			// kept so the record is parsed (and advances the borrow state)
-			// exactly as it would be in a whole-file read; with no fragment it
-			// stays dropped.
+			// Reassemble the record straddling the seek boundary with the head
+			// bytes so it parses (and advances the borrow state) exactly as in
+			// a whole-file read; with no fragment it stays dropped.
 			if len(anchor.fragment) > 0 {
 				processLine(append(anchor.fragment, scanner.Bytes()...))
 			}
 		} else if errors.Is(scanner.Err(), bufio.ErrTooLong) {
-			// The straddling partial line is itself oversized. Never Scan this
-			// scanner again: with an error set, bufio.Scanner hands the
-			// buffered 1 MiB prefix back as a final token (split-at-EOF
-			// recovery) and it would reach processLine as if it were a whole
-			// record. Drain the rest of the line and rebuild instead.
+			// The straddling partial line is itself oversized. With an error set,
+			// bufio.Scanner would hand the buffered prefix back as a final token
+			// and it would reach processLine as a whole record; drain and rebuild.
 			if !discardRestOfLine(br) {
 				return out
 			}
@@ -391,9 +288,6 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	}
 	for {
 		for scanner.Scan() {
-			// Cooperative cancellation. Done lookups every ctxCheckEvery
-			// lines keep the cost negligible while still guaranteeing
-			// prompt return on shutdown / dashboard navigation.
 			if processed%ctxCheckEvery == 0 {
 				select {
 				case <-ctx.Done():
@@ -407,20 +301,14 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 		err := scanner.Err()
 		if !errors.Is(err, bufio.ErrTooLong) {
 			if err != nil {
-				// Partial-write tails surface here as bufio errors. Treat as
-				// end-of-file so the merge layer doesn't lose the entries we
-				// already accumulated.
+				// Partial-write tails surface here; treat as EOF so accumulated entries are kept.
 				slog.Debug("kirojsonl: scanner error treated as EOF", "err", err)
 			}
 			return out
 		}
-		// One record exceeds maxLineBytes (#2448). The scanner has consumed
-		// exactly its buffer's worth of the line (no '\n' in it, or it would
-		// have been a token); drop the remainder and resume with a fresh
-		// scanner so the records after it still surface. The oversized
-		// record itself is skipped, as headPromptAnchor skips an oversized
-		// carry. This also covers the partial first line of the tail window
-		// being oversized — the head fragment is simply never reassembled.
+		// One record exceeds maxLineBytes (#2448): drop the remainder and
+		// resume with a fresh scanner so later records still surface. Also
+		// covers an oversized partial first line (fragment never reassembled).
 		if !discardRestOfLine(br) {
 			return out
 		}
@@ -430,8 +318,7 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 }
 
 // discardRestOfLine drops bytes from br up to and including the next '\n'.
-// Returns false when the input ends (or fails) before a newline is seen, in
-// which case nothing further can be scanned.
+// Returns false when the input ends before a newline is seen.
 func discardRestOfLine(br *bufio.Reader) bool {
 	for {
 		_, err := br.ReadSlice('\n')
@@ -449,39 +336,32 @@ func discardRestOfLine(br *bufio.Reader) bool {
 // headBackscanChunk is the read size for headPromptAnchor's reverse walk.
 const headBackscanChunk = 1 << 20 // 1 MiB
 
-// borrowProbeMS is a sentinel lastPromptMS handed to decodeLine while
-// counting head assistants: a record that comes back with exactly
-// borrowProbeMS+1 borrowed its ts (it has no meta.timestamp), which is the
-// only kind the forward scan's asstOffset counts. Real timestamps are unix
-// seconds ×1000, so they can never collide with the sentinel.
+// borrowProbeMS is a sentinel lastPromptMS for decodeLine while counting head
+// assistants: a record returning borrowProbeMS+1 borrowed its ts (no
+// meta.timestamp), the only kind asstOffset counts. Real timestamps are unix
+// seconds ×1000 and cannot collide with it.
 const borrowProbeMS = 1
 
-// headAnchor is the borrow state headPromptAnchor recovers from the
-// discarded head of an oversized session file.
+// headAnchor is the borrow state recovered from the discarded head of an oversized file.
 type headAnchor struct {
 	promptMS   int64  // ts (ms) of the most recent complete Prompt before off; 0 = none
 	asstOffset int64  // borrowed-ts AssistantMessages between that Prompt and off
 	fragment   []byte // head bytes of the record straddling off; nil when none/unknown
 }
 
-// headPromptAnchor walks the discarded head [0, off) backwards and returns
-// the most recent complete Prompt's timestamp plus the number of
-// borrowed-ts assistants that follow it before off. Real kiro sessions write
-// one Prompt followed by many MiB of ToolResults/AssistantMessage, so the
-// tail window frequently holds no Prompt at all; without this anchor every
-// in-window AssistantMessage (which never carries meta.timestamp) would be
-// dropped (#2332). Seeding asstOffset with the global count keeps each
-// assistant's borrowed ts (and thus UUID) identical to a whole-file parse,
-// so it does not drift as kiro appends and off moves. Uses ReadAt so the
-// caller's seek position is untouched. Cancellation or a read error yields
-// the zero anchor — the pre-fix behaviour.
+// headPromptAnchor walks the discarded head [0, off) backwards and returns the
+// most recent complete Prompt's timestamp plus the number of borrowed-ts
+// assistants between it and off. Real sessions write one Prompt followed by
+// MiB of ToolResults, so the tail window often holds no Prompt; without the
+// anchor every in-window AssistantMessage would be dropped (#2332). Seeding
+// asstOffset with the global count keeps borrowed ts (and UUIDs) identical to
+// a whole-file parse. Uses ReadAt so the caller's seek position is untouched;
+// cancellation or a read error yields the zero anchor.
 func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 	var a headAnchor
 	// buf is reused across passes: a chunk plus the carry (each ≤1 MiB).
 	buf := make([]byte, 0, 2*headBackscanChunk)
-	// carry holds the leading fragment of the previously scanned (later)
-	// region up to and including its first '\n', i.e. the tail of a line
-	// whose start lies in the bytes still to be read.
+	// carry is the tail of a line whose start lies in bytes still to be read.
 	var carry []byte
 	var count int64
 	pos := off
@@ -503,10 +383,8 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 		buf = append(buf, carry...)
 		lastNL := bytes.LastIndexByte(buf, '\n')
 		if pos == off && (lastNL >= 0 || chunkStart == 0) {
-			// Bytes after the last newline are the head of the record that
-			// straddles the seek point; parseFile reassembles it. With no
-			// newline in the whole chunk the record's start is unknown, so
-			// the fragment could never form valid JSON — skip it.
+			// Bytes after the last newline are the head of the record straddling
+			// the seek point. With no newline in the chunk its start is unknown.
 			a.fragment = append([]byte(nil), buf[lastNL+1:]...)
 		}
 		// Only complete lines are candidates, newest first.
@@ -514,15 +392,13 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 		for len(region) > 0 {
 			lineStart := bytes.LastIndexByte(region[:len(region)-1], '\n') + 1
 			if lineStart == 0 && chunkStart > 0 {
-				// The line begins in an earlier chunk; it becomes the carry
-				// and is evaluated whole on the next pass.
+				// The line begins in an earlier chunk: it becomes the carry.
 				break
 			}
 			line := region[lineStart : len(region)-1]
 			region = region[:lineStart]
-			// Same quick-filter as the forward scan; the record kind is
-			// decided by decodeLine, not by which marker matched (an
-			// AssistantMessage may embed a {"kind":"Prompt"} chunk).
+			// Same quick-filter as the forward scan; decodeLine decides the kind
+			// (an AssistantMessage may embed a {"kind":"Prompt"} chunk).
 			if !bytes.Contains(line, kindPromptMarker) && !bytes.Contains(line, kindAsstMarker) {
 				continue
 			}
@@ -545,8 +421,7 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 			carry = append(carry[:0], buf...)
 		}
 		if len(carry) > maxLineBytes {
-			// Longer than any line the forward scanner accepts; the record
-			// would be rejected anyway, so stop growing the fragment.
+			// Longer than the forward scanner accepts; stop growing the fragment.
 			carry = carry[:0]
 		}
 		pos = chunkStart
@@ -554,22 +429,15 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 	return a
 }
 
-// decodeLine parses one jsonl record into an EventEntry. Returns
-// (EventEntry{}, false) when the line is unusable (malformed JSON,
-// unknown kind, missing timestamp, or empty content) so the caller can
-// skip without aborting the whole file.
-//
-// lastPromptMS / asstOffset thread the parseFile-level borrow state
-// through so an AssistantMessage with no meta.timestamp inherits its
-// owning Prompt's ts plus a monotonic offset. Pass (0, 0) for the
-// stateless legacy semantics — orphan assistants are then dropped.
+// decodeLine parses one jsonl record into an EventEntry; ok is false for
+// malformed JSON, unknown kind, missing timestamp or empty content.
+// lastPromptMS / asstOffset thread the borrow state so an AssistantMessage
+// with no meta.timestamp inherits its Prompt's ts plus a monotonic offset;
+// (0, 0) drops orphan assistants.
 func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntry, bool) {
 	var rec kiroRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
-		// Silent skip: this is the partial-final-line case during
-		// concurrent writes, plus any future schema additions that
-		// emit non-JSON-friendly lines. Logging at debug rather than
-		// warn so a single mid-write tail doesn't spam ops dashboards.
+		// Debug, not warn: this is the partial-final-line case during concurrent writes.
 		slog.Debug("kirojsonl: skip malformed line", "err", err)
 		return clievent.EventEntry{}, false
 	}
@@ -579,18 +447,11 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 	case "Prompt":
 		entryType = "user"
 	case "AssistantMessage":
-		// "text" matches the cc dashboard contract:
-		// internal/discovery/history_tail.go emits Type:"text" for
-		// assistant messages, and dashboard.js' eventHtml branch on
-		// e.type === 'text' is what renders the markdown bubble.
-		// Emitting "assistant" here would render through the unknown-
-		// type fallback and produce a malformed card.
+		// "text" is what dashboard.js renders as a markdown bubble;
+		// "assistant" would fall through to the unknown-type card.
 		entryType = "text"
 	default:
-		// Unknown / future kinds (tool_use, system, etc.) are skipped
-		// rather than emitted as a generic "system" entry. Emitting
-		// would risk surfacing internal kiro events in the chat view;
-		// a follow-up sprint can map specific kinds explicitly.
+		// Unknown kinds are skipped rather than surfaced as generic system entries.
 		return clievent.EventEntry{}, false
 	}
 
@@ -602,13 +463,9 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 
 	timeMS, ok := extractTimestampMS(data.Meta)
 	if !ok {
-		// AssistantMessage in real kiro sessions never carries
-		// meta.timestamp, so borrow the most recent Prompt ts plus a
-		// monotonic offset to anchor the assistant on the timeline.
-		// Prompts that miss their own ts (and any assistant before the
-		// first ts-bearing prompt) can't be anchored — drop them
-		// rather than forge ts=0, which would corrupt the strict-<
-		// pagination boundary by collapsing many records to epoch.
+		// Borrow the most recent Prompt ts plus offset for an AssistantMessage.
+		// Anything else without a ts is dropped rather than forged as ts=0, which
+		// would collapse records to epoch and corrupt the strict-< cursor.
 		if entryType != "text" || lastPromptMS <= 0 {
 			return clievent.EventEntry{}, false
 		}
@@ -617,25 +474,19 @@ func decodeLine(line []byte, lastPromptMS, asstOffset int64) (clievent.EventEntr
 
 	fullText := concatTextChunks(data.Content)
 
-	// Strict cc-parity for AssistantMessage: drop the entry entirely
-	// when the model produced no plain-text output (only thinking +
-	// tool_use + an empty placeholder text chunk). Without this, every
-	// tool-driven turn injects a blank card into the transcript.
-	// Prompts (user messages) keep the legacy permissive behaviour:
-	// surface even an empty Summary so pagination time cursors advance.
+	// Drop an AssistantMessage with no plain text (thinking + tool_use only)
+	// so tool-driven turns don't inject blank cards. Prompts stay permissive
+	// so pagination cursors advance.
 	if entryType == "text" && strings.TrimSpace(fullText) == "" {
 		return clievent.EventEntry{}, false
 	}
 
-	// Truncation caps and the deterministic dedup UUID (#2336) come from the
-	// shared recipe — see history.NewDerivedEntry for why both matter.
+	// Caps and the deterministic dedup UUID come from the shared recipe (#2336).
 	return history.NewDerivedEntry(timeMS, entryType, fullText), true
 }
 
-// extractTimestampMS converts a kiro Prompt/AssistantMessage timestamp
-// (unix seconds, integer) to unix milliseconds. Returns (0, false)
-// when the meta block is missing or the timestamp is non-positive —
-// those entries are dropped by decodeLine.
+// extractTimestampMS converts a kiro unix-seconds timestamp to milliseconds;
+// (0, false) when meta is missing or the timestamp is non-positive.
 func extractTimestampMS(meta *kiroMessageMeta) (int64, bool) {
 	if meta == nil || meta.Timestamp <= 0 {
 		return 0, false
@@ -643,17 +494,9 @@ func extractTimestampMS(meta *kiroMessageMeta) (int64, bool) {
 	return meta.Timestamp * 1000, true
 }
 
-// concatTextChunks joins all kind=="text" chunks into a single string
-// with no separator. Kiro typically emits one text chunk per message but
-// the schema is a list, so handle multi-chunk defensively. Non-text
-// chunks (thinking, toolUse, toolResult, image, ...) are skipped — they
-// have no plain-text representation in the dashboard chat view, and the
-// cc dashboard makes the same trade-off in
-// discovery/history_tail.go's assistant arm.
-//
-// Each chunk's Data is a json.RawMessage. For text chunks we expect a
-// JSON string; a malformed chunk is skipped silently (matches the rest
-// of decodeLine's tolerance for partial-write tails).
+// concatTextChunks joins all kind=="text" chunks with no separator. Non-text
+// chunks have no plain-text representation in the chat view; a text chunk
+// whose Data is not a JSON string is skipped.
 func concatTextChunks(chunks []kiroContentChunk) string {
 	if len(chunks) == 0 {
 		return ""
@@ -666,10 +509,6 @@ func concatTextChunks(chunks []kiroContentChunk) string {
 		}
 		var s string
 		if err := json.Unmarshal(c.Data, &s); err != nil {
-			// Future schema drift (e.g. text payload becomes an object)
-			// should not break the rest of the message. Drop just this
-			// chunk; thinking/toolUse already pass through this same
-			// silent-skip path via the kind filter above.
 			continue
 		}
 		textChunks = append(textChunks, s)

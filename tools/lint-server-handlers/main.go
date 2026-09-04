@@ -1,41 +1,22 @@
 // Command lint-server-handlers enforces naozhi's server-package contracts
-// defined in docs/design/server-split-phase4-design.md §六.2 / §九.2:
+// (docs/design/server-split-phase4-design.md §六.2 / §九.2):
 //
-//   - Rule 1 (handle_decl): no new `func (s *Server) handle*` methods
-//     after Phase 0. The full Phase 0 baseline of existing handle*
-//     methods is auto-baselined at first run; future PRs that add a
-//     new handle* method to *Server fail CI.
-//   - Rule 2 (file_size): files in internal/server/ ≤ 500 lines
-//     (non-test); internal/dashboard/*/  ≤ 800 lines (non-test).
-//     Existing over-limit files are listed in exemptions.yaml with an
-//     `until_phase` field; the linter ignores them until the listed
-//     phase has merged. New files are always checked.
-//   - Rule 3a (field_block markers, Phase 0 必交付): wshub_*.go godoc
-//     头必须含 Field-block contract / WRITES: / READS-ALSO: /
-//     LIFECYCLE-METHOD 标注。文本扫描，不做语义分析。
-//   - Rule 3b (field_block AST, Phase 4b 前) — TODO: 字段访问对账
-//     与 §五 7 块归属表 + 跨方法追踪。
-//   - Rule 4 (iface_match, Phase 0 框架 / Phase 1 前完整): 实现侧
-//     godoc 中的 satisfies: 注释必须在 consumer-contracts.md 有对应
-//     条目。Phase 0b 骨架仅扫接口名出现性；Phase 1 前升级 method-set 对账。
-//   - Rule 5 (stale_exemption, Phase 0 框架 / Phase 1 前完整): exemptions
-//     条目反向依赖检查。Phase 0b 骨架仅检查文件存在；Phase 1 前补 git
-//     tag 比对 + 行数比对 + Closes-exemption commit trailer 校验。
+//   - handle_decl: no `func (s *Server) handle*` method outside the
+//     exemptions.yaml handle_baseline.
+//   - file_size: internal/server/ ≤ 500 lines, internal/dashboard/*/ ≤ 800
+//     (non-test); exemptions.yaml entries with `until_phase` may not grow.
+//   - field_block: wshub_*.go godoc 头必须含 Field-block contract / WRITES: /
+//     READS-ALSO: / LIFECYCLE-METHOD 标注（文本扫描）。
+//   - iface_match: godoc `satisfies:` 注释的接口必须出现在
+//     consumer-contracts.md。
+//   - stale_exemption: exemptions 条目必须指向存在的文件。
 //
-// Modes:
+// mode=warn (default) prints violations to stderr and exits 0; mode=fail
+// exits 1 on any violation. -sarif emits SARIF 2.1.0 on stdout.
 //
-//   - mode=warn (default): print violations to stderr, exit 0. CI uses
-//     this during Phase 0-4 so existing exemptions don't block PRs.
-//   - mode=fail: exit 1 on any violation. Phase 5 verification gate.
-//
-// Output format: human-readable lines on stderr; SARIF on stdout when
-// -sarif is given. SARIF is the format GitHub PR Annotations expect.
-//
-// Usage:
+// Usage (from the repo root):
 //
 //	lint-server-handlers [-mode warn|fail] [-sarif] [-exemptions PATH]
-//
-// Run from the repo root.
 package main
 
 import (
@@ -148,17 +129,15 @@ func main() {
 		vs = append(vs, scanFileSize(*dashboardPkg, 800, exemptFiles)...)
 	}
 
-	// Rule 3a (Phase 0b 必交付): field_block godoc 标注扫描
+	// Rule 3a: field_block godoc 标注扫描
 	vs = append(vs, scanFieldBlockMarkers(*serverPkg)...)
 
-	// Rule 4 (Phase 0b 框架, Phase 1 前完整): iface_match
-	// 扫整仓 internal/ + cmd/ — 任何 godoc 含 satisfies: 注释的文件
+	// Rule 4: iface_match — 扫整仓 internal/ + cmd/ 的 satisfies: 注释
 	vs = append(vs, scanIfaceMatch([]string{"internal", "cmd"})...)
 
-	// Rule 5 (Phase 0b 框架, Phase 1 前完整): stale_exemption
+	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts)...)
 
-	// Verbose mode: announce remaining skeleton work
 	if os.Getenv("LINT_VERBOSE") == "1" {
 		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b (AST field_block) due Phase 4b; rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
 	}
@@ -174,9 +153,8 @@ func main() {
 	}
 }
 
-// scanHandleHandlers returns "Server.handleX" names for every method in
-// the given server package directory whose receiver type is exactly
-// *Server (or Server) AND whose name starts with "handle" or "Handle".
+// scanHandleHandlers returns "Server.handleX" for every method in pkgDir
+// with receiver *Server / Server and a name starting with handle / Handle.
 func scanHandleHandlers(pkgDir string) ([]string, error) {
 	var out []string
 	fset := token.NewFileSet()
@@ -274,9 +252,7 @@ func scanFileSize(dir string, limit int, exempt map[string]exemption) []Violatio
 			return nil
 		}
 		if e, ok := exempt[rel]; ok {
-			// Within budget: lines must not GROW beyond the recorded
-			// baseline. New code in an exempted file is allowed to
-			// stay or shrink; growing is a regression.
+			// Exempted files may stay or shrink; growing is a regression.
 			if lines > e.Current {
 				out = append(out, Violation{
 					Rule:    "file_size",
@@ -337,9 +313,8 @@ func emitText(vs []Violation) {
 	fmt.Fprintf(os.Stderr, "lint-server-handlers: %d violation(s)\n", len(vs))
 }
 
-// emitSARIF prints a minimal SARIF 2.1.0 report on stdout. GitHub
-// Actions consume this with codeql/upload-sarif. Keeping the producer
-// inline avoids pulling sarif-go (1k-line dep) for one report shape.
+// emitSARIF prints a minimal SARIF 2.1.0 report on stdout (consumed by
+// codeql/upload-sarif). Inline producer avoids a sarif-go dependency.
 func emitSARIF(vs []Violation) {
 	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"},{"id":"field_block"},{"id":"iface_match"},{"id":"stale_exemption"}]}},"results":[`
 	const tail = `]}]}`

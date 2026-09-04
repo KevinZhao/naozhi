@@ -1,14 +1,8 @@
 // classify.go is the ONLY file in internal/usermsg that imports the
 // implementation packages (cli + session). It maps their sentinel errors
-// onto a stable, presentation-neutral Code enum; usermsg.go then maps Code →
-// Chinese text with zero cli/session dependency.
-//
-// This inverts the translation as R040034-ARCH-4 (#1413) proposes, but does
-// it WITHIN usermsg so cli/session need not grow a new public SessionErrorCode
-// surface yet: the errors.Is matching is confined here, and the text tables
-// in usermsg.go are now decoupled from the sentinel packages. When the i18n
-// track (#631) lands, the text tables move to internal/i18n untouched and
-// only classify.go (this file) stays behind referencing cli/session.
+// onto a presentation-neutral Code enum; usermsg.go maps Code → Chinese text
+// with zero cli/session dependency, so the text tables can move to
+// internal/i18n (#631) untouched.
 package usermsg
 
 import (
@@ -21,9 +15,7 @@ import (
 )
 
 // Code is a stable, package-neutral classification of a send-path error.
-// Values are NOT persisted or sent over the wire — they exist only to sever
-// the text tables from the cli/session sentinel surface, so the int values
-// may be reordered freely.
+// Values are NOT persisted or sent over the wire, so they may be reordered.
 type Code int
 
 const (
@@ -46,9 +38,8 @@ const (
 )
 
 // classify maps err onto a Code using errors.Is so wrapped sentinels still
-// match. key disambiguates the asleep case: a cron-namespace key yields
-// CodeCronAsleep, every other key CodeSessionAsleep. A nil err is the
-// caller's responsibility to short-circuit before calling classify.
+// match. A cron-namespace key turns the asleep case into CodeCronAsleep.
+// Callers short-circuit nil err before calling.
 func classify(err error, key string) Code {
 	switch {
 	case errors.Is(err, session.ErrMaxProcs):
@@ -84,18 +75,15 @@ func classify(err error, key string) Code {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return CodeRestarting
 	case errors.Is(err, session.ErrRouterStopped):
-		// Shutdown is in progress: GetOrCreate refuses to install a fresh
-		// session. Semantically identical to context.Canceled above — a
-		// "/new reset" cannot succeed either, so surface the restarting hint
-		// instead of the misleading CodeUnknown "/new" advice. [R202606b-CR-003]
+		// Shutdown in progress: a "/new reset" cannot succeed either, so surface
+		// the restarting hint instead of the misleading CodeUnknown advice.
 		return CodeRestarting
 	default:
 		return CodeUnknown
 	}
 }
 
-// isTimeout reports whether err is one of the timeout sentinels that
-// UserMessage specialises with a concrete duration. Kept here so the only
-// cli-import-needing predicate lives next to classify.
+// isNoOutputTimeout / isTotalTimeout are the timeout sentinels UserMessage
+// specialises with a concrete duration; kept here next to classify.
 func isNoOutputTimeout(err error) bool { return errors.Is(err, cli.ErrNoOutputTimeout) }
 func isTotalTimeout(err error) bool    { return errors.Is(err, cli.ErrTotalTimeout) }

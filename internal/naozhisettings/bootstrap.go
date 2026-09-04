@@ -1,18 +1,9 @@
-// Package naozhisettings manages the naozhi-owned Claude settings file (RFC
-// naozhi-owned-settings-v3): a settings.json that is deliberately ISOLATED from
-// the operator's ~/.claude/settings.json.
-//
-// Today naozhi-spawned cc reads ~/.claude/settings.json directly via
-// `--setting-sources user` (docs/rfc/direct-user-settings.md). That means
-// naozhi cannot be configured differently from the operator's interactive cc
-// (e.g. a deeper thinking budget for background sessions), and a broken local
-// settings file takes naozhi's next session down with it.
-//
-// This package produces a file naozhi owns. It is seeded ONCE from the local
-// settings (bootstrap), then decoupled: later edits to ~/.claude/settings.json
-// do not flow in. cc is pointed at it via `--setting-sources "" --settings
-// <file>` (see cli.SpawnOptions.SettingsFile). Opt-in: absent the file / with
-// the feature off, naozhi keeps the legacy `--setting-sources user` path.
+// Package naozhisettings manages the naozhi-owned Claude settings file: a
+// settings.json deliberately ISOLATED from the operator's ~/.claude/settings.json
+// so naozhi can be configured differently and a broken local file cannot take
+// naozhi down. It is seeded ONCE from the local settings, then decoupled; cc is
+// pointed at it via `--setting-sources "" --settings <file>`
+// (cli.SpawnOptions.SettingsFile). Opt-in (RFC naozhi-owned-settings-v3).
 package naozhisettings
 
 import (
@@ -25,48 +16,32 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// strippedKeys are the top-level settings keys removed during bootstrap.
-//
-//   - "hooks": the local settings' hooks may call back into naozhi and
-//     dead-loop (this is the very reason direct-user-settings' predecessor ran
-//     `--setting-sources ""`). naozhi's isolated file is a clean execution
-//     config with no host hooks. A high-level operator who hand-edits the file
-//     to add hooks does so at their own risk.
-//   - "env": auth/upstream selection is naozhi's job via the access-profile env
-//     overlay (a separate, audited channel), NOT this settings file. Copying the
-//     local env block would also drag any plaintext token in it onto disk in a
-//     second place. Drop it entirely; the settings file carries behaviour config
-//     only. (RFC naozhi-owned-settings-v3 §9 decision 2.)
+// strippedKeys are the top-level settings keys removed during bootstrap:
+//   - "hooks": local hooks may call back into naozhi and dead-loop; the
+//     isolated file carries no host hooks.
+//   - "env": auth/upstream selection belongs to the audited access-profile
+//     env overlay, and copying the block would duplicate any plaintext token
+//     on disk. The settings file carries behaviour config only.
 var strippedKeys = []string{"hooks", "env"}
 
-// Bootstrap builds the naozhi-owned settings document from the raw bytes of a
-// local ~/.claude/settings.json. It parses the document as a generic top-level
-// object, drops the stripped keys (hooks, env), and re-serialises the rest
-// VERBATIM — every other key (mcpServers, permissions, model pins, feature
-// toggles, …) is preserved byte-for-byte via json.RawMessage so naozhi never
-// has to know the full settings schema.
+// Bootstrap builds the naozhi-owned settings document from raw local
+// settings.json bytes: drops strippedKeys and re-serialises every other key
+// VERBATIM via json.RawMessage, so naozhi never needs the full schema.
 //
-// FAIL-SOFT: if local is not a valid JSON object (missing file → caller passes
-// nil/empty; corrupt → parse error), Bootstrap returns a minimal empty document
-// ("{}") and ok=false, so the caller can log a warning and still write a usable
-// isolated file rather than aborting startup. A nil error is only returned for
-// a genuine marshal failure (unreachable in practice). ok=true means the local
-// document was well-formed and its non-stripped keys were carried over.
+// FAIL-SOFT: if local is not a valid JSON object, it returns "{}" and ok=false
+// so the caller can warn and still write a usable file; err is never non-nil
+// in practice.
 func Bootstrap(local []byte) (doc []byte, ok bool, err error) {
 	keys, vals, parseErr := parseTopLevelOrdered(local)
 	if parseErr != nil {
-		// Missing or non-object local settings → seed an empty document. Not an
-		// error: a first-run host may have no ~/.claude/settings.json at all.
 		return []byte("{}"), false, nil
 	}
 	stripped := map[string]bool{}
 	for _, k := range strippedKeys {
 		stripped[k] = true
 	}
-	// Re-emit in the ORIGINAL key order (parseTopLevelOrdered preserves it) so
-	// the naozhi file is a minimal, low-noise diff against the local one — the
-	// RFC §5.3 "view differences" feature depends on stable ordering. A plain
-	// map round-trip would reorder every key alphabetically.
+	// Re-emit in original key order so the naozhi file is a minimal diff against
+	// the local one (the RFC §5.3 "view differences" feature depends on it).
 	var buf bytes.Buffer
 	buf.WriteString("{")
 	first := true
@@ -124,8 +99,7 @@ func parseTopLevelOrdered(data []byte) (keys []string, vals []json.RawMessage, e
 	return keys, vals, nil
 }
 
-// indentValue re-indents a raw JSON value to sit under a two-space top-level
-// key. Falls back to the compact form on any error (still valid JSON).
+// indentValue re-indents raw to sit under a two-space key; compact on error.
 func indentValue(raw json.RawMessage) []byte {
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "  ", "  "); err != nil {
@@ -134,18 +108,11 @@ func indentValue(raw json.RawMessage) []byte {
 	return buf.Bytes()
 }
 
-// EnsureBootstrapped writes the naozhi-owned settings file to path IF it does
-// not already exist, seeding it from localSettingsPath. An already-present file
-// is left UNTOUCHED (returns existed=true) — bootstrap is a one-time seed, never
-// a silent overwrite of a file the operator has since tuned (thinking budget,
-// hand edits). Use ReBootstrap for the explicit "re-init from local" action.
-//
-// The file is written 0600 (may carry mcp tokens or other config) via an atomic
-// write. A missing / unreadable / corrupt local file is NOT fatal: the naozhi
-// file is still written (seeded empty) and seededFromLocal=false; a non-nil err
-// in that case is a DIAGNOSTIC (e.g. local file present but unreadable) — the
-// file was still written, so the caller should warn but treat naozhi as usable.
-// Only a genuine write/mkdir failure returns err WITHOUT a written file.
+// EnsureBootstrapped writes the naozhi-owned settings file to path only if it
+// does not exist, seeding from localSettingsPath; an existing file is left
+// UNTOUCHED (existed=true) so operator tuning survives. Written 0600
+// atomically. A missing/unreadable local file is not fatal: the file is still
+// written and a non-nil err is advisory. Only a write/mkdir failure leaves no file.
 func EnsureBootstrapped(path, localSettingsPath string) (existed, seededFromLocal bool, err error) {
 	if _, statErr := os.Stat(path); statErr == nil {
 		return true, false, nil
@@ -160,12 +127,9 @@ func EnsureBootstrapped(path, localSettingsPath string) (existed, seededFromLoca
 	return false, seededFromLocal, diagErr
 }
 
-// ReBootstrap unconditionally re-seeds path from localSettingsPath, overwriting
-// any existing naozhi-owned file. This is the "用本地重新初始化" action (RFC §5.4)
-// and MUST be gated behind an explicit, confirmed operator request — it discards
-// naozhi's current isolated config (including a tuned thinking budget). Like
-// EnsureBootstrapped, a non-nil err after a successful write is advisory (local
-// unreadable); a write/mkdir failure returns err without overwriting.
+// ReBootstrap unconditionally re-seeds path from localSettingsPath, discarding
+// naozhi's current isolated config; MUST be gated behind an explicit operator
+// confirmation. Error semantics match EnsureBootstrapped.
 func ReBootstrap(path, localSettingsPath string) (seededFromLocal bool, err error) {
 	doc, seededFromLocal, diagErr := bootstrapFromFile(localSettingsPath)
 	if writeErr := writeDoc(path, doc); writeErr != nil {
@@ -174,10 +138,8 @@ func ReBootstrap(path, localSettingsPath string) (seededFromLocal bool, err erro
 	return seededFromLocal, diagErr
 }
 
-// writeDoc creates the destination's parent directory (0700) if needed and
-// atomically writes doc at 0600. Owning the MkdirAll here (rather than pushing
-// it onto every caller) keeps the package self-contained: a first-run host
-// whose data dir does not yet exist still gets a usable naozhi settings file.
+// writeDoc creates the parent dir (0700) if needed and atomically writes doc at
+// 0600, so a first-run host without a data dir still gets a settings file.
 func writeDoc(path string, doc []byte) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -190,19 +152,14 @@ func writeDoc(path string, doc []byte) error {
 	return nil
 }
 
-// bootstrapFromFile reads localSettingsPath (tolerating a missing file) and runs
-// Bootstrap over its bytes. A present-but-unreadable local file (permission,
-// I/O) is non-fatal — it falls through to an empty seed so naozhi still gets a
-// usable isolated file — but returns readErr so the caller can distinguish
-// "local absent" from "local unreadable" in its log (F5).
+// bootstrapFromFile reads localSettingsPath (missing file tolerated) and runs
+// Bootstrap. A present-but-unreadable file seeds empty and returns readErr so
+// the caller can distinguish "absent" from "unreadable".
 func bootstrapFromFile(localSettingsPath string) (doc []byte, seededFromLocal bool, err error) {
 	local, readErr := os.ReadFile(localSettingsPath)
 	if readErr != nil {
 		local = nil
 		if !os.IsNotExist(readErr) {
-			// Seed empty but tell the caller the local file existed and could
-			// not be read, so "seeded_from_local=false" is not mistaken for
-			// "local had no settings".
 			doc, _, _ = Bootstrap(nil)
 			return doc, false, fmt.Errorf("read local settings %q: %w", localSettingsPath, readErr)
 		}

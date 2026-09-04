@@ -1,24 +1,10 @@
-// Package ratelimit provides a thread-safe per-key token-bucket limiter
-// with a bounded-size LRU cache of entries and lazy TTL expiry.
+// Package ratelimit provides a thread-safe per-key token-bucket limiter with a
+// bounded LRU of entries and lazy TTL expiry, shared by the per-IP limiters in
+// internal/server and internal/node.
 //
-// It replaces two near-identical ad-hoc implementations in
-// internal/server (per-IP HTTP limiter) and internal/node (per-IP
-// /ws-node limiter). Consolidating the logic keeps eviction and
-// expiry behaviour consistent across endpoints and gives both call
-// sites O(1) eviction instead of the previous O(N) full-map scans.
-//
-// Design:
-//
-//   - Entries are kept in a doubly-linked list ordered by recency.
-//     The most-recently-used entry is at the head; the tail is the
-//     eviction candidate when MaxKeys is reached.
-//
-//   - A map[string]*list.Element provides O(1) lookup.
-//
-//   - TTL is applied lazily: when Allow hits an existing entry whose
-//     lastSeen is older than TTL, the entry is treated as absent and
-//     a fresh limiter is installed. No periodic scan runs.
-//
+// Entries live in a recency-ordered doubly-linked list (head = most recent,
+// tail = eviction candidate) plus a map for O(1) lookup. TTL is lazy: an entry
+// whose lastSeen is older than TTL is reset on next access; no periodic scan.
 // The zero value is not usable; call New.
 package ratelimit
 
@@ -30,20 +16,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Config configures a Limiter. Zero values pick sensible defaults so
-// callers only need to specify what they care about.
+// Config configures a Limiter; zero values pick defaults.
 type Config struct {
 	// Rate is the token-bucket refill rate. Required.
 	Rate rate.Limit
 	// Burst is the token-bucket burst size. Required (>=1).
 	Burst int
-	// MaxKeys caps the number of distinct keys held in memory.
-	// When exceeded, the least-recently-used key is evicted.
-	// Defaults to 1000 if zero.
+	// MaxKeys caps distinct keys held; the LRU key is evicted beyond it. Default 1000.
 	MaxKeys int
-	// TTL is the idle duration after which an entry is considered stale
-	// and its limiter is reset on next access. Defaults to 10 minutes
-	// if zero.
+	// TTL is the idle duration after which an entry is reset. Default 10 minutes.
 	TTL time.Duration
 }
 
@@ -52,16 +33,12 @@ const (
 	defaultTTL     = 10 * time.Minute
 )
 
-// Limiter is a thread-safe per-key token-bucket rate limiter backed by a
-// bounded LRU with lazy expiry. Construct with New.
+// Limiter is a per-key token-bucket limiter backed by a bounded LRU; use New.
 type Limiter struct {
 	cfg Config
 
-	// nowFn is injected in tests; nil → time.Now. Lets the lazy-TTL tests
-	// step time explicitly instead of sleeping past a short TTL — with a
-	// real clock, any scheduling delay longer than the TTL under test makes
-	// the "still within TTL" assertion flip (the entry expires and its
-	// bucket resets), which was flaky on loaded CI runners.
+	// nowFn is injected in tests (nil → time.Now) so lazy-TTL tests step time
+	// instead of sleeping past a short TTL.
 	nowFn func() time.Time
 
 	mu      sync.Mutex
@@ -97,12 +74,9 @@ func New(cfg Config) *Limiter {
 	}
 }
 
-// Allow reports whether the token bucket for key has a token available.
-// It updates the key's last-seen timestamp and promotes it to the LRU
-// head. Empty keys are rejected as a safety net so callers that failed
-// to resolve a client IP don't share a single "" bucket.
-//
-// Complexity is O(1) on both hit and miss paths; eviction is also O(1).
+// Allow reports whether the bucket for key has a token, refreshing last-seen
+// and promoting it to the LRU head. Empty keys are rejected so callers that
+// failed to resolve a client IP don't share one "" bucket. O(1) on all paths.
 func (l *Limiter) Allow(key string) bool {
 	if key == "" {
 		return false
@@ -115,8 +89,7 @@ func (l *Limiter) Allow(key string) bool {
 	if el, ok := l.entries[key]; ok {
 		ent := el.Value.(*entry)
 		if now.Sub(ent.lastSeen) > l.cfg.TTL {
-			// Lazy expiry: reset the bucket so long-idle keys don't
-			// carry stale debt into a new burst.
+			// Lazy expiry: long-idle keys don't carry stale debt into a new burst.
 			ent.limiter = rate.NewLimiter(l.cfg.Rate, l.cfg.Burst)
 		}
 		ent.lastSeen = now
@@ -141,8 +114,7 @@ func (l *Limiter) Allow(key string) bool {
 	return ent.limiter.Allow()
 }
 
-// Len returns the current number of tracked keys. Intended for tests
-// and observability; not a hot-path API.
+// Len returns the number of tracked keys (tests / observability).
 func (l *Limiter) Len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

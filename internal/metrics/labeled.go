@@ -1,31 +1,13 @@
-// Labeled-counter / labeled-gauge support built on stdlib expvar.Map.
+// Labeled counters / gauges built on stdlib expvar.Map, keeping the package's
+// zero-dependency commitment. Each labeled metric is a JSON object at
+// /debug/vars whose keys are the label-value tuples joined with `|`. Metrics
+// with a `backend` dimension (Multi-Backend RFC §10) double-write into the
+// legacy unlabeled expvar.Int and the labeled map.
 //
-// Why expvar.Map (not Prometheus): naozhi's metrics package commits to
-// "zero deps, stdlib-stable" (see metrics.go top docstring). Adding a
-// real metrics library only to gain labels would conflict with that
-// design and force operators to re-tool dashboards. expvar.Map keeps
-// the JSON shape exposed at /debug/vars consistent — each labeled
-// metric becomes a JSON object whose keys are the label-value tuples
-// joined with `|`.
-//
-// Multi-Backend RFC §10 (Sprint 6a) requires four metrics to gain a
-// `backend` dimension:
-//
-//   - naozhi_cli_spawn_total{backend}
-//   - naozhi_session_active{backend}                 (gauge)
-//   - naozhi_protocol_rpc_error_total{backend,method,code}
-//   - naozhi_acp_cancel_total{backend}
-//
-// Strategy: keep the legacy unlabeled expvar.Int counters (so existing
-// docs/ops/pprof.md jq queries continue to work) while ALSO writing into
-// a new expvar.Map keyed by the label tuple. After a 4-week double-write
-// migration window, the legacy ints can be removed in a follow-up.
-//
-// Cardinality: callers MUST sanitize variable label values (e.g. RPC
-// method strings come from agent JSON, user-supplied attachments, etc.)
-// before passing them in. labelKey enforces a hard MAX_KEY_LEN cap so a
-// runaway agent can't blow up the map; over-length keys collapse into a
-// sentinel "_overflow_" bucket that operators can alert on.
+// Cardinality: callers MUST sanitize variable label values (RPC method
+// strings from agent JSON, user-supplied data) before passing them in.
+// labelKey caps each segment and the joined tuple; over-length keys collapse
+// into the LabelOverflow sentinel bucket operators can alert on.
 
 package metrics
 
@@ -35,64 +17,47 @@ import (
 	"sync"
 )
 
-// LabelOverflow is the sentinel key used when a label tuple exceeds
-// maxLabelKeyLen. Counting overflows preserves total volume integrity
-// (no silent drops) and the operator alerting story is "any non-zero
-// rate on the _overflow_ key means a caller is mis-sanitizing labels".
+// LabelOverflow is the sentinel key for a label tuple exceeding
+// maxLabelKeyLen; counting overflows keeps total volume intact and alertable.
 const LabelOverflow = "_overflow_"
 
-// LabelEmpty is the key used when a caller passes "" for a label slot
-// (e.g. legacy session records without backend metadata). Distinct from
-// the overflow sentinel so dashboards can tell "missing data" apart
-// from "label was too long to record".
+// LabelEmpty is the key for an empty label value, distinct from the overflow
+// sentinel so dashboards can tell "missing" from "too long".
 const LabelEmpty = "_empty_"
 
-// maxLabelKeyLen caps the joined label tuple at 256 bytes. Each label
-// segment is also independently capped via clipLabelSegment so a
-// single attacker-controlled value can't dominate the budget.
+// maxLabelKeyLen caps the joined label tuple.
 const maxLabelKeyLen = 256
 
-// maxLabelSegmentLen caps any single label value at 64 bytes — enough
-// for canonical IDs ("claude", "kiro", "session/cancel", "INVALID_PARAMS")
-// while keeping the per-tuple cardinality bounded.
+// maxLabelSegmentLen caps any single label value — enough for canonical IDs
+// while bounding per-tuple cardinality.
 const maxLabelSegmentLen = 64
 
-// LabeledCounter wraps an expvar.Map and exposes Add(labels, delta) as
-// the sole production write entrypoint. Read-side helpers (Get / Sum /
-// ForEachKey) live in labeled_test_helpers_test.go so they don't bloat
-// the production export surface — operators read labeled metrics via
-// /debug/vars. Zero value not usable — call NewLabeledCounter.
+// LabeledCounter wraps an expvar.Map; Add is the sole production write
+// entrypoint (read helpers live in labeled_test_helpers_test.go — operators
+// read via /debug/vars). Zero value not usable; call NewLabeledCounter.
 type LabeledCounter struct {
 	m *expvar.Map
 }
 
-// NewLabeledCounter registers a new labeled counter under the given
-// expvar name. Panics on duplicate registration (same as expvar.NewMap)
-// to surface accidental double-registration.
+// NewLabeledCounter registers a labeled counter under name. Panics on
+// duplicate registration (as expvar.NewMap).
 func NewLabeledCounter(name string) *LabeledCounter {
 	return &LabeledCounter{m: expvar.NewMap(name)}
 }
 
-// Add increments the counter for the given label tuple by delta. delta
-// is an int64 to match expvar.Int.Add semantics; callers normally pass 1.
-//
-// Empty labels (the caller passed "") become "_empty_" to keep the JSON
-// keys strictly non-empty (jq doesn't tolerate "" keys nicely). Over-long
-// keys collapse into LabelOverflow — see package doc.
+// Add increments the counter for the label tuple by delta. Empty labels
+// become LabelEmpty; over-long tuples collapse into LabelOverflow.
 func (lc *LabeledCounter) Add(delta int64, labels ...string) {
 	lc.m.Add(labelKey(labels), delta)
 }
 
-// LabeledGauge is the gauge counterpart to LabeledCounter. Same map
-// backing; the API differs only in that callers Inc / Dec rather than
-// Add a fixed-delta count of events. Internally still expvar.Map of
-// *expvar.Int, so dashboards see the same JSON shape.
+// LabeledGauge is the gauge counterpart to LabeledCounter (same expvar.Map
+// backing; callers Inc / Dec).
 type LabeledGauge struct {
 	m *expvar.Map
 }
 
-// NewLabeledGauge registers a new labeled gauge under the given expvar
-// name. Same panic-on-duplicate semantics as NewLabeledCounter.
+// NewLabeledGauge registers a labeled gauge under name; panics on duplicate.
 func NewLabeledGauge(name string) *LabeledGauge {
 	return &LabeledGauge{m: expvar.NewMap(name)}
 }
@@ -100,21 +65,15 @@ func NewLabeledGauge(name string) *LabeledGauge {
 // Inc bumps the gauge for the label tuple by 1.
 func (lg *LabeledGauge) Inc(labels ...string) { lg.m.Add(labelKey(labels), 1) }
 
-// Dec decrements the gauge for the label tuple by 1. The gauge is allowed
-// to go negative — that is itself an operator signal that bookkeeping is
-// off (matching activeCount.Add(-1) < 0 → Store(0) clamp would mask the
-// bug). The reconcile pass in router.go drives gauges back to authoritative
-// truth on bulk paths (eviction/cleanup); a CAS-free non-negative clamp
-// proved racy under concurrent Dec — Value() then Add(-Value()) without a
-// CAS opens a window where a concurrent Dec turns the clamp into a bigger
-// positive number than zero — and was removed.
+// Dec decrements the gauge for the label tuple by 1. The gauge may go
+// negative — that is itself a signal that bookkeeping is off (a clamp would
+// mask it, and a CAS-free clamp is racy under concurrent Dec). The router
+// reconcile pass drives gauges back to authoritative truth on bulk paths.
 func (lg *LabeledGauge) Dec(labels ...string) { lg.m.Add(labelKey(labels), -1) }
 
-// Add atomically applies delta to the gauge for the label tuple in a single
-// expvar.Map operation. Used by the router reconciliation path to avoid the
-// "loop of N Inc/Dec" anti-pattern that exposes partial intermediate values
-// to /debug/vars scrapers. expvar.Map.Add is atomic per key, so the entire
-// reconcile-to-authoritative-count is observable as one transition.
+// Add applies delta in a single expvar.Map operation so the router
+// reconciliation path exposes one transition to scrapers rather than N
+// intermediate Inc/Dec values.
 func (lg *LabeledGauge) Add(delta int64, labels ...string) {
 	if delta == 0 {
 		return
@@ -134,29 +93,21 @@ func (lg *LabeledGauge) Get(labels ...string) int64 {
 	return 0
 }
 
-// ForEachKey calls fn with every label-tuple key present in the gauge.
-// Used by reconciliation paths (e.g. session.Router.countActive) that
-// need to zero out previously-seen backends whose last session exited
-// — without this, a "kiro just disappeared" bucket would stay at its
-// last value forever. Fn must not call other methods on lg (deadlock).
+// ForEachKey calls fn with every label-tuple key present. Reconciliation
+// (session.Router.countActive) uses it to zero out backends whose last
+// session exited. fn must not call other methods on lg (deadlock).
 func (lg *LabeledGauge) ForEachKey(fn func(key string)) {
 	lg.m.Do(func(kv expvar.KeyValue) { fn(kv.Key) })
 }
 
-// labelKey joins label values into a single string for use as an
-// expvar.Map key. Format: "v1|v2|v3". Empty / overflow handling is per
-// segment to keep the cardinality bound tight.
-//
-// Pooled builders amortize allocs on the hot path (every Add).
+// labelKey joins label values into an expvar.Map key ("v1|v2|v3"). Pooled
+// builders amortize allocs on the hot path (every Add).
 func labelKey(labels []string) string {
 	if len(labels) == 0 {
 		return LabelEmpty
 	}
-	// Fast path: a single label needs no join, so skip the pooled builder.
-	// clipLabelSegment caps each segment at maxLabelSegmentLen (64) which is
-	// below maxLabelKeyLen (256), so the joined-budget overflow check is
-	// unreachable for a single segment — this path is alloc-free and exactly
-	// equivalent to the loop below.
+	// A single label needs no join; clipLabelSegment's cap is below
+	// maxLabelKeyLen, so the overflow check is unreachable here.
 	if len(labels) == 1 {
 		return clipLabelSegment(labels[0])
 	}
@@ -170,28 +121,17 @@ func labelKey(labels []string) string {
 		b.WriteString(clipLabelSegment(v))
 	}
 	if b.Len() > maxLabelKeyLen {
-		// Pathological: many segments each <= maxLabelSegmentLen still
-		// blow the joined budget. Track via a counter the operator can
-		// alert on — see overflowCount.
+		// Many segments each within the per-segment cap still blew the joined budget.
 		overflowCount.Add(1)
 		return LabelOverflow
 	}
 	return b.String()
 }
 
-// clipLabelSegment truncates a single label value to the per-segment cap
-// and replaces empty values with LabelEmpty. Truncation is byte-based
-// (not rune-aware) since labels are expected to be ASCII identifiers;
-// the worst case for an unexpected UTF-8 input is a key that ends with
-// half a rune which is still a valid expvar.Map key.
-//
-// R246-SEC-6: any literal `|` in v collides with the joined-tuple
-// separator used by labelKey, so two distinct tuples ("a|b","c") and
-// ("a","b|c") would otherwise share an expvar.Map bucket and silently
-// merge metric streams. Replace `|` with `_` here so the cap is the
-// only place that needs to know about the separator. Cheap fast path:
-// IndexByte first so we don't allocate when v is the common case
-// (ASCII identifier with no separators).
+// clipLabelSegment truncates a label value to the per-segment cap (byte-based;
+// labels are expected to be ASCII) and maps "" to LabelEmpty. A literal `|`
+// is replaced with `_` because it is the tuple separator: otherwise
+// ("a|b","c") and ("a","b|c") would share a bucket and silently merge streams.
 func clipLabelSegment(v string) string {
 	if v == "" {
 		return LabelEmpty
@@ -209,8 +149,6 @@ var keyBuilderPool = sync.Pool{
 	New: func() any { return new(strings.Builder) },
 }
 
-// overflowCount counts labelKey calls that produced LabelOverflow. Exposed
-// via expvar so operators can alert on >0 rate. Distinct from the per-map
-// LabelOverflow bucket (which only captures the last 1 of N tuples that
-// share the overflow sentinel) — overflowCount is the cumulative total.
+// overflowCount counts labelKey calls that produced LabelOverflow — the
+// cumulative total across maps, unlike the per-map sentinel bucket.
 var overflowCount = expvar.NewInt("naozhi_metrics_label_overflow_total")

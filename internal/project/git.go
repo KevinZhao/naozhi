@@ -7,12 +7,9 @@ import (
 	"strings"
 )
 
-// DetectGitHubRemote inspects the project's .git/config and returns the first
-// remote URL it finds along with a flag indicating whether the URL points to
-// github.com. "origin" takes precedence; otherwise the first remote wins.
-//
-// Returns ("", false) if the directory is not a git repo, config is missing,
-// or no remote is configured.
+// DetectGitHubRemote reads the project's .git/config and returns the remote
+// URL ("origin" preferred, else the first remote) and whether it points to
+// github.com. Returns ("", false) when there is no repo, config or remote.
 func DetectGitHubRemote(projectPath string) (url string, isGitHub bool) {
 	cfgPath := filepath.Join(projectPath, ".git", "config")
 	f, err := os.Open(cfgPath)
@@ -74,11 +71,8 @@ func DetectGitHubRemote(projectPath string) (url string, isGitHub bool) {
 	return chosen, isGitHubURL(chosen)
 }
 
-// isGitHubURL returns true if the remote URL's host is github.com.
-// Handles the common forms:
-//   - https://github.com/owner/repo.git
-//   - git@github.com:owner/repo.git
-//   - ssh://git@github.com/owner/repo.git
+// isGitHubURL reports whether the remote URL's host is github.com, for
+// https://, ssh:// and scp-like (git@github.com:owner/repo.git) forms.
 func isGitHubURL(raw string) bool {
 	u := strings.TrimSpace(raw)
 	if u == "" {

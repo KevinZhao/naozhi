@@ -14,22 +14,15 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
-// psPath pins the ps(1) binary to /bin/ps so a PATH-manipulation attack
-// (local user appending a malicious "ps" earlier in PATH) cannot replace
-// the lookup. On macOS /bin is always on the root filesystem and ps is
-// guaranteed to exist there.
+// psPath pins ps(1) to /bin/ps so a PATH-manipulation attack (a malicious
+// "ps" earlier in PATH) cannot replace the lookup; /bin is always on the
+// macOS root filesystem.
 const psPath = "/bin/ps"
 
 // ProcStartTime returns a value that uniquely identifies a process instance
-// even after PID reuse. On Darwin we use ps(1) to get the process start time
-// and encode it as Unix microseconds.
-//
-// Unix microseconds reach MaxSafeJSONInt (2^53-1 ≈ 9.00e15) only near the
-// year 2255 (current Unix μs ≈ 1.77e15), so JS front-ends (dashboard.js) can
-// safely consume the field via JSON.parse without double-precision
-// truncation. See MaxSafeJSONInt in scanner.go; proc_darwin_test.go pins
-// the invariant. If the encoding is ever changed (e.g. to nanoseconds), the
-// budget collapses — replace μs×1000 and re-check against the guard test.
+// even after PID reuse: the ps(1) start time as Unix microseconds, which stay
+// below MaxSafeJSONInt until ~2255 so dashboard.js can JSON.parse the field
+// without truncation (proc_darwin_test.go pins this).
 func ProcStartTime(pid int) (uint64, error) {
 	// ps -o lstart= outputs e.g. "Sat Apr 12 14:30:00 2026"
 	out, err := exec.Command(psPath, "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
@@ -40,13 +33,11 @@ func ProcStartTime(pid int) (uint64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("ps returned empty lstart for pid %d", pid)
 	}
-	// ps(1) on Darwin prints lstart in the local timezone without a zone
-	// suffix; Parse (no location) would interpret the wallclock as UTC and
-	// shift start-time identity by the UTC offset (e.g. +8h in Shanghai),
-	// breaking stale-shim detection after TZ-sensitive restarts.
+	// Darwin ps prints lstart in local time with no zone suffix; parsing as
+	// UTC would shift the start-time identity by the UTC offset and break
+	// stale-shim detection after TZ-sensitive restarts.
 	t, err := time.ParseInLocation("Mon Jan  2 15:04:05 2006", s, time.Local)
 	if err != nil {
-		// Fallback: try single-digit day format "Mon Jan 2 15:04:05 2006"
 		t, err = time.ParseInLocation("Mon Jan 2 15:04:05 2006", s, time.Local)
 		if err != nil {
 			return 0, fmt.Errorf("parse lstart %q for pid %d: %w", s, pid, err)
@@ -62,10 +53,9 @@ func ProcStartTime(pid int) (uint64, error) {
 func procPidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 func procKillSIGKILL(pid int)   { _ = syscall.Kill(pid, syscall.SIGKILL) }
 
-// detectCLIName uses ps(1) to determine which CLI binary is running.
-// Iterates registered backend.Profile entries; the first whose
-// DetectInProc predicate matches the binary basename wins. Adding a new
-// backend requires no change to this function. See docs/rfc/multi-backend.md §3.4.
+// detectCLIName uses ps(1) to determine which CLI binary is running: the
+// first registered backend.Profile whose DetectInProc matches the binary
+// basename wins. See docs/rfc/multi-backend.md §3.4.
 func detectCLIName(pid int) string {
 	out, err := exec.Command(psPath, "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {

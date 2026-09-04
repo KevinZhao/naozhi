@@ -7,14 +7,10 @@ import (
 	"syscall"
 )
 
-// PidAlive checks whether a process with the given PID still exists.
-// Returns true if the process is alive (or owned by another user — EPERM).
-//
-// Reject non-positive PIDs explicitly: on Linux, kill(0, 0) broadcasts to
-// the caller's process group (returning success even with no matching
-// process), and kill(-N, 0) targets a process group which would report any
-// live peer as "alive". Either can produce a phantom "alive" result when a
-// caller has a zero/uninitialised PID (e.g. an incomplete shim hello).
+// PidAlive reports whether a process with the given PID exists (EPERM counts
+// as alive). Non-positive PIDs are rejected: kill(0, 0) and kill(-N, 0)
+// target process groups and would report a phantom "alive" for a
+// zero/uninitialised PID.
 func PidAlive(pid int) bool {
 	if pid <= 0 {
 		return false

@@ -25,10 +25,8 @@ type Manager struct {
 	root     string
 	defaults PlannerDefaults
 
-	// includeRoot registers the root directory itself as a project (named
-	// after its basename) in addition to its subdirectories. See
-	// ProjectsConfig.IncludeRoot. Files directly under root then resolve to an
-	// owning project so the dashboard renders preview/download buttons.
+	// includeRoot also registers the root directory itself as a project (see
+	// ProjectsConfig.IncludeRoot) so files directly under root resolve to an owner.
 	includeRoot bool
 
 	mu       sync.RWMutex
@@ -37,35 +35,21 @@ type Manager struct {
 	// bindingIndex: "platform:chatType:chatID" -> project name (built from all ChatBindings)
 	bindingIndex map[string]string
 
-	// resolveCache memoises ResolveWorkspaces' inode-walk fallback (ws path →
-	// project name, or "" for a confirmed no-match). It is consulted ONLY after
-	// the byte-wise strings.HasPrefix fast path misses, so the common (case-
-	// matching) workspace pays nothing. The fallback Stats every ancestor of a
-	// ws on a case-insensitive FS (macOS APFS/HFS+, Windows NTFS) where the
-	// configured projects_root and the on-disk path differ only in case — at
-	// 1 Hz × N dashboard polls that syscall fan-out would repeat every tick
-	// without this cache. Keyed by the raw ws string the caller passes.
-	//
-	// Lifetime: entries are valid only against the current m.projects snapshot,
-	// so Scan() clears the cache under m.mu.Lock when it swaps projects. The
-	// other writers (BindChat / SetFavorite / UpdateConfig) mutate a project's
-	// Config but never its Path, so a cached ws→name mapping stays correct
-	// across them and they deliberately do NOT clear it.
+	// resolveCache memoises ResolveWorkspaces' inode-walk fallback (ws → project
+	// name, "" = no match), consulted only after the byte-prefix fast path
+	// misses; without it a case-insensitive FS re-Stats every ancestor per
+	// dashboard poll. Valid only for the current m.projects: Scan clears it
+	// under m.mu.Lock (the other writers never change Path).
 	resolveCache sync.Map // ws string → string (project name; "" = no match)
 
-	// resolveGen is bumped (under m.mu.Lock) every time Scan replaces m.projects
-	// and clears resolveCache. The inode fallback now runs lock-free against a
-	// snapshot taken under the RLock, so a concurrent Scan can land between the
-	// snapshot and the cache Store; resolveWorkspaceByInode reads the generation
-	// alongside the snapshot and discards its Store if Scan bumped it meanwhile,
-	// so a stale ws→name computed from the old project set never survives a
-	// rescan (#2228).
+	// resolveGen is bumped under m.mu.Lock whenever Scan swaps m.projects and
+	// clears resolveCache; resolveWorkspaceByInode runs lock-free against a
+	// snapshot and discards its Store when the generation moved (#2228).
 	resolveGen atomic.Uint64
 }
 
-// projRef is a lock-free snapshot of the fields resolveWorkspaceByInode needs
-// from a Project, taken under m.mu.RLock so the inode walk can Stat the FS
-// after the lock is released (#2228).
+// projRef is the (name, Path) snapshot resolveWorkspaceByInode walks after
+// m.mu is released (#2228).
 type projRef struct {
 	name string
 	path string
@@ -105,11 +89,9 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 	return m, nil
 }
 
-// dirModTimeMillis returns the directory's filesystem mtime in unix ms.
-// It prefers the cheap os.DirEntry.Info() (already cached from ReadDir on most
-// platforms) and falls back to os.Stat(path) when entry is nil (the synthetic
-// root project) or Info() fails. Returns 0 on any error so the caller treats
-// the mtime as unknown and the picker falls back to backend order.
+// dirModTimeMillis returns the directory mtime in unix ms, preferring
+// entry.Info() and falling back to os.Stat (entry is nil for the synthetic
+// root). Returns 0 on error so the picker falls back to backend order.
 func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 	if entry != nil {
 		if info, err := entry.Info(); err == nil {
@@ -123,18 +105,10 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
-//
-// R202606c-CR-002: the whole scan — disk read, CreatedAt migration, and the
-// m.projects swap — runs under the write lock. Previously only the final swap
-// was locked while the on-disk read happened lock-free, so a writer
-// (BindChat/SetFavorite/UpdateConfig/UnbindAllChat) could append+persist a
-// binding in the window between this function reading the pre-change file and
-// installing its fresh map, silently dropping the just-made change from the
-// in-memory index. Serializing the entire scan against those writers (which
-// now also persist under the same lock) makes the two operations atomic w.r.t.
-// each other: a scan either sees a writer's change already on disk or runs
-// entirely before it. Scan is periodic and project mutations are low frequency,
-// so holding the lock across the disk IO is acceptable.
+// The whole scan — disk read, CreatedAt migration, m.projects swap — runs
+// under the write lock so it is atomic w.r.t. the writers (BindChat /
+// SetFavorite / UpdateConfig / UnbindAllChat), which persist under the same
+// lock. Scan is periodic and mutations are rare, so IO under lock is fine.
 func (m *Manager) Scan() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -162,13 +136,8 @@ func (m *Manager) Scan() error {
 			slog.Warn("skip project with bad config", "name", name, "err", err)
 			continue
 		}
-		// Defense-in-depth: the write-path (HTTP PUT / reverse-RPC
-		// update_config) already runs ValidateConfig, but a tampered
-		// project.yaml committed via git pull or a direct filesystem
-		// edit could land invalid values that flow into CLI argv
-		// (PlannerPrompt/PlannerModel) or bindingIndex (ChatBindings
-		// with ':' / NUL) if load accepted them silently. Skip the
-		// project same as a parse failure.
+		// Defense-in-depth: a tampered project.yaml (git pull / direct edit) could
+		// otherwise land invalid values in CLI argv or bindingIndex.
 		if err := ValidateConfig(cfg); err != nil {
 			slog.Warn("skip project with invalid config", "name", name, "err", err)
 			continue
@@ -186,14 +155,9 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	// IncludeRoot: register the root directory itself as a project so files
-	// living directly under root (not inside any subdirectory project) resolve
-	// to an owning project and the dashboard renders preview/download buttons.
-	// The root project uses basename(root) as its name; a real subdirectory of
-	// the same name wins (it was inserted above) so we never shadow it. Path
-	// resolution is longest-prefix everywhere (ResolveWorkspaces here,
-	// resolveProjectForAbsPath in the dashboard), so a file under a deeper
-	// subdirectory project still resolves there — root only catches the leftovers.
+	// include_root: register the root itself so files directly under root
+	// resolve to an owner. A real subdirectory with the same basename wins;
+	// resolution is longest-prefix everywhere, so root only catches leftovers.
 	if m.includeRoot {
 		rootName := filepath.Base(m.root)
 		if err := ValidateProjectName(rootName); err != nil {
@@ -224,27 +188,13 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	// Sidebar order migration: stamp CreatedAt on any project missing one.
-	// Sort the names so the synthesised timestamps preserve the upgraded
-	// binary's first-render order (which used to be byte-name ascending via
-	// All()'s old comparator) — operators see no visible reshuffling on the
-	// upgrade boot. Each project gets a 1ms-spaced value so subsequent
-	// All() sorts have a strict order regardless of clock resolution.
-	//
-	// Concurrency: this block runs before m.mu.Lock() and writes both
-	// in-memory ProjectConfig.CreatedAt and project.yaml on disk. Scan was
-	// never concurrency-safe; two simultaneous Scans would each pick their
-	// own `base`, the last m.projects = projects assignment wins in memory,
-	// and on disk the last writer wins. Migration is idempotent on
-	// subsequent boots (zero-CreatedAt set is empty), so a one-off skew
-	// during a racing first-upgrade Scan self-heals on the next clean Scan.
-	// No current caller invokes Scan concurrently.
+	// Sidebar order migration: stamp CreatedAt on projects missing one, sorted
+	// by name with 1ms spacing so the first render after upgrade keeps the old
+	// byte-name order and All() sorts stay strict. No concurrent Scan callers.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
-		// The root project (include_root) is synthetic: it has no
-		// .naozhi/project.yaml and we must NOT auto-create one inside the user's
-		// top-level workspace. Skip it here and stamp an in-memory-only
-		// CreatedAt below so the migration never persists to root.
+		// The root project is synthetic: never auto-create .naozhi/project.yaml
+		// inside the user's top-level workspace; it gets an in-memory CreatedAt.
 		if p.IsRoot {
 			continue
 		}
@@ -258,9 +208,8 @@ func (m *Manager) Scan() error {
 		for i, name := range missing {
 			p := projects[name]
 			p.Config.CreatedAt = base + int64(i)
-			// Best-effort persist: a write failure here just means the next
-			// boot will re-stamp (with a different base, so order may shift
-			// once). Log and move on rather than failing the whole scan.
+			// Best-effort persist: on failure the next boot re-stamps (order may
+			// shift once) rather than failing the whole scan.
 			cfgSnap := snapshotConfig(p)
 			if err := saveConfigToPath(p.configPath(), cfgSnap); err != nil {
 				slog.Warn("persist project CreatedAt failed",
@@ -269,17 +218,9 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	// Root project sidebar order: assign an in-memory-only CreatedAt that sorts
-	// the root entry strictly LAST among all projects so it lands at the bottom
-	// of the sidebar. Never persisted (that is the point of skipping it above),
-	// so it is recomputed every boot; because it is always the max, its relative
-	// position is stable across reboots regardless of the synthetic value.
-	//
-	// Override unconditionally (not just when CreatedAt==0): if the operator
-	// dropped a real .naozhi/project.yaml at the workspace root, loadConfig
-	// would have read its created_at and that would otherwise place root in the
-	// middle of the list, breaking the "root sorts last" invariant. The root
-	// project is synthetic, so its sidebar position is always derived here.
+	// Root project sorts strictly LAST: in-memory-only CreatedAt = max + 1,
+	// recomputed every boot. Override unconditionally so a real project.yaml
+	// dropped at the workspace root cannot place root mid-list.
 	for _, p := range projects {
 		if p.IsRoot {
 			var maxCreated int64
@@ -297,23 +238,17 @@ func (m *Manager) Scan() error {
 
 	m.projects = projects
 	m.rebuildBindingIndex()
-	// Drop the inode-walk fallback memo: it is keyed to the project set we just
-	// replaced, so a stale ws→name (e.g. a renamed/removed project, or a path
-	// that now resolves to a different deepest project) must not survive a
-	// rescan. Clear under the same write lock that swaps m.projects so a
-	// concurrent ResolveWorkspaces reader never sees fresh projects with a stale
-	// cache. Go 1.21+ sync.Map.Clear.
+	// Drop the inode-walk memo (keyed to the replaced project set) and bump the
+	// generation under the same write lock, so no reader sees fresh projects
+	// with a stale cache and no lock-free fallback keeps a stale Store (#2228).
 	m.resolveCache.Clear()
-	// Bump the generation so any inode fallback that snapshotted the old project
-	// set (lock-free, after its RUnlock) discards its now-stale Store (#2228).
 	m.resolveGen.Add(1)
 
 	slog.Info("scanned projects", "root", m.root, "count", len(projects))
 	return nil
 }
 
-// Get returns a snapshot of the project by name, or nil if not found.
-// The returned *Project is a copy; mutations do not affect the manager's state.
+// Get returns a snapshot (copy) of the project by name, or nil if not found.
 func (m *Manager) Get(name string) *Project {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -324,10 +259,8 @@ func (m *Manager) Get(name string) *Project {
 	return p.snapshot()
 }
 
-// All returns snapshots of all projects sorted by CreatedAt ascending so the
-// dashboard sidebar can render newly-added folders at the bottom of the list.
-// Name is the tiebreaker for entries that share a timestamp (mostly the
-// migration backfill batch and the unlikely same-millisecond create case).
+// All returns snapshots of all projects sorted by CreatedAt ascending (name as
+// tiebreaker) so the sidebar renders newly-added folders at the bottom.
 func (m *Manager) All() []*Project {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -361,41 +294,28 @@ func (m *Manager) ProjectForChat(platform, chatType, chatID string) *Project {
 
 // BindChat binds a chat to a project and persists the binding to project.yaml.
 func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error {
-	// R185-SEC-M1: IM /project <name> → BindChat is another trust boundary
-	// into bindingIndex. Enforce the same field invariants as ValidateConfig
-	// (R184-SEC-M1b) so the index's "platform:chatType:chatID" key invariant
-	// is upheld regardless of ingress. Empty required fields are also rejected
-	// (R185-SEC-M2).
+	// IM /project <name> is a trust boundary into bindingIndex: enforce the same
+	// field invariants as ValidateConfig so the key invariant holds on every ingress.
 	if platform == "" || chatType == "" || chatID == "" {
 		return fmt.Errorf("%w: BindChat requires non-empty platform/chatType/chatID", ErrInvalidConfig)
 	}
 	if err := validateBindingField(platform, chatType, chatID); err != nil {
 		return fmt.Errorf("%w: BindChat: %s", ErrInvalidConfig, err.Error())
 	}
-	// R202606c-CR-002: hold the write lock across saveConfigToPath. The
-	// periodic Scan() (server_loops.go) takes the same write lock and
-	// overwrites m.projects with the map freshly loaded from disk. If the
-	// save happened after Unlock(), a Scan firing in the window between
-	// Unlock and save would reload the pre-binding on-disk file and clobber
-	// the in-memory binding we just appended (lost until the next save+scan).
-	// saveConfigToPath is pure file IO and never re-enters m.mu, so holding
-	// the lock across it is reentrancy-safe; project mutations are low
-	// frequency so the wider lock window is acceptable.
+	// Hold the write lock across saveConfigToPath: the periodic Scan() takes the
+	// same lock and reloads m.projects from disk, so a save after Unlock would
+	// let a Scan clobber the in-memory binding. saveConfigToPath never re-enters m.mu.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.projects[projectName]
 	if !ok {
-		// R183-SEC-L1: use %q to mirror UpdateConfig / SetFavorite (lines 211,
-		// 237). An exported function is one future caller away from being
-		// reached without a trust-boundary ValidateProjectName; defense-in-
-		// depth quoting means bidi/C1/newline bytes in projectName cannot
+		// %q: defense-in-depth so bidi/C1/newline bytes in projectName cannot
 		// forge structured log entries via err.Error().
 		return fmt.Errorf("%w: %q", ErrNotFound, projectName)
 	}
 
 	binding := ChatBinding{Platform: platform, ChatID: chatID, ChatType: chatType}
 
-	// Check if already bound
 	for _, b := range p.Config.ChatBindings {
 		if b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType {
 			return nil // already bound
@@ -408,20 +328,12 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 }
 
 // UnbindAllChat removes all bindings for a given chat across all projects.
-//
-// R20260608-133914-LB-1 (#1961): a chat can end up bound to more than one
-// project (BindChat does not reject cross-project duplicates, and `/project
-// <name>` does not unbind first), so the single-value bindingIndex is not a
-// reliable enumeration of every project holding this binding. Scan every
-// project's ChatBindings and strip the matching binding from each, persisting
-// only the ones actually modified. This guarantees the godoc contract
-// ("across all projects") and removes the non-deterministic routing that
-// last-writer-wins index rebuilds produced for multi-bound chats.
+// A chat can be bound to several projects (BindChat allows cross-project
+// duplicates), so the single-value bindingIndex is not a reliable enumeration:
+// every project's ChatBindings is scanned; only modified ones persist (#1961).
 func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
-	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
-	// reload the pre-change on-disk configs and resurrect the bindings we just
-	// stripped. See BindChat for the full rationale; saveConfigToPath does not
-	// re-enter m.mu.
+	// Persist under the lock so a concurrent Scan() cannot resurrect the
+	// bindings just stripped (see BindChat).
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -461,19 +373,15 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	return firstErr
 }
 
-// SetFavorite toggles a project's Favorite flag and persists it atomically.
-// Only touches Favorite — other config fields are preserved.
+// SetFavorite sets a project's Favorite flag and persists it; other fields are untouched.
 func (m *Manager) SetFavorite(name string, favorite bool) error {
-	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
-	// reload the pre-change on-disk config and drop this Favorite flip. See
-	// BindChat for the full rationale; saveConfigToPath does not re-enter m.mu.
+	// Persist under the lock so a concurrent Scan() cannot drop this Favorite
+	// flip (see BindChat).
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		// R182-SEC-L1: %q mirrors UpdateConfig (line 234). set_favorite now
-		// validates at the RPC boundary (R182-SEC-M1), but function is
-		// defense-in-depth for any future caller that forgets to validate.
+		// %q: defense-in-depth against log forging via err.Error().
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	if p.Config.Favorite == favorite {
@@ -485,18 +393,14 @@ func (m *Manager) SetFavorite(name string, favorite bool) error {
 
 // UpdateConfig updates a project's config and persists it.
 func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
-	// R202606c-CR-002: persist under the lock so a concurrent Scan() cannot
-	// reload the pre-change on-disk config and drop this update. See BindChat
-	// for the full rationale; saveConfigToPath does not re-enter m.mu.
+	// Persist under the lock so a concurrent Scan() cannot drop this update
+	// (see BindChat).
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.projects[name]
 	if !ok {
-		// R181-SEC-P2-2: name comes from reverse-RPC frames (update_config)
-		// and dashboard query strings. %q escapes bidi/C1/newline so the
-		// wrapped error cannot forge structured log entries when the caller
-		// logs err.Error(). BindChat / UpdateBinding / SetFavorite now all
-		// use %q too (R182/R183/R185) so every ErrNotFound path is uniform.
+		// name comes from reverse-RPC frames and dashboard query strings; %q
+		// escapes bidi/C1/newline so the error cannot forge log entries.
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	p.Config = cfg
@@ -515,27 +419,14 @@ func (m *Manager) ProjectNames() map[string]struct{} {
 	return names
 }
 
-// ResolveWorkspaces maps workspace paths to project names in a single lock acquisition.
-// Returns a map from workspace path to project name. Paths that don't match any project are omitted.
-//
-// Matching is longest-prefix over the registered projects. The primary check is
-// a byte-wise strings.HasPrefix, which is exact and allocation-free. When that
-// misses for a ws, ResolveWorkspaces falls back to an inode-aware containment
-// walk (resolveWorkspaceByInode) so a case-insensitive filesystem (macOS
-// APFS/HFS+, Windows NTFS) still resolves the project even when the configured
-// projects_root and the on-disk workspace path differ only in case — e.g. root
-// "/Users/me/Workspace" vs a Claude-recorded cwd "/Users/me/workspace/foo".
-// Without the fallback those sessions render with no project/folder label in
-// the dashboard history panel even though they live under root.
+// ResolveWorkspaces maps workspace paths to project names in a single lock
+// acquisition; unmatched paths are omitted. Longest-prefix: a byte-wise
+// strings.HasPrefix first, then an inode-aware containment walk so a
+// case-insensitive FS resolves when root and recorded cwd differ only in case.
 func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
-	// projSnap is a lightweight (name, Path) snapshot of the registered
-	// projects taken under the RLock. The byte-prefix fast path runs under the
-	// lock; the inode fallback (resolveWorkspaceByInode → os.Lstat on every
-	// ancestor) must NOT — holding the RLock across that FS IO blocks every
-	// writer (BindChat / UpdateConfig / Scan, all m.mu.Lock) for the duration
-	// of the syscall fan-out. So we collect the snapshot under the lock and run
-	// the fallback after releasing it. R202606-CONC: ResolveWorkspaces FS-IO
-	// outside lock (#2228).
+	// The byte-prefix fast path runs under the RLock; the inode fallback Stats
+	// every ancestor and must NOT hold the lock (it would stall every writer),
+	// so it runs after RUnlock against a (name, Path) snapshot (#2228).
 	result := make(map[string]string, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	var fallbacks []string // ws paths that missed the byte prefix
@@ -568,8 +459,7 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 			result[ws] = bestName
 			continue
 		}
-		// Byte prefix missed for every project. Defer the inode-containment
-		// probe to after the lock is released (it Stats the FS).
+		// Byte prefix missed: defer the inode probe (Stats the FS) past the lock.
 		fallbacks = append(fallbacks, ws)
 	}
 	var snapGen uint64
@@ -578,15 +468,12 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 		for _, p := range m.projects {
 			projSnap = append(projSnap, projRef{name: p.Name, path: p.Path})
 		}
-		// Read the generation under the same RLock as the snapshot so a Scan
-		// that lands after RUnlock is detectable by resolveWorkspaceByInode.
+		// Same RLock as the snapshot, so a later Scan is detectable.
 		snapGen = m.resolveGen.Load()
 	}
 	m.mu.RUnlock()
 
-	// Inode fallback runs lock-free against the snapshot. On a case-insensitive
-	// FS the ws may still live under a project whose Path differs only in case,
-	// so probe inode containment (cached, since it Stats the FS).
+	// Inode fallback runs lock-free against the snapshot (cached; Stats the FS).
 	for _, ws := range fallbacks {
 		if name := m.resolveWorkspaceByInode(ws, projSnap, snapGen); name != "" {
 			result[ws] = name
@@ -596,33 +483,13 @@ func (m *Manager) ResolveWorkspaces(paths []string) map[string]string {
 }
 
 // resolveWorkspaceByInode is the inode-aware longest-prefix fallback for
-// ResolveWorkspaces. It is reached only when the byte-wise strings.HasPrefix
-// scan found no project for ws, so on a case-sensitive FS with matching case
-// (the common deployment) it is never called.
-//
-// It walks the projects snapshot and asks osutil.PathContainedInRoot whether ws
-// is the same path as, or beneath, that project's Path — a check that falls
-// back to an os.SameFile ancestor walk and so honours the kernel's case folding
-// without hard-coding any OS-specific rules. Among the projects that contain ws
-// it keeps the longest Path (deepest project wins), preserving the same
-// longest-prefix semantics as the fast path.
-//
-// It operates on a caller-supplied snapshot of (name, Path) pairs rather than
-// reading m.projects, and the caller invokes it WITHOUT holding m.mu — the
-// os.SameFile walk Stats each ancestor, and doing that under the RLock would
-// stall every writer (BindChat / UpdateConfig / Scan) for the syscall fan-out.
-//
-// Results (including a confirmed no-match, cached as "") are memoised in
-// resolveCache because the SameFile walk Stats each ancestor and the dashboard
-// re-resolves the same workspaces at 1 Hz. The cache is a sync.Map so concurrent
-// access is safe, and Scan clears it under the write lock when m.projects is
-// replaced.
-//
-// snapGen is the resolveGen value read under the same RLock as the projects
-// snapshot. Because this runs lock-free, a Scan can replace m.projects and
-// Clear() the cache between the snapshot and the Store below; in that case the
-// computed name is stale, so the Store is rolled back when resolveGen has moved
-// on — the cache then re-resolves against the fresh project set next tick (#2228).
+// ResolveWorkspaces, reached only when the byte-wise prefix scan misses. It
+// asks osutil.PathContainedInRoot (os.SameFile ancestor walk, honouring the
+// kernel's case folding) for each snapshotted project and keeps the deepest
+// match. Called WITHOUT m.mu held because the walk Stats the FS. Results
+// (including "" = no match) are memoised in resolveCache since the dashboard
+// re-resolves the same workspaces at 1 Hz; if resolveGen moved past snapGen
+// meanwhile, the just-stored value is stale and is deleted again (#2228).
 func (m *Manager) resolveWorkspaceByInode(ws string, projects []projRef, snapGen uint64) string {
 	if v, ok := m.resolveCache.Load(ws); ok {
 		return v.(string)
@@ -639,9 +506,8 @@ func (m *Manager) resolveWorkspaceByInode(ws string, projects []projRef, snapGen
 		}
 	}
 	m.resolveCache.Store(ws, bestName)
-	// If a Scan replaced the project set while we were walking lock-free, the
-	// value just stored was computed from a stale snapshot and its Clear() may
-	// have already run; drop it so it can't outlive the rescan.
+	// A Scan replaced the project set while we walked lock-free: the stored
+	// value is stale and its Clear() may already have run, so drop it.
 	if m.resolveGen.Load() != snapGen {
 		m.resolveCache.Delete(ws)
 	}
@@ -661,11 +527,9 @@ func (m *Manager) EffectivePlannerModel(p *Project) string {
 
 // EffectivePlannerPrompt returns the prompt for the planner (project override > global default > "").
 //
-// Prompt 最终会被拼成 argv 里的 `--append-system-prompt <prompt>` 传给 CLI 子进程，
-// prompt 字符串来自磁盘 CLAUDE.md（Claude tool 可写），必须在源头拦截 NUL / C0
-// 控制字节 + 非法 UTF-8，防止 argv 截断或 shim stream-json 编码受污染。
-// 非法 prompt 返回空串（等价于没有配置 planner prompt），而不是返回部分字符，
-// 避免"静默截断"产生难以追踪的 planner 行为漂移。
+// Prompt 最终拼进 argv 的 `--append-system-prompt <prompt>` 传给 CLI 子进程，且来自
+// 磁盘 CLAUDE.md（Claude tool 可写），必须在源头拦截 NUL / C0 控制字节 + 非法 UTF-8，
+// 防止 argv 截断或 shim stream-json 受污染。非法 prompt 返回空串而非部分字符，避免静默截断。
 func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 	raw := p.Config.PlannerPrompt
 	if raw == "" {
@@ -680,20 +544,17 @@ func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 	}
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
-		// 0x09 tab / 0x0A LF / 0x0D CR 是 markdown/CLAUDE.md 合法内容，放行；
-		// 其余 C0 控制字节 + NUL + DEL 会破坏 argv 或 stream-json，整串丢弃。
-		// 与 project.ValidateConfig / config.validatePlannerPrompt 对齐 DEL 处理。
+		// tab / LF / CR 是 markdown 合法内容，放行；其余 C0 + NUL + DEL 会破坏 argv 或
+		// stream-json，整串丢弃。与 project.ValidateConfig / config.validatePlannerPrompt 对齐。
 		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) || c == 0x7f {
 			slog.Warn("planner prompt contains control byte; dropping",
 				"project", p.Name, "byte", c)
 			return ""
 		}
 	}
-	// R225-SEC-6: 字节循环只覆盖 NUL/C0/DEL，跳不到 C1/bidi override/LS-PS（多字节
-	// UTF-8，首字节 >= 0xC2）。ValidateConfig 已在写路径上跑同一份 IsLogInjectionRune
-	// 扫描，但被篡改的 project.yaml 或绕开 ValidateConfig 的全局默认仍可能落到此处 —
-	// 运行时再扫一遍是 defense-in-depth；rune 用 U+XXXX 格式化避免 bidi 字面值翻转
-	// journalctl 渲染。
+	// 字节循环只覆盖 NUL/C0/DEL，跳不到 C1/bidi override/LS-PS（多字节 UTF-8）。
+	// ValidateConfig 已在写路径扫过，但被篡改的 project.yaml 或全局默认仍可能落到此处，
+	// 运行时再扫一遍是 defense-in-depth；rune 用 U+XXXX 格式化避免 bidi 字面值翻转日志渲染。
 	for _, r := range raw {
 		if osutil.IsLogInjectionRune(r) {
 			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS); dropping",

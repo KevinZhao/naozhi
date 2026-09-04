@@ -7,12 +7,9 @@ import (
 	"os"
 )
 
-// openNoFollow is the windows shim — there's no O_NOFOLLOW, so we use a
-// best-effort Lstat→Open two-step: Lstat rejects a final-component symlink
-// before we follow it, then Open returns the fd. There is a residual TOCTOU
-// window between Lstat and Open, matching the existing windows posture in
-// dashboard OpenWorkspaceFile and cron openRunFile shims. naozhi's production
-// target is Linux. [R202606d-SEC-1]
+// openNoFollow is the windows shim: no O_NOFOLLOW, so Lstat rejects a
+// final-component symlink before Open. A residual TOCTOU window remains
+// between the two calls; naozhi's production target is Linux.
 func openNoFollow(path string) (*os.File, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {

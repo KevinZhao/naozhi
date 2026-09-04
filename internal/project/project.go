@@ -23,21 +23,15 @@ type Project struct {
 	GitRemoteURL string `json:"git_remote_url,omitempty"`
 	IsGitHub     bool   `json:"is_github,omitempty"`
 
-	// DirModTime is the project directory's filesystem mtime captured at Scan
-	// time (unix ms). The dashboard "new session" folder picker orders its
-	// fallback tier by this value descending so the most-recently-touched
-	// workspace surfaces first — distinct from Config.CreatedAt (which anchors
-	// the persisted sidebar order). Not persisted; refreshed every Scan. Zero
-	// when the directory could not be stat'd (the picker then falls back to
-	// the backend order for that entry).
+	// DirModTime is the directory's mtime at Scan time (unix ms); the "new
+	// session" folder picker orders its fallback tier by it descending.
+	// Not persisted; 0 when the directory could not be stat'd.
 	DirModTime int64 `json:"dir_mtime,omitempty"`
 
-	// IsRoot marks the synthetic project that represents the projects root
-	// directory itself (registered only when ProjectsConfig.IncludeRoot is on).
-	// Its Path is the whole workspace tree, so it is treated like the
-	// __public_tmp__ pseudo-project on the file endpoints: the foreign-private
-	// UID / denied-name / irregular-type gates apply, and Scan never persists a
-	// CreatedAt for it (no .naozhi/project.yaml is auto-written into the root).
+	// IsRoot marks the synthetic project for the projects root itself
+	// (ProjectsConfig.IncludeRoot). Its Path is the whole workspace tree, so
+	// the file endpoints apply the __public_tmp__ pseudo-project gates and
+	// Scan never persists a CreatedAt for it.
 	IsRoot bool `json:"is_root,omitempty"`
 }
 
@@ -48,37 +42,27 @@ type ProjectConfig struct {
 	GitRemote  string `yaml:"git_remote,omitempty" json:"git_remote,omitempty"`
 	MemoryFile string `yaml:"memory_file,omitempty" json:"memory_file,omitempty"`
 
-	// CreatedAt anchors a project's sidebar order: the dashboard sorts
-	// projects by this value ascending so newly-added folders always land at
-	// the bottom of their tier (favorite / regular / fallback). unix ms.
-	// On first scan after upgrade, manager.Scan synthesises the value using
-	// the directory name's lexical rank (so existing layouts keep their
-	// relative order) and persists it back so subsequent boots are stable.
+	// CreatedAt (unix ms) anchors sidebar order: ascending, so new folders land
+	// at the bottom of their tier. Scan synthesises and persists it when missing.
 	CreatedAt int64 `yaml:"created_at,omitempty" json:"created_at,omitempty"`
 
 	PlannerModel  string `yaml:"planner_model,omitempty" json:"planner_model,omitempty"`
 	PlannerPrompt string `yaml:"planner_prompt,omitempty" json:"planner_prompt,omitempty"`
 
-	// Backend pins the default CLI backend ("claude" | "kiro" | …) for this
-	// project's sessions. Empty = router default. Referential validity (is it
-	// an enabled backend?) is checked at the config layer, which knows the
-	// backend registry; here ValidateConfig only enforces byte-hygiene. RFC
-	// project-access-profile PR-A.
+	// Backend pins the default CLI backend for this project's sessions; empty =
+	// router default. Referential validity is checked at the config layer;
+	// ValidateConfig only enforces byte-hygiene.
 	Backend string `yaml:"backend,omitempty" json:"backend,omitempty"`
-	// AccessProfile names the default access profile (auth/upstream overlay)
-	// for this project's sessions. This carries only the NAME — the env values
-	// live in the trusted config.yaml, so a project.yaml synced from git can at
-	// most point at an operator-defined profile, never inject env. Empty =
-	// global default. RFC project-access-profile PR-B / §5.
+	// AccessProfile names the default access profile for this project's
+	// sessions. Only the NAME: env values live in the trusted config.yaml, so a
+	// project.yaml synced from git can never inject env. Empty = global default.
 	AccessProfile string `yaml:"access_profile,omitempty" json:"access_profile,omitempty"`
 
-	// DisplayName is the operator-facing label that overrides the directory
-	// name in dashboard rendering. Empty means "use directory name".
-	// R110-P2 foundation: schema only, not yet wired through to UI.
+	// DisplayName overrides the directory name in dashboard rendering; empty
+	// means "use directory name".
 	DisplayName string `yaml:"display_name,omitempty" json:"display_name,omitempty"`
 	// Emoji is a single Unicode emoji (or short label prefix up to 8 runes)
-	// rendered alongside DisplayName. A single emoji may be up to ~4 runes
-	// once modifiers and ZWJ joiners are counted. Empty means "no prefix".
+	// rendered alongside DisplayName. Empty means "no prefix".
 	Emoji string `yaml:"emoji,omitempty" json:"emoji,omitempty"`
 
 	ChatBindings []ChatBinding `yaml:"chat_bindings,omitempty" json:"chat_bindings,omitempty"`
@@ -117,22 +101,16 @@ func (p *Project) snapshot() *Project {
 	return &cp
 }
 
-// snapshotLight returns a shallow copy without deep-copying ChatBindings.
-// Use when the caller only reads Name/Path/PlannerModel/PlannerPrompt.
+// snapshotLight returns a shallow copy without ChatBindings, for read-only callers.
 func (p *Project) snapshotLight() *Project {
 	cp := *p
 	cp.Config.ChatBindings = nil
 	return &cp
 }
 
-// IsPlannerKey returns true if the session key is a project planner key.
-// Format: "project:{name}:planner".
-//
-// R202606g-CR-002 / R040034-ARCH-2 (#1412): delegates to the single source
-// of truth in internal/sessionkey rather than re-implementing the prefix/
-// suffix/len check. sessionkey is a zero-internal-import leaf, so this does
-// not create an import cycle (and project does not import internal/session —
-// see no_session_import_test.go).
+// IsPlannerKey returns true if the session key is a project planner key
+// ("project:{name}:planner"). Delegates to internal/sessionkey, the single
+// source of truth (#1412).
 func IsPlannerKey(key string) bool {
 	return sessionkey.IsPlannerKey(key)
 }
@@ -164,9 +142,7 @@ func loadConfig(projectPath string) (ProjectConfig, error) {
 	return cfg, nil
 }
 
-// saveConfigToPath atomically writes a ProjectConfig to the given path.
-// Uses write-tmp → fsync → rename so a crash mid-write cannot truncate
-// the on-disk config and lose ChatBindings.
+// saveConfigToPath atomically writes cfg to path (write-tmp → fsync → rename).
 func saveConfigToPath(path string, cfg ProjectConfig) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {

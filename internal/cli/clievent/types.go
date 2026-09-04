@@ -1,41 +1,17 @@
-// Package clievent holds the leaf event-record types shared between the
-// CLI wrapper, persistence, discovery, and dashboard layers.
-//
-// Splitting these out of `internal/cli` breaks the diamond import that
-// would otherwise form: session → discovery → cli ← session. R217-ARCH-3
-// (#626). The cli package originally re-exported each type via a Go type
-// alias (`cli.EventEntry`); that alias was removed in #2496 step 1 so
-// every consumer — history/*, node, dashboard/*, session, cli itself —
-// imports this leaf directly and the package dependency graph reflects
-// who actually needs the process-management surface in cli.
-//
-// New record types should land here only when they are pure data shapes
-// with no behaviour and are consumed by ≥2 packages above the cli
-// boundary. Anything that needs cli-internal helpers stays in cli.
+// Package clievent holds the leaf event-record types shared between the CLI
+// wrapper, persistence, discovery, and dashboard layers, breaking the diamond
+// import session → discovery → cli ← session (#626). New record types land
+// here only when they are pure data shapes consumed by ≥2 packages above cli.
 package clievent
 
-// EventEntry is a simplified event record for the dashboard. The CLI
-// wrapper, EventLog ring buffer, JSONL persistence layer, and the
-// dashboard renderer all share this shape; persisted JSON in
-// `<dataDir>/sessions/*.jsonl` is round-tripped through this struct.
-//
-// Field semantics are documented inline below; they were lifted as-is
-// from internal/cli/eventlog.go (R217-ARCH-3 #626 — diamond-import
-// extraction). The `cli.EventEntry` alias that bridged the move was
-// dropped in #2496 step 1; refer to this type as clievent.EventEntry.
+// EventEntry is the event record shared by the CLI wrapper, EventLog ring
+// buffer, JSONL persistence and the dashboard renderer; persisted JSON in
+// `<dataDir>/sessions/*.jsonl` round-trips through this struct.
 type EventEntry struct {
-	// UUID is a 32-char lowercase hex identity for this event,
-	// assigned at Append-time by EventLog.stampUUID. Stable across
-	// process restarts because it rides along with the entry into
-	// the on-disk event log (internal/eventlog/persist). MergedSource
-	// uses UUID as the exact-match dedup key between the local
-	// JSONL tier and Claude CLI JSONL fallback — see RFC §3.5.2.
-	//
-	// "" means "legacy entry (from a pre-UUID persisted record or
-	// a Claude JSONL replay that hasn't been fingerprinted yet)".
-	// MergedSource handles the empty case by deriving a stable UUID
-	// from (Time + Summary) so two replays of the same Claude record
-	// land on the same key.
+	// UUID is a 32-char lowercase hex identity assigned by EventLog.stampUUID
+	// and persisted; MergedSource's exact-match dedup key between the local
+	// JSONL tier and Claude CLI JSONL fallback. "" = legacy entry (MergedSource
+	// derives a stable UUID from Time + Summary).
 	UUID       string   `json:"uuid,omitempty"`
 	Time       int64    `json:"time"`                 // unix ms
 	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
@@ -47,16 +23,10 @@ type EventEntry struct {
 	TeamName   string   `json:"team_name,omitempty"`  // team grouping key for agent team members
 	Background bool     `json:"background,omitempty"` // true for run_in_background team agents
 	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads
-	// ImagePaths is the workspace-relative path of the on-disk copy of each
-	// inline image, index-aligned with Images. Populated opportunistically by
-	// buildUserEntry when persistFileRefs persisted an image to the workspace
-	// attachment directory. Consumed by the dashboard lightbox so clicking a
-	// thumbnail can load the original via /api/sessions/attachment instead of
-	// the downsampled data URI. An empty slot (e.g. persist failed, or a
-	// legacy replayed event) falls back to the thumbnail. ALWAYS sanitized
-	// before use: callers join it under the session workspace and must reject
-	// any absolute or escaping path — validation lives in the HTTP handler,
-	// not here, so persisted history is pass-through.
+	// ImagePaths is the workspace-relative on-disk copy of each inline image,
+	// index-aligned with Images (empty slot → thumbnail fallback); used by the
+	// lightbox via /api/sessions/attachment. ALWAYS sanitized before use: the
+	// HTTP handler rejects absolute/escaping paths; persisted history is pass-through.
 	ImagePaths []string `json:"image_paths,omitempty"`
 	TaskID     string   `json:"task_id,omitempty"`     // agent task correlation ID
 	ToolUseID  string   `json:"tool_use_id,omitempty"` // links Agent tool_use → task_started
@@ -65,46 +35,30 @@ type EventEntry struct {
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
 	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
-	// Agent team internal-view linkage (RFC v4 agent-team-ui §3.2.2).
-	// All four fields are persisted to sessions/*.jsonl on "agent" and
-	// "task_start" entries so SubagentLinker.SeedFromHistory can rebuild
-	// the task_id → on-disk-transcript mapping after shim reconnect or
-	// CLI-dead respawn without re-scanning ~/.claude/projects/.
-	// Async backfilled via EventLog.SetAgentInternalID once the linker
-	// resolves, hence all omitempty.
+	// Agent team internal-view linkage, persisted on "agent" and "task_start"
+	// entries so SubagentLinker.SeedFromHistory can rebuild the task_id →
+	// transcript mapping after reconnect/respawn without re-scanning
+	// ~/.claude/projects/. Async backfilled via EventLog.SetAgentInternalID.
 	TaskType        string `json:"task_type,omitempty"`         // "in_process_teammate" | "local_bash" | ""
 	InternalAgentID string `json:"internal_agent_id,omitempty"` // "agent-<hex17>" filename stem under <projectDir>/<sessionID>/subagents/
 	JSONLPath       string `json:"jsonl_path,omitempty"`        // absolute path to agent transcript jsonl
 	FirstPromptID   string `json:"first_prompt_id,omitempty"`   // jsonl first-line promptId; guards against same-name re-spawn
 
-	// AskQuestion carries the interactive AskUserQuestion card payload. Only
-	// set on Type=="ask_question" entries synthesised from an AskUserQuestion
-	// tool_use block — kept as a separate field (rather than stuffing JSON
-	// into Detail) so the dashboard renderer doesn't have to re-parse and
-	// so Go callers (EventLog replay → WS broadcast) don't pay a JSON
-	// unmarshal per question bubble.
+	// AskQuestion carries the AskUserQuestion card payload on Type=="ask_question"
+	// entries; a typed field so dashboard and replay callers never re-parse Detail.
 	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
 
 	// ToolCall is the per-event payload for ACP tool_call / tool_call_update
-	// rich progress rows. Multi-Backend RFC §8.3 D17. Same struct on initial
-	// invocation and updates; dashboard threads them by ID. Stream-json
-	// (Claude) leaves nil and uses Type=="tool_use" with Tool name + Detail
-	// for input.
+	// rich progress rows; the dashboard threads them by ID. Stream-json
+	// (Claude) leaves nil and uses Type=="tool_use" with Tool + Detail.
 	ToolCall *ToolCall `json:"tool_call,omitempty"`
 }
 
 // ToolCall is the per-event payload for ACP tool_call / tool_call_update
-// session/update notifications. Multi-Backend RFC §8.3 D17.
-//
-// Same struct serves both the initial "tool invocation" event (Status==""
-// or "pending") and subsequent updates ("in_progress" / "completed" /
-// "failed"). The dashboard threads them by ID — successive events with the
-// same ID overwrite the prior progress row rather than appending.
-//
-// Output is the raw JSON payload kiro emits (kiro shape:
-// `{"items":[{"Json":{"exit_status":"...", "stdout":"..."}}]}`); the
-// dashboard decides how to extract a stdout string vs render JSON. Keeping
-// it here as a string preserves the original formatting for "view raw".
+// session/update notifications. The same struct serves the initial
+// invocation (Status "" or "pending") and updates; successive events with the
+// same ID overwrite the prior progress row. Output stays the raw JSON kiro
+// emits so "view raw" preserves formatting.
 type ToolCall struct {
 	ID         string `json:"id"`
 	Name       string `json:"name,omitempty"`
@@ -115,18 +69,17 @@ type ToolCall struct {
 	OutputJSON string `json:"output_json,omitempty"` // raw JSON of rawOutput
 }
 
-// AskQuestion mirrors the shape of AskUserQuestion.input observed against
-// claude CLI 2.1.132 (see test/e2e/askuser/aq1_aq2_trigger_and_schema.py).
-// ToolUseID is the tool_use id emitted by the assistant and serves as a
-// correlation key across dashboard + IM renderings of the same question.
+// AskQuestion mirrors the shape of AskUserQuestion.input (see
+// test/e2e/askuser/aq1_aq2_trigger_and_schema.py). ToolUseID correlates
+// dashboard + IM renderings of the same question.
 type AskQuestion struct {
 	ToolUseID string            `json:"tool_use_id"`
 	Items     []AskQuestionItem `json:"items"`
 }
 
 // AskQuestionItem is one question in a possibly multi-question card.
-// MultiSelect=true signals checkbox semantics; the CLI may set it but the
-// dashboard currently degrades to single-select (one click = one answer).
+// MultiSelect=true signals checkbox semantics; the dashboard currently
+// degrades to single-select.
 type AskQuestionItem struct {
 	Question    string           `json:"question"`
 	Header      string           `json:"header,omitempty"`
@@ -134,9 +87,8 @@ type AskQuestionItem struct {
 	Options     []AskQuestionOpt `json:"options"`
 }
 
-// AskQuestionOpt is one selectable choice. Label is the user-facing text that
-// the answer composer will echo back ("Header: Label."). Description is shown
-// in the card tooltip / secondary line but never echoed.
+// AskQuestionOpt is one selectable choice. Label is echoed back by the answer
+// composer ("Header: Label."); Description is tooltip-only, never echoed.
 type AskQuestionOpt struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`

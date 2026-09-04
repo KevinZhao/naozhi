@@ -1,12 +1,8 @@
 // Package gitinfo reads the git branch / worktree state of a directory by
-// parsing the on-disk git layout directly — no `git` subprocess.
-//
-// Why no exec: the dashboard resolves this for whatever workspace a session
-// runs in, i.e. an operator-supplied path. Spawning a child process per
-// lookup would add ~5-15 ms and put an attacker-influenced cwd on a process
-// boundary (git honours `.git/config` hooks-ish knobs, core.fsmonitor,
-// include.path …). Reading two small files is faster and has no execution
-// surface. `DetectGitHubRemote` already sets this precedent for `.git/config`.
+// parsing the on-disk git layout directly — no `git` subprocess. The
+// dashboard resolves this for an operator-supplied workspace path; spawning a
+// child there would put an attacker-influenced cwd on a process boundary
+// (git honours .git/config knobs), while reading two small files has none.
 package gitinfo
 
 import (
@@ -19,58 +15,36 @@ import (
 	"strings"
 )
 
-// State describes the git checkout a directory belongs to. The zero value
-// means "not a git repository" (callers check the bool that Detect returns).
+// State describes the git checkout a directory belongs to; zero value = not a repo.
 type State struct {
-	// Root is the absolute path of the working tree the directory belongs to
-	// (the dir that holds `.git`), not the dir passed to Detect.
+	// Root is the working tree root (the dir holding .git), not the dir passed to Detect.
 	Root string
-	// Branch is the short branch name ("master", "feat/x"). Empty when HEAD
-	// is detached.
+	// Branch is the short branch name; empty when HEAD is detached.
 	Branch string
-	// HeadSHA is the abbreviated (7 hex) commit id. Only set for a detached
-	// HEAD — on a branch the sha carries no extra signal for the operator and
-	// reading it would cost another file read (packed-refs walk).
+	// HeadSHA is the abbreviated (7 hex) commit id, set only for a detached HEAD.
 	HeadSHA string
-	// Detached is true when HEAD points at a commit rather than a branch
-	// (rebase, bisect, `git checkout <sha>`).
+	// Detached is true when HEAD points at a commit rather than a branch.
 	Detached bool
-	// Worktree is the linked-worktree name (the `.git/worktrees/<name>`
-	// segment). Empty for the main working tree.
+	// Worktree is the linked-worktree name (.git/worktrees/<name>); empty for the main tree.
 	Worktree string
-	// Repo is the main working tree's directory name — the repository
-	// identity that a linked worktree shares with its parent. Equal to
-	// filepath.Base(Root) for the main tree.
+	// Repo is the main working tree's directory name, shared by linked worktrees.
 	Repo string
 }
 
-// maxWalkUp caps how many parent directories Detect inspects before giving
-// up. A session cwd is normally the repo root or one or two levels in; 40
-// is far beyond any real layout while keeping the syscall count bounded for
-// a path like "/a/b/c/…/z" that is not in a repo at all.
+// maxWalkUp bounds Detect's ancestor walk (and syscalls) for a deep path outside any repo.
 const maxWalkUp = 40
 
-// maxHeadBytes caps the HEAD read. A well-formed HEAD is <100 bytes; the cap
-// keeps a hostile/corrupt repo from making us read a large file into memory.
+// maxHeadBytes caps the HEAD read so a hostile/corrupt repo cannot make us read a large file.
 const maxHeadBytes = 4 << 10
 
-// maxRefNameBytes caps the reported branch name. git itself has no hard
-// refname limit beyond the filesystem's, so cap defensively — the value is
-// rendered in a fixed-width dashboard chip.
+// maxRefNameBytes caps the reported branch name (rendered in a fixed-width chip).
 const maxRefNameBytes = 255
 
 // Detect resolves the git state of dir, walking up to the nearest ancestor
-// that holds a `.git` entry. The bool is false when dir is not inside a git
-// working tree, or when the layout is unreadable / malformed.
-//
-// dir must be absolute and already validated by the caller (the dashboard path
-// funnels through validateWorkspace). Detect only ever reads.
-//
-// root, when non-empty, bounds every path Detect will touch: the walk-up stops
-// before leaving it, and a `.git` file's gitdir pointer that resolves outside
-// it is refused. It must be an absolute, already-symlink-resolved path (the
-// same form validateWorkspace produces). Passing "" disables the bound — only
-// appropriate for callers with no containment policy at all.
+// holding a `.git` entry; ok is false outside a working tree or on a malformed
+// layout. dir must be absolute and already validated; Detect only reads.
+// root, when non-empty, bounds every path touched (walk-up and gitdir
+// pointers); it must be absolute and symlink-resolved. "" disables the bound.
 func Detect(dir, root string) (State, bool) {
 	if dir == "" || !filepath.IsAbs(dir) {
 		return State{}, false
@@ -80,12 +54,9 @@ func Detect(dir, root string) (State, bool) {
 	}
 	cur := filepath.Clean(dir)
 	for i := 0; i < maxWalkUp; i++ {
-		// Containment is checked on every cursor position, not just the input:
-		// validateWorkspace proves the WORKSPACE is inside root, but the
-		// ancestor walk would otherwise sail past the boundary and report a
-		// parent repo's path + branch — data outside the operator's declared
-		// tree. E.g. allowed_root=<repo>/docs would still disclose <repo> and
-		// its current branch.
+		// Checked at every cursor position: validateWorkspace proves the
+		// WORKSPACE is inside root, but the walk-up would otherwise disclose a
+		// parent repo's path + branch outside the operator's declared tree.
 		if !containedIn(cur, root) {
 			return State{}, false
 		}
@@ -101,13 +72,9 @@ func Detect(dir, root string) (State, bool) {
 	return State{}, false
 }
 
-// containedIn reports whether p is root or a descendant of it. An empty root
-// means "unbounded" and always passes.
-//
-// Both sides are expected to be Clean and symlink-resolved by the caller, so
-// this is a pure lexical check — deliberately NOT osutil.PathContainedInRoot,
-// whose inode-walk fallback would add syscalls to a per-cursor hot path and
-// pull a dependency into what is otherwise a leaf package.
+// containedIn reports whether p is root or a descendant of it; empty root
+// means unbounded. Inputs are Clean and symlink-resolved, so this is a pure
+// lexical check (osutil.PathContainedInRoot's inode walk would add syscalls here).
 func containedIn(p, root string) bool {
 	if root == "" {
 		return true
@@ -118,8 +85,7 @@ func containedIn(p, root string) bool {
 	return strings.HasPrefix(p, root+string(filepath.Separator))
 }
 
-// detectAt inspects exactly one candidate working-tree root (no walk-up).
-// allowedRoot bounds where a `.git` pointer file may send us; "" disables it.
+// detectAt inspects one candidate tree root; allowedRoot bounds where a .git pointer may send us.
 func detectAt(treeRoot, allowedRoot string) (State, bool) {
 	dotGit := filepath.Join(treeRoot, ".git")
 	info, err := os.Lstat(dotGit)
@@ -137,18 +103,14 @@ func detectAt(treeRoot, allowedRoot string) (State, bool) {
 		if err != nil {
 			return State{}, false
 		}
-		// The pointer is workspace-controlled content — files inside a workspace
-		// are agent-writable by design, so a `.git` file could name an absolute
-		// path or "../.." its way out of the tree. readHead's strict shape check
-		// keeps that from becoming a file-content oracle, but the containment
-		// check is what stops it being a path-existence probe at all.
+		// The pointer is agent-writable workspace content that could name a
+		// path outside the tree; containment stops it being a path-existence
+		// probe, readHead's shape check stops it being a file-content oracle.
 		if !containedIn(gitDir, allowedRoot) {
 			return State{}, false
 		}
 	default:
-		// Symlink or irregular type: do not follow. A `.git` symlink is not a
-		// layout git itself creates, and following it would let a workspace
-		// redirect our reads outside the tree.
+		// Symlink or irregular: do not follow; a .git symlink could redirect reads outside the tree.
 		return State{}, false
 	}
 
@@ -157,9 +119,7 @@ func detectAt(treeRoot, allowedRoot string) (State, bool) {
 
 	branch, sha, ok := readHead(gitDir)
 	if !ok {
-		// A `.git` that exists but has no parseable HEAD is not a checkout we
-		// can describe (freshly `git init`-ed dirs do have HEAD, so this is
-		// the corrupt/foreign case).
+		// A .git with no parseable HEAD is corrupt/foreign, not a checkout we can describe.
 		return State{}, false
 	}
 	st.Branch, st.HeadSHA = branch, sha
@@ -167,9 +127,8 @@ func detectAt(treeRoot, allowedRoot string) (State, bool) {
 	return st, true
 }
 
-// readGitDirPointer parses the "gitdir: <path>" line of a `.git` file and
-// returns the absolute git-dir path. Relative pointers resolve against the
-// working tree root, which is what git does.
+// readGitDirPointer parses the "gitdir: <path>" line of a .git file into an
+// absolute git-dir path; relative pointers resolve against the tree root.
 func readGitDirPointer(path, root string) (string, error) {
 	data, err := readFileCapped(path, maxHeadBytes)
 	if err != nil {
@@ -190,24 +149,12 @@ func readGitDirPointer(path, root string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
-// worktreeIdentity derives the linked-worktree name and the shared repository
-// name from a git-dir path. For anything that is not a linked worktree — a main
-// tree, a submodule — it returns ("", fallbackRepo), i.e. "this checkout stands
-// on its own".
-//
-// A linked worktree's git dir is "<common>/worktrees/<name>", but the path
-// shape alone is not a safe test: a main tree in a directory literally named
-// "worktrees" has gitDir "<…>/worktrees/.git", whose parent is also named
-// "worktrees" — that misread a plain checkout as a worktree named ".git", and
-// this repo keeps its worktrees under ".claude/worktrees/" so one `git init`
-// there would trigger it.
-//
-// The authoritative marker is the "commondir" file git writes into every linked
-// worktree's git dir (verified present in every real worktree; it holds the
-// relative path back to the common git dir). Requiring it both rejects the
-// coincidental-path case and yields the true common git dir, which is what
-// makes the repo name right for a worktree of a bare repo or of a submodule —
-// layouts where "two levels above worktrees" is not a working tree at all.
+// worktreeIdentity derives the linked-worktree name and shared repository
+// name from a git-dir path; for a main tree or submodule it returns
+// ("", fallbackRepo). The "<common>/worktrees/<name>" path shape alone is not
+// a safe test (a main tree in a directory literally named "worktrees" would
+// misread as a worktree named ".git"); the authoritative marker is the
+// "commondir" file git writes into every linked worktree's git dir.
 func worktreeIdentity(gitDir, fallbackRepo string) (worktree, repo string) {
 	parent := filepath.Dir(gitDir)
 	if filepath.Base(parent) != "worktrees" {
@@ -226,39 +173,29 @@ func worktreeIdentity(gitDir, fallbackRepo string) (worktree, repo string) {
 }
 
 // repoNameFromCommonDir turns a common git dir into the repository's display
-// name. Three shapes, all observed with real git:
-//
-//	<main-tree>/.git          → "<main-tree>"  (normal repo: strip the .git)
-//	<name>.git                → "<name>"       (bare repo: strip the suffix)
-//	<super>/.git/modules/<p>  → "<p>"          (submodule: the module path tail)
-//
-// Falls back to the caller's own directory name when none applies, so a layout
-// we don't recognise degrades to "name this checkout after itself" rather than
-// surfacing an unrelated parent directory.
+// name: "<main-tree>/.git" → "<main-tree>", bare "<name>.git" → "<name>",
+// submodule "<super>/.git/modules/<p>" → "<p>". Otherwise it falls back to the
+// caller's own directory name rather than surfacing an unrelated parent.
 func repoNameFromCommonDir(commonDir, fallback string) string {
 	base := filepath.Base(commonDir)
 	if base == ".git" {
 		parent := filepath.Base(filepath.Dir(commonDir))
-		// A submodule's common dir is "<super>/.git/modules/<path>", so a
-		// ".git" base means we are at a real working tree's git dir.
 		if parent == "" || parent == "." || parent == string(filepath.Separator) {
 			return fallback
 		}
 		return parent
 	}
 	if strings.HasSuffix(base, ".git") && len(base) > len(".git") {
-		return strings.TrimSuffix(base, ".git") // bare repo
+		return strings.TrimSuffix(base, ".git")
 	}
 	if base == "" || base == "." || base == string(filepath.Separator) {
 		return fallback
 	}
-	return base // submodule module dir, or any other named git dir
+	return base
 }
 
-// readCommonDir resolves <gitDir>/commondir. The stored path is relative to
-// gitDir (git writes "../.." for a standard worktree). Returns ok=false when
-// the file is absent or unreadable — the signal that this is not a linked
-// worktree.
+// readCommonDir resolves <gitDir>/commondir (relative to gitDir; git writes
+// "../.."). ok=false when absent — the signal that this is not a linked worktree.
 func readCommonDir(gitDir string) (string, bool) {
 	data, err := readFileCapped(filepath.Join(gitDir, "commondir"), maxHeadBytes)
 	if err != nil {
@@ -274,15 +211,10 @@ func readCommonDir(gitDir string) (string, bool) {
 	return filepath.Clean(p), true
 }
 
-// readHead parses <gitDir>/HEAD into either a branch name or an abbreviated
-// sha. The bool is false when HEAD is missing or its content matches neither
-// shape.
-//
-// Only the two well-formed shapes are accepted ("ref: refs/…" or a 40/64-hex
-// object id). That strictness is deliberate: a `.git` FILE lets a workspace
-// point gitDir anywhere, so echoing an arbitrary file's first line back into
-// the dashboard would turn this into a file-content oracle. Requiring a
-// git-shaped value keeps the reported string to data git itself wrote.
+// readHead parses <gitDir>/HEAD into a branch name or an abbreviated sha.
+// Only git-shaped forms ("ref: refs/…" or a 40/64-hex object id) are accepted:
+// a `.git` FILE lets a workspace point gitDir anywhere, so echoing an arbitrary
+// file's first line into the dashboard would be a file-content oracle.
 func readHead(gitDir string) (branch, sha string, ok bool) {
 	data, err := readFileCapped(filepath.Join(gitDir, "HEAD"), maxHeadBytes)
 	if err != nil {
@@ -323,22 +255,11 @@ func isHexObjectID(s string) bool {
 }
 
 // sanitizeName drops rendering-hostile runes and caps length so a refname or
-// directory name cannot spoof the chip or inject terminal escapes into logs.
-// Returns "" when nothing printable survives.
-//
-// Dropping bidi and zero-width runes matters specifically here: the chip exists
-// to answer "which checkout am I editing", so a branch named
-// "feat/<U+202E>gnp.evil" that renders right-to-left-reversed would make the
-// operator read a different branch than the session is on — defeating the
-// feature rather than merely looking odd. A zero-width space inside "master"
-// likewise renders identically to the real thing.
-//
-// The rune class mirrors escJs in static/nz_util.js (R202606j-SEC-9, #2344),
-// which established this policy for filesystem-derived names reaching the
-// dashboard: C0/C1 controls, ZWSP..RLM, the bidi embeddings/overrides, WJ, the
-// bidi isolates, LS/PS, and the BOM. Printables (CJK, emoji, accented latin)
-// pass through — this is display content, not a log-only sink, so the policy is
-// "drop the dangerous class", not osutil.SanitizeForLog's lossy "_" mapping.
+// directory name cannot spoof the chip or inject terminal escapes into logs;
+// "" when nothing printable survives. Bidi/zero-width runes matter here: a
+// branch named "feat/<U+202E>gnp.evil" renders reversed and misleads the
+// operator about which checkout they are on. The rune class mirrors escJs in
+// static/nz_util.js (#2344); printables pass through since this is display content.
 func sanitizeName(s string) string {
 	if len(s) > maxRefNameBytes {
 		s = s[:maxRefNameBytes]
@@ -354,7 +275,6 @@ func sanitizeName(s string) string {
 }
 
 // isUnsafeNameRune reports whether r must not survive into a displayed name.
-// Kept as a named predicate so the class is greppable next to its JS twin.
 func isUnsafeNameRune(r rune) bool {
 	switch {
 	case r < 0x20, r == 0x7f: // C0 + DEL
@@ -377,17 +297,10 @@ func isUnsafeNameRune(r rune) bool {
 	return false
 }
 
-// readFileCapped reads at most max bytes from path, rejecting anything that is
-// not a regular file.
-//
-// The open goes through openGitMeta, whose unix build adds O_NONBLOCK — that
-// flag is load-bearing, not an optimisation: opening a FIFO for reading blocks
-// inside open(2) until a writer arrives, so a `.git/HEAD` fifo would wedge the
-// handler goroutine forever and the regular-file check below would never run.
-//
-// The mode check happens on the OPEN descriptor (f.Stat, i.e. fstat) rather
-// than on the path (os.Lstat) so a swap between check and open cannot slip a
-// fifo/device past it.
+// readFileCapped reads at most max bytes from path, rejecting non-regular
+// files. openGitMeta's O_NONBLOCK is load-bearing (see open_unix.go): without
+// it a `.git/HEAD` fifo blocks open(2) before this check can run. The mode
+// check uses fstat on the open fd so a check/open swap cannot slip a fifo past.
 func readFileCapped(path string, max int) ([]byte, error) {
 	f, err := openGitMeta(path)
 	if err != nil {
@@ -416,8 +329,7 @@ func firstLine(data []byte) string {
 	return string(bytes.TrimRight(data, "\r"))
 }
 
-// cutPrefix is strings.CutPrefix restricted to the case we need (prefix
-// present → remainder), kept local so the parse sites read as one-liners.
+// cutPrefix is strings.CutPrefix restricted to the prefix-present case.
 func cutPrefix(s, prefix string) (string, bool) {
 	if !strings.HasPrefix(s, prefix) {
 		return "", false

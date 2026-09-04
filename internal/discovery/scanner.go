@@ -26,187 +26,109 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// Scanner holds the mutable caches that used to be package-level globals
-// (promptCache, summaryCache). Existing call sites hit the compat
-// wrappers below — `Scan` / `LookupSummaries` / `RefreshDynamic` — which
-// delegate to DefaultScanner(). Tests that need isolation (e.g. parallel
-// subtests that would otherwise contend on the package globals) can
-// instantiate a fresh `*Scanner` via NewScanner() and use its methods
-// directly. Without this struct, `scanner_test.go` could not run any
-// test with `t.Parallel()` — all 29 tests are serial today.
-//
-// Field semantics:
-//
-//	promptCache   — hit-result cache for extractLastPrompt, keyed by
-//	                (JSONL path, mtime). Cleared by Scan's generation
-//	                counter once it exceeds 500 entries.
-//	summaryCache  — hit-result cache for LookupSummaries' index-file
-//	                reads, same 500-entry bound.
-//
-// The two caches share semantics but hold different value types, so they
-// do not unify into one field without an empty-interface box — kept
-// separate for compile-time safety.
-//
-// pathCache accelerates findSessionJSONL's fallback-scan path: when cwd
-// is unknown the scanner must os.ReadDir(claudeDir/projects) and Stat one
-// `<project>/<sessionID>.jsonl` candidate per project. On fleets with
-// hundreds of historical project directories that is O(N) syscalls per
-// lookup — amplified by NewRouter's 10-wide historyWg goroutine pool
-// replaying resume chains at startup. A small map keyed by
-// (claudeDir + sessionID) collapses the repeat cost: positive hits
-// re-validate with a single os.Stat, negative hits expire after a short
-// TTL so a newly-created JSONL is picked up automatically.
+// Scanner holds the mutable caches behind the package-level wrappers
+// (Scan / LookupSummaries / RefreshDynamic → DefaultScanner()); tests needing
+// isolation use NewScanner(). promptCache and summaryCache are hit-result
+// caches keyed by path+mtime, aged by Scan's generation counter and bounded
+// at 500 entries. pathCache fronts findSessionJSONL's O(projects) fallback
+// scan: positive hits re-validate with one os.Stat, negatives expire by TTL.
 type Scanner struct {
 	promptCache  promptCacheState
 	summaryCache summaryCacheState
 	pathCache    pathCacheState
 
 	// summaryLoad collapses concurrent loads of the same sessions-index.json
-	// into one os.Stat + os.ReadFile + json.Unmarshal. Without it, the 4
-	// concurrent promptWg goroutines (plus repeated scans) each take the
-	// summary write lock on a cache miss and serialise behind the slowest
-	// stat+parse for the same workspace (PERF-10 #1967). Keyed by indexPath.
+	// into one stat+read+parse, so promptWg goroutines on a cache miss do not
+	// serialise behind the slowest parse for the same workspace (#1967).
 	summaryLoad singleflight.Group
 
-	// promptSem bounds the concurrent prompt-extraction I/O fan-out in Scan
-	// and RefreshDynamic to promptSemCap goroutines. Allocated once in
-	// NewScanner and reused across every scan cycle: each worker does a
-	// symmetric send-then-receive, so the channel is always fully drained
-	// before the *Wait() returns, making it safe to reuse. This eliminates
-	// the per-cycle `make(chan struct{}, 4)` garbage the ~10s discovery loop
-	// produced on every tick (PERF-003 #2124).
+	// promptSem bounds the prompt-extraction fan-out to promptSemCap. Each
+	// worker does a symmetric send-then-receive, so the channel is drained
+	// before Wait() returns and can be reused across scan cycles (#2124).
 	promptSem chan struct{}
 }
 
-// promptSemCap caps the concurrent prompt-extraction I/O fan-out (per
-// Scan / RefreshDynamic) so a workspace with hundreds of sessions does
-// not open hundreds of JSONL files at once.
+// promptSemCap caps concurrent prompt-extraction I/O so a workspace with
+// hundreds of sessions does not open hundreds of JSONL files at once.
 const promptSemCap = 4
 
 type promptCacheState struct {
 	sync.RWMutex
 	entries map[string]*promptCacheEntry
-	// generation is bumped once per Scan. It is atomic so getCachedPrompt can
-	// refresh a hit entry's generation without upgrading the RLock to a write
-	// lock (PERF-6 #1966): within one scan cycle every hit entry was otherwise
-	// gen-stale on first touch and forced a Lock(), serialising the concurrent
-	// promptWg goroutines behind a trivial map write.
+	// generation is bumped once per Scan; atomic so getCachedPrompt refreshes a
+	// hit entry's gen without a write lock serialising promptWg goroutines (#1966).
 	generation atomic.Uint64
 }
 
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
-	// gen is an inline atomic. The map stores *promptCacheEntry so the entry's
-	// address (and thus &gen) stays stable for its lifetime: getCachedPrompt
-	// refreshes it lock-free via Store, and evictPromptCache reads it via Load
-	// under the write lock. Storing the pointer avoids the prior per-miss
-	// new(atomic.Uint64) heap allocation (R202606h-PERF-003 #2322) while keeping
-	// the stable-address contract that the lock-free Store on hit requires
-	// (PERF-6 #1966).
+	// gen is an inline atomic. The map stores *promptCacheEntry so &gen stays
+	// stable for the entry's lifetime: getCachedPrompt refreshes it lock-free
+	// via Store and evictPromptCache reads it under the write lock (#2322).
 	gen atomic.Uint64
 }
 
 type summaryCacheState struct {
 	sync.RWMutex
 	entries map[string]*summaryCacheEntry
-	// generation is bumped once per Scan. Atomic (like promptCache.generation)
-	// so getCachedSummary can refresh a hit entry's gen lock-free instead of
-	// upgrading its RLock to a write lock (R202606h-PERF-011 #2330 / PERF-6
-	// #1966).
+	// generation is bumped once per Scan; atomic (like promptCache) so
+	// getCachedSummary can refresh a hit entry's gen lock-free (#2330).
 	generation atomic.Uint64
 }
 
 type summaryCacheEntry struct {
 	mtime int64
 	index sessionsIndex
-	// gen is an inline atomic. The map stores *summaryCacheEntry so &gen stays
-	// stable for the entry's lifetime, letting getCachedSummary refresh it via
-	// a lock-free Store on a cache hit (#2330).
+	// gen is an inline atomic; the map stores *summaryCacheEntry so &gen stays
+	// stable and getCachedSummary can refresh it lock-free on a hit (#2330).
 	gen atomic.Uint64
 }
 
-// pathCacheState maps (claudeDir + "\x00" + sessionID) to the resolved
-// JSONL path when known, or a zero-path entry with a negativeUntil
-// deadline when a recent scan failed to locate the file. Access is
-// arbitrated by sync.RWMutex: the hit path uses RLock and the slow
-// `os.ReadDir` + Stat fan-out takes the write lock only to commit
-// results. findSessionJSONL can race with itself for distinct
-// sessionIDs without contention because the map lookup is O(1).
+// pathCacheState maps (claudeDir, sessionID) to the resolved JSONL path, or to
+// a zero-path entry with a negativeUntil deadline when a scan found nothing.
+// Hits take RLock; the slow ReadDir+Stat fan-out takes the write lock to commit.
 type pathCacheState struct {
 	sync.RWMutex
 	entries map[pathKey]pathCacheEntry
 }
 
-// pathKey is the composite (claudeDir, sessionID) map key. Using a struct
-// key instead of a packed "dir\x00id" string eliminates the per-lookup
-// string concatenation+allocation on the hot findSessionJSONL path — the
-// startup resume-chain replay calls findSessionJSONL O(N×chain) times and
-// every cache hit was paying for a fresh key string (PERF-005 #2125).
+// pathKey is the composite (claudeDir, sessionID) map key; a struct key avoids
+// the per-lookup string concatenation a packed "dir\x00id" key costs (#2125).
 type pathKey struct {
 	dir string
 	id  string
 }
 
-// pathCacheEntry holds either a positive result (path != "") or a
-// bounded negative result (path == "" && !negativeUntil.IsZero()).
-// Positive entries have no explicit TTL: callers validate the path
-// with os.Stat and drop the cache on mismatch, so claude CLI deleting
-// or renaming the JSONL self-heals on the next lookup. Negative
-// entries expire after pathCacheNegativeTTL so a legitimately new
-// JSONL (e.g. a session that started after the last scan) eventually
-// makes it past the cache rather than being shadowed forever.
+// pathCacheEntry is a positive result (path != "") or a bounded negative one.
+// Positives have no TTL (callers os.Stat-validate and evict on mismatch, so a
+// renamed/deleted JSONL self-heals); negatives expire after pathCacheNegativeTTL.
 type pathCacheEntry struct {
 	path          string
 	negativeUntil time.Time
 }
 
-// pathCacheNegativeTTL caps how long a "scanned everything and didn't
-// find it" verdict stays cached. 60s matches the feeling of "retry
-// soon if you care" without letting a startup burst of 10 concurrent
-// resume-chain walks each pay for a full os.ReadDir pass. Positive
-// entries have no TTL — os.Stat revalidation covers invalidation.
+// pathCacheNegativeTTL caps how long a "not found" verdict stays cached: long
+// enough for a startup burst of resume-chain walks to share one ReadDir pass.
 const pathCacheNegativeTTL = 60 * time.Second
 
-// pathCacheMaxEntries bounds the map so a long-running process that
-// sees tens of thousands of distinct sessionIDs (via resume chains or
-// dashboard queries) does not grow the map without limit. When the
-// cap is reached expired negative entries are dropped first; if all
-// entries are positive or fresh-negative, evictPathCacheLocked falls
-// through to arbitrary (random map-iteration) eviction so the cap is
-// enforced unconditionally.
+// pathCacheMaxEntries bounds the map for long-running processes that see tens
+// of thousands of distinct sessionIDs. Expired negatives are dropped first;
+// evictPathCacheLocked then falls back to random eviction so the cap always holds.
 const pathCacheMaxEntries = 2048
 
-// pathCacheEvictBatch is the headroom evictPathCacheLocked creates after
-// running the arbitrary-eviction fallback pass. Dropping exactly one entry
-// per store at the cap would thrash the map — this cushions the cap so
-// subsequent stores amortise the eviction pass.
+// pathCacheEvictBatch is the headroom evictPathCacheLocked leaves after the
+// fallback pass so stores at the cap do not re-evict on every call.
 const pathCacheEvictBatch = 16
 
-// maxSessionFileBytes caps the size of Claude session-state files we will
-// read during Scan. Real files are tiny (under a few KB); anything larger
-// is either corruption or an operator artifact and should be skipped
-// rather than parsed.
+// maxSessionFileBytes caps Claude session-state files read during Scan; real
+// files are a few KB, anything larger is corruption and is skipped.
 const maxSessionFileBytes int64 = 1024 * 1024
 
-// readBoundedSessionFile opens path, stats the file descriptor (no extra
-// path-lookup syscall vs DirEntry.Info), and reads up to maxSessionFileBytes
-// + 1 bytes via io.LimitReader so an oversized file is rejected without
-// pulling its full contents into memory.
-//
-// Returns:
-//   - non-nil data and nil error: file size <= maxSessionFileBytes; caller
-//     gets the full contents.
-//   - nil data and non-nil error: open/stat/read failure OR the file
-//     exceeded the cap; caller skips the entry. The cap-exceeded case is
-//     surfaced as an error rather than a partial read so callers cannot
-//     accidentally json.Unmarshal a truncated payload.
-//
-// R237-PERF-7 (#676): replaces a DirEntry.Info() Stat + os.ReadFile pair
-// (which itself does Open + fstat + Read). One Open path-lookup + one
-// fstat (free, on the open fd) per session file is the cheapest path the
-// kernel offers; the prior approach did 1 stat-by-name + 1 stat-by-name
-// (inside ReadFile via os.OpenFile→openFile) + Read.
+// readBoundedSessionFile opens path, fstats the descriptor and reads through
+// io.LimitReader so an oversized file is rejected without loading it. The
+// cap-exceeded case is an error, not a partial read, so callers cannot
+// json.Unmarshal a truncated payload. One Open + one fstat per file (#676).
 func readBoundedSessionFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -220,11 +142,8 @@ func readBoundedSessionFile(path string) ([]byte, error) {
 	if info.Size() > maxSessionFileBytes {
 		return nil, fmt.Errorf("session file exceeds %d-byte cap (%d bytes)", maxSessionFileBytes, info.Size())
 	}
-	// LimitReader is defence-in-depth against a concurrent writer growing
-	// the file between Stat and Read. ReadAll grows organically; we cannot
-	// pre-size into io.ReadAll directly (it builds its own backing array),
-	// but the Open + LimitReader pair eliminates the wasted megabyte alloc
-	// the previous os.ReadFile path made when a corrupt file was skipped.
+	// LimitReader is defence-in-depth against a concurrent writer growing the
+	// file between Stat and Read.
 	data, err := io.ReadAll(io.LimitReader(f, maxSessionFileBytes+1))
 	if err != nil {
 		return nil, err
@@ -235,9 +154,8 @@ func readBoundedSessionFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-// NewScanner returns a fresh Scanner with empty caches. Used directly by
-// tests that need isolation; production callers use the package-level
-// wrappers which hit DefaultScanner.
+// NewScanner returns a fresh Scanner with empty caches, for tests that need
+// isolation; production callers use the wrappers over DefaultScanner.
 func NewScanner() *Scanner {
 	return &Scanner{
 		promptCache:  promptCacheState{entries: make(map[string]*promptCacheEntry)},
@@ -247,18 +165,15 @@ func NewScanner() *Scanner {
 	}
 }
 
-// DefaultScanner returns the process-wide Scanner used by the package-
-// level wrappers. Lazy-initialized via sync.Once so callers that never
-// invoke Scan/LookupSummaries don't allocate the cache maps.
+// defaultScannerInst is the process-wide Scanner behind the package-level
+// wrappers, lazily initialised so callers that never scan allocate nothing.
 var (
 	defaultScannerOnce sync.Once
 	defaultScannerInst *Scanner
 )
 
-// scanUserPromptBufPool recycles the 16 KiB initial line buffers passed to
-// bufio.Scanner in scanUserPrompt. The hot path is extractLastPromptUncached
-// running up to 4 candidate JSONLs concurrently per Scan; without a pool
-// every candidate pays a fresh 16 KiB heap alloc.
+// scanUserPromptBufPool recycles the 16 KiB bufio.Scanner buffers used by
+// scanUserPrompt, which runs for up to 4 candidates concurrently per Scan.
 var scanUserPromptBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 16*1024)
@@ -266,14 +181,12 @@ var scanUserPromptBufPool = sync.Pool{
 	},
 }
 
-// userTypeMarker is the JSONL quick-filter prefix used by scanUserPrompt.
-// Hoisted to package scope so the `[]byte(...)` literal does not allocate
-// on every line of the hot JSONL scan loop.
+// userTypeMarker is scanUserPrompt's quick-filter substring, hoisted so the
+// []byte literal does not allocate on every line of the hot scan loop.
 var userTypeMarker = []byte(`"type":"user"`)
 
-// summaryStatFn is the os.Stat indirection used by loadSummaryIndex. A
-// package var so tests can count syscalls and assert the #2247 fix elides
-// the redundant in-flight stat on a cache miss.
+// summaryStatFn is the os.Stat indirection used by loadSummaryIndex; a var so
+// tests can count syscalls (#2247).
 var summaryStatFn = os.Stat
 
 func DefaultScanner() *Scanner {
@@ -283,9 +196,8 @@ func DefaultScanner() *Scanner {
 	return defaultScannerInst
 }
 
-// evictPromptCache deletes entries that are more than one generation old.
-// Eviction only runs when the cache exceeds 500 entries.
-// Must be called with s.promptCache.Lock() held.
+// evictPromptCache deletes entries more than one generation old once the cache
+// exceeds 500 entries. Caller must hold s.promptCache.Lock().
 func (s *Scanner) evictPromptCache() {
 	if len(s.promptCache.entries) <= 500 {
 		return
@@ -298,9 +210,8 @@ func (s *Scanner) evictPromptCache() {
 	}
 }
 
-// evictSummaryCache deletes entries that are more than one generation old.
-// Eviction only runs when the cache exceeds 500 entries.
-// Must be called with s.summaryCache.Lock() held.
+// evictSummaryCache deletes entries more than one generation old once the
+// cache exceeds 500 entries. Caller must hold s.summaryCache.Lock().
 func (s *Scanner) evictSummaryCache() {
 	if len(s.summaryCache.entries) <= 500 {
 		return
@@ -313,40 +224,23 @@ func (s *Scanner) evictSummaryCache() {
 	}
 }
 
-// runningThreshold is the JSONL mtime recency window used to classify a
-// discovered process as "running" (actively writing) vs "ready" (idle).
-// Set to 30s to avoid status flapping: Claude CLI may write JSONL during
-// idle housekeeping (compaction, MCP events, session index updates), so a
-// narrow window (e.g. 5s) causes ready->running oscillation on every scan.
+// runningThreshold is the JSONL mtime window that classifies a discovered
+// process as "running" vs "ready". 30s avoids flapping: the CLI writes JSONL
+// during idle housekeeping (compaction, MCP events, index updates).
 const runningThreshold = 30 * time.Second
 
-// noJSONLGrace is the window we give a freshly-started CLI process to
-// write its first JSONL line before we treat the absence of a conversation
-// file as a signal that the process is an idle wrapper rather than a real
-// user session. VS Code's Claude extension keeps an extra `claude` child
-// alive for the lifetime of the editor without ever issuing --resume or
-// receiving a user prompt, so its sessionID never gets a JSONL — surfacing
-// it as a discovered session produces a duplicate sidebar entry alongside
-// the actual resumed process the user is talking to.
+// noJSONLGrace is the window a freshly-started CLI process gets to write its
+// first JSONL line before a missing conversation file marks it as an idle
+// wrapper: VS Code's Claude extension keeps an extra `claude` child alive for
+// the editor's lifetime that never gets a JSONL and would duplicate the sidebar.
 const noJSONLGrace = 5 * time.Second
 
-// MaxSafeJSONInt mirrors JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1).
-// Any uint64 field that crosses a JSON boundary and may be consumed by a JS
-// front-end (dashboard.js) or a reverse-RPC peer that proxies values into
-// JSON must stay below this ceiling, otherwise JSON.parse silently truncates
-// to the nearest double and PID-identity comparisons (ProcStartTime) return
-// wrong matches after the rounding.
-//
-// Current producers stay well below the bound:
-//   - Linux ProcStartTime (jiffies since boot @ 100 Hz): reaching 2^53 needs
-//     ~2.85 million years of uptime.
-//   - Darwin ProcStartTime (Unix microseconds): reaching 2^53 needs ~2255 CE
-//     (present Unix μs ≈ 1.77e15 ≪ 9.00e15).
-//
-// The constant exists to pin the invariant as a source-level contract: the
-// proc_{linux,darwin}_test.go suites assert ProcStartTime(os.Getpid()) <=
-// MaxSafeJSONInt so a future encoding change (e.g. nanoseconds, or a non-
-// epoch reference) that silently blows the budget fails at CI time.
+// MaxSafeJSONInt mirrors JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1). Any
+// uint64 that crosses a JSON boundary into dashboard.js or a reverse-RPC peer
+// must stay below it or JSON.parse rounds it and PID-identity comparisons
+// (ProcStartTime) match wrongly. Producers are far below (Linux jiffies:
+// ~2.85M years of uptime; Darwin Unix μs: year ~2255) and proc_*_test.go
+// asserts ProcStartTime(os.Getpid()) <= MaxSafeJSONInt to catch encoding changes.
 const MaxSafeJSONInt uint64 = (1 << 53) - 1
 
 // DiscoveredSession represents a Claude CLI process found on the system.
@@ -362,13 +256,9 @@ type DiscoveredSession struct {
 	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro" (detected from process cmdline)
 	Summary    string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
 	LastPrompt string `json:"last_prompt,omitempty"` // most recent user message
-	// ProcStartTime encodes a per-PID boot identity used to detect PID reuse.
-	// Linux:  /proc/PID/stat field 22 (jiffies since system boot).
-	// Darwin: Unix microseconds parsed from `ps -o lstart=`.
-	// Crosses JSON boundaries into dashboard.js and reverse-RPC payloads —
-	// MUST stay below MaxSafeJSONInt (2^53-1), otherwise JS JSON.parse
-	// truncates the value and handleTakeover's identity equality fails.
-	// Both producer paths remain bounded by physical units; see MaxSafeJSONInt.
+	// ProcStartTime is a per-PID boot identity that detects PID reuse (Linux:
+	// /proc/PID/stat field 22; Darwin: Unix μs from ps lstart). It crosses JSON
+	// boundaries and MUST stay below MaxSafeJSONInt or handleTakeover's check fails.
 	ProcStartTime uint64 `json:"proc_start_time"`
 	Project       string `json:"project,omitempty"` // project name resolved from CWD (filled by server)
 	Node          string `json:"node,omitempty"`    // workspace/node ID (filled by server for multi-node)
@@ -390,45 +280,29 @@ type scanCandidate struct {
 	lastActive int64
 }
 
-// Scan is the package-level wrapper that delegates to DefaultScanner.
-// Preserves the pre-refactor signature so call sites in server/ and cmd/
-// do not need to change. Use (*Scanner).Scan directly when you need cache
-// isolation (e.g. parallel test subtests).
+// Scan is the package-level wrapper over DefaultScanner. Use (*Scanner).Scan
+// directly when you need cache isolation.
 func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	return DefaultScanner().Scan(claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
-// ScanContext is the cancellation-aware variant of Scan. The prompt-extraction
-// fan-out (bounded by promptSem) performs unbounded filesystem IO
-// (os.Open + bufio.Scanner over up to 512KiB), so a slow or hung filesystem
-// (NFS/FUSE/ESTALE) could otherwise park the worker goroutines indefinitely
-// and stall shutdown past systemd TimeoutStopSec. Passing a cancelable ctx
-// (e.g. derived from SIGTERM) lets the semaphore-acquire select abandon
-// not-yet-started extractions promptly. R202606d-GO-002 (#2244).
+// ScanContext is the cancellation-aware variant of Scan: the prompt-extraction
+// fan-out does unbounded filesystem IO, so a hung NFS/FUSE mount could stall
+// shutdown past systemd TimeoutStopSec without a SIGTERM-derived ctx (#2244).
 func ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	return DefaultScanner().ScanContext(ctx, claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
-// that are not managed by naozhi (excluded via excludePIDs). The discovered
-// SessionID is taken verbatim from each {pid}.json — modern Claude CLI keeps
-// that field accurate.
-//
-// excludeSessionIDs and managedCWDs are retained for signature/back-compat with
-// the existing call sites (server discoveryCache, upstream discover callback,
-// auto-takeover) but are no longer consulted: they previously fed a
-// "session-ID upgrade" heuristic that rewrote a process's
-// SessionID to the newest JSONL in its CWD. Because ~/.claude/projects/<cwd>/ is
-// shared by every session that ran in that directory, the heuristic mis-assigned
-// other sessions' transcripts to live processes (dashboard crosstalk) and is
-// removed. See the second-pass note in the body and
-// TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
+// not managed by naozhi (excludePIDs), with SessionID taken verbatim from each
+// {pid}.json. excludeSessionIDs and managedCWDs are retained for call-site
+// compatibility but not consulted (TestScan_SessionIDNeverUpgradedToOtherSessionJSONL).
 func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	return s.ScanContext(context.Background(), claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
-// ScanContext is the cancellation-aware variant of (*Scanner).Scan. See the
-// ScanContext package-level wrapper for rationale (R202606d-GO-002 #2244).
+// ScanContext is the cancellation-aware variant of (*Scanner).Scan; see the
+// package-level ScanContext.
 func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
@@ -439,14 +313,10 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 		return nil, err
 	}
 
-	// Advance cache generations once per scan so the eviction logic can
-	// identify entries that have not been touched in the last two scan cycles.
+	// Advance cache generations once per scan; eviction ages by generation.
 	s.promptCache.generation.Add(1)
-	// #2330: generation is now atomic, matching promptCache — no write lock
-	// needed to advance it.
 	s.summaryCache.generation.Add(1)
 
-	// First pass: collect alive sessions with their original session IDs.
 	var candidates []scanCandidate
 
 	for _, entry := range entries {
@@ -454,19 +324,8 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 			continue
 		}
 
-		// Session files are small by construction (a handful of fields).
-		// If a file has somehow grown pathologically large (operator dropped
-		// something in the Claude sessions dir, or disk corruption), skip
-		// it rather than allocating megabytes of data we will then try to
-		// parse as JSON. 1 MiB is ~100x the expected max size.
-		//
-		// R237-PERF-7 (#676): single-Open path. The previous DirEntry.Info()
-		// + os.ReadFile pair did one stat-by-name (Info on systems where the
-		// readdir entry didn't carry size metadata, e.g. Linux getdents64
-		// without DT_REG-with-size), then os.ReadFile re-Open + Stat-by-fd +
-		// Read. Open + Stat-by-fd + LimitReader collapses that into one
-		// path-lookup syscall per session file (50-200 sessions per dashboard
-		// scan in the wild).
+		// Session files are a handful of fields; skip anything pathologically
+		// large rather than parse it. One Open + fstat per file (#676).
 		data, err := readBoundedSessionFile(filepath.Join(sessDir, entry.Name()))
 		if err != nil {
 			continue
@@ -494,19 +353,10 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 			continue
 		}
 
-		// Filter out idle CLI wrappers that never got a JSONL written. The
-		// VS Code Claude extension launches one --resume <id> child for the
-		// active conversation plus a second sessionless wrapper that lingers
-		// for the editor's lifetime; both publish a sessions/<pid>.json file
-		// but only the first ever produces a JSONL under projects/. Without
-		// this gate the dashboard sidebar shows two cards for one VS Code
-		// window, which is the bug this guard fixes. The grace window keeps
-		// genuinely-fresh CLI starts (claude /, sdk-cli) visible during the
-		// 1-2 s before they flush their first message to disk.
-		// One Stat answers both the no-JSONL grace gate (existence) and
-		// lastActive (mtime). Previously findJSONLPath + jsonlMtime Stat'd
-		// the same path twice per candidate. lastActive falls back to the
-		// process start time when no JSONL exists yet, matching jsonlMtime.
+		// Gate out idle CLI wrappers that never got a JSONL (VS Code runs one
+		// --resume child plus a sessionless wrapper, both with sessions/<pid>.json;
+		// the wrapper would duplicate the sidebar card). One Stat serves both the
+		// grace gate and lastActive, which falls back to the process start time.
 		jsonlPath := filepath.Join(claudeDir, "projects", projDirName(sf.CWD), sf.SessionID+".jsonl")
 		la := sf.StartedAt
 		if fi, err := os.Stat(jsonlPath); err != nil {
@@ -521,36 +371,18 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 		candidates = append(candidates, scanCandidate{sf: sf, lastActive: la})
 	}
 
-	// Historical note: a "second pass" here used to upgrade a process's
-	// SessionID to the newest JSONL in its CWD, on the theory that the CLI
-	// failed to rewrite {pid}.json after /clear. Modern Claude CLI keeps
-	// {pid}.json's sessionId accurate, and ~/.claude/projects/<cwd>/ is shared
-	// by every session that ever ran in that directory (managed, closed, cron),
-	// so the heuristic routinely mis-assigned a *different* session's JSONL to
-	// a live process — the dashboard card and preview then showed someone
-	// else's conversation, and takeover --resume targeted the wrong session.
-	// The upgrade is removed; the SessionID is whatever {pid}.json records.
-	// Regression: TestScan_SessionIDNeverUpgradedToOtherSessionJSONL.
-
-	// No live candidates: the summary/prompt batch and the result loop below
-	// all iterate over `candidates`, so with none they produce an empty result
-	// (LookupSummaries returns nil on an empty map, the prompt slice is empty,
-	// and the final loop never runs). Skip the map/slice allocations entirely —
-	// between active sessions this is the steady-state path on every ~10s scan.
-	// R202606h-PERF-005.
+	// No live candidates: skip the map/slice allocations — between active
+	// sessions this is the steady-state path on every ~10s scan.
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
-	// Batch-lookup summaries from sessions-index.json for all candidates.
 	candidateWorkspaces := make(map[string]string, len(candidates))
 	for i := range candidates {
 		candidateWorkspaces[candidates[i].sf.SessionID] = candidates[i].sf.CWD
 	}
 	summaryMap := s.LookupSummaries(claudeDir, candidateWorkspaces)
 
-	// Batch-extract last prompts in parallel (up to 4 concurrent I/O operations)
-	// to avoid serial 512KB reads per discovered session.
 	prompts := make([]string, len(candidates))
 	var promptWg sync.WaitGroup
 	promptSem := s.promptSem
@@ -558,11 +390,9 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 		promptWg.Add(1)
 		go func(idx int) {
 			defer promptWg.Done()
-			// R202606d-GO-002 (#2244): abandon not-yet-started extractions when
-			// ctx is canceled (SIGTERM) so a slow/hung FS cannot park this
-			// goroutine waiting on promptSem past shutdown deadline. Leaving
-			// prompts[idx] as its zero value ("") is the same outcome as an
-			// empty/failed extraction, so callers stay correct.
+			// Abandon not-yet-started extractions on ctx cancellation so a hung
+			// FS cannot park this goroutine on promptSem past shutdown; an empty
+			// prompts[idx] is the same outcome as a failed extraction (#2244).
 			select {
 			case promptSem <- struct{}{}:
 			case <-ctx.Done():
@@ -605,55 +435,25 @@ func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs
 	return result, nil
 }
 
-// processAlive checks whether a process with the given PID exists.
-// Delegates to osutil.PidAlive so the pid<=0 guard (kill(0, sig) broadcasts
-// to the whole process group and kill(-N, sig) targets groups — both would
-// misreport phantom processes as alive) is consistent across packages.
+// processAlive checks whether a process with the given PID exists. Delegates
+// to osutil.PidAlive so the pid<=0 guard (kill(0)/kill(-N) broadcast to groups
+// and would misreport phantom processes as alive) is consistent across packages.
 func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
 }
 
-// claudeSlugMaxLen mirrors the Claude CLI's own length cap on an encoded
-// project directory name. Beyond it the CLI truncates to exactly this many
-// characters and appends "-" + a base36 hash of the *original*
-// (pre-substitution) path, keeping deep paths collision-free while staying
-// inside filesystem NAME_MAX. Verified against the CLI bundle (2.1.219,
-// `x0`/`axt`) and end-to-end against a 40-segment CWD.
+// claudeSlugMaxLen mirrors the Claude CLI's cap on an encoded project directory
+// name: beyond it the CLI truncates and appends "-" + a base36 hash of the
+// original path (verified against CLI 2.1.219 with a 40-segment CWD).
 const claudeSlugMaxLen = 200
 
-// ClaudeProjectSlug converts a CWD path to the Claude project directory name.
-// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo".
-//
-// This is the single source of truth for Claude CLI's ~/.claude/projects/
-// directory-naming scheme. internal/session mirrors it via a thin wrapper that
-// calls this function, and a cross-package equivalence test pins the two
-// call sites together so a future change to Claude's scheme cannot be
-// applied to only one side (RNEW-002).
-//
-// The scheme replaces every character outside [A-Za-z0-9] with '-', not just
-// '/'. The distinction matters for any path with a dot or underscore segment:
-// a git worktree under "<repo>/.claude/worktrees/<name>" encodes to
-// "…-repo--claude-worktrees-<name>" (the "/." pair collapsing into "--"),
-// which the previous '/'-only substitution mis-encoded as "…-repo-.claude-…"
-// so every O(1) JSONL lookup missed and silently degraded to a full
-// projects/ scan. Non-ASCII input is substituted per UTF-16 code unit, so a
-// CJK ideograph becomes one '-' and an emoji (surrogate pair) becomes two —
-// see substituteNonAlnum for the observed CLI behaviour this matches.
-//
-// The length cap is applied to the substituted form, which is pure ASCII, so
-// its byte length already equals the UTF-16 length the CLI measures.
-//
-// R241-SEC-4 (#465): control bytes (< 0x20) in cwd are stripped before the
-// substitution. Hand-edited persisted state (cron_jobs.json,
-// sessions-index.json) can carry embedded \t / \n / \r values that would
-// otherwise leak into the resulting filesystem path component, where
-// downstream Stat/Open calls produce confusingly-quoted error messages or —
-// worse — succeed on an attacker-prepared dir whose name happens to share
-// the encoded prefix. Stripping (rather than substituting) them keeps that
-// guarantee: a control byte contributes no character at all, so it cannot be
-// used to steer the encoded name. The encoding is lossy by design; an
-// operator who legitimately runs CWD with a literal newline in the path is
-// not on the supported matrix.
+// ClaudeProjectSlug converts a CWD path to the Claude project directory name,
+// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo"; it is the
+// single source of truth for the scheme (internal/session wraps it). Every
+// character outside [A-Za-z0-9] becomes '-' per UTF-16 code unit (see
+// substituteNonAlnum). Control bytes (< 0x20) are stripped first so hand-edited
+// persisted state (cron_jobs.json, sessions-index.json) with embedded \t/\n
+// cannot steer the encoded path onto an attacker-prepared directory (#465).
 func ClaudeProjectSlug(cwd string) string {
 	if hasControlByte(cwd) {
 		cwd = stripControlBytes(cwd)
@@ -666,21 +466,11 @@ func ClaudeProjectSlug(cwd string) string {
 }
 
 // substituteNonAlnum replaces everything outside [A-Za-z0-9] with '-',
-// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")`.
-//
-// The unit of replacement is one UTF-16 code unit, because that is what a JS
-// regex iterates: a BMP rune (e.g. a CJK ideograph) yields ONE '-', and a
-// non-BMP rune (emoji, encoded as a surrogate pair) yields TWO. Substituting
-// per byte instead would emit three '-' per CJK character and produce a name
-// that does not exist on disk — verified against claude CLI 2.1.219, where
-// cwd "/tmp/slugtest2/中文目录" creates "-tmp-slugtest2-----" (5 dashes: one
-// separator + one per ideograph), not the 13 a per-byte walk yields.
-//
-// Invalid UTF-8 bytes decode to utf8.RuneError with size 1 and so contribute
-// one '-' each, which keeps the function total on arbitrary byte sequences.
+// mirroring the CLI's `replace(/[^a-zA-Z0-9]/g, "-")` per UTF-16 code unit: a
+// BMP rune (CJK ideograph) yields ONE '-', a non-BMP rune (emoji) TWO. Verified
+// against CLI 2.1.219 ("/tmp/slugtest2/中文目录" → "-tmp-slugtest2-----").
+// Invalid UTF-8 bytes decode as RuneError size 1 and contribute one '-' each.
 func substituteNonAlnum(s string) string {
-	// Scan first so a clean all-alnum string (never true for an absolute
-	// path, but cheap to check) skips the copy.
 	needs := false
 	for i := 0; i < len(s); i++ {
 		if !isASCIIAlnum(s[i]) {
@@ -691,10 +481,8 @@ func substituteNonAlnum(s string) string {
 	if !needs {
 		return s
 	}
-	// strings.Builder rather than []byte+string(): Builder.String() hands out
-	// the buffer without copying, keeping this at one allocation per call.
-	// ClaudeProjectSlug runs on every dashboard sidebar fetch and every cron
-	// transcript URL resolution, so a second copy would compound under load.
+	// strings.Builder hands out its buffer without copying, keeping this at
+	// one allocation per call on the sidebar-fetch / cron URL hot paths.
 	var b strings.Builder
 	// The output is never longer than the input: every ASCII-alnum byte maps
 	// to itself, and any multi-byte rune shrinks to at most two dashes.
@@ -710,7 +498,6 @@ func substituteNonAlnum(s string) string {
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		// One dash per UTF-16 code unit: non-BMP runes are a surrogate pair.
 		if r > 0xFFFF {
 			b.WriteString("--")
 		} else {
@@ -725,25 +512,18 @@ func isASCIIAlnum(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-// claudeSlugHash reproduces the CLI's overflow suffix: a Java-style
-// 32-bit string hash of the original path, absolute-valued and rendered
-// base36. The CLI computes it as
+// claudeSlugHash reproduces the CLI's overflow suffix, a Java-style 32-bit
+// string hash of the original path rendered base36:
 //
 //	let t = 0; for (c of s) t = (t << 5) - t + c.charCodeAt(i) | 0
 //	Math.abs(t).toString(36)
 //
-// so the arithmetic must wrap at 32 bits signed and iterate UTF-16 code
-// units. We iterate runes and fold non-BMP runes into their surrogate pair
-// to match; int32 arithmetic gives the same wraparound as JS's `| 0`.
-//
-// Math.abs(-2^31) is 2^31 in JS (it leaves the int32 domain), which int32
-// negation cannot represent — that single input is special-cased so the
-// suffix still matches instead of silently wrapping back to -2^31.
+// int32 arithmetic matches JS's `| 0` wraparound; non-BMP runes are folded
+// into surrogate pairs; Math.abs(-2^31) is 2^31 in JS, so that input is special-cased.
 func claudeSlugHash(s string) string {
 	var h int32
 	for _, r := range s {
 		if r > 0xFFFF {
-			// Non-BMP: JS sees a surrogate pair, two code units.
 			r -= 0x10000
 			hi := int32(0xD800 + (r >> 10))
 			lo := int32(0xDC00 + (r & 0x3FF))
@@ -763,8 +543,7 @@ func claudeSlugHash(s string) string {
 	return strconv.FormatInt(int64(h), 36)
 }
 
-// hasControlByte returns true when s contains any byte < 0x20. Single
-// pass with no allocation when the string is clean (the common case).
+// hasControlByte reports whether s contains any byte < 0x20 (no allocation).
 func hasControlByte(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 {
@@ -774,9 +553,8 @@ func hasControlByte(s string) bool {
 	return false
 }
 
-// stripControlBytes returns s with every byte < 0x20 removed. Allocates
-// only when called — hasControlByte gates this so the typical cwd
-// string never pays the copy.
+// stripControlBytes returns s with every byte < 0x20 removed; hasControlByte
+// gates it so the typical cwd never pays the copy.
 func stripControlBytes(s string) string {
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
@@ -787,9 +565,7 @@ func stripControlBytes(s string) string {
 	return string(b)
 }
 
-// projDirName is the package-internal alias retained for call-site brevity.
-// It intentionally delegates to ClaudeProjectSlug so the exported form stays
-// the single source of truth.
+// projDirName is the package-internal alias for ClaudeProjectSlug.
 func projDirName(cwd string) string {
 	return ClaudeProjectSlug(cwd)
 }
@@ -824,16 +600,11 @@ func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	return prompt
 }
 
-// extractLastPromptWithMtime is the underlying implementation. It returns the
-// last prompt plus the JSONL mtime (unix ms) and whether the file exists, so a
-// caller that also needs lastActive (RefreshDynamic) can reuse this single Stat
-// instead of paying a second os.Stat via jsonlMtime on the same path —
-// R20260603-PERF-2.
+// extractLastPromptWithMtime returns the last prompt plus the JSONL mtime (unix
+// ms) and whether the file exists, so RefreshDynamic can reuse this single Stat
+// for lastActive instead of a second os.Stat via jsonlMtime.
 func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (string, int64, bool) {
-	// Single Stat resolves both existence and mtime. Previously this went
-	// through findJSONLPath (one Stat to confirm the file exists) and then
-	// immediately Stat'd the same path again for the cache key — two
-	// syscalls on one path per candidate, every scan cycle.
+	// One Stat resolves both existence and mtime.
 	path := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -852,8 +623,7 @@ func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (
 	return result, mtimeMs, true
 }
 
-// getCachedPrompt checks the prompt cache. Reads use RLock; only the gen
-// refresh on a hit upgrades to the write lock (cheap in-place update).
+// getCachedPrompt checks the prompt cache under RLock; a hit refreshes gen lock-free.
 func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 	s.promptCache.RLock()
 	cached, ok := s.promptCache.entries[path]
@@ -861,10 +631,8 @@ func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
 	if !ok || cached.mtime != mtime {
 		return "", false
 	}
-	// Refresh the entry's generation lock-free so eviction keeps it alive.
-	// The *atomic.Uint64 address is stable for the entry's lifetime, so this
-	// Store needs no write lock — avoiding the per-hit Lock() upgrade that
-	// serialised concurrent promptWg goroutines (PERF-6 #1966).
+	// Refresh gen lock-free so eviction keeps the entry alive; the entry
+	// address is stable so no write-lock upgrade is needed (#1966).
 	cached.gen.Store(s.promptCache.generation.Load())
 	return cached.prompt, true
 }
@@ -889,7 +657,6 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 	}
 	defer f.Close()
 
-	// Read up to the last 512KB of the file
 	const tailSize = 512 * 1024
 	offset := fileSize - tailSize
 	if offset < 0 {
@@ -903,13 +670,10 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 
 	lastPrompt := scanUserPrompt(f)
 
-	// If the tail scan found no text prompt and we skipped earlier content,
-	// re-scan from the beginning. This handles sessions where the only user
-	// text prompt is near the start and the tail is all tool_result messages.
-	// Cap the fallback read at tailSize too (#2227): without a limit a 10MB
-	// JSONL whose tail is all tool_result lines would be read in full on every
-	// preview refresh. The opening prompt lives near the start, so the first
-	// tailSize bytes carry the same coverage the tail window gives at the end.
+	// If the tail found no text prompt and earlier content was skipped, re-scan
+	// from the start, capped at tailSize too (#2227): the opening prompt lives
+	// near the start, and without a cap a 10MB JSONL whose tail is all
+	// tool_result lines would be read in full on every preview refresh.
 	if lastPrompt == "" && offset > 0 {
 		if _, err := f.Seek(0, io.SeekStart); err == nil {
 			lastPrompt = scanUserPrompt(io.LimitReader(f, tailSize))
@@ -926,9 +690,8 @@ func scanUserPrompt(r io.Reader) string {
 	var lastPrompt string
 	scanner := bufio.NewScanner(r)
 	bufPtr := scanUserPromptBufPool.Get().(*[]byte)
-	// bufio.Scanner may grow the provided slice; reset to zero length on
-	// return and rely on Scanner's internal growth not modifying capacity
-	// below the initial 16 KiB (buf cap only grows, never shrinks).
+	// bufio.Scanner may grow the slice; reset length on return (capacity never
+	// shrinks below the initial 16 KiB).
 	defer func() {
 		buf := (*bufPtr)[:0]
 		*bufPtr = buf
@@ -941,7 +704,6 @@ func scanUserPrompt(r io.Reader) string {
 		if len(line) == 0 {
 			continue
 		}
-		// Quick check before full parse
 		if !bytes.Contains(line, userTypeMarker) {
 			continue
 		}
@@ -962,33 +724,18 @@ func scanUserPrompt(r io.Reader) string {
 }
 
 // SanitizePromptForTransport strips bytes that corrupt structured log output,
-// terminal rendering, or /api/sessions/resume's charset gate. Scoped to
-// last_prompt / first_prompt strings that flow from a CLI JSONL file through
-// the sidebar JSON response and (optionally) back to the resume endpoint as
-// a client-echoed value.
-//
-// Claude CLI occasionally emits user messages that include control bytes
-// (PDF upload notifications use U+0085 NEL, shell tool outputs contain
-// C0 noise). Leaving those bytes inside last_prompt corrupts slog JSON,
-// breaks /api/sessions/resume round-trips (which enforce a stricter
-// charset), and can introduce ANSI control sequences into the sidebar.
-//
-// Tab is preserved because tab-delimited snippets are legitimate user
-// content and slog JSONHandler escapes tab safely.
-//
-// Exported so recent.go (extractFirstPrompt) and any future JSONL preview
-// path can share the same policy without import cycles.
+// terminal rendering, or /api/sessions/resume's charset gate from last_prompt /
+// first_prompt strings flowing from a CLI JSONL through the sidebar JSON and
+// back to the resume endpoint. Claude CLI emits user messages with control
+// bytes (PDF uploads use U+0085 NEL, shell outputs carry C0 noise). Tab is kept:
+// tab-delimited snippets are legitimate and slog escapes it. Used by recent.go too.
 func SanitizePromptForTransport(s string) string {
 	if s == "" {
 		return s
 	}
-	// R20260608133928-PERF-15: use rune-level iteration for the fast-path so
-	// that valid multi-byte UTF-8 (Chinese, emoji, accented chars) does not
-	// bail out early. The previous byte-level check treated any byte ≥ 0x80 as
-	// "dirty" and fell through to strings.Map unconditionally — for a Chinese
-	// prompt that is every call. We bail only when we encounter a rune that
-	// strings.Map would actually replace, keeping the predicate identical to
-	// the slow path to prevent fast/slow divergence.
+	// Rune-level fast path so valid multi-byte UTF-8 (Chinese, emoji) does not
+	// fall through to strings.Map; the predicate is identical to the slow path
+	// so the two cannot diverge.
 	clean := true
 	for _, r := range s {
 		if r == '\t' {
@@ -1016,15 +763,10 @@ func SanitizePromptForTransport(s string) string {
 	}, s)
 }
 
-// claudeSystemInjectedTagNames enumerates the XML-like tags that Claude
-// Code and its plugins inject as synthetic user messages (task queue
-// notifications, hook system reminders, slash-command envelopes, deferred-
-// tool announcements). These are operational noise, not user intent, and
-// must not become the session title or an entry in the history view.
-//
-// Kept in lockstep with the UI-side filter in internal/server/static/dashboard.js
-// (eventHtml + formatSessionMarkdown). When adding a tag in one place, add
-// it in the other, otherwise exports and titles drift apart.
+// claudeSystemInjectedTagNames enumerates the XML-like tags Claude Code and
+// its plugins inject as synthetic user messages — operational noise that must
+// not become a session title or history entry. Kept in lockstep with the UI
+// filter in internal/server/static/dashboard.js (eventHtml + formatSessionMarkdown).
 var claudeSystemInjectedTagNames = [...]string{
 	"task-notification",
 	"system-reminder",
@@ -1034,12 +776,9 @@ var claudeSystemInjectedTagNames = [...]string{
 }
 
 // IsClaudeSystemInjectedText reports whether text is a Claude-Code-injected
-// system XML frame (e.g. "<task-notification>…"). A leading "<tag>" or
-// "<tag " counts as a match; anything else is treated as real user content.
-// Also catches the CLI's synthetic "[Request interrupted by user]" marker
-// (and its "for tool use" variant), which the CLI writes as a user message
-// when SIGINT aborts a turn — it is not user intent and should be filtered
-// out of titles, previews, and transcript exports.
+// system XML frame (a leading "<tag>" / "<tag " from claudeSystemInjectedTagNames)
+// or the CLI's synthetic "[Request interrupted by user]" marker written when
+// SIGINT aborts a turn — neither is user intent for titles, previews or exports.
 func IsClaudeSystemInjectedText(text string) bool {
 	if isClaudeInterruptMarker(text) {
 		return true
@@ -1062,10 +801,8 @@ func IsClaudeSystemInjectedText(text string) bool {
 	return false
 }
 
-// isClaudeInterruptMarker matches the CLI-synthesised user messages that
-// represent an interrupt (SIGINT / stop button) rather than user intent.
-// Two known variants in Claude CLI ≥ 2.1: plain turn interrupt, and the
-// "for tool use" suffix when the interrupt landed between tool_use blocks.
+// isClaudeInterruptMarker matches the two CLI-synthesised interrupt messages
+// (SIGINT / stop button) in Claude CLI ≥ 2.1.
 func isClaudeInterruptMarker(text string) bool {
 	return text == "[Request interrupted by user]" ||
 		text == "[Request interrupted by user for tool use]"
@@ -1079,12 +816,10 @@ func extractUserText(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &msg) != nil || len(msg.Content) == 0 {
 		return ""
 	}
-	// Try string
 	var s string
 	if json.Unmarshal(msg.Content, &s) == nil {
 		return strings.TrimSpace(s)
 	}
-	// Try []block
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -1108,13 +843,7 @@ func findJSONLPath(claudeDir, cwd, sessionID string) string {
 	return ""
 }
 
-// ProcStartTime and detectCLIName are in platform-specific files:
-//   proc_linux.go  — reads /proc/PID/stat and /proc/PID/cmdline
-//   proc_darwin.go — uses sysctl and ps(1)
-
-// LookupSummaries is the package-level wrapper that delegates to
-// DefaultScanner. Preserves the pre-refactor signature for zero-churn
-// back-compat at call sites.
+// LookupSummaries is the package-level wrapper over DefaultScanner.
 func LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
 	return DefaultScanner().LookupSummaries(claudeDir, sessions)
 }
@@ -1128,10 +857,6 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 	}
 
 	// Group session IDs by project directory to read each index file once.
-	// Preallocate upper bound len(sessions): worst case each session is in
-	// its own project dir. Actual entry count is typically ≤ number of
-	// distinct workspaces, so some headroom is acceptable vs. map rehash
-	// cost on the growing path.
 	byProjDir := make(map[string][]string, len(sessions)) // indexPath → []sessionID
 	for sid, workspace := range sessions {
 		if workspace == "" {
@@ -1148,11 +873,8 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 			continue
 		}
 
-		// Single-session projects (the common case) skip the map alloc: a
-		// linear scan for one id is cheaper than allocating a map header +
-		// bucket. Larger sids lists fall back to O(1) membership via a set
-		// since idx.Entries can grow into the hundreds for long-lived
-		// projects and O(entries×sids) scaling hurts.
+		// Single-session projects (the common case) skip the set allocation;
+		// idx.Entries can reach the hundreds, so larger lists use O(1) membership.
 		switch len(sids) {
 		case 1:
 			want := sids[0]
@@ -1181,17 +903,13 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 }
 
 // loadSummaryIndex resolves indexPath to its parsed sessionsIndex, serving the
-// summary cache on an mtime hit and otherwise reading + parsing the file once.
-// Concurrent callers for the same indexPath are collapsed via singleflight so
-// they share a single os.Stat + os.ReadFile + json.Unmarshal instead of each
-// taking the summary write lock and serialising behind the slowest parse
-// (PERF-10 #1967). ok is false when the index is missing or unparseable.
+// summary cache on an mtime hit and otherwise reading + parsing once. Concurrent
+// callers for the same indexPath are collapsed via singleflight so they share
+// one stat+read+parse (#1967). ok is false when missing or unparseable.
 func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
-	// Fast path: stat once and serve a fresh cache hit without entering
-	// singleflight at all (the common steady-state case). On a miss, carry the
-	// stat's mtime into the flight so the closure does not re-stat the same
-	// file (#2247): the fast-path stat is microseconds old and the file is the
-	// same, so a second syscall buys nothing.
+	// Fast path: one stat serves a fresh cache hit without entering
+	// singleflight. On a miss the stat's mtime is carried into the flight so
+	// the closure does not re-stat the same file (#2247).
 	fastMtime, haveFastMtime := int64(0), false
 	if fi, err := summaryStatFn(indexPath); err == nil {
 		mtime := fi.ModTime().UnixNano()
@@ -1204,18 +922,16 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 	v, err, _ := s.summaryLoad.Do(indexPath, func() (any, error) {
 		mtime := fastMtime
 		if !haveFastMtime {
-			// The fast-path stat failed for this caller (e.g. a transient
-			// error); stat inside the flight so a genuine miss still surfaces
-			// the file's mtime rather than treating it as missing.
+			// This caller's fast-path stat failed (transient error); stat inside
+			// the flight so a genuine miss still surfaces the file's mtime.
 			fi, err := summaryStatFn(indexPath)
 			if err != nil {
 				return sessionsIndex{}, err
 			}
 			mtime = fi.ModTime().UnixNano()
 		}
-		// Re-check the cache inside the flight: an earlier flight for the same
-		// key may have just populated it, or a parallel fast-path missed by a
-		// hair. This keeps a burst from re-reading the file N times.
+		// Re-check inside the flight: an earlier flight may have just populated
+		// the cache, so a burst does not re-read the file N times.
 		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
 			return cachedIdx, nil
 		}
@@ -1236,8 +952,7 @@ func (s *Scanner) loadSummaryIndex(indexPath string) (sessionsIndex, bool) {
 	return v.(sessionsIndex), true
 }
 
-// getCachedSummary checks the summary cache. Reads use RLock; only the gen
-// refresh on a hit upgrades to the write lock (cheap in-place update).
+// getCachedSummary checks the summary cache under RLock; a hit refreshes gen lock-free.
 func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
 	s.summaryCache.RLock()
 	cached, ok := s.summaryCache.entries[indexPath]
@@ -1245,11 +960,8 @@ func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex
 	if !ok || cached.mtime != mtime {
 		return sessionsIndex{}, false
 	}
-	// Refresh the entry's generation lock-free so eviction keeps it alive. The
-	// *summaryCacheEntry address (and thus &gen) is stable for the entry's
-	// lifetime, so this Store needs no write-lock upgrade — avoiding the
-	// per-hit Lock() that serialised concurrent LookupSummaries readers
-	// (R202606h-PERF-011 #2330 / PERF-6 #1966).
+	// Refresh gen lock-free so eviction keeps the entry alive; the entry
+	// address is stable so no write-lock upgrade is needed (#2330).
 	cached.gen.Store(s.summaryCache.generation.Load())
 	return cached.index, true
 }
@@ -1265,52 +977,40 @@ func (s *Scanner) setCachedSummary(indexPath string, mtime int64, idx sessionsIn
 }
 
 // RefreshDynamic updates the mutable fields (LastActive, State, Summary,
-// LastPrompt) of already-discovered sessions in place.  It uses the same
-// caches as Scan, so repeated calls for unchanged JSONL/index files are cheap
-// (os.Stat + cache hit).  Returns true if any field changed.
-//
-// RefreshDynamic is the package-level wrapper that delegates to
-// DefaultScanner. Preserves the pre-refactor signature.
+// LastPrompt) of already-discovered sessions in place using Scan's caches, so
+// unchanged files cost an os.Stat + cache hit. Returns true if anything changed.
 func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	return DefaultScanner().RefreshDynamic(claudeDir, sessions)
 }
 
-// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic.
-// Like ScanContext it guards the promptSem fan-out so a slow/hung filesystem
-// cannot park the prompt-extraction goroutines past shutdown. R202606d-GO-002
-// (#2244).
+// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic;
+// like ScanContext it guards the promptSem fan-out against a hung FS (#2244).
 func RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
 	return DefaultScanner().RefreshDynamicContext(ctx, claudeDir, sessions)
 }
 
-// RefreshDynamic deliberately does NOT advance promptCache/summaryCache
-// generations — Scan is the sole authority for aging. Advancing here would
-// double-tick gen when Scan and RefreshDynamic run in the same cycle,
-// halving the effective cache lifetime (entries evicted after 1 cycle
-// instead of 2) and triggering repeated JSONL parses.
+// RefreshDynamic deliberately does NOT advance the cache generations — Scan is
+// the sole authority for aging. Advancing here too would double-tick gen when
+// both run in one cycle, halving cache lifetime and re-parsing JSONLs.
 func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	return s.RefreshDynamicContext(context.Background(), claudeDir, sessions)
 }
 
 // RefreshDynamicContext is the cancellation-aware variant of
-// (*Scanner).RefreshDynamic. See RefreshDynamicContext package wrapper for
-// rationale (R202606d-GO-002 #2244).
+// (*Scanner).RefreshDynamic; see the package-level RefreshDynamicContext.
 func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false
 	}
 
-	// Batch-lookup summaries.
 	workspaces := make(map[string]string, len(sessions))
 	for i := range sessions {
 		workspaces[sessions[i].SessionID] = sessions[i].CWD
 	}
 	summaryMap := s.LookupSummaries(claudeDir, workspaces)
 
-	// Batch-extract last prompts in parallel. The same Stat that the prompt
-	// extraction already performs also yields the JSONL mtime, so we capture
-	// it here and reuse it below instead of paying a second os.Stat per
-	// session via jsonlMtime — R20260603-PERF-2.
+	// Batch-extract last prompts in parallel; the Stat the extraction performs
+	// also yields the JSONL mtime, reused below instead of a second os.Stat.
 	prompts := make([]string, len(sessions))
 	mtimes := make([]int64, len(sessions))
 	mtimeOK := make([]bool, len(sessions))
@@ -1320,11 +1020,9 @@ func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, s
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			// R202606d-GO-002 (#2244): abandon not-yet-started extractions on
-			// ctx cancellation (SIGTERM) so a hung FS cannot park this goroutine
-			// on the semaphore past shutdown. mtimeOK[idx] stays false, so the
-			// merge loop below falls back to the existing StartedAt — the same
-			// path taken when the JSONL did not exist.
+			// Abandon not-yet-started extractions on ctx cancellation so a hung
+			// FS cannot park this goroutine past shutdown; mtimeOK[idx] stays
+			// false and the merge loop falls back to StartedAt (#2244).
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
@@ -1341,8 +1039,6 @@ func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, s
 	nowMs := time.Now().UnixMilli()
 	for i := range sessions {
 		sess := &sessions[i]
-		// Reuse the mtime captured during prompt extraction; fall back to
-		// startedAt when the JSONL did not exist, matching jsonlMtime.
 		la := sess.StartedAt
 		if mtimeOK[i] {
 			la = mtimes[i]
@@ -1371,10 +1067,9 @@ func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, s
 	return changed
 }
 
-// IsValidSessionID checks whether s is a valid UUID-format session ID.
-// Hand-rolled 36-char format check (8-4-4-4-12 lowercase hex with dashes)
-// to avoid the DFA lookup cost a regexp.MatchString pays on every
-// discovered session during each Scan.
+// IsValidSessionID checks whether s is a UUID-format session ID (8-4-4-4-12
+// lowercase hex). Hand-rolled to avoid the regexp DFA cost paid on every
+// discovered session per Scan.
 func IsValidSessionID(s string) bool {
 	if len(s) != 36 {
 		return false
@@ -1412,11 +1107,9 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 		encodedCWD := projDirName(cwd)
 		tmpBase := os.TempDir()
 		lockDir := filepath.Clean(filepath.Join(tmpBase, fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID))
-		// Defense-in-depth: use filepath.Rel to verify lockDir stays
-		// strictly beneath os.TempDir(). String-prefix matching is fragile
-		// against sibling names (e.g. /tmp vs /tmp10 where the cleaned
-		// paths happen to share a prefix byte sequence) and against a
-		// lockDir that collapses to tmpBase itself.
+		// filepath.Rel verifies lockDir stays strictly beneath os.TempDir();
+		// string-prefix matching is fragile against sibling names (/tmp vs
+		// /tmp10) and a lockDir that collapses to tmpBase itself.
 		if rel, err := filepath.Rel(tmpBase, lockDir); err == nil &&
 			rel != "." && rel != ".." &&
 			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -1425,11 +1118,9 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 	}
 }
 
-// waitForExit polls until the process exits or ctx is cancelled.
-// Returns true if ctx was cancelled before the process exited. A single
-// timer is reused across the back-off loop (Stop+Reset) to avoid 5-6
-// per-call time.NewTimer allocations during cluster-wide WaitAndCleanup
-// sweeps.
+// waitForExit polls until the process exits or ctx is cancelled, returning
+// true if ctx was cancelled first. A single timer is reused across the
+// back-off loop to avoid per-iteration time.NewTimer allocations.
 func waitForExit(ctx context.Context, pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	wait := 50 * time.Millisecond

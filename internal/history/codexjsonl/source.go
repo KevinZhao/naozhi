@@ -1,29 +1,9 @@
 // Package codexjsonl implements history.Source on top of the codex CLI's
-// per-session rollout transcripts under ~/.codex/sessions.
-//
-// Unlike claude (project-slug dirs) or kiro (flat <sid>.jsonl), codex
-// persists each thread as a date-bucketed rollout file whose name embeds
-// the thread UUID:
-//
-//	~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<threadId>.jsonl
-//
-// The threadId is the same UUID naozhi captures from thread/start, so the
-// source globs for the suffix `-<threadId>.jsonl` across the date tree
-// rather than composing a single deterministic path.
-//
-// Each line is a self-describing record with a top-level "type" + ISO-8601
-// "timestamp". We consume the two `event_msg` payloads that map cleanly to
-// a chat-history view (codex's transcript is friendlier than kiro's — these
-// lines carry both a real timestamp AND already-joined plain text):
-//
-//	{"timestamp":"2026-06-21T11:53:07.956Z","type":"event_msg",
-//	  "payload":{"type":"user_message","message":"..."}}
-//	{"timestamp":"2026-06-21T11:53:11.127Z","type":"event_msg",
-//	  "payload":{"type":"agent_message","message":"..."}}
-//
-// Other line types (session_meta, turn_context, response_item,
-// token_count, task_started/complete) are silently skipped so the schema
-// can evolve without breaking pagination.
+// rollout transcripts, ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<threadId>.jsonl.
+// threadId is the UUID naozhi captures from thread/start, so the source globs
+// for the `-<threadId>.jsonl` suffix across the date tree. Only event_msg
+// lines of type user_message / agent_message are consumed; other line types
+// are skipped so the schema can evolve without breaking pagination.
 package codexjsonl
 
 import (
@@ -46,24 +26,17 @@ import (
 	"github.com/naozhi/naozhi/internal/history"
 )
 
-// SessionIDFunc returns the codex thread ID for the bound session, or ""
-// when no thread has been negotiated yet. Re-evaluated on every LoadBefore
-// call so a thread/resume transition is observed by the next page request.
+// SessionIDFunc returns the codex thread ID for the bound session, or "" when
+// none is negotiated yet. Re-evaluated on every LoadBefore call.
 type SessionIDFunc func() string
 
-// maxFileBytes caps how many bytes LoadBefore reads from a single rollout
-// file. Mirrors kirojsonl's per-session safety limit so a runaway
-// transcript can't OOM the dashboard.
+// maxFileBytes caps how many bytes LoadBefore reads from one rollout file.
 const maxFileBytes = 16 << 20 // 16 MiB
 
-// ctxCheckEvery is how many parsed lines elapse between context.Done
-// checks during parsing. Mirrors kirojsonl.
+// ctxCheckEvery is how many parsed lines elapse between context.Done checks.
 const ctxCheckEvery = 100
 
-// scanBufPool recycles the 64 KiB initial line buffer that bufio.Scanner
-// would otherwise heap-allocate on every parseFile call. The dashboard
-// paginates a session by issuing one LoadBefore per page, so a fresh 64 KiB
-// alloc per page is pure churn (mirrors kirojsonl's scanBufPool).
+// scanBufPool recycles the 64 KiB initial bufio.Scanner buffer across pages.
 var scanBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 64*1024)
@@ -71,54 +44,41 @@ var scanBufPool = sync.Pool{
 	},
 }
 
-// maxLineBytes is the longest rollout record the scan accepts. Assistant
-// messages can be long, so this is well above bufio.Scanner's 64 KiB
-// default; anything longer (large function_call_output records) is skipped
-// rather than aborting the scan (#2448).
+// maxLineBytes is the longest rollout record the scan accepts; longer records
+// are skipped rather than aborting the scan (#2448).
 const maxLineBytes = 1 << 20
 
-// lineReaderPool recycles the bufio.Reader that sits between the file and
-// the scanner so an oversized record can be drained and the scan resumed
-// (see parseFile). Pooled for the same per-page churn reason as
-// scanBufPool.
+// lineReaderPool recycles the bufio.Reader between file and scanner that lets
+// an oversized record be drained and the scan resumed (see parseFile).
 var lineReaderPool = sync.Pool{
 	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
 }
 
 // Source is the codex rollout-JSONL-backed history.Source.
 type Source struct {
-	rootDir   string        // ~/.codex/sessions — empty disables the source
-	sessionID SessionIDFunc // produces the current codex thread ID
+	rootDir   string // ~/.codex/sessions — empty disables the source
+	sessionID SessionIDFunc
 
-	// findRollout caches the resolved rollout path per thread id. A session's
-	// thread id is stable for its lifetime and the date-bucketed tree it lives
-	// in can hold thousands of files after months of codex use, so a full
-	// filepath.WalkDir on every LoadBefore (session first render + each "load
-	// more") is wasted work. mu guards the cache because the dashboard issues
-	// LoadBefore concurrently across requests.
+	// findRollout caches the resolved rollout path per thread id (stable for the
+	// session; the date tree can hold thousands of files). mu guards it.
 	mu         sync.Mutex
 	cachedSid  string
 	cachedPath string
 }
 
-// New constructs a Source. If rootDir is empty or sessionIDFn is nil, the
-// Source degrades to a zero-result implementation so misconfiguration never
-// produces a nil-pointer panic. Callers always get a non-nil *Source and
-// can rely on LoadBefore returning (nil, nil) in degraded states.
+// New constructs a Source. Empty rootDir or nil sessionIDFn yields a
+// zero-result Source (LoadBefore returns (nil, nil)) rather than a panic.
 func New(rootDir string, sessionIDFn SessionIDFunc) *Source {
 	return &Source{rootDir: rootDir, sessionID: sessionIDFn}
 }
 
-// init registers this backend's factory so any *cli.Wrapper constructed
-// with BackendID="codex" picks up the codex rollout history source
-// automatically when this package is blank-imported (wireup).
+// init registers the codex history factory with cli.
 func init() {
 	cli.RegisterHistoryFactory("codex", factory)
 }
 
-// factory is the cli.HistoryFactoryFn for codex. Returns
-// cli.NoopHistorySource when the wiring lacks a CodexSessionsDir so a
-// router-level misconfig still yields a non-nil source.
+// factory returns cli.NoopHistorySource when the wiring lacks a
+// CodexSessionsDir so a router-level misconfig still yields a non-nil source.
 func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
 	if deps.CodexSessionsDir == "" {
 		return cli.NoopHistorySource{}
@@ -134,21 +94,15 @@ type codexRecord struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
-// codexEventMsg is the payload of an event_msg line. message is the
-// already-joined plain text for user_message / agent_message.
+// codexEventMsg is the payload of an event_msg line.
 type codexEventMsg struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 }
 
 // LoadBefore returns up to `limit` entries strictly older than beforeMS for
-// the bound codex thread, in chronological order (oldest → newest). When
-// beforeMS <= 0 the upper bound is dropped and callers receive the newest
-// `limit` entries.
-//
-// Errors are informational: the history.Source contract treats them as
-// end-of-history, so an unreadable rollout falls through to MergedSource's
-// non-fatal logging path rather than aborting pagination.
+// the bound codex thread, oldest → newest; beforeMS <= 0 drops the bound.
+// Errors are informational (history.Source treats them as end-of-history).
 func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -161,9 +115,8 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 		return nil, nil
 	}
 
-	// Defence-in-depth: SessionIDFunc is exported, so reject a sid that
-	// could escape rootDir via the glob pattern. Treat a bad sid as "no
-	// session" rather than an error (matches kirojsonl).
+	// SessionIDFunc is exported: reject a sid that could escape rootDir via
+	// the glob pattern. A bad sid is "no session", not an error.
 	if strings.ContainsAny(sid, `/\`) || strings.Contains(sid, "..") {
 		slog.Warn("codexjsonl: refusing sid containing path separator or '..'",
 			"sid_len", len(sid))
@@ -187,10 +140,8 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 
 	entries := s.parseFile(ctx, f, beforeMS)
 
-	// codex appends in chronological order, so parseFile already returns
-	// sorted entries in the common case. Skip the O(n log n) stable sort when
-	// the slice is already ordered; only pay it on the (defensive) out-of-order
-	// path. merged.mergeDedup applies the same IsSorted fast-path downstream.
+	// codex appends chronologically, so skip the O(n log n) sort unless the
+	// slice is actually out of order.
 	less := func(i, j int) bool { return entries[i].Time < entries[j].Time }
 	if !sort.SliceIsSorted(entries, less) {
 		sort.SliceStable(entries, less)
@@ -202,19 +153,12 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	return entries, nil
 }
 
-// findRollout locates the rollout file whose name ends in
-// `-<sid>.jsonl` under the date-bucketed tree. codex names files
-// rollout-<ISO8601>-<threadId>.jsonl inside YYYY/MM/DD/, so a recursive
-// match on the suffix is the robust lookup (the leading timestamp is not
-// known to naozhi). When multiple match (should not happen — threadId is a
-// UUID), the lexicographically last is returned so a resumed/forked thread
-// reading the freshest file wins.
+// findRollout locates the rollout file ending in `-<sid>.jsonl` under the
+// date tree (the leading timestamp is not known to naozhi). If several match,
+// the lexicographically last wins so a resumed thread reads the freshest file.
 func (s *Source) findRollout(sid string) (string, error) {
-	// Cache hit: the thread id is unchanged and we previously resolved a path.
-	// A stale path (file deleted/moved) is self-healing — the caller's os.Open
-	// fails and LoadBefore falls through to its (nil,nil) tail, and the next
-	// distinct sid (or process restart) re-walks. We trade that rare miss for
-	// skipping a full-tree WalkDir on the hot pagination path.
+	// Cache hit. A stale path (file deleted/moved) is self-healing: os.Open
+	// fails, LoadBefore returns (nil, nil), and the next distinct sid re-walks.
 	s.mu.Lock()
 	if s.cachedSid == sid && s.cachedPath != "" {
 		p := s.cachedPath
@@ -247,9 +191,8 @@ func (s *Source) findRollout(sid string) (string, error) {
 	if walkErr != nil && best == "" {
 		return "", walkErr
 	}
-	// Cache the resolved path so subsequent pages for the same thread skip the
-	// WalkDir. Only cache a non-empty hit; an empty result (no rollout flushed
-	// yet) must keep re-walking until codex writes the file.
+	// Only cache a non-empty hit; an empty result (no rollout flushed yet)
+	// must keep re-walking until codex writes the file.
 	if best != "" {
 		s.mu.Lock()
 		s.cachedSid = sid
@@ -260,36 +203,27 @@ func (s *Source) findRollout(sid string) (string, error) {
 }
 
 // parseFile streams the rollout file, decoding each event_msg line that
-// satisfies the beforeMS upper bound. Blank lines, malformed JSON, unknown
-// types, and unparseable timestamps are individually skipped so a bad line
-// never poisons the rest of the file. Returns entries in arrival order
-// (chronological per codex's append contract).
+// satisfies the beforeMS bound. Blank, malformed, unknown-type and
+// bad-timestamp lines are skipped individually. Returns arrival order.
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []clievent.EventEntry {
-	// Read the LAST maxFileBytes of the file, not the first. codex appends
-	// chronologically with no rotation, so a long agentic session can exceed
-	// the cap; reading from offset 0 would surface only the oldest turns and
-	// the newest messages would never be parsed. Seek to the tail window and
-	// drop the first (likely partial) line so the cap covers recent bytes.
+	// Read the LAST maxFileBytes: codex appends with no rotation, so reading
+	// from offset 0 would never reach the newest turns. Drop the partial first line.
 	skipPartialFirstLine := false
 	if fi, err := f.Stat(); err == nil && fi.Size() > maxFileBytes {
 		if _, err := f.Seek(fi.Size()-maxFileBytes, io.SeekStart); err == nil {
 			skipPartialFirstLine = true
 		}
 	}
-	// br sits between the file and the scanner so that an oversized record
-	// can be skipped (#2448): bufio.Scanner is unusable after ErrTooLong, so
-	// the rest of the line is drained from br and a fresh scanner resumes on
-	// br without losing any bytes already buffered past the long line.
+	// br lets an oversized record be drained and a fresh scanner resume without
+	// losing buffered bytes (bufio.Scanner is unusable after ErrTooLong) (#2448).
 	br := lineReaderPool.Get().(*bufio.Reader)
 	br.Reset(io.LimitReader(f, maxFileBytes))
 	defer func() {
 		br.Reset(nil)
 		lineReaderPool.Put(br)
 	}()
-	// Allow maxLineBytes lines — bufio.Scanner's default 64 KiB would
-	// truncate token-rich replies. The initial buffer is pooled:
-	// bufio.Scanner only grows (never shrinks below) the slice we hand it, so
-	// returning it at zero length recycles the 64 KiB backing array.
+	// The initial buffer is pooled: bufio.Scanner only grows the slice we hand
+	// it, so returning it at zero length recycles the backing array.
 	bufPtr := scanBufPool.Get().(*[]byte)
 	defer func() {
 		b := (*bufPtr)[:0]
@@ -299,12 +233,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 	scanner := bufio.NewScanner(br)
 	scanner.Buffer(*bufPtr, maxLineBytes)
 	if skipPartialFirstLine && !scanner.Scan() && errors.Is(scanner.Err(), bufio.ErrTooLong) {
-		// A successful Scan discards the partial line straddling the seek
-		// boundary. When that partial line is itself oversized, never Scan
-		// this scanner again: with an error set, bufio.Scanner hands the
-		// buffered 1 MiB prefix back as a final token (split-at-EOF recovery)
-		// and it would be decoded as if it were a whole record. Drain the
-		// rest of the line and rebuild instead.
+		// The partial first line is itself oversized. With an error set,
+		// bufio.Scanner would hand the buffered prefix back as a final token
+		// and it would decode as a whole record; drain and rebuild instead.
 		if !discardRestOfLine(br) {
 			return nil
 		}
@@ -345,11 +276,8 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			}
 			return out
 		}
-		// One record exceeds maxLineBytes (#2448). The scanner has consumed
-		// exactly its buffer's worth of the line (no '\n' in it, or it would
-		// have been a token); drop the remainder and resume with a fresh
-		// scanner so the records after it still surface. This also covers
-		// the partial first line of the tail window being oversized.
+		// One record exceeds maxLineBytes (#2448): drop the remainder and
+		// resume with a fresh scanner so later records still surface.
 		if !discardRestOfLine(br) {
 			return out
 		}
@@ -359,8 +287,7 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 }
 
 // discardRestOfLine drops bytes from br up to and including the next '\n'.
-// Returns false when the input ends (or fails) before a newline is seen, in
-// which case nothing further can be scanned.
+// Returns false when the input ends before a newline is seen.
 func discardRestOfLine(br *bufio.Reader) bool {
 	for {
 		_, err := br.ReadSlice('\n')
@@ -375,10 +302,8 @@ func discardRestOfLine(br *bufio.Reader) bool {
 	}
 }
 
-// decodeLine parses one rollout record into an EventEntry. Returns
-// (EventEntry{}, false) when the line is not a renderable event_msg
-// (user_message / agent_message), is malformed, has no parseable timestamp,
-// or carries empty text.
+// decodeLine parses one rollout record into an EventEntry; ok is false unless
+// it is a non-empty user_message / agent_message with a parseable timestamp.
 func decodeLine(line []byte) (clievent.EventEntry, bool) {
 	var rec codexRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
@@ -400,9 +325,8 @@ func decodeLine(line []byte) (clievent.EventEntry, bool) {
 	case "user_message":
 		entryType = "user"
 	case "agent_message":
-		// "text" matches the cc dashboard contract — dashboard.js renders the
-		// markdown bubble on e.type === 'text'. Emitting "assistant" would
-		// fall through to the unknown-type card.
+		// "text" is what dashboard.js renders as a markdown bubble;
+		// "assistant" would fall through to the unknown-type card.
 		entryType = "text"
 	default:
 		// system / reasoning / token_count / task_* lines are not chat bubbles.
@@ -418,15 +342,13 @@ func decodeLine(line []byte) (clievent.EventEntry, bool) {
 		return clievent.EventEntry{}, false
 	}
 
-	// Truncation caps and the deterministic dedup UUID (#2336) come from the
-	// shared recipe — see history.NewDerivedEntry for why both matter.
+	// Caps and the deterministic dedup UUID come from the shared recipe (#2336).
 	return history.NewDerivedEntry(timeMS, entryType, ev.Message), true
 }
 
-// parseISOms converts codex's ISO-8601 RFC3339 timestamp (e.g.
-// "2026-06-21T11:53:07.956Z") to unix milliseconds. Returns (0, false) on
-// an unparseable or non-positive value so the entry is dropped rather than
-// collapsed to epoch (which would corrupt the strict-< pagination cursor).
+// parseISOms converts codex's RFC3339 timestamp to unix milliseconds; (0, false)
+// on an unparseable or non-positive value so the entry is dropped rather than
+// collapsed to epoch (which would corrupt the strict-< cursor).
 func parseISOms(s string) (int64, bool) {
 	if s == "" {
 		return 0, false

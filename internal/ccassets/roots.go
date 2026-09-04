@@ -9,15 +9,12 @@ import (
 	"github.com/naozhi/naozhi/internal/assets"
 )
 
-// errPathEscape is returned when a Ref resolves outside its allowed root. It
-// wraps assets.ErrNotFound so the handler maps it to 404 (don't leak whether
-// a traversal target exists) — RFC §5.
+// errPathEscape wraps assets.ErrNotFound so the handler maps a traversal
+// attempt to 404 and does not leak whether the target exists.
 var errPathEscape = fmt.Errorf("ccassets: path escapes allowed root: %w", assets.ErrNotFound)
 
-// isUnderHome reports whether path is lexically under home (both are
-// filepath.Clean'd). Returns false when home is empty. Used to guard plugin
-// InstallPath values that arrive from user-writable JSON; prevents a crafted
-// installPath="/" from escaping the home directory tree (R20260603-GO-2/3).
+// isUnderHome reports whether path is lexically under home (false when home
+// is empty). Guards plugin InstallPath values from user-writable JSON.
 func isUnderHome(path, home string) bool {
 	if home == "" || path == "" {
 		return false
@@ -28,16 +25,10 @@ func isUnderHome(path, home string) bool {
 	return strings.HasPrefix(cleanPath, prefix) || cleanPath == cleanHome
 }
 
-// projectDirRE locks the memory Source.Project segment to the alphabet Claude's
-// project-dir encoder produces (leading "-", then alnum / "-"). Prevents a
-// crafted Project value from carrying traversal into the memory root (§5).
+// projectDirRE locks Source.Project to the project-dir encoder's alphabet (no traversal).
 var projectDirRE = regexp.MustCompile(`^-[A-Za-z0-9_-]+$`)
 
-// skillRoot returns the absolute skills root for a given source kind, or ""
-// if that source is unavailable (e.g. project source with empty RepoRoot).
-//
-// P0 scope: only user + project skill roots. Plugin / memory roots are added
-// in later phases (RFC §7).
+// skillRoot returns the skills root for a source kind, or "" if unavailable.
 func skillRoot(home, repoRoot, sourceKind string) string {
 	switch sourceKind {
 	case "user":
@@ -56,9 +47,7 @@ func skillRoot(home, repoRoot, sourceKind string) string {
 }
 
 // resolveUnder joins root+rel and verifies, both lexically and after symlink
-// resolution, that the result stays under root. Mirrors the ext/memory
-// R242-SEC-7 double-check (RFC §5). The returned path is the symlink-resolved
-// absolute path safe to read.
+// resolution, that the result stays under root; returns the resolved path.
 func resolveUnder(root, rel string) (string, error) {
 	if root == "" {
 		return "", errPathEscape
@@ -66,10 +55,8 @@ func resolveUnder(root, rel string) (string, error) {
 	if strings.Contains(rel, "..") {
 		return "", errPathEscape
 	}
-	// #2250: rel originates from a user-controlled Ref.RelPath. Mirror the
-	// dashboard project files.go:431/437 guard — reject NUL (fails before the
-	// arg reaches filepath.Join) and absolute paths (`/foo` joined with root
-	// silently discards root on some platforms, escaping the allowed tree).
+	// rel is user-controlled: reject NUL and absolute paths (an absolute rel
+	// joined with root silently discards root on some platforms). (#2250)
 	if strings.ContainsRune(rel, 0) || filepath.IsAbs(rel) {
 		return "", errPathEscape
 	}
@@ -94,28 +81,20 @@ func resolveUnder(root, rel string) (string, error) {
 	return resolved, nil
 }
 
-// rootForRef picks the single allowed root for a ReadRaw Ref and returns the
-// rel path RELATIVE TO THAT ROOT (RFC §5). The root is always the deepest
-// container we control (skills dir / plugin install dir / memory dir / home),
-// never a parent — so a rel like "secret.txt" cannot reach a sibling, and
-// resolveUnder additionally gates "..". The Asset.RelPath carries a display
-// prefix that we strip so resolveUnder anchors at the right root.
+// rootForRef picks the single allowed root for a ReadRaw Ref and the rel path
+// RELATIVE TO THAT ROOT. The root is always the deepest container we control
+// (plugin install dir / memory dir / home), never a parent, so a rel cannot
+// reach a sibling; resolveUnder additionally gates "..".
 func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err error) {
 	switch ref.Source.Kind {
 	case "user":
-		// user-level skill/agent/command/mcp all live directly under home;
-		// RelPath is already home-relative ("skills/x/SKILL.md", ".mcp.json").
-		// Anchor at home and let resolveUnder gate traversal.
 		root, rel = home, ref.RelPath
 
 	case "project":
-		// project assets under <repoRoot>; RelPath is repo-relative
-		// (".claude/skills/x/SKILL.md").
 		root, rel = repoRoot, ref.RelPath
 
 	case "plugin":
-		// plugin assets live under the plugin's installPath; resolve it from
-		// the manifest so an uninstalled/unknown plugin is refused (§5).
+		// Resolve installPath from the manifest so an unknown plugin is refused.
 		ip, e := readInstalledPlugins(home)
 		if e != nil || ip == nil {
 			return "", "", errPathEscape
@@ -131,8 +110,7 @@ func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err er
 		root, rel = installPath, ref.RelPath
 
 	case "memory_project":
-		// memory under projects/<encoded>/memory/; the encoded segment must
-		// match the alphabet so it can't carry traversal.
+		// The encoded project segment must match the alphabet (no traversal).
 		if home == "" || !projectDirRE.MatchString(ref.Source.Project) {
 			return "", "", errPathEscape
 		}

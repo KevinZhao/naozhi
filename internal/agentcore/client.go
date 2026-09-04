@@ -17,9 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-// runtimeAPI is the slice of the AgentCore data-plane SDK the client uses.
-// Interface seam so tests inject fakes (mirrors internal/transcribe's
-// transcribeAPI pattern).
+// runtimeAPI is the slice of the AgentCore SDK the client uses (test seam).
 type runtimeAPI interface {
 	InvokeAgentRuntime(ctx context.Context, params *bedrockagentcore.InvokeAgentRuntimeInput, optFns ...func(*bedrockagentcore.Options)) (*bedrockagentcore.InvokeAgentRuntimeOutput, error)
 	StopRuntimeSession(ctx context.Context, params *bedrockagentcore.StopRuntimeSessionInput, optFns ...func(*bedrockagentcore.Options)) (*bedrockagentcore.StopRuntimeSessionOutput, error)
@@ -34,14 +32,13 @@ type Config struct {
 }
 
 // Client invokes run-once jobs on an AgentCore Runtime and holds their
-// event streams (decision A1-a). Safe for concurrent use.
+// event streams. Safe for concurrent use.
 type Client struct {
 	api runtimeAPI
 	cfg Config
 }
 
-// New builds a Client using the default AWS credential chain (env → IAM
-// role → profile), matching internal/transcribe's loading pattern.
+// New builds a Client using the default AWS credential chain.
 func New(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.RuntimeARN == "" {
 		return nil, fmt.Errorf("agentcore: RuntimeARN is required")
@@ -53,11 +50,8 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agentcore: load aws config: %w", err)
 	}
-	// Confirm RuntimeARN belongs to the operator's own AWS account before any
-	// job prompt can be sent to it. A config-injected ARN pointing at an
-	// attacker-controlled AgentCore runtime would otherwise exfiltrate the
-	// (sensitive) job prompt. Resolve the caller's account via STS and
-	// fail-fast on any STS failure rather than silently allowing the invoke.
+	// RuntimeARN must belong to the operator's own account: a config-injected
+	// ARN for an attacker-controlled runtime would exfiltrate the job prompt.
 	ident, err := sts.NewFromConfig(awsCfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return nil, fmt.Errorf("agentcore: resolve caller account (sts): %w", err)
@@ -68,10 +62,8 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	return &Client{api: bedrockagentcore.NewFromConfig(awsCfg), cfg: cfg}, nil
 }
 
-// verifyARNAccount checks that runtimeARN parses and that its account segment
-// matches the operator's own AWS account. Pure function (no AWS calls) so the
-// account-ownership rule is unit-testable in isolation; the STS lookup that
-// feeds accountID stays a thin wrapper in New.
+// verifyARNAccount checks that runtimeARN parses, names a regional
+// bedrock-agentcore runtime, and matches the caller's account. Pure (no AWS).
 func verifyARNAccount(runtimeARN, accountID string) error {
 	if accountID == "" {
 		return fmt.Errorf("agentcore: empty caller account id from STS")
@@ -80,9 +72,7 @@ func verifyARNAccount(runtimeARN, accountID string) error {
 	if err != nil {
 		return fmt.Errorf("agentcore: invalid RuntimeARN %q: %w", runtimeARN, err)
 	}
-	// Defense-in-depth: a misconfigured ARN pointing at another service in the
-	// same account (e.g. a Lambda or S3 ARN) would otherwise pass the account
-	// check. Assert the ARN actually names a regional AgentCore runtime.
+	// A same-account ARN for another service would pass the account check alone.
 	if parsed.Service != "bedrock-agentcore" {
 		return fmt.Errorf("agentcore: RuntimeARN service %q is not bedrock-agentcore (config-injection guard)", parsed.Service)
 	}
@@ -103,66 +93,44 @@ func newWithAPI(api runtimeAPI, cfg Config) *Client {
 // RunResult is the outcome of one held run.
 type RunResult struct {
 	RunID string
-	// State is the §6.1 three-way classification.
+	// State is the three-way terminal classification.
 	State TerminalState
 	// ExitCode is the CLI exit code when an exit frame arrived (else 0).
 	ExitCode int
-	// CostUSD is the CLI-reported total cost (total_cost_usd from the
-	// result event); 0 when no result event arrived (transport failure /
-	// idle-burn). RFC §7.3/§7.5 run-record meta.
+	// CostUSD is total_cost_usd from the CLI result event; 0 when none arrived.
 	CostUSD float64
-	// DurationMS is the CLI-reported run wall-clock (duration_ms from the
-	// result event); 0 when no result event arrived.
+	// DurationMS is duration_ms from the CLI result event; 0 when none arrived.
 	DurationMS int64
-	// ImageVersion / MemoryPeakBytes come from the bootstrap kind=meta
-	// frame (microVM execution receipt the CLI stream cannot supply).
-	// Zero when the image predates the meta frame or the frame was cut.
+	// ImageVersion / MemoryPeakBytes come from the bootstrap kind=meta frame.
 	ImageVersion    string
 	MemoryPeakBytes int64
-	// Err is the underlying failure. Invariant: non-nil if and only if
-	// State == FailedTransport (a clean-EOF cut with no terminal
-	// attestation carries ErrNoTerminalAttestation). Callers may branch on
-	// either State or Err interchangeably.
+	// Err is non-nil iff State == FailedTransport (a clean-EOF cut without
+	// attestation carries ErrNoTerminalAttestation).
 	Err error
 }
 
 // ErrNoTerminalAttestation marks a stream that ended cleanly at the HTTP
-// layer without the job ever attesting a terminal state (no result event,
-// no exit frame) — the platform idle-burn shape observed in validation V8.
-// The microVM's fate is unknown; §6.2 containment applies.
+// layer without result or exit frame (platform idle-burn); microVM fate unknown.
 var ErrNoTerminalAttestation = errors.New("agentcore: stream ended without result or exit attestation")
 
-// EventSink receives decoded envelopes during a run, in stream order, from
-// the goroutine that owns the stream. Keepalive frames are filtered out
-// before the sink. Classification observes each envelope BEFORE the sink
-// sees it — sinks are read-only consumers; mutating the envelope has no
-// effect on the terminal state. Sink errors abort the run (classified
-// FailedTransport): losing events is worse than losing the run — the run
-// record would lie.
+// EventSink receives decoded envelopes in stream order (keepalives filtered).
+// Classification observes each envelope BEFORE the sink; sinks are read-only.
+// A sink error aborts the run as FailedTransport — a lossy run record would lie.
 type EventSink func(env *Envelope) error
 
-// Run invokes one run-once job and holds the event stream until terminal
-// (RFC §4.3 A1-a). It blocks for the job's whole lifetime; run it from a
-// goroutine the caller owns.
+// Run invokes one run-once job and blocks until the event stream is terminal.
 //
-// Return contract (deliberately strict so the §6.2 gate cannot be skipped
-// by an `if err != nil { return }` idiom):
+// Return contract (strict so the containment gate cannot be skipped):
 //
-//	err != nil ⟺ res == nil — the job was never attempted (invalid
-//	    payload / runID); nothing reached the platform, no containment due.
-//	err == nil ⟺ res != nil — the job was attempted; res.State is the
-//	    only truth about its fate. Invoke-call failures, stream breaks,
-//	    and sink failures all land in res.State == FailedTransport with
-//	    res.Err set. There is no path where an attempted job's failure is
-//	    reported via the function error.
+//	err != nil ⟺ res == nil — never attempted (invalid payload / runID).
+//	err == nil ⟺ res != nil — attempted; res.State is the only truth. Invoke
+//	    failures, stream breaks and sink failures all land in FailedTransport.
 //
-// ctx cancellation breaks the hold and classifies FailedTransport — the
-// §6.2 containment (Stop-then-confirm before replay) applies. maxLifetime
-// clamping is the runtime's job (configured ≤60min per §6.2 rule 2); Run
-// adds no extra timeout of its own.
+// ctx cancellation classifies FailedTransport (Stop-then-confirm before
+// replay). Run adds no timeout; maxLifetime clamping is the runtime's job.
 func (c *Client) Run(ctx context.Context, runID string, payload *Payload, sink EventSink) (*RunResult, error) {
 	if len(runID) < 33 {
-		// Validation F3: the API rejects shorter ids with an opaque 4xx.
+		// The API rejects shorter ids with an opaque 4xx.
 		return nil, fmt.Errorf("agentcore: runID %q shorter than 33 chars (API minimum)", runID)
 	}
 	body, err := payload.Marshal()
@@ -178,9 +146,7 @@ func (c *Client) Run(ctx context.Context, runID string, payload *Payload, sink E
 		Payload:          body,
 	})
 	if err != nil {
-		// The invoke call failed, but the request may have reached the
-		// platform — conservatively an attempted job: FailedTransport, so
-		// retry paths go through the §6.2 Stop-then-confirm gate.
+		// The request may have reached the platform: conservatively attempted.
 		return &RunResult{
 			RunID: runID,
 			State: FailedTransport,
@@ -192,32 +158,23 @@ func (c *Client) Run(ctx context.Context, runID string, payload *Payload, sink E
 	return holdStream(ctx, runID, out.Response, sink), nil
 }
 
-// holdStream decodes SSE frames off the response body until it ends, fans
-// envelopes out to sink, and classifies the terminal state. Free function:
-// it depends only on the stream, never on AWS state. Streaming decode
-// line-by-line — never buffer the whole body (validation F1 is the whole
-// reason this package exists).
+// holdStream decodes SSE frames line-by-line (never buffering the whole
+// body), fans envelopes out to sink, and classifies the terminal state.
 func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSink) *RunResult {
 	var cls classifier
 	res := &RunResult{RunID: runID}
 
 	sc := bufio.NewScanner(body)
-	// Single stream-json lines can carry large tool results. The bootstrap
-	// caps its stdout lines at 16MB and wraps them in the SSE envelope —
-	// allow envelope overhead on top so a max-size CLI line still fits.
-	// MaxEnvelopeLineBytes is the shared wire ceiling the cron reader also
-	// uses, so any line accepted here is readable back (#2083).
+	// Shared wire ceiling: any line accepted here is readable back (#2083).
 	sc.Buffer(make([]byte, 64*1024), MaxEnvelopeLineBytes)
 
 	for sc.Scan() {
 		raw := sc.Bytes()
-		// SSE framing: "data: {...}" lines separated by blank lines. Strip
-		// a trailing \r in case a middlebox rewrote LF to CRLF (Scanner
-		// only splits on \n).
+		// SSE "data: {...}" frames; strip \r in case a middlebox rewrote LF to CRLF.
 		raw = bytes.TrimSuffix(raw, []byte("\r"))
 		data, ok := bytes.CutPrefix(raw, []byte("data: "))
 		if !ok {
-			continue // blank separators, comments
+			continue
 		}
 		var env Envelope
 		if err := json.Unmarshal(data, &env); err != nil {
@@ -230,8 +187,6 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 		case KindExit:
 			res.ExitCode = env.Code
 		case KindMeta:
-			// Execution receipt (RFC §7.3): image version + peak RSS the
-			// CLI stream cannot supply. Last-writer-wins (one per run).
 			if env.ImageVersion != "" {
 				res.ImageVersion = env.ImageVersion
 			}
@@ -239,14 +194,13 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 				res.MemoryPeakBytes = env.MemoryPeakBytes
 			}
 		case KindCLI:
-			// Cost/duration receipt rides the stream-json result event.
 			if m, ok := ResultMetaOf(env.Line); ok {
 				res.CostUSD = m.CostUSD
 				res.DurationMS = m.DurationMS
 			}
 		}
 		if env.Kind == KindKeepalive {
-			continue // liveness only — never reaches the sink
+			continue
 		}
 		if sink != nil {
 			if err := sink(&env); err != nil {
@@ -259,8 +213,7 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 
 	streamErr := sc.Err()
 	if streamErr == nil && ctx.Err() != nil {
-		// Scanner can surface a cancelled read as a clean EOF depending on
-		// the transport layer; ctx is the truth.
+		// A cancelled read can surface as a clean EOF; ctx is the truth.
 		streamErr = ctx.Err()
 	}
 	res.State = cls.terminal(streamErr)
@@ -273,13 +226,11 @@ func holdStream(ctx context.Context, runID string, body io.Reader, sink EventSin
 	return res
 }
 
-// RuntimeARN returns the configured runtime ARN. Used by the cron adapter
-// to stamp the run-record meta (RFC §7.3) with the runtime a job targeted.
+// RuntimeARN returns the configured runtime ARN.
 func (c *Client) RuntimeARN() string { return c.cfg.RuntimeARN }
 
-// Stop tears down a runtime session. This is the §6.2 rule-1 termination
-// primitive: after FailedTransport, Stop MUST succeed before the run is
-// eligible for replay. Validation V4: takes effect within seconds.
+// Stop tears down a runtime session. After FailedTransport, Stop MUST
+// succeed before the run is eligible for replay.
 func (c *Client) Stop(ctx context.Context, runID string) error {
 	_, err := c.api.StopRuntimeSession(ctx, &bedrockagentcore.StopRuntimeSessionInput{
 		AgentRuntimeArn:  aws.String(c.cfg.RuntimeARN),

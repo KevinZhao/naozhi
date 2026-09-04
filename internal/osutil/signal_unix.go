@@ -5,7 +5,7 @@ package osutil
 import "syscall"
 
 // SendTerm sends SIGTERM to the given PID. Returns syscall.ESRCH if the
-// process no longer exists; callers usually treat that as success. Wraps
+// process does not exist; callers usually treat that as success. Wraps
 // syscall.Kill so Windows builds can stub it out without polluting every
 // caller with a build-tag block.
 func SendTerm(pid int) error {

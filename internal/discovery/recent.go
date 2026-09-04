@@ -24,81 +24,51 @@ type RecentSession struct {
 	LastPrompt string `json:"last_prompt,omitempty"`
 	LastActive int64  `json:"last_active"` // unix ms (JSONL mtime)
 	// RetiredAt is the unix ms instant the session left the live sidebar
-	// (Router.Reset / Router.Remove). Filled by SessionHandlers from the
-	// RetiredStore when present; zero means "never observed retiring under
-	// the current naozhi process generation, fall back to LastActive".
-	// The dashboard sorts the history popover by RetiredAt || LastActive
-	// so the most recently closed session lands on top regardless of when
-	// its JSONL was last appended.
+	// (Router.Reset / Router.Remove), filled from the RetiredStore; zero means
+	// "fall back to LastActive". The dashboard sorts the history popover by
+	// RetiredAt || LastActive so the most recently closed session lands on top.
 	RetiredAt int64  `json:"retired_at,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	Project   string `json:"project,omitempty"` // filled by server
 }
 
-// RecentSessionsFilter is the consumer-facing hook RecentSessions calls
-// before returning a session.  Both methods are best-effort:  an
-// implementation that returns false for everything degrades to the
-// pre-filter behaviour, never blocks the scan, and never panics.
-//
-// Implementations MUST be safe for concurrent reads (RecentSessions may
-// be called from multiple goroutines via the dashboard 1Hz poll).
-// Construction of the filter (e.g. snapshotting Scheduler.KnownSessionIDs)
-// should happen outside the hot loop — RecentSessions calls these
-// methods O(N) times per scan.
+// RecentSessionsFilter is the consumer-facing hook RecentSessions calls before
+// returning a session. Both methods are best-effort (false = unfiltered),
+// MUST be safe for concurrent reads (the dashboard 1Hz poll calls
+// RecentSessions from multiple goroutines) and should snapshot state at
+// construction — they run O(N) times per scan.
 type RecentSessionsFilter interface {
-	// SkipWorkspace reports whether all sessions under the given
-	// resolved workspace path should be hidden.  Used to hide
-	// naozhi-internal subsystem workdirs (e.g. sys-sessions).
-	// workspace is the absolute filesystem path returned by
-	// resolveWorkspaceWithIndex / resolveWorkspaceByParts; an empty
-	// string is never passed.
+	// SkipWorkspace reports whether all sessions under the given resolved
+	// (absolute, non-empty) workspace path should be hidden, e.g.
+	// naozhi-internal sys-session workdirs.
 	SkipWorkspace(workspace string) bool
-	// SkipSessionID reports whether the specific Claude session
-	// (identified by its UUID-style sessionID) should be hidden.
-	// Used to hide cron-spawned sessions which share their workspace
-	// with regular user sessions and so cannot be filtered by path.
+	// SkipSessionID reports whether the specific Claude session should be
+	// hidden, e.g. cron-spawned sessions that share their workspace with
+	// regular user sessions and so cannot be filtered by path.
 	SkipSessionID(sessionID string) bool
 }
 
-// noopRecentFilter is the stand-in used when callers pass nil — keeps
-// the scan loop branch-free without per-call nil checks.
+// noopRecentFilter stands in for a nil filter so the scan loop needs no nil checks.
 type noopRecentFilter struct{}
 
 func (noopRecentFilter) SkipWorkspace(string) bool { return false }
 func (noopRecentFilter) SkipSessionID(string) bool { return false }
 
-// RecentSessions scans ~/.claude/projects/* for recent sessions,
-// returning up to `limit` sessions modified within `maxAge`.
-// If limit <= 0, all sessions within the time window are returned.
-//
-// Filtering layers (in order):
-//  1. Workspace resolution: skip directories that can't be mapped back to a real
-//     directory on disk (session can't be resumed without the correct CWD).
-//  2. Hidden-path: skip workspaces with a dot-prefixed path component, which
-//     belong to automated tools (claude-mem observer et al) rather than to a
-//     user-visible project — except git worktrees under ".claude/worktrees",
-//     which are ordinary user sessions.
-//  3. filter.SkipWorkspace: caller-supplied workspace blacklist (e.g. sys-sessions).
-//  4. excludeSessionIDs / filter.SkipSessionID: per-session-ID filtering.
-//
-// filter may be nil; nil is equivalent to passing a no-op filter.
-// Sessions in excludeSessionIDs are always skipped (legacy parameter
-// kept for source-compat with discovery callers; new callers should
-// prefer filter.SkipSessionID for richer semantics).
+// RecentSessions scans ~/.claude/projects/* for recent sessions, returning up
+// to `limit` sessions modified within `maxAge` (limit <= 0 returns all).
+// Filtering, in order: (1) directories that cannot be mapped back to a real
+// workspace on disk are skipped; (2) workspaces with a dot-prefixed component
+// (automated tools) are skipped, except git worktrees under ".claude/worktrees";
+// (3) filter.SkipWorkspace, then excludeSessionIDs / filter.SkipSessionID.
+// filter may be nil; excludeSessionIDs is always honoured.
 func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
 	return RecentSessionsCtx(context.Background(), claudeDir, limit, maxAge, excludeSessionIDs, filter)
 }
 
-// RecentSessionsCtx is RecentSessions with cancellation support. The
-// per-directory FS walk (which can stall indefinitely on a slow/hung
-// home — NFS, FUSE) checks ctx.Done() before each project directory and
-// returns whatever it has scanned so far once the context is cancelled or
-// its deadline expires. PERF-009 (#2134): the dashboard history scan runs
-// as the singleflight leader, so an unbounded walk blocks every concurrent
-// poll goroutine waiting on the flight; a bounded context caps that stall.
-//
-// On early return the partial result is still sorted/trimmed normally, so
-// callers get a best-effort recent slice rather than nil.
+// RecentSessionsCtx is RecentSessions with cancellation support: the walk
+// checks ctx before each project directory and returns the (still sorted and
+// trimmed) partial result once cancelled, so a hung NFS/FUSE home cannot
+// block every poll waiting on the singleflight leader (#2134).
 func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
 	if claudeDir == "" {
 		return nil
@@ -117,23 +87,12 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 
 	cutoff := time.Now().Add(-maxAge).UnixMilli()
 
-	// R247-PERF-16 (#561): preallocate based on directory count. Each
-	// project directory typically yields 1-5 sessions in the 7-day window;
-	// growing from nil through 1→2→4→8→16→32 doublings on a many-project
-	// dev box re-allocs the backing array 5+ times before steady state.
-	// The cap hint (one slot per project dir, growable when a project
-	// happens to have many sessions in window) eliminates the early
-	// doublings without over-committing — a project with zero matches
-	// just leaves slots unused, well-bounded by the entry count.
 	all := make([]RecentSession, 0, len(entries))
 	jsonlPaths := make(map[string]string, len(entries))
 
 	for _, e := range entries {
-		// PERF-009 (#2134): bail out of the walk as soon as the context
-		// is cancelled / its deadline lapses so a slow FS cannot pin the
-		// singleflight leader for the full traversal. Each project dir
-		// triggers stat/ReadDir/file reads below, so the gate sits at the
-		// top of the per-directory body.
+		// Bail out as soon as ctx is cancelled so a slow FS cannot pin the
+		// singleflight leader for the full traversal (#2134).
 		if err := ctx.Err(); err != nil {
 			slog.Warn("recent sessions scan cancelled mid-walk; returning partial result",
 				"scanned", len(all), "err", err)
@@ -147,24 +106,19 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 		projDir := filepath.Join(projectsDir, dirName)
 		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName)
 
-		// Layer 1: skip unresolvable workspaces.
 		if workspace == "" {
 			continue
 		}
 
-		// Layer 2: skip tool-owned hidden paths, now that we hold the
-		// decoded workspace and can tell ".claude/worktrees/x" (a user's
-		// git worktree — keep) from ".claude-mem/..." (an observer's
-		// scratch dir — drop). The old pre-decode `strings.Contains(dirName,
-		// "--")` heuristic could not, and hid every worktree session (#2370).
+		// Layer 2: skip tool-owned hidden paths. Operating on the decoded
+		// workspace tells ".claude/worktrees/x" (a user's git worktree — keep)
+		// from ".claude-mem/..." (an observer's scratch dir — drop) (#2370).
 		if isHiddenToolWorkspace(workspace) {
 			continue
 		}
 
-		// Layer 3: caller-supplied workspace blacklist.  Skip the entire
-		// directory (no per-file Stat) — sys-sessions JSONLs would
-		// otherwise leak AutoTitler prompt fragments into the user
-		// history panel.
+		// Layer 3: caller-supplied workspace blacklist, so sys-session JSONLs
+		// cannot leak AutoTitler prompt fragments into the user history panel.
 		if filter.SkipWorkspace(workspace) {
 			continue
 		}
@@ -186,7 +140,6 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 			}
 		}
 
-		// Fallback: collect metadata only (no file reads for prompt yet)
 		for _, rs := range recentFromJSONLFiles(projDir, workspace, excludeSessionIDs) {
 			if rs.LastActive < cutoff {
 				continue
@@ -199,15 +152,11 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 		}
 	}
 
-	// Sort by last_active desc (most recent first).
 	slices.SortFunc(all, func(a, b RecentSession) int {
 		return cmp.Compare(b.LastActive, a.LastActive)
 	})
 
-	// Deferred prompt extraction: only read JSONL for sessions that will
-	// be returned. Result is bounded by min(limit, len(all)); preallocate
-	// to that exact upper bound to skip the post-doubling churn on
-	// dashboard polls hitting `limit=50` against a many-session dataset.
+	// Deferred prompt extraction: only read JSONL for sessions that will be returned.
 	resCap := len(all)
 	if limit > 0 && limit < resCap {
 		resCap = limit
@@ -217,9 +166,8 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 		if limit > 0 && len(result) >= limit {
 			break
 		}
-		// PERF-009 (#2134): extractFirstPrompt opens+reads a JSONL file
-		// per result; honour cancellation here too so a slow FS in the
-		// prompt-extraction phase cannot pin the leader either.
+		// extractFirstPrompt opens+reads a JSONL per result; honour
+		// cancellation here too so a slow FS cannot pin the leader (#2134).
 		if err := ctx.Err(); err != nil {
 			slog.Warn("recent sessions prompt extraction cancelled; returning partial result",
 				"extracted", len(result), "err", err)
@@ -234,34 +182,24 @@ func RecentSessionsCtx(ctx context.Context, claudeDir string, limit int, maxAge 
 	return result
 }
 
-// ---------------------------------------------------------------------------
-// Directory scan cache
-// ---------------------------------------------------------------------------
-
 // jsonlFileInfo holds cached metadata for a single .jsonl file.
 type jsonlFileInfo struct {
 	sessionID string
 	mtime     int64 // unix ms
 }
 
-// dirFilesCacheEntry stores cached file metadata for a project directory.
-//
-// R247-PERF-19: byID is a derived sessionID→mtime map built once at cache
-// fill time so recentFromParsedIndex (called per dashboard sidebar refresh)
-// no longer rebuilds it on every call. Map and slice share the same dirMtime
-// invalidation lifetime; populating both up front trades O(N) extra memory
-// (where N = .jsonl count, typically ≤ a few dozen per workspace) for one
-// allocation amortised over many sidebar reads.
+// dirFilesCacheEntry stores cached .jsonl metadata for a project directory;
+// byID is derived once at fill time so recentFromParsedIndex (called per
+// sidebar refresh) does not rebuild it. Both share the dirMtime lifetime.
 type dirFilesCacheEntry struct {
 	dirMtime int64 // directory mtime in UnixNano (changes on file add/remove)
 	files    []jsonlFileInfo
 	byID     map[string]int64 // sessionID → mtime; nil iff len(files)==0
 }
 
-// dirFilesCache caches per-directory .jsonl file metadata. Cache entries are
-// invalidated when the directory mtime changes (i.e. files are added or removed).
-// Individual file mtime changes (content appended) do NOT invalidate the cache,
-// which is acceptable for the 7-day history sidebar.
+// dirFilesCache caches per-directory .jsonl metadata, invalidated when the
+// directory mtime changes (file add/remove). Appends to individual files do
+// NOT invalidate it, which is acceptable for the 7-day history sidebar.
 var dirFilesCache sync.Map // projDir → *dirFilesCacheEntry
 
 // cachedJSONLFileInfo returns .jsonl file metadata for a project directory,
@@ -273,9 +211,8 @@ func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
 	return nil
 }
 
-// cachedJSONLByID returns the sessionID→mtime map for a project directory,
-// reusing the same mtime-validated cache as cachedJSONLFileInfo. The returned
-// map is read-only; callers must not mutate it. R247-PERF-19.
+// cachedJSONLByID returns the sessionID→mtime map for a project directory from
+// the same mtime-validated cache as cachedJSONLFileInfo. Read-only for callers.
 func cachedJSONLByID(projDir string) map[string]int64 {
 	if entry := loadCachedDirEntry(projDir); entry != nil {
 		return entry.byID
@@ -283,9 +220,8 @@ func cachedJSONLByID(projDir string) map[string]int64 {
 	return nil
 }
 
-// loadCachedDirEntry returns the cached entry for projDir, refilling the cache
-// on a miss / stale dirMtime. Centralised so cachedJSONLFileInfo and
-// cachedJSONLByID share one scan + one cache slot per directory state.
+// loadCachedDirEntry returns the cached entry for projDir, refilling on a
+// miss / stale dirMtime so both accessors share one scan per directory state.
 func loadCachedDirEntry(projDir string) *dirFilesCacheEntry {
 	dirInfo, err := os.Stat(projDir)
 	if err != nil {
@@ -299,16 +235,10 @@ func loadCachedDirEntry(projDir string) *dirFilesCacheEntry {
 		}
 	}
 
-	// Cache miss or stale — full scan.
 	dirEntries, err := os.ReadDir(projDir)
 	if err != nil {
 		return nil
 	}
-	// Preallocate to len(dirEntries) so the typical projects directory
-	// (almost-all .jsonl files, rare hidden subdirs) lands every entry
-	// in the initial backing array. Slot waste from filtered-out non-jsonl
-	// entries is bounded by the directory entry count, well below the
-	// nil→1→2→4→… grow churn this avoids on every cache miss. R247-PERF-19.
 	files := make([]jsonlFileInfo, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		name := de.Name()
@@ -356,20 +286,15 @@ func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []
 	return out
 }
 
-// firstPromptScanBudget bounds how many bytes of *normal* (sub-cap) lines
-// extractFirstPrompt will accumulate before giving up on finding the first
-// user prompt. The first real text turn lands within the first few KB on any
-// normal transcript, so this only trips on a head full of large non-user
-// turns. Oversized lines are drained by readJSONLLine without counting
-// against this budget (draining is pure I/O, no unmarshal), so a head of
-// inline-image lines is skipped cheaply rather than instantly exhausting it.
+// firstPromptScanBudget bounds how many bytes of normal (sub-cap) lines
+// extractFirstPrompt accumulates before giving up; the first text turn lands
+// within a few KB on any normal transcript. Oversized lines are drained by
+// readJSONLLine without counting, so an inline-image head is skipped cheaply.
 const firstPromptScanBudget = 512 * 1024
 
-// extractFirstPrompt reads the first user message from a JSONL file.
-// Scans at most firstPromptScanBudget bytes from the head to stay fast, and
-// uses readJSONLLine so a leading oversized inline-image line is skipped
-// rather than aborting the scan (which is why the sidebar preview used to be
-// blank for image-heavy sessions).
+// extractFirstPrompt reads the first user message from a JSONL file, scanning
+// at most firstPromptScanBudget bytes and skipping (not aborting on) a leading
+// oversized inline-image line via readJSONLLine.
 func extractFirstPrompt(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -382,13 +307,9 @@ func extractFirstPrompt(path string) string {
 	for {
 		line, oversized, rerr := readJSONLLine(r)
 		scanned += len(line)
-		// Fast pre-filter: skip lines that can't be user messages. This
-		// avoids json.Unmarshal on every line; the Unmarshal below is the
+		// Cheap pre-filter before json.Unmarshal; the Unmarshal below is the
 		// authoritative check. Oversized lines carry no first-prompt text.
 		if len(line) > 0 && !oversized && bytes.Contains(line, []byte(`"type"`)) {
-			// Reuse the package's canonical JSONL line schema (history.go)
-			// instead of re-declaring the type/message shape inline. The
-			// extra Timestamp/UUID fields are simply ignored here. (#1478)
 			var hl historyLine
 			if json.Unmarshal(line, &hl) == nil && hl.Type == "user" {
 				if text := extractUserText(hl.Message); text != "" {
@@ -407,45 +328,34 @@ func extractFirstPrompt(path string) string {
 // stay visible in the history panel even though the path is dot-hidden.
 const worktreesMarker = ".claude" + string(filepath.Separator) + "worktrees" + string(filepath.Separator)
 
-// hasDotComponent reports whether any component of p is dot-prefixed, i.e.
-// p is "." something or contains a "<sep>." pair.
-//
-// Checking the leading position separately matters because workspace paths are
-// not guaranteed absolute: resolveWorkspaceWithIndex returns
-// sessions-index.json's originalPath verbatim once os.Stat says it is a
-// directory, and that field is file content. A relative ".tool/observer" that
-// resolves against the process CWD would otherwise pass for non-hidden and
-// leak the tool's prompts into the user history panel.
+// hasDotComponent reports whether any component of p is dot-prefixed. The
+// leading position is checked separately because workspace paths are not
+// guaranteed absolute (sessions-index.json's originalPath is used verbatim),
+// and a relative ".tool/observer" must not pass as non-hidden.
 func hasDotComponent(p string) bool {
 	return strings.HasPrefix(p, ".") || strings.Contains(p, string(filepath.Separator)+".")
 }
 
 // isHiddenToolWorkspace reports whether a resolved workspace path belongs to
-// an automated tool rather than a user project. The rule: any dot-prefixed
-// path component makes it tool-owned — except the ".claude/worktrees/<name>"
-// prefix, which is where Claude Code puts user git worktrees.
-//
-// Operating on the decoded path (not the encoded directory name) is what lets
-// this distinguish the two: both collapse to a "--" in the encoded form.
+// an automated tool rather than a user project: any dot-prefixed component
+// makes it tool-owned, except Claude Code's ".claude/worktrees/<name>" git
+// worktrees. It works on the decoded path; both encode to "--".
 func isHiddenToolWorkspace(workspace string) bool {
 	if !hasDotComponent(workspace) {
 		return false
 	}
-	// Locate ".claude/worktrees/" as a whole component, so the tail of e.g.
-	// "my.claude/worktrees/" does not match. It qualifies either at the very
-	// start of a relative path or immediately after a separator.
+	// Match ".claude/worktrees/" as a whole component so "my.claude/worktrees/"
+	// does not qualify.
 	prefix, rest, ok := cutWorktreesMarker(workspace)
 	if !ok {
 		return true
 	}
-	// Everything before the marker must itself be dot-free, otherwise a tool
-	// dir that happens to nest a worktree (".cache/x/.claude/worktrees/y")
-	// would be whitelisted by association.
+	// The prefix must itself be dot-free, else a tool dir nesting a worktree
+	// (".cache/x/.claude/worktrees/y") would be whitelisted by association.
 	if hasDotComponent(prefix) {
 		return true
 	}
-	// An empty remainder means the path IS ".claude/worktrees" itself — a
-	// container directory, not a worktree, so it stays hidden.
+	// An empty remainder is the ".claude/worktrees" container itself, not a worktree.
 	if rest == "" {
 		return true
 	}
@@ -454,9 +364,8 @@ func isHiddenToolWorkspace(workspace string) bool {
 }
 
 // cutWorktreesMarker splits p around a whole-component ".claude/worktrees/"
-// occurrence, returning the part before the marker, the part after it, and
-// whether the marker was found. The marker matches at the start of p (relative
-// path) or directly after a separator (absolute path).
+// occurrence (at the start of a relative path or directly after a separator),
+// returning the parts before and after it and whether it was found.
 func cutWorktreesMarker(p string) (prefix, rest string, ok bool) {
 	if strings.HasPrefix(p, worktreesMarker) {
 		return "", p[len(worktreesMarker):], true
@@ -468,14 +377,9 @@ func cutWorktreesMarker(p string) (prefix, rest string, ok bool) {
 	return "", "", false
 }
 
-// ---------------------------------------------------------------------------
-// Workspace resolution
-// ---------------------------------------------------------------------------
-
 // resolveWorkspaceWithIndex determines the real filesystem path for a Claude
-// project directory and optionally returns the parsed sessions index (if present).
-// Reading the index once avoids double I/O for directories that have both
-// originalPath and session entries.
+// project directory and returns the parsed sessions index if present, reading
+// the index once for both purposes.
 func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex) {
 	data, err := os.ReadFile(filepath.Join(projDir, "sessions-index.json"))
 	if err == nil {
@@ -486,8 +390,7 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 					return idx.OriginalPath, &idx
 				}
 			}
-			// Index exists but originalPath missing or stale — still use entries,
-			// fall through to DFS for workspace.
+			// Index exists but originalPath missing or stale — keep entries, DFS for workspace.
 			if ws := resolveWorkspaceByParts(dirName); ws != "" {
 				return ws, &idx
 			}
@@ -497,12 +400,8 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 	return resolveWorkspaceByParts(dirName), nil
 }
 
-// recentFromParsedIndex extracts sessions from an already-parsed sessions index.
-// Uses cached file metadata and O(1) map lookups per index entry.
-//
-// R247-PERF-19: the sessionID→mtime map is now cached inside the directory
-// cache entry, so repeated sidebar refreshes (no .jsonl add/remove between
-// them) reuse the same map allocation instead of rebuilding it per call.
+// recentFromParsedIndex extracts sessions from an already-parsed sessions
+// index using the cached sessionID→mtime map (O(1) per index entry).
 func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclude map[string]bool) []RecentSession {
 	jsonlMtimes := cachedJSONLByID(projDir)
 
@@ -530,45 +429,19 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 	return out
 }
 
-// resolveWorkspaceByParts reconstructs a workspace path from an encoded project
-// directory name by testing segments against the filesystem.
-//
-// Claude Code encodes workspace paths by replacing every character outside
-// [A-Za-z0-9] with "-" (see ClaudeProjectSlug), so
-// "-home-ec2-user-workspace-foo" originated from "/home/ec2-user/workspace/foo".
-// The encoding is lossy in two directions: a "-" in the encoded name may have
-// been a "/", a literal "-", a ".", a "_", a space, … and directory names may
-// themselves contain literal hyphens.
-//
-// Two passes, cheapest first:
-//
-//  1. tryResolveParts — splits on "-" and DFS-joins consecutive parts,
-//     verifying each candidate with os.Stat. Resolves any path whose only
-//     encoded characters were "/" and literal "-", which is every ordinary
-//     workspace. ~10-20 stats.
-//  2. resolveByDirScan — for names pass 1 cannot explain (a "." / "_" / space
-//     in some segment), ReadDir each level and re-encode the real child names
-//     to find which one the encoded remainder started with. Deterministic
-//     where pass 1 can only guess, at the cost of a ReadDir per level.
-//
-// Pass 2 is what makes git worktrees visible: a session run in
-// "<repo>/.claude/worktrees/<name>" encodes to "…-repo--claude-worktrees-…"
-// (the "/." collapsing into "--"), and no amount of hyphen-splitting can
-// recover the leading dot of ".claude" (#2370).
-//
-// dfsPathCache caches successful (non-empty) results. Encoded directory names
-// never change, so a resolved mapping is stable and safe to cache for the
-// process lifetime.
-//
-// Negative results ("") are deliberately NOT cached: the empty string is an
-// "unresolvable right now" sentinel, not a stable fact. A workspace directory
-// may be temporarily absent during the scan (unmounted network/removable
-// drive, git worktree mid-rebuild/checkout) and reappear later. Caching the
-// negative result would permanently drop that project from the history
-// sidebar until the process restarts (#1994). Re-running both bounded passes
-// on a cache miss is cheap.
+// dfsPathCache caches successful resolveWorkspaceByParts results; encoded
+// names never change, so a mapping is stable for the process lifetime.
+// Negative results ("") are NOT cached: a workspace may be temporarily absent
+// (unmounted drive, worktree mid-rebuild) and caching "" would hide the
+// project until restart (#1994). Re-running the bounded passes is cheap.
 var dfsPathCache sync.Map // encoded dirName → resolved workspace path
 
+// resolveWorkspaceByParts reconstructs a workspace path from an encoded
+// project directory name, where every non-[A-Za-z0-9] character became "-"
+// (see ClaudeProjectSlug). Pass 1, tryResolveParts, splits on "-" and
+// DFS-joins parts with os.Stat, resolving any ordinary workspace; pass 2,
+// resolveByDirScan, re-encodes real child names per level for segments that
+// held ".", "_" or spaces — what makes ".claude/worktrees" sessions visible (#2370).
 func resolveWorkspaceByParts(dirName string) string {
 	if v, ok := dfsPathCache.Load(dirName); ok {
 		return v.(string)
@@ -583,9 +456,6 @@ func resolveWorkspaceByParts(dirName string) string {
 	statCount := 0
 	result := tryResolveParts(parts, "/", &statCount)
 	if result == "" {
-		// Pass 1 exhausted: some segment holds a character the "-" split
-		// cannot recover (".", "_", space). Re-encode real directory names
-		// instead of guessing at the decoding.
 		budget := dirScanBudget
 		result = resolveByDirScan(dirName[1:], "/", &budget)
 	}
@@ -596,35 +466,17 @@ func resolveWorkspaceByParts(dirName string) string {
 }
 
 // dirScanBudget caps how many directory entries resolveByDirScan may re-encode
-// across the whole walk. Two encoded children can share a prefix (".claude"
-// and "-claude" both encode to "-claude"), so the walk backtracks and is
-// worst-case exponential without a ceiling. A real path costs one ReadDir per
-// level and a handful of comparisons; the cap only trips on adversarial or
-// pathologically wide trees, where returning "" degrades to the pre-fix
-// behaviour (project hidden) rather than stalling the history scan.
+// per walk: encoded children can share a prefix (".claude" and "-claude" both
+// give "-claude"), so backtracking is worst-case exponential. It only trips on
+// adversarial trees, where "" (project hidden) beats stalling the scan.
 const dirScanBudget = 10000
 
-// resolveByDirScan walks down from base, consuming the encoded remainder by
-// matching it against the *re-encoded* names of base's real subdirectories.
-// Returns the absolute path whose ClaudeProjectSlug-encoding is
-// "-"+originalRemainder, or "" when no such directory exists.
-//
-// remainder is the encoded name with the leading "-" already stripped, i.e.
-// for "-home-user-x" the initial call passes "home-user-x" with base "/".
-//
-// The encoding is not injective — ".claude", "-claude" and "_claude" all
-// encode to "-claude" — so several real children can match one encoded
-// segment. Two properties keep that safe:
-//
-//   - Every returned path re-encodes to the input by construction (each level
-//     is matched against its own re-encoding), so a caller can never receive a
-//     path belonging to a *different* encoded name. Ambiguity picks a
-//     different valid pre-image, it does not fabricate one.
-//   - The choice is deterministic: os.ReadDir sorts by name, and
-//     dotPreferredOrder then hoists dot-prefixed candidates so the ".claude"
-//     form Claude itself uses wins over an exotic "-claude"/"_claude"
-//     sibling. (A path resolvable without a dot is handled by pass 1 and
-//     never reaches here at all.)
+// resolveByDirScan walks down from base, consuming the encoded remainder
+// (leading "-" stripped) by matching it against the re-encoded names of
+// base's real subdirectories; returns the path whose encoding is "-"+remainder
+// or "". The encoding is not injective, but every returned path re-encodes to
+// the input by construction, and the choice is deterministic: os.ReadDir sorts
+// by name and dotPreferredOrder hoists dot-prefixed candidates.
 func resolveByDirScan(remainder, base string, budget *int) string {
 	if remainder == "" {
 		return ""
@@ -640,9 +492,8 @@ func resolveByDirScan(remainder, base string, budget *int) string {
 		}
 		*budget--
 		if !e.IsDir() {
-			// A symlink to a directory reports mode Symlink here, not Dir;
-			// Stat it so a symlinked workspace component still resolves
-			// (matches tryResolveParts, which Stats and thus follows links).
+			// Symlinks to directories report mode Symlink, not Dir; Stat so a
+			// symlinked workspace component still resolves (as tryResolveParts does).
 			if e.Type()&os.ModeSymlink == 0 {
 				continue
 			}
@@ -651,10 +502,8 @@ func resolveByDirScan(remainder, base string, budget *int) string {
 			}
 		}
 		name := e.Name()
-		// "." / ".." would make filepath.Join walk in place or upwards and
-		// recurse without consuming the remainder. os.ReadDir does not list
-		// them, but guard anyway so a future switch to a different directory
-		// reader cannot introduce an unbounded walk.
+		// "." / ".." would recurse without consuming the remainder. os.ReadDir
+		// omits them, but guard so a different directory reader cannot loop.
 		if name == "." || name == ".." {
 			continue
 		}
@@ -666,8 +515,7 @@ func resolveByDirScan(remainder, base string, budget *int) string {
 		if remainder == enc {
 			return candidate
 		}
-		// The separator "/" encodes to "-" like everything else, so a
-		// non-leaf match consumes enc plus exactly one "-".
+		// "/" encodes to "-" too, so a non-leaf match consumes enc plus one "-".
 		if !strings.HasPrefix(remainder, enc) || len(remainder) <= len(enc) || remainder[len(enc)] != '-' {
 			continue
 		}
@@ -678,16 +526,9 @@ func resolveByDirScan(remainder, base string, budget *int) string {
 	return ""
 }
 
-// dotPreferredOrder returns entries with dot-prefixed names first, preserving
-// os.ReadDir's lexical order within each group. Only allocates when the
-// directory actually mixes dot and non-dot entries AND a non-dot entry
-// precedes a dot one — the common case (no dotfiles, or dotfiles already
-// sorted first) returns the input slice untouched.
-//
-// Rationale: the slug encoding maps ".claude", "-claude" and "_claude" onto
-// the same "-claude", and lexical order puts "-claude" first. The ambiguity
-// that occurs in practice is Claude's own ".claude/worktrees" layout, so the
-// dot form is the better guess.
+// dotPreferredOrder returns dot-prefixed entries first, preserving os.ReadDir's
+// lexical order within each group, and only allocates when a non-dot entry
+// precedes a dot one. ".claude" is the pre-image seen in practice for "-claude".
 func dotPreferredOrder(entries []os.DirEntry) []os.DirEntry {
 	firstDot := -1
 	for i, e := range entries {
@@ -696,8 +537,6 @@ func dotPreferredOrder(entries []os.DirEntry) []os.DirEntry {
 			break
 		}
 	}
-	// No dot entries, or the very first entry is already a dot entry: the
-	// existing order needs no adjustment.
 	if firstDot <= 0 {
 		return entries
 	}
@@ -745,7 +584,3 @@ func tryResolveParts(parts []string, base string, statCount *int) string {
 	}
 	return ""
 }
-
-// ---------------------------------------------------------------------------
-// Naozhi-managed session detection
-// ---------------------------------------------------------------------------

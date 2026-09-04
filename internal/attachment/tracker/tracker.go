@@ -16,35 +16,25 @@ import (
 	"github.com/naozhi/naozhi/internal/attachment"
 )
 
-// Defaults tuned for naozhi's "dozens of sessions, hundreds of
-// attachments/day" profile. Tune via Options.
+// Defaults tuned for "dozens of sessions, hundreds of attachments/day".
 const (
 	DefaultChannelBuffer  = 1024
 	DefaultCoalesceWindow = 1 * time.Second
 	DefaultIdleCloseAfter = 10 * time.Minute
 )
 
-// Observer receives tracker-level lifecycle callbacks. Matches the
-// shape of internal/eventlog/persist.Observer so the session layer
-// can forward both into internal/metrics without translating.
+// Observer receives tracker-level lifecycle callbacks. Matches the shape of
+// internal/eventlog/persist.Observer so the session layer can forward both
+// into internal/metrics without translating.
 type Observer interface {
-	// OnReferenceBump fires once per .meta file rewrite (NOT once
-	// per incoming event — coalesced). n is the number of references
-	// folded into this write; 1 for singleton, >1 when coalesce
-	// batched multiple bumps to the same attachment.
+	// OnReferenceBump fires once per .meta rewrite (coalesced, not per event).
+	// n is the number of references folded into this write.
 	OnReferenceBump(n int)
-	// OnReferenceClear fires once per .meta file rewrite during
-	// session removal. n is the number of files whose keyhash was
-	// cleared.
+	// OnReferenceClear fires once per .meta rewrite during session removal.
 	OnReferenceClear(n int)
-	// OnMetaWriteError fires when UpdateMetaFile returned an error
-	// (missing sidecar, disk full, …). path is the absolute .meta
-	// path; implementations typically log + increment a counter.
+	// OnMetaWriteError fires when UpdateMetaFile failed; path is the .meta path.
 	OnMetaWriteError(path string, err error)
-	// OnDrop fires when the worker's channel is full at enqueue
-	// time and the event is discarded. Mirrors the persist-layer
-	// drop counter so operators have a single metric family to
-	// monitor.
+	// OnDrop fires when the ingest channel is full and the event is discarded.
 	OnDrop(n int)
 }
 
@@ -55,35 +45,24 @@ func (noopObserver) OnReferenceClear(int)           {}
 func (noopObserver) OnMetaWriteError(string, error) {}
 func (noopObserver) OnDrop(int)                     {}
 
-// WorkspaceResolver maps a session key-hash to the absolute workspace
-// path where that session's event log stored its ImagePaths. The
-// tracker does NOT own the key → workspace table (session.Router
-// does); passing the closure keeps this package decoupled from the
-// session package.
-//
-// Return "" when the session is unknown; the tracker then drops
-// the bump with a Debug log rather than walk an arbitrary filesystem.
+// WorkspaceResolver maps a session key-hash to its absolute workspace path
+// (session.Router owns the table). Return "" for an unknown session — the
+// tracker then drops the bump rather than walk an arbitrary filesystem.
 type WorkspaceResolver func(keyhash string) string
 
-// Options configures a Tracker. Zero fields fall back to the
-// Default* constants.
+// Options configures a Tracker. Zero fields fall back to the Default* constants.
 type Options struct {
-	// Workspaces maps session keyhash → absolute workspace root.
-	// Required: a nil resolver disables every bump (the tracker
-	// becomes a no-op).
+	// Workspaces maps session keyhash → absolute workspace root. Required.
 	Workspaces WorkspaceResolver
 
-	// ChannelBuffer bounds the size of the ingest queue. Full
-	// channel triggers the drop policy documented in OnDrop.
+	// ChannelBuffer bounds the ingest queue; full triggers the OnDrop policy.
 	ChannelBuffer int
 
-	// CoalesceWindow is the debounce interval: repeated bumps on
-	// the same (keyhash, absPath) pair within this window only
-	// trigger a single .meta write at the window's end.
+	// CoalesceWindow is the debounce interval: repeated bumps on the same
+	// (keyhash, absPath) within it trigger a single .meta write.
 	CoalesceWindow time.Duration
 
-	// Clock is injected for deterministic tests. Production leaves
-	// it nil and uses time.Now.
+	// Clock is injected for deterministic tests; nil uses time.Now.
 	Clock func() time.Time
 
 	// Observer receives metric callbacks. nil → noop.
@@ -98,23 +77,13 @@ type Tracker struct {
 	closed  atomic.Bool
 	wg      sync.WaitGroup
 
-	// pending holds bumps that are inside the coalesce window. Keys
-	// are (keyhash, absPath) tuples; values capture the most recent
-	// observed timeMS. Single-writer — only the run goroutine
-	// touches this. Stats() must NOT read pending directly; use
-	// pendingSize instead. Reading len(pending) from any other
-	// goroutine is undefined behaviour and can fault the runtime
-	// with "concurrent map read and map write".
+	// pending holds bumps inside the coalesce window. Only the run goroutine
+	// touches it; Stats() must read pendingSize, never len(pending).
 	pending map[coalesceKey]pendingBump
 
-	// pendingSize mirrors len(pending) so Stats() can expose the
-	// gauge to /health without touching the map. The single writer
-	// (run goroutine) is responsible for keeping it in sync with
-	// every insert/delete in pending; readers Load atomically.
+	// pendingSize mirrors len(pending), kept in sync by the run goroutine.
 	pendingSize atomic.Int64
 
-	// writtenCnt / clearCnt / droppedCnt mirror Observer callbacks
-	// for test introspection and /health stats snapshot.
 	writtenCnt atomic.Int64
 	clearCnt   atomic.Int64
 	droppedCnt atomic.Int64
@@ -133,7 +102,6 @@ type pendingBump struct {
 	flushAt time.Time
 }
 
-// trackerJob is the union type the channel carries.
 type trackerJobKind int
 
 const (
@@ -148,16 +116,14 @@ type trackerJob struct {
 	// Bump payload.
 	absPaths []string
 	timeMS   int64
-	// Clear payload ← session removal.
+	// Clear payload (session removal).
 	clearWorkspace string
-	// Common done channel for synchronous callers (used by Flush /
-	// OnSessionRemoved); nil for async bumps.
+	// done is set for synchronous callers (Flush / OnSessionRemoved); nil for bumps.
 	done chan error
 }
 
-// NewTracker spins up the worker goroutine and returns a ready
-// Tracker. Opts.Workspaces must be non-nil; otherwise the tracker
-// would have no way to turn a keyhash into an attachment path.
+// NewTracker spins up the worker goroutine and returns a ready Tracker.
+// Opts.Workspaces must be non-nil.
 func NewTracker(opts Options) (*Tracker, error) {
 	if opts.Workspaces == nil {
 		return nil, errors.New("tracker: Options.Workspaces is required")
@@ -185,15 +151,9 @@ func NewTracker(opts Options) (*Tracker, error) {
 	return t, nil
 }
 
-// OnPersistedEntry is the hot-path hook the session-layer sink
-// bridge calls whenever an EventEntry with non-empty ImagePaths
-// reaches disk (replayPhase=false only). It enqueues a bump for
-// every path; the worker coalesces.
-//
-// Non-blocking: full channel drops the entire batch with a counter
-// increment. The event-log entry itself is already durable — a
-// dropped tracker bump only means the attachment may be collected
-// a little early under heavy load.
+// OnPersistedEntry is the hot-path hook for an EventEntry with ImagePaths
+// reaching disk (replayPhase=false only). Non-blocking: a full channel drops
+// the batch — the entry is durable, the attachment may merely be GC'd early.
 func (t *Tracker) OnPersistedEntry(keyhash string, absPaths []string, timeMS int64) {
 	if t == nil || t.closed.Load() {
 		return
@@ -218,13 +178,9 @@ func (t *Tracker) OnPersistedEntry(keyhash string, absPaths []string, timeMS int
 	}
 }
 
-// OnSessionRemoved walks the workspace's attachment directory and
-// clears keyhash from every .meta file that references it. Blocks
-// until the worker finishes the walk (sessions are deleted
-// infrequently; simplicity beats async semantics here).
-//
-// ctx timeout enforces a hard upper bound so a slow filesystem can't
-// wedge Router.Remove indefinitely.
+// OnSessionRemoved walks the workspace's attachment directory and clears
+// keyhash from every .meta file that references it. Blocks until the worker
+// finishes; ctx bounds the wait so a slow filesystem cannot wedge Router.Remove.
 func (t *Tracker) OnSessionRemoved(ctx context.Context, keyhash, workspace string) error {
 	if t == nil || t.closed.Load() {
 		return nil
@@ -246,12 +202,9 @@ func (t *Tracker) OnSessionRemoved(ctx context.Context, keyhash, workspace strin
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
-	// R20260605B-CORR-16: the first select picks uniformly among ready
-	// cases, so when Stop() has closed closeCh AND t.in still has buffer
-	// space, ~50% of the time the job is buffered into t.in after run()
-	// has already drained-and-exited — nothing will ever write done. The
-	// closeCh case here lets us return ErrTrackerClosed immediately rather
-	// than blocking for the full ctx budget (a 5s shutdown stall).
+	// After Stop() the first select may still buffer the job into t.in after
+	// run() has drained and exited, so done would never be written; the
+	// closeCh case returns at once instead of burning the whole ctx budget.
 	select {
 	case err := <-done:
 		return err
@@ -262,9 +215,8 @@ func (t *Tracker) OnSessionRemoved(ctx context.Context, keyhash, workspace strin
 	}
 }
 
-// Flush synchronously writes every pending coalesced bump. Used by
-// tests and by Router.Shutdown to guarantee tracker state is on
-// disk before process exit.
+// Flush synchronously writes every pending coalesced bump. Used by tests
+// and by Router.Shutdown so tracker state is on disk before exit.
 func (t *Tracker) Flush(ctx context.Context) error {
 	if t == nil || t.closed.Load() {
 		return nil
@@ -278,9 +230,7 @@ func (t *Tracker) Flush(ctx context.Context) error {
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
-	// R20260605B-CORR-16: same drain-then-buffer race as OnSessionRemoved —
-	// cover the closed case so a lost job returns ErrTrackerClosed at once
-	// instead of stalling for the full ctx timeout.
+	// Same drain-then-buffer race as OnSessionRemoved.
 	select {
 	case err := <-done:
 		return err
@@ -291,8 +241,8 @@ func (t *Tracker) Flush(ctx context.Context) error {
 	}
 }
 
-// Stop signals the worker to drain and exit. Idempotent. Safe to
-// call after Stop — subsequent hot-path calls are no-ops.
+// Stop signals the worker to drain and exit. Idempotent; subsequent
+// hot-path calls are no-ops.
 func (t *Tracker) Stop(ctx context.Context) error {
 	if t == nil {
 		return nil
@@ -314,8 +264,7 @@ func (t *Tracker) Stop(ctx context.Context) error {
 	}
 }
 
-// Stats returns a snapshot of the counters the tracker exposes via
-// /health.attachment_tracker.
+// Stats is the counter snapshot exposed via /health.attachment_tracker.
 type Stats struct {
 	Written      int64
 	Cleared      int64
@@ -324,10 +273,8 @@ type Stats struct {
 	Pending      int
 	ChannelCap   int
 	ChannelDepth int
-	// LastDrainMs is how long ago the worker last processed a job,
-	// in milliseconds. -1 means "never drained" (the worker has not
-	// handled a single job yet); distinct from 0 which means
-	// "drained within the last millisecond".
+	// LastDrainMs is how long ago the worker last processed a job; -1 means
+	// never drained (distinct from 0 = within the last millisecond).
 	LastDrainMs int64
 }
 
@@ -354,21 +301,10 @@ func (t *Tracker) Stats() Stats {
 	}
 }
 
-// WriterAlive reports whether the worker goroutine can still accept
-// and drain work. A healthy tracker is NOT required to have seen a
-// recent drain — an idle session with no image events is still alive,
-// just quiet. The liveness signal is:
-//
-//	not closed AND (channel is empty-and-not-full OR recent drain)
-//
-// The empty-channel shortcut covers cold-start (never drained) and
-// long idle periods (no image events in hours). The recent-drain
-// branch catches the "channel has work and worker is making progress"
-// case. The failure mode we want to flag is "channel has work but
-// worker stalled" — i.e. queue non-empty AND no drain in 5s.
-//
-// Production /health consumes this directly. See the mirroring
-// implementation in persist.Persister.WriterAlive.
+// WriterAlive reports whether the worker can still accept and drain work:
+// not closed AND (channel empty-and-not-full OR recent drain). The flagged
+// failure mode is "queue non-empty AND no drain in 5s"; an idle tracker is
+// alive. Mirrors persist.Persister.WriterAlive.
 func (t *Tracker) WriterAlive() bool {
 	if t == nil || t.closed.Load() {
 		return false
@@ -385,15 +321,14 @@ func (t *Tracker) WriterAlive() bool {
 	return drainedRecently && notFull
 }
 
-// Errors callers match with errors.Is.
+// ErrTrackerClosed is returned once Stop has been called; match with errors.Is.
 var ErrTrackerClosed = errors.New("tracker: closed")
 
 // --- worker ----------------------------------------------------
 
 func (t *Tracker) run() {
 	defer t.wg.Done()
-	// Debounce tick granularity = CoalesceWindow/4, bounded on both
-	// sides to avoid pathological intervals on extreme configs.
+	// Debounce tick = CoalesceWindow/4, clamped to [50ms, 1s].
 	tickEvery := t.opts.CoalesceWindow / 4
 	if tickEvery < 50*time.Millisecond {
 		tickEvery = 50 * time.Millisecond
@@ -431,9 +366,7 @@ func (t *Tracker) handleJob(job trackerJob) {
 	case jobKindBump:
 		t.handleBump(job)
 	case jobKindClear:
-		// Clear callers expect the observe + pending bumps applied
-		// first so OnSessionRemoved's sweep sees the post-bump refs
-		// rather than a stale subset.
+		// Apply pending bumps first so the clear sweep sees post-bump refs.
 		t.flushAll()
 		err := t.handleClear(job)
 		if job.done != nil {
@@ -467,14 +400,8 @@ func (t *Tracker) handleBump(job trackerJob) {
 			t.pendingSize.Add(1)
 			continue
 		}
-		// Keep the highest timeMS observed, but DO NOT reset flushAt
-		// [R202606c-GO-002]: a key that is bumped faster than the
-		// coalesce window must still flush at its first deadline.
-		// Pushing flushAt out on every bump let a hot key starve
-		// forever (no .meta write until Stop/Flush), during which the
-		// GC reads stale on-disk meta and can delete a still-referenced
-		// attachment. Keep the original deadline so every key lands on
-		// disk within at most one CoalesceWindow of entering pending.
+		// Keep the highest timeMS but DO NOT reset flushAt: a hot key would
+		// otherwise starve forever while GC reads stale on-disk meta.
 		if job.timeMS > prev.timeMS {
 			prev.timeMS = job.timeMS
 		}
@@ -483,9 +410,7 @@ func (t *Tracker) handleBump(job trackerJob) {
 }
 
 func (t *Tracker) handleClear(job trackerJob) error {
-	// A full walk of the workspace's attachment directory. This is
-	// O(files) but happens only on session removal (rare). We read
-	// every .meta, remove the keyhash, rewrite on change.
+	// O(files) walk; only on session removal (rare).
 	root := filepath.Join(job.clearWorkspace, attachment.Dir)
 	dayEntries, err := os.ReadDir(root)
 	if err != nil {
@@ -496,10 +421,8 @@ func (t *Tracker) handleClear(job trackerJob) error {
 	}
 	cleared := 0
 	for _, de := range dayEntries {
-		// Abort the sweep promptly once the tracker is closing so a
-		// large/slow workspace can't pin run() (and Stop's wg.Wait
-		// goroutine) long past Stop's ctx deadline. RemoveReference is
-		// idempotent, so a half-completed clear is safe.
+		// Abort once closing so a slow workspace cannot pin run() past Stop's
+		// deadline; RemoveReference is idempotent so a partial clear is safe.
 		select {
 		case <-t.closeCh:
 			return ErrTrackerClosed
@@ -548,8 +471,7 @@ func (t *Tracker) handleClear(job trackerJob) error {
 	return nil
 }
 
-// flushDue writes every pending entry whose coalesce window has
-// elapsed. Called from the debounce ticker.
+// flushDue writes every pending entry whose coalesce window has elapsed.
 func (t *Tracker) flushDue() {
 	if len(t.pending) == 0 {
 		return
@@ -569,8 +491,7 @@ func (t *Tracker) flushDue() {
 	}
 }
 
-// flushAll writes every pending entry regardless of deadline. Used
-// by Flush and by graceful Stop.
+// flushAll writes every pending entry regardless of deadline.
 func (t *Tracker) flushAll() {
 	if len(t.pending) == 0 {
 		return
@@ -586,17 +507,15 @@ func (t *Tracker) flushAll() {
 	}
 }
 
-// applyBump performs the single-attachment read-modify-write. Any
-// error is counted and surfaced to the Observer but never logged
-// at ERROR level to avoid log spam for legitimate churn (e.g. a
-// file deleted between persist and bump).
+// applyBump performs the single-attachment read-modify-write. Errors are
+// counted and surfaced to the Observer, never logged at ERROR (a file
+// deleted between persist and bump is legitimate churn).
 func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
 	metaPath := attachment.MetaPathFor(key.absPath)
 	changed, err := attachment.UpdateMetaFile(metaPath, func(m *attachment.Meta) bool {
 		addedRef := m.AddReference(key.keyhash)
-		// Always advance LastReferencedAt to max(current, bump) —
-		// even if the keyhash was already present, we want to
-		// extend the retention window.
+		// Advance LastReferencedAt even when the keyhash was already present
+		// so the retention window extends.
 		if bump.timeMS > m.LastReferencedAt {
 			m.LastReferencedAt = bump.timeMS
 			return true
@@ -614,20 +533,17 @@ func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
 	}
 }
 
-// resolveAttachmentPath turns a workspace-relative (or already
-// absolute) ImagePath into an absolute path rooted at workspace.
-// Returns "" for paths that escape the workspace attachment subtree
-// — defensive guard so a compromised EventEntry cannot coax the
-// tracker into rewriting arbitrary .meta files.
+// resolveAttachmentPath turns a workspace-relative (or absolute) ImagePath
+// into an absolute path rooted at workspace. Returns "" for paths that
+// escape the workspace attachment subtree so a compromised EventEntry
+// cannot make the tracker rewrite arbitrary .meta files.
 func resolveAttachmentPath(workspace, p string) string {
 	if p == "" {
 		return ""
 	}
-	// Normalise separator so mixed forward-slash / back-slash (from
-	// a Windows client) cannot sidestep the prefix check.
+	// Normalise separators so mixed slashes cannot sidestep the prefix check.
 	p = strings.ReplaceAll(p, `\`, "/")
 	if filepath.IsAbs(p) {
-		// Absolute path: require it to live under workspace/Dir.
 		cleaned := filepath.Clean(p)
 		wsAbsRoot := filepath.Join(workspace, attachment.Dir)
 		if !strings.HasPrefix(cleaned, wsAbsRoot+string(filepath.Separator)) {
@@ -635,13 +551,10 @@ func resolveAttachmentPath(workspace, p string) string {
 		}
 		return cleaned
 	}
-	// Workspace-relative path. Clean + guard against "../" escapes.
 	cleaned := filepath.Clean(p)
 	if strings.HasPrefix(cleaned, "..") {
 		return ""
 	}
-	// Only paths that begin with the known attachment subtree are
-	// accepted; anything else is not an attachment.
 	if !strings.HasPrefix(cleaned, attachment.Dir+string(filepath.Separator)) &&
 		cleaned != attachment.Dir {
 		return ""

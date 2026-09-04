@@ -2,48 +2,21 @@
 // internal/session.Router struct carries an accurate `// 读写: <files>`
 // annotation listing which router_*.go files read or write it.
 //
-// 背景（router_core.go NEEDS-DESIGN R245-ARCH-48）：router-split refactor 把
-// Router 的方法拆到多个 router_*.go 文件，每个字段头上手工维护一行
-//
-//	// 读写: core (init), lifecycle (spawn), cleanup (remove)
-//
-// 列出哪些 router_*.go 域访问该字段。这是拆分后"字段-方法耦合"唯一可见的
-// 机制，但纯手工维护会悄悄腐烂：重构把某 getter 挪进新 router_*.go 却忘了
-// 更新注释。本工具是机器兜底——AST 解析每个字段的注释声明域，再 AST 扫描
-// 所有 router_*.go 实际的 `r.<field>` 访问，把实测域与声明域对账，发现漂移
-// 即报。
-//
-// 实现遵循 tools/lint-fact-table + tools/lint-server-handlers 既有先例：
-//
-//   - mode=warn（默认）：违规打到 stderr，exit 0。CI 在 router-split 进行
-//     期间用此模式——既有注释漂移先以 warning 暴露、单独 PR 修复，不卡 PR。
-//   - mode=fail：任意违规 exit 1。后续稳定后切换的验收门。
-//
-// 漂移规则：
+// AST 解析每个字段注释声明的域，再扫描所有 router_*.go 实际的 `r.<field>`
+// 访问，把实测域与声明域对账：
 //
 //   - drift_omitted：字段被某 router_*.go 域 D 访问，但其注释未声明 D。
 //   - missing_annotation：字段无 `// 读写:` 注释。
 //
-// 域名 = router_*.go 文件名去掉 `router_` 前缀与 `.go` 后缀（如
-// router_capacity.go → capacity）。注释里的非域 token（如 "all router_*.go"
-// 这类通配、"test helpers"、以及 "Resolver()" / "wrapperFor" 这类方法名说明）
-// 被识别为 wildcard，会抑制该字段的 drift_omitted——它们表达"任意/方法级
-// 访问"，无法精确对账到单一文件域。
+// 域名 = router_*.go 文件名去掉 `router_` 前缀与 `.go` 后缀。注释里的非域
+// token（"all router_*.go"、"test helpers"、方法名说明）识别为 wildcard，
+// 抑制该字段的 drift_omitted。facet 迁到独立包后（如 workspacestore.Store）
+// 其 inner 字段由编译器接管，只对账 Router 外层字段；同包 sub-struct facet
+// 按 one-level 递归对账。mode=warn（默认）只打 stderr，mode=fail 违规 exit 1。
 //
-// 纯增量（pure-additive）：本工具只读源码，不改 Router 结构、方法签名、锁
-// 拓扑，也不改既有 52 条 `// 读写:` 注释。
-//
-// 范围边界（#2495 step 1 起）：facet 一旦迁到独立包（如 wsStore 的类型变为
-// workspacestore.Store），其 inner 字段对 package session 不可见，字段访问约束
-// 由编译器接管，本工具不再（也无法）递归其 inner 字段——只对账 Router 上那个
-// 外层字段（r.wsStore）的域注释。仍留在同包的 sub-struct facet（ss / bkStore /
-// kid / pp）继续按下面的 one-level 递归规则对账。
-//
-// 用法：
+// 用法（从 repo root 运行）：
 //
 //	check-router-fields [-mode warn|fail] [-dir internal/session]
-//
-// 从 repo root 运行。
 package main
 
 import (
@@ -79,7 +52,7 @@ type fieldAnnotation struct {
 	name     string
 	hasAnno  bool            // true when a `// 读写:` comment was found
 	domains  map[string]bool // declared file-domain set (e.g. {"core","lifecycle"})
-	wildcard bool            // annotation carried a non-domain token (all/test/method-name) → suppress drift
+	wildcard bool            // non-domain token seen (all/test/method-name) → suppress drift
 }
 
 func main() {
@@ -107,22 +80,17 @@ func main() {
 	}
 }
 
-// check runs the full pipeline against the router_*.go files in dir:
-//  1. parse router_core.go, extract Router fields + their `// 读写:` annotations,
-//     recursing one level into named local sub-struct types so the inner fields
-//     of facets like wsStore (workspaceStore) keep their own drift accounting
-//  2. AST-scan every non-test router_*.go for r.<field> and r.<subStruct>.<inner>
-//     accesses, mapping each hit to the file's domain
-//  3. compare observed domains against declared domains; emit Violations
+// check parses Router fields + `// 读写:` annotations from router_core.go
+// (recursing one level into same-package sub-struct facets), scans every
+// non-test router_*.go for r.<field> / r.<sub>.<inner> accesses, and diffs
+// observed domains against declared ones.
 func check(dir string) ([]Violation, error) {
 	files, err := routerFiles(dir)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build a registry of named struct types declared across all router_*.go
-	// files so parseRouterFields can recurse one level into a Router field
-	// whose type is a local sub-struct (e.g. wsStore workspaceStore).
+	// Named struct types across router_*.go, for one-level facet recursion.
 	structDecls, err := collectStructDecls(files)
 	if err != nil {
 		return nil, fmt.Errorf("collect struct decls: %w", err)
@@ -173,8 +141,7 @@ func diff(fields []fieldAnnotation, observed map[string]map[string]bool) []Viola
 			})
 			continue
 		}
-		// Wildcard annotations (all router_*.go / test helpers / method-name
-		// notes) intentionally cover unspecified files — skip drift checks.
+		// Wildcard annotations cover unspecified files — skip drift checks.
 		if f.wildcard {
 			continue
 		}
@@ -227,12 +194,8 @@ func fileDomain(path string) string {
 	return base
 }
 
-// collectStructDecls AST-walks every router_*.go file and returns a registry
-// of named struct type declarations (typeName → *ast.StructType). It lets
-// parseRouterFields resolve a Router field whose type is a sub-struct defined
-// in a sibling file (e.g. workspaceStore in router_workspace.go) and recurse
-// one level into its inner fields. Comments are parsed so inner-field
-// `// 读写:` annotations survive the descent.
+// collectStructDecls returns typeName → *ast.StructType for every named
+// struct declared in files (comments parsed so inner `// 读写:` survive).
 func collectStructDecls(files []string) (map[string]*ast.StructType, error) {
 	decls := make(map[string]*ast.StructType)
 	for _, path := range files {
@@ -255,18 +218,10 @@ func collectStructDecls(files []string) (map[string]*ast.StructType, error) {
 	return decls, nil
 }
 
-// parseRouterFields parses corePath, finds `type Router struct`, and returns
-// one fieldAnnotation per named field (embedded fields are skipped).
-//
-// When a Router field's type is a named local sub-struct present in
-// structDecls (e.g. wsStore workspaceStore), the tool also recurses ONE level
-// into that sub-struct and emits a fieldAnnotation for each inner field, using
-// the inner field's own `// 读写:` doc. This keeps per-inner-field drift
-// accounting alive after a facet extraction (Router P1, #383): accesses like
-// r.wsStore.overrides are attributed to the inner field "overrides", not just
-// to the outer "wsStore" field. The returned subStructFields maps the outer
-// field name (wsStore) to the set of inner field names so scanFieldAccess can
-// credit r.<outer>.<inner> selector chains.
+// parseRouterFields returns one fieldAnnotation per named Router field
+// (embedded fields skipped). A field whose type is a same-package struct in
+// structDecls is recursed ONE level so inner fields keep their own drift
+// accounting; subStructFields maps outer name → inner field-name set.
 func parseRouterFields(corePath string, structDecls map[string]*ast.StructType) ([]fieldAnnotation, map[string]map[string]bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, corePath, nil, parser.ParseComments)
@@ -293,13 +248,10 @@ func parseRouterFields(corePath string, structDecls map[string]*ast.StructType) 
 	var out []fieldAnnotation
 	subStructFields := make(map[string]map[string]bool)
 	for _, field := range structType.Fields.List {
-		// Skip embedded fields (no names).
 		if len(field.Names) == 0 {
 			continue
 		}
 		anno := parseAnnotation(field.Doc)
-		// One annotation block applies to all names on the same field decl
-		// (rare for this struct, but handle it).
 		for _, id := range field.Names {
 			fa := anno
 			fa.name = id.Name
@@ -324,13 +276,10 @@ func parseRouterFields(corePath string, structDecls map[string]*ast.StructType) 
 	return out, subStructFields, nil
 }
 
-// namedTypeIdent reports whether expr is a bare named type identifier (e.g.
-// `sessionStore`) and returns its name. Pointer/slice/map/qualified types are
-// intentionally not followed — only a same-package value sub-struct facet is
-// recursed. A qualified type (e.g. `workspacestore.Store`, #2495) means the
-// facet lives in its own package: its fields are unexported there, so the
-// compiler already forbids r.<outer>.<inner> access and there is nothing for
-// this lint to account for below the outer field.
+// namedTypeIdent reports whether expr is a bare named type identifier and
+// returns its name. Pointer/slice/map/qualified types are not followed: a
+// qualified facet type lives in its own package and the compiler already
+// forbids r.<outer>.<inner> access there (#2495).
 func namedTypeIdent(expr ast.Expr) (string, bool) {
 	if id, ok := expr.(*ast.Ident); ok {
 		return id.Name, true
@@ -338,8 +287,7 @@ func namedTypeIdent(expr ast.Expr) (string, bool) {
 	return "", false
 }
 
-// parseInnerFields returns one fieldAnnotation per named field of a sub-struct,
-// carrying each inner field's own `// 读写:` doc annotation.
+// parseInnerFields returns one fieldAnnotation per named field of st.
 func parseInnerFields(st *ast.StructType) []fieldAnnotation {
 	var out []fieldAnnotation
 	for _, field := range st.Fields.List {
@@ -356,10 +304,8 @@ func parseInnerFields(st *ast.StructType) []fieldAnnotation {
 	return out
 }
 
-// knownDomains is the closed set of file-domain tokens that map to a real
-// router_*.go file. A leading comma-segment token in this set is a declared
-// domain; any other leading token is treated as a wildcard (method-name note
-// like "Resolver()" / "wrapperFor", or "all"/"test" coverage phrases).
+// knownDomains is the closed set of tokens that map to a real router_*.go
+// file; any other leading token is treated as a wildcard.
 var knownDomains = map[string]bool{
 	"core":          true,
 	"lifecycle":     true,
@@ -372,10 +318,8 @@ var knownDomains = map[string]bool{
 	"workspace":     true,
 }
 
-// parseAnnotation scans a field's doc comment group for a `// 读写: …` line
-// and parses the comma-separated domain list. The annotation may span the
-// comment text after the marker; only the leading token of each comma segment
-// is interpreted as a domain.
+// parseAnnotation finds the `// 读写: …` line in doc and parses the
+// comma-separated domain list (leading token of each segment).
 func parseAnnotation(doc *ast.CommentGroup) fieldAnnotation {
 	fa := fieldAnnotation{domains: map[string]bool{}}
 	if doc == nil {
@@ -396,9 +340,8 @@ func parseAnnotation(doc *ast.CommentGroup) fieldAnnotation {
 	return fa
 }
 
-// parseDomainList splits the annotation body on commas and records the leading
-// token of each segment. Recognized tokens go into fa.domains; an unrecognized
-// leading token (method name, "all", "test", …) flags fa.wildcard.
+// parseDomainList records the leading token of each comma segment: known
+// domains go into fa.domains, anything else flags fa.wildcard.
 func parseDomainList(fa *fieldAnnotation, body string) {
 	for _, seg := range strings.Split(body, ",") {
 		tok := leadingToken(seg)
@@ -409,13 +352,11 @@ func parseDomainList(fa *fieldAnnotation, body string) {
 			fa.domains[tok] = true
 			continue
 		}
-		// Non-domain leading token → wildcard coverage we can't pin to a file.
 		fa.wildcard = true
 	}
 }
 
-// leadingToken extracts the first identifier-like word from a segment, e.g.
-// " lifecycle (spawn/reset)" → "lifecycle", "all router_*.go (…)" → "all".
+// leadingToken extracts the first identifier-like word of a segment.
 func leadingToken(seg string) string {
 	seg = strings.TrimSpace(seg)
 	end := 0
@@ -430,17 +371,10 @@ func leadingToken(seg string) string {
 	return seg[:end]
 }
 
-// scanFieldAccess AST-walks path and returns the set of Router field names
-// referenced via a `r.<field>` selector (any receiver identifier — the
-// selector's field name is what matters, and r is the conventional receiver).
-//
-// It also recurses one level into Router sub-struct facets: when subStructFields
-// declares that r.<outer> is a sub-struct with inner fields, a chained selector
-// `r.<outer>.<inner>` credits BOTH the outer field <outer> and the inner field
-// <inner>. This is the load-bearing extension for Router P1 (#383): after a
-// field group is moved off Router into a facet (wsStore workspaceStore), an
-// access like r.wsStore.overrides still attributes drift to the moved inner
-// field "overrides", so the P0 lint does not go blind on the relocated field.
+// scanFieldAccess returns the Router field names referenced in path via a
+// `r.<field>` selector. A chained `r.<outer>.<inner>` whose outer is in
+// subStructFields credits the inner field, so drift accounting survives
+// a field group moving into a facet.
 func scanFieldAccess(path string, fieldNames map[string]bool, subStructFields map[string]map[string]bool) (map[string]bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -453,9 +387,7 @@ func scanFieldAccess(path string, fieldNames map[string]bool, subStructFields ma
 		if !ok {
 			return true
 		}
-		// Chained selector: r.<outer>.<inner>. The outer selector is itself a
-		// SelectorExpr off the bare "r" receiver. Credit the inner field to
-		// its sub-struct's inner-field set.
+		// Chained selector r.<outer>.<inner>: credit the inner field.
 		if outerSel, ok := sel.X.(*ast.SelectorExpr); ok {
 			if base, ok := outerSel.X.(*ast.Ident); ok && base.Name == "r" {
 				if inner, ok := subStructFields[outerSel.Sel.Name]; ok && inner[sel.Sel.Name] {
@@ -464,10 +396,8 @@ func scanFieldAccess(path string, fieldNames map[string]bool, subStructFields ma
 			}
 			return true
 		}
-		// Only count selectors off a bare identifier receiver (r.field),
-		// matching the Router method convention. This avoids matching
-		// unrelated x.field selectors on other types that happen to share
-		// a field name.
+		// Only selectors off the bare "r" receiver count, so unrelated
+		// x.field selectors sharing a field name are ignored.
 		ident, ok := sel.X.(*ast.Ident)
 		if !ok || ident.Name != "r" {
 			return true

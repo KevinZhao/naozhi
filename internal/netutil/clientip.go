@@ -8,27 +8,12 @@ import (
 	"strings"
 )
 
-// ClientIP extracts the real client IP from r.
-//
-// When trustedProxy is true (deployed behind ALB/CloudFront) it reads the
-// last entry of X-Forwarded-For — the one appended by the trusted proxy,
-// which cannot be spoofed by the client. Otherwise it falls back to
-// r.RemoteAddr.
-//
-// The last XFF entry is validated via net.ParseIP so a malformed header
-// (stray whitespace, garbage token) cannot produce a bogus rate-limit key
-// that would bypass per-IP limits.
-//
-// The XFF scan avoids strings.Split to save one []string allocation per
-// request: strings.LastIndexByte + a single TrimSpace on the tail slice
-// is zero-alloc on the hot path.
-//
-// R247-SEC-25 nuance: when trustedProxy is true but the request arrives
-// without a usable XFF (header missing or unparseable last hop), this
-// function falls back to r.RemoteAddr. In a strict ALB-fronted deployment
-// every legitimate request is XFF-stamped, so an XFF-less request collapses
-// every "real" client into the single proxy-IP bucket and degrades per-IP
-// rate-limit fairness.
+// ClientIP extracts the real client IP from r. With trustedProxy (behind
+// ALB/CloudFront) it takes the LAST X-Forwarded-For entry — appended by the
+// trusted proxy, so the client cannot spoof it — validated via net.ParseIP so a
+// malformed header cannot mint a bogus rate-limit key. Otherwise, or when no
+// usable XFF is present, it falls back to r.RemoteAddr (which in an ALB-fronted
+// deployment collapses XFF-less requests into the single proxy-IP bucket).
 func ClientIP(r *http.Request, trustedProxy bool) string {
 	ip, _ := clientIPInternal(r, trustedProxy)
 	return ip
@@ -53,15 +38,10 @@ func clientIPInternal(r *http.Request, trustedProxy bool) (string, bool) {
 			return tail, true
 		}
 	}
-	// R20260605: no usable XFF. In trustedProxy mode that normally means the
-	// request did not traverse the proxy and is treated as unresolvable. But
-	// a loopback RemoteAddr (127.0.0.1/::1) cannot be externally routed — the
-	// kernel guarantees it originated on-host — so it is the legit
-	// direct-access path (SSH tunnel / local curl / port-forward), the same
-	// case isLoopbackClient deliberately allows. Resolve it to its loopback IP
-	// so it gets a real per-IP rate-limit key instead of a hard fail-closed
-	// reject. An externally-routable RemoteAddr without usable XFF stays
-	// unresolvable, preserving R244-SEC-P3-3's shared-bucket DoS guard.
+	// No usable XFF in trustedProxy mode normally means the request bypassed
+	// the proxy → unresolvable (shared-bucket DoS guard). A loopback RemoteAddr
+	// is kernel-guaranteed on-host (SSH tunnel / local curl), the same path
+	// isLoopbackClient allows, so it resolves to a real per-IP key.
 	if isLoopbackIPString(ip) {
 		return ip, true
 	}
@@ -69,21 +49,17 @@ func clientIPInternal(r *http.Request, trustedProxy bool) (string, bool) {
 }
 
 // RequestHasResolvableClientIP reports whether r carries a usable per-client
-// rate-limit key. In !trustedProxy mode every request has a key. In
-// trustedProxy mode the request is resolvable when X-Forwarded-For carries a
-// parseable last hop, OR when the request arrives directly on the loopback
-// interface (no XFF, RemoteAddr is 127.0.0.1/::1) — the kernel-guaranteed
-// on-host direct-access path. Single source of truth for the per-package
-// copies in internal/server and internal/dashboard/auth.
+// rate-limit key: always in !trustedProxy mode; in trustedProxy mode when XFF
+// has a parseable last hop or the request arrived directly on loopback. Single
+// source of truth for internal/server and internal/dashboard/auth.
 func RequestHasResolvableClientIP(r *http.Request, trustedProxy bool) bool {
 	_, ok := clientIPInternal(r, trustedProxy)
 	return ok
 }
 
-// isLoopbackIPString parses a bare IP host (no port) and reports whether it is
-// a loopback address. Empty / "@" (UDS RemoteAddr) is treated as loopback so
-// filesystem-gated UDS deployments resolve; an unparseable string is treated
-// as non-loopback so the ambiguous case fails closed.
+// isLoopbackIPString reports whether a bare IP host is loopback. Empty / "@"
+// (UDS RemoteAddr) counts as loopback so filesystem-gated UDS deployments
+// resolve; an unparseable string fails closed as non-loopback.
 func isLoopbackIPString(host string) bool {
 	if host == "" || host == "@" {
 		return true
