@@ -24,6 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/knownids"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/session/workspacestore"
 	"github.com/naozhi/naozhi/internal/sessionconst"
 	"github.com/naozhi/naozhi/internal/tuningspec"
@@ -205,17 +206,15 @@ type Router struct {
 	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
 	wsStore workspacestore.Store
 
-	// pp is the process-pool / shim-reconciler facet (#805): pendingSpawns,
-	// spawningKeys, shimStuckOnReset, removeWg (processPool, process_pool.go).
-	// No lock of its own — read/written ONLY under r.mu (no atomics).
-	//
-	// removeWg is a sync.WaitGroup and therefore NON-COPYABLE; embedding by
-	// value is sound ONLY because Router is always &Router{} (go vet copylocks
-	// enforces). Do NOT add any method/func taking Router or processPool by
-	// value. spawningKeys done-channel pairing and pendingSpawns RAII balance
-	// stay funneled through this struct under r.mu; lint recurses into processPool.
-	// 读写: core (init/acquire-release RAII helpers), lifecycle (spawnSession write/close/Reset/ResetAndRecreate/GetOrCreate), shim (reconnect read), cleanup (RemoveAsync Add/Done/finishRemoveCleanup write), test helpers (removeWg.Wait)
-	pp processPool
+	// pp is the spawn-concurrency facet (#805, #2495): pending-spawn count,
+	// per-key in-flight spawn done-channels, shim-stuck flags and the
+	// RemoveAsync WaitGroup, in internal/session/spawnpool. No lock of its own —
+	// every method is called under r.mu (the WaitGroup methods excepted) because
+	// the pending count joins the live count in the capacity check and in-flight
+	// keys are checked against the live session index. Embeds a sync.WaitGroup:
+	// never copy Router or take it by value (go vet copylocks). Zero value is usable.
+	// 读写: core (acquire-release RAII helpers), lifecycle (spawnSession/GetOrCreate/Reset/ResetAndRecreate), shim (reconnect read), cleanup (RemoveAsync/finishRemoveCleanup), test helpers (WaitRemoves)
+	pp spawnpool.Store
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
@@ -348,7 +347,7 @@ type Router struct {
 type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
 // pendingSpawnSlot is a one-shot RAII token returned by
-// (*Router).acquirePendingSpawnSlotLocked. It guards r.pp.pendingSpawns against
+// (*Router).acquirePendingSpawnSlotLocked. It guards the pending-spawn count against
 // a stranded ++ on any panic / error path between increment and decrement.
 // release() is idempotent: happy-path callers decrement explicitly at the
 // original site and a `defer token.release()` absorbs any unexpected exit.
@@ -357,12 +356,12 @@ type pendingSpawnSlot struct {
 	released bool
 }
 
-// acquirePendingSpawnSlotLocked increments r.pp.pendingSpawns and returns a
+// acquirePendingSpawnSlotLocked takes a pending-spawn slot and returns a
 // slot token whose release method can be called from any lock state.
 //
 // LOCK: caller must hold r.mu (write).
 func (r *Router) acquirePendingSpawnSlotLocked() *pendingSpawnSlot {
-	r.pp.pendingSpawns++
+	r.pp.AcquireSpawnSlot()
 	return &pendingSpawnSlot{r: r}
 }
 
@@ -372,7 +371,7 @@ func (s *pendingSpawnSlot) releaseLocked() {
 	if s == nil || s.released {
 		return
 	}
-	s.r.pp.pendingSpawns--
+	s.r.pp.ReleaseSpawnSlot()
 	s.released = true
 }
 
@@ -385,7 +384,7 @@ func (s *pendingSpawnSlot) release() {
 	}
 	s.r.mu.Lock()
 	if !s.released {
-		s.r.pp.pendingSpawns--
+		s.r.pp.ReleaseSpawnSlot()
 		s.released = true
 	}
 	s.r.mu.Unlock()
@@ -685,15 +684,13 @@ func NewRouter(cfg RouterConfig) *Router {
 		historyLoader:    cfg.HistoryLoader,
 		resolver:         cfg.Resolver,
 	}
-	// Value facets (ss / pp / bkStore) have no lock of their own and are not
+	// Value facets (ss / bkStore) have no lock of their own and are not
 	// composite-literal initialised, so their maps are allocated here.
-	// wsStore and kid are zero-value usable (maps allocated lazily).
+	// wsStore, kid and pp are zero-value usable (maps allocated lazily).
 	r.ss.sessions = make(map[string]*ManagedSession)
 	r.ss.byChat = make(map[string]map[string]struct{})
 	r.ss.keyhash = make(map[string]string)
 	r.ss.idToKey = make(map[string]string)
-	r.pp.spawningKeys = make(map[string]chan struct{})
-	r.pp.shimStuckOnReset = make(map[string]bool)
 	r.bkStore.wrapper = defaultWrapper
 	r.bkStore.wrappers = wrappers
 	r.bkStore.defaultBackend = defaultBackend

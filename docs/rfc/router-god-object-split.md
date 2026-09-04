@@ -21,7 +21,7 @@
 | **P2** KnownIDsStore | ✅ landed | PR #1837（`store.go` `type knownIDsStore`，字段 `kid`）；2026-09-04 #2495 step 2 迁为独立包 `internal/session/knownids`（字段私有化 + 自带 `sync.Mutex`，facet 整体脱离 `r.mu`，穿透访问 0，inner 字段 `// 读写:` 注释与 lint 递归对该 facet 下线） |
 | **P3** BackendStore | ✅ landed | PR #1804（`router_backend.go` `type backendStore`，字段 `bkStore`） |
 | **P4** SessionStore | ✅ landed | PR #1841（`store.go` `type sessionStore`，字段 `ss`） |
-| **P5** ProcessPool | ✅ landed | PR #1852（`process_pool.go` `type processPool`，字段 `pp`） |
+| **P5** ProcessPool | ✅ landed | PR #1852（`process_pool.go` `type processPool`，字段 `pp`）；2026-09-04 #2495 step 3 迁为独立包 `internal/session/spawnpool`（字段私有化，无自有锁、调用方持 `r.mu`（WaitGroup 方法除外），穿透访问 0，inner 字段 `// 读写:` 注释与 lint 递归对该 facet 下线） |
 | **P6** ManagedSession facet | ✅ 实质完成 | 文件级拆分由 `managed-session-split.md`（Implemented v2.3）交付；processIface facet 接口 `ProcessSender`/`ProcessEventReader`/`ProcessLifecycle`/`HistoryInjector` 均已在 `managed.go` 定义（processIface embed，附 contract test）。注：ManagedSession **struct 字段**未做 sub-struct 分组——按 managed-session-split.md 非目标处理，无独立 issue 跟踪 |
 | **P7** discovery↔sysession catalog | ✅ closed won't-do | §8.4 step 2 的 follow-up 设计（PR #1881，`session-catalog-boundary.md`）经对抗性核实得出"重叠技术上不成立"（discovery 与 sysession 零耦合、双视角实际在 discovery↔Router 且已被三重机制缝合、无统一类型消费者），#577 据此于 2026-06-07 永久关闭，重开判据写在 closure comment |
 
