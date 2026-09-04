@@ -27,103 +27,37 @@ import (
 type Handlers struct {
 	DashboardToken string
 	cookieSecret   []byte
-	// cookieGen is an opaque per-construction generation marker mixed into
-	// the CookieMAC HMAC input. Two roles:
-	//
-	//   1. Per-process restart rotation: cookieSecret is regenerated on
-	//      each fresh stateDir, but operators that share stateDir across
-	//      restarts (the common case) keep the same secret — meaning a
-	//      pre-restart MAC would still verify after restart. Mixing
-	//      cookieGen ensures every (process, secret, token) triple yields
-	//      a distinct MAC even when the first two are stable.
-	//
-	//   2. Future hot-reload of DashboardToken: the rotation handler can
-	//      bump cookieGen to immediately invalidate every outstanding
-	//      cookie without rotating cookieSecret (which would also kick
-	//      every other authenticated surface). Today this field is set
-	//      once at construction; the bump path is left for the eventual
-	//      rotation RFC.
-	//
-	// R247-SEC-17 / R245-SEC-2 / R243-SEC-13 / R242-SEC-5 — same root
-	// cause across four review rounds: HMAC(secret, token) lacked any
-	// freshness input.
+	// cookieGen is a per-construction generation marker mixed into the
+	// CookieMAC HMAC input so a shared cookieSecret still yields a distinct
+	// MAC per process.
 	cookieGen string
-	// cookieGenSeq is an atomic counter mixed into CookieMAC alongside
-	// cookieGen. Bumping it (via RotateCookieGen) immediately invalidates
-	// every outstanding auth cookie because CookieMAC's HMAC input
-	// changes — even at-rest browsers carrying the old cookie value will
-	// fail constant-time compare on their next request and be
-	// re-challenged at /api/auth/login.
-	//
-	// R245-SEC-2 (#826): closes the hot-rotate gap. Pre-fix, cookieGen
-	// only changed at process restart, so a hot-reload of DashboardToken
-	// (or of any other secret-rotation event handlers added later) left
-	// existing cookies valid for the 24h MaxAge window. Per-process
-	// restart rotation still works (cookieGen seed continues to vary by
-	// time.Now().UnixNano() at construction); RotateCookieGen layers
-	// in-process freshness without disturbing the seed-once contract.
-	//
-	// atomic.Uint64 is zero-value safe so existing struct-literal
-	// fixtures (csrf_test.go, debug_pprof_test.go, etc.) keep working
-	// without changes. Read on the CookieMAC hot path is a single
-	// atomic load — same cost class as the existing cookieGen read.
+	// cookieGenSeq is an atomic counter mixed into CookieMAC; bumping it
+	// (RotateCookieGen) invalidates every outstanding auth cookie (#826).
 	cookieGenSeq atomic.Uint64
-	// loginLimiter is an O(1) LRU-backed per-IP limiter. At 10k attacking IPs
-	// the previous two-pass O(n) scan was done under a single mutex and could
-	// block legitimate logins; the ratelimit package does insertion, LRU
-	// eviction and TTL reset in constant time.
+	// loginLimiter is an O(1) LRU-backed per-IP limiter.
 	loginLimiter *ratelimit.Limiter
-	// R191-SEC-M2: wsUpgradeLimiter is a separate bucket gated ONLY on WS
-	// upgrade attempts. Previously the Hub used LoginAllow directly, so 5
-	// rapid WS connects from a NATed client could starve the same IP's HTTP
-	// login attempts for 60s (and vice versa). The upgrade path sees
-	// legitimately bursty traffic on tab-reload / mobile wake, so we grant
-	// a looser budget; the inner /api/auth/login POST still uses the tight
-	// loginLimiter for brute-force guard.
+	// wsUpgradeLimiter is a separate, looser bucket for WS upgrade attempts so
+	// bursty reconnects cannot starve the same IP's login budget (or vice versa).
 	wsUpgradeLimiter *ratelimit.Limiter
-	// R230C-SEC-12: unauthDashLimiter throttles unauthenticated GET /dashboard.
-	// Unauthenticated users would otherwise hit the login template renderer
-	// (and the login-page CSP/HTML asset) without any back-pressure, which a
-	// scanner can use both to fingerprint the deployment and to push CPU on
-	// the embed.FS read + crypto/rand cookie path. Same bucket family as
-	// wsUpgradeLimiter (60/min sustained, 20 burst) is plenty for a real
-	// human refreshing the login page; sustained scanners drop to 429.
+	// unauthDashLimiter throttles unauthenticated GET /dashboard so scanners
+	// cannot fingerprint the deployment or burn CPU on the login-page render.
 	unauthDashLimiter *ratelimit.Limiter
 	TrustedProxy      bool // trust X-Forwarded-For for client IP extraction
 }
 
 const maxLoginLimiters = 10000
 
-// authCookieMaxAgeSeconds is the lifetime of the nz_auth cookie set on a
-// successful login.
-//
-// R20260613-SEC-3 (#2074): the cookie MAC carries no per-session identity
-// (it is HMAC(secret, token||gen||seq), shared by every browser), so logout
-// cannot revoke a single cookie server-side without RotateCookieGen — which
-// would evict every concurrent operator (see HandleLogout's comment, #1913).
-// Until per-session cookie identity lands, the only server-side bound on a
-// stolen-but-unrevoked cookie is this MaxAge. Shortening it from 24h to 1h
-// shrinks the post-compromise replay window 24× at the cost of a more
-// frequent re-login on long-idle sessions. Active tabs are unaffected: the
-// dashboard re-issues the cookie on every successful login and the WS layer
-// holds an open session, so a working operator rarely sees the prompt.
+// authCookieMaxAgeSeconds is the nz_auth cookie lifetime. The MAC carries no
+// per-session identity, so MaxAge is the only server-side bound on a stolen
+// cookie; 1h keeps the replay window short while sliding renewal spares
+// active tabs (#2074).
 const authCookieMaxAgeSeconds = 3600 // 1 hour
 
-// New constructs a Handlers from the auth-relevant ServerOptions inputs.
-// Phase 3a (server-split-phase4-design.md §6.5 Plan B): exported ctor so
-// internal/server's buildAuthHandlers can construct without needing access
-// to unexported fields. Limiters wired with sane defaults; LoginAllow /
-// WSUpgradeAllow / UnauthDashAllow handle nil limiter fallback for legacy
-// hand-rolled fixtures.
+// New constructs a Handlers with default limiters; the *Allow methods
+// tolerate nil limiters for hand-rolled fixtures.
 func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedProxy bool) *Handlers {
-	// R241-SEC-10 (#470): the cookie MAC is HMAC(secret, token || gen || seq).
-	// When the caller passes an empty gen the MAC collapses to a value fully
-	// determined by (token, secret) alone — deterministic across processes,
-	// so a captured cookie keeps authenticating against any future instance
-	// sharing the same token + secret. Seed an unpredictable per-construction
-	// gen so the no-seed path still rotates the MAC on every restart instead
-	// of replaying a fixed value. Callers that supply a gen (production seeds
-	// one from server.go) keep their explicit value.
+	// An empty gen would make the MAC fully determined by (token, secret), so a
+	// captured cookie would authenticate against any future instance (#470).
 	if cookieGen == "" {
 		cookieGen = RandomCookieGen()
 	}
@@ -138,9 +72,8 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 	}
 }
 
-// NewLoginLimiter returns the per-IP rate limiter for HTTP /api/auth/login
-// and for the WS `auth` inner message (both of which directly test
-// credentials and deserve tight brute-force budgets).
+// NewLoginLimiter returns the tight per-IP limiter for HTTP /api/auth/login
+// and the WS `auth` inner message (both directly test credentials).
 func NewLoginLimiter() *ratelimit.Limiter {
 	return ratelimit.New(ratelimit.Config{
 		Rate:    rate.Every(12 * time.Second), // 5 attempts per minute
@@ -150,10 +83,8 @@ func NewLoginLimiter() *ratelimit.Limiter {
 	})
 }
 
-// NewWSUpgradeLimiter returns the per-IP WS-upgrade limiter. It is
-// intentionally looser than NewLoginLimiter because the upgrade itself
-// performs no credential check (cookie auth happens inline; password auth
-// happens via the `auth` message which goes through loginLimiter).
+// NewWSUpgradeLimiter returns the per-IP WS-upgrade limiter, intentionally
+// looser than NewLoginLimiter because the upgrade itself checks no credentials.
 func NewWSUpgradeLimiter() *ratelimit.Limiter {
 	return ratelimit.New(ratelimit.Config{
 		Rate:    rate.Every(time.Second), // 60 attempts per minute sustained
@@ -174,25 +105,20 @@ func (a *Handlers) LoginAllow(ip string) bool {
 }
 
 // WSUpgradeAllow reports whether the given IP is allowed one more WS upgrade.
-// Separate from LoginAllow (R191-SEC-M2) to prevent WS-flood → login-DoS
-// and login-flood → WS-DoS cross-endpoint lockouts.
+// Separate from LoginAllow to prevent cross-endpoint lockouts.
 func (a *Handlers) WSUpgradeAllow(ip string) bool {
 	if ip == "" {
 		ip = unknownIPKey
 	}
 	if a.wsUpgradeLimiter == nil {
-		// Fallback so tests that construct Handlers without the new
-		// limiter don't silently disable upgrade gating (return false would
-		// break them; return true preserves prior behaviour).
+		// nil limiter (fixture without one): keep upgrade gating open.
 		return true
 	}
 	return a.wsUpgradeLimiter.Allow(ip)
 }
 
 // UnauthDashAllow reports whether the given IP is allowed one more
-// unauthenticated GET /dashboard. Returns true when the limiter has not
-// been wired (older test constructions) so test fixtures don't break.
-// R230C-SEC-12.
+// unauthenticated GET /dashboard; a nil limiter allows.
 func (a *Handlers) UnauthDashAllow(ip string) bool {
 	if ip == "" {
 		ip = unknownIPKey
@@ -203,28 +129,12 @@ func (a *Handlers) UnauthDashAllow(ip string) bool {
 	return a.unauthDashLimiter.Allow(ip)
 }
 
-// CookieMAC returns an HMAC-derived value used as the auth cookie value.
-// This prevents the raw dashboard token from appearing in cookies.
-//
-// R245-SEC-9 [BREAKING-LOCAL]: returns "" when DashboardToken is empty
-// rather than HMAC(secret, ""). The previous form computed a deterministic
-// MAC over the empty string that any caller could replay; IsAuthenticated
-// already short-circuits to true on empty token so the value was unused
-// today, but the residual MAC was a regression-bait. Returning "" makes
-// the no-token contract explicit at the source so future callers cannot
-// accidentally accept a cookie value that "matches" the empty MAC.
-//
-// R247-SEC-17: HMAC input now includes cookieGen so the MAC rotates on
-// every process restart (and any future hot-reload that bumps cookieGen)
-// even when stateDir / cookieSecret are stable. The serialised input uses
-// a length-prefixed framing (`token || \x00 || cookieGen || \x00 || seq`)
-// so a malicious (token, gen, seq) split that concatenates to the same
-// bytes cannot collide with a legitimate split.
-//
-// R245-SEC-2 (#826): cookieGenSeq is also mixed in so RotateCookieGen
-// produces a new MAC immediately, invalidating every outstanding cookie
-// without needing a process restart. The atomic load is the same cost
-// class as the prior plain-string read.
+// CookieMAC returns the HMAC-derived auth cookie value so the raw dashboard
+// token never appears in cookies. Returns "" when DashboardToken is empty so
+// no caller can accept a cookie that "matches" the empty MAC. Input is framed
+// as `token || \x00 || cookieGen || \x00 || seq` so a malicious split cannot
+// collide with a legitimate one; seq lets RotateCookieGen invalidate all
+// outstanding cookies (#826).
 func (a *Handlers) CookieMAC() string {
 	if a.DashboardToken == "" {
 		return ""
@@ -240,17 +150,8 @@ func (a *Handlers) CookieMAC() string {
 }
 
 // RotateCookieGen invalidates every outstanding auth cookie by bumping
-// the cookieGenSeq counter mixed into CookieMAC. Safe to call from any
-// goroutine — uses an atomic increment with no lock.
-//
-// R245-SEC-2 (#826): the rotation hook a future hot-reload handler must
-// invoke whenever the dashboard token (or any other auth-relevant
-// secret) changes. Without this call, a token rotation at runtime
-// leaves the prior token's cookies valid for the full 24h MaxAge
-// because cookieGen was only seeded once at construction. Calling
-// RotateCookieGen on the rotation event closes that window — every
-// browser carrying an old MAC fails the constant-time compare on its
-// next request and is sent back through /api/auth/login.
+// cookieGenSeq (atomic, goroutine-safe). Hot-reload handlers must call it
+// whenever the dashboard token or another auth secret changes (#826).
 func (a *Handlers) RotateCookieGen() {
 	a.cookieGenSeq.Add(1)
 }
@@ -261,10 +162,8 @@ func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 	if a.DashboardToken == "" {
 		return true
 	}
-	// Bearer header. Compare SHA-256 digests so length differences do not
-	// leak via the short-circuit branch inside ConstantTimeCompare (which
-	// returns 0 immediately when operand lengths differ). Mirrors the
-	// feishu webhook constantTimeEqualString pattern.
+	// Compare SHA-256 digests so length differences do not leak via the
+	// short-circuit inside ConstantTimeCompare.
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		token := strings.TrimPrefix(auth, "Bearer ")
@@ -274,11 +173,8 @@ func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 			return true
 		}
 	}
-	// Cookie fallback — value is HMAC-derived, not the raw token.
-	// R245-SEC-9: defence in depth — bail when expected is empty (token=""
-	// path). The early-return at the top already covers the single-call
-	// production path; this check ensures any future call site that
-	// reorders the no-token short-circuit cannot accept a forged "" cookie.
+	// Cookie fallback — HMAC-derived, not the raw token. Bail when expected
+	// is empty (token="" path) so a forged "" cookie is never accepted.
 	if c, err := r.Cookie(AuthCookieName); err == nil {
 		expected := a.CookieMAC()
 		if expected == "" {
@@ -292,12 +188,11 @@ func (a *Handlers) IsAuthenticated(r *http.Request) bool {
 // RequireAuth is an HTTP middleware that rejects unauthenticated requests.
 //
 // State-changing methods additionally pass through a same-origin gate
-// (SameOriginOK) so a cross-origin attacker on a sibling subdomain
-// (evil.naozhi-host.example) cannot ride a victim's auth cookie through a
-// hidden `fetch('...', {credentials:'include'})`. Safe methods (GET/HEAD/
-// OPTIONS) skip the gate so bookmarks and preflight still work. The gate
-// allows callers with no Origin / Referer header (curl, server scripts) —
-// those can't carry a browser's session cookies. R31-SEC1 / R26-SEC1.
+// (SameOriginOK) so a cross-origin attacker on a sibling subdomain cannot ride
+// a victim's auth cookie through a hidden `fetch(..., {credentials:'include'})`.
+// Safe methods (GET/HEAD/OPTIONS) skip the gate so bookmarks and preflight
+// still work; callers with no Origin / Referer (curl, server scripts) pass —
+// they can't carry a browser's session cookies.
 func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !IsSafeMethod(r.Method) && !SameOriginOK(r, a.TrustedProxy) {
@@ -312,13 +207,9 @@ func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// Sliding renewal: refresh the cookie's MaxAge on each authenticated
-		// request so an active operator never trips the 1h idle expiry and
-		// gets re-prompted mid-session. Only re-issue when the request actually
-		// carried a valid nz_auth cookie — Bearer-token / no-token callers must
-		// not be handed a session cookie they didn't ask for, and re-issuing
-		// keeps the same HMAC value so the replay window stays a sliding 1h
-		// (no security regression vs the fixed-window MaxAge).
+		// Sliding renewal: re-issue the cookie only when the request carried a
+		// valid nz_auth cookie — Bearer / no-token callers must not be handed
+		// a session cookie.
 		if a.cookieRequestAuthenticated(r) {
 			a.writeAuthCookie(w, r)
 		}
@@ -326,10 +217,8 @@ func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// cookieRequestAuthenticated reports whether the request is authenticated
-// specifically via a valid nz_auth cookie (as opposed to a Bearer header or
-// the no-token open mode). Used to scope sliding-renewal cookie re-issue to
-// browser sessions that already hold a cookie.
+// cookieRequestAuthenticated reports whether the request is authenticated via
+// a valid nz_auth cookie (not Bearer or no-token mode); scopes sliding renewal.
 func (a *Handlers) cookieRequestAuthenticated(r *http.Request) bool {
 	if a.DashboardToken == "" {
 		return false
@@ -347,20 +236,12 @@ func (a *Handlers) cookieRequestAuthenticated(r *http.Request) bool {
 
 func (a *Handlers) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// CSP uses hash-based allowlist for the single inline <script>/<style>
-	// blocks baked into loginPageHTML. `unsafe-inline` would neutralise any
-	// future XSS defence on this origin, so we pin the exact bytes of the
-	// inline content instead. The hashes are computed once at package init
-	// (see loginPageCSP) so the page stays static but any accidental edit
-	// to the inline blocks immediately breaks loading — that's the
-	// intended self-check: if the hash no longer matches, an operator
-	// notices during manual review, rather than silently broadening the
-	// policy.
+	// CSP pins the SHA-256 hashes of the inline <script>/<style> blocks instead
+	// of `unsafe-inline`; hashes are computed at package init so an edit to the
+	// inline blocks breaks loudly rather than silently broadening the policy.
 	w.Header().Set("Content-Security-Policy", loginPageCSP)
-	// R241-SEC-1: only send HSTS on TLS connections. Sending it over plain
-	// HTTP (loopback or LAN deployments) pollutes the browser's HSTS cache
-	// for 31536000 s and breaks future HTTP access on the same origin.
-	// Mirrors the IsSecure gate used by HandleLogin's cookie Secure flag.
+	// HSTS only over TLS: on plain HTTP (loopback / LAN) it would poison the
+	// browser's HSTS cache and break future HTTP access on the same origin.
 	if a.IsSecure(r) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	}
@@ -374,19 +255,13 @@ func (a *Handlers) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// loginPageCSP is the strict CSP served with the login page. The inline
-// <script> and <style> blocks in loginPageHTML are allowlisted by their
-// SHA-256 hashes; adding `unsafe-inline` (as the prior implementation did)
-// would make any XSS on this origin capable of exfiltrating the dashboard
-// token field. Hashes are extracted from loginPageHTML at package init so
-// the string stays authoritative for both page bytes and CSP.
+// loginPageCSP is the strict CSP served with the login page: inline blocks are
+// allowlisted by SHA-256 hash; `unsafe-inline` would let any XSS on this origin
+// exfiltrate the dashboard token field.
 var loginPageCSP = buildLoginPageCSP()
 
-// init enforces R232-SEC-9: extract failures (zero matches for either tag)
-// would silently fall back to 'none', which serves the page with a CSP that
-// blocks its own inline <script>/<style> — a "login broken" surface that
-// only manifests at first request. Panic at package init so the regression
-// is caught at process start.
+// init panics when extraction yields zero matches for either tag: falling back
+// to 'none' would block the page's own inline blocks at first request.
 func init() {
 	scripts := extractInlineBlocks(loginPageHTML, inlineScriptRe)
 	styles := extractInlineBlocks(loginPageHTML, inlineStyleRe)
@@ -415,10 +290,8 @@ func buildLoginPageCSP() string {
 	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'; frame-ancestors 'none'"
 }
 
-// Separate regexes per tag: a single `</(?:script|style)>` alternation would
-// let a `<script>…</style>` cross-closure match and silently produce the
-// wrong hash (CSP still refuses the page, failing closed, but this keeps
-// the error surface obvious).
+// Separate regexes per tag: a `</(?:script|style)>` alternation would let a
+// `<script>…</style>` cross-closure match produce the wrong hash.
 var (
 	inlineScriptRe = regexp.MustCompile(`(?s)<script[^>]*>(.*?)</script>`)
 	inlineStyleRe  = regexp.MustCompile(`(?s)<style[^>]*>(.*?)</style>`)
@@ -438,22 +311,16 @@ func hashInline(body string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
-// clientIP extracts the client IP from the request.
-// Delegates to the package-level clientIP helper which handles TrustedProxy.
+// clientIP extracts the client IP from the request, honouring TrustedProxy.
 func (a *Handlers) clientIP(r *http.Request) string {
 	return netutil.ClientIP(r, a.TrustedProxy)
 }
 
-// IsSecure returns true if the connection is over TLS.
-// When TrustedProxy is enabled, also trusts the X-Forwarded-Proto header
-// (set by ALB/CloudFront). Without TrustedProxy, only trusts r.TLS.
-//
-// X-Forwarded-Proto may be a comma-separated chain (proto1, proto2) when
-// multiple proxies prepend their own value; only the last hop (the proxy
-// directly in front of naozhi, which we trust via TrustedProxy) is
-// authoritative. A client-injected leading value must never be honoured,
-// so we take the final segment. Per RFC 7239 §5.4 the scheme token is
-// case-insensitive (Nginx may emit "HTTPS"), so compare with EqualFold.
+// IsSecure returns true if the connection is over TLS. With TrustedProxy it
+// also trusts X-Forwarded-Proto (ALB/CloudFront). That header may be a
+// comma-separated chain; only the last hop (the proxy we trust) is
+// authoritative, so a client-injected leading value is never honoured.
+// Scheme tokens are case-insensitive per RFC 7239 §5.4 (EqualFold).
 func (a *Handlers) IsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -469,34 +336,14 @@ func (a *Handlers) IsSecure(r *http.Request) bool {
 }
 
 // HandleLoginNoScript is the form-action target for the login page's
-// `<form action="/api/auth/noscript" method="POST">`. The login flow is
-// fully JavaScript-driven (the JS submit handler intercepts and POSTs
-// JSON to /api/auth/login); a non-JS browser that hits Submit would
-// otherwise cause the form-encoded `token=…` body to be POSTed to
-// `/dashboard` and land in server access logs as part of the URL-decoded
-// body if any future middleware reads it.
-//
-// R243-SEC-15 (#800): defence-in-depth. Today no handler reads the form
-// body, but the browser still ships the token inside an unencrypted POST
-// frame (no TLS guarantee) and the proxy hop chain can log it. Routing
-// the no-JS path to this dedicated handler makes the contract explicit:
-// (a) we never read r.Body, so the token never enters server memory in
-// log-format; (b) we return a 400 with a clear "JavaScript required"
-// page so the operator knows what happened; (c) the response is plain
-// HTML so a screen-reader user can still see the failure mode.
-//
-// We do NOT parse the form body — the io.Copy(io.Discard, ...) on a
-// MaxBytesReader-bounded body drains and drops it without exposing it
-// to slog. ParseForm would otherwise stash key/value pairs in
-// r.PostForm where any debug handler could later dump them.
+// `<form action="/api/auth/noscript" method="POST">`. Without it a non-JS
+// submit would POST the form-encoded `token=…` to `/dashboard`, where future
+// middleware could log it. Contract (#800): r.Body is never parsed, so the
+// token never enters r.PostForm; respond 400 with a plain "JavaScript
+// required" page.
 func (a *Handlers) HandleLoginNoScript(w http.ResponseWriter, r *http.Request) {
-	// Bound + drain the body so the connection can be reused but the
-	// token bytes never enter a parsed map. MaxBytesReader caps at
-	// 1 KiB — same ceiling HandleLogin uses for its JSON body. The
-	// drain is best-effort; closing without reading would also work
-	// but some proxies hold the request open expecting the body to be
-	// consumed. We deliberately ignore the read err — we already chose
-	// to discard the bytes regardless of content.
+	// Bound + drain the body so the connection can be reused but the token
+	// bytes never enter a parsed map; the read error is deliberately ignored.
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -505,17 +352,15 @@ func (a *Handlers) HandleLoginNoScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Explicit 400 (not 405) so the operator's browser shows our
-	// message instead of the default ServeMux "Method Not Allowed".
+	// Explicit 400 (not 405) so the browser shows our message.
 	w.WriteHeader(http.StatusBadRequest)
 	if _, err := w.Write([]byte(noScriptLoginHTML)); err != nil {
 		slog.Debug("noscript login write", "err", err)
 	}
 }
 
-// noScriptLoginHTML is the response body for HandleLoginNoScript. Plain
-// static HTML — no embedded token, no embedded URL parameter, nothing
-// derivable from request input. Kept short to fit a single TCP frame.
+// noScriptLoginHTML is the static response body for HandleLoginNoScript —
+// no embedded token or request-derived input.
 const noScriptLoginHTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>naozhi — JavaScript required</title>
@@ -528,12 +373,8 @@ const noScriptLoginHTML = `<!DOCTYPE html>
 </body></html>`
 
 func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	// HandleLogin sits outside RequireAuth (it's the endpoint that GRANTS
-	// auth), so apply the same-origin gate manually. A cross-origin login
-	// form post cannot be exploited for CSRF (attacker would need to know
-	// the user's token), but still enforce for consistency and to catch
-	// misconfigured reverse proxies before they send secrets around.
-	// R31-SEC1 / R26-SEC1.
+	// HandleLogin sits outside RequireAuth (it GRANTS auth), so apply the
+	// same-origin gate manually; also catches misconfigured reverse proxies.
 	if !SameOriginOK(r, a.TrustedProxy) {
 		slog.Warn("rejecting cross-origin login attempt",
 			"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
@@ -541,17 +382,9 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
-	// R247-SEC-25 (#528): when TrustedProxy=true and X-Forwarded-For is
-	// missing or unparseable, a.clientIP(r) silently falls back to
-	// r.RemoteAddr — which under ALB/CloudFront is the proxy's single IP.
-	// Every legitimate XFF-less request would then share that one bucket,
-	// letting a single attacker burn the loginLimiter slot for every other
-	// XFF-less caller. In a properly configured trusted-proxy deployment
-	// the proxy MUST stamp XFF, so an XFF-less request is either a proxy
-	// misconfig or an attacker bypassing the proxy — either way, fail
-	// loud (400) so the operator notices, instead of degrading to a
-	// shared-bucket rate limit. Mirrors the AllowRequest gate on the
-	// general HTTP rate-limiter (R244-SEC-P3-3).
+	// With TrustedProxy=true an XFF-less request would fall back to the proxy's
+	// single IP, so every such caller would share one loginLimiter bucket that
+	// one attacker can burn. A trusted proxy MUST stamp XFF; fail loud (#528).
 	if !requestHasResolvableClientIP(r, a.TrustedProxy) {
 		slog.Warn("login refused: trusted-proxy mode but X-Forwarded-For missing/unparseable",
 			"remote", r.RemoteAddr, "xff", r.Header.Get("X-Forwarded-For"))
@@ -580,19 +413,9 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	// Same SHA-256 pre-digest trick as IsAuthenticated so a timing probe
-	// cannot distinguish "wrong length" from "wrong bytes" — ConstantTimeCompare
-	// short-circuits on length mismatch. Aligns both auth entry points.
-	//
-	// R220-SEC-2: keep the "no token configured" decision inside the same
-	// branch as the constant-time compare result, AND combine via bitwise
-	// AND of two int comparisons (no `||` short-circuit). Previous form
-	// `if a.DashboardToken == "" || !matched` returned faster on empty
-	// token because the compare-result branch was skipped, leaving a
-	// remote-observable timing distinction between "no token" vs
-	// "configured but wrong". The `byte(...)` widening forces both
-	// operands to be evaluated regardless of the first comparison's
-	// result.
+	// Same SHA-256 pre-digest as IsAuthenticated. "No token configured" is
+	// combined with the compare result via bitwise AND (no `||` short-circuit)
+	// so it is not remotely distinguishable by timing.
 	gotLogin := sha256.Sum256([]byte(req.Token))
 	wantLogin := sha256.Sum256([]byte(a.DashboardToken))
 	matched := subtle.ConstantTimeCompare(gotLogin[:], wantLogin[:])
@@ -612,10 +435,8 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteOK(w)
 }
 
-// writeAuthCookie issues (or re-issues) the nz_auth session cookie with a
-// fresh MaxAge window. Used both on login and on every authenticated request
-// (sliding renewal) so an actively-used dashboard never trips the 1h MaxAge
-// and prompts for re-login mid-session — only a genuinely idle tab does.
+// writeAuthCookie issues (or re-issues) the nz_auth cookie with a fresh
+// MaxAge window (login + sliding renewal on authenticated requests).
 func (a *Handlers) writeAuthCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
@@ -629,22 +450,10 @@ func (a *Handlers) writeAuthCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	// R20260607-SEC-7 (#1913): logout MUST NOT call RotateCookieGen(). Because
-	// every authenticated browser is issued the *same* CookieMAC value (the MAC
-	// is HMAC(secret, token||gen||seq) with no per-session entropy), a global
-	// seq bump invalidates every outstanding cookie at once. The endpoint is
-	// only RequireAuth-gated, so any holder of any valid cookie — including a
-	// stolen one — could log out every concurrent operator (denial-of-
-	// authentication). RotateCookieGen stays reserved for genuine secret-
-	// rotation events (see server.go), which legitimately revoke all sessions.
-	//
-	// Tradeoff (re S9 / #389): clearing only the browser cookie leaves the
-	// shared MAC valid for its MaxAge, so a cookie captured before logout can
-	// still replay. True per-cookie server-side revocation needs per-session
-	// cookie identity (a nonce baked into the cookie value + a revocation set),
-	// which is a larger redesign tracked separately. The narrow clear here is
-	// strictly safer than the global bump: a stolen cookie can no longer be
-	// weaponised to evict every other authenticated user.
+	// Logout MUST NOT call RotateCookieGen(): every browser holds the *same*
+	// CookieMAC, so a global seq bump would let any cookie holder — including a
+	// thief — log out every operator (#1913). Per-cookie revocation needs
+	// per-session identity (#389).
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    "",
@@ -654,13 +463,9 @@ func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.IsSecure(r),
 		MaxAge:   -1,
 	})
-	// #2157: also clear the nz_anon per-browser owner label so logout fully
-	// resets browser-held naozhi state. Field set mirrors mintAnonCookie in
-	// internal/server/send_anon_cookie.go. The name is duplicated as a string
-	// literal here — source of truth is internal/server/send_anon_cookie.go's
-	// unexported `anonCookieName` const, which this package cannot import
-	// (server->auth import cycle), matching the unknownIPKey precedent in
-	// cookie.go.
+	// Also clear the nz_anon per-browser owner label (#2157). Field set mirrors
+	// mintAnonCookie in internal/server/send_anon_cookie.go; the name is a
+	// literal because this package cannot import internal/server.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "nz_anon",
 		Value:    "",

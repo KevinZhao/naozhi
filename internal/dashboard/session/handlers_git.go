@@ -17,10 +17,8 @@ import (
 // field is empty and the dashboard renders no chip.
 type gitStateView struct {
 	IsRepo bool `json:"is_repo"`
-	// Workspace is the session's resolved cwd. Already exposed on
-	// /api/sessions (SessionSnapshot.Workspace), so this adds no new surface;
-	// it is echoed here so the chip's tooltip can name the directory the
-	// branch was read from without a second lookup.
+	// Workspace is the session's resolved cwd (already exposed via
+	// SessionSnapshot.Workspace), echoed so the chip tooltip needs no second lookup.
 	Workspace string `json:"workspace,omitempty"`
 	// Root is the working-tree root — differs from Workspace when the session
 	// runs in a subdirectory of the repo.
@@ -35,26 +33,19 @@ type gitStateView struct {
 }
 
 // HandleGit serves GET /api/sessions/git?key= — the git branch / worktree the
-// session's workspace sits on, so the operator can tell at a glance which
-// checkout a conversation is editing.
-//
-// Read-only and best-effort: any resolution failure (unknown key, workspace
-// outside allowedRoot, not a git repo) returns 200 with is_repo=false rather
-// than an error status. The chip is decoration; a 4xx here would surface as a
-// console error on every non-git workspace, which is the normal case for
-// plain document folders.
-//
-// Local-node only, mirroring HandleRuns: a remote session's workspace lives
-// on that node's filesystem, so resolving it here would read the wrong tree.
-// The frontend skips the call for node != "local".
+// session's workspace sits on. Read-only and best-effort: any resolution
+// failure (unknown key, workspace outside allowedRoot, not a repo) returns 200
+// with is_repo=false, because a 4xx would surface as a console error on every
+// plain-folder workspace. Local-node only (mirrors HandleRuns); the frontend
+// skips the call for node != "local".
 func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
 		return
 	}
-	// Same key hygiene the events / runs endpoints enforce (R172-SEC-L2):
-	// caps length and rejects control bytes before the key reaches slog.
+	// Same key hygiene as the events / runs endpoints: caps length and rejects
+	// control bytes before the key reaches slog.
 	if err := sessionpkg.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
@@ -65,10 +56,9 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, gitStateView{})
 		return
 	}
-	// Re-validate the stored workspace against allowedRoot before touching the
-	// filesystem: the value was validated at SetWorkspace time, but a config
-	// change (allowedRoot tightened since) can leave a stale entry behind, and
-	// this handler must not read outside the operator's declared tree.
+	// Re-validate against allowedRoot before touching the filesystem: the value
+	// was validated at SetWorkspace time, but a tightened allowedRoot can leave
+	// a stale entry, and this handler must not read outside the declared tree.
 	// A nil validateWS (hand-built Handlers in tests) fails closed.
 	if h.validateWS == nil {
 		httputil.WriteJSON(w, gitStateView{})
@@ -82,23 +72,14 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// allowedRoot bounds gitinfo's ancestor walk and its gitdir-pointer follow.
-	// Without it, validateWS would prove only that the WORKSPACE is in-tree
-	// while Detect walked up past the boundary and reported a parent repo's
-	// path + branch — e.g. allowed_root=<repo>/docs still disclosing <repo> and
-	// its current branch. Empty allowedRoot means the deployment declared no
-	// containment policy at all, which gitinfo mirrors as unbounded.
-	//
-	// The bound must be symlink-resolved to compare against wsPath, which
-	// validateWorkspace already returns resolved. validateWorkspace resolves
-	// allowedRoot internally for its own check but doesn't hand it back, so
-	// repeat it here with the same EvalSymlinks-failure fallback (raw path) it
-	// uses — otherwise a symlinked root component (/home → /var/home) would
-	// make every lookup fail closed instead of reporting the branch.
+	// allowedRoot bounds gitinfo's ancestor walk and gitdir-pointer follow;
+	// otherwise Detect could walk past the boundary and disclose a parent repo's
+	// path + branch (e.g. allowed_root=<repo>/docs). Empty means no containment
+	// policy, which gitinfo mirrors as unbounded. The bound must be
+	// symlink-resolved like wsPath, with the same raw-path fallback validateWS uses.
 	st, ok := gitinfo.Detect(wsPath, resolveRootForBound(h.allowedRoot))
 	if !ok {
-		// Not a git checkout — a legitimate, common state. Echo the workspace
-		// so the client can still show the directory if it wants to.
+		// Not a git checkout — common and legitimate; echo the workspace.
 		httputil.WriteJSON(w, gitStateView{Workspace: wsPath})
 		return
 	}
@@ -114,11 +95,10 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveRootForBound symlink-resolves allowedRoot so it can be compared
-// lexically against the resolved workspace path. Mirrors validateWorkspace's
-// own handling, including the "EvalSymlinks failed → use the raw path" fallback
-// (a root that cannot be resolved must still bound the walk, just less
-// precisely — falling back to "" would silently unbound it).
+// resolveRootForBound symlink-resolves allowedRoot so it compares lexically
+// against the resolved workspace path. Mirrors validateWorkspace, including the
+// "EvalSymlinks failed → raw path" fallback: an unresolvable root must still
+// bound the walk; falling back to "" would silently unbound it.
 func resolveRootForBound(allowedRoot string) string {
 	if allowedRoot == "" {
 		return ""
@@ -130,14 +110,10 @@ func resolveRootForBound(allowedRoot string) string {
 	return resolved
 }
 
-// resolveSessionWorkspace returns the cwd a session key runs in, using the
-// same precedence as resolveAttachmentWorkspace in internal/server: the live
-// session's own workspace first (that is the directory the CLI process
-// actually has open), then the chat-level override, then the router default.
-//
-// Duplicating the precedence rather than importing it is deliberate — the
-// server-side helper hangs off *Hub, and this package must not reverse-import
-// internal/server (Phase 3e boundary).
+// resolveSessionWorkspace returns the cwd a session key runs in, with the same
+// precedence as resolveAttachmentWorkspace in internal/server: live session
+// workspace, then chat-level override, then router default. Duplicated rather
+// than imported because this package must not reverse-import internal/server.
 func (h *Handlers) resolveSessionWorkspace(key string) string {
 	if h.router == nil {
 		return ""

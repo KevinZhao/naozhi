@@ -10,10 +10,9 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// cronAttentionItemView is the wire shape of one §7.4 confirmation-queue card.
-// Mirrors cronpkg.SandboxAttentionItem but SanitizeForLog's the operator-facing
-// label (a job title persisted before the validator was tightened, or
-// hand-edited on disk, could carry control/bidi runes).
+// cronAttentionItemView is the wire shape of one §7.4 confirmation-queue card;
+// the operator-facing label is SanitizeForLog'd (hand-edited / pre-validator
+// titles can carry control/bidi runes).
 type cronAttentionItemView struct {
 	JobID       string `json:"job_id"`
 	RunID       string `json:"run_id"`
@@ -23,18 +22,14 @@ type cronAttentionItemView struct {
 	CreatedAtMS int64  `json:"created_at_ms,omitempty"`
 }
 
-// cronAttentionListResp is the GET /api/cron/attention response. Named struct
-// (not map[string]any) keeps the 1Hz-poll endpoint on the cached reflect path,
-// matching HandleRunsList's rationale.
+// cronAttentionListResp is the GET /api/cron/attention response.
 type cronAttentionListResp struct {
 	Items []cronAttentionItemView `json:"items"`
 }
 
 // HandleAttentionList serves GET /api/cron/attention — the §7.4 confirmation
-// queue (failed-transport / orphaned runs of side-effecting jobs awaiting a
-// human decision). Shares the runs rate limiter (FS scan, same bypass concern
-// as the run history endpoints). Returns an empty items array (not 404) when
-// the queue is empty so the drawer renders a deterministic empty state.
+// queue (failed-transport / orphaned runs of side-effecting jobs). Returns an
+// empty items array (not 404) when the queue is empty.
 func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
@@ -60,9 +55,7 @@ func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleRunConfirm serves POST /api/cron/runs/{run_id}/confirm — the §7.4
-// `确认已完成` action. Marks the run resolved without replaying (the operator
-// has verified the side effect already landed). Write-rate-limited: it mutates
-// queue state. Idempotent — confirming a run not in the queue returns 200.
+// `确认已完成` action: marks the run resolved without replaying. Idempotent.
 func (h *Handlers) HandleRunConfirm(w http.ResponseWriter, r *http.Request) {
 	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
@@ -77,9 +70,7 @@ func (h *Handlers) HandleRunConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.scheduler.ConfirmSandboxRun(runID); err != nil {
-		// runID is already shape-validated by attentionRunID, so the only
-		// reachable error here is a server-side disk fault (os.Remove EIO/
-		// EACCES) — a 5xx, not a malformed-request 4xx (review PR-6 L1).
+		// runID is shape-validated, so the only reachable error is a disk fault.
 		slog.Error("cron run confirm failed", "err", err)
 		writeCronErr(w, http.StatusInternalServerError, "confirm failed")
 		return
@@ -95,11 +86,9 @@ type cronReplayResp struct {
 }
 
 // HandleRunReplay serves POST /api/cron/runs/{run_id}/replay — the §7.3 「重放」
-// + §7.4 `确认未完成，重放` action. Re-injects the run's input snapshot into a
-// fresh microVM. The §6.2 rule-1 Stop-before-replay is embedded in
-// ReplaySandboxRun, so a transport-failed run whose microVM cannot be confirmed
-// dead returns 409 (ErrStopUnconfirmed) and does NOT replay. Requires job_id in
-// the body (the snapshot is keyed by job+run).
+// / §7.4 `确认未完成，重放` action. ReplaySandboxRun embeds the §6.2 rule-1
+// Stop-before-replay, so a run whose microVM cannot be confirmed dead returns
+// 409 (ErrStopUnconfirmed) and does NOT replay.
 func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
@@ -140,8 +129,7 @@ func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrNoSnapshot):
 			writeCronErr(w, http.StatusUnprocessableEntity, "run has no input snapshot to replay")
 		case errors.Is(err, cronpkg.ErrStopUnconfirmed):
-			// §6.2 rule 1 unsatisfied: the original microVM's fate is unknown.
-			// 409 Conflict — the operator can retry (Stop is idempotent).
+			// Original microVM's fate is unknown; 409 lets the operator retry.
 			writeCronErr(w, http.StatusConflict, "original microVM termination unconfirmed; retry to replay safely")
 		case errors.Is(err, cronpkg.ErrReplayInFlight):
 			writeCronErr(w, http.StatusConflict, "job already has a run in flight")
@@ -150,9 +138,7 @@ func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrSchedulerStopped):
 			writeCronErr(w, http.StatusServiceUnavailable, "scheduler stopped")
 		default:
-			// Fallthrough is a server-side fault (snapshot manifest read I/O,
-			// crypto/rand generateRunID failure) — a 5xx, not a 4xx; runID +
-			// jobID are already shape-validated above (review PR-6 L1).
+			// Server-side fault; runID + jobID are already shape-validated.
 			slog.Error("cron run replay failed", "err", err)
 			writeCronErr(w, http.StatusInternalServerError, "replay failed")
 		}
@@ -165,7 +151,7 @@ func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 }
 
 // attentionRunID extracts + shape-validates the {run_id} path param shared by
-// confirm/replay. Writes the 4xx + returns ok=false on any validation failure.
+// confirm/replay; writes the 4xx and returns ok=false on failure.
 func (h *Handlers) attentionRunID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	runID := r.PathValue("run_id")
 	if runID == "" {

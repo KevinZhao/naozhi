@@ -14,43 +14,21 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// runIDLenLimit caps the run_id query parameter length. Run IDs and job
-// IDs share the same generator class (hex with headroom for future
-// entropy bumps) and the same on-disk JSON store, so they share the
-// cronpkg.MaxIDLen constant. R230B-CR-1: previously a separate const was
-// kept "in case of divergence", but no concrete plan exists for run IDs
-// to grow longer than job IDs, and two parallel constants drifted in
-// review with no source of truth. Reuse one constant; revisit if a real
-// divergence requirement appears.
+// runIDLenLimit caps run_id length; run IDs and job IDs share one generator and
+// store, so they share cronpkg.MaxIDLen.
 const runIDLenLimit = cronpkg.MaxIDLen
 
-// GET /api/cron/runs?job_id=&limit=&before=
-//
-// Returns CronRun summaries for one job, newest first. limit default 50,
-// clamped to [1, cronpkg.DefaultRunsKeepCount]. before is unix-ms; only runs
-// strictly older than that timestamp are returned (paging cursor).
-//
-// Response shape:
-//
-//	{ "runs":[ { run_id, state, trigger, started_at, ended_at,
-//	             duration_ms, session_id, error_class } ],
-//	  "next_before": <unix-ms>   // omitted when no more pages
-//	}
-//
-// Authenticated; no per-job ACL beyond the global dashboard auth gate
-// (mirrors HandleList's policy).
+// GET /api/cron/runs?job_id=&limit=&before= returns CronRun summaries for one
+// job, newest first. limit defaults to 50 (clamped to DefaultRunsKeepCount);
+// before is a unix-ms paging cursor. next_before is omitted on the last page.
 func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
-	// R222-SEC-3: gate per-IP before any scheduler / FS work so an attacker
-	// holding a stolen dashboard token cannot enumerate the run history at
-	// unbounded rate. Nil-guarded for hand-built tests.
+	// Gate per-IP before any scheduler / FS work (stolen-token enumeration).
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
-		// R230B-CR-3: same byte shape as the map[string]any fast path —
-		// `{"runs":[]}`. Explicit empty slice keeps json.Marshal off the
-		// nil → "null" rendering branch.
+		// Explicit empty slice so json.Marshal emits `[]`, not null.
 		httputil.WriteJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
 		return
 	}
@@ -102,30 +80,19 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 	for _, r := range rows {
 		out = append(out, cronSummaryToView(r))
 	}
-	// R230B-CR-3: named struct in place of map[string]any keeps this 1Hz-poll
-	// endpoint on the cached reflect path (one-time alloc) instead of paying
-	// the per-call map iteration + interface boxing each request.
 	resp := cronRunsListResp{Runs: out}
-	// next_before: emit only when this page was full (caller may have more).
-	// Conservative: a partial page can still indicate "no more" because runs
-	// older than this batch may have been GC'd; we let the dashboard treat
-	// next_before as "fetch older than this" hint.
+	// next_before only when this page was full; a partial page may still mean
+	// "no more" because older runs may have been GC'd.
 	if len(out) == limit && len(out) > 0 {
 		resp.NextBefore = out[len(out)-1].StartedAt
 	}
 	httputil.WriteJSON(w, resp)
 }
 
-// GET /api/cron/runs/{run_id}?job_id=...
-//
-// Returns the full CronRun (Prompt + Result + ErrorMsg). 404 when missing,
-// 500 with "corrupt record" message when the file exists but fails to
-// parse / exceeds size cap. Used by the dashboard detail drawer.
+// GET /api/cron/runs/{run_id}?job_id=... returns the full CronRun (Prompt +
+// Result + ErrorMsg): 404 when missing, 500 when the record is corrupt.
 func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
-	// R222-SEC-3: same per-IP gate as HandleRunsList. Detail reads also do
-	// FS I/O (read JSON file from disk) so they share the limiter and
-	// budget, not separate buckets — a single bucket prevents bypass-via-
-	// alternate-endpoint when both URLs share an identical token.
+	// Same per-IP bucket as HandleRunsList so the alternate URL cannot bypass it.
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
@@ -134,9 +101,6 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
-	// Path param: /api/cron/runs/{run_id}; PathValue is supplied by the
-	// http.ServeMux pattern at registration time. Defensive in case the
-	// pattern is changed without updating this handler.
 	runID := r.PathValue("run_id")
 	if runID == "" {
 		http.Error(w, "run_id is required", http.StatusBadRequest)
@@ -170,32 +134,21 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "run record corrupt", http.StatusInternalServerError)
 			return
 		}
-		// Default: treat any non-corrupt error (incl. fs.ErrNotExist)
-		// as "not found" — distinguishing "not exist" vs "perm denied"
-		// would leak filesystem layout to a remote caller.
+		// Any non-corrupt error (incl. fs.ErrNotExist) is "not found" so the
+		// response cannot leak filesystem layout to a remote caller.
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
-	// [R202606-SEC-2] Cross-ownership check, mirroring HandleRunTranscript:
-	// defensive even though runStore.Get keys the lookup on the disk path. A
-	// future refactor that loosens the key must not silently expose another
-	// job's run through this URL.
+	// Cross-ownership check: runStore.Get keys on the disk path, but a future
+	// refactor that loosens the key must not expose another job's run here.
 	if run.JobID != jobID {
 		slog.Warn("cron run detail: job_id mismatch", "url_job_id", jobID, "run_job_id", run.JobID, "run_id", runID)
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
-	// SanitizeForLog the Prompt + WorkDir fields read off disk: dashboard
-	// validate* gates already strip control / bidi characters at the write
-	// edge, but a CronRun persisted before the policy was tightened (or
-	// hand-edited on disk) can carry runes that would render dangerously
-	// in the dashboard. Result/ErrorMsg are already sanitised inside
-	// recordResultP0WithSanitised before persistence.
-	// [R112714-SEC-5] SanitizeForLog SessionID: a CronRun record persisted
-	// before the validator was tightened (or hand-edited on disk) can carry
-	// control/bidi characters. UUID session IDs are at most 36 chars;
-	// clamp to 64 to give headroom for future formats without amplifying
-	// an injected payload.
+	// SanitizeForLog Prompt / WorkDir / SessionID read off disk: a record
+	// persisted before the validators were tightened (or hand-edited) can carry
+	// control / bidi runes. Result and ErrorMsg are sanitised before persistence.
 	out := cronRunDetailView{
 		RunID:       run.RunID,
 		JobID:       run.JobID,
@@ -217,9 +170,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		out.EndedAt = run.EndedAt.UnixMilli()
 	}
 	if m := run.SandboxMeta; m != nil {
-		// RFC §7.3 meta bar. RuntimeARN is operator-facing config (no
-		// secret), but SanitizeForLog it defensively in case a hand-edited
-		// record carries control bytes that would render dangerously.
+		// RuntimeARN is non-secret, but sanitise in case of a hand-edited record.
 		out.Sandbox = &cronRunSandboxView{
 			RuntimeARN:      osutil.SanitizeForLog(m.RuntimeARN, 256),
 			ImageVersion:    osutil.SanitizeForLog(m.ImageVersion, 128),
@@ -232,32 +183,25 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, out)
 }
 
-// sandboxEventsMaxResponse caps how many envelope frames GET .../events
-// returns. Matches the cron-side default; the dashboard renders the run's
-// opening (boot + early turns — most useful for "what happened / where did
-// it break"), with a truncated flag for the tail.
+// sandboxEventsMaxResponse caps envelope frames returned by GET .../events; the
+// dashboard renders the run's opening with a truncated flag for the tail.
 const sandboxEventsMaxResponse = 2000
 
-// cronRunEventsResp is the wire shape for GET /api/cron/runs/{run}/events.
-// Events are raw stream envelopes (kind=cli/boot/exit/meta…) re-emitted
-// verbatim as JSON so the dashboard renders them with the same component
-// the local-session event stream uses (RFC §7.3 "identical message render").
+// cronRunEventsResp is the wire shape for GET /api/cron/runs/{run}/events:
+// raw stream envelopes re-emitted verbatim so the dashboard reuses the
+// local-session event renderer (RFC §7.3).
 type cronRunEventsResp struct {
 	Events    []json.RawMessage `json:"events"`
 	Truncated bool              `json:"truncated,omitempty"`
 }
 
 // HandleRunEvents serves GET /api/cron/runs/{run_id}/events?job_id= — the
-// persisted sandbox event log (RFC §6.1/§7.3). Shares the runs rate limiter
-// (FS I/O, same bypass concern as detail). Returns an empty events array for
-// a run with no log (local run / events-disabled deploy) rather than 404, so
-// the dashboard renders an empty stream consistently.
+// persisted sandbox event log (RFC §6.1/§7.3). Returns an empty events array
+// (not 404) for a run with no log so the dashboard renders consistently.
 func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
-	// R20260613-SEC-1: use the dedicated transcriptLimiter rather than the
-	// shared runsLimiter. The events path uses bufio.Scanner (16.5 MB max
-	// token) and is I/O-heavy like the transcript endpoint — sharing one
-	// bucket lets either endpoint starve the other. Fall back to runsLimiter
-	// for legacy hand-rolled Handlers fixtures without a transcriptLimiter.
+	// The events path is I/O-heavy like the transcript endpoint, so it uses
+	// transcriptLimiter (sharing runsLimiter lets either starve the other);
+	// falls back to runsLimiter for fixtures without a transcriptLimiter.
 	limiter := h.transcriptLimiter
 	if limiter == nil {
 		limiter = h.runsLimiter
@@ -283,36 +227,18 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 
 	lines, truncated, err := h.scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
 	if errors.Is(err, cronpkg.ErrSandboxEventsBusy) {
-		// Concurrency semaphore saturated: fail fast (mirrors the transcript
-		// endpoint's "busy" 503) rather than serving a partial stream.
+		// Semaphore saturated: fail fast (503) rather than serve a partial stream.
 		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "cron run events busy"})
 		return
 	}
 	if err != nil {
-		// A scan error still returns the partial head (lines may be non-nil);
-		// log + serve what we have rather than hiding a healthy opening.
+		// A scan error still returns the partial head; serve what we have.
 		slog.Warn("cron sandbox: run events read error", "job_id", jobID, "run_id", runID, "err", err)
 	}
-	// R20260613-SEC-1: redact secrets from each NDJSON line before serving to
-	// the dashboard. The sandbox event log can contain tool-call input that
-	// echoes environment variables (e.g. ANTHROPIC_API_KEY, Bearer tokens).
-	// textutil.RedactSecrets replaces known secret-token shapes with [REDACTED]
-	// while preserving JSON validity: secret chars are alphanumeric/-/_ which
-	// are all legal inside a JSON string, and [REDACTED] is equally legal there.
-	//
-	// [R202606-SEC-008] also redact absolute filesystem paths, matching the
-	// transcript endpoint's order (RedactSecrets → RedactAbsolutePaths in
-	// sanitizeWireText). A sandbox tool-call input can echo host paths (e.g.
-	// /home/<user>/.aws/credentials, ~/.ssh/id_rsa) which leak the host's
-	// filesystem layout to an authenticated operator. osutil.RedactAbsolutePaths
-	// swaps each path token for the literal "<path>", which is legal inside a
-	// JSON string, so the NDJSON line stays valid JSON.
-	//
-	// Both redactors CAN still damage structure at the edges (an env
-	// assignment ending at `"}`; a path followed by a JSON-escaped quote), and
-	// a single unencodable line used to fail the whole response. redactRawJSON
-	// re-applies the redaction per string value when the text-level pass broke
-	// the line, and substitutes a placeholder for lines that were never JSON.
+	// Redaction contract: every NDJSON line is scrubbed of secrets (tool-call
+	// input can echo API keys / Bearer tokens) and then of absolute host paths
+	// (filesystem layout leak), same order as sanitizeWireText. Both redactors
+	// can break JSON at the edges, so redactRawJSON re-applies per string value.
 	events := make([]json.RawMessage, len(lines))
 	for i, ln := range lines {
 		events[i] = redactRawJSON(string(ln), redactEventText)
@@ -320,17 +246,14 @@ func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
 }
 
-// redactEventText is the per-string redaction chain for sandbox run events:
-// secrets first, then absolute host paths (same order as sanitizeWireText).
+// redactEventText is the per-string redaction chain for sandbox run events.
 func redactEventText(s string) string {
 	return osutil.RedactAbsolutePaths(textutil.RedactSecrets(s))
 }
 
 // cronRunSnapshotResp is the wire shape for GET /api/cron/runs/{run}/snapshot
-// — the §7.3 input-snapshot panel (debug / replay preview). Carries the
-// content-addressed manifest fields plus the resolved prompt text. Secrets
-// appear ONLY as reference names (secret_refs), never values (§5.1 red line);
-// the panel renders the names and the UI never has a value to leak.
+// (§7.3 input-snapshot panel). Secrets appear ONLY as reference names
+// (secret_refs), never values (§5.1 red line).
 type cronRunSnapshotResp struct {
 	Available    bool     `json:"available"`
 	Prompt       string   `json:"prompt,omitempty"`
@@ -340,11 +263,9 @@ type cronRunSnapshotResp struct {
 	SecretRefs   []string `json:"secret_refs,omitempty"`
 }
 
-// HandleRunSnapshot serves GET /api/cron/runs/{run_id}/snapshot?job_id= —
-// the §7.3 input-snapshot view. Shares the runs rate limiter (FS I/O).
-// Returns {available:false} (not 404) for a run with no snapshot (local run
-// / snapshots-disabled / pre-snapshot run) so the panel renders a
-// deterministic "unavailable" state.
+// HandleRunSnapshot serves GET /api/cron/runs/{run_id}/snapshot?job_id= (§7.3).
+// Returns {available:false} (not 404) for a run with no snapshot so the panel
+// renders a deterministic "unavailable" state.
 func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
@@ -375,11 +296,9 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
 		return
 	}
-	// [R20260614-GO-004] Cross-ownership check: mirrors HandleRunDetail (line 183)
-	// and HandleRunTranscript (transcript.go:327). Path isolation already
-	// prevents cross-job reads (runsnapshots/<jobID>/<runID>.json), but an
-	// explicit guard here ensures a future refactor that loosens the path
-	// convention cannot silently expose another job's snapshot.
+	// Cross-ownership check, mirroring HandleRunDetail: path isolation already
+	// prevents cross-job reads, but a future path-convention change must not
+	// silently expose another job's snapshot.
 	if man.JobID != "" && man.JobID != jobID {
 		slog.Warn("cron snapshot: job_id mismatch", "url_job_id", jobID, "man_job_id", man.JobID, "run_id", runID)
 		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
@@ -390,11 +309,8 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
 		// Still return the manifest metadata; prompt blob may have been GC'd.
 	}
-	// [R202606-SEC-1] SanitizeForLog each secret ref name before projecting to
-	// wire, matching the Model/ImageVersion/Prompt edge: a manifest hand-edited
-	// on disk (or written before the validator was tightened) can carry
-	// control/bidi runes in a ref name that would render dangerously in the
-	// dashboard panel. Ref names are short identifiers; clamp to 256.
+	// SanitizeForLog each secret ref name: a hand-edited manifest can carry
+	// control/bidi runes. Ref names are short identifiers; clamp to 256.
 	var secretRefs []string
 	if len(man.SecretRefs) > 0 {
 		secretRefs = make([]string, len(man.SecretRefs))
@@ -404,12 +320,9 @@ func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	httputil.WriteJSON(w, cronRunSnapshotResp{
 		Available: true,
-		// Prompt was validated non-control at the cron write edge, but
-		// SanitizeForLog defensively in case a blob predates that policy.
+		// Sanitise defensively in case the blob predates the write-edge policy.
 		Prompt: osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
-		// [R20260614-GO-005] SanitizeForLog PromptHash: should be 64 lowercase
-		// hex chars (sha256), but the manifest is a disk JSON that can be
-		// hand-edited. Clamp to 64 to match the expected field width.
+		// PromptHash should be 64 hex chars but the manifest is hand-editable.
 		PromptHash:   osutil.SanitizeForLog(man.PromptHash, 64),
 		Model:        osutil.SanitizeForLog(man.Model, 128),
 		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),

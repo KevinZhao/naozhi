@@ -58,8 +58,8 @@ func (h *Handlers) HandleRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
 		return
 	}
-	// Same key validation the events endpoint enforces (R172-SEC-L2): caps
-	// length and rejects control bytes before the key reaches slog / the store.
+	// Same key validation as the events endpoint: caps length and rejects
+	// control bytes before the key reaches slog / the store.
 	if err := sessionpkg.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return

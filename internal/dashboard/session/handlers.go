@@ -31,20 +31,14 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// maxResumeLastPromptBytes caps the last_prompt field on /api/sessions/resume.
-// The body-level MaxBytesReader is 1 MiB; this field-level cap prevents a
-// megabyte-scale string from being persisted on the session and then echoed
-// to every dashboard client on each /api/sessions poll.
+// maxResumeLastPromptBytes caps the last_prompt field on /api/sessions/resume
+// so a megabyte-scale string is never persisted and echoed on every poll.
 const maxResumeLastPromptBytes = 2 * 1024
 
 // SanitizeResumeLastPrompt strips injection-prone bytes from a resume
-// last_prompt before it reaches slog attrs or /api/sessions broadcasts,
-// while preserving tab (operators paste tab-delimited snippets and slog
-// JSONHandler escapes tab safely).
-//
-// Mirrors osutil.SanitizeForLog except for the tab carve-out. Inlined here
-// because the tab allowance is a dashboard-specific relaxation — ordinary
-// log attrs should keep the stricter rule.
+// last_prompt before it reaches slog attrs or /api/sessions broadcasts.
+// Mirrors osutil.SanitizeForLog except tab is preserved (operators paste
+// tab-delimited snippets; slog JSONHandler escapes tab safely).
 func SanitizeResumeLastPrompt(s string, maxLen int) string {
 	if s == "" {
 		return s
@@ -75,24 +69,16 @@ func SanitizeResumeLastPrompt(s string, maxLen int) string {
 		return r
 	}, s)
 	if maxLen > 0 && len(mapped) > maxLen {
-		// Truncate at a rune boundary so we never split a multi-byte UTF-8
-		// codepoint — the result feeds into sessions.json and the dashboard
-		// UI, where invalid UTF-8 surfaces as garbled glyphs.
+		// Truncate at a rune boundary: invalid UTF-8 surfaces as garbled glyphs
+		// in sessions.json and the dashboard UI.
 		mapped = mapped[:textutil.TruncateAtRuneBoundary(mapped, maxLen)]
 	}
 	return mapped
 }
 
-// Note: user-label validation lives in the session package
-// (sessionpkg.ValidateUserLabel / sessionpkg.MaxUserLabelBytes) so the dashboard
-// HTTP path and the reverse-RPC worker (internal/upstream) share one
-// implementation. R64-GO-H3 / L1 / L2 consolidated the rules there.
-
 // workspaceFallbackName returns the folder name to display as a session's
 // sidebar group when the workspace is not registered with ProjectManager.
-// Returns an empty string for inputs that are empty, root ("/"), or resolve
-// to "." — these cannot produce a meaningful group label so the frontend
-// falls back to the generic catch-all instead.
+// Empty, "/" or "." inputs yield "" so the frontend uses its catch-all.
 func workspaceFallbackName(ws string) string {
 	if ws == "" {
 		return ""
@@ -104,32 +90,19 @@ func workspaceFallbackName(ws string) string {
 	return base
 }
 
-// watchdogStats is the /api/sessions "watchdog" sub-object. Declared as a
-// named struct (not an inline map[string]any) so json/reflect caches the
-// type descriptor once and the value is stack-allocated per response,
-// eliminating the per-poll 2-key map heap alloc the dashboard hot path
-// used to pay. R58-PERF-F2.
+// watchdogStats is the /api/sessions "watchdog" sub-object. A named struct
+// (not map[string]any) keeps the per-poll value stack-allocated.
 type watchdogStats struct {
 	NoOutputKills int64 `json:"no_output_kills"`
 	TotalKills    int64 `json:"total_kills"`
 }
 
-// sessionStatsStatic holds the subset of /api/sessions.stats fields that are
-// immutable after server startup. Pre-built once by initStaticStats and then
-// embedded (by value) into sessionStats on every poll — the copy is a
-// fixed-size struct on the stack, not a 9-key map clone with per-key
-// interface{} boxing like the previous map[string]any implementation.
-// Embedding keeps the JSON output flat (all fields promoted to top-level of
-// the "stats" object), preserving byte-identical shape with the prior
-// map-based response for dashboard.js and any curl/monitoring consumers.
-//
-// `system` stays a map[string]any to reuse initStaticStats's deep-copy path
-// (the h.callSystemInfo() singleton map is process-wide and must not alias into
-// per-response allocations; see initStaticStats comments). Keeping the field
-// typed as a map preserves that contract while still collapsing the rest of
-// the stats object to a struct. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 /
-// R51-PERF-005 / R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001
-// (all the same underlying hot-path alloc).
+// sessionStatsStatic holds the /api/sessions.stats fields that are immutable
+// after startup. Built once by initStaticStats and embedded by value into
+// sessionStats on every poll; embedding keeps the JSON flat and byte-identical
+// to the earlier map shape. System stays a map[string]any because it must be
+// deep-copied from the process-wide callSystemInfo() singleton (see
+// doInitStaticStats).
 type sessionStatsStatic struct {
 	Backend          string         `json:"backend"`
 	CLIName          string         `json:"cli_name"`
@@ -142,15 +115,10 @@ type sessionStatsStatic struct {
 	Agents           []string       `json:"agents"`
 }
 
-// sessionStats is the full "stats" sub-object returned from GET /api/sessions.
-// Prior code built this as a 12+ key map[string]any literal on every poll;
-// this named struct holds the static subset by anonymous embed (JSON fields
-// promote flat) and the dynamic counters + version + uptime + watchdog
-// inline, with `projects` omitempty when the dashboard has no configured
-// projects. Marshals byte-identically to the prior map shape so dashboard.js
-// consumers (stats.agents / stats.default_workspace / stats.projects /
-// stats.cli_name / stats.cli_version / stats.workspace_id / stats.workspace_name
-// / stats.system / stats.version) see the same keys in the same order.
+// sessionStats is the "stats" sub-object of GET /api/sessions. Static fields
+// are promoted flat via the embed; the JSON key set is a wire contract with
+// dashboard.js (stats.agents / default_workspace / projects / cli_* /
+// workspace_* / system / version).
 type sessionStats struct {
 	sessionStatsStatic
 	Active  int    `json:"active"`
@@ -158,12 +126,9 @@ type sessionStats struct {
 	Ready   int    `json:"ready"`
 	Total   int    `json:"total"`
 	Version uint64 `json:"version"`
-	// VersionTag is the naozhi build tag (e.g. `git describe` output).
-	// Surfaced separately from the uint64 `version` counter (which tracks
-	// session-store mutations) so dashboard.js can render a footer like
-	// "naozhi v1.2.3-dirty · dark" without conflating with the poll-version
-	// field. Omitempty preserves the legacy wire shape when the ldflag is
-	// unset (e.g. `go run` without -X, or `go build` without Makefile).
+	// VersionTag is the naozhi build tag (`git describe`), distinct from the
+	// uint64 `version` store-mutation counter. omitempty keeps the wire shape
+	// when the ldflag is unset.
 	VersionTag string        `json:"version_tag,omitempty"`
 	Uptime     string        `json:"uptime"`
 	Watchdog   watchdogStats `json:"watchdog"`
@@ -172,11 +137,8 @@ type sessionStats struct {
 	Projects []projectListEntry `json:"projects"`
 }
 
-// nodeStatusEntry is the per-node element in /api/sessions "nodes".
-// Named struct (vs map[string]any{...}) eliminates N inner-map allocs and
-// interface{} boxing on every 1 Hz dashboard poll. `omitempty` on
-// remote_addr keeps the JSON output identical for offline / "local" rows
-// that don't carry an address. R62-PERF-1.
+// nodeStatusEntry is the per-node element in /api/sessions "nodes"; omitempty
+// on remote_addr keeps offline / "local" rows byte-identical to the old map.
 type nodeStatusEntry struct {
 	DisplayName string `json:"display_name"`
 	Status      string `json:"status"`
@@ -184,29 +146,18 @@ type nodeStatusEntry struct {
 }
 
 // sessionListLocalResp is the /api/sessions response shape for single-node
-// deployments (no remote nodes configured). Replaces a per-poll
-// `make(map[string]any, 3)` + 3 string-keyed boxed assignments — a struct
-// literal marshals byte-identically (sessions / stats / history_sessions
-// keys in the same order as the prior map iteration order Go fixed for
-// json.Marshal at v1.12+) while skipping the map bucket alloc + 3
-// interface{} boxes per request. `history_sessions` is omitempty so
-// deployments without JSONL history serialize the same 2-key object as
-// before. R226-PERF-7.
+// deployments. history_sessions is omitempty so deployments without JSONL
+// history serialize the same 2-key object.
 type sessionListLocalResp struct {
 	Sessions        []sessionpkg.SessionSnapshot `json:"sessions"`
 	Stats           sessionStats                 `json:"stats"`
 	HistorySessions []discovery.RecentSession    `json:"history_sessions,omitempty"`
 }
 
-// sessionListMultiResp is the /api/sessions response shape for multi-node
-// deployments (>=1 configured remote node). `Sessions` is []any because
-// the multi-node merge concatenates local SessionSnapshot values with
-// remote node session entries (arbitrary map[string]any decoded from
-// peer JSON). `Nodes` has no omitempty: this struct is only used when
-// the node map is populated, so the field is always present in the
-// JSON output, matching the prior `resp["nodes"] = nodeStatus`
-// unconditional assignment. `HistorySessions` keeps omitempty for the
-// same reason as the single-node variant. R226-PERF-7.
+// sessionListMultiResp is the /api/sessions response shape when >=1 remote node
+// is configured. Sessions is []any because local SessionSnapshot values are
+// merged with remote entries decoded as map[string]any. Nodes has no omitempty:
+// this struct is only used when the node map is populated.
 type sessionListMultiResp struct {
 	Sessions        []any                      `json:"sessions"`
 	Stats           sessionStats               `json:"stats"`
@@ -214,50 +165,15 @@ type sessionListMultiResp struct {
 	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
 }
 
-// CronView is the consolidated narrow consumer interface the server
-// package needs from *cron.Scheduler. R242-ARCH-13 (#754) collapses three
-// previously-separate single-method shapes — cronHubOps (EnsureStub +
-// SetJobPrompt, used by the Hub's auto-save-prompt path), cronStubChecker
-// (EnsureStub, used by Handlers.HandleEvents to revive dismissed
-// cron stubs) and cronSessionLister (KnownSessionIDs, used by
-// loadHistorySessions to hide cron-spawned JSONLs from the catch-all
-// history panel) — into one interface so reviewers and test authors only
-// have to learn one shape.
+// CronView is the narrow consumer interface this package needs from
+// *cron.Scheduler (EnsureStub / SetJobPrompt / KnownSessionIDs). It aliases the
+// canonical definition in internal/dashboard/cronview so the shape cannot drift
+// from internal/server's copy (#1536).
 //
-// *cron.Scheduler satisfies CronView implicitly. Defined in the server
-// package (not in cron) so server's coupling to cron stays at the three
-// methods we actually call rather than the full Scheduler API. Lineage:
-// R228-ARCH-17 (cronStubChecker) → R232-ARCH-7 (cronHubOps) → R245-ARCH
-// (cronSessionLister) → R242-ARCH-13 (CronView).
-//
-// R242-ARCH-28 (#772): EnsureStub returns false in three distinct cases
-// that callers historically had to disambiguate by side-effect:
-//
-//	(a) the key isn't a `cron:` key at all (non-cron caller path —
-//	    legitimate no-op, not a failure);
-//	(b) the cron job ID parsed out of the key is unknown to the scheduler
-//	    (the job was deleted before the dashboard tab re-subscribed);
-//	(c) the job is known but stub-registration failed inside cron
-//	    (unexpected — should be slog'd by the cron implementation).
-//
-// All three currently surface as the same bool, so HandleEvents /
-// handleSubscribe cannot tell "this is a non-cron key, behave normally"
-// from "this used to be a cron job, return 404". Today's callers fall
-// through to the existing nil-session 404 in case (b) which happens to
-// be correct, and case (c) is so rare that the absence of a structured
-// reason is acceptable; promoting EnsureStub to (ok bool, reason string)
-// is queued behind the cron→server interface tightening RFC because it
-// breaks every test mock + the *cron.Scheduler concrete signature, and
-// the production behaviour is already correct under the bool-only
-// contract. Reviewers picking up this comment: the proposal is in
-// `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
-// ambiguity is documented here so a future caller doesn't accidentally
-// add a bug-prone reason-by-deduction branch over the bool.
-//
-// R20260531070014-ARCH-2 (#1536): the interface body was byte-identical to
-// internal/server/cronview.go. Both now alias the single canonical
-// definition in the leaf package internal/dashboard/cronview, so the shape
-// can no longer drift between the two consumers.
+// EnsureStub returns false for three indistinguishable cases: non-cron key
+// (legitimate no-op), unknown job ID, or stub registration failure. Callers
+// fall through to the nil-session 404, which is correct for all three; do not
+// add a reason-by-deduction branch over the bool (#772).
 type CronView = cronview.CronView
 
 // historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
@@ -288,32 +204,18 @@ type Handlers struct {
 	// mirrors dashproject.Handlers.projectStableKeyEnabled.
 	projectStableKeyEnabled bool
 	scheduler               CronView // optional; used by HandleEvents to revive dismissed cron stubs (EnsureStub)
-	// cronSessions is the optional Scheduler-side view consulted when
-	// building the history panel via KnownSessionIDs(). When nil, cron-spawned
-	// JSONLs are NOT filtered from history (degraded behaviour matches pre-R245).
-	// The underlying type is *cron.Scheduler in production; tests may inject
-	// a stub. R245-ARCH (cron+sys hide-from-history).
-	//
-	// scheduler and cronSessions remain two separate CronView fields rather
-	// than a single shared one because production wiring (server.go) must
-	// be allowed to nil either independently — e.g. to disable history
-	// filtering while keeping stub revival, or vice versa. Both are typed
-	// CronView so a single concrete *cron.Scheduler can satisfy both.
-	// R242-ARCH-13 (#754).
+	// cronSessions feeds KnownSessionIDs() to the history panel; nil disables
+	// filtering cron-spawned JSONLs. Kept separate from scheduler so server.go
+	// can nil either independently (#754).
 	cronSessions CronView
-	// sysWorkDir is the absolute filesystem path used by sysession's
-	// transient claude -p Runner.  When non-empty, every JSONL under
-	// this workspace path is hidden from the history panel — AutoTitler
-	// otherwise leaks prompt fragments into the catch-all "recent
-	// sessions" list. Empty (typical in tests / disabled sysession)
-	// degrades cleanly. R245-ARCH.
+	// sysWorkDir is sysession's transient Runner workspace; when non-empty its
+	// JSONLs are hidden from the history panel (AutoTitler otherwise leaks
+	// prompt fragments into "recent sessions").
 	sysWorkDir  string
 	claudeDir   string
 	allowedRoot string
 	agents      map[string]sessionpkg.AgentOpts
-	// agentIDs is the precomputed list of agent IDs surfaced in /api/sessions.
-	// Built once at construction (agents map is immutable after startup) so the
-	// dashboard poll handler avoids allocating + filling this slice on each hit.
+	// agentIDs is precomputed once (agents map is immutable after startup).
 	agentIDs   []string
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
@@ -323,94 +225,55 @@ type Handlers struct {
 	backendTag    string
 	workspaceID   string
 	workspaceName string
-	// versionTag is the naozhi build tag piped into sessionStats.VersionTag
-	// on every poll. Immutable after construction. Empty means "unknown"
-	// (e.g. `go run` with no -X main.version ldflag) and is omitted from
-	// the JSON response via omitempty.
+	// versionTag is the build tag surfaced as sessionStats.VersionTag; empty
+	// means unknown and is omitted from JSON.
 	versionTag    string
 	watchdogNoOut *atomic.Int64
 	watchdogTotal *atomic.Int64
 
-	// snapshotEnricher is an optional hook wired from server.go to
-	// Hub.enrichSnapshot so SubagentInfo rows in /api/sessions responses
-	// carry the tailer-side LastTool / ToolUses / DurationMS that never
-	// appear in the parent stream. nil in tests that don't build a Hub.
+	// snapshotEnricher is wired from server.go to Hub.enrichSnapshot so
+	// SubagentInfo rows carry tailer-side LastTool / ToolUses / DurationMS.
+	// nil in tests that don't build a Hub.
 	snapshotEnricher func(*sessionpkg.SessionSnapshot)
 
-	// uptimeCache memoises the formatted uptime string at 1-second resolution.
-	// HandleList is hit at 1 Hz × N dashboard tabs, and
-	// time.Since(startedAt).Round(time.Second).String() allocates a short
-	// string on every call — roughly (N-1)/N of those allocations sit inside
-	// the same 1-second bucket. Caching the string with its bucket-id (seconds
-	// since start) lets all pollers within the same second reuse one alloc.
-	// Races are benign: concurrent misses re-format the same value. R65-PERF-L-1.
+	// uptimeCache memoises the formatted uptime string per 1-second bucket so
+	// N tabs polling at 1 Hz share one alloc. Races are benign: concurrent
+	// misses re-format the same value.
 	uptimeCache atomic.Pointer[uptimeSnapshot]
 
-	// projectListCache memoises the projectList slice built in HandleList at
-	// 1-second resolution, sharing one rebuild across N dashboard tabs polling
-	// at 1 Hz. Each tab opening adds (len(projects) ≤ ~50) projectListEntry
-	// allocations + dashproject.RedactGitRemoteURL calls per second; with the cache N tabs
-	// collapse to 1 rebuild/s instead of N. The cached slice is read-only —
-	// HandleList copies the header into stats.Projects, never mutating it —
-	// so multiple readers can safely share the same backing array within a
-	// bucket. Misses re-build identically; last-writer-wins via Store is
-	// intentional (the formatted slice still escapes to the response).
-	//
-	// 1s resolution is chosen over a Manager-version invalidation hook because
-	// (a) project mutations are minute-scale (operator clicks vs poll Hz), so
-	// 1s lag is invisible to humans; (b) versioning project.Manager would
-	// touch a package outside this file's domain. R247-PERF-15 [REPEAT-3].
+	// projectListCache memoises the projectList slice per 1-second bucket so N
+	// tabs share one rebuild. The cached slice is READ-ONLY (HandleList copies
+	// the header, never mutates); misses rebuild identically and last-writer
+	// wins. 1s resolution beats a Manager-version hook because project
+	// mutations are minute-scale and it avoids touching project.Manager.
 	projectListCache atomic.Pointer[projectListSnapshot]
 
-	// staticStats pre-builds the subset of /api/sessions stats fields that
-	// are immutable after startup (backend, cli_name, workspace_*, system,
-	// agents). HandleList copies this struct by value on each poll instead
-	// of rebuilding a 9-key map literal — a struct copy is a single
-	// stack-local memmove vs per-key interface{} boxing + map bucket alloc.
+	// staticStats is the immutable stats subset, copied by value per poll.
 	// Initialized once by initStaticStats() after all fields are set.
-	// Round 79 upgrade from map[string]any → named struct.
 	staticStats sessionStatsStatic
-	// staticStatsOnce enforces the "initStaticStats called exactly once"
-	// contract structurally. A test double or future refactor that calls
-	// initStaticStats twice would otherwise race with concurrent HandleList
-	// readers, who read staticStats without synchronisation. R61-GO-12.
+	// staticStatsOnce makes "initStaticStats called exactly once" structural;
+	// a second call would race with HandleList readers of staticStats.
 	staticStatsOnce sync.Once
 
 	// History cache (120s TTL — see cacheTTL in historySessions).
 	//
-	// ALIASING CONTRACT (R62-GO-5): cache hits return the slice *header* only,
-	// not a copy. Multiple readers end up with slice values that alias the same
-	// backing array, which is race-free in Go — the backing array is allocated
-	// fresh by loadHistorySessions() (a `make + append` pipeline that discards
-	// the old backing array on TTL expiry), not mutated in place. Concurrent
-	// readers may observe the array alive past the mutex release because Go's
-	// GC keeps it reachable through every slice header still referencing it.
-	//
-	// The invariant writers MUST preserve: ANY refresh path (loadHistorySessions,
-	// WarmHistoryCache, future features) must assign a freshly allocated slice
-	// to h.historyCache, never mutate the existing backing array via
-	// append-in-place on a header already handed out. Shallow copy before any
-	// such mutation. Breaking this invariant produces cross-reader data
-	// corruption indistinguishable from a classic data race.
+	// ALIASING CONTRACT: cache hits return the slice header only, so readers
+	// alias the same backing array. This is race-free ONLY because every
+	// refresh path (loadHistorySessions, WarmHistoryCache, future features)
+	// assigns a freshly allocated slice to h.historyCache and never appends
+	// in place on a header already handed out. Shallow copy before any such
+	// mutation.
 	historyCache     []discovery.RecentSession
 	historyCacheTime time.Time
-	// historyCacheTimeUnixNano mirrors historyCacheTime.UnixNano() for
-	// wait-free TTL checks on the hot path. R040034-PERF-5 (#1404):
-	// historySessions() previously locked twice on each follower poll —
-	// once on the fast-path TTL check and again inside the singleflight
-	// closure for re-check. With this atomic mirror the fast-path TTL
-	// check is wait-free and the flight closure skips its mutex entirely.
-	// The lock is now only acquired when we actually need to read the
-	// cached slice (fresh-cache hit) or install a new one (load path).
-	// Writers MUST keep this atomic in sync with historyCacheTime under
-	// historyCacheMu so concurrent fast-path readers cannot observe the
-	// atomic say "fresh" while the slice has not yet been installed.
+	// historyCacheTimeUnixNano mirrors historyCacheTime.UnixNano() so the
+	// hot-path TTL check is wait-free (#1404). Writers MUST update it under
+	// historyCacheMu together with historyCacheTime so fast-path readers never
+	// see "fresh" before the slice is installed.
 	historyCacheTimeUnixNano atomic.Int64
 	historyCacheMu           sync.RWMutex
 	historyFlight            singleflight.Group
-	// warmHistoryWg tracks the WarmHistoryCache goroutine so callers (server
-	// shutdown) can wait for the background FS scan to finish before tearing
-	// down h.claudeDir-dependent state. R64-GO-M1.
+	// warmHistoryWg tracks the WarmHistoryCache goroutine so server shutdown
+	// can wait for the background FS scan before tearing down claudeDir state.
 	warmHistoryWg sync.WaitGroup
 
 	// Summary cache (30s TTL) — avoids re-running discovery.LookupSummaries
@@ -418,76 +281,36 @@ type Handlers struct {
 	summaryCache     map[string]string
 	summaryCacheTime time.Time
 	summaryCacheMu   sync.RWMutex
-	// summaryFlight collapses concurrent misses at the 30s TTL boundary into
-	// a single LookupSummaries invocation. Before this, N simultaneous tab
-	// polls that missed the cache each performed a full N×os.Stat scan over
-	// the project's .claude directory — multiplied by slow network filesystems
-	// this could saturate disk IO. Mirrors the historyFlight pattern.
-	// R60-PERF-5.
+	// summaryFlight collapses concurrent misses at the TTL boundary into one
+	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
 
-	// retiredStore stamps the unix-ms instant a session left the live
-	// sidebar (Router.Reset / Router.Remove) so loadHistorySessions can
-	// emit retired_at on each RecentSession. The dashboard then sorts the
-	// history popover by retired_at || last_active, putting the most
-	// recently closed panel on top regardless of when its JSONL was last
-	// written. nil disables the feature; the response degrades to
-	// last_active-only ordering. See discovery.RetiredStore godoc.
+	// retiredStore stamps when a session left the live sidebar so history rows
+	// carry retired_at (dashboard sorts by retired_at || last_active). nil
+	// disables; ordering degrades to last_active only.
 	retiredStore *discovery.RetiredStore
 
-	// validateWS / systemInfoFn inject server-package helpers without
-	// reverse-import. Phase 3e (server-split-phase4-design.md §6.5 Plan B).
+	// validateWS / systemInfoFn inject server-package helpers without a
+	// reverse import.
 	validateWS   func(ws, root string) (string, error)
 	systemInfoFn func() map[string]any
 }
 
-// GET /api/sessions
-//
-// R246-CR-002 split (#736): HandleList previously combined cutoff filter +
-// state count + project mapping + summary lookup + stats build + node merge
-// + JSON shape selection in one ~300 line function. The body now orchestrates
-// focused helpers; each helper is independently testable and the per-helper
-// docstring states its mutation contract:
-//   - filterAndCountSnapshots — sidebar cutoff + scratch/cron/sys filter +
-//     running/ready counts in a single pass
-//   - fillProjectAndSummary  — workspace → project name + summaries-index
-//     lookup; mutates snapshots in place
-//   - buildSessionStats      — typed stats payload (no map[string]any boxing)
-//   - buildLocalResp         — single-node JSON shape
-//   - buildMultiNodeResp     — multi-node merge (live + cached) JSON shape
-//
-// Performance comments + race anchors stay on the helpers rather than this
-// orchestrator so reviewers don't have to hold the whole pipeline in their
-// head while reading a single concern.
+// HandleList serves GET /api/sessions. It orchestrates focused helpers —
+// filterAndCountSnapshots, fillProjectAndSummary, buildSessionStats,
+// buildLocalResp / buildMultiNodeResp — each of which documents its own
+// mutation contract (#736).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
-	// R20260607-PERF-1 (#1916): storeGen-gated REST poll. The dashboard polls
-	// /api/sessions at 1 Hz × N tabs; the WS push path already debounces on
-	// storeGen, but this handler used to rebuild the whole snapshot slice
-	// (make([]SessionSnapshot,N) + N×Snapshot() + json.Marshal — ~14 KB/poll
-	// for 50 sessions) on every tick even when nothing changed.
-	//
-	// We now publish an ETag that captures every input that can change the
-	// SINGLE-NODE response body — the session storeGen version plus a history
-	// fingerprint (the history cache epoch + length; a re-scan that produces
-	// identical content bumps the epoch and harmlessly falls through to a full
-	// rebuild ~once per 120 s TTL, never a stale 304). The multi-node response
-	// additionally folds in live node-connection status that has no version
-	// hook, so the conditional fast path is deliberately scoped to single-node
-	// deployments; multi-node always rebuilds. When the client echoes a
-	// matching If-None-Match the handler emits 304 and skips the snapshot
-	// build, filterAndCountSnapshots, fillProjectAndSummary, buildSessionStats
-	// and the JSON marshal entirely.
-	//
-	// Backward compatible: a client that omits If-None-Match (or a non-single-
-	// node deployment) always gets a full 200 with the ETag header set, so the
-	// optimisation engages only once both sides cooperate.
+	// Conditional GET (#1916): the ETag folds in storeGen plus a history
+	// fingerprint (cache epoch + length) — every input that can change the
+	// SINGLE-NODE body. Multi-node responses also depend on live node status
+	// with no version hook, so they always rebuild. Clients that omit
+	// If-None-Match always get a full 200 with the ETag set.
 	knownNodes := h.nodeAccess.KnownNodes()
 	singleNode := len(knownNodes) == 0
 
-	// sinceVersion is the storeGen the client last rendered, parsed back out of
-	// its If-None-Match validator. Zero (unparseable / absent header) means
-	// "client has nothing" and forces a full build. ListSessionsIfChanged does
-	// the wait-free gen.Load() compare and only rebuilds when it advanced.
+	// sinceVersion is the storeGen the client last rendered; 0 (absent or
+	// unparseable) forces a full build.
 	clientETag := r.Header.Get("If-None-Match")
 	sinceVersion := parseETagVersion(clientETag)
 
@@ -496,17 +319,12 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	var etag string
 	if singleNode {
 		// Warm the history cache BEFORE fingerprinting so the ETag reflects the
-		// exact history slice buildLocalResp will embed below (its own
-		// historySessions() call then hits the warm cache at the same epoch).
-		// Cheap: the wait-free atomic TTL fast-path returns the cached slice
-		// without an FS scan on the steady-state poll. Without this the ETag
-		// could be stamped from a pre-repopulation epoch while the body carries
-		// post-repopulation history.
+		// exact history slice buildLocalResp embeds (its own historySessions()
+		// call then hits the same epoch). Steady state is a wait-free TTL hit.
 		h.historySessions()
 		etag = h.sessionsListETag(version)
-		// Snapshots unchanged AND the full validator (which also folds in the
-		// history fingerprint) still matches what the client holds → nothing in
-		// the single-node body moved, so 304 and skip the rebuild entirely.
+		// Snapshots unchanged AND full validator matches → nothing in the
+		// single-node body moved; 304 and skip the rebuild.
 		if !changed && clientETag != "" && clientETag == etag {
 			w.Header().Set("ETag", etag)
 			w.Header().Set("Cache-Control", "no-store")
@@ -515,13 +333,9 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// changed==false means ListSessionsIfChanged returned a nil snapshot slice
-	// (the gen had not advanced) but the request still needs a full body — e.g.
-	// a multi-node deployment, a first poll with no validator, or a single-node
-	// poll whose history fingerprint moved while storeGen held. Build the slice
-	// now via ListSessionsWithVersion so the (snapshots, version) pair stays in
-	// the same r.mu.RLock epoch (R246-PERF-15 #726): response.version is exactly
-	// the version that produced the snapshot slice, closing the gen/data race.
+	// changed==false with no 304 (multi-node, first poll, or history moved
+	// while storeGen held) still needs a body. ListSessionsWithVersion keeps
+	// (snapshots, version) in one r.mu.RLock epoch (#726).
 	if !changed {
 		snapshots, version = h.router.ListSessionsWithVersion()
 		if singleNode {
@@ -529,15 +343,12 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Capture once so downstream cutoff / uptime bucket computations share a
-	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.
+	// Captured once so cutoff / uptime bucket share a single vDSO call.
 	now := time.Now()
 
 	snapshots, running, ready := filterAndCountSnapshots(snapshots, now)
 
-	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
-	// hub tailer registry is empty or hasn't been wired — safe for tests
-	// that build Handlers without a Hub.
+	// Overlay tailer-side agent metrics; no-op when no Hub is wired (tests).
 	if h.snapshotEnricher != nil {
 		for i := range snapshots {
 			h.snapshotEnricher(&snapshots[i])
@@ -548,11 +359,8 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	stats := h.buildSessionStats(now, version, running, ready)
 
-	// knownNodes was sampled once at the top (KnownNodes returns an immutable
-	// snapshot without the nodeAccess lock; NodesSnapshot would take it).
-	// Single-node deployments (the common case) have len(knownNodes)==0 and
-	// never need the live snapshot. R20260607-PERF-1 (#1916): stamp the ETag so
-	// the next poll's If-None-Match can match and 304 without a rebuild.
+	// KnownNodes was sampled once at the top (immutable snapshot, no lock).
+	// Stamp the ETag so the next poll's If-None-Match can 304.
 	if singleNode {
 		w.Header().Set("ETag", etag)
 		httputil.WriteJSON(w, h.buildLocalResp(snapshots, stats))
@@ -562,12 +370,10 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, h.buildMultiNodeResp(snapshots, stats, knownNodes))
 }
 
-// parseETagVersion extracts the storeGen version embedded in a sessionsListETag
-// validator (`"v<N>-h<E>-n<L>"`). It is intentionally lenient: any header it
-// cannot parse — a weak validator, a future format, a stale value from an older
-// binary, or an absent header — yields 0, which forces ListSessionsIfChanged to
-// rebuild. The history epoch / length suffix is not parsed here; it only needs
-// to participate in the full-string equality check, not the gen gate.
+// parseETagVersion extracts the storeGen version from a sessionsListETag
+// validator (`"v<N>-h<E>-n<L>"`). Lenient: anything unparseable (weak
+// validator, future format, absent header) yields 0, forcing a rebuild. The
+// history suffix only participates in the full-string equality check.
 func parseETagVersion(etag string) uint64 {
 	etag = strings.TrimPrefix(etag, "W/")
 	etag = strings.Trim(etag, `"`)
@@ -585,22 +391,12 @@ func parseETagVersion(etag string) uint64 {
 	return v
 }
 
-// sessionsListETag derives the conditional-GET validator for the single-node
-// /api/sessions response from the session storeGen version plus the history
-// cache fingerprint (epoch nanos + length). These are exactly the inputs that
-// vary the single-node body: snapshots are storeGen-gated, and history_sessions
-// changes only when the cache is repopulated (a new epoch) or invalidated
-// (epoch reset to 0). Stats fields are either static (sessionStatsStatic) or
-// derived from the same snapshots/version, and projects/uptime move at coarser
-// resolution than the snapshot version they ride alongside, so they never
-// change the body while version holds.
-//
-// Returning the same etag for an unchanged (version, history) pair lets a
-// cooperating client's If-None-Match short-circuit the rebuild; a mismatch (the
-// common change case, or a client that never sends the header) falls through to
-// a full 200. A re-scan that yields byte-identical history still bumps the
-// epoch and produces a fresh etag — a harmless ~1/120s missed optimisation, not
-// a stale read.
+// sessionsListETag derives the single-node /api/sessions validator from the
+// storeGen version plus the history cache fingerprint (epoch nanos + length) —
+// exactly the inputs that vary the body. Stats fields are static or derived
+// from the same snapshots/version; projects/uptime move at coarser resolution.
+// A re-scan yielding identical history still bumps the epoch: a harmless
+// missed optimisation, never a stale read.
 func (h *Handlers) sessionsListETag(version uint64) string {
 	historyEpoch := h.historyCacheTimeUnixNano.Load()
 	h.historyCacheMu.RLock()
@@ -612,51 +408,29 @@ func (h *Handlers) sessionsListETag(version uint64) string {
 		`-n` + strconv.Itoa(historyLen) + `"`
 }
 
-// filterAndCountSnapshots walks the router snapshot exactly once to:
+// filterAndCountSnapshots walks the router snapshot once: it counts running /
+// ready across ALL entries (so maxProcs pressure includes scratch / cron / sys
+// sessions) and drops scratch / cron / sys keys from the returned slice (they
+// own dedicated panels). Compacts in place — the result aliases the input
+// header with shrunk len, so callers must not retain the original.
 //
-//  1. count running / ready sessions across ALL surviving entries (so the
-//     maxProcs pressure indicator stays correct even for scratch / cron /
-//     sys sessions that don't show up in the sidebar),
-//  2. drop scratch / cron / sys keys from the returned slice — those
-//     surfaces own dedicated dashboard panels (drawer / 「定时任务」 /
-//     System) and must not duplicate-render in the sidebar.
-//
-// The function compacts in place: the returned slice aliases the input
-// header but with len shrunk to the number of sidebar-eligible entries,
-// so callers must not retain the original header after this call.
-//
-// #2278: this no longer applies a 24h "dead session" cutoff. Sessions the
-// user opened stay in the sidebar until manually closed (dashboard delete →
-// Remove, or /new → Reset); an idle-expired session (process reaped for
-// memory, DeathReason set) remains as a resumable card. The `now` parameter
-// is retained for the count-time contract and signature stability even
-// though no time-based drop happens here anymore. Terminal removal of
-// SessionID-bearing sessions is driven solely by explicit user action, and
-// orphan cleanup by Router.shouldPrune (which keeps resumable sessions).
-//
-// R246-CR-002 split (#736): previously inlined into HandleList; the merged
-// filter+count pass (rather than two walks) was deliberate for hot-path
-// alloc reasons and the performance contract is preserved here.
+// No 24h "dead session" cutoff (#2278): sessions stay until explicitly
+// closed; idle-expired ones remain as resumable cards. `now` is retained for
+// signature stability.
 func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Time) ([]sessionpkg.SessionSnapshot, int, int) {
 	_ = now // retained for signature stability; no time-based cutoff (#2278)
 	var running, ready int
 	n := 0
 	for _, snap := range snapshots {
-		// Always count running/ready first so maxProcs pressure stays visible
-		// in stats regardless of whether the session is sidebar-eligible.
 		switch snap.State {
 		case "running":
 			running++
 		case "ready":
 			ready++
 		}
-		// Scratch (ephemeral aside) sessions own a CLI process and therefore
-		// show up in router.ListSessions, but the drawer UX treats them as
-		// private to one dashboard tab. Cron flows through the dedicated
-		// 「定时任务」panel (cron-panel-consolidation RFC), and sys: daemons
-		// are naozhi-internal infrastructure surfaced via the System drawer
-		// (docs/rfc/system-session.md §9.2). None of them belong in the
-		// sidebar listing.
+		// Scratch, cron and sys: sessions own a CLI process so they appear in
+		// ListSessions, but each has its own panel (drawer / 「定时任务」 / System
+		// drawer, docs/rfc/system-session.md §9.2) and must not render here.
 		if sessionkey.IsScratchKey(snap.Key) || sessionkey.IsCronKey(snap.Key) || sessionkey.IsSysKey(snap.Key) {
 			continue
 		}
@@ -666,25 +440,11 @@ func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Ti
 	return snapshots[:n], running, ready
 }
 
-// workspacesPool reuses the []string scratch slice fillProjectAndSummary
-// + loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every
-// /api/sessions poll (1 Hz × N tabs) and every history scan. R217-PERF-10
-// (#616): the previous per-call `make([]string, 0, len(snapshots))` showed
-// up in heap profiles on session-heavy dashboards. ResolveWorkspaces
-// reads the header inside its own RLock and never retains the backing
-// array, so a pool entry is safe to recycle once the call returns.
-//
-// Each pool entry is a *[]string so the runtime can elide the per-Get
-// alloc on the typed pointer wrapper too — directly pooling []string
-// would still alloc a new header on every Put because slice values are
-// non-pointer. The slice we hand out has cap >= the requested size and
-// len reset to 0; callers append fresh data and Put back the same
-// pointer. A grown slice (cap > 4096) is dropped on Put so a single
-// pathological request cannot inflate every pool entry's footprint.
-//
-// Concurrency: sync.Pool is safe; the per-tab calls never share a
-// borrowed slice. The cap-bounding contract on Put ensures the pool's
-// steady-state working-set stays bounded by the typical session count.
+// workspacesPool recycles the []string scratch that fillProjectAndSummary and
+// loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every poll
+// (#616). ResolveWorkspaces never retains the backing array, so recycling is
+// safe. Entries are *[]string so Put doesn't re-alloc a header; slices grown
+// past 4096 are dropped on Put to bound the steady-state footprint.
 var workspacesPool = sync.Pool{
 	New: func() any {
 		s := make([]string, 0, 32) // typical sidebar fits in this prefix
@@ -699,10 +459,8 @@ func borrowWorkspaces(want int) *[]string {
 	p := workspacesPool.Get().(*[]string)
 	s := *p
 	if cap(s) < want {
-		// Grow once to the request size + slack rather than letting
-		// append's geometric growth stamp out a fresh backing array on
-		// each call. Bounded by the snapshot length so a deployment with
-		// thousands of sessions does not over-allocate.
+		// Grow once to the request size rather than letting append's geometric
+		// growth allocate on each call.
 		s = make([]string, 0, want)
 	} else {
 		s = s[:0]
@@ -711,24 +469,18 @@ func borrowWorkspaces(want int) *[]string {
 	return p
 }
 
-// returnWorkspaces hands the recycled slice back to the pool. Slices
-// whose backing array has been grown past the cap-bounding threshold are
-// dropped so a single oversized poll cannot inflate every pool entry's
-// retained footprint.
+// returnWorkspaces hands the slice back to the pool, dropping oversized
+// backing arrays so one big poll cannot inflate every entry's footprint.
 func returnWorkspaces(p *[]string) {
 	if p == nil {
 		return
 	}
 	const maxRetainCap = 4096
 	if cap(*p) > maxRetainCap {
-		// Drop the oversized backing array; the pool will allocate a
-		// fresh small one on next Get via the New func above.
 		return
 	}
-	// Clear element references so the pool does not keep the workspace
-	// strings live past the request. Strings are interned by Go's
-	// compiler for short literals but workspace paths are dynamically
-	// constructed and would otherwise be GC-pinned via the pool.
+	// Clear element references so the pool doesn't GC-pin workspace strings
+	// past the request.
 	s := *p
 	for i := range s {
 		s[i] = ""
@@ -738,20 +490,11 @@ func returnWorkspaces(p *[]string) {
 }
 
 // fillProjectAndSummary stamps each snapshot with its project name (from
-// ProjectManager + planner-key fallback) and any persisted Summary lookup
-// from sessions-index.json. Mutates snapshots in place.
-//
-// Splitting this out of HandleList lets tests exercise project-name
-// resolution against a stub ProjectManager without spinning up the full
-// dashboard handler. R246-CR-002 (#736).
+// ProjectManager + planner-key fallback) and any persisted Summary from
+// sessions-index.json. Mutates snapshots in place.
 func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot) {
 	if h.projectMgr != nil {
-		// Borrow a recycled []string scratch buffer to feed
-		// ResolveWorkspaces. R217-PERF-10 (#616): the previous per-call
-		// `make([]string, 0, len(snapshots))` showed up in heap profiles
-		// on session-heavy dashboards (1 Hz × N tabs). ResolveWorkspaces
-		// reads the header inside its own RLock and never retains the
-		// backing array, so the pool entry is safe to recycle on return.
+		// Pooled scratch buffer (#616); ResolveWorkspaces never retains it.
 		wsPtr := borrowWorkspaces(len(snapshots))
 		defer returnWorkspaces(wsPtr)
 		workspaces := *wsPtr
@@ -765,9 +508,8 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
-				// Planner keys are "project:{name}:planner". Extract the
-				// middle segment with two IndexByte calls to avoid the
-				// []string alloc from SplitN.
+				// Planner keys are "project:{name}:planner"; two IndexByte calls
+				// avoid SplitN's []string alloc.
 				key := snapshots[i].Key
 				const plannerPrefix = "project:"
 				if len(key) > len(plannerPrefix) {
@@ -780,13 +522,10 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 			} else if name := wsMap[snapshots[i].Workspace]; name != "" {
 				snapshots[i].Project = name
 			} else if base := workspaceFallbackName(snapshots[i].Workspace); base != "" {
-				// Fallback for unregistered workspaces: show the folder name
-				// so sessions that are not bound to a ProjectManager project
-				// still land in a meaningful sidebar group instead of "Other".
-				// ProjectFallback signals the frontend to include the
-				// workspace path in the group key so two different folders
-				// with the same basename (e.g. /a/tmp and /b/tmp) do not
-				// collapse into one group.
+				// Unregistered workspace: show the folder name so the session
+				// still lands in a meaningful group. ProjectFallback tells the
+				// frontend to key the group by path so /a/tmp and /b/tmp don't
+				// collapse together.
 				snapshots[i].Project = base
 				snapshots[i].ProjectFallback = true
 			}
@@ -804,12 +543,8 @@ func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot)
 	}
 }
 
-// buildSessionStats assembles the typed sessionStats payload that ships in
-// the GET /api/sessions response. The named-struct copy avoids the
-// map[string]any-style boxing the prior implementation paid on every 1 Hz
-// poll. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 / R51-PERF-005 /
-// R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001. Split out per
-// R246-CR-002 (#736).
+// buildSessionStats assembles the typed sessionStats payload for GET
+// /api/sessions.
 func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, ready int) sessionStats {
 	active, total := h.router.Stats()
 	stats := sessionStats{
@@ -826,12 +561,9 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 			TotalKills:    h.watchdogTotal.Load(),
 		},
 	}
-	// R20260612-global-version: cli_version is seeded into staticStats at
-	// startup from the spawn-time wrapper version, which goes stale after a
-	// host claude upgrade under a long-lived naozhi. Re-resolve it per poll
-	// from router.CLIVersion() — now backed by the live init-frame version —
-	// so the global banner tracks the upgrade without a restart. The lookup
-	// is a lock-free atomic read; only overwrite when non-empty so an
+	// cli_version in staticStats is the spawn-time value and goes stale after
+	// a host claude upgrade; re-resolve from the live init-frame version each
+	// poll (lock-free atomic read). Only overwrite when non-empty so an
 	// unwired router can't blank the startup value.
 	if live := h.router.CLIVersion(); live != "" {
 		stats.CLIVersion = live
@@ -841,13 +573,6 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 }
 
 // buildLocalResp constructs the single-node /api/sessions JSON shape.
-//
-// Use a named struct (sessionListLocalResp) instead of map[string]any
-// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
-// boxing on every request. JSON output is byte-identical to the prior
-// map literal because the field tags + omitempty preserve key order
-// and the optional history_sessions semantics. R226-PERF-7. Split out
-// per R246-CR-002 (#736).
 func (h *Handlers) buildLocalResp(snapshots []sessionpkg.SessionSnapshot, stats sessionStats) sessionListLocalResp {
 	resp := sessionListLocalResp{
 		Sessions: snapshots,
@@ -859,27 +584,15 @@ func (h *Handlers) buildLocalResp(snapshots []sessionpkg.SessionSnapshot, stats 
 	return resp
 }
 
-// buildMultiNodeResp constructs the multi-node /api/sessions JSON shape.
-// Local sessions are tagged with Node="local"; remote-node sessions and
-// connection status are merged from the node cache + live nodesSnapshot.
-//
-// Use a named struct (sessionListMultiResp) instead of map[string]any
-// so the multi-node hot path mirrors the single-node optimisation: no
-// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
-// every 1 Hz poll. JSON output stays byte-identical because the
-// field tags preserve key names and history_sessions keeps omitempty.
-// R226-PERF-7. Split out per R246-CR-002 (#736).
+// buildMultiNodeResp constructs the multi-node /api/sessions JSON shape: local
+// sessions are tagged Node="local" and merged with remote-node sessions and
+// connection status from the node cache + live nodesSnapshot.
 func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, stats sessionStats, knownNodes map[string]string) sessionListMultiResp {
-	// Multi-node path: now we actually need the live nodesSnapshot for
-	// connection status + fill-in. This acquires the nodeAccess lock.
+	// Only the multi-node path needs the live snapshot (takes the nodeAccess lock).
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
-	// Multi-node: tag local sessions and merge with cached remote sessions.
-	// R040034-PERF-3 (#1402): box *SessionSnapshot (pointer) into the []any
-	// rather than the value type — Go iface holds word-sized pointer payloads
-	// inline, but a 280 B struct value forces a heap copy on every box (50
-	// sessions × 1 Hz/tab pre-fix). JSON output is byte-identical because
-	// json.Marshal dereferences pointer-to-struct identically to the value.
+	// Box *SessionSnapshot rather than the 280 B value: pointer payloads sit
+	// inline in the iface, and json.Marshal output is identical (#1402).
 	allSessions := make([]any, 0, len(snapshots))
 	for i := range snapshots {
 		snapshots[i].Node = "local"
@@ -890,11 +603,6 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 	if localName == "" {
 		localName = "Local"
 	}
-	// nodeStatus is a map[string]nodeStatusEntry (named struct, omitempty on
-	// remote_addr) instead of map[string]any{...map[string]any{...}} — the
-	// prior shape paid N inner-map allocs + interface{} boxing per key on
-	// every 1 Hz /api/sessions poll. Marshals identically to the JSON
-	// clients expect. R62-PERF-1.
 	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(knownNodes))
 	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
@@ -953,36 +661,20 @@ func eventsBefore(entries []clievent.EventEntry, before int64) []clievent.EventE
 	return out
 }
 
-// GET /api/sessions/events
-//
-// Query parameters:
-//   - key       (required): session key
-//   - node      (optional): remote node ID (proxy to that node)
-//   - after     (optional, ms): incremental fetch — entries with Time >= after
-//     (re-admits the watermark ms, #2456; client dedups by uuid)
-//   - before    (optional, ms): pagination fetch — entries with Time < before,
-//     returning up to `limit` newest-first-then-
-//     reversed (chronological) entries
-//   - limit     (optional): caps the result count. Required when `before` is set;
-//     optional with `after` (defaults to uncapped for
-//     backwards compat); when neither `after` nor `before`
-//     is given, limit controls the initial page size
-//     (defaults to returning everything — legacy behaviour)
-//
-// Precedence: `after` wins over `before` if both are supplied (streaming
-// catch-up outranks pagination). No params = full history (legacy).
+// HandleEvents serves GET /api/sessions/events?key=&node=&after=&before=&limit=.
+// `after` (ms) is an incremental fetch with Time >= after (watermark re-admitted,
+// #2456; client dedups by uuid); `before` (ms) pages strictly older entries,
+// newest `limit` of them in chronological order; `limit` alone sizes the
+// initial page. `after` wins over `before`; no params returns full history.
 func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
 		return
 	}
-	// R172-SEC-L2: same validation the reverse-RPC fetch_events handler
-	// enforces at the connector edge (internal/upstream/connector.go).
-	// Without this gate an authenticated operator could post a multi-KB
-	// key that lands in slog attrs on the "session not found" path or
-	// embeds control bytes that corrupt log pipelines. ValidateSessionKey
-	// also implicitly caps length at MaxSessionKeyBytes (~520 B).
+	// Same gate as the reverse-RPC fetch_events handler: rejects multi-KB or
+	// control-byte keys before they reach slog attrs; also caps length at
+	// MaxSessionKeyBytes.
 	if err := sessionpkg.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
@@ -1026,10 +718,8 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy — the node RPC only carries `after` (it predates
-	// before/limit), so pagination is emulated here: fetch what the peer has
-	// and apply the `before` cursor locally. Not a protocol change, so older
-	// peer binaries keep working.
+	// Remote node proxy — the node RPC only carries `after`, so `before` /
+	// `limit` pagination is emulated locally; older peers keep working.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
@@ -1043,13 +733,9 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if beforeStr != "" && afterStr == "" {
-			// #2433: "load earlier" page. Previously `before` was ignored
-			// and the tail-`limit` slice below re-served the NEWEST page on
-			// every click, so prependEvents (no dedup) stacked duplicates
-			// and the button never reached "done". Mirror the local branch:
-			// strictly older than the cursor, newest `limit` of those, plus
-			// an authoritative has-more flag. An empty page is the client's
-			// stop signal, so it must come back as [] with has-more=0.
+			// "Load earlier" page (#2433): strictly older than the cursor, newest
+			// `limit` of those, plus an authoritative has-more flag. An empty page
+			// is the client's stop signal, so it must be [] with has-more=0.
 			pageLimit := limit
 			if pageLimit == 0 {
 				pageLimit = maxEventsPageLimit
@@ -1067,8 +753,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteJSON(w, page)
 			return
 		}
-		// Apply page cap on the returned entries so the dashboard gets a
-		// consistent-size payload even from legacy peers.
+		// Page cap so legacy peers still yield a consistent-size payload.
 		if limit > 0 && len(entries) > limit {
 			entries = entries[len(entries)-limit:]
 		}
@@ -1079,9 +764,8 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	// Local
 	sess := h.router.SessionFor(key)
 	if sess == nil && h.scheduler != nil && h.scheduler.EnsureStub(key) {
-		// Cron stubs are torn down by sidebar "×". The stub is lazily rebuilt
-		// on next click so polling clients (WS-down fallback) can still open
-		// the panel instead of getting a permanent 404 until the next tick.
+		// Cron stubs torn down by sidebar "×" are lazily rebuilt on next click so
+		// polling (WS-down) clients don't get a permanent 404 until the next tick.
 		sess = h.router.SessionFor(key)
 	}
 	if sess == nil {
@@ -1099,31 +783,18 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			entries = entries[len(entries)-limit:]
 		}
 	case beforeStr == "" && limit > 0:
-		// Initial page (limit only, no `before` cursor): mirror the WS
-		// subscribe handshake's visible-aware read. A plain tail-N could be
-		// entirely internal events (parallel agent team) and render to the
-		// blank "该会话最近仅有 agent 活动" placeholder. Walk ring-then-disk
-		// until the page carries enough real chat bubbles. This branch is the
-		// HTTP-fallback twin of completeSubscribe's msg.Limit>0 case.
+		// Initial page (limit only): visible-aware read mirroring the WS
+		// subscribe handshake, so a tail-N of internal-only events (agent team)
+		// doesn't render the blank "该会话最近仅有 agent 活动" placeholder.
 		visTarget := limit
 		if visTarget > sessionpkg.DefaultVisibleTarget {
 			visTarget = sessionpkg.DefaultVisibleTarget
 		}
-		// maxTotal=0 lets the reader use its own ceiling (ring size) rather
-		// than the client's page-size hint, so visible bubbles sitting beyond
-		// `limit` positions under an internal flood are still surfaced. The
-		// result is still bounded by maxEventsPageLimit (== ring size).
-		//
-		// X-Events-Has-More mirrors the WS "history" frame's has_more field:
-		// it tells the dashboard whether older history exists so it can mount
-		// the "load earlier" affordance without the brittle len>=limit guess.
-		// The body stays a bare JSON array — the flag rides a response header
-		// so the three existing array consumers (initial / incremental /
-		// pagination) keep their contract. Always set it ("0" or "1") on this
-		// branch so a modern client treats it as authoritative; an absent header
-		// then unambiguously means a legacy server or remote-node relay, where
-		// the client falls back to the length heuristic. Set before WriteJSON
-		// writes headers.
+		// maxTotal=0 lets the reader use its own ceiling (ring size) so visible
+		// bubbles beyond `limit` under an internal flood still surface.
+		// X-Events-Has-More mirrors the WS "history" has_more field; it rides a
+		// header so the bare-array body contract holds. Always set ("0"/"1") on
+		// this branch; an absent header means legacy server / remote relay.
 		var hasMore bool
 		entries, hasMore = sess.EventInitialPageCtx(r.Context(), visTarget, 0)
 		if hasMore {
@@ -1136,17 +807,11 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		if pageLimit == 0 {
 			pageLimit = maxEventsPageLimit
 		}
-		// "Load earlier" pagination: walk strictly backward by time. This must
-		// stay a plain time-ordered page — applying the visible-aware reader
-		// here would skip past internal events the operator is paging toward,
-		// breaking the load-earlier cursor contract.
-		//
+		// "Load earlier": a plain time-ordered page — the visible-aware reader
+		// would skip internal events the operator is paging toward.
 		// EventEntriesBeforeCtx falls back to the backend's history.Source
-		// (JSONL for claude) when the in-memory log no longer contains entries
-		// older than `before`. The request context propagates into disk I/O
-		// so a client-cancelled fetch unblocks the reverse JSONL scan on a
-		// slow filesystem. Non-claude backends receive a noop Source and
-		// behave exactly like the legacy memory-only path.
+		// (JSONL for claude) when memory no longer holds entries older than
+		// `before`; the request ctx lets a cancelled fetch unblock disk I/O.
 		entries = sess.EventEntriesBeforeCtx(r.Context(), before, pageLimit)
 	default:
 		entries = sess.EventEntries()
@@ -1155,17 +820,10 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, entries)
 }
 
-// DELETE /api/sessions accepts two input shapes for the session key:
-//
-//   - Query string:   DELETE /api/sessions?key=<k>&node=<n>   (REST-idiomatic)
-//   - JSON body:      DELETE /api/sessions  {key, node}        (legacy)
-//
-// Query wins when `key` is present there — lets scripted users do
-// `curl -X DELETE .../api/sessions?key=X` without crafting a body, which
-// some HTTP clients (curl -G, fetch()) make awkward. The legacy JSON body
-// path is preserved because the dashboard frontend and existing tests use
-// it; a flag-day migration would gain nothing over this additive change.
-// Both paths converge on the same validation + routing logic below.
+// HandleDelete serves DELETE /api/sessions. The key comes from the query
+// string (?key=&node=, REST-idiomatic, wins when present) or the legacy JSON
+// body {key, node} used by the dashboard frontend; both converge on the same
+// validation + routing.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key  string `json:"key"`
@@ -1174,9 +832,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if q := r.URL.Query(); q.Get("key") != "" {
 		req.Key = q.Get("key")
 		req.Node = q.Get("node")
-		// Drain + close body (http.Server will close it for us, but
-		// unreading it could confuse some middleware). MaxBytesReader
-		// still applies to defend against trailer-bomb.
+		// Drain + close body; MaxBytesReader still bounds a trailer-bomb.
 		r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
@@ -1187,11 +843,8 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// R175-SEC-M: same gate HandleEvents already runs (R172-SEC-L2). Without
-	// it an authenticated operator could post a multi-KB key that reaches the
-	// "remote remove session failed" slog.Warn attr (line below) or embeds
-	// control bytes that corrupt log pipelines. ValidateSessionKey also caps
-	// length at MaxSessionKeyBytes (~520 B).
+	// Same gate as HandleEvents: reject multi-KB / control-byte keys before
+	// they reach the slog.Warn attr below; also caps at MaxSessionKeyBytes.
 	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
@@ -1207,11 +860,9 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
 			if contracts.IsUnknownRPCMethodErr(err) {
-				// Peer is running an older binary without remove_session
-				// support; return 409 + explicit body so the dashboard can
-				// show a specific "upgrade needed" message instead of the
-				// generic "remove failed". 409 (Conflict) signals the
-				// request was valid but the peer cannot fulfill it.
+				// Peer runs an older binary without remove_session; 409 + explicit
+				// body lets the dashboard show "upgrade needed" instead of a
+				// generic failure.
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
 			}
@@ -1226,12 +877,9 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RemoveAsync (not Remove): the session leaves the router synchronously
-	// under r.mu — so a 200 here truthfully means "the session is gone from
-	// the list and accepts no more messages" — while the slow teardown
-	// (proc.Close up to 8s + socket wait + event-log/attachment cleanup)
-	// runs in a detached goroutine. The dashboard does an optimistic delete
-	// and no longer blocks on the worst-case ~15s teardown.
+	// RemoveAsync: the session leaves the router synchronously (200 truthfully
+	// means "gone from the list, accepts no more messages") while the slow
+	// teardown (proc.Close up to 8s + socket wait + cleanup) runs detached.
 	if !h.router.RemoveAsync(req.Key) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -1240,8 +888,8 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteOK(w)
 }
 
-// PATCH /api/sessions/label — update the operator-set display label for a
-// session. Empty label clears any prior value.
+// HandleSetLabel serves PATCH /api/sessions/label — the operator-set display
+// label for a session. Empty label clears any prior value.
 func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key   string `json:"key"`
@@ -1253,9 +901,8 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
-	// R175-SEC-M: gate req.Key before it reaches slog attrs (remote failure
-	// path below logs both node + key) or router lookups. Same policy as
-	// HandleEvents / HandleDelete.
+	// Gate req.Key before it reaches slog attrs or router lookups (same policy
+	// as HandleEvents / HandleDelete).
 	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
@@ -1275,25 +922,11 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 		}
 		updated, err := nc.ProxySetSessionLabel(r.Context(), req.Key, label)
 		if err != nil {
-			// R246-SEC-14 (#820): wrap node + key through SanitizeLogAttr
-			// before slog encodes them. ValidateSessionKey already rejects
-			// the bidi / C0 / C1 / zero-width classes that fragment slog
-			// attrs, but `req.Node` only travels through nodeAccess.LookupNode
-			// (which validates against the discovery directory, not the byte
-			// class) — a future node-id format change could re-open the gap.
-			// Aligning with the dispatch/commands.go:51 pattern keeps the
-			// audit-log surface uniform, so a regression in either validator
-			// cannot smuggle log-fragmentation bytes past slog's TextHandler.
-			//
-			// R246-SEC-14 (REPEAT-3, #820): the upstream node's err.Error()
-			// can echo attacker-influenced bytes verbatim — a malicious
-			// remote naozhi build could embed CR/LF or bidi runes in its
-			// RPC error string and fragment our local slog audit trail.
-			// Wrapping err.Error() through SanitizeLogAttr closes that
-			// hole; the upstream wrapper text already includes "unknown
-			// method:" / "rpc:" / etc. so legitimate diagnostic content
-			// survives sanitisation (only control + bidi + C1 are
-			// stripped).
+			// SanitizeLogAttr on node, key AND err.Error(): ValidateSessionKey
+			// already rejects bidi / C0 / C1 / zero-width bytes in the key, but
+			// req.Node is only validated against the discovery directory and a
+			// malicious remote build can echo CR/LF or bidi runes in its RPC error
+			// string, fragmenting the local slog audit trail (#820).
 			slog.Warn("remote set session label failed",
 				"node", sessionpkg.SanitizeLogAttr(req.Node),
 				"key", sessionpkg.SanitizeLogAttr(req.Key),
@@ -1309,20 +942,15 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
-		// Parallel audit entry with the local-path slog.Info below so an
-		// operator grepping journalctl sees every label change regardless of
-		// which node owns the session. R64-GO-M3.
-		// R246-SEC-14 (#820): defence-in-depth sanitiser on node + key,
-		// matches the warn-path branch above.
+		// Parallel audit entry with the local-path slog.Info so journalctl shows
+		// every label change regardless of owning node; sanitised as above (#820).
 		slog.Info("session label updated",
 			"node", sessionpkg.SanitizeLogAttr(req.Node),
 			"key", sessionpkg.SanitizeLogAttr(req.Key),
 			"label_len", len(label))
-		// Don't echo label — it is attacker-influenced text. Validation already
-		// ensured it is safe in storage, but reflecting user input in an HTTP
-		// body is a latent reflected-XSS vector if any future caller renders
-		// the response via innerHTML. Client patches its cache from its own
-		// optimistic value, not from the response.
+		// Don't echo label — attacker-influenced text is a latent reflected-XSS
+		// vector if a future caller renders the response via innerHTML. Client
+		// patches its cache from its own optimistic value.
 		httputil.WriteOK(w)
 		return
 	}
@@ -1332,8 +960,8 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// R246-SEC-14 (#820): SanitizeLogAttr on key matches the remote path so
-	// the audit-log byte class is uniform regardless of which branch fired.
+	// SanitizeLogAttr on key keeps the audit-log byte class uniform with the
+	// remote path (#820).
 	slog.Info("session label updated", "node", "local",
 		"key", sessionpkg.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
@@ -1357,9 +985,8 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid session_id", http.StatusBadRequest)
 		return
 	}
-	// Bound last_prompt so a single resume request can't ship a megabyte-scale
-	// string that is then broadcast on every /api/sessions poll. Control chars
-	// would also inject into structured slog JSONHandler output.
+	// Bound last_prompt: it is persisted and broadcast on every /api/sessions
+	// poll, and control chars would inject into slog JSONHandler output.
 	if len(req.LastPrompt) > maxResumeLastPromptBytes {
 		http.Error(w, "last_prompt too long", http.StatusBadRequest)
 		return
@@ -1370,16 +997,11 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "last_prompt is not valid utf-8", http.StatusBadRequest)
 		return
 	}
-	// Control / bidi / LS-PS bytes are sanitized instead of rejected. The
-	// prior policy (R65-SEC-M-3) returned 400 to block slog-injection via
-	// `/api/sessions` broadcasts. SanitizeResumeLastPrompt replaces the
-	// dangerous class with "_" — the injection surface still closed,
-	// and unlike a hard reject, sanitization lets sessions whose CLI
-	// JSONL contains CLI-injected control bytes (e.g. PDF upload
-	// notifications emitting U+0085 NEL) still resume from the history
-	// pane. Tab is preserved (operators paste tab-delimited snippets
-	// and slog JSONHandler escapes tab). last_prompt is display/log-only,
-	// so lossy mapping on the rest of the class is acceptable.
+	// Control / bidi / LS-PS bytes are sanitized to "_" rather than rejected:
+	// the slog-injection surface stays closed, yet sessions whose JSONL carries
+	// CLI-injected control bytes (e.g. U+0085 NEL from PDF uploads) can still
+	// resume from the history pane. last_prompt is display/log-only, so lossy
+	// mapping is acceptable; tab is preserved.
 	req.LastPrompt = SanitizeResumeLastPrompt(req.LastPrompt, maxResumeLastPromptBytes)
 
 	workspace := req.Workspace
@@ -1390,14 +1012,11 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 			wsPath, err = h.validateWS(workspace, h.allowedRoot)
 		}
 		if err != nil {
-			// Decouple the client-facing message from the underlying error
-			// chain so a future edit of validateWorkspace wrapping a
-			// *os.PathError (e.g. with %w) cannot leak resolved filesystem
-			// paths to the dashboard user. validateWorkspace already logs
-			// diagnostic detail via slog. R61-SEC-10.
-			// R179-SEC-1: sanitize the workspace before it lands in slog attrs
-			// — authenticated callers can slip bidi/C1/newline bytes past the
-			// structural path check. Mirrors the send.go (R175-SEC-P1) gate.
+			// Keep the client-facing message decoupled from the error chain so a
+			// wrapped *os.PathError can't leak resolved filesystem paths;
+			// validateWorkspace already logs detail. Sanitize the workspace before
+			// it lands in slog attrs — authenticated callers can slip bidi / C1 /
+			// newline bytes past the structural path check.
 			slog.Warn("resume workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(workspace, 256))
 			httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid workspace"})
 			return
@@ -1408,19 +1027,12 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		workspace = h.router.DefaultWorkspace()
 	}
 
-	// R247-SEC-24 / R246-SEC-5: resume key entropy widened from 8 → 16
-	// bytes (64 → 128 bits) so the random tail matches anonCookie / upload
-	// IDs and the rest of the codebase's 128-bit short-id budget. The
-	// previous 64-bit tail had a birthday-bound (~2^32 IDs before
-	// collision) that, while comfortably above realistic resume volume,
-	// was inconsistent with sibling code and would have eventually been
-	// flagged by another review round; align here to retire the audit
-	// item permanently.
+	// 16 random bytes (128 bits) so the resume key tail matches anonCookie /
+	// upload IDs and the codebase's short-id entropy budget.
 	var rb [16]byte
 	if _, err := rand.Read(rb[:]); err != nil {
-		// crypto/rand failures are pathologically rare (kernel entropy
-		// pool gone, exhausted FDs), but without a log operators cannot
-		// distinguish "resume failed" from other 500s.
+		// crypto/rand failures are pathologically rare; log so operators can
+		// distinguish this from other 500s.
 		slog.Error("resume register: generate key failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1442,8 +1054,8 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
-	// R175-SEC-M: gate req.Key before it reaches slog attrs / router lookup.
-	// Same policy as HandleEvents / HandleDelete / HandleSetLabel.
+	// Gate req.Key before it reaches slog attrs / router lookup (same policy as
+	// the other session handlers).
 	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
@@ -1496,17 +1108,12 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 
 	const cacheTTL = 120 * time.Second
 
-	// R040034-PERF-5 (#1404): wait-free fast-path TTL check via the atomic
-	// mirror; the lock is taken only when the TTL check passes and we need
-	// a consistent slice header read. Old code locked unconditionally even
-	// for the cold (TTL-expired) path that subsequently dropped through
-	// to singleflight without using the cached slice at all.
+	// Wait-free fast-path TTL check via the atomic mirror (#1404); the lock is
+	// taken only when the TTL passes and we need a consistent slice header.
 	if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
 		h.historyCacheMu.RLock()
-		// Re-confirm under lock — between Load() and Lock() a writer could
-		// have invalidated the cache (InvalidateHistoryCache writes 0).
-		// Without this re-check we could return a stale slice header that
-		// was being concurrently nilled out.
+		// Re-confirm under lock — InvalidateHistoryCache could have written 0
+		// between Load() and RLock().
 		if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
 			cached := h.historyCache
 			h.historyCacheMu.RUnlock()
@@ -1516,20 +1123,11 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 	}
 
 	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
-		// Re-check via the atomic — a prior leader could have populated
-		// the cache between our expiry detection and this closure running.
-		// Mirrors the double-check pattern in lookupSummariesCached so
-		// tail callers at a TTL boundary don't each pay an FS scan.
-		// R64-GO-M2 + R040034-PERF-5 (#1404): the re-check is now
-		// wait-free and only escalates to a lock if the atomic says
-		// "fresh"; the prior implementation took historyCacheMu twice
-		// per fan-out wave (fast-path + flight closure).
-		//
-		// Use historyCacheTimeUnixNano.Load()!=0 (not historyCache != nil)
-		// to determine cache population: an "empty-history" deployment
-		// legitimately stores a nil slice on every load, which was then
-		// misclassified as "not cached" and drove a redundant FS scan
-		// every TTL window. R67-GO-5.
+		// Re-check via the atomic — a prior leader may have populated the cache
+		// before this closure ran (double-check pattern, as in
+		// lookupSummariesCached). Population is judged by UnixNano != 0, not
+		// historyCache != nil: an empty-history deployment legitimately caches a
+		// nil slice and must not re-scan every TTL window.
 		if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
 			h.historyCacheMu.RLock()
 			if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
@@ -1548,22 +1146,16 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 	return nil
 }
 
-// uptimeSnapshot is the value cached by uptimeCache. Bucket is the integer
-// number of seconds since startedAt; Str is the pre-formatted rendering at
-// that resolution. Cached at 1-second resolution because the dashboard polls
-// every second and all pollers within the same bucket observe the same value.
+// uptimeSnapshot is the value cached by uptimeCache: Bucket is whole seconds
+// since startedAt, Str the pre-formatted rendering at that resolution.
 type uptimeSnapshot struct {
 	Bucket int64
 	Str    string
 }
 
 // uptimeStringAt returns time.Since(startedAt).Round(time.Second).String()
-// with a 1-second resolution memoisation. HandleList captures time.Now()
-// once at the top of the request so the filter pass and the per-session
-// uptime share a single vDSO call. Concurrent misses may all format the same
-// value; last-writer-wins via unconditional Store is intentional — losers
-// drop their locally formatted copy (the formatted string still escapes
-// to the response regardless, so no leak). R67-PERF-4.
+// memoised per 1-second bucket. Concurrent misses may format the same value;
+// last-writer-wins via unconditional Store is intentional.
 func (h *Handlers) uptimeStringAt(now time.Time) string {
 	d := now.Sub(h.startedAt).Round(time.Second)
 	bucket := int64(d / time.Second)
@@ -1575,34 +1167,25 @@ func (h *Handlers) uptimeStringAt(now time.Time) string {
 	return s
 }
 
-// initStaticStats pre-builds the immutable subset of /api/sessions stats so
-// HandleList only has to overlay active/running/ready/total/version/uptime/
-// watchdog on each poll. Safe to call multiple times: the Once guards against
-// a test double or future refactor re-running the init concurrently with
-// HandleList readers. R61-GO-12.
+// InitStaticStats pre-builds the immutable subset of /api/sessions stats so
+// HandleList only overlays the dynamic counters per poll. The Once guards
+// against a re-run racing with concurrent HandleList readers.
 func (h *Handlers) InitStaticStats() {
 	h.staticStatsOnce.Do(h.doInitStaticStats)
 }
 
 func (h *Handlers) doInitStaticStats() {
-	// Deep-copy h.callSystemInfo()'s singleton map: HandleList copies the
-	// sessionStatsStatic struct by value on each poll, but the System map
-	// field is a reference type — without the deep copy here every poll
-	// response would alias the singleton. A future maintainer adding a
-	// mutable system field (e.g. network counters) would then silently
-	// introduce a data race across the dashboard hot path. Breaking the
-	// alias at initialisation enforces the read-only contract structurally.
+	// Deep-copy the callSystemInfo() singleton: staticStats is copied by value
+	// per poll but the System map is a reference, so without this every
+	// response would alias the process-wide map and any future mutable field
+	// would be a data race.
 	sysSrc := h.callSystemInfo()
 	sysCopy := make(map[string]any, len(sysSrc))
 	for k, v := range sysSrc {
 		sysCopy[k] = v
 	}
-	// Copy agentIDs for consistency with the "system" deep-copy contract.
-	// String elements are immutable so today the shared backing array is
-	// race-free, but baking the copy in at init time prevents a future
-	// maintainer from turning agentIDs into []AgentInfo (mutable struct)
-	// and introducing a cross-goroutine data race on every dashboard poll.
-	// R58-GO-M2.
+	// Copy agentIDs for the same read-only contract; guards against a future
+	// mutable element type introducing a cross-goroutine race.
 	agentsCopy := make([]string, len(h.agentIDs))
 	copy(agentsCopy, h.agentIDs)
 	h.staticStats = sessionStatsStatic{
@@ -1618,13 +1201,10 @@ func (h *Handlers) doInitStaticStats() {
 	}
 }
 
-// WarmHistoryCache pre-populates the history sessions cache in the background
-// so that the first dashboard load does not block on a full filesystem scan.
-//
-// The goroutine is tracked by warmHistoryWg so WaitWarmHistory can block
-// server shutdown until the FS scan finishes. Without the tracker the
-// goroutine could outlive the shutdown and write h.historyCache after
-// h.claudeDir-dependent state had been torn down. R64-GO-M1.
+// WarmHistoryCache pre-populates the history cache in the background so the
+// first dashboard load doesn't block on a full FS scan. The goroutine is
+// tracked by warmHistoryWg so WaitWarmHistory can block shutdown until the
+// scan finishes.
 func (h *Handlers) WarmHistoryCache() {
 	if h.claudeDir == "" {
 		return
@@ -1645,31 +1225,23 @@ func (h *Handlers) WaitWarmHistory() {
 	h.warmHistoryWg.Wait()
 }
 
-// InvalidateHistoryCache forces the next /api/sessions poll to repopulate
-// historyCache from disk instead of serving the up-to-120s cached slice.
-// Wired into Router.SetOnKeyRetired so a Reset/Remove that just retired a
-// session-key surfaces the underlying jsonl in the history popover within
-// one poll, instead of being hidden for up to two minutes by the TTL.
+// InvalidateHistoryCache forces the next poll to repopulate historyCache from
+// disk. Wired into Router.SetOnKeyRetired so a just-retired session's jsonl
+// appears in the history popover within one poll instead of up to 120s later.
 func (h *Handlers) InvalidateHistoryCache() {
 	h.historyCacheMu.Lock()
 	h.historyCache = nil
 	h.historyCacheTime = time.Time{}
-	// R040034-PERF-5 (#1404): keep the atomic mirror in lockstep with the
-	// canonical historyCacheTime so wait-free fast-path readers see the
-	// invalidation immediately (Store=0 ⇔ time.Time{}).
+	// Keep the atomic mirror in lockstep (Store=0 ⇔ time.Time{}) so wait-free
+	// readers see the invalidation immediately.
 	h.historyCacheTimeUnixNano.Store(0)
 	h.historyCacheMu.Unlock()
 }
 
-// lookupSummariesCached returns sessionID→summary with a 30s TTL cache.
-// The cache key set (sessionID subset) may vary between calls; we store the
-// full lookup result and serve cached entries that overlap with the current
-// snapshot request. On miss or expiry, re-run discovery.LookupSummaries and
-// merge the fresh result into the cache.
-//
-// Concurrent misses at the TTL boundary are collapsed via summaryFlight so
-// N parallel tab polls that all see the cache as expired do not each
-// perform a full N×os.Stat fan-out. R60-PERF-5.
+// lookupSummariesCached returns sessionID→summary with a 30s TTL cache. The
+// full lookup result is stored and served to any snapshot subset; concurrent
+// misses at the TTL boundary collapse via summaryFlight so N tab polls don't
+// each pay the N×os.Stat fan-out.
 func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot) map[string]string {
 	const summaryTTL = 30 * time.Second
 
@@ -1681,20 +1253,11 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 	}
 	h.summaryCacheMu.RUnlock()
 
-	// singleflight collapses concurrent callers into one LookupSummaries
-	// run. Followers get the same map the leader computed, so we also
-	// avoid redundant cache-write contention. The "summary" key is a
-	// fixed constant because the leader's result is cached for the
-	// entire ±30s window regardless of which subset drove the miss.
-	//
-	// Build sessionWorkspaces *inside* the flight closure: only the leader
-	// actually consumes it, so followers no longer pay an O(N sessions)
-	// map alloc + copy that is immediately discarded when the flight
-	// routes them to the leader's result. The leader also gets the most
-	// recent router view because snapshots passed in from each follower
-	// may differ slightly; the leader captures whichever caller's
-	// snapshots happened to win the race, which is acceptable for a 30s
-	// cache window. R61-PERF-1.
+	// Fixed "summary" flight key: the leader's result is cached for the whole
+	// 30s window regardless of which subset drove the miss. sessionWorkspaces is
+	// built INSIDE the closure so followers don't pay an O(N) map they'd
+	// discard; whichever caller's snapshots win the race is acceptable for a
+	// 30s window.
 	v, _, _ := h.summaryFlight.Do("summary", func() (any, error) {
 		// Re-check under lock — a prior leader could have populated the
 		// cache between our expiry detection and this closure running.
@@ -1706,23 +1269,10 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 		}
 		h.summaryCacheMu.RUnlock()
 
-		// R040034-PERF-4 (#1403): only ask discovery.LookupSummaries
-		// for sessions that don't already carry a Summary on the
-		// snapshot. Snapshots whose Summary is already populated (from
-		// proc.LastResponseSummary or an earlier sessions-index hit)
-		// would otherwise pay an unnecessary projDir grouping + index
-		// read on every cache miss tick. The fill loop in
-		// fillSessionSummariesFromIndex is no-op-on-empty for missing
-		// keys (it only writes when summaryMap[id] != ""), so dropping
-		// the already-summarised snapshots from the lookup input keeps
-		// the wire output identical — those snapshots keep their
-		// existing Summary value untouched. Most polls hit the 30s
-		// cache and never reach this closure; on a cold miss we shrink
-		// the per-session fan-out from O(N_sessions) to
-		// O(N_new_sessions). Allocate the map at the worst-case size
-		// so the rare poll right after a workspace switch (where
-		// every snapshot has Summary == "") doesn't pay map-rehash
-		// growth — the trim is on the steady-state side.
+		// Only look up sessions that don't already carry a Summary (#1403): the
+		// fill loop is a no-op on missing keys, so wire output is identical
+		// while a cold miss shrinks the fan-out to O(N_new). Sized worst-case so
+		// the poll right after a workspace switch doesn't pay map growth.
 		sessionWorkspaces := make(map[string]string, len(snapshots))
 		for _, snap := range snapshots {
 			if snap.SessionID == "" || snap.Workspace == "" {
@@ -1747,12 +1297,9 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 	return nil
 }
 
-// RecordRetired stamps the retirement instant for sessionID into the
-// retired-store and invalidates the history cache so the new ordering
-// shows up on the next dashboard poll. No-op when the store is not
-// configured (tests, deployments without StateDir). sessionID may be
-// empty when the session was retired before the CLI returned a UUID;
-// the store ignores empty IDs internally.
+// RecordRetired stamps the retirement instant for sessionID and invalidates
+// the history cache so the new ordering shows on the next poll. No-op when
+// the store is unconfigured or sessionID is empty (CLI never returned a UUID).
 func (h *Handlers) RecordRetired(sessionID string) {
 	if h.retiredStore == nil || sessionID == "" {
 		return
@@ -1761,11 +1308,9 @@ func (h *Handlers) RecordRetired(sessionID string) {
 	h.InvalidateHistoryCache()
 }
 
-// FlushRetiredStore writes any pending retired-at marks to disk. Called
-// from server shutdown so the final retirement event survives a restart.
-// No-op when the store is not configured. Errors surface via slog inside
-// the store's Save path; this method swallows them so shutdown does not
-// fail the parent.
+// FlushRetiredStore writes pending retired-at marks to disk at server
+// shutdown. No-op without a store; errors are logged, not returned, so
+// shutdown doesn't fail.
 func (h *Handlers) FlushRetiredStore() {
 	if h.retiredStore == nil {
 		return
@@ -1775,39 +1320,27 @@ func (h *Handlers) FlushRetiredStore() {
 	}
 }
 
-// historyScanTimeout bounds the loadHistorySessions FS walk. PERF-009
-// (#2134): the scan runs inside the 120s-TTL singleflight leader, so an
-// unbounded walk over a slow home blocks all concurrent pollers; 5s is
-// generously above a healthy walk yet caps a hung-FS stall.
+// historyScanTimeout bounds the loadHistorySessions FS walk, which runs inside
+// the singleflight leader and would otherwise stall every poller on a hung
+// filesystem (#2134).
 const historyScanTimeout = 5 * time.Second
 
 func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
 
-	// R245-ARCH: hide cron-spawned and sys-session JSONLs from the
-	// catch-all history panel.  Both have dedicated UI surfaces (cron
-	// panel / system drawer) — leaking them here also exposed
-	// AutoTitler prompt fragments because sys workdir lives under
-	// ~/.claude/projects like a regular workspace.
-	//
-	// Snapshot Scheduler.KnownSessionIDs once per scan: it walks all
-	// jobs × runStore.Recent which can be O(jobs × 200) and we don't
-	// want to re-pay that cost per RecentSession candidate.
+	// Hide cron-spawned and sys-session JSONLs (both have their own UI; the sys
+	// workdir lives under ~/.claude/projects and would leak AutoTitler prompts).
+	// KnownSessionIDs is O(jobs × 200), so snapshot it once per scan.
 	filter := historyFilter{skipWorkspace: h.sysWorkDir}
 	if h.cronSessions != nil {
 		filter.skipSessions = h.cronSessions.KnownSessionIDs()
 	}
-	// PERF-009 (#2134): cap the FS walk so a slow/hung home (NFS, FUSE)
-	// can't pin this singleflight leader — and with it every concurrent
-	// poll goroutine waiting on the flight — for the full traversal.
+	// Cap the walk so a slow/hung home (NFS, FUSE) can't pin the flight leader (#2134).
 	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
 	defer cancel()
 	all := discovery.RecentSessionsCtx(ctx, h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
-	// Resolve project names in batch.  R217-PERF-10 (#616): borrow the
-	// pooled []string scratch (same pool fillProjectAndSummary uses) so
-	// the history-scan path also stops paying a per-call workspaces alloc
-	// every time the 120s history TTL expires.
+	// Resolve project names in batch using the pooled scratch slice (#616).
 	if h.projectMgr != nil && len(all) > 0 {
 		wsPtr := borrowWorkspaces(len(all))
 		workspaces := *wsPtr
@@ -1822,11 +1355,8 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 		}
 	}
 
-	// Stamp retired_at from the in-memory store for sessions whose
-	// retirement instant we recorded (Router.Reset / Router.Remove).
-	// Snapshot once and look each entry up so the inner loop is O(N)
-	// against an already-sorted slice instead of N retiredStore.Get
-	// mutex acquires.
+	// Stamp retired_at from one Snapshot() so the loop is O(N) without N mutex
+	// acquires.
 	if h.retiredStore != nil && len(all) > 0 {
 		retiredMap := h.retiredStore.Snapshot()
 		if len(retiredMap) > 0 {
@@ -1838,13 +1368,12 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 		}
 	}
 
-	now := time.Now() // R20260603-PERF-12: compute outside lock to keep vDSO off the critical section
+	now := time.Now() // outside the lock to keep vDSO off the critical section
 	h.historyCacheMu.Lock()
 	h.historyCache = all
 	h.historyCacheTime = now
-	// R040034-PERF-5 (#1404): mirror update under the lock so wait-free
-	// readers can never observe atomic-fresh while h.historyCache is
-	// still pointing at the old (or nil) slice.
+	// Mirror update under the lock so wait-free readers never see atomic-fresh
+	// while h.historyCache still points at the old slice.
 	h.historyCacheTimeUnixNano.Store(now.UnixNano())
 	h.historyCacheMu.Unlock()
 
@@ -1860,10 +1389,8 @@ func (h *Handlers) callSystemInfo() map[string]any {
 	return h.systemInfoFn()
 }
 
-// Deps bundles all wiring for New. Phase 3e
-// (server-split-phase4-design.md §6.5 Plan B): exported ctor so
-// internal/server can construct without needing access to unexported
-// fields.
+// Deps bundles all wiring for New so internal/server can construct a Handlers
+// without access to unexported fields.
 type Deps struct {
 	Router        *sessionpkg.Router
 	ProjectMgr    *project.Manager
@@ -1927,13 +1454,11 @@ func (h *Handlers) SetSnapshotEnricher(fn func(*sessionpkg.SessionSnapshot)) {
 	h.snapshotEnricher = fn
 }
 
-// RetiredStorePresent reports whether the RetiredStore is wired. Phase 3e
-// — exposed for server-package shutdown ordering checks (Prune call gate).
+// RetiredStorePresent reports whether the RetiredStore is wired (server
+// shutdown Prune gate).
 func (h *Handlers) RetiredStorePresent() bool { return h.retiredStore != nil }
 
-// PruneRetiredStore prunes entries older than cutoffMs from the RetiredStore.
-// No-op when retiredStore is nil. Phase 3e — server.go's shutdown sweep
-// calls this.
+// PruneRetiredStore prunes entries older than cutoffMs; no-op when unwired.
 func (h *Handlers) PruneRetiredStore(cutoffMs int64) {
 	if h.retiredStore != nil {
 		h.retiredStore.Prune(cutoffMs)

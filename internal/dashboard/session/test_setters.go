@@ -1,13 +1,7 @@
-// Phase 3e (server-split-phase4-design.md §6.5 Plan B): test-only setters
-// expose unexported fields so internal/server's integration tests
-// (4 dashboard_session_*_test.go files that depend on newTestServer
-// fixtures) can wire them after server.New runs but before exercising
-// HandleX. NOT for production use — production paths construct the
-// Handlers via New(Deps{...}).
-//
-// File name suffixed _test.go is intentional in some cases but here we
-// keep it as a non-test file so the setters are compiled into the
-// server's test binary too. They have no production code path.
+// Test-only setters exposing unexported fields so internal/server's
+// integration tests can wire a Handlers after server.New runs. Kept as a
+// non-test file so they compile into the server test binary; no production
+// code path uses them (production constructs via New(Deps{...})).
 package session
 
 import (

@@ -3,19 +3,15 @@ package httputil
 import "net/http"
 
 // WithMaxBytes wraps r.Body with http.MaxBytesReader capped at n bytes and
-// returns r for call-site chaining. R20260527122801-SEC-1 (#1325) is
-// enforced at every mutating handler by passing MaxRequestBodyBytes (or a
-// tighter per-endpoint cap) here before the body is read. Previously
-// duplicated per sub-package (#2285); internal/server keeps its own private
-// copy until its middleware moves.
+// returns r for call-site chaining. Every mutating handler must call it with
+// MaxRequestBodyBytes (or a tighter cap) before reading the body (#1325).
 func WithMaxBytes(w http.ResponseWriter, r *http.Request, n int64) *http.Request {
 	r.Body = http.MaxBytesReader(w, r.Body, n)
 	return r
 }
 
 // MaxMultipartFields caps non-file form entries accepted in a single
-// multipart upload. Dashboard uploads carry a handful of known fields; 32
-// leaves slack for growth without permitting unbounded form-value maps.
+// multipart upload.
 const MaxMultipartFields = 32
 
 // RejectIfTooManyFields writes a 400 JSON error and returns true when the

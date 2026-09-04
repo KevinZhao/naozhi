@@ -4,13 +4,10 @@ package project
 
 import "os"
 
-// CreateWorkspaceFile is the windows shim — there is no O_NOFOLLOW, so a
-// symlinked leaf cannot be refused kernel-atomically. We approximate the
-// unix posture: O_EXCL still prevents silent overwrite on create, and the
-// handler's prior parent-dir EvalSymlinks + prefix check still contains the
-// directory. The residual symlinked-leaf-overwrite window matches the
-// existing windows posture in OpenWorkspaceFile; naozhi's production target
-// is Linux where the O_NOFOLLOW path is authoritative.
+// CreateWorkspaceFile is the windows shim: without O_NOFOLLOW a symlinked leaf
+// cannot be refused atomically. O_EXCL still prevents silent overwrite and the
+// handler's parent-dir EvalSymlinks + prefix check still contains the
+// directory; naozhi's production target is Linux.
 func CreateWorkspaceFile(resolved string, overwrite bool) (*os.File, error) {
 	flags := os.O_WRONLY | os.O_CREATE
 	if overwrite {

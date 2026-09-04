@@ -1,24 +1,8 @@
 // Package discovery hosts the dashboard endpoints that surface external
-// Claude CLI sessions running on this host (and on connected nodes) and
-// allow operators to take them over or close them under naozhi management.
-//
-// Phase 3b (server-split-phase4-design.md §6.5 Plan B): handlers moved
-// here from internal/server/dashboard_discovered.go. The DiscoveryHandlers
-// type was already a self-contained struct in master with a small Deps
-// surface — this PR mostly relocates the file and inverts a couple of
-// server-package private dependencies into injected closures so the
-// sub-package compiles standalone:
-//
-//   - ValidateWorkspace / VerifyProcIdentity inject as func parameters
-//     (DI; small interface surface — see Handlers struct below)
-//   - DiscoveryCacheView interface replaces the *server.discoveryCache
-//     direct field (snapshot + evictPID are the only methods used)
-//   - NodeAccessor interface is duplicated locally (subset of server.NodeAccessor)
-//     so we don't reverse-import internal/server
-//
-// The 4 handlers (handleList / handlePreview / handleTakeover / handleClose)
-// continue to satisfy the existing route table in
-// internal/server/dashboard.go::registerDashboard via *DiscoveryHandlers.
+// Claude CLI sessions on this host (and connected nodes) and let operators
+// take them over or close them under naozhi management. Server dependencies
+// are injected as closures / small interfaces (CacheView, NodeAccessor,
+// SessionRouter) so the package never reverse-imports internal/server.
 package discovery
 
 import (
@@ -38,43 +22,31 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// CacheView is the subset of *server.discoveryCache that this package needs.
-// Defining it as a small interface here (per "accept interfaces" idiom) keeps
-// the dependency direction one-way: server implements, discovery consumes.
+// CacheView is the subset of the server's discovery cache this package needs.
 type CacheView interface {
 	Snapshot() []discovery.DiscoveredSession
 	EvictPID(pid int)
 }
 
-// NodeAccessor is the 2-method subset of contracts.NodeAccessor that
-// DiscoveryHandlers actually call. Kept narrow (rather than aliasing the
-// shared contract, #2285) because the package's test doubles implement only
-// these two methods; contracts' TestDashboardContractsDeclaredOnce asserts
-// this stays a strict subset so the shapes cannot drift. server's
-// *nodeAccessor satisfies both.
+// NodeAccessor is the 2-method subset of contracts.NodeAccessor these handlers
+// call; kept narrow for the test doubles, and asserted a strict subset by
+// TestDashboardContractsDeclaredOnce (#2285).
 type NodeAccessor interface {
 	HasNodes() bool
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 }
 
-// SessionRouter is the subset of *session.Router this package calls.
-// Defined as an interface so future test doubles do not need a full Router.
-// Takeover's first return is dropped (*session.ManagedSession is unused by
-// these handlers — they only care about success/failure) so we use a
-// distinct method name + an adapter at the wiring site, avoiding a
-// circular dependency on internal/session for the named return type.
+// SessionRouter is the subset of *session.Router this package calls. Takeover
+// drops the *ManagedSession return (only success/failure matters) via an
+// adapter at the wiring site.
 type SessionRouter interface {
 	Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error
 }
 
 // Handlers groups the discovered-session and takeover API endpoints.
-//
-// Lifecycle:
-//   - constructed once via New() in internal/server/build_handlers.go
-//     before the server context is available
-//   - SetAppContext(ctx) is called from server.go after registerDashboard
-//     so background takeover/close goroutines can outlive the request
-//     ctx but be cancelled at process shutdown
+// Constructed once via New() before the server context exists;
+// SetAppContext(ctx) is called afterwards so background takeover/close
+// goroutines outlive the request but die at process shutdown.
 type Handlers struct {
 	appCtx          context.Context // server lifecycle context, set via SetAppContext
 	bg              sync.WaitGroup  // tracks background takeover/close goroutines for graceful drain
@@ -88,14 +60,12 @@ type Handlers struct {
 	broadcast       func()            // hub.BroadcastSessionsUpdate
 	validateWS      func(ws, root string) (string, error)
 	verifyProcIdent func(pid int, expectedStartTime uint64) bool
-	// procStartTime reads the current /proc start_time for a pid (injected
-	// discovery.ProcStartTime). Feeds the atomic pidfd-based SendTermVerified
-	// identity guard so the SIGTERM cannot leak to a recycled PID. (#1670)
+	// procStartTime reads /proc start_time for a pid; feeds the pidfd-based
+	// SendTermVerified guard so SIGTERM cannot leak to a recycled PID (#1670).
 	procStartTime func(pid int) (uint64, error)
 }
 
-// Deps bundles all wiring. Constructor takes a single struct so future
-// additions don't break call sites.
+// Deps bundles all wiring for New.
 type Deps struct {
 	Cache        CacheView
 	NodeAccess   NodeAccessor
@@ -107,8 +77,7 @@ type Deps struct {
 	Broadcast    func()
 	ValidateWS   func(ws, root string) (string, error)
 	VerifyProcID func(pid int, expectedStartTime uint64) bool
-	// ProcStartTime reads /proc/<pid> start_time (discovery.ProcStartTime).
-	// Used by the atomic SendTermVerified identity guard. (#1670)
+	// ProcStartTime feeds the SendTermVerified identity guard (#1670).
 	ProcStartTime func(pid int) (uint64, error)
 }
 
@@ -129,18 +98,15 @@ func New(d Deps) *Handlers {
 	}
 }
 
-// sendTermVerified routes the SIGTERM through osutil.SendTermVerified, which
-// on Linux pins the target via pidfd so the kill cannot leak to a recycled PID
-// (#1670). The injected procStartTime (discovery.ProcStartTime) supplies the
-// identity guard; when it is nil (older wiring / test doubles) the guard is
-// skipped and SendTermVerified relies on the pidfd pin alone, but the
-// verifyProcIdent pre-check below preserves the previous behaviour so no caller
-// loses defence-in-depth.
+// sendTermVerified routes SIGTERM through osutil.SendTermVerified, which pins
+// the target via pidfd so the kill cannot leak to a recycled PID (#1670).
+// When procStartTime is nil (older wiring / test doubles) the verifyProcIdent
+// pre-check is adapted into the identity guard so no caller loses
+// defence-in-depth.
 func (h *Handlers) sendTermVerified(pid int, expectedStartTime uint64) error {
 	stFn := h.procStartTime
 	if stFn == nil && h.verifyProcIdent != nil {
-		// Adapt the legacy bool verifier into the (uint64, error) shape the
-		// atomic primitive expects: a passing verify means start_time matches.
+		// Adapt the bool verifier into the (uint64, error) shape.
 		stFn = func(p int) (uint64, error) {
 			if h.verifyProcIdent(p, expectedStartTime) {
 				return expectedStartTime, nil
@@ -151,25 +117,20 @@ func (h *Handlers) sendTermVerified(pid int, expectedStartTime uint64) error {
 	return osutil.SendTermVerified(pid, expectedStartTime, stFn)
 }
 
-// SetAppContext is called once after the server context is available.
-// Background takeover/close goroutines use this so they outlive the
-// request and only die at process shutdown.
+// SetAppContext is called once after the server context exists; background
+// takeover/close goroutines use it to outlive the request until shutdown.
 func (h *Handlers) SetAppContext(ctx context.Context) {
 	h.appCtx = ctx
 }
 
 // Wait blocks until all background takeover/close goroutines have exited.
-// Called from the server shutdown sequence after srv.Shutdown returns (no
-// new requests can spawn goroutines at that point), so a graceful shutdown
-// drains in-flight WaitAndCleanup work instead of leaving goroutines parked
-// on FindProcess/exit waits after the HTTP server goroutine has gone away.
+// Called after srv.Shutdown returns so a graceful shutdown drains in-flight
+// WaitAndCleanup work.
 func (h *Handlers) Wait() {
 	h.bg.Wait()
 }
 
-// SetClaudeDirForTest swaps claudeDir for tests that previously poked the
-// unexported field directly. NOT for production use — the field is
-// otherwise immutable after New().
+// SetClaudeDirForTest swaps claudeDir for tests. NOT for production use.
 func (h *Handlers) SetClaudeDirForTest(dir string) {
 	h.claudeDir = dir
 }
@@ -178,7 +139,6 @@ func (h *Handlers) SetClaudeDirForTest(dir string) {
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	sessions := h.cache.Snapshot()
 
-	// Merge remote discovered sessions
 	if h.nodeAccess.HasNodes() {
 		for i := range sessions {
 			sessions[i].Node = "local"
@@ -212,11 +172,9 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node — only fall through to local when nodeID is empty or "local".
 	if nodeID != "" && nodeID != "local" {
-		// LookupNode validates nodeID against the allowlist ([a-zA-Z0-9._-],
-		// 64-byte cap) and writes a 400 on failure, matching every other
-		// remote-proxy handler. GetNode alone would let a log-injection
-		// payload (\n, ANSI escapes) into the "node not connected" warn
-		// attribute, which corrupts slog JSON output. R67-SEC-2.
+		// LookupNode validates nodeID against the allowlist and writes a 400
+		// on failure; GetNode alone would let a log-injection payload into the
+		// warn attribute.
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
@@ -233,28 +191,16 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local
 	if h.claudeDir == "" {
 		httputil.WriteJSON(w, []any{})
 		return
 	}
 
-	// cwd is an optional optimisation hint. When present and valid it lets
-	// LoadHistory resolve the JSONL via an O(1) os.Stat on the CWD-derived
-	// path, bypassing the findSessionJSONL fallback scan AND its 60s
-	// negative-result cache. The negative cache is what made interactive
-	// preview flake: a single miss (card shown during the noJSONLGrace window
-	// before the JSONL flushed, or while claude renamed it during history
-	// compaction) poisons every preview for that session for 60s, rendering a
-	// blank "暂无会话历史" splash that "fixes itself" only once the TTL
-	// expires. The CWD direct-stat lookup runs before the cache check, so a
-	// fresh poll picks the conversation up the instant it lands on disk.
-	//
-	// A stale/invalid hint degrades to "" (full scan) rather than erroring —
-	// cwd never widens the result set, it only short-circuits the lookup.
-	// Reject traversal / control-byte payloads so a crafted cwd cannot probe
-	// arbitrary projDirName slugs (defense-in-depth; matches the takeover path
-	// which validates CWD the same way).
+	// cwd is an optional hint letting LoadHistory resolve the JSONL via an
+	// O(1) stat, bypassing the findSessionJSONL scan and its 60s negative
+	// cache (which otherwise made a single early miss blank the preview for
+	// 60s). An invalid hint degrades to "" (full scan) — cwd never widens the
+	// result set; traversal / control bytes are rejected as on the takeover path.
 	cwd := r.URL.Query().Get("cwd")
 	if cwd != "" {
 		if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
@@ -294,7 +240,6 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
 		if !ok {
@@ -310,14 +255,10 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify PID is in the discovered list before killing.
-	// Use cache snapshot — fresh Scan() filters out dead processes.
-	//
-	// When claudeDir is empty there is no discovered list to cross-check
-	// against, so an authenticated caller could otherwise submit any
-	// positive pid+proc_start_time and SIGTERM arbitrary processes owned
-	// by the naozhi user. Refuse the operation — matches handleClose's
-	// 503 behaviour when claudeDir is unavailable. R67-SEC-4.
+	// Verify PID is in the discovered list (cache snapshot — a fresh Scan()
+	// filters out dead processes). With claudeDir empty there is no list to
+	// cross-check, so an authenticated caller could SIGTERM arbitrary
+	// processes owned by the naozhi user: refuse, matching handleClose.
 	if h.claudeDir == "" {
 		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
 		return
@@ -335,19 +276,15 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute session key before launching goroutine so we can return it immediately.
+	// Compute the session key before launching the goroutine so we can return it.
 	cwd := req.CWD
 	if cwd == "" {
 		cwd = "unknown"
 	}
-	// Validate CWD against allowedRoot to prevent sessions running in arbitrary directories.
 	if cwd != "unknown" {
-		// Reject `..` traversal segments and control bytes BEFORE
-		// filepath.Clean — Clean collapses `/home/../etc` into `/etc`
-		// silently, so a pure post-Clean check would let traversal slip
-		// through as a now-canonical absolute path when allowedRoot is
-		// empty (single-user default). session.ValidateRemoteWorkspacePath
-		// encodes the same rules used on the remote-proxy path. R67-SEC-7.
+		// Reject `..` and control bytes BEFORE filepath.Clean: Clean collapses
+		// `/home/../etc` into `/etc`, so a post-Clean-only check would let
+		// traversal through when allowedRoot is empty.
 		if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
 			http.Error(w, "invalid cwd", http.StatusBadRequest)
 			return
@@ -363,17 +300,13 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	cwdKey := session.SanitizeCWDKey(cwd)
 	key := session.TakeoverKey(cwdKey)
 
-	// Kill the original process.
-	// Verify PID identity before sending signal (TOCTOU guard).
 	if req.ProcStartTime == 0 {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
-	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
-	// process instance via pidfd before signalling so the old
-	// PidAlive→verify→SendTerm window — through which a recycled PID could be
-	// killed — no longer exists. ESRCH (process already gone) is success;
-	// ErrPidReused is the 409 the frontend expects.
+	// Atomic identity-confirmed SIGTERM (#1670): pidfd pins the instance so no
+	// PidAlive→verify→SendTerm window remains. ESRCH is success; ErrPidReused
+	// is the 409 the frontend expects.
 	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
 		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
@@ -386,12 +319,10 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Immediately remove the killed PID from the discovery cache so the
-	// frontend's fetchSessions() call (triggered right after the 202 response)
-	// won't see the stale entry and re-render the old card in the sidebar.
+	// Evict the killed PID now so the frontend's immediate fetchSessions()
+	// does not re-render the stale card.
 	h.cache.EvictPID(req.PID)
 
-	// Capture locals for the background goroutine.
 	pid := req.PID
 	sessionID := req.SessionID
 	procStartTime := req.ProcStartTime
@@ -404,20 +335,15 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	h.bg.Add(1)
 	go func() {
 		defer h.bg.Done()
-		// Wait, SIGKILL, and remove stale session files. Use the cleaned
-		// cwd (filepath.Clean, trailing-slash/"." normalised) so the lock-dir
-		// path WaitAndCleanup derives via projDirName matches the same cwd
-		// router.Takeover spawns under below — passing the raw req.CWD here
-		// would compute a different projDirName slug and miss the cleanup. (#1786)
+		// Use the cleaned cwd so the lock-dir path WaitAndCleanup derives via
+		// projDirName matches the cwd router.Takeover spawns under (#1786).
 		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 
-		// Takeover via router — use Background context so the spawned process
-		// outlives the HTTP request.
+		// appCtx so the spawned process outlives the HTTP request.
 		err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
 			Model:     agentOpts.Model,
 			ExtraArgs: agentOpts.ExtraArgs,
-			// #2493: carry the agent's standing system prompt so a taken-over
-			// session spawns with the same instructions as a fresh one.
+			// Carry the agent's standing system prompt (#2493).
 			SystemPrompt: agentOpts.SystemPrompt,
 		})
 		if err != nil {
@@ -457,7 +383,6 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
 		if !ok {
@@ -472,11 +397,8 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify PID is in the discovered list before killing.
-	// Use the cache snapshot instead of a fresh Scan(), because Scan()
-	// filters out dead processes — if the process was already killed
-	// externally the fresh scan won't find it, but we still need to
-	// clean up the stale entry.
+	// Verify PID is in the discovered list using the cache snapshot: a fresh
+	// Scan() drops dead processes, but a stale entry still needs cleanup.
 	if h.claudeDir == "" {
 		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
 		return
@@ -503,12 +425,9 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
-	// process instance via pidfd, re-checks start_time through that pinned
-	// identity, then signals — closing the PID-reuse TOCTOU window that the
-	// old PidAlive→verifyProcIdent→SendTerm sequence left open. A recycled
-	// PID can no longer be killed: pidfd refers to the exact original
-	// instance or fails ESRCH. ESRCH (already dead) falls through to cleanup.
+	// Atomic identity-confirmed SIGTERM (#1670): pidfd pins the exact original
+	// instance or fails ESRCH, closing the PID-reuse TOCTOU window. ESRCH
+	// (already dead) falls through to cleanup.
 	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
 		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)

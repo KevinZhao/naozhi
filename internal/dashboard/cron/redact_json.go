@@ -7,24 +7,17 @@ import (
 )
 
 // redactedJSONPlaceholder replaces a JSON value that could not be redacted
-// while keeping it well-formed (malformed source bytes). Serving a fixed
-// placeholder keeps the enclosing response encodable — the alternative was
-// json.Encoder failing on the whole payload and the panel showing nothing.
+// while keeping it well-formed, so the enclosing response stays encodable
+// instead of json.Encoder failing on the whole payload.
 var redactedJSONPlaceholder = json.RawMessage(`{"redacted":true}`)
 
 // redactRawJSON applies fn (a text redactor such as textutil.RedactSecrets)
-// to a raw JSON document without breaking its structure.
-//
-// Fast path: fn is run over the raw text. If nothing changed and the input
-// is valid JSON it is returned as-is (aliased). If the substituted text is
-// still valid JSON — the overwhelmingly common case, since redaction markers
-// are legal inside JSON strings — it is returned directly.
-//
-// Slow path: when the text-level substitution damaged the structure (a
-// marker swallowed a closing quote / escape), the document is decoded, fn is
-// applied to every string value individually, and the tree is re-encoded.
-// Numbers round-trip via json.Number so precision is preserved. Input that
-// cannot be decoded at all yields redactedJSONPlaceholder.
+// to a raw JSON document without breaking its structure. Fast path: fn runs
+// over the raw text and the result is returned if it is still valid JSON
+// (redaction markers are legal inside JSON strings). Slow path: when the
+// substitution damaged the structure, the document is decoded, fn is applied
+// to every string value, and the tree is re-encoded (json.Number preserves
+// numeric precision). Undecodable input yields redactedJSONPlaceholder.
 func redactRawJSON(raw string, fn func(string) string) json.RawMessage {
 	out := fn(raw)
 	if out == raw {
