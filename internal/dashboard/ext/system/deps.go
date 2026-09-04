@@ -41,7 +41,7 @@ type Deps struct {
 	UpdateStatus  *selfupdate.Status
 	UpdateChecker *selfupdate.Checker
 	BuildVersion  string
-	// InstallEnabled gates POST .../apply (update.dashboard_install).
+	// InstallEnabled gates POST .../apply.
 	InstallEnabled bool
 }
 

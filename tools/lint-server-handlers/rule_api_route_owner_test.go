@@ -95,6 +95,36 @@ func (srv *Server) registerAPI() {
 	}
 }
 
+// TestAPIRouteOwner_FollowsMethodValueLocals pins that a Server handler bound
+// to a local first (`h := s.handleX`, `var h = s.handleX`, reassignment) is
+// still attributed when the local is registered, while an unrelated local is
+// not.
+func TestAPIRouteOwner_FollowsMethodValueLocals(t *testing.T) {
+	src := `package server
+func (s *Server) registerAPI() {
+	h := s.handleFoo
+	var g = s.HandleBar
+	var k http.HandlerFunc
+	k = s.handleBaz
+	other := s.systemH.HandleDaemons
+	s.mux.HandleFunc("GET /api/foo", auth(h))
+	s.mux.HandleFunc("GET /api/bar", g)
+	s.mux.Handle("GET /api/baz", auth(wrap(k)))
+	s.mux.HandleFunc("GET /api/other", auth(other))
+	s.mux.HandleFunc("GET /dashboard", h)
+}`
+	vs := scanFixture(t, src)
+	want := []string{"Server.handleFoo", "Server.HandleBar", "Server.handleBaz"}
+	if len(vs) != len(want) {
+		t.Fatalf("got %d violations, want %d:\n%v", len(vs), len(want), vs)
+	}
+	for i, v := range vs {
+		if !strings.Contains(v.Message, want[i]) {
+			t.Errorf("[%d] message %q does not name %q", i, v.Message, want[i])
+		}
+	}
+}
+
 // TestAPIRouteOwner_LiveRoutesClean runs rule 6 against the real routes.go
 // so the repository state cannot drift from the rule while its unit fixtures
 // stay green.

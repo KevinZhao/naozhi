@@ -95,7 +95,6 @@ file_size:
 # rule 1 (handle_decl) 的唯一豁免。归属规则见 internal/server/doc.go：
 # internal/server 只拥有 HTTP 管道（mux/routes、middleware、WS hub、health、
 # 静态壳与资源、平台 webhook 注册、send/upload 管线）；其余 /api/* handler
-# 一律放 internal/dashboard/<sub> 子包并经 Deps 结构体注入。任何新的
-# (s *Server) handle* 方法都是 lint fail，不再往本清单加条目。
+# 一律放 internal/dashboard/<sub> 子包并经 Deps 结构体注入。
 handle_baseline:
     - Server.handleDashboard    # 静态壳 GET /dashboard = server 自有
