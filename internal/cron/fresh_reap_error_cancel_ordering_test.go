@@ -62,16 +62,6 @@ func TestFreshReapErrorPath_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
 	}
 	body := string(src)
 
-	// Locate the R20260608-CORR-1 anchor comment, which marks both Reset
-	// moves (cancel + send-error). We require at least two occurrences to
-	// confirm both branches were patched.
-	anchorRe := regexp.MustCompile(`R20260608-CORR-1`)
-	anchors := anchorRe.FindAllStringIndex(body, -1)
-	if len(anchors) < 2 {
-		t.Errorf("scheduler_run.go: expected >=2 R20260608-CORR-1 anchors (one per branch: cancel + send-error), got %d; "+
-			"both branches must carry the ordering comment to stay auditable (#1956)", len(anchors))
-	}
-
 	// For each patched branch the if-snap.fresh-Reset block must appear
 	// BEFORE the immediately following finishRun call. We walk the source
 	// positions of all `if snap.fresh {` guarded Reset calls and all

@@ -14,44 +14,28 @@ import (
 	"unicode/utf8"
 )
 
-// maxCronStoreBytes caps the size of cron_jobs.json during Load. The realistic
-// worst case is maxJobsHardCap (500) × per-job payload (~8 KiB prompt + ~4 KiB
-// truncated LastResult + metadata) ≈ 6.5 MiB; 16 MiB leaves headroom for future
-// fields without risking unbounded memory use on a tampered file. When the
-// store exceeds this cap loadJobs returns an error and leaves the file in
-// place — callers (Scheduler.Start) must abort rather than continue with an
-// empty in-memory state that would be persisted back and silently clobber the
-// operator's real jobs.
+// maxCronStoreBytes caps the size of cron_jobs.json during Load: worst case is
+// maxJobsHardCap × ~12 KiB per job ≈ 6.5 MiB, so 16 MiB leaves headroom while
+// bounding memory on a tampered file. Over the cap, loadJobs returns an error
+// and leaves the file in place so Scheduler.Start aborts instead of persisting
+// an empty state over the operator's real jobs.
 const maxCronStoreBytes = 16 * 1024 * 1024
 
-// loadJobs reads and parses the on-disk cron job store. The three possible
-// outcomes are distinguished deliberately:
+// loadJobs reads and parses the on-disk cron job store. Outcomes:
 //
-//   - (map, nil): normal read, including "file does not exist" (fresh
-//     deployment). Returned map may be nil for the no-file case — callers
-//     treat that identically to empty.
-//   - (nil, nil): parse failed. The corrupt file has already been renamed to
-//     <path>.corrupt.<ts>, so starting from empty state will not destroy
-//     evidence and the next save is safe.
-//   - (nil, error): the original file is still on disk (size cap exceeded,
-//     I/O error, or the corrupt-rename itself failed). Callers MUST abort:
-//     continuing with empty state would cause the next persist to clobber the
-//     operator's real jobs with `[]`, silently losing data.
+//   - (map, nil): normal read; a missing file yields a nil map (= empty).
+//   - (nil, nil): parse failed; the corrupt file was renamed to
+//     <path>.corrupt.<ts> so starting empty destroys no evidence.
+//   - (nil, error): the original file is still on disk (size cap, I/O error,
+//     or the corrupt-rename failed). Callers MUST abort: continuing with empty
+//     state would make the next persist clobber the real jobs with `[]`.
 func loadJobs(path string) (map[string]*Job, error) {
 	if path == "" {
 		return nil, nil
 	}
-	// R236-SEC-01 / R238-SEC-8 (#829, CWE-59 / CWE-367): refuse to follow a
-	// symlink at the cron store path with no TOCTOU window. The earlier
-	// Lstat-then-Open shape left a race in which a local attacker could
-	// swap cron_jobs.json for a symlink between the two syscalls; openCron-
-	// StoreFile uses OpenFile(O_NOFOLLOW|O_CLOEXEC) on unix so the kernel
-	// refuses the follow atomically (windows falls back to the historical
-	// Lstat→Open two-step — naozhi's production target is Linux). Fstat on
-	// the resulting fd validates the inode we actually have open is a
-	// regular file, closing the corrupt-rename branch as well: an attacker
-	// who hands us a fifo/socket cannot reach the json.Unmarshal +
-	// os.Rename code path because !IsRegular bails first.
+	// OpenFile(O_NOFOLLOW|O_CLOEXEC) refuses a symlinked cron_jobs.json atomically
+	// (no Lstat→Open TOCTOU, #829); Fstat below validates the open inode is a
+	// regular file so a fifo/socket never reaches json.Unmarshal + os.Rename.
 	f, err := openCronStoreFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -61,24 +45,15 @@ func loadJobs(path string) (map[string]*Job, error) {
 			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
 			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
 		}
-		// R241-SEC-9 (#469): Treat any non-NotExist open failure as a
-		// hard error. The earlier shape Lstat'd the path and only Warn'd
-		// on non-NotExist Lstat failures (FUSE pseudo-EBUSY etc.) before
-		// continuing to os.Open, leaving a symlink-bypass window. Now
-		// the only success path is a clean OpenFile(O_NOFOLLOW), so any
-		// error other than ErrNotExist must abort the load —
-		// continuation would risk reading attacker-substituted bytes or
-		// (worse) succeeding with an empty []*Job that the next persist
-		// silently writes back, clobbering the operator's real jobs.
-		// ErrNotExist remains the "no file = empty jobs" path.
+		// Any non-NotExist open failure aborts the load: continuing could read
+		// attacker-substituted bytes or succeed with an empty []*Job that the next
+		// persist writes back over the real jobs (#469).
 		slog.Warn("open cron store failed", "path", path, "err", err)
 		return nil, fmt.Errorf("open cron store: %w", err)
 	}
 	defer f.Close()
-	// Fstat on the open fd: same inode the bytes will be read from, no
-	// second path lookup. Reject anything that's not a plain file —
-	// O_NOFOLLOW filtered symlinks but a fifo/socket/device with the right
-	// name would still get past Open and only Fstat catches it.
+	// Fstat on the open fd: O_NOFOLLOW filtered symlinks, but a fifo/socket/device
+	// only fails here.
 	fi, err := f.Stat()
 	if err != nil {
 		slog.Warn("cron: fstat store path failed; refusing to load",
@@ -96,13 +71,9 @@ func loadJobs(path string) (map[string]*Job, error) {
 		return nil, fmt.Errorf("read cron store: %w", err)
 	}
 	if int64(len(data)) > maxCronStoreBytes {
-		// We read cap+1 via the LimitReader, so we can only report "at least"
-		// the true size. Leave the original in place so operators can
-		// inspect and recover; returning an error forces Scheduler.Start
-		// to abort rather than overwrite the file with an empty array on
-		// the next save. Strip the absolute path from the user-facing
-		// error — it may propagate to upstream/dashboard and leak host
-		// filesystem layout. Full path goes to the warn log for operators.
+		// LimitReader read cap+1, so only "at least" is known. Leave the original in
+		// place and return an error so Start aborts. The absolute path is kept out of
+		// the user-facing error (may propagate to dashboard); it goes to the log.
 		slog.Warn("cron store exceeds size cap",
 			"path", path, "size", len(data), "cap", maxCronStoreBytes)
 		return nil, fmt.Errorf("cron store exceeds size cap (at least %d bytes, cap=%d bytes); refusing to load — inspect the file or move it aside before restarting",
@@ -111,15 +82,10 @@ func loadJobs(path string) (map[string]*Job, error) {
 
 	var entries []*Job
 	if err := json.Unmarshal(data, &entries); err != nil {
-		// Preserve the corrupt file so the next save does not silently
-		// overwrite operator-visible evidence. Mirrors session/store.go.
-		// If the rename itself fails we return an error (the original file
-		// is still on disk and an empty save would destroy it).
-		// Append a cryptographic nonce to the rename target so two naozhi
-		// instances mis-configured to share the same data dir don't pick
-		// the same corruptPath at the same second and silently overwrite
-		// each other's evidence file — rename collision would leave one
-		// instance starting with empty in-memory state.
+		// Preserve the corrupt file so the next save does not overwrite evidence; if
+		// the rename fails return an error (an empty save would destroy the original).
+		// The random nonce keeps two instances sharing one data dir from colliding on
+		// the same corruptPath within a second.
 		corruptPath := path + ".corrupt." + time.Now().UTC().Format("20060102-150405") + "." + randomNonce()
 		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
 			return nil, fmt.Errorf("parse cron store failed (%v); could not rename: %w",
@@ -130,13 +96,9 @@ func loadJobs(path string) (map[string]*Job, error) {
 		return nil, nil
 	}
 
-	// Defensive cap: even if the file fits within maxCronStoreBytes, an
-	// attacker / corrupted shrinker could craft an array with hundreds of
-	// thousands of zero-byte stub entries. The scheduler enforces
-	// maxJobsHardCap at AddJob time but loadJobs runs before the scheduler
-	// rejects them, so we'd allocate the map and walk every entry first.
-	// Refuse to load anything beyond the hard cap rather than partially
-	// loading and letting the scheduler silently truncate.
+	// Defensive cap: an array of hundreds of thousands of stub entries fits under
+	// maxCronStoreBytes; refuse rather than allocate the map and let the
+	// scheduler silently truncate at maxJobsHardCap.
 	if len(entries) > maxJobsHardCap {
 		slog.Warn("cron store exceeds job count cap",
 			"path", path, "count", len(entries), "cap", maxJobsHardCap)
@@ -146,70 +108,49 @@ func loadJobs(path string) (map[string]*Job, error) {
 
 	m := make(map[string]*Job, len(entries))
 	for _, j := range entries {
-		// R20260526-CR-001: guard against nil entries in the JSON array.
-		// json.Unmarshal of `[null, {...}]` into []*Job yields a slice whose
-		// first element is a nil *Job. Without this check, j.ID below would
-		// panic (NPE) the moment a tampered or hand-edited cron_jobs.json
-		// is loaded. Drop the nil entry and keep loading the rest.
+		// json.Unmarshal of `[null, {...}]` yields nil *Job entries; drop them
+		// instead of panicking.
 		if j == nil {
 			continue
 		}
 		if j.ID == "" {
 			continue
 		}
-		// R235-CR-12: enforce ID hex shape on load. AddJob always produces
-		// IsValidID-conformant IDs (generateID), so a non-conformant ID came
-		// either from a hand-edited cron_jobs.json or from an attacker writing
-		// the file directly. runStore.Append rejects the same job at runtime
-		// (slog.Warn + return), but the entry would otherwise sit in s.jobs
-		// forever and round-trip back to disk on every persist.
+		// A non-conformant ID can only come from a hand-edited or attacker-written
+		// file; runStore.Append would reject it at runtime, but it would otherwise sit
+		// in s.jobs forever and round-trip to disk on every persist.
 		if !IsValidID(j.ID) {
 			slog.Warn("cron store: dropping job with invalid ID",
 				"path", path, "cron_id_bytes", len(j.ID))
 			continue
 		}
-		// R234-SEC-12: defensive prompt validation. AddJob / dashboard PATCH
-		// already enforce validateCronPrompt (UTF-8 + no C0 controls except
-		// \t/\n/\r), but cron_jobs.json can be edited directly by an
-		// operator. An invalid-UTF-8 prompt would corrupt every later
-		// json.Marshal (round-trip writes U+FFFD silently); a control-byte
-		// payload would smuggle ANSI / log-injection sequences into every
-		// CronRun.Result and dashboard broadcast. Drop offenders rather
-		// than aborting the whole load — losing a single tampered job is
-		// strictly safer than refusing to start the scheduler.
+		// Defensive prompt validation (the write paths already enforce
+		// validateCronPrompt, but cron_jobs.json can be edited offline): invalid UTF-8
+		// corrupts every later json.Marshal and control bytes smuggle ANSI / log
+		// injection into every CronRun.Result. Drop the job rather than abort the load.
 		if !utf8.ValidString(j.Prompt) || containsCronUnsafe(j.Prompt) {
 			slog.Warn("cron store: dropping job with invalid prompt bytes",
 				"path", path, "cron_id", j.ID, "prompt_bytes", len(j.Prompt))
 			continue
 		}
-		// R20260602-091302-CR-13: mirror the MaxPromptBytes byte-length cap
-		// that the write path (SetJobPrompt) enforces. A hand-edited
-		// cron_jobs.json could carry a prompt far exceeding 8 KiB; without
-		// this guard every cron run would replay a runaway prompt through the
-		// CLI and every /api/cron broadcast would carry the oversized payload.
+		// Mirror the write path's MaxPromptBytes cap so a hand-edited runaway prompt
+		// is not replayed every run.
 		if len(j.Prompt) > MaxPromptBytes {
 			slog.Warn("cron store: dropping job with overlong prompt",
 				"path", path, "cron_id", j.ID,
 				"prompt_bytes", len(j.Prompt), "cap", MaxPromptBytes)
 			continue
 		}
-		// R235-CR-5: same defensive rationale for Title / Backend. AddJob /
-		// dashboard PATCH validate these before accepting; an attacker
-		// hand-editing the JSON could smuggle bidi / control bytes into
-		// dashboard responses and platform notifications via Job.Title or
-		// Job.Backend, so drop offenders here as well.
+		// Same defensive rationale for Title / Backend: bidi / control bytes would
+		// reach dashboard responses and notifications.
 		if !utf8.ValidString(j.Title) || containsCronUnsafe(j.Title) {
 			slog.Warn("cron store: dropping job with invalid title bytes",
 				"path", path, "cron_id", j.ID, "title_bytes", len(j.Title))
 			continue
 		}
-		// R250-GO-12 (#1075): defence-in-depth rune-count cap mirroring
-		// addJobAcquiringLock / UpdateJob's MaxCronTitleLen guard. Without
-		// this, a hand-edited cron_jobs.json with a 1 MiB legal-UTF-8 Title
-		// would persist and inflate every /api/cron list broadcast at 1 Hz.
-		// Byte-level bound below would let a single CJK title (~3B/rune)
-		// reach 3× MaxCronTitleLen runes before tripping; rune count is the
-		// invariant the write-path enforces, so mirror it here.
+		// Rune-count cap mirroring the write path's MaxCronTitleLen guard; the
+		// byte-level check above alone would let a CJK title reach 3× the rune cap
+		// and inflate every 1 Hz list broadcast (#1075).
 		if utf8.RuneCountInString(j.Title) > MaxCronTitleLen {
 			slog.Warn("cron store: dropping job with overlong title",
 				"path", path, "cron_id", j.ID,
@@ -222,11 +163,9 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
-		// Placement: tampered/unknown values are normalised to local rather
-		// than dropping the whole job — unlike injection-bearing bytes above,
-		// a bad placement is a routing choice, and losing the job over it
-		// would be worse than running it at the safe default placement.
-		// The sandbox×work_dir Phase 1 combination degrades the same way.
+		// Placement: tampered/unknown values are normalised to local rather than
+		// dropping the job — a bad placement is a routing choice, not an injection
+		// vector. The sandbox×work_dir combination degrades the same way.
 		if err := validatePlacement(j.Placement); err != nil {
 			slog.Warn("cron store: normalising job with invalid placement to local",
 				"path", path, "cron_id", j.ID, "err", err)
@@ -237,17 +176,10 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID)
 			j.Placement = ""
 		}
-		// R236-QA-16: defensive Schedule / WorkDir validation. AddJob /
-		// dashboard PATCH already validate Schedule via robfig/cron + the
-		// minCronInterval floor, and reject WorkDir paths that escape the
-		// configured root, but cron_jobs.json can be hand-edited offline.
-		// A non-UTF-8 or control-byte WorkDir would smuggle ANSI / log-
-		// injection sequences into every "could not chdir" slog line; an
-		// over-long Schedule would propagate into dashboard responses and
-		// metrics labels. Length caps mirror MaxScheduleBytes (256) and
-		// the per-Job WorkDir budget below — runtime semantics are not
-		// affected because Scheduler.registerJob re-validates the schedule
-		// before adding it to robfig/cron.
+		// Defensive Schedule / WorkDir validation for offline edits: control bytes
+		// would smuggle log injection into "could not chdir" lines and an over-long
+		// Schedule would reach dashboard responses and metrics labels. Runtime
+		// semantics are unaffected because registerJob re-validates the schedule.
 		if len(j.Schedule) > MaxScheduleBytes || !utf8.ValidString(j.Schedule) || containsCronUnsafe(j.Schedule) {
 			slog.Warn("cron store: dropping job with invalid schedule bytes",
 				"path", path, "cron_id", j.ID, "schedule_bytes", len(j.Schedule))
@@ -260,12 +192,8 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "work_dir_bytes", len(j.WorkDir))
 			continue
 		}
-		// R239-CR-2 / R236-QA-16: same defensive rationale for NotifyChatID /
-		// NotifyPlatform. Both fields ride the cronJobView struct and are
-		// broadcast to dashboard at 1Hz via /api/cron; an attacker hand-editing
-		// cron_jobs.json could smuggle bidi / control bytes into the dashboard
-		// payload that way. AddJob / dashboard PATCH validate these on the
-		// write path; this is the equivalent guard for the load path.
+		// Same defensive rationale for NotifyChatID / NotifyPlatform: both ride the
+		// 1Hz /api/cron broadcast.
 		if !utf8.ValidString(j.NotifyChatID) || containsCronUnsafe(j.NotifyChatID) {
 			slog.Warn("cron store: dropping job with invalid notify_chat_id bytes",
 				"path", path, "cron_id", j.ID, "chat_id_bytes", len(j.NotifyChatID))
@@ -276,12 +204,8 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "platform_bytes", len(j.NotifyPlatform))
 			continue
 		}
-		// R260528-BUG-8: refuse silent overwrite when the same ID appears
-		// twice. validateCronJob / AddJob never produces a duplicate, but
-		// a hand-edited cron_jobs.json (or a botched merge tool) could. The
-		// previous `m[j.ID] = j` quietly dropped whichever entry came first
-		// — masking the corruption while the second-occurrence wins. Keep
-		// the first occurrence + slog.Warn so operators see the dup at boot.
+		// A duplicate ID can only come from a hand-edited or badly merged file; keep
+		// the first occurrence and warn so operators see the corruption at boot.
 		if _, dup := m[j.ID]; dup {
 			slog.Warn("cron store: dropping duplicate job ID",
 				"path", path, "cron_id", j.ID)
@@ -293,29 +217,14 @@ func loadJobs(path string) (map[string]*Job, error) {
 	return m, nil
 }
 
-// containsCronUnsafe reports whether s contains any byte sequence that the
-// cron field-safety audit rejects: disallowed C0 control bytes, the DEL
-// byte, Unicode bidi overrides, or line-/paragraph-separator codepoints.
-// Together these are the codepoints that validateCronPrompt blocks on the
-// IM / dashboard write paths and that a hand-edited cron_jobs.json could
-// otherwise smuggle into IM notifications and dashboard responses.
-//
-// C0 policy: \t (0x09), \n (0x0A), \r (0x0D) are explicitly allowed;
-// everything else in 0x00-0x1F plus 0x7F (DEL) trips the guard.
-//
-// Bidi / separator policy (R236-SEC-07): U+202A..U+202E (LRE/RLE/PDF/
-// LRO/RLO) and U+2066..U+2069 (LRI/RLI/FSI/PDI) can visually reorder
-// surrounding glyphs in any IM / browser renderer, so a tampered prompt
-// could swap "rm -rf /tmp/safe" into "rm -rf /etc/passwd" at display
-// time without changing the bytes on the wire. U+2028 (LS) and U+2029
-// (PS) introduce hard line breaks the prompt sanitiser otherwise
-// accepts. All eight codepoints encode as 3-byte UTF-8 sequences in the
-// E2 80 / E2 81 prefix range, so we only decode when the first two
-// bytes match — keeps the common ASCII-only path branchless.
-//
-// Inlined byte scan rather than the textutil regex helper because
-// loadJobs runs once at startup over a small file and importing textutil
-// would pull in regexp init cost on every scheduler boot. R234-SEC-12.
+// containsCronUnsafe reports whether s contains any byte the cron field-safety
+// policy rejects: C0 controls other than \t \n \r, DEL, Unicode bidi overrides
+// (U+202A..U+202E, U+2066..U+2069) or LS/PS (U+2028/U+2029). Bidi codepoints
+// can visually reorder glyphs in IM / browser renderers so a tampered prompt
+// swaps "rm -rf /tmp/safe" for "rm -rf /etc/passwd" at display time; LS/PS
+// introduce hard line breaks. Matches what validateCronPrompt blocks on the
+// write paths. Inlined byte scan (no textutil regex) because loadJobs runs once
+// at startup and the ASCII path stays branchless.
 func containsCronUnsafe(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -325,10 +234,8 @@ func containsCronUnsafe(s string) bool {
 		if b < 0x20 || b == 0x7F {
 			return true
 		}
-		// Detect bidi / LS / PS via direct UTF-8 byte inspection. The
-		// guarded codepoints all live in U+2028..U+2029 and
-		// U+202A..U+202E (E2 80 A8..AE) and U+2066..U+2069
-		// (E2 81 A6..A9), so peek when we see the E2 80 / E2 81 prefix.
+		// All guarded codepoints are 3-byte sequences with an E2 80 / E2 81 prefix
+		// (U+2028..U+202E → E2 80 A8..AE, U+2066..U+2069 → E2 81 A6..A9).
 		if b == 0xE2 && i+2 < len(s) {
 			b1 := s[i+1]
 			b2 := s[i+2]

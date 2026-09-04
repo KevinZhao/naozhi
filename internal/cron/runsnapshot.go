@@ -12,36 +12,27 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// SandboxRunSnapshot is the content-addressed record of a sandbox run's
-// INPUT (RFC §5.1/§5.2) — everything needed to replay it into a fresh
-// microVM, persisted on the naozhi side so replay is "re-inject the same
-// payload" rather than "reconstruct session state". One manifest per run:
+// SandboxRunSnapshot is the content-addressed record of a sandbox run's INPUT
+// — everything needed to replay it into a fresh microVM:
 //
 //	<store-dir>/runsnapshots/<jobID>/<runID>.json   ← this manifest
 //	<store-dir>/runsnapshots/blobs/<sha256>          ← deduped content blobs
 //
-// SECRETS RED LINE (§5.1): the manifest stores secret REFERENCE NAMES only
-// (SecretRefs), never values. Replay re-resolves the current value by
-// reference at inject time — so a rotated secret is picked up, and no
-// plaintext ever lands on naozhi's disk. The audit test
+// SECRETS RED LINE: the manifest stores secret REFERENCE NAMES only
+// (SecretRefs), never values; replay re-resolves by reference at inject time.
 // TestSnapshot_NeverPersistsSecretValues pins this.
 type SandboxRunSnapshot struct {
 	RunID string `json:"run_id"`
 	JobID string `json:"job_id"`
 	// PromptHash is the SHA-256 of the (agent-command-stripped) prompt; the
-	// text itself lives in the blob store, deduped across runs that share a
-	// prompt (§5.2). Empty only if the prompt was empty (never, in practice
-	// — sandbox jobs validate non-empty before invoke).
+	// text itself lives deduped in the blob store.
 	PromptHash string `json:"prompt_hash,omitempty"`
 	// Model pins the CLI model the run requested ("" = image default).
 	Model string `json:"model,omitempty"`
-	// ImageVersion records the base image the run targeted (from the run
-	// receipt) so a replay can pin the same image (§5.2 "the version that
-	// produced it"). Empty when unknown.
+	// ImageVersion records the base image the run targeted so a replay can pin
+	// it. Empty when unknown.
 	ImageVersion string `json:"image_version,omitempty"`
-	// SecretRefs are the NAMES of secrets the run was injected with — never
-	// the values (§5.1 red line). Empty in Phase 1 (no secret injection yet);
-	// the field exists so the manifest shape is forward-stable for B5.
+	// SecretRefs are the NAMES of injected secrets — never the values.
 	SecretRefs []string `json:"secret_refs,omitempty"`
 	// SchemaV guards forward migrations of the manifest shape.
 	SchemaV int `json:"schema_v"`
@@ -55,24 +46,18 @@ func (s *Scheduler) sandboxSnapshotDir() string {
 	return s.stateSubtree("runsnapshots")
 }
 
-// writeSandboxSnapshot persists one run's input manifest + its prompt blob
-// BEFORE the invoke, so a replay (or post-mortem) can re-inject the exact
-// input. Best-effort: a write failure logs and returns without failing the
-// run (the run is more valuable than its replay handle). Content-addressed:
-// the prompt blob is keyed by its hash, so N runs sharing a prompt store
-// one copy.
-//
-// secretRefs carries the NAMES of injected secrets (empty in Phase 1).
-// Callers MUST NOT pass secret values here — the manifest is plaintext on
-// disk.
+// writeSandboxSnapshot persists one run's input manifest + prompt blob BEFORE
+// the invoke so a replay can re-inject the exact input. Best-effort: a write
+// failure logs and does not fail the run. Content-addressed: N runs sharing a
+// prompt store one blob. Callers MUST NOT pass secret values in secretRefs —
+// the manifest is plaintext on disk.
 func (s *Scheduler) writeSandboxSnapshot(jobID, runID, prompt, model, imageVersion string, secretRefs []string, lg *slog.Logger) {
 	root := s.sandboxSnapshotDir()
 	if root == "" {
 		return
 	}
-	// Path-traversal guard mirroring the readers: IDs are scheduler hex in
-	// production, but the exported WriteSandboxSnapshotForTest seam and any
-	// future caller must not be able to escape the snapshot root.
+	// Path-traversal guard mirroring the readers: the test seam and any future
+	// caller must not escape the snapshot root.
 	if !IsValidID(jobID) || !IsValidID(runID) {
 		lg.Warn("cron sandbox: snapshot write rejected non-hex id", "job_id", jobID, "run_id", runID)
 		return
@@ -101,10 +86,8 @@ func (s *Scheduler) writeSandboxSnapshot(jobID, runID, prompt, model, imageVersi
 		lg.Warn("cron sandbox: snapshot dir create failed; replay unavailable", "err", err)
 		return
 	}
-	// runID is scheduler-generated hex — path-safe by construction. Atomic
-	// write to match writeSnapshotBlob's tmp+rename discipline (the blob it
-	// references is committed atomically; a truncated manifest would dangle a
-	// hash to a blob it can no longer parse) — R20260614-ARCH-2.
+	// Atomic write to match writeSnapshotBlob's tmp+rename: a truncated manifest
+	// would dangle a hash to an unparseable blob.
 	if err := osutil.WriteFileAtomic(filepath.Join(dir, runID+".json"), b, 0o600); err != nil {
 		lg.Warn("cron sandbox: snapshot manifest write failed; replay unavailable", "err", err)
 	}
@@ -127,12 +110,10 @@ func (s *Scheduler) writeSnapshotBlob(root, content string) (string, error) {
 	if _, err := os.Stat(path); err == nil {
 		return hash, nil // dedup: blob already present
 	}
-	// Write to a UNIQUE temp file + rename so a concurrent reader never sees
-	// a half-written blob and two writers racing the SAME hash don't collide
-	// on one tmp path (a shared `<hash>.tmp` let the loser's Remove-on-error
-	// delete the winner's committed blob — review PR-4 F1). os.CreateTemp
-	// gives each writer its own tmp; the final rename is idempotent because
-	// content-addressing guarantees same hash ⇒ same bytes.
+	// Unique temp file + rename: a reader never sees a half-written blob, and two
+	// writers racing the SAME hash cannot collide on one tmp path (a shared tmp
+	// let the loser's Remove delete the winner's blob). The rename is idempotent
+	// because same hash ⇒ same bytes.
 	f, err := os.CreateTemp(blobDir, hash+".tmp-*")
 	if err != nil {
 		return "", fmt.Errorf("create blob tmp: %w", err)

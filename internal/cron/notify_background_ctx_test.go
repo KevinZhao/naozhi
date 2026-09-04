@@ -82,14 +82,4 @@ func TestNotifyTarget_ChainsToStopCtxContract(t *testing.T) {
 			"pre-fix shape that left a hung webhook pinning triggerWG.Wait at " +
 			"the full stopBudget. Chain to s.stopCtx instead.")
 	}
-
-	// 3) The R243-SEC-14 anchor must survive — it is the in-code reference
-	// future readers grep for.
-	if !strings.Contains(fnBody, "R243-SEC-14") && !strings.Contains(fnBody, "#799") {
-		t.Error("notifyTarget's R243-SEC-14 / #799 anchor comment has been " +
-			"removed. The comment is the only in-code reference explaining " +
-			"why the parent is s.stopCtx rather than Background. Keep text " +
-			"along the lines of \"R243-SEC-14\" or \"#799\" so future audits " +
-			"can grep to the reasoning.")
-	}
 }

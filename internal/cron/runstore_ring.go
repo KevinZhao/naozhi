@@ -6,19 +6,13 @@ import (
 	"sync/atomic"
 )
 
-// recentCacheEntry is the cached newest-first snapshot for one job.
+// recentCacheEntry is the cached newest-first snapshot for one job, stored in
+// a fixed-capacity ring (cap = runStore.keepCount) so cacheHeadPush — called
+// on every Append — is O(1) by rotating head instead of shifting data.
 //
-// R242-GO-8 / R235-PERF-3 / R233-PERF-2: storage is a fixed-capacity ring
-// buffer (cap = runStore.keepCount, typically 200). cacheHeadPush is the
-// hot path — every Append calls it, so pre-historical implementations
-// that did `append + copy` shifted up to keepCount-1 entries per push
-// (O(N) per Append). The ring lets us land each push in O(1) by
-// rotating `head` backwards instead of moving data.
-//
-// Logical view: newest-first slice of length `count`, where index 0 is
-// the newest entry. Physically: `ring[head]` is the newest, `ring[(head
-// + count - 1) % cap(ring)]` is the oldest. ringRead / ringSnapshot
-// translate logical → physical for all consumers.
+// Logical view: newest-first slice of length count, index 0 newest.
+// Physically ring[head] is the newest and ring[(head+count-1)%cap] the oldest;
+// ringRead / ringSnapshot translate logical → physical.
 type recentCacheEntry struct {
 	mu sync.RWMutex
 	// ring is the fixed-capacity backing array. cap(ring) == runStore.keepCount
@@ -29,30 +23,19 @@ type recentCacheEntry struct {
 	// count is the populated length (0 ≤ count ≤ cap(ring)).
 	count int
 	warm  bool // false until first warm() pass; List/Recent will lazy-warm
-	// runIDs is the set of RunIDs currently present in the ring. cacheHeadPush
-	// consults it for an O(1) duplicate check instead of an O(count) linear
-	// ring scan on every Append (#1517). It is maintained in lockstep with the
-	// ring under entry.mu: ringSeed rebuilds it, ringPushHead inserts the new
-	// RunID (and deletes the evicted oldest when the ring is full). The dedup
-	// is needed because a warmCache ringSeed can interleave between an Append's
-	// WriteFileAtomic and its matching cacheHeadPush (R20260527122801-PERF-4 /
-	// #1335), seeding a RunID ahead of its own late push. nil until the first
-	// ringSeed allocates it.
+	// runIDs is the set of RunIDs currently in the ring, giving cacheHeadPush an
+	// O(1) dedup check (#1517). Maintained in lockstep with the ring under
+	// entry.mu by ringSeed / ringPushHead; nil until the first ringSeed. Needed
+	// because a warmCache ringSeed can interleave between an Append's
+	// WriteFileAtomic and its cacheHeadPush, seeding a RunID ahead of its push.
 	runIDs map[string]struct{}
-	// capZeroWarned is set on the first cap=0 self-heal observation so the
-	// warn fires exactly once per entry rather than once per process.
-	// R20260602-CR-4: per-entry instead of a package-level sync.Once so
-	// parallel tests each get their own warn gate and cannot silence one
-	// another.
+	// capZeroWarned gates the cap=0 self-heal warning to once per entry (a
+	// package-level once would let one entry silence all others).
 	capZeroWarned atomic.Bool
 }
 
-// warnRingCapZero fires a slog.Warn for the cap=0 self-heal path. It is
-// rate-limited per recentCacheEntry via e.capZeroWarned (atomic CAS) so
-// each entry warns at most once, independent of other entries. This is
-// R20260602-CR-4: the previous package-level sync.Once silenced warnings
-// for all subsequent entries once the first triggered, hiding the
-// regression in parallel-test and multi-job scenarios.
+// warnRingCapZero fires the cap=0 self-heal slog.Warn at most once per
+// recentCacheEntry (atomic CAS on e.capZeroWarned).
 func warnRingCapZero(e *recentCacheEntry, site string) {
 	if e.capZeroWarned.CompareAndSwap(false, true) {
 		slog.Warn("cron runstore: recentCache ring cap=0 on read; self-healing to empty (ringSeed bypass regression?)",
@@ -63,12 +46,10 @@ func warnRingCapZero(e *recentCacheEntry, site string) {
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
 // and must ensure 0 ≤ i < entry.count.
 func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
-	// R247-GO-4: defensive against cap(ring)==0 with count>0 — same self-heal
-	// philosophy as cacheHeadPush's `cap(entry.ring) != s.keepCount` reseed.
-	// Avoids integer divide-by-zero panic on a regression path that bypasses
-	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
+	// Defensive against cap(ring)==0 with count>0 (a path that bypassed ringSeed):
+	// avoids a divide-by-zero panic, mirroring cacheHeadPush's reseed self-heal.
 	if cap(e.ring) == 0 {
-		// R249-ARCH-13 (#979): warn once so the silent self-heal is auditable.
+		// Warn once so the silent self-heal is auditable (#979).
 		warnRingCapZero(e, "ringRead")
 		return CronRunSummary{}
 	}
@@ -78,12 +59,9 @@ func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
 // ringSnapshot returns a fresh newest-first slice of up to limit entries.
 // Caller holds entry.mu. limit ≤ 0 or limit > count returns count entries.
 func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
-	// R247-GO-4: see ringRead — guard cap=0 + count>0 regression and the
-	// degenerate count==0 fast path (no allocation needed). [BREAKING-LOCAL]
+	// Guard cap=0 + count>0 regression, plus the count==0 no-alloc fast path.
 	if cap(e.ring) == 0 || e.count == 0 {
-		// R249-ARCH-13 (#979): warn once when cap=0 *despite* a populated
-		// count — that is the bypass regression. The count==0 case is the
-		// benign empty-cache fast path and stays silent.
+		// Only cap=0 despite a populated count is the bypass regression; count==0 stays silent.
 		if cap(e.ring) == 0 && e.count > 0 {
 			warnRingCapZero(e, "ringSnapshot")
 		}
@@ -110,19 +88,14 @@ func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
 // entry.mu and entry.ring is allocated (cap > 0).
 func (e *recentCacheEntry) ringPushHead(summary CronRunSummary) {
 	c := cap(e.ring)
-	// Move head one slot backwards, wrapping around. After this, the
-	// freshly written summary is the newest entry.
 	e.head = (e.head - 1 + c) % c
 	if e.count == 0 {
-		// First push into an empty ring: ensure ring length covers head.
-		// We keep len(ring) == cap(ring) so plain index assignment works
-		// regardless of count.
+		// Keep len(ring) == cap(ring) so plain index assignment works regardless of count.
 		e.ring = e.ring[:c]
 	}
 	if e.count == c {
-		// Ring full: the slot we're about to overwrite holds the oldest
-		// entry, which is being evicted. Drop it from the RunID set so the
-		// O(1) dedup index (#1517) stays in lockstep with the ring.
+		// Ring full: the slot being overwritten holds the evicted oldest entry;
+		// drop it from the dedup index (#1517).
 		if e.runIDs != nil {
 			delete(e.runIDs, e.ring[e.head].RunID)
 		}
@@ -144,11 +117,7 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 		e.ring = make([]CronRunSummary, keepCount)
 	} else {
 		e.ring = e.ring[:keepCount]
-		// Zero out trailing slots so old entries beyond count don't pin
-		// strings / sub-slices (avoid leaking RAM through a smaller seed).
-		// R20260606-PERF-6: use clear() (Go 1.21+) instead of a per-element
-		// loop — a single memclr over the tail sub-slice rather than N
-		// separate GC-visible assignments.
+		// Zero trailing slots so entries beyond count don't pin strings / sub-slices.
 		if len(rows) < keepCount {
 			clear(e.ring[len(rows):])
 		}
@@ -160,9 +129,7 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	copy(e.ring[:n], rows[:n])
 	e.head = 0
 	e.count = n
-	// Rebuild the RunID dedup index (#1517) from the freshly-seeded rows so
-	// the next cacheHeadPush can do an O(1) membership test against this
-	// snapshot instead of an O(count) linear scan.
+	// Rebuild the RunID dedup index from the seeded rows (#1517).
 	if e.runIDs == nil {
 		e.runIDs = make(map[string]struct{}, n)
 	} else {

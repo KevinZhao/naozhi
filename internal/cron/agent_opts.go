@@ -1,56 +1,37 @@
 // Package cron — agent_opts.go owns the cron-local view of session-spawn
-// types so cron does not need to import internal/session.
-//
-// All types here mirror counterparts in internal/session (AgentOpts,
-// ManagedSession, SessionStatus, InterruptOutcome). The production
-// adapter in internal/wireup/cron_router_adapter.go translates between them;
-// an init() panic in that adapter pins the InterruptOutcome ordinals
-// against session.InterruptOutcome so a divergence crashes the binary
-// at boot rather than silently miscasting.
-//
-// Why local types: keeping these in cron breaks the cron → session
-// reverse import edge that historically forced a full session graph
-// rebuild for every cron change. New session-side fields don't ripple
-// here unless cron actually consumes them.
+// types (AgentOpts, Session, SessionStatus, InterruptOutcome) so cron does
+// not import internal/session. The adapter in
+// internal/wireup/cron_router_adapter.go translates between them and its
+// init() panics if the SessionStatus/InterruptOutcome ordinals diverge.
 package cron
 
 import "context"
 
-// AgentOpts is the cron-local view of session-spawn parameters. Field
-// set is INTENTIONALLY a subset of session.AgentOpts: only what cron's
-// scheduler actually reads. Adapter translates session.AgentOpts →
-// cron.AgentOpts at the cmd/naozhi boundary.
+// AgentOpts is the cron-local view of session-spawn parameters — only the
+// subset cron's scheduler reads; the wireup adapter translates from
+// session.AgentOpts.
 //
-// ExtraArgs aliasing contract: callers populating AgentOpts to feed the
-// cron Scheduler MUST own ExtraArgs exclusively. The adapter clones
-// the slice on the way out to session.AgentOpts so a downstream
-// append() can't corrupt cron's own copy and vice-versa.
+// ExtraArgs aliasing contract: callers populating AgentOpts for the cron
+// Scheduler MUST own ExtraArgs exclusively; the adapter clones the slice on
+// the way out so a downstream append() can't corrupt cron's copy.
 type AgentOpts struct {
 	Backend   string
 	Model     string
 	Workspace string
 	ExtraArgs []string
-	// Effort mirrors session.AgentOpts.Effort so a cron job inherits the
-	// thinking-effort tier configured for its agent — the per-agent layer
-	// exists precisely so a background sweeper can run cheaper than an
-	// interactive planner. docs/rfc/kiro-effort-control.md
+	// Effort mirrors session.AgentOpts.Effort so a cron job inherits its
+	// agent's thinking-effort tier. docs/rfc/kiro-effort-control.md
 	Effort string
 	// SystemPrompt mirrors session.AgentOpts.SystemPrompt so a cron job
-	// inherits agents[<id>].system_prompt like any other session of that
-	// agent (#2493). Cron adds no layer of its own.
+	// inherits agents[<id>].system_prompt (#2493). Cron adds no layer of its own.
 	SystemPrompt string
 	Exempt       bool
 }
 
-// SessionStatus mirrors session.SessionStatus value-for-value. The
-// adapter does cron.SessionStatus(int(session.SessionStatus)); we rely
-// on the iota order matching. session.SessionStatus has three values
-// (Existing / Resumed / New). These ordinals ARE panic-pinned at boot
-// by internal/wireup/cron_router_adapter.go init() (R260528-GO-18), which
-// asserts cron.SessionExisting/Resumed/New equal their session.*
-// counterparts and panics on divergence — production inflight
+// SessionStatus mirrors session.SessionStatus value-for-value; the adapter
+// casts numerically, so the iota order must match. The ordinals are
+// panic-pinned at boot by the wireup adapter's init() — production inflight
 // broadcasts key off the value, so a silent reorder is not safe.
-// Do not drop that pin believing only tests would break.
 type SessionStatus int
 
 const (
@@ -60,48 +41,33 @@ const (
 )
 
 // Session is the minimum surface cron needs from a live router-spawned
-// session: send a turn, query the running CLI session id (so the
-// inflight broadcast can fill in SessionID before Send returns —
-// fix(cron) #766), and (when deadline fires) interrupt. Cron does
-// NOT use attachments or per-turn event callbacks today; if that ever
-// changes, add fields here then.
-//
-// The narrow contract makes the adapter trivial — see
-// internal/wireup/cron_router_adapter.go cronSessionAdapter.
+// session: send a turn, query the running CLI session id (so the inflight
+// broadcast can fill in SessionID before Send returns, #766), and interrupt
+// when the deadline fires. Cron does NOT use attachments or per-turn event
+// callbacks; add fields here only when it does.
 type Session interface {
 	Send(ctx context.Context, text string) (SendResult, error)
 	SessionID() string
 	InterruptViaControl() InterruptOutcome
 }
 
-// SendResult is the cron-local subset of cli.SendResult. cron reads
-// Text (for IM notify + run history), SessionID (for stub chain
-// refresh) and CostUSD (R202606e-ARCH-1 #2280: per-run cost for local
-// runs, which have no SandboxMeta receipt to carry it). No alloc-
-// sensitive paths cross this boundary so a fresh struct per Send is fine.
+// SendResult is the cron-local subset of cli.SendResult: Text (IM notify +
+// run history), SessionID (stub chain refresh) and CostUSD (per-run cost
+// for local runs, which have no SandboxMeta receipt to carry it, #2280).
 type SendResult struct {
 	Text      string
 	SessionID string
 	// CostUSD is the CLI's cumulative total_cost_usd for the run (mirrors
-	// cli.SendResult.CostUSD). Local (non-sandbox) cron runs persist this
-	// onto CronRun so per-job monthly cost aggregates stop reading 0.
+	// cli.SendResult.CostUSD); local cron runs persist it onto CronRun.
 	CostUSD float64
 }
 
-// InterruptOutcome mirrors session.InterruptOutcome value-for-value
-// AND ordinal-for-ordinal. The adapter does
-//
-//	cron.InterruptOutcome(c.s.InterruptViaControl())
-//
-// which is a numeric cast — diverging ordinals would silently shuffle
-// values. The init() panic in internal/wireup/cron_router_adapter.go pins
-// the contract; CI green build proves the ordinals still match.
-//
-// Five values mirror session.go exactly: Sent / NoSession / NoTurn /
-// Unsupported / Error. Cron's executeOpt only branches on Sent and
-// Unsupported today (warn-level escalation when watchdog fired but
-// interrupt did not land); the other values exist purely so the cast
-// remains lossless.
+// InterruptOutcome mirrors session.InterruptOutcome value-for-value AND
+// ordinal-for-ordinal: the adapter does a numeric cast
+// cron.InterruptOutcome(c.s.InterruptViaControl()), so the ordinals must
+// match session.InterruptOutcome; the wireup adapter init() panics on
+// divergence. executeOpt only branches on Sent and Unsupported; the other
+// values exist so the cast stays lossless.
 type InterruptOutcome int
 
 const (

@@ -17,12 +17,11 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// sandboxPending is the §6.5 in-flight record, written to
-// <store-dir>/sandboxpending/<runID>.json before InvokeAgentRuntime and
-// removed after the run reaches a terminal state. Its sole purpose is to
-// survive a naozhi restart: the held stream dies with the process, but the
-// microVM keeps running — this file is the only handle the next boot has
-// to Stop it and close out the run record.
+// sandboxPending is the in-flight record written to
+// <store-dir>/sandboxpending/<runID>.json before InvokeAgentRuntime and removed
+// after the run reaches a terminal state. It exists to survive a naozhi
+// restart: the held stream dies with the process but the microVM keeps
+// running, and this file is the only handle the next boot has to Stop it.
 type sandboxPending struct {
 	JobID            string `json:"job_id"`
 	RunID            string `json:"run_id"`
@@ -45,11 +44,8 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 	if dir == "" {
 		return ""
 	}
-	// #2166: route the dir create through the symlink-guarded helper so a
-	// planted `<stateDir>/sandboxpending → /elsewhere` cannot silently redirect
-	// the §6.5 restart-reconcile handle into an attacker-chosen directory.
-	// Degrades to no reconcile handle (like a MkdirAll failure) rather than
-	// writing through the symlink.
+	// Symlink-guarded dir create: a planted `<stateDir>/sandboxpending → /elsewhere`
+	// must not redirect the restart-reconcile handle (#2166). Degrades to no handle.
 	if err := s.mkdirStateSubtree(dir); err != nil {
 		lg.Warn("cron sandbox: pending dir create failed; restart reconcile unavailable for this run", "err", err)
 		return ""
@@ -61,29 +57,21 @@ func (s *Scheduler) writeSandboxPending(p sandboxPending, lg *slog.Logger) strin
 	}
 	// runID is scheduler-generated hex — path-safe by construction.
 	path := filepath.Join(dir, p.RunID+".json")
-	// Atomic write (tmp→fsync→rename→SyncDir): this file is the ONLY restart
-	// reconcile handle to Stop an orphaned microVM (godoc lines 16-21). A
-	// crash mid-write under bare os.WriteFile could leave a truncated/empty
-	// record that reconcile drops as corrupt → permanent microVM orphan
-	// (R20260614-ARCH-1).
+	// Atomic write: this file is the ONLY restart-reconcile handle; a truncated
+	// record from a crash mid-write would be dropped as corrupt → permanent orphan.
 	if err := osutil.WriteFileAtomic(path, b, 0o600); err != nil {
 		lg.Warn("cron sandbox: pending write failed; restart reconcile unavailable for this run", "err", err)
 		return ""
 	}
-	// R20260616-PERF-001 (#2140): record the live jobID→path mapping so a
-	// later DeleteJobByID resolves this run's pending file with one map lookup
-	// instead of scanning + unmarshalling every concurrent run's record. The
-	// per-job CAS keeps at most one in-flight run per job, so a single entry
-	// per key is correct; a re-write for the same job overwrites the (now
-	// stale) prior path.
+	// Live jobID→path index lets DeleteJobByID find this run's pending file with
+	// one lookup instead of scanning every record. The per-job CAS keeps at most
+	// one in-flight run per job, so one entry per key is correct (#2140).
 	s.setSandboxPendingIndex(p.JobID, path)
 	return path
 }
 
-// setSandboxPendingIndex records jobID→path for the §6.5 in-flight record.
-// sandboxPendingIndex is allocated in NewScheduler (scheduler.go) and is the
-// only construction path that reaches the sandbox write seam, so the map is
-// guaranteed non-nil here — no nil guard needed [R202606e-GO-001].
+// setSandboxPendingIndex records jobID→path for the in-flight record. The map
+// is allocated in NewScheduler, the only construction path reaching this seam.
 func (s *Scheduler) setSandboxPendingIndex(jobID, path string) {
 	s.sandboxPendingMu.Lock()
 	s.sandboxPendingIndex[jobID] = path
@@ -125,27 +113,16 @@ func removeSandboxPending(path string, lg *slog.Logger) {
 	}
 }
 
-// reconcileSandboxPending is the §6.5 startup pass: every pending file is
-// an orphaned run — the previous process died while holding its stream.
-// For each: Stop the microVM (idempotent; it may have finished or been
-// idle-burned long ago), close the run record as failed-transport with an
-// orphaned marker, and drop the file. Runs asynchronously from Start()
-// (mirrors the cold-start runs/ GC) — Stop calls are network I/O and must
-// not block scheduler startup.
+// reconcileSandboxPending is the startup pass: every pending file is an
+// orphaned run whose previous process died holding the stream. For each: Stop
+// the microVM (idempotent), close the run record as failed-transport, drop the
+// file. Runs asynchronously from Start() — Stops are network I/O. The terminal
+// record goes through finishRun with a synthetic started event first so
+// subscribers see a consistent started→ended pair.
 //
-// The terminal record goes through finishRun's three-write protocol with a
-// synthetic started event first, so subscribers see a consistent
-// started→ended pair (the original started frame died with the previous
-// process — same rationale as emitSyntheticSkipped).
-//
-// R20260616-PERF-006 (#2142): the cheap validate/drop-corrupt pass stays
-// serial (local I/O), then the surviving orphans' Stops are fanned out across
-// a bounded worker pool (sandboxReconcileWorkers). Each orphan's StopSession
-// is an independent ~30s network call, so serial N×30s on a slow upstream
-// could stall the reconcile pass for minutes; the pool caps that to
-// ⌈N/workers⌉×30s while bounding peak in-flight Stops. reconcileOneSandboxOrphan
-// is concurrency-safe: every shared-state touch goes through s.mu (RLock
-// snapshot + finishRun's own re-lock) or atomic metrics counters.
+// The validate/drop-corrupt pass is serial (local I/O); surviving orphans'
+// Stops fan out across sandboxReconcileWorkers since each is an independent
+// ~30s network call (#2142). reconcileOneSandboxOrphan is concurrency-safe.
 func (s *Scheduler) reconcileSandboxPending() {
 	dir := s.sandboxPendingDir()
 	if dir == "" {
@@ -169,7 +146,6 @@ func (s *Scheduler) reconcileSandboxPending() {
 			continue
 		}
 		// Bail on shutdown so N×30s Stop timeouts don't exhaust gcWaitBudget.
-		// Mirrors trimAllCtx's inter-entry ctx.Err() check (scheduler.go).
 		if s.stopCtx.Err() != nil {
 			return
 		}
@@ -181,19 +157,11 @@ func (s *Scheduler) reconcileSandboxPending() {
 		}
 		var p sandboxPending
 		if err := json.Unmarshal(raw, &p); err != nil || !IsValidID(p.RunID) || !IsValidID(p.JobID) || p.StartedAtMS <= 0 || p.RuntimeSessionID == "" {
-			// Corrupt or tampered record (RunID/JobID must be scheduler-
-			// generated hex — they flow into run-record paths and the
-			// broadcast, so shape-validate before use). StartedAtMS<=0
-			// (R20260614-GO-003) is equally corrupt: time.UnixMilli on a
-			// zero/negative value yields a 1970 (or pre-epoch) StartedAt that
-			// flows into CronRun.StartedAt and an astronomical DurationMS,
-			// wrecking the dashboard timeline — drop the record. Remove so it
-			// does not re-warn on every boot.
-			// RuntimeSessionID=="" (R20260615-030459-COR-002): a pending record
-			// without a runtime session id cannot be reconciled — reconcile would
-			// skip the StopSession block yet still call finishRun and
-			// remove the file, breaking §6.2 containment. Treat as corrupt:
-			// drop+warn, aligned with stopSandboxRunsForJob's guard.
+			// Corrupt or tampered record: RunID/JobID flow into run-record paths and the
+			// broadcast, StartedAtMS<=0 would produce a 1970 StartedAt and an astronomical
+			// DurationMS, and a record without a RuntimeSessionID cannot be reconciled
+			// (Stop would be skipped yet finishRun + remove would still run). Drop it so
+			// it does not re-warn on every boot.
 			slog.Warn("cron sandbox: corrupt pending record dropped", "file", osutil.SanitizeForLog(e.Name(), 256), "err", err)
 			_ = os.Remove(path)
 			continue
@@ -204,13 +172,10 @@ func (s *Scheduler) reconcileSandboxPending() {
 	if len(orphans) == 0 {
 		return
 	}
-	// Serial when there is nothing to parallelise — avoid the goroutine +
-	// channel plumbing for the common single-orphan case.
+	// Single orphan: skip the goroutine + channel plumbing.
 	if len(orphans) == 1 {
-		// R202606-CR-002: honor shutdown before the (up to sandboxStopTimeout)
-		// Stop, mirroring the per-orphan ctx.Err() gate the parallel path applies
-		// at line 241. Without this a SIGTERM during a single-orphan reconcile
-		// still blocks ~30s on the Stop, slowing shutdown.
+		// Honor shutdown before the (up to sandboxStopTimeout) Stop, mirroring the
+		// parallel path.
 		if s.stopCtx.Err() != nil {
 			return
 		}
@@ -229,10 +194,8 @@ func (s *Scheduler) reconcileSandboxPending() {
 		go func() {
 			defer wg.Done()
 			for o := range jobs {
-				// Per-orphan shutdown bail: a Stop() racing reconcile cancels
-				// stopCtx; stop dispatching new Stops so we don't exhaust the
-				// gcWaitBudget. reconcileOneSandboxOrphan also re-checks via its
-				// WithTimeout(stopCtx, …) so an in-flight Stop unblocks too.
+				// Per-orphan shutdown bail: stop dispatching new Stops so gcWaitBudget is not
+				// exhausted; an in-flight Stop unblocks via its WithTimeout(stopCtx, …).
 				if s.stopCtx.Err() != nil {
 					continue
 				}
@@ -240,12 +203,9 @@ func (s *Scheduler) reconcileSandboxPending() {
 			}
 		}()
 	}
-	// R202606e-GO-002: select on stopCtx while feeding the unbuffered jobs
-	// channel. Without this a SIGTERM during a multi-orphan reconcile cannot
-	// unblock the send side: workers stop dispatching Stops (line 236) but keep
-	// draining, while the sender stays parked on `jobs <- o` until every orphan
-	// is handed off — so close(jobs)/wg.Wait() (and the gcWaitBudget) are held
-	// hostage by the remaining sends. Bail out of feeding once shutdown begins.
+	// Select on stopCtx while feeding the unbuffered channel: workers stop
+	// dispatching on shutdown but keep draining, so a plain send would park until
+	// every orphan was handed off and hold close(jobs)/wg.Wait() hostage.
 	for _, o := range orphans {
 		select {
 		case jobs <- o:
@@ -259,24 +219,18 @@ func (s *Scheduler) reconcileSandboxPending() {
 	wg.Wait()
 }
 
-// orphanDecision is what reconcile owes a single §6.5 orphan once the Stop
-// and the terminal-record probe have been observed. It is the output of the
-// pure classifier classifyOrphanPending; reconcileOneSandboxOrphan only
-// executes it. Centralising the five historical keep/remove early returns
-// here (#2172 / R202606-ARCH-3) turns the §6.2 containment state machine
-// from five inline comments into one table-tested function.
+// orphanDecision is what reconcile owes a single orphan once the Stop and the
+// terminal-record probe have been observed. Output of the pure classifier
+// classifyOrphanPending; reconcileOneSandboxOrphan only executes it (#2172).
 type orphanDecision uint8
 
 const (
-	// orphanKeepPending: the microVM's fate is unknown (§6.2 not satisfied)
-	// or cannot be confirmed from this process — leave the pending file so
-	// the NEXT start retries. Nothing else is touched.
+	// orphanKeepPending: the microVM's fate is unknown or cannot be confirmed
+	// from this process — leave the pending file so the NEXT start retries.
 	orphanKeepPending orphanDecision = iota
-	// orphanRemoveOnly: the Stop confirmed but the run is ALREADY terminal
-	// on disk (an in-process transport failure whose Stop had not confirmed
-	// drove finishRun before the process died, #2054). Only the microVM Stop
-	// and the pending file were owed — a second finish would double-count
-	// RunCounters + metrics and broadcast a phantom lifecycle.
+	// orphanRemoveOnly: the Stop confirmed but the run is ALREADY terminal on
+	// disk (an in-process transport failure drove finishRun before the process
+	// died, #2054). A second finish would double-count counters + metrics.
 	orphanRemoveOnly
 	// orphanRemoveAfterFinish: Stop confirmed and no terminal record exists
 	// (or the record is unparseable and can never be confirmed terminal) —
@@ -290,22 +244,20 @@ type orphanReason uint8
 
 const (
 	orphanReasonNone orphanReason = iota
-	// orphanReasonSandboxUnconfigured: cron.sandbox removed between restarts
-	// — no Stop primitive exists this boot (review §6.5 F1).
+	// orphanReasonSandboxUnconfigured: cron.sandbox removed between restarts —
+	// no Stop primitive this boot.
 	orphanReasonSandboxUnconfigured
 	// orphanReasonInvalidSessionID: RuntimeSessionID read from an operator-
-	// writable file fails the production-format check (R20260613-SEC-2). An
-	// empty id is folded in here too: without a handle §6.2 cannot be
-	// satisfied, so keeping the file is the only containment-preserving move
-	// (reconcileSandboxPending already drops "" as corrupt upstream, COR-002).
+	// writable file fails the production-format check (or is empty); without a
+	// handle containment cannot be satisfied, so keeping the file is the only move.
 	orphanReasonInvalidSessionID
 	// orphanReasonStopFailed: StopSession returned an error — fate unknown.
 	orphanReasonStopFailed
 	// orphanReasonAlreadyTerminal: runs/<job>/<run>.json has EndedAt set.
 	orphanReasonAlreadyTerminal
 	// orphanReasonProbeTransient: s.Run failed with something other than
-	// fs.ErrNotExist / ErrCorruptRun (EIO / ESTALE / EACCES …, #2149) — the
-	// record may be terminal, so finishing now could double-count.
+	// fs.ErrNotExist / ErrCorruptRun (EIO / ESTALE / EACCES …, #2149) — the record
+	// may be terminal, so finishing now could double-count.
 	orphanReasonProbeTransient
 )
 
@@ -345,19 +297,16 @@ func orphanStopBlocked(sandboxConfigured bool, runtimeSessionID string) (orphanR
 	return orphanReasonNone, false
 }
 
-// classifyOrphanPending is the pure §6.2/§6.5 containment state machine for
-// one orphan. Rules, in order (first match wins):
+// classifyOrphanPending is the pure containment state machine for one orphan;
+// rules in order (first match wins). fs.ErrNotExist and ErrCorruptRun
+// deliberately fall through rule 5 to rule 6.
 //
-//  1. sandbox not configured            → Keep   (F1: retry handle must survive)
-//  2. RuntimeSessionID invalid or empty → Keep   (SEC-2: cannot confirm fate)
-//  3. Stop returned an error            → Keep   (§6.2 rule 1 unsatisfied)
+//  1. sandbox not configured            → Keep   (retry handle must survive)
+//  2. RuntimeSessionID invalid or empty → Keep   (cannot confirm fate)
+//  3. Stop returned an error            → Keep   (containment unsatisfied)
 //  4. run record present and EndedAt≠0 → RemoveOnly (#2054: already finished)
 //  5. record probe failed transiently   → Keep   (#2149: may be terminal)
 //  6. otherwise                         → RemoveAfterFinish
-//
-// Rule 5 deliberately lets fs.ErrNotExist (no record) and ErrCorruptRun
-// (record can never be confirmed terminal) fall through to rule 6.
-// No I/O, no locks: TestClassifyOrphanPending covers every branch.
 func classifyOrphanPending(pr orphanProbe) orphanVerdict {
 	if reason, blocked := orphanStopBlocked(pr.sandboxConfigured, pr.runtimeSessionID); blocked {
 		return orphanVerdict{orphanKeepPending, reason}
@@ -395,7 +344,7 @@ func (s *Scheduler) probeOrphan(p sandboxPending) orphanProbe {
 }
 
 // logOrphanVerdict emits the operator-facing line for a Keep / RemoveOnly
-// verdict at the historical level for that reason. RemoveAfterFinish has no
+// verdict at the log level matching that reason. RemoveAfterFinish has no
 // line of its own — finishRun's own logging covers it.
 func logOrphanVerdict(lg *slog.Logger, v orphanVerdict, pr orphanProbe) {
 	switch v.reason {
@@ -439,17 +388,11 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 	// down — finishRun's recordTerminalResult re-checks s.jobs[id] and no-ops
 	// the persist; the broadcast pair still closes subscriber timelines.
 	js, j := s.snapshotOrphanJob(p.JobID)
-	// R20260615-030459-COR-001 / R202606-CR-001 (#2156): re-check job existence
-	// under RLock ONCE before any subscriber-visible write. The snapshot was
-	// taken under a lock we have since released; a concurrent DeleteJobByID
-	// that ran in the gap deletes the job + sweeps the attention queue.
-	// Without this re-check we would (a) leave a ghost attention card whose
-	// replay ErrJobNotFound's, and (b) broadcast a phantom
-	// cron_run_started/ended pair for a job the dashboard no longer shows.
-	// The SAME boolean feeds the attention write and finishOrphanRun so the
-	// two agree on whether the job still exists. j!=nil but
-	// jobExists==false ⇒ deleted in the gap: metrics-only path (counters
-	// stay balanced, nothing broadcast).
+	// Re-check job existence under RLock ONCE before any subscriber-visible write:
+	// a concurrent DeleteJobByID in the gap since the snapshot deletes the job and
+	// sweeps the attention queue, so writing would leave a ghost attention card and
+	// a phantom started/ended pair (#2156). The SAME boolean feeds both the
+	// attention write and finishOrphanRun so they agree.
 	jobExists := j != nil && s.jobExists(p.JobID)
 	if jobExists {
 		s.maybeEnqueueOrphanAttention(p, js, lg)
@@ -459,8 +402,8 @@ func (s *Scheduler) reconcileOneSandboxOrphan(p sandboxPending, path string) {
 }
 
 // orphanJobSnapshot is the subset of *Job the orphan finish needs, copied
-// under s.mu.RLock (R20260613-GOLANG-001: UpdateJob mutates *Job fields in
-// place under s.mu.Lock, so any lock-free read is a data race).
+// under s.mu.RLock (UpdateJob mutates *Job in place under s.mu.Lock, so any
+// lock-free read is a data race).
 type orphanJobSnapshot struct {
 	sideEffects  bool
 	label        string
@@ -496,23 +439,15 @@ func (s *Scheduler) jobExists(jobID string) bool {
 	return s.jobs[jobID] != nil
 }
 
-// maybeEnqueueOrphanAttention applies §6.2 rule 3 + §7.4 to a live-job
-// orphan: a side-effecting job enters the human confirmation queue. The
-// microVM was Stopped, but it may have completed and produced its side
-// effect (PR push, etc.) before naozhi died — only a human can tell. A
-// side-effect-free orphan is safe to leave as a plain failed-transport
-// record (it re-runs next tick). RuntimeSessionID is already spent (we
-// Stopped it); kept on the record for symmetry — the queue's replay action
-// re-Stops idempotently.
+// maybeEnqueueOrphanAttention enqueues a live side-effecting job's orphan for
+// human confirmation: the microVM was Stopped, but it may have completed and
+// produced its side effect before naozhi died — only a human can tell. A
+// side-effect-free orphan stays a plain failed-transport record.
 //
-// #2119: an in-process transport failure may have ALREADY enqueued an
-// attention record for this runID (reason=transport) before the process
-// died. writeSandboxAttention uses WriteFileAtomic to the same <runID>.json
-// path, so an unconditional write would CLOBBER it and downgrade the reason
-// from "transport" (stream lost) to "orphaned" (restart) — misleading the
-// operator about what actually happened. Probe first; write only when no
-// record exists. A read error (qerr) is treated as "may exist" → skip,
-// preserving any prior reason (the failed-transport CronRun still warns).
+// An in-process transport failure may have ALREADY enqueued a record for this
+// runID (reason=transport); an unconditional write would clobber it and
+// downgrade the reason to "orphaned" (#2119). Probe first; a read error is
+// treated as "may exist" → skip.
 func (s *Scheduler) maybeEnqueueOrphanAttention(p sandboxPending, js orphanJobSnapshot, lg *slog.Logger) {
 	if !js.sideEffects {
 		return
@@ -546,25 +481,13 @@ const (
 )
 
 // finishOrphanRun is the SINGLE convergence point for the orphan's terminal
-// accounting (#2172: the former j!=nil vs nil-job metrics paths had to be
-// mirrored by hand and drifted — R20260613-CR-2, R20260614-GO-001).
-//
-// jobExists=true — full protocol: synthetic started frame + finishRun
-// (persist → bumpRunStateMetrics → broadcast → CronRunEndedTotal).
-//
-// jobExists=false — metrics-only mirror of that protocol with the broadcast
-// halves removed, in the SAME order the live path produces them:
-// CronRunStartedTotal (what emitRunStarted would bump) → per-state buckets
-// via bumpRunStateMetrics (what finishRun bumps after persist settles; no
-// persist is attempted here, so no gate — same as finishRun's skipPersist
-// branch) → CronRunEndedTotal (finishRun's final statement). The job was
-// deleted while naozhi was down (j==nil, R20260613-GOLANG-004) or in the
-// snapshot→finish gap (#2156): there is no live job to attach a record to,
-// and a started/ended pair for a job the dashboard already dropped would be
-// a phantom lifecycle. The run did start and end (failed), so the
-// Started/Ended balance (/health, runstore.go in-flight gauge) and the
-// per-state buckets must still advance by one — never by hand-writing the
-// per-state Add. TestReconcileOrphan_TerminalCounterParity pins that both
+// accounting (#2172). jobExists=true: full protocol — synthetic started frame +
+// finishRun (persist → bumpRunStateMetrics → broadcast → CronRunEndedTotal).
+// jobExists=false (job deleted while naozhi was down or in the snapshot→finish
+// gap, #2156): metrics-only mirror in the SAME order — CronRunStartedTotal →
+// bumpRunStateMetrics → CronRunEndedTotal — with the broadcast halves removed,
+// since a started/ended pair for a job the dashboard already dropped would be a
+// phantom lifecycle. TestReconcileOrphan_TerminalCounterParity pins that both
 // branches move every counter identically.
 func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *Job, jobExists bool, lg *slog.Logger) {
 	startedAt := time.UnixMilli(p.StartedAtMS)
@@ -584,13 +507,10 @@ func (s *Scheduler) finishOrphanRun(p sandboxPending, js orphanJobSnapshot, j *J
 		Trigger:   runtelemetry.TriggerScheduled,
 		Fresh:     js.freshContext,
 	})
-	// finalizer carries a NIL inflight deliberately: the orphan belongs to
-	// the PREVIOUS process — this process's CAS gate was never taken for it.
-	// The reconcile goroutine runs after cron.Start(), so the same job's
-	// run-B may be live RIGHT NOW holding the gate; a finalizer bound to
-	// s.jobInflight(jobID) would reset run-B's view and Store(false) its
-	// gate, letting a third tick double-run. finalize() no-ops on nil
-	// inflight, which is exactly right here.
+	// NIL inflight deliberately: the orphan belongs to the PREVIOUS process, so
+	// this process's CAS gate was never taken for it. The same job's run-B may be
+	// live RIGHT NOW holding the gate; a finalizer bound to s.jobInflight(jobID)
+	// would Store(false) run-B's gate and let a third tick double-run.
 	s.finishRun(finishArgs{
 		job: j, runID: p.RunID, startedAt: startedAt,
 		trigger: runtelemetry.TriggerScheduled,
@@ -610,35 +530,16 @@ func removeReconciledPending(path string, lg *slog.Logger) {
 	}
 }
 
-// stopSandboxRunsForJob terminates any in-flight sandbox microVM(s) for a
-// job being deleted, closing the Phase 1 gap (executeSandbox godoc): until
-// now DeleteJobByID left a live run to finish or hit maxLifetime, burning
-// cloud cost and possibly producing side effects the operator no longer
-// wants. The §6.5 pending record carries the runtime session id, so delete
-// can now Stop the microVM directly.
-//
-// Runs lock-free from deleteJobPostCleanup. Best-effort and idempotent:
-//
-//   - R20260616-PERF-001 (#2140): the common case resolves the job's in-flight
-//     pending file with a single map lookup (sandboxPendingIndex, kept write-
-//     authoritative by writeSandboxPending / the terminal remove) instead of an
-//     os.ReadDir + per-file ReadFile/unmarshal over EVERY concurrent run's
-//     record. Only falls back to the full dir scan on an index miss — i.e. for
-//     a pending file written by a PREVIOUS process that this boot's index never
-//     saw (those are normally drained by reconcileSandboxPending at startup, but
-//     a delete that races reconcile must still find them).
-//   - StopSession is idempotent server-side and maps ResourceNotFound→nil
-//     (adapter), so a run that finished + removed its pending file between
-//     our lookup and the Stop is harmless.
-//   - Removes the pending file after a confirmed Stop so startup reconcile
-//     does not later re-Stop a session for a job that no longer exists. On
-//     Stop failure the file is KEPT (mirrors reconcile / §6.2): the microVM
-//     fate is unknown and the next startup must retry.
-//
-// No terminal CronRun is written here: the in-flight run's own goroutine is
-// still holding the stream and will reach finishRun (which no-ops the
-// persist for the now-deleted job via recordTerminalResult's jobs[id]
-// re-check). Writing a record here would race that goroutine.
+// stopSandboxRunsForJob terminates any in-flight sandbox microVM for a job
+// being deleted, using the runtime session id in the pending record; otherwise
+// the run would finish or hit maxLifetime, burning cost and possibly producing
+// side effects the operator no longer wants. Runs lock-free from
+// deleteJobPostCleanup. Best-effort and idempotent: the common case resolves
+// the pending file via sandboxPendingIndex (#2140) and only falls back to a dir
+// scan for files written by a previous process; StopSession is idempotent; the
+// file is removed after a confirmed Stop and KEPT on failure (fate unknown).
+// No terminal CronRun is written here: the run's own goroutine still reaches
+// finishRun, which no-ops the persist for the deleted job.
 func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 	if s.sandbox == nil {
 		return // sandbox placement not configured — nothing could be in flight
@@ -647,17 +548,15 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 	if dir == "" {
 		return
 	}
-	// Fast path: this process wrote the pending record, so its path is in the
-	// index — one lookup + one ReadFile, no full-dir scan.
+	// Fast path: this process wrote the record, so its path is in the index.
 	if path := s.lookupSandboxPendingIndex(jobID); path != "" {
 		if s.stopOneSandboxPendingFile(jobID, path) {
 			s.clearSandboxPendingIndex(jobID, path)
 		}
 		return
 	}
-	// Slow path (index miss): a pending file may have been left by a previous
-	// process. Scan the dir for a JobID match. Bounded by the live orphan
-	// count, and only taken when the in-memory index has nothing for jobID.
+	// Slow path (index miss): a pending file left by a previous process; scan for
+	// a JobID match.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -666,9 +565,7 @@ func (s *Scheduler) stopSandboxRunsForJob(jobID string) {
 		return
 	}
 	for _, e := range entries {
-		// R20260613-GO-002: bail on shutdown so N×30s StopSession calls don't
-		// exhaust gcWaitBudget. Mirrors reconcileSandboxPending's inter-entry
-		// guard (line 105).
+		// Bail on shutdown so N×30s StopSession calls don't exhaust gcWaitBudget.
 		if s.stopCtx.Err() != nil {
 			return
 		}
@@ -705,17 +602,13 @@ func (s *Scheduler) stopOneSandboxPendingFile(jobID, path string) bool {
 		return false // benign: the run goroutine may have just removed it
 	}
 	var p sandboxPending
-	// R20260613-LOGIC-2: validate RunID in addition to JobID/RuntimeSessionID.
-	// p.RunID is read from operator-writable disk and flows into slog fields
-	// below — without validation a tampered pending file can inject control
-	// characters or oversized strings into structured logs. Mirrors the same
-	// guard in reconcileSandboxPending.
+	// RunID is validated too: it is read from operator-writable disk and flows
+	// into slog fields, so a tampered file could inject control characters.
 	if err := json.Unmarshal(raw, &p); err != nil || p.JobID != jobID || p.RuntimeSessionID == "" || !IsValidID(p.RunID) {
 		return false
 	}
-	// R20260613-SEC-2: validate RuntimeSessionID read from disk before passing
-	// to StopSession. On invalid format: log-warn and skip (file is kept —
-	// startup reconcile retries on next boot).
+	// Validate RuntimeSessionID from disk before StopSession; on invalid format
+	// skip and keep the file for startup reconcile.
 	if !isValidRuntimeSessionID(p.RuntimeSessionID) {
 		slog.Warn("cron sandbox: delete-stop skipped — pending record has invalid RuntimeSessionID format",
 			"job_id", jobID, "run_id", p.RunID, "runtime_session_id", p.RuntimeSessionID)

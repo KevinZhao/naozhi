@@ -14,14 +14,10 @@ import (
 // symlink; isSymlinkLoopErr identifies it for the cross-platform caller.
 var errSymlinkLoopWindows = errors.New("cron: refused to follow symlink (windows shim)")
 
-// openRunFile opens path for reading. Windows lacks O_NOFOLLOW, so we use a
-// best-effort Lstat→Open two-step: Lstat rejects a final-component symlink
-// before we follow it, then Open returns the fd. There is a TOCTOU window
-// between Lstat and Open in which an attacker could swap the entry to a
-// symlink — Fstat in the caller still validates IsRegular() on the fd, so
-// the worst case is opening a symlink target that happens to be a regular
-// file. naozhi's production target is Linux; this path exists only so the
-// package compiles on the windows-latest CI runner and developer workstations.
+// openRunFile opens path for reading. Windows lacks O_NOFOLLOW, so this is a
+// best-effort Lstat→Open two-step with a residual TOCTOU window; the caller's
+// Fstat still validates IsRegular() on the fd. Production target is Linux;
+// this exists so the package compiles on windows CI and workstations.
 func openRunFile(path string) (*os.File, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -33,11 +29,8 @@ func openRunFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY, 0)
 }
 
-// openCronStoreFile is the cron_jobs.json store-side counterpart to the
-// runstore openRunFile shim. Windows lacks O_NOFOLLOW so we keep the
-// historical Lstat→Open shape; the residual TOCTOU is the same one that
-// affected openRunFile on windows since R235-SEC-5, which the unix build
-// closes via O_NOFOLLOW. naozhi's production target is Linux.
+// openCronStoreFile is the cron_jobs.json counterpart to openRunFile: same
+// best-effort Lstat→Open shape and residual TOCTOU (Linux closes it with O_NOFOLLOW).
 func openCronStoreFile(path string) (*os.File, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {

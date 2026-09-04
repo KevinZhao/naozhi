@@ -46,19 +46,6 @@ func TestFreshGetSession_SourceAnchor_ResetBeforeFinishRun(t *testing.T) {
 	}
 	body := string(src)
 
-	// Require at least 2 R20260608-CORR-1 anchors inside executeGetSession
-	// (one per branch: cancel + session-error). The executeOpt anchors already
-	// counted by the prior test are on the same marker so we require >= 4 total
-	// across the whole file (2 from executeOpt + 2 from executeGetSession).
-	anchorRe := regexp.MustCompile(`R20260608-CORR-1`)
-	anchors := anchorRe.FindAllStringIndex(body, -1)
-	if len(anchors) < 4 {
-		t.Errorf("scheduler_run.go: expected >=4 R20260608-CORR-1 anchors "+
-			"(cancel+send-error in executeOpt + cancel+session-error in executeGetSession), got %d; "+
-			"all four branches must carry the ordering comment (#1956, R20260608133928-GO-7)",
-			len(anchors))
-	}
-
 	// Every `if a.snap.fresh {` Reset block must be followed by a finishRun
 	// before the next such block (or EOF) — ordering invariant for
 	// executeGetSession's a.snap / a.key variant.

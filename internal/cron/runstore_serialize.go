@@ -10,20 +10,11 @@ import (
 	"sync"
 )
 
-// appendMarshalBufPool reuses bytes.Buffer + json.Encoder scratch space
-// across runStore.Append calls so each Append avoids the per-call
-// encodeState alloc that json.Marshal performs internally. Mirrors the
-// MarshalRecord pattern in internal/eventlog/schema/record.go. Cron Append
-// rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
-// ~2KB of encode scratch otherwise — pooling drops that to amortised zero
-// after the warmup period. R240-PERF-6 / #1043.
-// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to
-// it. R20260602190132-PERF-2: a json.Encoder caches its internal encodeState
-// (~2KB) across Encode calls on the same encoder, but constructing a fresh
-// json.NewEncoder(buf) every marshalRunPooled call discarded that cache so the
-// pooled buffer never actually amortised the encoder-side alloc. Pooling the
-// encoder alongside the buffer closes that gap — the encodeState is now reused
-// for the lifetime of the pooled pair.
+// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to it,
+// pooled via appendMarshalBufPool so runStore.Append avoids json.Marshal's
+// per-call encodeState alloc (#1043). The encoder is pooled together with the
+// buffer because a json.Encoder only caches its encodeState across Encode
+// calls on the same encoder.
 type appendMarshalScratch struct {
 	buf *bytes.Buffer
 	enc *json.Encoder
@@ -57,10 +48,8 @@ func marshalRunPooled(run *CronRun) ([]byte, error) {
 		appendMarshalBufPool.Put(sc)
 	}()
 	buf.Reset()
-	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
-	// the legacy callers and any future Unmarshal of historical records is
-	// indistinguishable from json.Marshal output. The encoder is bound to buf
-	// once at construction and reused from the pool, retaining its encodeState.
+	// Encoder keeps json.Marshal's HTML-escape default so on-disk bytes stay
+	// indistinguishable from json.Marshal output.
 	if err := sc.enc.Encode(run); err != nil {
 		return nil, err
 	}
@@ -73,37 +62,23 @@ func marshalRunPooled(run *CronRun) ([]byte, error) {
 	return out, nil
 }
 
-// readRun parses a single run file. Returns ErrCorruptRun on parse
-// failure or oversize; fs.ErrNotExist propagates unchanged.
+// readRun parses a single run file. Returns ErrCorruptRun on parse failure
+// or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5 / R242-GO-17 / R238-SEC-7 (#827): the original implementation
-// did Lstat + (cond) ReadFile, which left a TOCTOU window — between the
-// Lstat result observing a regular file and ReadFile opening the path,
-// an attacker with write access to runs/<jobID>/ could swap the entry
-// for a symlink and have ReadFile dereference a sensitive file. We close
-// the window by using OpenFile with O_NOFOLLOW (kernel refuses to follow
-// a final-component symlink, returning ELOOP) and Fstat'ing the resulting
-// fd: the bytes we read come from exactly the inode whose mode we just
-// validated as a regular file, regardless of any concurrent rename. The
-// guard is the only barrier between Get() and a malicious symlink because
-// Get() takes a caller-supplied runID that has not been ReadDir-filtered.
-// diskListNewestFirst / trimJobLocked already skip symlinks during their
-// directory scans, so they use readRunNoLstat to avoid paying for the
-// redundant fd validation.
+// Open uses O_NOFOLLOW + Fstat on the resulting fd so the bytes read come
+// from exactly the inode validated as a regular file — no Lstat→ReadFile
+// TOCTOU in which runs/<jobID>/<runID>.json could be swapped for a symlink
+// (#827). This guard matters because Get() takes a caller-supplied runID that
+// was never ReadDir-filtered; scan-based callers use readRunNoLstat instead.
 func (s *runStore) readRun(path string) (*CronRun, error) {
-	// openRunFile is platform-specialised: Unix uses O_NOFOLLOW for a
-	// kernel-atomic symlink refusal; Windows falls back to a Lstat-then-
-	// Open two-step (best-effort, since O_NOFOLLOW is Unix-only).
+	// openRunFile is platform-specialised: Unix O_NOFOLLOW; Windows Lstat-then-Open best effort.
 	f, err := openRunFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	// Fstat on the fd returns metadata for the exact inode we have
-	// open — no second path lookup, no race window. Reject anything
-	// that's not a plain file: Open with O_NOFOLLOW already filtered
-	// symlinks, but a fifo/socket/device with the right name would
-	// still get past Open and only Fstat catches it.
+	// Fstat describes the exact open inode. O_NOFOLLOW already refused symlinks,
+	// but a fifo/socket/device with the right name only fails here.
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -114,18 +89,13 @@ func (s *runStore) readRun(path string) (*CronRun, error) {
 	return s.parseRunFromFile(f, fi)
 }
 
-// readRunNoLstat is the loop-friendly variant of readRun for callers that
-// have already filtered the entry through DirEntry.Type() (rejecting symlinks
-// + non-regular modes during the directory scan). It skips the redundant
-// Lstat syscall, halving syscall count for large directory listings —
-// R245-PERF-9 (cluster: R243-PERF-11).
+// readRunNoLstat is the loop-friendly variant of readRun for callers whose
+// directory scan already rejected symlinks / non-regular entries via
+// DirEntry.Type(); it skips the redundant fd validation.
 //
-// SAFETY: must NOT be used as the entry-point for a constructed path (e.g.
-// Get()'s direct path lookup). Get arrives with a caller-supplied runID
-// that has not been ReadDir-filtered, so the Lstat guard in readRun is the
-// only barrier against `runs/<jobID>/<runID>.json` being a symlink to
-// /etc/passwd. diskListNewestFirst is the sole caller because its scan loop
-// already drops symlinks at the e.Type()&fs.ModeSymlink check.
+// SAFETY: must NOT be used for a constructed path such as Get()'s
+// caller-supplied runID — readRun's O_NOFOLLOW guard is the only barrier
+// against runs/<jobID>/<runID>.json being a symlink to a sensitive file.
 func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
 	return s.parseRunBytes(path)
 }
@@ -136,17 +106,12 @@ func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
 // the Fstat result already validated as a regular file, used to size-hint
 // the buffer.
 func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error) {
-	// io.ReadAll grows incrementally; preallocate when fi.Size() is a
-	// reasonable hint. The cap+1 read pattern is irrelevant here because
-	// decodeRunBytes enforces the cap explicitly on the returned slice
-	// length, so even a regular file that grew between Stat and Read
-	// gets rejected by the size check.
+	// Preallocate from fi.Size(); decodeRunBytes still enforces the cap on the
+	// returned length, so a file that grew between Stat and Read is rejected.
 	size := fi.Size()
 	if size < 0 || size > s.maxRunBytes {
-		// Stat already says we're over cap — short-circuit before any
-		// ReadAll alloc. Match parseRunBytes's wrap exactly so callers
-		// can't tell the readRun vs readRunNoLstat path apart by error
-		// shape.
+		// Over cap per Stat: short-circuit; same wrap as parseRunBytes so the error
+		// shape is identical.
 		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, size, s.maxRunBytes)
 	}
 	buf := make([]byte, 0, size)
@@ -158,14 +123,12 @@ func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error
 }
 
 // readAllIntoReader is the testable core of readAllInto. It accepts an
-// io.Reader so unit tests can inject a fake reader that repeatedly returns
-// (0, nil) to exercise the zero-progress guard (R171023-CR-007).
+// io.Reader so tests can inject a reader that repeatedly returns (0, nil).
 //
-// The guard breaks out of the loop after zeroProgressLimit consecutive
-// (0, nil) reads so the function does not hang on io.Reader implementations
-// that are contractually allowed to return (0, nil) (e.g., certain FUSE
-// file systems). os.File on Linux follows POSIX and will not do this in
-// practice, but defence-in-depth applies here.
+// The guard returns io.ErrNoProgress after zeroProgressLimit consecutive
+// (0, nil) reads so the loop cannot hang on readers that are contractually
+// allowed to do that (e.g. some FUSE file systems); os.File on Linux does
+// not in practice.
 const zeroProgressLimit = 2
 
 func readAllIntoReader(r io.Reader, buf []byte) ([]byte, error) {
@@ -193,10 +156,8 @@ func readAllIntoReader(r io.Reader, buf []byte) ([]byte, error) {
 	}
 }
 
-// decodeRunBytes enforces the size cap and json.Unmarshal step shared by
-// both file-based and bytes-based read paths. Extracted from parseRunBytes
-// so parseRunFromFile (the TOCTOU-safe path) can reuse the wrapping shape
-// without an extra ReadFile.
+// decodeRunBytes enforces the size cap and json.Unmarshal step shared by the
+// file-based and bytes-based read paths so both wrap errors identically.
 func decodeRunBytes(data []byte, maxRunBytes int64) (*CronRun, error) {
 	if int64(len(data)) > maxRunBytes {
 		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), maxRunBytes)
