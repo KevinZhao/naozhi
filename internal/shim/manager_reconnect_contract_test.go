@@ -24,8 +24,6 @@ import (
 //  3. `oldHandle.Close()` MUST happen OUTSIDE m.mu (Close performs
 //     network I/O; holding m.mu across it would serialise every other
 //     Manager mutation behind a possibly-slow Close).
-//  4. The RACE CONTRACT godoc tag must remain in place so future
-//     reviewers follow the chain back to this audit item.
 //
 // Any refactor that drops the swap-capture (leaking old fd), swaps
 // without closing (leaking handle), or moves the Close inside the lock
@@ -36,15 +34,6 @@ func TestReconnect_SwapClosesOldHandleContract(t *testing.T) {
 		t.Fatalf("read manager.go: %v", err)
 	}
 	body := string(src)
-
-	// 4) RACE CONTRACT tripwire comment must survive.
-	if !regexp.MustCompile(`RACE CONTRACT \(R49-REL-SHIM-MANAGER-RECONNECT-CONCUR\)`).MatchString(body) {
-		t.Error("Reconnect no longer carries the RACE CONTRACT godoc. " +
-			"R49-REL-SHIM-MANAGER-RECONNECT-CONCUR: the comment is the only " +
-			"in-code anchor linking the swap-close-old behaviour to this audit " +
-			"item. Keep the R49-REL-SHIM-MANAGER-RECONNECT-CONCUR tag so grep " +
-			"still lands here.")
-	}
 
 	// Locate the Reconnect function body for the structural checks.
 	startIdx := strings.Index(body, "func (m *Manager) Reconnect(")

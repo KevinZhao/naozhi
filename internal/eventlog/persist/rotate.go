@@ -12,65 +12,37 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// DefaultKeepRecords is how many of the newest records a rotate keeps
-// in the rewritten file (not counting the header). Set deliberately
-// above any caller's "visible history" — rotate_test assumes 2× the
-// LoadLatest page size so a dashboard "load earlier" right after
-// rotate still sees previous page content without falling through to
-// Claude JSONL.
+// DefaultKeepRecords is how many newest records a rotate keeps (excluding
+// the header). Kept above 2× the LoadLatest page size so a dashboard "load
+// earlier" right after rotate does not fall through to Claude JSONL.
 const DefaultKeepRecords = 1000
 
-// rotateAfterCloseHook is a test-only seam. When non-nil, rotate() invokes
-// it immediately after w.close() (and before the renames/reopens); a
-// non-nil error return drives the post-close failure path so tests can
-// verify the poisoned-writer eviction (R20260605B-CORR-11, #1815) without
-// fabricating a real filesystem fault. Always nil in production.
+// rotateAfterCloseHook is a test-only seam invoked right after w.close(); a
+// non-nil error drives the post-close failure path (#1815). Always nil in
+// production.
 var rotateAfterCloseHook func() error
 
-// rotate executes the O(1) tail-cut rotate documented in RFC §5.2:
+// rotate performs the O(1) tail-cut: pick the oldest idx ByteOff that keeps
+// at least DefaultKeepRecords entries, splice header + tail into tmp.log
+// and rebased idx entries into tmp.idx, fsync both, rename over the live
+// pair (POSIX atomic), SyncDir, then reopen the new pair as w's fds.
 //
-//  1. Decide the cut: from idx entries, pick the oldest ByteOff we
-//     want to keep so that at least DefaultKeepRecords entries survive
-//     (header + the newest N).
-//  2. Splice:
-//     tmp.log = header + <bytes from cutOff..end of old log>
-//     tmp.idx = <idx entries for the surviving records, rebased>
-//  3. fsync tmp.log, fsync tmp.idx.
-//  4. rename tmp.log → <stem>.log, rename tmp.idx → <stem>.idx
-//     (POSIX atomic).
-//  5. SyncDir so the directory entry flip is durable.
-//  6. Reopen the new pair as this writer's backing fds.
-//
-// Crash safety:
-//   - Any crash before step 4 leaves the tmp files orphaned; the
-//     startup SweepOrphans path deletes them on next boot.
-//   - A crash between the two renames would leave log renamed but
-//     idx not — recovery would then see an "idx ahead of log" or
-//     "log ahead of idx" mismatch and fix it. ext4 can reorder the
-//     two renames; we accept the risk because the worst case is one
-//     recovery pass, not lost data.
-//
-// Returns nil on success; on failure the old files are still intact
-// and the writer keeps using them. A subsequent rotate attempt runs
-// on the next batch to trip the threshold again.
+// Crash safety: tmp files orphaned before the renames are removed by
+// SweepOrphans at startup; a crash between the two renames leaves a
+// log/idx mismatch that Recover repairs (ext4 may reorder the renames —
+// worst case is one recovery pass, not lost data). On failure the old
+// files stay intact and the writer keeps using them.
 func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	idxEntries, err := ReadAllIdx(w.idxPath)
 	if err != nil {
 		return fmt.Errorf("read idx for rotate: %w", err)
 	}
 	if len(idxEntries) == 0 {
-		// Empty idx means nothing to rotate (nothing persisted yet).
-		// Shouldn't happen given the threshold check, but bail safely.
 		return nil
 	}
 
-	// Find the cut point. idxEntries[0] is always the header (seq=0
-	// by construction); we need at least DefaultKeepRecords entries
-	// past the header.
 	cutIdx := chooseCutIndex(idxEntries, DefaultKeepRecords, p.opts.IdxStride)
 	if cutIdx <= 0 {
-		// Nothing to trim (< keep records). Extend threshold avoids
-		// tight-loop rotate.
 		return nil
 	}
 
@@ -78,15 +50,12 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	tmpLog := tmpLogPath(p.opts.Dir, stem, epoch)
 	tmpIdx := tmpIdxPath(p.opts.Dir, stem, epoch)
 
-	// Always clean tmp files on any failure path.
 	cleanup := func() {
 		_ = os.Remove(tmpLog)
 		_ = os.Remove(tmpIdx)
 	}
 
 	// ----- splice log bytes -----------------------------------
-	// Keep the header (bytes 0..idxEntries[0].Len) and the tail
-	// starting at cutEntry.ByteOff. The records between are dropped.
 	newLogSize, newIdx, err := spliceLog(w.logPath, tmpLog, idxEntries, cutIdx)
 	if err != nil {
 		cleanup()
@@ -109,25 +78,15 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 		return fmt.Errorf("fsync tmp idx: %w", err)
 	}
 
-	// ----- close current fds before rename ---------------------
-	// On POSIX rename-over-open is fine (the old inode is retained
-	// until close), but we'd continue writing to the OLD inode via
-	// the old fd. Close first so the next write opens the new file.
+	// Close before rename: rename-over-open is fine on POSIX, but writes
+	// would keep going to the OLD inode via the old fd.
 	_ = w.close()
 
-	// R20260605B-CORR-11 (#1815): w.close() above unconditionally nils
-	// w.logBuf, w.logFile, and w.idxWriter. Every error path between
-	// here and the successful field reassignment below leaves `w`
-	// poisoned (nil buffers). handleBatch only LOGS a rotate error and
-	// keeps the cached writer in p.writers, so the NEXT batch would call
-	// WriteRecordRaw(w.logBuf, ...) and the next flush w.logBuf.Flush()
-	// on a nil *bufio.Writer — a nil-pointer panic on the run goroutine,
-	// which has no recover() and so crashes the whole process, halting
-	// ALL event-log persistence. Evict the poisoned writer on any such
-	// error so writerFor rebuilds a clean one (via Recover) on next
-	// access; the old files are intact, so recovery is lossless. The
-	// guard clears itself once the reopen below succeeds. Safe: rotate
-	// runs on the single run goroutine that owns p.writers.
+	// w.close() nilled w.logBuf/logFile/idxWriter. handleBatch only logs a
+	// rotate error and keeps the cached writer, so any failure before the
+	// reassignment below must evict w or the next batch nil-derefs w.logBuf
+	// and panics the run goroutine (#1815). Safe: rotate runs on the single
+	// goroutine that owns p.writers.
 	rotateOK := false
 	defer func() {
 		if !rotateOK {
@@ -135,8 +94,6 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 		}
 	}()
 
-	// Test seam: deterministically exercise the eviction path above
-	// without a real I/O fault. Production leaves this nil.
 	if rotateAfterCloseHook != nil {
 		if err := rotateAfterCloseHook(); err != nil {
 			cleanup()
@@ -172,20 +129,12 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 		return fmt.Errorf("reopen idx post-rotate: %w", err)
 	}
 	w.logFile = logFile
-	// Rebuild the bufio wrapper against the freshly-opened fd.
-	// close() nilled w.logBuf; if we skipped this the next
-	// handleBatch would panic on WriteRecordRaw(w.logBuf, ...)
-	// dereferencing a nil *bufio.Writer.
-	//
-	// R249-PERF-21 (#995): borrow from the shared pool rather than
-	// allocating a fresh 64 KiB buffer per rotate. close() above
-	// already returned the previous logBuf, so a hot rotate cycle
-	// reuses the same backing array each iteration.
+	// close() nilled w.logBuf; rebuild it from the shared pool (#995) or the
+	// next handleBatch nil-derefs it.
 	w.logBuf = acquireLogBuf(logFile)
 	w.idxWriter = idxWriter
 	w.bytes = newLogSize
-	// nextSeq keeps increasing; rotate does NOT recycle seq numbers.
-	// The new file's highest idx seq + 1 is the correct next seq.
+	// Seq numbers are never recycled: continue from the new file's last idx seq.
 	if n := len(newIdx); n > 0 {
 		w.nextSeq = newIdx[n-1].Seq + 1
 	}
@@ -201,22 +150,12 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	return nil
 }
 
-// chooseCutIndex picks the idx slot where the rewritten file's body
-// starts. It returns the INDEX in idxEntries (not a seq), so the
-// caller can read cutEntry.ByteOff directly. The header (index 0) is
-// never the cut point — the header is always preserved.
-//
-// Algorithm:
-//   - Count non-header idx entries: n = len(idxEntries) - 1.
-//   - If n <= keep, return 0 (nothing to cut yet — caller will skip).
-//   - Otherwise pick the slot that keeps ~`keep` entries. With idx
-//     stride S each idx slot covers S records on average, so to keep
-//     `keep` records we back off `keep/S` idx slots from the end.
-//
-// Because idx is sparse, we can't cut at an arbitrary record count;
-// we cut at an idx slot. That means rotate may keep slightly more
-// than `keep` (the S-1 records between the chosen idx slot and the
-// next one) but never fewer.
+// chooseCutIndex returns the INDEX in idxEntries (not a seq) where the
+// rewritten body starts; 0 means nothing to cut. The header (index 0) is
+// never the cut point. With stride S each idx slot covers ~S records, so
+// keeping `keep` records means backing off ceil(keep/S) slots from the
+// end; because idx is sparse, rotate may keep up to S-1 more than `keep`
+// but never fewer.
 func chooseCutIndex(idxEntries []schema.IdxEntry, keep int, stride int) int {
 	if len(idxEntries) <= 1 {
 		return 0
@@ -224,12 +163,10 @@ func chooseCutIndex(idxEntries []schema.IdxEntry, keep int, stride int) int {
 	if stride < 1 {
 		stride = 1
 	}
-	// Number of idx slots we need at the tail to cover `keep` records.
 	slotsNeeded := (keep + stride - 1) / stride
 	if slotsNeeded >= len(idxEntries)-1 {
 		return 0
 	}
-	// Leave slotsNeeded at the end, plus the header (idx 0).
 	cutIdx := len(idxEntries) - slotsNeeded
 	if cutIdx < 1 {
 		return 0
@@ -237,13 +174,9 @@ func chooseCutIndex(idxEntries []schema.IdxEntry, keep int, stride int) int {
 	return cutIdx
 }
 
-// spliceLog copies <header bytes> + <tail from cutOff..end> from
-// src → dst, computing the new per-entry idx metadata as it goes.
-// The returned idx entries have ByteOff rebased to the new file.
-//
-// Keeps memory use bounded: we never slurp the whole old file. The
-// header is small (<= 1 KiB typical) and we stream the tail via a
-// bufio.Reader aligned to record boundaries.
+// spliceLog copies <header bytes> + <tail from cutOff..end> from src to
+// dst, returning the new size and idx entries rebased to the new file.
+// The tail is streamed via bufio; the old file is never slurped whole.
 func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int) (int64, []schema.IdxEntry, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -255,9 +188,8 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	if err != nil {
 		return 0, nil, fmt.Errorf("create tmp log: %w", err)
 	}
-	// Explicit close so a write-flush failure surfaces before the caller
-	// fsyncs and renames the tmp file. dstClosed guards the deferred
-	// fallback close on the error paths below.
+	// Explicit close on success so a flush error surfaces before the caller
+	// fsyncs and renames; dstClosed guards the deferred fallback close.
 	dstClosed := false
 	defer func() {
 		if !dstClosed {
@@ -270,16 +202,9 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	if headerEntry.ByteOff != 0 || headerEntry.Seq != 0 {
 		return 0, nil, fmt.Errorf("bad header idx entry: %+v", headerEntry)
 	}
-	// R20260605B-CORR-13 (#1817): headerEntry.Len is an int32 decoded
-	// straight from the on-disk idx (schema.UnmarshalIdxEntry casts
-	// uint32->int32, idx.go) with no read-time bound. A single bit-flip
-	// in the header Len field that sets the high bit yields a negative
-	// int32; make([]byte, negative) panics ("makeslice: len out of
-	// range") on the run goroutine — which has no recover() — crashing
-	// the process during a routine rotate. Reject a corrupted header Len
-	// so rotate fails safely (old files stay intact, see the func doc)
-	// instead. The upper bound mirrors the write-time record cap
-	// (schema.MaxRecordBytes); the header is itself a framed record.
+	// headerEntry.Len is an int32 decoded from disk with no bound; a
+	// bit-flipped negative value would panic make(). Reject so rotate fails
+	// safely with the old files intact (#1817).
 	if headerEntry.Len < 0 || int64(headerEntry.Len) > schema.MaxRecordBytes {
 		return 0, nil, fmt.Errorf("bad header idx entry len: %d", headerEntry.Len)
 	}
@@ -294,9 +219,6 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 
 	// ----- copy tail records, rebasing idx --------------------
 	cutEntry := idxEntries[cutIdx]
-	// Seek to the cut point. The tail consists of one or more
-	// framed records; we stream them via bufio and rewrite idx
-	// entries as we go.
 	if _, err := src.Seek(cutEntry.ByteOff, io.SeekStart); err != nil {
 		return 0, nil, fmt.Errorf("seek to cut: %w", err)
 	}
@@ -307,20 +229,10 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 		Seq: 0, ByteOff: 0, Len: headerEntry.Len, TimeMS: headerEntry.TimeMS,
 	})
 
-	// We preserve idx seq numbers from the old file (no seq recycle).
-	// However, we re-record idx entries only for the records we
-	// actually see — recovery picks them up from there.
-	//
-	// R217-GO-4 (#603): correlate frames to idx entries via the source
-	// byte-offset rather than re-decoding every body to read rec.Seq.
-	// The old file's idx entries past cutIdx are sorted by ByteOff
-	// (records are appended in monotonically-increasing offset order),
-	// so we can track srcOff relative to cutEntry.ByteOff and match
-	// idxEntries[nextExpectedIdxPos].ByteOff exactly. Records without an
-	// idx entry are skipped (sparse idx), and records that match push a
-	// new IdxEntry with the rebased dstOff. This drops one
-	// schema.UnmarshalRecord per record on the rotation path — for a
-	// rotation cutting 1000 records, that's 1000 fewer JSON decodes.
+	// Idx entries past cutIdx are sorted by ByteOff, so frames are matched to
+	// idx entries by tracking srcOff instead of decoding each body for
+	// rec.Seq (#603). Records without an idx entry are skipped (sparse idx);
+	// seq numbers are preserved, never recycled.
 	nextExpectedIdxPos := cutIdx
 	srcOff := cutEntry.ByteOff
 	for {
@@ -330,9 +242,8 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 				break
 			}
 			if errors.Is(err, ErrPartialTail) {
-				// Should not happen at this point — spliceLog is
-				// running under a fully-fsynced source file. Bail
-				// rather than commit a corrupted tail.
+				// The source is fully fsynced, so a partial tail is corruption;
+				// bail rather than commit it.
 				return 0, nil, fmt.Errorf("unexpected partial tail in source log at %d", dstOff)
 			}
 			return 0, nil, fmt.Errorf("read src frame: %w", err)
@@ -341,23 +252,16 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 			ReleaseFramedBody(body)
 			return 0, nil, fmt.Errorf("write tmp frame: %w", err)
 		}
-		// Release before continuing the loop. WriteRecordRaw has
-		// already copied body bytes into dst's bufio buffer (see
-		// frameWrite contract), so reuse via pool is safe.
+		// WriteRecordRaw has consumed body; return it to the pool.
 		ReleaseFramedBody(body)
 
-		// Skip any idx entries whose ByteOff is strictly less than the
-		// current src offset. This guards against a malformed idx that
-		// references an offset between record boundaries — recovery
-		// would have rejected such an idx upfront, but the defensive
-		// skip keeps spliceLog robust to a sparser-than-expected idx.
+		// Defensive: skip idx entries pointing between record boundaries
+		// (malformed or sparser-than-expected idx).
 		for nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].ByteOff < srcOff {
 			nextExpectedIdxPos++
 		}
-		// If the record we just spliced matches the next expected idx
-		// entry by source offset, push a rebased IdxEntry. Reuse the
-		// idx's Seq + TimeMS (authoritative) and the live frameLen from
-		// the splice (matches the actual on-disk record length post-rebase).
+		// Frame matches the next idx entry: push it rebased. Seq/TimeMS from
+		// the idx are authoritative; Len is the live frame length.
 		if nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].ByteOff == srcOff {
 			newIdx = append(newIdx, schema.IdxEntry{
 				Seq:     idxEntries[nextExpectedIdxPos].Seq,
@@ -371,9 +275,7 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 		dstOff += int64(frameLen)
 	}
 
-	// Explicit Close before the caller fsyncs the path: a deferred close
-	// would silently drop a flush error from the buffered file's kernel
-	// page-cache, leaving the caller to fsync potentially-partial bytes.
+	// Explicit Close so a flush error surfaces before the caller fsyncs.
 	if cerr := dst.Close(); cerr != nil {
 		return 0, nil, fmt.Errorf("close tmp log: %w", cerr)
 	}
@@ -382,9 +284,8 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	return dstOff, newIdx, nil
 }
 
-// writeIdxFile creates a fresh idx file populated with `entries`.
-// Unlike IdxWriter (which appends), this is used by rotate to write
-// a complete file in one pass.
+// writeIdxFile creates a fresh idx file populated with entries in one pass
+// (rotate); IdxWriter is the append path.
 func writeIdxFile(path string, entries []schema.IdxEntry) error {
 	if len(entries) == 0 {
 		return errors.New("persist: refusing to write empty idx")
@@ -396,8 +297,7 @@ func writeIdxFile(path string, entries []schema.IdxEntry) error {
 	return os.WriteFile(path, buf, 0o600)
 }
 
-// fsyncPath opens, syncs, and closes a file. Used by rotate to bring
-// tmp files to disk before the atomic rename.
+// fsyncPath opens, syncs, and closes a file (tmp files before rename).
 func fsyncPath(path string) error {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {

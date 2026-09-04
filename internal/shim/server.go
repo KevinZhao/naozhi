@@ -24,13 +24,10 @@ import (
 )
 
 // defaultMaxClientLineBytes is the compiled-in per-line size limit.
-// Tests may override via setMaxClientLineBytes; production always sees this value.
 const defaultMaxClientLineBytes = 16 * 1024 * 1024 // 16MB
 
-// maxClientLineBytes is held in an atomic so tests can dial it down
-// without racing the runCommandLoop reader. A zero stored value resolves
-// to defaultMaxClientLineBytes. Mirrors the pattern used by maxWriteLineBytes
-// (R237-CR-4 / #701).
+// maxClientLineBytesAtomic holds the per-line limit so tests can dial it
+// down without racing the runCommandLoop reader; zero means default (#701).
 var maxClientLineBytesAtomic atomic.Int64
 
 // maxClientLineBytes returns the active per-line read limit.
@@ -42,27 +39,20 @@ func maxClientLineBytes() int {
 	return int(v)
 }
 
-// setMaxClientLineBytes overrides the per-line limit for tests.
-// Returns the previous value so callers can restore it via defer.
-// A value of zero resets to the compiled-in default.
+// setMaxClientLineBytes overrides the per-line limit for tests; returns the
+// previous value, zero resets to the default.
 func setMaxClientLineBytes(v int) int {
 	return int(maxClientLineBytesAtomic.Swap(int64(v)))
 }
 
 // defaultMaxClientSessionBytes is the cumulative post-auth byte budget per
-// client connection. R216-SEC-3 (#541): without it, a client holding a
-// valid auth token can repeatedly send near-16-MB lines because the
-// per-line LimitedReader resets on every iteration. 1000 maximum-sized
-// lines (16 GB gross) is well above any legitimate prompt+image traffic
-// but stops a post-auth memory-pressure DoS before the writer goroutine,
-// CLI, or downstream readers feel it. The cap is generous on purpose —
-// the goal is catching pathological abuse, not throttling well-behaved
-// clients.
+// client connection: the per-line LimitedReader resets every iteration, so
+// without it an authenticated client could churn near-16-MB lines
+// indefinitely (memory-pressure DoS). Generous on purpose (#541).
 const defaultMaxClientSessionBytes int64 = defaultMaxClientLineBytes * 1000
 
-// maxClientSessionBytes is held in an atomic so tests can dial it down
-// without racing the runCommandLoop reader on the hot recv path. Mirrors
-// the pattern used by maxWriteLineBytes (R237-CR-4 / #701).
+// maxClientSessionBytes is atomic so tests can dial it down without racing
+// the recv hot path; zero means default.
 var maxClientSessionBytes atomic.Int64
 
 // maxClientSessionBytesValue returns the active cumulative cap. A zero
@@ -75,34 +65,24 @@ func maxClientSessionBytesValue() int64 {
 	return v
 }
 
-// setMaxClientSessionBytes overrides the cumulative cap for tests.
-// Returns the previous value so callers can restore it via defer. A
-// value of zero resets to the compiled-in default.
+// setMaxClientSessionBytes overrides the cumulative cap for tests; returns
+// the previous value, zero resets to the default.
 func setMaxClientSessionBytes(v int64) int64 {
 	return maxClientSessionBytes.Swap(v)
 }
 
-// maxWriteLineBytes caps the inner "line" field of a post-auth "write" frame
-// before it is piped into CLI stdin. The outer frame cap above accommodates
-// an entire NDJSON envelope including 16-MB leeway; but every byte of
-// msg.Line flows through bufio.Scanner on the Claude side, whose default
-// buffer is 10 MB. Matching cap to the naozhi-side producer limit
-// (cli.maxStdinLineBytes = 12 MB) keeps the shim a faithful pass-through
-// while refusing anything that would overflow Claude's scanner and silently
-// kill its stdout. Defense-in-depth against future drift: naozhi's dispatch
-// layer already coalesces user text to a much smaller soft cap, so
-// production paths never approach this limit. R67-SEC-5.
-//
-// R237-CR-4 (#701): held in an atomic.Int64 (instead of a plain `var int`)
-// so the handleClient oversize-reject test can dial it down without racing
-// the runtime read on the hot recv path. Tests use setMaxWriteLineBytes /
-// maxWriteLineBytesValue; production callers read via Load().
+// defaultMaxWriteLineBytes caps the inner "line" field of a post-auth "write"
+// frame before it is piped into CLI stdin. Every byte of msg.Line flows
+// through bufio.Scanner on the Claude side (10 MB default buffer); matching
+// the naozhi-side producer limit (cli.maxStdinLineBytes = 12 MB) keeps the
+// shim a faithful pass-through while refusing anything that would overflow
+// Claude's scanner and silently kill its stdout. Held in an atomic so tests
+// can dial it down without racing the recv hot path (#701).
 const defaultMaxWriteLineBytes int64 = 12 * 1024 * 1024 // 12MB
 
 var maxWriteLineBytes atomic.Int64
 
-// maxWriteLineBytesValue returns the active write-line cap. Wraps the
-// atomic load so call sites read like the legacy plain-int access.
+// maxWriteLineBytesValue returns the active write-line cap; zero means default.
 func maxWriteLineBytesValue() int64 {
 	v := maxWriteLineBytes.Load()
 	if v == 0 {
@@ -111,53 +91,35 @@ func maxWriteLineBytesValue() int64 {
 	return v
 }
 
-// setMaxWriteLineBytes overrides the cap for tests. Returns the previous
-// value so callers can restore it via defer. A value of zero resets to the
-// compiled-in default.
+// setMaxWriteLineBytes overrides the cap for tests; returns the previous
+// value, zero resets to the default.
 func setMaxWriteLineBytes(v int64) int64 {
 	return maxWriteLineBytes.Swap(v)
 }
 
-// Shim server timers. These three durations historically shared the same
-// "30s" literal but are semantically independent:
-//   - shimSocketWatchInterval: cadence of the defense-in-depth stat() poll
-//     that detects a deleted AF_UNIX socket file so an orphaned shim can
-//     initiate self-shutdown.
-//   - shimShutdownGracePeriod: time after SIGTERM/SIGINT within which a
-//     fresh client Attach must arrive; otherwise the shim exits (matches
-//     the intended systemctl-stop behaviour).
-//   - shimAuthReadDeadline: how long the shim waits for a connecting peer
-//     to send its first line ("attach"/"hello") after AF_UNIX dial.
+// Shim server timers (semantically independent despite equal values):
+//   - shimSocketWatchInterval: stat() poll cadence detecting a deleted AF_UNIX
+//     socket file so an orphaned shim can self-shutdown.
+//   - shimShutdownGracePeriod: window after SIGTERM/SIGINT for a fresh client
+//     Attach; otherwise the shim exits.
+//   - shimAuthReadDeadline: wait for a connecting peer's first line.
 const (
 	shimSocketWatchInterval = 30 * time.Second
 	shimShutdownGracePeriod = 30 * time.Second
 	shimAuthReadDeadline    = 30 * time.Second
 )
 
-// postExitReattachWindow is the grace period the shim keeps listening
-// for a re-attaching naozhi client after the upstream CLI process has
-// exited (cleanly or via watchdog). Within this window the shim
-// preserves its socket so the operator's reconnect / fresh_context
-// cron / dashboard auto-reattach can deliver the dead-CLI signal to
-// the naozhi side; once exceeded the shim exits and naozhi schedules
-// a fresh Spawn. Reused after a client has reattached so the second
-// timer covers the post-handshake "now you should re-establish a CLI"
-// window before the shim forfeits its slot.
-//
-// Closes R237-CR-7. Previously hard-coded as "60 * time.Second" four
-// times in Run(); changing the value here updates every grace path
-// uniformly. Do NOT confuse with shimShutdownGracePeriod (post-SIGTERM
-// attach grace) or the freshShimShutdownGuard window (boot-handshake
-// guard, see line ~975).
+// postExitReattachWindow is how long the shim keeps listening for a
+// re-attaching naozhi client after the CLI exited (cleanly or via watchdog),
+// so the dead-CLI signal can be delivered; reused after a reattach as the
+// "re-establish a CLI" window before the shim forfeits its slot. Distinct
+// from shimShutdownGracePeriod and freshShimShutdownGuard.
 const postExitReattachWindow = 60 * time.Second
 
-// freshShimShutdownGuard is the window after shim startup during
-// which an *unauthenticated* "shutdown" command is ignored when the
-// CLI is still alive — protects against handshake-glitch shutdowns
-// before client buffers are primed. See the long comment on the
-// refusal path for the full UCCLEP-2026-04-26 rationale. Mirrors the
-// `const window = 60 * time.Second` used in
-// TestShutdownGuard_EvaluationMatrix; bump both together.
+// freshShimShutdownGuard is the window after startup during which an
+// *unauthenticated* "shutdown" is ignored while the CLI is alive (protects
+// against handshake-glitch shutdowns before client buffers are primed).
+// TestShutdownGuard_EvaluationMatrix mirrors the value; bump both together.
 const freshShimShutdownGuard = 60 * time.Second
 
 // Config holds shim process configuration passed via CLI flags.
@@ -181,15 +143,10 @@ type Config struct {
 
 // Run is the main entry point for the shim process.
 //
-// R237-CR-8 (#715): the log-file handle is a Run-local atomic.Pointer
-// instead of a package-level var so test harnesses that spin up multiple
-// shimServer instances in the same process (no production caller does
-// this — the OS-level shim is one binary one Run — but the Run-as-library
-// exec path under -race shares the address space) cannot clobber each
-// other's deferred panic handler. atomic.Pointer is still required so the
-// deferred recover() observes a memory-barrier-reachable handle even if
-// the signal handler / panic recover races against the os.OpenFile branch
-// initialization (R216-GO-2 invariant preserved).
+// The log-file handle is a Run-local atomic.Pointer (not a package var) so
+// test harnesses running multiple shimServer instances in one process cannot
+// clobber each other's deferred panic handler; atomic so the deferred
+// recover() observes the handle even if it races the OpenFile branch (#715).
 func Run(cfg Config) error {
 	var shimLogFilePtr atomic.Pointer[os.File]
 	// Redirect slog to a persistent log file so shim logs survive parent restart.
@@ -212,28 +169,24 @@ func Run(cfg Config) error {
 			fmt.Fprintf(f, "Run() returning at %s\n", time.Now().Format(time.RFC3339))
 		}
 		slog.Info("shim exiting")
-		// Flush + close the log file so the final "returning"/"exiting"
-		// lines survive sudden power loss or aggressive fs flush delays.
+		// Sync+close so the final lines survive power loss.
 		if f != nil {
 			_ = f.Sync()
 			_ = f.Close()
 		}
 	}()
 
-	// Signal handling
 	ignoreHupPipe()
 
-	// Start CLI subprocess
 	cli, err := startCLI(cfg.CLIPath, cfg.CLIArgs, cfg.CWD)
 	if err != nil {
 		slog.Error("failed to start CLI", "err", err)
 		return fmt.Errorf("start CLI: %w", err)
 	}
 
-	// Clean stale socket before binding
 	_ = CleanStaleSocket(cfg.SocketPath)
 
-	// Create unix socket listener with atomic permissions
+	// umask 0177 so the socket file is created 0600 atomically.
 	oldUmask := setUmask(0177)
 	listener, err := net.Listen("unix", cfg.SocketPath)
 	setUmask(oldUmask)
@@ -244,19 +197,17 @@ func Run(cfg Config) error {
 	defer listener.Close()
 	defer os.Remove(cfg.SocketPath)
 
-	// Enforce directory permissions (handles pre-existing dirs)
+	// Re-apply 0700 for pre-existing dirs.
 	if dir := socketDir(cfg.SocketPath); dir != "" {
 		os.Chmod(dir, 0700) //nolint:errcheck
 	}
 
-	// Generate auth token
 	tokenRaw, tokenB64, err := GenerateToken()
 	if err != nil {
 		cli.kill()
 		return err
 	}
 
-	// Write state file
 	state := State{
 		ShimPID:      os.Getpid(),
 		CLIPID:       cli.pid(),
@@ -280,10 +231,8 @@ func Run(cfg Config) error {
 	os.Stdout.Close()
 	os.Stdin.Close()
 
-	// Ring buffer
 	buf := NewRingBuffer(cfg.BufferSize, cfg.MaxBufBytes)
 
-	// Shim server state
 	s := &shimServer{
 		cli:       cli,
 		listener:  listener,
@@ -295,34 +244,22 @@ func Run(cfg Config) error {
 		done:      make(chan struct{}),
 	}
 
-	// Watchdog for disconnect periods
 	s.watchdog = NewWatchdog(cfg.WatchdogTimeout, func() {
 		slog.Warn("watchdog: killing unresponsive CLI")
 		cli.kill()
 	})
 
-	// Start stdout/stderr readers
 	go s.readStdout()
 	go s.readStderr()
 	// Socket self-watch: if something outside this process unlinks our socket
-	// file (external cleaner, stray rm -rf, another process's StartShim that
-	// bypassed the dial-first guard), the kernel keeps the AF_UNIX listener fd
-	// alive but no new connection can ever reach it — we become an orphan
-	// consuming a CLI seat and piling up ring-buffer events no one drains.
-	// Poll stat() every 30s; on ENOENT, initiate the same shutdown path as
-	// SIGTERM. This is a defense-in-depth layer behind Manager.Discover's
-	// socket check (F4) and StartShim's dial-first guard (F3); under normal
-	// operation it never fires.
+	// file, the kernel keeps the listener fd alive but no client can ever
+	// reach it — an orphan holding a CLI seat. Defense-in-depth behind
+	// Manager.Discover's socket check and StartShim's dial-first guard.
 	go s.watchSocketFile(cfg.SocketPath, shimSocketWatchInterval)
 
-	// SIGTERM/SIGINT: always start a 30s grace period regardless of whether a
-	// client is currently connected. Previously the grace timer was skipped when
-	// clientConn != nil, causing `systemctl stop naozhi-shim-*` to be silently
-	// ignored until systemd sent SIGKILL. Now we always arm the timer; the only
-	// way to cancel it is a fresh client Attach (setClient clears graceTimer),
-	// so a re-attached naozhi cancels shutdown. A plain Detach (clearClient)
-	// does NOT cancel — if no new attach arrives within 30s, the shim exits,
-	// which is the intended systemctl-stop behavior.
+	// SIGTERM/SIGINT: always arm the grace timer, even with a client attached
+	// (otherwise systemctl stop is ignored until SIGKILL). Only a fresh client
+	// Attach cancels it (setClient clears graceTimer); a plain Detach does not.
 	sigCh := make(chan os.Signal, 1)
 	notifyTerminate(sigCh)
 	go func() {
@@ -356,7 +293,6 @@ func Run(cfg Config) error {
 		s.initiateShutdown()
 	}()
 
-	// Accept loop
 	idleTimeout := cfg.IdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = 4 * time.Hour
@@ -367,12 +303,9 @@ func Run(cfg Config) error {
 	const maxInflightClients = 16
 	clientSem := make(chan struct{}, maxInflightClients)
 
-	// spawnClient enforces the clientSem admission gate so every handleClient
-	// goroutine (normal accept + post-cli_exited reconnect + post-watchdog
-	// reconnect) pays the same semaphore slot. Previously only the main
-	// accept branch was gated; the two reconnect branches did a raw `go
-	// s.handleClient(...)` which let a post-kill reconnect storm bypass the
-	// 16-slot cap exactly when fd pressure peaks. R71-GO-H1.
+	// spawnClient enforces the clientSem admission gate for every handleClient
+	// goroutine (main accept + both post-CLI-death reconnect paths), so a
+	// post-kill reconnect storm cannot bypass the cap when fd pressure peaks.
 	spawnClient := func(conn net.Conn) {
 		select {
 		case clientSem <- struct{}{}:
@@ -381,7 +314,7 @@ func Run(cfg Config) error {
 				s.handleClient(conn, idleTimeout)
 			}()
 		default:
-			// Pool full → shed load identically to the main accept branch.
+			// Pool full: shed load.
 			conn.Close()
 		}
 	}
@@ -444,18 +377,11 @@ func Run(cfg Config) error {
 	}
 }
 
-// waitForReattach implements the post-CLI-death grace window. After the
-// CLI process has exited (cleanly via cli.exited or forcibly via
-// watchdog.Fired) the shim keeps its socket open for postExitReattachWindow
-// so a reconnecting naozhi client can pick up the dead-CLI signal. If a
-// client connects, the helper hands it to spawnClient and waits a second
-// postExitReattachWindow for the operator handoff to complete (or s.done
-// to fire). Either way the helper returns once the window has elapsed or
-// shutdown was requested.
-//
-// reason is woven into the log messages so cli_exited and watchdog paths
-// remain individually traceable in operator logs even though the timer
-// machinery is shared. Closes R237-CR-5 (#707).
+// waitForReattach keeps the socket open for postExitReattachWindow after the
+// CLI died so a reconnecting naozhi client can pick up the dead-CLI signal;
+// if one connects it is handed to spawnClient and a second window covers the
+// operator handoff. Returns once the window elapses or s.done fires. reason
+// keeps the cli_exited and watchdog paths distinguishable in logs (#707).
 func (s *shimServer) waitForReattach(acceptCh <-chan net.Conn, spawnClient func(net.Conn), reason string) {
 	exitTimer := time.NewTimer(postExitReattachWindow)
 	select {
@@ -495,18 +421,12 @@ type shimServer struct {
 	mu    sync.Mutex
 	state State
 	// sessionIDKnown mirrors state.SessionID != "" so the stdout hot path
-	// (tryExtractSessionID, 5-50 lines/s/session) can skip the per-line
-	// bytes.Contains scan + json.Unmarshal once the ID is set, without
-	// taking s.mu. The ID is assigned exactly once (system/init or the first
-	// result / ACP frame) and never cleared, so a one-way latch is safe.
+	// skips the per-line scan + Unmarshal without taking s.mu. The ID is
+	// assigned once and never cleared, so a one-way latch is safe.
 	sessionIDKnown atomic.Bool
-	// clientAttached mirrors `clientConn != nil` for the stdout hot path so
-	// readStdout can skip MarshalStdoutLine's per-line JSON allocation when no
-	// naozhi is attached (idle cron sessions running long tool calls emit
-	// 20-50 lines/s that would otherwise be marshalled into a frame and
-	// dropped). R202606f-PERF-006 (#2295). It is a hint only: a benign race
-	// where it reads true just as a client detaches simply falls through to
-	// enqueueWrite, which is already nil-safe (drops the frame).
+	// clientAttached mirrors clientConn != nil so readStdout can skip the
+	// per-line frame marshal when no naozhi is attached (#2295). Hint only:
+	// a stale true falls through to enqueueWrite, which is nil-safe.
 	clientAttached atomic.Bool
 	clientConn     net.Conn      // current connected client (at most one)
 	writeCh        chan []byte   // buffered channel for async writes to client
@@ -522,14 +442,8 @@ func (s *shimServer) initiateShutdown() {
 }
 
 // watchSocketFile polls the socket path and initiates shutdown if the file
-// disappears. See startup comment next to `go s.watchSocketFile(...)` for
-// the motivation — this handles the "zombie shim" failure mode where the
-// listener fd is alive but the filesystem path is gone, making the shim
-// unreachable to any new client.
-//
-// Stat() is used (not Lstat) so a symlink replacement points us at whatever
-// the operator intended; if that target is missing we still fire. interval
-// is parameterised so tests can exercise the trigger without a 30s wait.
+// disappears (listener fd alive but path gone = unreachable zombie shim).
+// interval is parameterised for tests.
 func (s *shimServer) watchSocketFile(socketPath string, interval time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -544,26 +458,18 @@ func (s *shimServer) watchSocketFile(socketPath string, interval time.Duration) 
 		case <-s.done:
 			return
 		case <-t.C:
-			// Lstat (not Stat) so a symlink swap pointing at a still-existing
-			// path cannot keep this watcher alive past the real socket's
-			// removal — Stat follows symlinks and would happily report success
-			// on the swap target. R218-SEC-12.
+			// Lstat (not Stat): a symlink swap pointing at a still-existing
+			// path must not keep this watcher alive past the real socket's removal.
 			if _, err := os.Lstat(socketPath); err != nil {
-				// Only self-terminate on confirmed ENOENT — transient errors
-				// like EACCES (SELinux relabel mid-deploy), ESTALE (NFS), or
-				// EINTR would otherwise take down a healthy shim on the next
-				// 30s tick. R65-GO-M-1.
+				// Only self-terminate on ENOENT — transient EACCES/ESTALE/EINTR
+				// must not take down a healthy shim.
 				if !errors.Is(err, os.ErrNotExist) {
 					slog.Warn("shim socket stat transient error, staying up",
 						"socket", socketPath, "err", err)
 					continue
 				}
-				// Do not retry — if the path is gone, it is gone; recreating
-				// the socket from here would race StartShim's dial-first
-				// guard and reintroduce the clobber bug we just fixed. Just
-				// exit cleanly so naozhi can spawn a fresh shim on the next
-				// message. Grace timer already armed by the SIGTERM handler
-				// when no client attached; initiateShutdown shortcuts that.
+				// Do not recreate the socket here: that would race StartShim's
+				// dial-first guard. Exit so naozhi spawns a fresh shim.
 				slog.Warn("shim socket file disappeared, shutting down",
 					"socket", socketPath, "err", err)
 				s.initiateShutdown()
@@ -586,11 +492,8 @@ func (s *shimServer) resetIdleTimer(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.idleTimer != nil {
-		// Stop returns false if the timer already fired but the C channel
-		// hasn't been drained yet. Without the non-blocking drain, a stale
-		// idle event could outlive the Stop and bleed into the next reset
-		// cycle on Go toolchains older than 1.23 (R224-GO-8). Modern
-		// toolchains auto-drain on Reset; the select is belt-and-suspenders.
+		// Drain if Stop returns false so a stale idle event cannot bleed into
+		// the next reset cycle (pre-1.23 toolchains; belt-and-suspenders now).
 		if !s.idleTimer.Stop() {
 			select {
 			case <-s.idleTimer.C:
@@ -607,8 +510,8 @@ func (s *shimServer) setClient(conn net.Conn) (writeCh chan []byte, clientDone c
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Kick old client: close its done channel (signals writer goroutine + enqueueWrite)
-	// then close its connection. Never close writeCh — the writer goroutine drains it.
+	// Kick old client: close its done channel, then its conn. Never close
+	// writeCh — the writer goroutine drains it.
 	if s.clientConn != nil {
 		if s.clientDone != nil {
 			close(s.clientDone)
@@ -680,66 +583,43 @@ func (s *shimServer) readStdout() {
 		seq := s.buffer.Push(line) // Push makes its own copy for replay storage
 		s.watchdog.Reset()
 
-		// Extract session_id from init/result events
 		s.tryExtractSessionID(line)
 
-		// R202606f-PERF-006 (#2295): skip the per-line JSON frame allocation
-		// when no naozhi is attached. buffer.Push / tryExtractSessionID /
-		// watchdog.Reset above still run (they feed replay, session-ID latch,
-		// and liveness regardless of a client), but MarshalStdoutLine +
-		// enqueueWrite are pure waste with no consumer — an idle cron session
-		// running a long tool call emits 20-50 lines/s that were marshalled
-		// into a frame only for enqueueWrite to drop on a nil channel. The
-		// atomic latch is a hint: a client attaching mid-line just misses one
-		// frame, which replay (buffer.Push, already done) backfills on attach.
+		// Skip the per-line frame marshal when no naozhi is attached (#2295);
+		// Push/extract/Reset above still run. A client attaching mid-line
+		// misses one frame, which replay backfills on attach.
 		if !s.clientAttached.Load() {
 			continue
 		}
 
-		// Build message and enqueue (non-blocking, no lock during Flush).
-		//
-		// R67-PERF-3: route the stdout hot path through MarshalStdoutLine,
-		// which aliases `line` directly into the ServerMsg via unsafe.String
-		// so json.Marshal walks the scanner's existing buffer instead of an
-		// intermediate `string(line)` copy. enqueueWrite hands the result to
-		// a client channel before the next Scan() runs, so the alias never
-		// outlives this iteration. Wire output is byte-for-byte identical to
-		// the prior MarshalLine path (round-tripped in protocol_test.go).
+		// MarshalStdoutLine aliases `line` via unsafe.String; enqueueWrite hands
+		// the result off before the next Scan(), so the alias never outlives
+		// this iteration.
 		if data, err := MarshalStdoutLine(seq, line); err == nil {
 			s.enqueueWrite(data)
 		}
 	}
 
-	// CLI stdout closed
 	s.cli.wait()
 	slog.Info("CLI stdout EOF")
 }
 
-// Search patterns for tryExtractSessionID, hoisted to package scope so the
-// per-line hot path reuses these byte slices instead of allocating a fresh
-// []byte for each bytes.Contains call. snake = claude stream-json frames,
-// camel = ACP/kiro frames.
+// tryExtractSessionID search keys, hoisted to avoid a per-line []byte alloc.
+// snake = claude stream-json frames, camel = ACP/kiro frames.
 var (
 	sessionIDSnakeKey = []byte(`"session_id"`)
 	sessionIDCamelKey = []byte(`"sessionId"`)
 )
 
 func (s *shimServer) tryExtractSessionID(line []byte) {
-	// Fast path: the ID is assigned exactly once and never cleared, so once
-	// it is known every later stdout line (5-50/s/session) can skip the
-	// bytes.Contains scan + json.Unmarshal entirely. The atomic latch lets us
-	// bail without taking s.mu on the overwhelmingly common already-known case.
+	// The ID is assigned once and never cleared; the latch skips the scan and
+	// s.mu on the common already-known case.
 	if s.sessionIDKnown.Load() {
 		return
 	}
 
-	// Fast gate: fires on every CLI stdout line until the ID is known.
-	// Only init / result / ACP session/new events carry session_id; the vast
-	// majority of lines are assistant_delta / tool_use and contain neither
-	// token. Two bytes.Contains scans cover both the claude (snake_case
-	// "session_id") and ACP/kiro (camelCase "sessionId") frame conventions.
-	// R65-PERF-H-3 design preserved: still no full decoder-state alloc when
-	// the line lacks both tokens.
+	// Only init / result / ACP session/new frames carry the ID; two Contains
+	// scans avoid a decoder alloc for the vast majority of lines.
 	hasSnake := bytes.Contains(line, sessionIDSnakeKey)
 	hasCamel := bytes.Contains(line, sessionIDCamelKey)
 	if !hasSnake && !hasCamel {
@@ -770,10 +650,8 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 	}
 
 	if hasCamel {
-		// ACP / kiro: session/new response carries the canonical session ID
-		// in result.sessionId; subsequent session/update notifications also
-		// echo it. The first sighting wins so a later notification can't
-		// overwrite a freshly-assigned ID with a stale one.
+		// ACP / kiro: session/new response carries result.sessionId; later
+		// session/update notifications echo it in params. First sighting wins.
 		var ev struct {
 			Result struct {
 				SessionID string `json:"sessionId"`
@@ -852,46 +730,23 @@ func (s *shimServer) saveState() {
 	}
 }
 
-// performHandshake runs the pre-active-client auth phase: peer-UID
-// verification, attach-message read under a deadline + LimitedReader, and
-// constant-time token compare against s.tokenRaw. On success it clears the
-// auth read deadline (so the post-auth command loop is not capped at
-// shimAuthReadDeadline) and returns the parsed attach message + ok=true.
-//
-// Carved out of handleClient (R219-CR-8 / #657) so the auth gate is
-// independently testable and the parent function reads as a flat:
-//
-//	handshake → hello → replay → become-active → loop.
-//
-// Pure semantic-equivalent extraction; ALL the legacy guard-rails are
-// preserved in place:
-//   - VerifyPeerUID Warn-level audit log on UID mismatch.
-//   - SetReadDeadline failure short-circuits BEFORE the read loop starts
-//     (prevents goroutine leak if the conn is half-closed).
-//   - LimitedReader caps pre-auth memory at maxClientLineBytes+1 so a
-//     pre-auth peer cannot OOM the shim with a very long attach line.
-//   - subtle.ConstantTimeCompare guards the token check.
-//   - On token failure we send "auth_failed" so the client can surface
-//     the reason (vs. silent close which would look like a network blip).
-//   - Clearing the read deadline post-auth is itself fail-safe: if the
-//     clear fails (rare; conn dying) we bail rather than leave a stale
-//     deadline armed against the post-auth command loop.
+// performHandshake runs the pre-active-client auth phase: peer-UID check,
+// attach-message read under shimAuthReadDeadline + a LimitedReader (caps
+// pre-auth memory), constant-time token compare, then clears the read
+// deadline so the post-auth loop is not capped. On token failure it sends
+// "auth_failed" so the client can surface the reason (#657).
 func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	// Verify connecting peer has same UID (defense-in-depth beyond token auth)
 	if !VerifyPeerUID(conn) {
-		// Elevated to Warn: a UID mismatch on a unix socket that is supposed
-		// to be owner-private is an audit-worthy event. Debug-level output
-		// is silenced in production deployments and would hide an in-progress
-		// same-host privilege escalation attempt.
+		// Warn (not Debug): a UID mismatch on an owner-private socket is
+		// audit-worthy and Debug is silenced in production.
 		slog.Warn("shim: rejecting client with UID mismatch",
 			"remote", conn.RemoteAddr().String())
 		return ClientMsg{}, false
 	}
 
-	// Set read deadline for auth phase (shimAuthReadDeadline to send attach).
-	// If the deadline can't be installed (conn already half-closed), the
-	// read loop below would block until TCP keepalive expires — leak the
-	// goroutine. Bail out immediately instead.
+	// If the deadline can't be installed (conn half-closed) the read below
+	// could block until keepalive expires — bail instead of leaking.
 	if err := conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)); err != nil {
 		slog.Debug("shim: set auth read deadline failed", "err", err)
 		return ClientMsg{}, false
@@ -901,7 +756,6 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(lr, 4096)
 
-	// Read attach message
 	attachLine, err := reader.ReadBytes('\n')
 	if err != nil || lr.N == 0 {
 		slog.Debug("client read attach failed", "err", err)
@@ -920,9 +774,8 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 		return ClientMsg{}, false
 	}
 
-	// Clear read deadline after successful auth. If clearing fails, an old
-	// deadline could fire and prematurely kick a healthy client; bail out so
-	// the client reconnects cleanly.
+	// If clearing the deadline fails, a stale one could kick a healthy client
+	// later; bail so the client reconnects cleanly.
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		slog.Debug("shim: clear auth read deadline failed", "err", err)
 		return ClientMsg{}, false
@@ -966,9 +819,8 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// Replay buffered lines directly (still not the active client, no duplication)
 	lines := s.buffer.LinesSince(attachMsg.Seq)
 	for _, l := range lines {
-		// MarshalReplayLine aliases l.data (stable for the entry's life, see
-		// RingBuffer.Push/LinesSince) only across the synchronous marshal, and
-		// writeRaw writes the frame before the next iteration — no copy needed.
+		// MarshalReplayLine aliases l.data only across the synchronous marshal
+		// and writeRaw writes before the next iteration — no copy needed.
 		data, err := MarshalReplayLine(l.seq, l.data)
 		if err != nil {
 			continue
@@ -984,9 +836,8 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode)})
 	}
 
-	// Reject new client if CLI is alive and another client is already connected.
-	// This prevents an unexpected reconnect from kicking out a client that is
-	// actively communicating with the CLI (race during session creation).
+	// Reject a new client while the CLI is alive and another client is
+	// connected, so an unexpected reconnect cannot kick an active one.
 	s.mu.Lock()
 	hasActiveClient := s.clientConn != nil
 	s.mu.Unlock()
@@ -999,8 +850,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// NOW become the active client (after replay complete, no duplication window)
 	writeCh, clientDone := s.setClient(conn)
 
-	// Stop disconnect watchdog and cancel SIGTERM grace timer (if active).
-	// A new client connecting means the shim is needed — don't shut down.
+	// A new client means the shim is needed: stop watchdog, cancel grace timer.
 	s.watchdog.Stop()
 	s.mu.Lock()
 	if s.graceTimer != nil {
@@ -1010,19 +860,14 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	s.mu.Unlock()
 
 	// Writer goroutine: drains writeCh to the socket, exits on clientDone.
-	// A per-flush write deadline bounds slow/stuck reader scenarios so
-	// Flush cannot wedge the goroutine beyond 10s even if the outer
-	// conn.Close() in the defer is delayed.
+	// A per-flush write deadline bounds a stuck reader to 10s.
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		w := bufio.NewWriter(conn)
-		// If SetWriteDeadline fails (conn already closed / half-closed), skip the
-		// Flush entirely. Without a deadline, bufio.Flush can block until TCP
-		// keepalive expires (minutes), wedging this writer goroutine and
-		// starving the defer that signals clientDone to readers. Clearing the
-		// deadline after a successful Flush is best-effort — if it fails the
-		// conn is dying and the outer close will tear everything down.
+		// Without a deadline bufio.Flush can block until keepalive expires and
+		// starve the defer that signals clientDone; if the deadline can't be
+		// set, skip the Flush. Clearing it afterwards is best-effort.
 		flushWithDeadline := func() error {
 			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 				return fmt.Errorf("set write deadline: %w", err)
@@ -1067,21 +912,17 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		}
 	}()
 
-	// sendCliExited carries the runCommandLoop signal into the teardown defer:
-	// when the live CLI died, the terminal cli_exited frame is written
-	// synchronously to conn AFTER the async writer goroutine has drained and
-	// exited (so there is no interleave with its buffered output and no race
-	// with conn.Close losing the frame). #1783.
+	// sendCliExited: when the live CLI died, the terminal cli_exited frame is
+	// written synchronously AFTER the async writer has drained and exited so
+	// it cannot interleave with buffered output or be lost to conn.Close (#1783).
 	var sendCliExited bool
 	var cliExitCode int
 	defer func() {
-		// Close clientDone (clearClient) so the writer goroutine flushes its
-		// pending buffer and exits; wait for it before touching conn directly.
+		// clearClient closes clientDone so the writer flushes and exits; wait
+		// for it before touching conn directly.
 		s.clearClient(conn)
 		<-writerDone
-		// Now that the writer goroutine is gone, conn is exclusively ours:
-		// deliver the terminal cli_exited frame synchronously (writeRaw sets a
-		// 10s write deadline + flushes to the socket) so it cannot be dropped.
+		// conn is now exclusively ours: deliver cli_exited synchronously.
 		if sendCliExited {
 			resp := ServerMsg{Type: "cli_exited", Code: intPtr(cliExitCode)}
 			if data, err := resp.MarshalLine(); err == nil {
@@ -1100,7 +941,6 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		s.saveState()
 	}()
 
-	// Update state
 	s.mu.Lock()
 	s.state.LastConnectedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Unlock()
@@ -1109,68 +949,47 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	sendCliExited, cliExitCode = s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
 }
 
-// runCommandLoop is the post-auth, post-replay client message dispatch loop.
-// Carved out of handleClient (#697 / R237-CR-3) so the 327-line parent
-// stays comprehensible to AI-review windows. Pure semantic-equivalent
-// extraction: same goroutine ownership, same return semantics (any return
-// here unwinds the calling handleClient defers), same channel topology.
+// runCommandLoop is the post-auth, post-replay client dispatch loop; any
+// return unwinds the calling handleClient's defers.
 //
-//   - reader / postAuthLR: bounded post-auth line reader; postAuthLR.N is
-//     reset per-line so the LimitedReader gate fires on oversize input.
-//   - clientDone: closed by setClient teardown; the producer goroutine
-//     watches it to avoid leaking when handleClient returns.
-//   - cliWasAlive: snapshot of cli.alive() taken at attach time. Drives
-//     the cli.exited dedup so a dead-CLI replay path doesn't re-emit
-//     cli_exited (closed channel is always selectable).
+//   - reader / postAuthLR: bounded line reader; postAuthLR.N is reset per line.
+//   - clientDone: closed by setClient teardown; the producer goroutine watches
+//     it to avoid leaking.
+//   - cliWasAlive: cli.alive() at attach time; drives cli_exited dedup.
 //
-// Returns sendCliExited=true (with the CLI exit code) when the loop exited
-// because the live CLI died and the terminal cli_exited control frame still
-// needs to reach the client. The caller (handleClient) delivers that frame
-// synchronously AFTER the async writer goroutine has drained and exited, so it
-// cannot be dropped on a transiently-full writeCh nor lost to a conn.Close()
-// racing the writer's flush — the #1783 correctness bug. All other exit paths
-// (client disconnect, command-driven disconnect, shutdown) return
-// sendCliExited=false.
+// Returns sendCliExited=true (plus exit code) when the live CLI died, so
+// handleClient delivers cli_exited synchronously after the writer drains (#1783).
 func (s *shimServer) runCommandLoop(
 	reader *bufio.Reader,
 	postAuthLR *io.LimitedReader,
 	clientDone <-chan struct{},
 	cliWasAlive bool,
 ) (sendCliExited bool, exitCode int) {
-	// Command loop: reads from client, also watches for CLI exit and shutdown
 	lineCh := make(chan []byte, 1)
 	go func() {
 		defer close(lineCh)
-		// R216-SEC-3 (#541): track cumulative bytes consumed since auth so a
-		// client holding a valid token cannot keep sending near-max-size
-		// lines indefinitely. The per-line LimitedReader caps any single
-		// line, but without a session-wide tally an attacker can drive
-		// sustained 16-MB payload churn through the post-auth path.
+		// Cumulative byte tally: the per-line LimitedReader alone would let an
+		// authenticated client churn near-max lines indefinitely (#541).
 		var sessionBytes int64
 		for {
 			postAuthLR.N = int64(maxClientLineBytes()) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
-				// Distinguish oversize (per-line limit exhausted) from normal EOF/disconnect.
-				// When postAuthLR.N reaches 0 the LimitedReader stops feeding the bufio
-				// reader, which surfaces as an unexpected error rather than a clean close.
+				// postAuthLR.N reaching 0 surfaces as an error, not a clean close:
+				// distinguish oversize from EOF/disconnect.
 				if postAuthLR.N <= 0 {
 					slog.Warn("client line exceeded per-line byte limit, disconnecting",
 						"limit", maxClientLineBytes())
 				}
 				return
 			}
-			// Enforce line size limit (bufio.NewReaderSize only sets buffer, not max line).
-			// Disconnect on oversize lines: a misbehaving/malicious client that flood-sends
-			// large lines would otherwise burn CPU in a tight loop while holding the
-			// single-client semaphore slot — better to sever and let them reconnect.
+			// bufio.NewReaderSize sets buffer, not max line. Disconnect rather
+			// than spin: a flooding client would burn CPU while holding a slot.
 			if len(line) > maxClientLineBytes() {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
 				return
 			}
-			// Cumulative cap (R216-SEC-3 / #541). Disconnect once the total
-			// bytes a single authenticated session has fed us crosses the
-			// budget; legitimate clients never approach this in practice.
+			// Cumulative cap (#541).
 			sessionBytes += int64(len(line))
 			if cap := maxClientSessionBytesValue(); sessionBytes > cap {
 				slog.Warn("client session byte cap exceeded, disconnecting",
@@ -1185,11 +1004,9 @@ func (s *shimServer) runCommandLoop(
 		}
 	}()
 
-	// cliExited is nil when the CLI was already dead at attach time:
-	// cli_exited was emitted during replay, and a nil channel is never
-	// selectable, so the loop won't busy-return on the perpetually-closed
-	// s.cli.exited. When the CLI was alive, this aliases s.cli.exited so a
-	// real exit still notifies the client. [R20260603-CR-7]
+	// nil when the CLI was already dead at attach time: cli_exited was emitted
+	// during replay and a nil channel is never selectable, so the loop won't
+	// busy-return on the perpetually-closed s.cli.exited.
 	cliExited := s.cli.exited
 	if !cliWasAlive {
 		cliExited = nil
@@ -1210,17 +1027,10 @@ func (s *shimServer) runCommandLoop(
 			}
 
 		case <-cliExited:
-			// Reachable only when cliWasAlive==true: when CLI was already dead at
-			// attach time cliExited is set to nil (see above), and a nil channel is
-			// never selected, preventing double delivery of cli_exited.
-			//
-			// Do NOT enqueue cli_exited on writeCh here: it is the final control
-			// frame before teardown, and returning immediately closes clientDone
-			// (handleClient defer) and then conn — which races the async writer's
-			// flush and could lose the frame, leaving the client to discover the
-			// death only via a later reconnect+replay (#1783). Instead we hand the
-			// exit code back to handleClient, which delivers cli_exited
-			// synchronously after the writer goroutine has drained and exited.
+			// Reachable only when cliWasAlive (see nil-ing above). Do NOT
+			// enqueue cli_exited on writeCh: returning closes clientDone and
+			// conn, racing the async writer's flush (#1783). handleClient
+			// delivers it synchronously after the writer has drained.
 			return true, s.cli.exitCode
 
 		case <-s.done:
@@ -1229,35 +1039,23 @@ func (s *shimServer) runCommandLoop(
 	}
 }
 
-// handleClientCommand dispatches a single ClientMsg into the appropriate
-// shim action. Returns true when the caller must disconnect the client
-// (oversize write, stdin EPIPE, shutdown, detach, refused-shutdown
-// guard); returns false to keep the loop running. Carved out of
-// runCommandLoop's switch (#697 / R237-CR-3) so each verb's policy
-// stays readable in isolation.
+// handleClientCommand dispatches one ClientMsg. Returns true when the caller
+// must disconnect the client (oversize write, stdin EPIPE, shutdown, detach,
+// refused-shutdown guard).
 func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 	switch msg.Type {
 	case "write":
-		// Reject payloads that would overflow Claude's 10 MB bufio.Scanner
-		// buffer and deadlock stdout. naozhi's own dispatch layer caps
-		// coalesced user text well below this ceiling; a hostile or buggy
-		// client reaching this path is treated as a protocol violation
-		// and disconnected so the slot frees for healthy clients.
-		// R67-SEC-5.
+		// Reject payloads that would overflow Claude's 10 MB bufio.Scanner and
+		// deadlock stdout; treated as a protocol violation → disconnect.
 		if limit := maxWriteLineBytesValue(); int64(len(msg.Line)) > limit {
 			slog.Warn("client write too large, disconnecting",
 				"size", len(msg.Line), "limit", limit)
 			return true
 		}
 		if s.cli.alive() {
-			// R190-ERR-M1: previously the write error was silently
-			// dropped. If the CLI process dies between alive() and
-			// Write (EPIPE), the client's message is lost without
-			// notification — the client keeps waiting for a reply
-			// that will never arrive until its next ping times out.
-			// Log the failure and disconnect the client so it can
-			// reconnect to a fresh shim; cli.exited will fire on
-			// the next loop iteration and take the normal exit path.
+			// EPIPE between alive() and Write would silently lose the message;
+			// disconnect so the client reconnects, and cli.exited takes the
+			// normal exit path next iteration.
 			if _, err := s.cli.stdin.Write([]byte(msg.Line + "\n")); err != nil {
 				slog.Warn("shim: cli stdin write failed, disconnecting client", "err", err)
 				return true
@@ -1279,21 +1077,11 @@ func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 			s.enqueueWrite(data)
 		}
 	case "shutdown":
-		// Only refuse an "early shutdown" when it comes from a path
-		// with no authenticated client. An authenticated client
-		// (naozhi) issuing shutdown within the 60s window means the
-		// client has made the deliberate choice to tear this shim
-		// down — fresh_context cron, explicit Router.Reset, config
-		// drift handling, etc. Blocking those would keep the shim's
-		// socket listening for 30+ seconds and cause the "refusing
-		// to clobber" regression on fast restart (UCCLEP-2026-04-26).
-		// The 60s window was originally added to protect against
-		// handshake glitches where a half-ready shim receives an
-		// errant shutdown before buffers are primed; that's only
-		// meaningful when no client is actively driving the
-		// lifecycle. We're inside the per-client message loop here,
-		// so clientConn normally equals conn — the defensive check
-		// below stays in case a future refactor drifts that.
+		// Only refuse an early shutdown when no authenticated client is
+		// attached: an authed naozhi issuing shutdown within the guard window
+		// is deliberate (fresh_context cron, Router.Reset, config drift), and
+		// blocking it caused "refusing to clobber" on fast restart. Inside this
+		// loop clientConn normally equals conn; the check is defensive.
 		s.mu.Lock()
 		hasClient := s.clientConn != nil
 		s.mu.Unlock()
@@ -1312,10 +1100,8 @@ func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 	return false
 }
 
-// writeMsg writes a ServerMsg directly to a connection (used during auth/replay
-// before the client becomes the active client with async writes).
-// Enforces a 10s write deadline so a malicious or stalled client cannot pin
-// the single-client semaphore slot indefinitely by refusing to read.
+// writeMsg writes a ServerMsg directly to conn (auth/replay phase, before the
+// async writer exists) under writeRaw's 10s write deadline.
 func writeMsg(conn net.Conn, msg ServerMsg) {
 	data, err := msg.MarshalLine()
 	if err != nil {
@@ -1324,15 +1110,11 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	writeRaw(conn, data)
 }
 
-// writeRaw writes a pre-marshaled NDJSON frame with the same 10s write
-// deadline guard as writeMsg. Split out so the reconnect replay loop can feed
-// MarshalReplayLine's zero-copy output without re-stringifying each buffered
-// line through a ServerMsg.
+// writeRaw writes a pre-marshaled NDJSON frame under a 10s write deadline so a
+// stalled client cannot pin a semaphore slot indefinitely. Split out so the
+// replay loop can feed MarshalReplayLine's zero-copy output.
 func writeRaw(conn net.Conn, data []byte) {
-	// If SetWriteDeadline fails (conn already closed by defer teardown), skip
-	// the write. Without a deadline, a stalled client could pin the single-
-	// client semaphore slot indefinitely — the point of the deadline is to
-	// guarantee this helper never blocks beyond 10s.
+	// Deadline set failed (conn already closed): skip the write.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return
 	}
@@ -1452,9 +1234,8 @@ func (c *cliProc) closeStdin() {
 
 func (c *cliProc) waitOrKill(timeout time.Duration) {
 	c.closeStdin()
-	// Use time.NewTimer + defer Stop instead of time.After: the fast-path
-	// (c.exited fires first) would otherwise leave a parked timer goroutine
-	// until the full timeout elapses. Called up to 3 times per shutdown.
+	// NewTimer + Stop rather than time.After so the fast path does not leave a
+	// parked timer for the full timeout.
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	select {
@@ -1474,18 +1255,11 @@ func CleanStaleSocket(path string) error {
 	return os.Remove(path)
 }
 
-// ensureSocketFreeForReuse is the StartShim-side pre-bind check: if someone
-// is actively listening on the target socket, refuse to clobber — removing
-// a live listener's filesystem entry silently turns the peer into a zombie
-// (its listener fd is still held by the kernel, but no new client can dial
-// it). That is exactly the UCCLEP-2026-04-25 regression.
-//
-// 500ms is generous — Unix domain socket connect is microseconds under
-// normal load; anything slower is already diagnostic of a hosed peer and
-// we would rather block StartShim briefly than race into corruption. The
-// split from CleanStaleSocket exists because CleanStaleSocket is also used
-// by the shim-side bind path, where a different error surface is expected
-// (the shim owns the socket and just wants to rm leftovers).
+// ensureSocketFreeForReuse is the StartShim-side pre-bind check: refuse to
+// clobber a live listener, since removing its filesystem entry turns the peer
+// into an unreachable zombie (fd still held by the kernel). 500ms is generous
+// for a unix connect; slower is already diagnostic. Separate from
+// CleanStaleSocket, whose shim-side bind path expects a different error surface.
 func ensureSocketFreeForReuse(socketPath string) error {
 	if conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond); err == nil {
 		_ = conn.Close()
@@ -1498,17 +1272,10 @@ func ensureSocketFreeForReuse(socketPath string) error {
 // WaitSocketGone polls the socket path until it disappears or maxWait
 // elapses. Returns true when the socket is gone; false on timeout.
 //
-// Used by callers that just asked a shim to shut down and intend to spawn
-// a fresh one on the same key — observing socket unlink before StartShim
-// avoids the dial-first guard ("refusing to clobber") and the 30s zombie
-// window described in server.go's shutdown path.
-//
-// The socket file is unlinked in the shim's Run defer chain after its
-// listener closes, so this normally returns in a single 20ms tick once
-// the shim exits. We poll by stat rather than dial because a dial would
-// re-establish connection state with any remaining accept goroutine and
-// muddies the semantics; stat maps directly to "is the filesystem entry
-// still there".
+// Used by callers that just asked a shim to shut down and will spawn a fresh
+// one on the same key: observing the unlink avoids the dial-first "refusing
+// to clobber" guard. Polls by stat (not dial) so no connection state is
+// re-established with a lingering accept goroutine.
 func WaitSocketGone(socketPath string, maxWait time.Duration) bool {
 	if socketPath == "" {
 		return true

@@ -17,22 +17,15 @@ import (
 // State represents the persistent state of a running shim, stored as JSON.
 //
 // Versioning contract:
-//   - Version (legacy "version" tag) is the hard schema version gate; readers
-//     refuse to load a file whose Version != stateVersion. Historically the
-//     only versioning signal; kept unchanged to preserve binary compatibility
-//     across rolling upgrades.
-//   - SchemaVersion (canonical forward-compat marker) is the advisory schema
-//     version reported on disk. Starts at 1 and increments only on
-//     major-breaking layout changes; additive fields use omitempty without a
-//     bump. Readers that see SchemaVersion > theirMax log a warning and
-//     refuse to reconnect — enforced in ReadStateFile against
-//     maxSupportedSchemaVersion. A zero value on read (omitempty default on older
-//     writers) MUST be interpreted as v1.
+//   - Version is the hard schema gate; readers refuse a file whose Version !=
+//     stateVersion. Kept unchanged for binary compatibility across upgrades.
+//   - SchemaVersion is the advisory forward-compat marker: starts at 1,
+//     increments only on major-breaking layout changes; additive fields use
+//     omitempty without a bump. Readers refuse SchemaVersion >
+//     maxSupportedSchemaVersion. Zero on read MUST be interpreted as v1.
 type State struct {
 	Version int `json:"version"`
-	// SchemaVersion is the advisory forward-compat schema marker. See the
-	// struct-level "Versioning contract" godoc above. Omitted when zero;
-	// readers treat absent/zero as v1.
+	// SchemaVersion: see the struct-level "Versioning contract"; zero = v1.
 	SchemaVersion   int      `json:"schema_version,omitempty"`
 	ShimPID         int      `json:"shim_pid"`
 	CLIPID          int      `json:"cli_pid"`
@@ -47,53 +40,33 @@ type State struct {
 	StartedAt       string   `json:"started_at"`
 	LastConnectedAt string   `json:"last_connected_at,omitempty"`
 	BufferCount     int      `json:"buffer_count"`
-	// SpawnOverlay is the per-request override layer the session router
-	// applied on top of the backend defaults when it built CLIArgs (#2494).
-	// Three-valued on read:
-	//   - nil: the state was written by a shim that predates the field
-	//     (upgrade window). The reader cannot know which overrides went
-	//     into CLIArgs and must fall back to its legacy comparison.
-	//   - non-nil, zero value: spawned with NO per-request overrides — the
-	//     writer knew the layer and it was empty. Encoded as `{}`.
-	//   - non-nil, populated: the overrides that were in effect.
-	// Additive field: omitempty, no SchemaVersion bump (see the struct-level
-	// "Versioning contract" — bumping would make a rolled-back binary refuse
-	// to reconnect to every shim spawned by the newer one).
+	// SpawnOverlay is the per-request override layer applied on top of the
+	// backend defaults when CLIArgs was built (#2494). nil: written by a shim
+	// predating the field (reader falls back to legacy comparison); non-nil
+	// zero (`{}`): known and empty; populated: overrides in effect. Additive
+	// (omitempty, no SchemaVersion bump — a rolled-back binary must still reconnect).
 	SpawnOverlay *SpawnOverlay `json:"spawn_overlay,omitempty"`
 }
 
-// SpawnOverlay is the per-request layer of spawn parameters that the session
-// router merges above the backend-level defaults (config.yaml
-// cli.model/effort/extra_args, cli.backends[]) and below the per-session
-// dashboard tuning. It records WHAT was requested (agents[].model,
-// agents[].effort, agents[].extra_args, the resolved access-profile ID), not
-// the merged result: the drift comparison on the next naozhi start re-merges
-// the persisted overlay with the CURRENT backend defaults, so an operator's
-// config change is still detected as drift while an agent-level override is
-// no longer misread as one (#2494).
+// SpawnOverlay is the per-request spawn layer the session router merges above
+// backend defaults (config.yaml cli.model/effort/extra_args, cli.backends[])
+// and below per-session dashboard tuning. It records WHAT was requested, not
+// the merged result: the drift comparison re-merges it with CURRENT backend
+// defaults, so an operator config change is still drift while an agent-level
+// override is not (#2494). The shim treats it as opaque metadata.
 //
-// The shim treats this as opaque metadata — it is decoded from the
-// --spawn-overlay flag, written into the state file, and never interpreted.
-//
-// Extension contract: a new argv-bearing per-request field on
-// session.AgentOpts (e.g. AppendSystemPrompt, #2493) must gain a field here
-// with the same name so the drift rebuild can carry it; a field added to
-// AgentOpts but not here reproduces #2494 for that field.
+// Extension contract: every argv-bearing per-request field on session.AgentOpts
+// must gain a same-named field here, or the drift rebuild misreads it (#2494).
 type SpawnOverlay struct {
 	Model     string   `json:"model,omitempty"`
 	Effort    string   `json:"effort,omitempty"`
 	ExtraArgs []string `json:"extra_args,omitempty"`
-	// AccessProfile is the RESOLVED profile ID (after one-shot override,
-	// resume lock and default_access_profile fell through), "" = global
-	// baseline. The profile's default_model is looked up from current config
-	// at compare time, so the ID — not the model it resolved to — is what
-	// travels.
+	// AccessProfile is the RESOLVED profile ID ("" = global baseline); the
+	// profile's default_model is looked up from current config at compare time.
 	AccessProfile string `json:"access_profile,omitempty"`
-	// AppendSystemPrompt is the layered session.AgentOpts.SystemPrompt
-	// (agents[].system_prompt + planner prompt / scratch context) that the
-	// spawn rendered as `--append-system-prompt` (#2493). Recorded so the
-	// drift rebuild reproduces the same argv; without it every prompted
-	// session would be misread as drift on each restart (#2494 for prompts).
+	// AppendSystemPrompt is the layered SystemPrompt rendered as
+	// --append-system-prompt (#2493); without it every prompted session
+	// would read as drift on restart.
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
 }
 
@@ -126,33 +99,17 @@ func DecodeSpawnOverlay(s string) (*SpawnOverlay, error) {
 
 const stateVersion = 1
 
-// maxSupportedSchemaVersion is the largest SchemaVersion this naozhi
-// build knows how to read. A state file claiming a higher version
-// may contain fields / semantics this binary doesn't understand,
-// so Reader REFUSES to parse it rather than silently dropping data.
-// Bump this when the schema grows a new forward-compatible field.
+// maxSupportedSchemaVersion is the largest SchemaVersion this build reads;
+// higher is refused rather than silently dropping fields.
 const maxSupportedSchemaVersion = 1
 
 // WriteStateFile atomically writes the state to path with mode 0600.
 //
-// R215-SEC-P3-1 archive anchor: AuthToken is stored in plaintext under a
-// 0700 directory + 0600 file. The shim already enforces same-UID at the
-// AF_UNIX layer via SO_PEERCRED (peeruid_linux.go), so a same-UID attacker
-// who can read the state file can also dial the socket directly; encrypting
-// the token at rest would not raise the bar. Per-user threat model is "OS
-// accounts are trust boundaries" — encryption would only obfuscate, not
-// secure. Tracked as accepted risk.
-//
-// R247-ARCH-5 (#621): the write path delegates to osutil.WriteFileAtomic
-// rather than reimplementing the temp-write → fsync → rename → fsync-dir
-// sequence inline. The previous local copy and the canonical helper had
-// drifted on the temp-file naming pattern (".shim-state-*.tmp" here vs
-// ".<base>.*.tmp" in osutil); the helper's pattern groups temp files by
-// destination basename, which is a strict improvement for crash-recovery
-// sweeps. Mkdir + Chmod of the parent state directory remain the caller's
-// responsibility (osutil.WriteFileAtomic does not own the parent dir mode
-// because callers carry different perm policies — shim wants 0700, other
-// stores tolerate 0750).
+// AuthToken is stored in plaintext under a 0700 dir + 0600 file: SO_PEERCRED
+// already enforces same-UID at the socket, so a same-UID reader could dial
+// directly anyway; encrypting at rest would not raise the bar (accepted risk).
+// Mkdir + Chmod of the parent dir stay here because osutil.WriteFileAtomic
+// does not own the parent mode (#621).
 func WriteStateFile(path string, state State) error {
 	state.Version = stateVersion
 	data, err := json.MarshalIndent(state, "", "    ")
@@ -185,9 +142,8 @@ func ReadStateFile(path string) (State, error) {
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		slog.Warn("shim state file has overly permissive mode — refusing to read",
 			"path", path, "mode", fmt.Sprintf("%#o", perm))
-		// Do not echo the path in the error string — the error surfaces
-		// through Reconnect and can land in HTTP responses; the full path
-		// is already captured in the slog above for operator triage.
+		// Don't echo the path: the error can land in HTTP responses via
+		// Reconnect; the slog above already has it.
 		return State{}, fmt.Errorf("shim state has insecure permissions %#o", perm)
 	}
 	data, err := os.ReadFile(path)
@@ -202,13 +158,8 @@ func ReadStateFile(path string) (State, error) {
 		return State{}, fmt.Errorf("unsupported state version %d (want %d) in %s", state.Version, stateVersion, path)
 	}
 	if state.SchemaVersion > maxSupportedSchemaVersion {
-		// Honour the struct-level "Versioning contract" godoc: readers that
-		// see SchemaVersion > theirMax SHOULD log a warning *and* refuse to
-		// reconnect. The refuse half was already implemented; without the
-		// warn an operator running a downgraded binary against newer state
-		// gets a silent reconnect failure with no breadcrumb. Mirror the
-		// insecure-permissions branch above, which already logs before it
-		// returns its error.
+		// Warn as well as refuse, so a downgraded binary against newer state
+		// leaves a breadcrumb instead of a silent reconnect failure.
 		slog.Warn("shim state was written by a newer naozhi; refusing to reconnect",
 			"path", path,
 			"observed_schema_version", state.SchemaVersion,
@@ -220,12 +171,9 @@ func ReadStateFile(path string) (State, error) {
 
 // RemoveStateFile removes the state file and ignores not-found errors.
 //
-// The write path (WriteStateFile → osutil.WriteFileAtomic) fsyncs the parent
-// directory so a freshly-written state survives a crash; the removal path must
-// be symmetric (#406). Without the directory fsync, an unlink that purges a
-// stale/zombie record could be lost on power loss, so restart discovery would
-// re-find the same dead shim. fsync the parent after a successful removal;
-// osutil.SyncDir degrades gracefully on EPERM/EINVAL (FUSE/older fs / tmpfs).
+// The write path fsyncs the parent dir; removal must be symmetric (#406) or
+// an unlink of a zombie record could be lost on power loss and restart
+// discovery would re-find the dead shim. osutil.SyncDir degrades gracefully.
 func RemoveStateFile(path string) {
 	if err := os.Remove(path); err != nil {
 		return // not-found or other error: nothing durably changed to fsync
@@ -253,9 +201,8 @@ func SocketPath(keyHash string) string {
 		dir = filepath.Join(dir, "naozhi")
 	}
 	os.MkdirAll(dir, 0700) //nolint:errcheck
-	// Re-apply 0700 even when MkdirAll is a no-op: a pre-existing directory
-	// from an earlier build / backup tool may have looser permissions, and
-	// the socket file inherits the directory's traverse-visibility.
+	// Re-apply 0700 even when MkdirAll is a no-op: a pre-existing dir may be
+	// looser and the socket inherits its traverse-visibility.
 	os.Chmod(dir, 0700) //nolint:errcheck
 	return filepath.Join(dir, fmt.Sprintf("shim-%s.sock", keyHash))
 }
@@ -265,18 +212,10 @@ func StateFilePath(stateDir, keyHash string) string {
 	return filepath.Join(stateDir, keyHash+".json")
 }
 
-// KeyHash returns a truncated SHA-256 hex hash of the session key.
-// Produces a 32-character string with negligible collision probability.
-//
-// R202606f-SEC-004 (#2298): widened from 64 bits (h[:8]) to 128 bits
-// (h[:16]). The hash names both the socket file (shim-<hash>.sock) and the
-// state file (<hash>.json); a collision maps two distinct session keys to the
-// same paths, clobbering a live session's state file and corrupting its
-// reconnect token. At 64 bits the birthday bound (~n²/2^65) becomes
-// non-negligible once a long-lived host accumulates billions of distinct keys
-// (an IM bot mints a fresh key per session). 128 bits pushes the bound back
-// into the cryptographically-irrelevant range. No protocol change — only the
-// file/socket name length grows.
+// KeyHash returns a truncated SHA-256 hex hash of the session key (128 bits,
+// 32 hex chars). It names both the socket and state files, so a collision
+// clobbers a live session's state and reconnect token; 64 bits was
+// birthday-bound-exposed on hosts minting billions of keys (#2298).
 func KeyHash(key string) string {
 	h := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(h[:16])

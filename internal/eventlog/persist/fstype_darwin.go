@@ -7,13 +7,9 @@ import (
 	"syscall"
 )
 
-// DetectFS on macOS uses Statfs_t.Fstypename (a NUL-padded []int8)
-// rather than a numeric code. The local dev environment is the only
-// non-Linux production target; supportedness on macOS matches APFS.
-//
-// HFS+ and ancient volumes report "hfs" — we still treat them as
-// supported because developer laptops rarely run anything else,
-// and our durability claim on macOS is "best effort" anyway.
+// DetectFS on macOS reads Statfs_t.Fstypename (NUL-padded []int8) rather
+// than a numeric code. APFS and hfs are treated as supported; durability on
+// macOS (dev-only target) is best effort anyway.
 func DetectFS(dir string) FSDetection {
 	var s syscall.Statfs_t
 	if err := syscall.Statfs(dir, &s); err != nil {
@@ -36,8 +32,7 @@ func DetectFS(dir string) FSDetection {
 	case "apfs":
 		return FSDetection{Type: FSTypeAPFS, Supported: true}
 	case "hfs":
-		// Treat as APFS-equivalent for supportedness. Rare in
-		// modern dev setups.
+		// APFS-equivalent for supportedness.
 		return FSDetection{Type: FSTypeAPFS, Supported: true}
 	case "nfs":
 		return FSDetection{Type: FSTypeNFS, Supported: false}

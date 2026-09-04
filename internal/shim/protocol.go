@@ -50,17 +50,9 @@ type ServerMsg struct {
 const ProtocolVersion = 1
 
 // MinSupportedProtocolVersion is the oldest ProtocolVersion this binary
-// will accept on a hello. R230B-ARCH-22 / RNEW-ARCH-403: keeps the
-// version negotiation window distinct from the current protocol so a
-// rolling deploy that bumps shim before naozhi (or vice versa) has a
-// well-defined transition window. While both peers ship the same
-// constant, this is just defence-in-depth — a mismatched binary refuses
-// the connection cleanly instead of mis-parsing fields it doesn't
-// understand.
-//
-// Today MinSupportedProtocolVersion == ProtocolVersion == 1; bumping to
-// 2 should advance both, and bumping MinSupportedProtocolVersion to N
-// is the explicit "we no longer accept ProtocolVersion < N" signal.
+// accepts on a hello, giving a rolling deploy that bumps shim before naozhi
+// (or vice versa) a well-defined window. Bumping it to N is the explicit
+// "no longer accept ProtocolVersion < N" signal.
 const MinSupportedProtocolVersion = 1
 
 // boolPtr returns a pointer to b. Useful for ServerMsg fields that need explicit false.
@@ -69,10 +61,8 @@ func boolPtr(b bool) *bool { return &b }
 // intPtr returns a pointer to i. Useful for ServerMsg fields that need explicit 0.
 func intPtr(i int) *int { return &i }
 
-// MarshalLine marshals a ServerMsg as a single NDJSON line, including a trailing
-// '\n'. Callers can enqueue the returned slice directly without a second append
-// that would otherwise trigger a growslice copy on every CLI stdout line.
-// R65-PERF-L-2.
+// MarshalLine marshals a ServerMsg as a single NDJSON line including the
+// trailing '\n', so callers can enqueue the slice without a second append.
 func (m *ServerMsg) MarshalLine() ([]byte, error) {
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -82,30 +72,15 @@ func (m *ServerMsg) MarshalLine() ([]byte, error) {
 }
 
 // MarshalStdoutLine builds the NDJSON envelope for a "stdout" frame directly
-// from the raw scanner bytes, skipping the intermediate `string(line)` copy
-// that the generic MarshalLine path would otherwise force.
+// from the raw scanner bytes: unsafe.String aliases them into ServerMsg.Line
+// so json.Marshal reads the scanner's buffer instead of a `string(line)` copy
+// (hot path, 5–50 lines/s ×N sessions). Output is byte-for-byte identical to
+// `(&ServerMsg{Type:"stdout",Seq:seq,Line:string(line)}).MarshalLine()`.
 //
-// R67-PERF-3: the shim's readStdout hot path runs at every CLI stdout line
-// (5–50/s during active turns, ×N concurrent sessions). The previous code
-// did `string(line)` to populate ServerMsg.Line, then json.Marshal walked
-// that string a second time to produce the JSON-escaped output — i.e. two
-// passes over the byte content per line. By aliasing the scanner bytes into
-// a string header via unsafe.String we hand json.Marshal the same backing
-// memory the bufio.Scanner already owns, so there is zero extra alloc for
-// the line content itself. Output is byte-for-byte identical to
-// `(&ServerMsg{Type:"stdout",Seq:seq,Line:string(line)}).MarshalLine()`,
-// round-trip tested via ParseServerMsg.
-//
-// SAFETY: the returned []byte must be fully consumed (or copied into the
-// caller's enqueue buffer) BEFORE the caller advances bufio.Scanner. The
-// shim's enqueueWrite path satisfies this — it copies the slice into a
-// per-client channel before the next Scan().
+// SAFETY: the alias is confined to the synchronous Marshal (the encoder
+// copies into its own buffer, so the result borrows nothing); callers must
+// not advance the bufio.Scanner before the call returns.
 func MarshalStdoutLine(seq int64, line []byte) ([]byte, error) {
-	// unsafe.String produces a string header backed by `line`'s storage;
-	// json.Marshal only reads the string during this call and the result
-	// holds none of the borrowed bytes (the JSON encoder copies escaped
-	// runes into its output buffer). Aliasing is therefore confined to
-	// the synchronous Marshal call below.
 	var lineStr string
 	if len(line) > 0 {
 		lineStr = unsafe.String(&line[0], len(line))
@@ -118,23 +93,13 @@ func MarshalStdoutLine(seq int64, line []byte) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// MarshalReplayLine builds the NDJSON envelope for a "replay" frame directly
-// from the buffered line bytes, skipping the `string(line)` copy the generic
-// MarshalLine path forces. Mirrors MarshalStdoutLine but stamps Type "replay"
-// + the supplied Seq, for the reconnect buffer-replay loop.
+// MarshalReplayLine is MarshalStdoutLine for "replay" frames, fed by the
+// reconnect buffer-replay loop (avoids a per-line string copy on a 10k ring).
 //
-// On a 10k-line ring a single reconnect would otherwise copy every buffered
-// line into a string just to feed json.Marshal a second pass; aliasing the
-// stable ring bytes via unsafe.String removes that per-line alloc.
-//
-// SAFETY: the returned []byte aliases `line` only for the duration of the
-// synchronous json.Marshal below (the encoder copies escaped runes into its
-// own output buffer, so the result borrows nothing). The replay caller writes
-// the frame synchronously via conn.Write before advancing to the next buffered
-// line, and the RingBuffer's LinesSince hands back stable copies that outlive
-// the loop — so the borrowed bytes cannot be mutated mid-marshal. Output is
-// byte-for-byte identical to
-// `(&ServerMsg{Type:"replay",Seq:seq,Line:string(line)}).MarshalLine()`.
+// SAFETY: `line` is aliased only across the synchronous json.Marshal; the
+// caller writes each frame before advancing and LinesSince returns stable
+// copies, so the bytes cannot mutate mid-marshal. Output is byte-for-byte
+// identical to `(&ServerMsg{Type:"replay",Seq:seq,Line:string(line)}).MarshalLine()`.
 func MarshalReplayLine(seq int64, line []byte) ([]byte, error) {
 	var lineStr string
 	if len(line) > 0 {
@@ -155,14 +120,9 @@ func ParseClientMsg(line []byte) (ClientMsg, error) {
 	return msg, err
 }
 
-// ParseServerMsg parses a single NDJSON line into a ServerMsg.
-//
-// No in-tree consumer: naozhi is the *server* side of this protocol — it
-// writes ServerMsg and reads ClientMsg (see ParseClientMsg). This helper
-// is kept as the symmetric counterpart of ParseClientMsg and is part of
-// the protocol's public contract surface, so a future client / log-tail
-// inspector can decode server output without copy-pasting the unmarshal
-// boilerplate. Round-trip-tested in protocol_test.go.
+// ParseServerMsg parses a single NDJSON line into a ServerMsg. No in-tree
+// consumer; kept as the symmetric public counterpart of ParseClientMsg for
+// external decoders and round-trip tests.
 func ParseServerMsg(line []byte) (ServerMsg, error) {
 	var msg ServerMsg
 	err := json.Unmarshal(line, &msg)

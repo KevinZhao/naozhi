@@ -8,21 +8,13 @@ import (
 	"github.com/naozhi/naozhi/internal/session/api"
 )
 
-// RawSystemSessionRouter is the producer-side router shape, satisfied
-// directly by the concrete *session.Router. It differs from the
-// daemon-facing SystemSessionRouter on exactly one method:
-// EventEntriesForKey here returns []clievent.EventEntry (the router's native
-// type) instead of the sysession-local []SystemEventEntry.
-//
-// This interface is the ONLY place in the package that mentions
-// internal/cli. Config.Router accepts a RawSystemSessionRouter so
-// wiring code (cmd/naozhi) can keep passing the bare *session.Router;
-// NewManager immediately wraps it in routerAdapter so every daemon sees
-// the cli-free SystemSessionRouter (R260528-ARCH-9 / #1370).
+// RawSystemSessionRouter is the producer-side router shape satisfied directly
+// by *session.Router; it differs from SystemSessionRouter only in
+// EventEntriesForKey returning the native []clievent.EventEntry. It is the
+// ONLY place in the package that mentions internal/cli: Config.Router accepts
+// it and NewManager wraps it in routerAdapter (#1370).
 type RawSystemSessionRouter interface {
-	// Embeds the shared streaming-read capability (R246-ARCH-11 /
-	// R240-ARCH-15, #791 / #1032) so both router shapes in this package
-	// reference one canonical VisitSessions signature.
+	// Shared streaming-read capability: one canonical VisitSessions signature (#791).
 	api.SessionVisitor
 	SetUserLabelWithOrigin(key, label, origin string) bool
 	ClearUserLabelOrigin(key string) bool
@@ -31,25 +23,17 @@ type RawSystemSessionRouter interface {
 }
 
 // routerAdapter bridges a RawSystemSessionRouter to the cli-free
-// SystemSessionRouter consumed by daemons. Every method except
-// EventEntriesForKey is a straight pass-through; EventEntriesForKey
-// down-projects each clievent.EventEntry onto the ≤2-field SystemEventEntry
-// mirror so the daemon code path never references internal/cli.
-//
-// R20260602-PERF-1 (#1578): the projection also drops non-user and
-// blank-summary entries here, at the single conversion point, instead of
-// copying all ~500 ring entries and re-filtering them in
-// buildExcerptFromHistory. AutoTitler is the sole consumer and only ever
-// reads type=="user" turns with non-empty summaries, so this is
-// behaviour-equivalent while shrinking both the copy and the downstream
-// walk to just the entries that survive.
+// SystemSessionRouter. Every method except EventEntriesForKey is a straight
+// pass-through; EventEntriesForKey projects onto SystemEventEntry and drops
+// non-user / blank-summary entries at this single conversion point instead
+// of copying all ~500 ring entries for buildExcerptFromHistory to re-filter.
+// AutoTitler is the sole consumer and only reads such turns (#1578).
 type routerAdapter struct {
 	raw RawSystemSessionRouter
 }
 
-// wrapRouter adapts a producer-side router into the daemon-facing
-// interface. Returns nil when raw is nil so the Manager's nil-Router
-// guard stays meaningful.
+// wrapRouter adapts a producer-side router; returns nil for nil raw so the
+// Manager's nil-Router guard stays meaningful.
 func wrapRouter(raw RawSystemSessionRouter) SystemSessionRouter {
 	if raw == nil {
 		return nil
@@ -76,16 +60,11 @@ func (a routerAdapter) RegisterSystemStub(key, workspace, lastPrompt string) {
 func (a routerAdapter) EventEntriesForKey(key string) []SystemEventEntry {
 	raw := a.raw.EventEntriesForKey(key)
 	if len(raw) == 0 {
-		// Preserve the nil/empty distinction's only observable effect
-		// (buildExcerptFromHistory treats both as "empty seed").
+		// buildExcerptFromHistory treats nil and empty alike ("empty seed").
 		return nil
 	}
-	// Project + filter in one pass: keep only the type=="user" turns with
-	// a non-blank summary that buildExcerptFromHistory would have kept
-	// anyway (R20260602-PERF-1 / #1578). Worst case (all-user) this still
-	// allocates len(raw); typical ring traffic (~70% non-user) shrinks the
-	// slice ~3×. Returning nil when nothing survives keeps the empty-seed
-	// contract identical to the pre-filter behaviour.
+	// Project + filter in one pass (#1578); returning nil when nothing
+	// survives keeps the empty-seed contract.
 	out := make([]SystemEventEntry, 0, len(raw))
 	for _, e := range raw {
 		if e.Type != "user" || strings.TrimSpace(e.Summary) == "" {
@@ -99,6 +78,5 @@ func (a routerAdapter) EventEntriesForKey(key string) []SystemEventEntry {
 	return out
 }
 
-// Compile-time guarantee that the concrete *session.Router satisfies the
-// producer-side interface (and therefore can be passed to Config.Router).
+// Compile-time guarantee that *session.Router satisfies the producer-side interface.
 var _ RawSystemSessionRouter = (*session.Router)(nil)

@@ -7,40 +7,26 @@ import (
 	"strings"
 )
 
-// keyHashBytes is the number of SHA-256 prefix bytes used in file
-// names. 16 bytes → 32 hex chars → 2^-64 collision probability for up
-// to billions of distinct keys. More bytes would just widen file
-// names without material safety gain.
+// keyHashBytes is the SHA-256 prefix length used in file names: 16 bytes →
+// 32 hex chars, ~2^-64 collision probability.
 const keyHashBytes = 16
 
-// suffixes and prefixes we plant under the events/ directory. They
-// share a common stem = hex(SHA-256(key)[:keyHashBytes]) so one DropKey
-// can match all relatives via filepath.Glob in a single call.
+// File suffixes under events/. All relatives share the stem
+// hex(SHA-256(key)[:keyHashBytes]) so one Glob matches them all.
 const (
 	// logExt is the append-only framed record file.
 	logExt = ".log"
 	// idxExt is the fixed-width sparse index sidecar (see schema/idx.go).
 	idxExt = ".idx"
-	// tmpInfix appears in the tmp rotate staging path to distinguish
-	// in-progress rotates from regular files: "<stem>.tmp.<epoch>.log".
-	// We detect and delete any orphaned tmp file on startup.
+	// tmpInfix marks rotate staging files: "<stem>.tmp.<epoch>.log";
+	// orphans are deleted on startup.
 	tmpInfix = ".tmp."
 )
 
-// KeyHash derives a stem for file names from a session key. The hash
-// is one-way (sha256 prefix) so operators reading file listings can
-// NOT infer session identities by eyeballing; they must cross-reference
-// the file's header record (schema.FileHeader.Key) which is written
-// in plaintext inside <stem>.log.
-//
-// The stem is hex-encoded (32 lowercase chars) so it is:
-//   - safe across all filesystems (no escape required)
-//   - deterministic (re-hashing the same key always yields the same stem)
-//   - cheap to compare (no runtime conversions needed)
-//
-// The sum is truncated to keyHashBytes bytes. Truncation is intentional
-// — shorter file names beat the vanishingly small collision risk from
-// the full 32-byte hash.
+// KeyHash derives the file-name stem: lowercase hex of the first
+// keyHashBytes bytes of SHA-256(key). One-way, so listings do not reveal
+// session identities; the plaintext key lives in schema.FileHeader.Key
+// inside <stem>.log.
 func KeyHash(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:keyHashBytes])
@@ -51,21 +37,9 @@ func LogPath(dir, key string) string {
 	return filepath.Join(dir, KeyHash(key)+logExt)
 }
 
-// DEADCODE-13 (#1206): IdxPath had no production callers — every
-// production path that needs the .idx file derives it from the bound
-// Persister's *idxFile, not from a freshly composed path. Tests that
-// need to peek at the on-disk .idx now inline
-// `filepath.Join(dir, KeyHash(key)+".idx")` (or use the unexported
-// `idxExt` constant inside this package). Re-exporting was a YAGNI
-// trap that misled callers into thinking idx file paths are part of
-// the public surface.
-
-// tmpLogPath / tmpIdxPath return rotate-staging paths for a given stem
-// and epoch. Epoch is usually time.Now().UnixNano() to disambiguate
-// racing rotate attempts (rotate is serialized through the single
-// writer goroutine, so races don't actually occur in production, but
-// the epoch keeps tests that fabricate multiple staging files from
-// stomping on each other).
+// tmpLogPath / tmpIdxPath return rotate-staging paths
+// "<stem>.tmp.<epoch>.{log,idx}". Rotate is serialized on the writer
+// goroutine; the epoch only keeps test-fabricated staging files apart.
 func tmpLogPath(dir, stem string, epoch int64) string {
 	return filepath.Join(dir, stem+tmpInfix+itoa(epoch)+logExt)
 }
@@ -74,14 +48,12 @@ func tmpIdxPath(dir, stem string, epoch int64) string {
 	return filepath.Join(dir, stem+tmpInfix+itoa(epoch)+idxExt)
 }
 
-// IsLogFileName reports whether base is a <stem>.log file (not a
-// tmp-rotate staging file). Used by the orphan sweep to avoid mistaking
-// a half-rotated file for a committed session log.
+// IsLogFileName reports whether base is a committed <stem>.log (not a
+// tmp-rotate staging file).
 func IsLogFileName(base string) bool {
 	if !strings.HasSuffix(base, logExt) {
 		return false
 	}
-	// Reject "<stem>.tmp.<epoch>.log" — tmp files are swept separately.
 	stem := strings.TrimSuffix(base, logExt)
 	if strings.Contains(stem, tmpInfix) {
 		return false
@@ -101,9 +73,8 @@ func IsIdxFileName(base string) bool {
 	return isHexStem(stem)
 }
 
-// IsTmpFileName reports whether base is a rotate-staging file. Startup
-// cleanup removes any such file because only a completed rotate has
-// its `rename()` commit the new log/idx atomically.
+// IsTmpFileName reports whether base is a rotate-staging file; only a
+// completed rotate commits via rename, so startup removes any such file.
 func IsTmpFileName(base string) bool {
 	if !strings.Contains(base, tmpInfix) {
 		return false
@@ -111,10 +82,8 @@ func IsTmpFileName(base string) bool {
 	return strings.HasSuffix(base, logExt) || strings.HasSuffix(base, idxExt)
 }
 
-// isHexStem verifies the bare stem (no extension, no tmp infix) is
-// exactly keyHashBytes*2 lowercase hex chars. Anything else is either
-// operator noise or a naming scheme from a future naozhi version;
-// either way, we leave it alone.
+// isHexStem verifies s is exactly keyHashBytes*2 lowercase hex chars;
+// anything else (operator noise, a future naming scheme) is left alone.
 func isHexStem(s string) bool {
 	if len(s) != keyHashBytes*2 {
 		return false
@@ -128,9 +97,8 @@ func isHexStem(s string) bool {
 	return true
 }
 
-// itoa is a mini int64-to-string used to avoid pulling strconv into
-// the hot-path file helpers. The epoch values here are always positive
-// (time.Now().UnixNano()), so signedness handling is trivial.
+// itoa avoids pulling strconv into the file-path helpers; epochs are
+// always positive.
 func itoa(n int64) string {
 	if n == 0 {
 		return "0"

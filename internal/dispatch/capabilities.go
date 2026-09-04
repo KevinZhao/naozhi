@@ -7,69 +7,39 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Capabilities groups the host-supplied hooks the Dispatcher reaches into the
-// surrounding Server through (Send / Takeover / ReplyFooter). Implementations
-// live in the host package (server.serverCaps) so dispatch stays free of
-// server / Hub references.
-//
-// NewDispatcher always installs a non-nil Capabilities so the hot path can
-// dereference unconditionally; legacy DispatcherConfig.{SendFn,TakeoverFn,
-// ReplyFooterFn} closures are wrapped in an internal adapter for backward
-// compatibility. R243-ARCH-10.
-//
-// R245-ARCH-45 (#904): this interface IS the requested SessionFlow bundle.
-// Pre-bundle code injected three independent closures (SendFn / TakeoverFn /
-// ReplyFooterFn); tests had to mock each one and any reviewer reading
-// NewDispatcher had to track three separate nil checks. The bundle gives
-// callers and tests a single mock surface (server.serverCaps in production,
-// a stub Capabilities impl in tests). The legacy *Fn fields are retained as
-// Deprecated entries on DispatcherConfig only as a backward-compatibility
-// shim for the existing test fixtures; new wiring should populate
-// DispatcherConfig.Capabilities directly. GetOrCreate is not part of this
-// bundle on purpose — it lives on SessionRouter (the cfg.Router slot), which
-// already has its own one-interface mock surface.
+// Capabilities groups the host-supplied hooks (Send / Takeover / ReplyFooter)
+// the Dispatcher reaches into the surrounding Server through, so dispatch
+// stays free of server / Hub references (production: server.serverCaps).
+// NewDispatcher always installs a non-nil Capabilities; the Deprecated
+// DispatcherConfig.{SendFn,TakeoverFn,ReplyFooterFn} closures are wrapped in
+// an internal adapter. GetOrCreate is deliberately not part of this bundle —
+// it lives on SessionRouter (#904).
 type Capabilities interface {
 	// Send forwards a turn payload to the session router after guard /
-	// queue gating has succeeded. Production wires
-	// Server.sendWithBroadcast (server.go ~930). Required: implementations
-	// must NOT silently drop — a missing send path is a constructor bug
-	// and the historical NewDispatcher contract panics rather than
-	// suppressing the message (see NoopCapabilities.Send).
+	// queue gating has succeeded. Implementations must NOT silently drop —
+	// a missing send path is a constructor bug (see NoopCapabilities.Send).
 	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 
-	// Takeover is invoked on the first message of every chat to give the
-	// host a chance to adopt an external Claude session. Returns true
-	// when adoption succeeded; the dispatcher discards the result either
-	// way (GetOrCreate runs unconditionally afterwards).
-	//
-	// Default: NoopCapabilities returns false (no external session).
+	// Takeover is invoked on the first message of every chat to let the host
+	// adopt an external Claude session. Returns true on adoption; the
+	// dispatcher runs GetOrCreate unconditionally afterwards either way.
 	Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 
-	// ReplyFooter returns the per-session reply tag (e.g. "cc" / "kiro")
-	// given the session's backend ID. The IM reply path appends
-	// "\n\n— <tag>" when the result is non-empty. Empty backendID means
-	// "session has no backend pinned"; implementations typically resolve
-	// it to the router's default backend tag.
-	//
-	// Default: NoopCapabilities returns "" (no footer).
+	// ReplyFooter returns the per-session reply tag (e.g. "cc" / "kiro") for
+	// the session's backend ID; the IM reply path appends "\n\n— <tag>" when
+	// non-empty. Empty backendID means "no backend pinned" and typically
+	// resolves to the router's default backend tag.
 	ReplyFooter(backendID string) string
 }
 
-// NoopCapabilities is the default Capabilities installed when callers leave
-// DispatcherConfig.Capabilities unset AND don't provide a legacy *Fn closure.
-// Take/ReplyFooter return their documented defaults (false / ""); Send panics.
-//
-// In production, NewDispatcher's R248-ARCH-2 boot-panic gate fires before any
-// message arrives so misconfigured wireup fails loud at startup; this method
-// is the runtime backstop for tests/headless contexts that opt out via
-// AllowMissingSender and then still try to call Send.
+// NoopCapabilities is the default Capabilities when callers leave
+// DispatcherConfig.Capabilities unset and provide no legacy *Fn closure.
+// Takeover/ReplyFooter return false / ""; Send panics.
 type NoopCapabilities struct{}
 
-// Send panics with a "wireup missing" message. NoopCapabilities is the
-// constructor-default; the boot-panic gate (NewDispatcher, R248-ARCH-2)
-// catches missing Send wireup before any traffic arrives, so reaching this
-// method at runtime means a test opted out via DispatcherConfig.
-// AllowMissingSender and then still tried to call Send.
+// Send panics: NewDispatcher's boot-panic gate catches missing Send wireup at
+// startup, so reaching this at runtime means a test opted out via
+// DispatcherConfig.AllowMissingSender and still called Send.
 func (NoopCapabilities) Send(context.Context, string, *session.ManagedSession, string, []cli.Attachment, cli.EventCallback) (*cli.SendResult, error) {
 	panic("dispatch: Capabilities.Send not wired (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn)")
 }
@@ -82,86 +52,53 @@ func (NoopCapabilities) Takeover(context.Context, string, string, session.AgentO
 // ReplyFooter returns "" (no footer appended).
 func (NoopCapabilities) ReplyFooter(string) string { return "" }
 
-// MessageSender narrows Capabilities to the single required Send hook. The
-// Capabilities interface mixes a contract-required method (Send — panics if
-// missing) with two contract-optional ones (Takeover / ReplyFooter — both
-// have noop defaults). Splitting the required surface lets future
-// consumers / tests depend on the smallest seam they actually need without
-// implementing the full bundle.
-//
-// R248-ARCH-1 (#373): every Capabilities also satisfies MessageSender, so
-// the existing host wireup keeps working. New call sites that only forward
-// turns may type-assert or accept MessageSender directly.
+// MessageSender narrows Capabilities to the single required Send hook so
+// consumers / tests can depend on the smallest seam they need. Every
+// Capabilities also satisfies MessageSender (#373).
 type MessageSender interface {
 	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
-// TakeoverHook isolates the optional first-message takeover probe so a host
-// that does not adopt external Claude sessions does not have to provide a
-// stub method just to silence an interface satisfier check. R248-ARCH-1.
+// TakeoverHook isolates the optional first-message takeover probe.
 type TakeoverHook interface {
 	Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 }
 
 // ReplyFooterHook isolates the optional reply tag suffix used by the IM
-// reply path. R248-ARCH-1.
+// reply path.
 type ReplyFooterHook interface {
 	ReplyFooter(backendID string) string
 }
 
-// Compile-time guarantee that the existing Capabilities interface still
-// satisfies all three facets — the docstring "Capabilities IS the bundle"
-// is enforced by the language rather than a comment that can drift.
+// Compile-time pin: Capabilities satisfies all three facets.
 var (
 	_ MessageSender   = (Capabilities)(nil)
 	_ TakeoverHook    = (Capabilities)(nil)
 	_ ReplyFooterHook = (Capabilities)(nil)
 )
 
-// SessionView is the narrow read-only seam over *session.ManagedSession
-// that the dispatch send path actually consumes. The existing
-// MessageSender.Send still takes the concrete pointer for back-compat
-// (changing the signature is breaking; the rewire is tracked separately),
-// but new dispatch-internal helpers should accept SessionView so test
-// fakes need not stitch together the full ~30 method ManagedSession
-// surface to exercise a code path.
-//
-// R260528-ARCH-5 (#1366): the existing seam (`Send(... sess *session.ManagedSession ...)`)
-// is virtual — fakes cannot synthesise an internal struct, so dispatch
-// tests cannot drive Send without dragging a Router graph along. Adding
-// SessionView as an additive interface lets callers within dispatch
-// narrow at their own pace; any new Send overloads or wrapper layers
-// should declare SessionView rather than the concrete pointer so the
-// satisfier requirement stays stable across future ManagedSession
-// internal-field churn.
-//
-// *session.ManagedSession satisfies SessionView implicitly via the
-// existing exported accessors. A satisfier var pins the contract so a
-// future rename / removal surfaces here in CI.
+// SessionView is the narrow read-only seam over *session.ManagedSession that
+// the dispatch send path consumes. MessageSender.Send still takes the
+// concrete pointer for back-compat; new dispatch-internal helpers should
+// accept SessionView so test fakes need not implement the full
+// ManagedSession surface (#1366).
 type SessionView interface {
-	// SessionID returns the active CLI session identifier (the protocol's
-	// session token). Used by dispatch-side logging / dedup keys.
+	// SessionID returns the active CLI session identifier.
 	SessionID() string
-	// Backend returns the backend identifier (e.g. "claude" / "kiro") the
-	// session was spawned against. Empty for legacy stores predating the
-	// Backend field.
+	// Backend returns the backend identifier (e.g. "claude" / "kiro");
+	// empty for legacy stores predating the Backend field.
 	Backend() string
-	// InterruptViaControl asks the session's underlying CLI to abort the
-	// in-flight turn via an in-band stream-json control_request. Returns
-	// the outcome enum (Sent / NoSession / NoTurn / Unsupported / Error)
-	// matching ManagedSession.InterruptViaControl.
+	// InterruptViaControl aborts the in-flight turn via an in-band
+	// stream-json control_request; see ManagedSession.InterruptViaControl.
 	InterruptViaControl() session.InterruptOutcome
 }
 
-// Compile-time guarantee that *session.ManagedSession satisfies
-// SessionView. See SessionView docstring for the rationale.
+// Compile-time pin: *session.ManagedSession satisfies SessionView.
 var _ SessionView = (*session.ManagedSession)(nil)
 
-// closureCapabilities adapts the legacy SendFn / TakeoverFn / ReplyFooterFn
-// closures into a Capabilities implementation. Used internally by
-// NewDispatcher when callers populate the Deprecated *Fn fields instead of
-// Capabilities directly. nil closures fall back to NoopCapabilities
-// behaviour (panic for Send, false for Takeover, "" for ReplyFooter).
+// closureCapabilities adapts the Deprecated SendFn / TakeoverFn /
+// ReplyFooterFn closures into a Capabilities; nil closures fall back to
+// NoopCapabilities behaviour.
 type closureCapabilities struct {
 	send        func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 	takeover    func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool

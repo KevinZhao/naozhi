@@ -9,18 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// VerifyPeerUID verifies the connecting peer has the same UID via the
-// Darwin LOCAL_PEERCRED socket option (BSD getpeereid(3) family).
-//
-// Linux uses SO_PEERCRED on SOL_SOCKET (returns syscall.Ucred); macOS
-// instead exposes the credential triple through SOL_LOCAL/LOCAL_PEERCRED
-// and the Xucred struct. The semantics match: the kernel records the
-// connecting peer's effective UID at connect() time, so a stale handle
-// cannot be reused by another process.
-//
-// Returns false on any error (non-Unix conn, raw-conn syscall failure,
-// getsockopt failure, mismatched UID). Falsy is the safe default — the
-// caller closes the connection on every false return.
+// VerifyPeerUID verifies the connecting peer has the same UID via Darwin's
+// SOL_LOCAL/LOCAL_PEERCRED (Xucred), the counterpart of Linux SO_PEERCRED:
+// the kernel records the peer's effective UID at connect() time.
+// Returns false on any error — the caller closes the connection.
 func VerifyPeerUID(conn net.Conn) bool {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
