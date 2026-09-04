@@ -362,9 +362,8 @@ func (r *Router) Cleanup() {
 		r.ss.gen.Add(1)
 	}
 	// Snapshot the dirty stores in the smallest shape the save path needs: a
-	// []*ManagedSession (#1606), the ws-overrides map, the memoised known-IDs bytes.
+	// []*ManagedSession (#1606) and the ws-overrides map.
 	var sessionsCopy []*ManagedSession
-	var knownIDsCopy []byte
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
@@ -378,20 +377,13 @@ func (r *Router) Cleanup() {
 	if r.wsStore.Dirty() {
 		wsOverridesCopy = r.wsStore.Snapshot()
 	}
-	// knownIDs fsync is throttled to knownIDsSaveInterval. Commit savedAt
-	// optimistically here — still under r.mu — so a concurrent saveIfDirty tick
-	// skips the redundant work (an I/O budget gate, not a file-level race guard:
-	// tmp files are unique per WriteFileAtomic call).
-	var snapshotKnownIDsGen uint64
-	var knownIDsMarshalErr error
-	if r.kid.dirty && now.Sub(r.kid.savedAt) >= knownIDsSaveInterval {
-		// Sorted snapshot and marshal are both memoised by gen (#1638, #2143).
-		knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
-		snapshotKnownIDsGen = r.kid.gen
-		r.kid.savedAt = now
-	}
 
 	r.mu.Unlock()
+
+	// Known IDs live off r.mu. ClaimSave stamps savedAt so a concurrent
+	// saveIfDirty tick skips the redundant work (an I/O budget gate, not a
+	// file-level race guard: tmp files are unique per WriteFileAtomic call).
+	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(now, knownIDsSaveInterval)
 
 	// Periodic save outside lock to reduce crash-recovery data loss.
 	if sessionsCopy != nil {
@@ -417,27 +409,14 @@ func (r *Router) Cleanup() {
 		}
 	}
 	if knownIDsMarshalErr != nil {
-		// Reset savedAt so the next tick retries; leave dirty set.
+		// ClaimSave already released the throttle; dirty stays set.
 		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
-		r.mu.Lock()
-		r.kid.savedAt = time.Time{}
-		r.mu.Unlock()
-	} else if knownIDsCopy != nil {
-		// savedAt was committed pre-save under r.mu. On success only clear
-		// dirty; on failure reset savedAt so the throttle gate re-opens next tick.
+	} else if knownIDsDue {
 		if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
-			r.mu.Lock()
-			r.kid.savedAt = time.Time{}
-			r.mu.Unlock()
+			r.kid.ResetSaveThrottle()
 		} else {
-			// Only clear dirty if no concurrent trackSessionID fired since the
-			// snapshot (gen compare — an add + evict pair keeps len() identical).
-			r.mu.Lock()
-			if r.kid.gen == snapshotKnownIDsGen {
-				r.kid.dirty = false
-			}
-			r.mu.Unlock()
+			r.kid.MarkSavedIfUnchanged(snapshotKnownIDsGen)
 		}
 	}
 
@@ -542,14 +521,8 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 // Cleanup ticks do not discard newly discovered session IDs.
 func (r *Router) saveIfDirty() {
 	// The snapshot phase only READS state and dirty flags, so take the RLock
-	// and let hot GetOrCreate / Send paths proceed concurrently (#1535). The
-	// one mutation — committing savedAt — is a short write-locked section below.
+	// and let hot GetOrCreate / Send paths proceed concurrently (#1535).
 	r.mu.RLock()
-	knownIDsDue := r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval
-	if !r.ss.dirty && !r.wsStore.Dirty() && !knownIDsDue {
-		r.mu.RUnlock()
-		return
-	}
 	// Slice snapshot, not a map copy — see the matching note in Cleanup (#1606).
 	var sessionsCopy []*ManagedSession
 	if r.ss.dirty {
@@ -562,30 +535,15 @@ func (r *Router) saveIfDirty() {
 	if r.wsStore.Dirty() {
 		wsOverridesCopy = r.wsStore.Snapshot()
 	}
-	var knownIDsCopy []byte
-	var snapshotKnownIDsGen uint64
-	var knownIDsMarshalErr error
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
 	snapshotWsGen := r.wsStore.Gen()
 	r.mu.RUnlock()
 
-	if knownIDsDue {
-		// snapshotKnownIDsMarshaledLocked writes the r.kid.* memo caches, so it
-		// MUST run under the write lock, not the RLock above (#2306). Re-verify
-		// the throttle and commit savedAt under the exclusive lock so two ticks
-		// racing past the RLock check do not both stamp + double-write the same .tmp target.
-		r.mu.Lock()
-		if r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval {
-			r.kid.savedAt = time.Now()
-			// Sorted snapshot and marshal are both memoised by gen (#1638, #2143).
-			knownIDsCopy, knownIDsMarshalErr = r.snapshotKnownIDsMarshaledLocked()
-			snapshotKnownIDsGen = r.kid.gen
-		}
-		// else: lost the race; another tick already claimed this save window.
-		// knownIDsCopy stays nil so the write below is skipped.
-		r.mu.Unlock()
-	}
+	// Known IDs live off r.mu. ClaimSave checks the throttle and stamps
+	// savedAt in one critical section, so two ticks cannot both claim the
+	// same save window and double-write the file.
+	knownIDsCopy, snapshotKnownIDsGen, knownIDsDue, knownIDsMarshalErr := r.kid.ClaimSave(time.Now(), knownIDsSaveInterval)
 
 	if sessionsCopy != nil {
 		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
@@ -609,26 +567,14 @@ func (r *Router) saveIfDirty() {
 		}
 	}
 	if knownIDsMarshalErr != nil {
-		// Reset savedAt so the next tick retries; leave dirty set.
+		// ClaimSave already released the throttle; dirty stays set.
 		slog.Warn("periodic known IDs marshal failed", "err", knownIDsMarshalErr)
-		r.mu.Lock()
-		r.kid.savedAt = time.Time{}
-		r.mu.Unlock()
-	} else if knownIDsCopy != nil {
-		// savedAt committed pre-save; only toggle dirty on success. Reset savedAt
-		// on failure so the throttle gate re-opens on the next tick.
+	} else if knownIDsDue {
 		if err := saveKnownIDsBytes(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
-			r.mu.Lock()
-			r.kid.savedAt = time.Time{}
-			r.mu.Unlock()
+			r.kid.ResetSaveThrottle()
 		} else {
-			// Only clear dirty if no concurrent trackSessionID fired since the snapshot.
-			r.mu.Lock()
-			if r.kid.gen == snapshotKnownIDsGen {
-				r.kid.dirty = false
-			}
-			r.mu.Unlock()
+			r.kid.MarkSavedIfUnchanged(snapshotKnownIDsGen)
 		}
 	}
 }
@@ -731,9 +677,6 @@ func (r *Router) shutdown() {
 		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
-	// Gen-memoised sorted+marshaled snapshot keeps deterministic ordering and
-	// reuses cached bytes when unchanged (#1638, #2143).
-	knownIDsCopy, knownIDsMarshalErr := r.snapshotKnownIDsMarshaledLocked()
 	wsOverrides := r.wsStore.Snapshot()
 
 	// Collect processes to close, then release lock to close concurrently
@@ -745,6 +688,9 @@ func (r *Router) shutdown() {
 		}
 	}
 	r.mu.Unlock()
+
+	// Known IDs live off r.mu; the final save is unthrottled.
+	knownIDsCopy, knownIDsMarshalErr := r.kid.MarshalSnapshot()
 
 	// Save session state outside lock (avoids JSON marshal + file I/O under mutex).
 	// disk_full lets monitoring page on ENOSPC separately; each error chain is

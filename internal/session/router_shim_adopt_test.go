@@ -53,7 +53,6 @@ func TestAdoptableShimKey(t *testing.T) {
 func TestAdoptLiveShimLocked_PublishesSession(t *testing.T) {
 	r := newTestRouter(3)
 	r.ss.idToKey = map[string]string{}
-	r.kid.ids = map[string]bool{}
 
 	const key = "dashboard:direct:2026-06-07-150009-2-naozhi:general"
 	state := shim.State{
@@ -117,7 +116,6 @@ func TestClassifyShimState_AdoptedSessionReconnects(t *testing.T) {
 func TestAdoptLiveShimLocked_EmptySessionID(t *testing.T) {
 	r := newTestRouter(3)
 	r.ss.idToKey = map[string]string{}
-	r.kid.ids = map[string]bool{}
 
 	const key = "dashboard:direct:2026-06-07-150409-3-naozhi:general"
 	state := shim.State{

@@ -1,8 +1,8 @@
 // Package session router label / interrupt / discovery / takeover.
 //
 // This file holds operator-facing controls (SetUserLabel, the Interrupt
-// family) and discovery integration (DiscoveryExcludeIDs, trackSessionID,
-// RegisterForResume, RegisterCronStub*, ManagedExcludeSets, Takeover).
+// family) and discovery integration (DiscoveryExcludeIDs, RegisterForResume,
+// RegisterCronStub*, ManagedExcludeSets, Takeover).
 package session
 
 import (
@@ -231,46 +231,6 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	return ids
 }
 
-// maxKnownIDs caps the persistent known-IDs set to prevent unbounded growth.
-// UUID session IDs are 36 bytes; at 10K entries this is ~360KB in memory.
-const maxKnownIDs = 10000
-
-// trackSessionID adds a session ID to the persistent known-IDs set.
-// Caller must hold r.mu OR call before any concurrent access (e.g. NewRouter init).
-// Eviction is FIFO by insertion order: random eviction could drop a still-active
-// session ID and make discovery misclassify its live CLI as an external session.
-func (r *Router) trackSessionID(id string) {
-	if id == "" {
-		return
-	}
-	if r.kid.ids[id] {
-		return
-	}
-	if len(r.kid.ids) >= maxKnownIDs {
-		// Drop the oldest entry. The live window is order[orderHead:]; clearing
-		// the front slot and advancing orderHead is amortized O(1) instead of
-		// an O(N) ~80KB shift under the hot r.mu write lock.
-		oldest := r.kid.order[r.kid.orderHead]
-		delete(r.kid.ids, oldest)
-		r.kid.order[r.kid.orderHead] = ""
-		r.kid.orderHead++
-		// Compact only when the dead prefix reaches half the slice. Copy into a
-		// FRESH buffer: reslicing would pin the original backing array and leak
-		// the dead-prefix strings.
-		if r.kid.orderHead >= len(r.kid.order)/2 {
-			live := r.kid.order[r.kid.orderHead:]
-			compacted := make([]string, len(live), maxKnownIDs+1)
-			copy(compacted, live)
-			r.kid.order = compacted
-			r.kid.orderHead = 0
-		}
-	}
-	r.kid.ids[id] = true
-	r.kid.order = append(r.kid.order, id)
-	r.kid.gen++
-	r.kid.dirty = true
-}
-
 // RegisterForResume creates a suspended session entry so that the next
 // GetOrCreate call for this key will resume the given session ID.
 // If another session already targets the same sessionID, the existing key
@@ -308,7 +268,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	if lastPrompt != "" {
 		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
-	r.trackSessionID(sessionID)
+	r.kid.Track(sessionID)
 	if sessionID != "" {
 		r.ss.idToKey[sessionID] = key
 	}

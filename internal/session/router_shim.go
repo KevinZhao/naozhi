@@ -570,7 +570,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			sess.SetCLIVersion(recWrapper.CLIVersion)
 		}
 		if state.SessionID != "" {
-			r.trackSessionID(state.SessionID)
+			r.kid.Track(state.SessionID)
 			r.ss.idToKey[state.SessionID] = state.Key
 		}
 		if !sess.exempt {

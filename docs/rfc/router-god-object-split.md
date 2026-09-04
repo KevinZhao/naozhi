@@ -18,7 +18,7 @@
 | :--- | :--- | :--- |
 | **P0** check-router-fields lint | ✅ landed | PR #1762（warn 模式）→ #1796（修 32 处注释漂移 + 翻 fail 模式）；工具在 `tools/check-router-fields/` |
 | **P1** WorkspaceStore | ✅ landed | PR #1802（`router_workspace.go` `type workspaceStore`，并扩展 lint 支持 sub-struct）；2026-09-04 #2495 step 1 迁为独立包 `internal/session/workspacestore`（字段私有化，穿透访问 0，inner 字段 `// 读写:` 注释与 lint 递归对该 facet 下线） |
-| **P2** KnownIDsStore | ✅ landed | PR #1837（`store.go` `type knownIDsStore`，字段 `kid`） |
+| **P2** KnownIDsStore | ✅ landed | PR #1837（`store.go` `type knownIDsStore`，字段 `kid`）；2026-09-04 #2495 step 2 迁为独立包 `internal/session/knownids`（字段私有化 + 自带 `sync.Mutex`，facet 整体脱离 `r.mu`，穿透访问 0，inner 字段 `// 读写:` 注释与 lint 递归对该 facet 下线） |
 | **P3** BackendStore | ✅ landed | PR #1804（`router_backend.go` `type backendStore`，字段 `bkStore`） |
 | **P4** SessionStore | ✅ landed | PR #1841（`store.go` `type sessionStore`，字段 `ss`） |
 | **P5** ProcessPool | ✅ landed | PR #1852（`process_pool.go` `type processPool`，字段 `pp`） |
