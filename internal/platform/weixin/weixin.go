@@ -1,34 +1,12 @@
 // Package weixin implements the WeChat iLink Bot platform adapter.
 //
-// Security threat model (R244-SEC-P3-5, #899)
-//
-// Unlike Feishu/Slack/Discord (which receive inbound webhooks and therefore
-// require HMAC-style request-signature verification with timestamp + nonce
-// replay protection), weixin uses iLink's outbound long-poll API: naozhi
-// initiates every connection over TLS to https://ilinkai.weixin.qq.com and
-// pulls events with the configured Token presented as a bearer credential.
-// There is no inbound webhook surface that an external attacker could spoof,
-// so there is also no SHA-1 / HMAC signature path in this package — the
-// upstream issue's "SHA-1 token verification, replay risk" framing assumed
-// a webhook receiver that does not exist for this transport.
-//
-// Authenticity assumptions:
-//   - Upstream identity: the server's TLS certificate (MinVersion 1.2 in
-//     api.go) authenticates iLink. A successful TLS handshake plus a valid
-//     getUpdates response is the only inbound trust anchor; no payload
-//     signature is computed because the long-poll body is delivered inside
-//     the same TLS channel.
-//   - Token confidentiality: the Token is passed in request bodies (not URL
-//     query strings) and never logged. Operators who deploy with a stolen
-//     token can impersonate the bot at the API layer; rotating Token at the
-//     iLink dashboard invalidates the prior credential.
-//   - Replay: no nonce/timestamp gate exists in this package because there
-//     is no inbound message to replay — a third party cannot inject an
-//     event without first compromising TLS or stealing the Token.
-//
-// If a future iLink revision adds an inbound webhook, the threat model above
-// no longer holds and this package must grow a transport_hook.go mirroring
-// internal/platform/feishu/transport_hook.go (timestamp + nonce + signature).
+// Threat model: weixin uses iLink's outbound long-poll API — naozhi initiates
+// every connection over TLS and presents the Token as a bearer credential.
+// There is no inbound webhook to spoof or replay, so there is no HMAC /
+// nonce / timestamp path here; the TLS handshake is the only inbound trust
+// anchor and the Token (sent in request bodies, never logged) is the only
+// credential. If iLink ever adds an inbound webhook, this package must grow a
+// transport_hook.go mirroring feishu's (timestamp + nonce + signature) (#899).
 package weixin
 
 import (
@@ -66,15 +44,11 @@ type Weixin struct {
 	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
 	pollWg    sync.WaitGroup // tracks the pollLoop goroutine
 
-	// dispatch bounds concurrent inbound message-handler goroutines (shared
-	// platform.DefaultHandlerConcurrency cap) and tracks them so Stop() can
-	// drain in-flight work. R236-SEC-1, #2254.
+	// dispatch bounds concurrent handler goroutines and lets Stop() drain them.
 	dispatch platform.BoundedDispatch
 
-	// contextTokens caches the latest context_token per user for reply.
-	// Value is *tokenEntry (token + last-updated unix seconds) so we can
-	// drop entries whose tokens have gone stale — otherwise users who
-	// message once and never return accumulate forever.
+	// contextTokens caches the latest context_token per user for reply, with
+	// an update stamp so one-off users are evicted instead of accumulating.
 	contextTokens sync.Map // map[userID]*tokenEntry
 }
 
@@ -83,36 +57,27 @@ type tokenEntry struct {
 	updatedNs int64 // time.Now().UnixNano() at Store
 }
 
-// tokenTTL is the idle time after which a cached context_token is evicted.
-// iLink tokens are short-lived anyway; aggressive eviction is safe because
+// tokenTTL is the idle time after which a cached context_token is evicted;
 // the next inbound message refreshes it.
 const tokenTTL = 24 * time.Hour
 
-// cleanupInterval controls how often the background goroutine scans.
+// tokenCleanupInterval controls how often the eviction goroutine scans.
 const tokenCleanupInterval = 1 * time.Hour
 
-// maxIncomingTextBytes bounds the per-message text handed to the dispatcher.
-// Aliases platform.DefaultMaxIncomingBytes (R230C-ARCH-6). iLink's 2 MiB
-// response budget covers batch polling, not individual messages; without a
-// per-message cap a single user (or a compromised iLink relay) can push
-// megabyte text through every cron/send path, amplifying stdin bytes on
-// each replay.
+// maxIncomingTextBytes bounds per-message text handed to the dispatcher; the
+// 2 MiB response budget covers batch polling, not one message.
 const maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 
-// maxWeixinMsgsPerPoll caps the number of messages processed per poll
-// response after json.Unmarshal. The 2 MB io.LimitReader bounds the body
-// size, but with ~20-byte minimal messages a hostile iLink relay could
-// otherwise pack ~100k records into a single response and spawn a goroutine
-// per record. Real iLink relays rarely emit more than a handful per poll.
-// R235-SEC-8.
+// maxWeixinMsgsPerPoll caps messages processed per poll: the 2 MB body cap
+// would still let a hostile relay pack ~100k tiny records and spawn a
+// goroutine each.
 const maxWeixinMsgsPerPoll = 100
 
-// validateBaseURLScheme enforces that the operator-supplied iLink base URL
-// uses HTTPS. Any loopback host (localhost, 127.0.0.0/8, ::1, IPv6 zone IDs,
-// etc.) is exempt so developers can wire local mock servers. R235-SEC-1.
+// validateBaseURLScheme requires HTTPS for the iLink base URL; loopback hosts
+// are exempt so developers can wire local mock servers.
 func validateBaseURLScheme(baseURL string) error {
 	if baseURL == "" {
-		// defaultBaseURL is hard-coded https:// in api.go.
+		// defaultBaseURL is https://.
 		return nil
 	}
 	u, err := url.Parse(baseURL)
@@ -134,19 +99,14 @@ func validateBaseURLScheme(baseURL string) error {
 	return fmt.Errorf("weixin base_url must use https:// (got %q); the iLink poll response carries no HMAC, so TLS is the only authenticity guarantee", baseURL)
 }
 
-// baseURLIsTLS reports whether the configured relay reaches iLink over TLS.
-// Empty base_url defaults to the hard-coded https:// endpoint (api.go), so
-// it is TLS. Only a validateBaseURLScheme-approved loopback http:// URL is
-// non-TLS — for which authenticity has neither TLS nor HMAC backing.
-// R214-SEC-1 (#417).
+// baseURLIsTLS reports whether the relay is reached over TLS; only an approved
+// loopback http:// mock is not, and then authenticity has no backing at all.
 func (w *Weixin) baseURLIsTLS() bool {
 	if w.cfg.BaseURL == "" {
 		return true // defaultBaseURL is https://
 	}
 	u, err := url.Parse(w.cfg.BaseURL)
 	if err != nil {
-		// validateBaseURLScheme already gate-kept Start; an unparseable URL
-		// can't have reached here. Treat as non-TLS defensively.
 		return false
 	}
 	return strings.EqualFold(u.Scheme, "https")
@@ -171,11 +131,8 @@ func (w *Weixin) MaxReplyLength() int { return w.cfg.MaxReplyLen }
 // SupportsInterimMessages returns false — iLink Bot context_token is single-use.
 func (w *Weixin) SupportsInterimMessages() bool { return false }
 
-// UsesSingleUseReplyToken returns true — the iLink Bot context_token cached
-// from the inbound poll is consumed by the first Reply and rejected upstream
-// on reuse. #2136: this tells the dispatcher to collapse a long reply into a
-// single (truncated) message rather than fan it into N chunks, of which only
-// the first would arrive and chunks 2..N would be silently lost.
+// UsesSingleUseReplyToken returns true — the context_token is consumed by the
+// first Reply, so the dispatcher must collapse long replies (#2136).
 func (w *Weixin) UsesSingleUseReplyToken() bool { return true }
 
 // RegisterRoutes is a no-op (long-poll, no inbound HTTP).
@@ -183,21 +140,13 @@ func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
 // Start implements RunnablePlatform. Launches getUpdates long-poll loop.
 func (w *Weixin) Start(handler platform.MessageHandler) error {
-	// R235-SEC-1: enforce HTTPS for the operator-supplied iLink relay URL.
-	// The poll response is fully trusted (no HMAC) so without TLS a
-	// MITM-able transport can inject arbitrary from_user_id / prompt text.
-	// Empty BaseURL → defaultBaseURL (https://) is used by newAPIClient.
-	// http://localhost / 127.0.0.1 / [::1] stay allowed for local dev mocks.
+	// The poll response is fully trusted (no HMAC), so without TLS a MITM could
+	// inject arbitrary from_user_id / prompt text.
 	if err := validateBaseURLScheme(w.cfg.BaseURL); err != nil {
 		return err
 	}
-	// R214-SEC-1 (#417): the iLink long-poll body carries no inbound HMAC —
-	// authenticity rests entirely on the transport. Surface that posture at
-	// startup so an operator auditing journalctl sees the trust assumption
-	// explicitly rather than having to read the package doc. When the
-	// configured relay is a non-HTTPS loopback mock the TLS anchor is gone
-	// too, so warn louder: that mode is for local development only and MUST
-	// NOT face untrusted networks.
+	// Surface the trust posture in journalctl; a non-TLS loopback mock has no
+	// authenticity anchor at all and MUST NOT face untrusted networks.
 	if w.baseURLIsTLS() {
 		slog.Info("weixin: inbound long-poll has no HMAC; authenticity relies on TLS to the iLink relay (see package threat model)")
 	} else {
@@ -210,12 +159,8 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("weixin platform already started")
 	}
 	w.started = true
-	// Assign lifecycle handles (handler/cancel) BEFORE releasing startMu so a
-	// concurrent Stop() that snapshots them under the same lock observes a
-	// fully-initialised value rather than a nil/torn cancel. Mirrors
-	// slack.go:139-154. The goroutines launched after Unlock only read fields
-	// already published inside the critical section, and the WaitGroup Add
-	// calls precede the goroutine spawns so Stop's Wait can never miss them.
+	// Lifecycle handles and wg.Add happen under startMu, before the spawns, so
+	// a concurrent Stop() sees a fully-initialised cancel and cannot miss a Wait.
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.handler = handler
@@ -239,12 +184,8 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform.
 func (w *Weixin) Stop() error {
-	// Snapshot lifecycle handles under startMu so a pre-Start Stop() or a
-	// racing Start() cannot hand us a nil/torn cancel (the read now has a
-	// happens-before edge with Start's write). Mirrors slack.go:201-205.
-	// Release the lock BEFORE the Wait calls — pollLoop/cleanup/handler
-	// goroutines never take startMu, but holding it across a blocking Wait
-	// is needless lock contention and a future deadlock hazard.
+	// Snapshot under startMu so a pre-Start or racing Stop() never sees a torn
+	// cancel; release before the blocking Waits.
 	w.startMu.Lock()
 	cancel := w.cancel
 	started := w.started
@@ -282,9 +223,7 @@ func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
 
 // Reply sends a text message to a WeChat user.
 func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
-	// Guard parity with feishu/slack/discord: an empty text body produces a
-	// no-op reply instead of pushing a blank bubble to the user. Images are
-	// logged but dropped — the iLink Bot API does not accept attachments.
+	// Images are dropped with a warning — the iLink Bot API takes no attachments.
 	if len(msg.Images) > 0 {
 		slog.Warn("weixin: image attachments are not supported; dropping images",
 			"chat", osutil.SanitizeForLog(msg.ChatID, 128),
@@ -301,9 +240,7 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 		contextToken = entry.token
 	}
 	if contextToken == "" {
-		// %q + sanitize: ChatID arrives from the iLink relay; if it ever
-		// carried a control byte, embedding it raw in an error string would
-		// leak through any caller that surfaces err.Error() to logs or IM.
+		// ChatID comes from the relay; sanitize before it reaches err.Error().
 		return "", fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
 			osutil.SanitizeForLog(msg.ChatID, 128))
 	}
@@ -311,10 +248,7 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	if err := w.api.sendMessage(ctx, msg.ChatID, msg.Text, contextToken); err != nil {
 		return "", fmt.Errorf("weixin send: %w", err)
 	}
-	// R232-SEC-11: ChatID arrives from the iLink relay; sanitize before
-	// embedding in the returned MessageID so any control byte / log-injection
-	// sequence cannot survive into downstream slog/IM surfaces that print the
-	// id verbatim.
+	// Sanitized ChatID: downstream slog/IM surfaces print the id verbatim.
 	return fmt.Sprintf("weixin:%s:%d", osutil.SanitizeForLog(msg.ChatID, 128), time.Now().UnixMilli()), nil
 }
 
@@ -359,7 +293,6 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			continue
 		}
 
-		// Check API-level errors
 		if resp.Ret != 0 || resp.ErrCode != 0 {
 			consecutiveFailures++
 			slog.Error("weixin getUpdates API error",
@@ -379,33 +312,26 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 
 		consecutiveFailures = 0
 
-		// Update cursor
 		if resp.GetUpdatesBuf != "" {
 			cursor = resp.GetUpdatesBuf
 		}
 
-		// R235-SEC-8: cap messages per poll. The 2 MiB body LimitReader caps
-		// total bytes, but a hostile relay could pack many short records;
-		// truncate rather than drop the poll so the cursor still advances.
+		// Truncate rather than drop the poll so the cursor still advances.
 		if len(resp.Msgs) > maxWeixinMsgsPerPoll {
 			slog.Warn("weixin poll: msg count exceeds cap, truncating",
 				"count", len(resp.Msgs), "cap", maxWeixinMsgsPerPoll)
 			resp.Msgs = resp.Msgs[:maxWeixinMsgsPerPoll]
 		}
 
-		// Process messages
 		for _, msg := range resp.Msgs {
-			// Only process user messages, skip bot messages
 			if msg.MessageType != msgTypeUser {
 				continue
 			}
 
 			text := extractText(msg)
 			if text == "" {
-				// No text item: iLink sent an image/audio/other attachment we
-				// don't currently forward. Debug-level so bursts of media from
-				// one user don't flood operator logs; still queryable when
-				// troubleshooting "why didn't my message go through".
+				// Image/audio/other attachment we do not forward; Debug so media
+				// bursts do not flood operator logs.
 				slog.Debug("weixin non-text message ignored",
 					"from", osutil.SanitizeForLog(msg.FromUserID, 128),
 					"msg_id", msg.MessageID,
@@ -425,11 +351,8 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				continue
 			}
 
-			// Cache context_token for reply. Bound the stored length so a
-			// misbehaving (or compromised) iLink relay can't pin arbitrary
-			// memory per user for the 24h TTL window. Real tokens are UUID-
-			// scale strings; legitimate values stay well under 512 bytes.
-			// (R227-SEC-8)
+			// Bound the cached token so a misbehaving relay cannot pin arbitrary
+			// memory per user for the TTL window; real tokens are UUID-scale.
 			const maxContextTokenLen = 512
 			if msg.ContextToken != "" && len(msg.ContextToken) <= maxContextTokenLen {
 				w.contextTokens.Store(from, &tokenEntry{
@@ -437,33 +360,18 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 					updatedNs: time.Now().UnixNano(),
 				})
 			} else if len(msg.ContextToken) > maxContextTokenLen {
-				// An oversized token is silently unusable: Reply needs a cached
-				// context_token, so dropping it here means this user's replies
-				// fail forever with no trace. Surface it (length only — never
-				// log the token itself) so the misbehaving relay is diagnosable.
+				// Replies to this user will fail; log the length only, never the token.
 				slog.Warn("weixin context_token exceeds cap, dropping (replies to this user will fail)",
 					"from", osutil.SanitizeForLog(from, 128),
 					"size", len(msg.ContextToken), "cap", maxContextTokenLen)
 			}
 
-			// EventID is the global dedup key — dispatch.go shares ONE
-			// platform.Dedup across every platform, so a bare integer
-			// message_id (e.g. "42") with no namespace can collide with another
-			// platform's (or another user's) identically-numbered event and
-			// silently drop the second message as a "replay". Prefix with the
-			// platform and the sender so the key is unique per (platform, user,
-			// message). Mirrors slack's channel:ts composite fix (#2015). #2116.
-			//
-			// When the upstream response omits message_id the zero value 0 is
-			// not a real ID, so leave EventID empty and let the dispatch-side
-			// composite fallback key handle dedup. That fallback key is shaped
-			// fallback:<platform>:<chatID>:<MessageID>:<minute>; if we also
-			// leave IncomingMessage.MessageID empty it degenerates to
-			// from+minute, and a second DISTINCT message from the same user in
-			// the same wall-clock minute collides and is silently dropped.
-			// Populate MessageID with a per-message distinguisher from Seq
-			// (monotonic per relay) or CreateTimeMs so legitimate distinct
-			// messages keep distinct fallback keys. #2117.
+			// EventID feeds the single cross-platform Dedup, so a bare integer
+			// message_id must be namespaced by platform + sender (#2116). With
+			// no message_id, leave EventID empty and give the dispatch fallback
+			// key (fallback:<platform>:<chatID>:<MessageID>:<minute>) a
+			// per-message distinguisher, or two distinct messages from one user
+			// in the same minute collide (#2117).
 			eventID := ""
 			fallbackMsgID := ""
 			if msg.MessageID != 0 {
@@ -484,9 +392,6 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				MentionMe: true, // direct messages always mention the bot
 			}
 
-			// R236-SEC-1: cap concurrent handler goroutines. When saturated,
-			// drop the message + slog.Warn so a burst cannot spawn unbounded
-			// goroutines.
 			w.dispatch.TryGo("weixin", func() { w.handler(ctx, incoming) },
 				"user", osutil.SanitizeForLog(from, 128))
 		}

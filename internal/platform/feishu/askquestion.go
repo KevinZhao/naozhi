@@ -14,12 +14,9 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// Length caps for card-action value fields. Labels and headers ride in the
-// button `value` object round-trip; without caps, a crafted Feishu relay
-// (or a replay of a signed mutated envelope) could stuff 60 KB strings into
-// CC stdin — the webhook body limit is 64 KiB and there's no per-field cap.
-// Match ~4 KiB worth of runes so card-sourced user messages can't exceed
-// the normal IM text budget.
+// Rune caps for card-action value fields: they round-trip through the button
+// `value` object, and without caps a crafted relay could stuff ~60 KB into CC
+// stdin (the webhook body limit is 64 KiB with no per-field cap).
 const (
 	cardValueLabelMaxRunes  = 512 // labels may include descriptions
 	cardValueHeaderMaxRunes = 128 // short prose
@@ -27,19 +24,10 @@ const (
 	cardButtonTextMaxRunes  = 100 // Feishu truncates anyway; stay safe
 )
 
-// SendQuestionCard posts an AskUserQuestion prompt to the Feishu chat.
-//
-// Multi-question cards (len(Items) > 1) are rendered as a read-only
-// markdown card that enumerates every question + options and asks the
-// user to reply with a free-form text containing all answers at once.
-// This avoids the Feishu interactive-card pitfall where each button click
-// immediately fires a separate card_action event — which would deliver a
-// partial answer to CC before the user finished picking the rest.
-//
-// Single-question cards (len(Items) == 1) keep the per-option buttons
-// since one click unambiguously IS the full answer.
-//
-// Feishu card schema 2.0: open.feishu.cn/document/feishu-cards/quick-start
+// SendQuestionCard posts an AskUserQuestion prompt. Single-question cards
+// get per-option buttons (one click IS the full answer); multi-question cards
+// are read-only markdown asking for one free-form reply, because each button
+// click fires a separate card_action and would deliver a partial answer.
 func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platform.QuestionCard) (string, error) {
 	if len(card.Items) == 0 {
 		return "", fmt.Errorf("feishu question card: no items")
@@ -50,7 +38,6 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 	if len(card.Items) == 1 {
 		body, err = buildQuestionCardJSON(card)
 	} else {
-		// Multi-question: markdown-only card with typed-reply hint.
 		body, err = buildMultiQuestionMarkdownCardJSON(card)
 	}
 	if err != nil {
@@ -73,11 +60,8 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 	return f.postMessage(ctx, token, reqBody)
 }
 
-// buildMultiQuestionMarkdownCardJSON renders a read-only card that lists
-// every question + numbered options and asks the user to reply in one
-// message. We keep the same schema-2.0 envelope so the markdown renders
-// with the full GitHub-flavored feature set; the absence of an action
-// block is what makes it free-form-answer only.
+// buildMultiQuestionMarkdownCardJSON renders a read-only card listing every
+// question + options and asking for one reply; no action block = free-form only.
 func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("**Claude 想请你确认以下问题，请在一条消息里一次回复全部：**\n")
@@ -102,7 +86,6 @@ func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, err
 		}
 	}
 	b.WriteString("\n回复示例：")
-	// Build a friendly example using the first option of each question.
 	parts := make([]string, 0, len(card.Items))
 	for _, item := range card.Items {
 		if len(item.Options) == 0 {
@@ -110,9 +93,7 @@ func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, err
 		}
 		h := item.Header
 		if h == "" {
-			// Rune-aware truncation — byte-slicing [:20] would split multi-byte
-			// CJK codepoints and emit invalid UTF-8 into the card body, making
-			// json.Encoder.Encode fail and aborting the whole card send.
+			// Rune-aware: byte-slicing CJK would emit invalid UTF-8 and fail Encode.
 			h = textutil.TruncateRunesNoEllipsis(item.Question, 20)
 		}
 		parts = append(parts, h+"："+item.Options[0].Label)
@@ -140,23 +121,10 @@ func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, err
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// buildQuestionCardJSON constructs a Feishu schema-2.0 interactive card with
-// buttons. Wire format (verified against open.feishu.cn schema docs):
-//
-//	{
-//	  "schema": "2.0",
-//	  "body": { "elements": [ ... ] }
-//	}
-//
-// Elements rendered per question group:
-//   - markdown text for the header + question
-//   - an action_module with one button per option, each carrying a `value`
-//     object that our card-action webhook handler decodes back to a plain
-//     user text reply.
-//
-// Multi-select: we emit the same single-press buttons — one click =
-// one answer. A later iteration can upgrade to the Feishu `multi_select`
-// form input for true multi-select semantics.
+// buildQuestionCardJSON constructs a schema-2.0 interactive card: markdown
+// header + question, then one button per option whose `value` object the
+// card-action handler decodes back into a plain user reply. Multi-select still
+// emits single-press buttons (one click = one answer).
 func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 	type action struct {
 		Tag  string `json:"tag"`
@@ -178,13 +146,9 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 	}
 
 	var elements []any
-	// Leading title so the user immediately sees this is an AskUserQuestion
-	// card rather than free-form chat output.
 	elements = append(elements, markdownElem{Tag: "markdown", Content: "**Claude 想请你确认**"})
 
 	for _, item := range card.Items {
-		// Heading + question text. Combine into one markdown block to keep
-		// the card compact; an empty header just produces bare question text.
 		var b strings.Builder
 		if item.Header != "" {
 			fmt.Fprintf(&b, "**%s**\n", escapeMarkdown(item.Header))
@@ -196,45 +160,30 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 		for _, opt := range item.Options {
 			btnText := opt.Label
 			if opt.Description != "" {
-				// Feishu buttons don't have a secondary label so keep it on
-				// the main text; markdown isn't supported on button text, so
-				// use a simple dash separator.
+				// Buttons have no secondary label and no markdown; plain dash separator.
 				btnText = opt.Label + " — " + opt.Description
 			}
-			// Clip button label at rune boundary — byte-level [:100] could
-			// split a multi-byte CJK sequence into invalid UTF-8 that
-			// Feishu's relay would reject or render as mojibake.
+			// Rune-boundary clip: byte-level slicing could produce invalid UTF-8.
 			btnText = textutil.TruncateRunesNoEllipsis(btnText, cardButtonTextMaxRunes)
 			a := action{Tag: "button", Type: "default"}
 			a.Text.Tag = "plain_text"
 			a.Text.Content = btnText
-			// session_key is no longer embedded — the inbound path never read
-			// it (routing re-derives from chat context) and keeping it
-			// widened the attack surface. Values are rune-capped so an
-			// inbound replay can't bounce 60 KB into CC stdin.
+			// No session_key: routing re-derives from chat context, and every
+			// value is rune-capped so a replay cannot bounce 60 KB into CC stdin.
 			a.Value = map[string]any{
 				"kind":        "ask_answer",
 				"tool_use_id": textutil.TruncateRunesNoEllipsis(card.ToolUseID, cardValueIDMaxRunes),
 				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
 				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
 			}
-			// #2148: embed the originating session's agent id so the card-click
-			// answer routes back to the SAME agent session that asked the
-			// question. Feishu's card-action callback carries no agent dimension
-			// and the synthesised answer text has no /agent prefix, so without
-			// this the answer would default to the "general" agent and the
-			// asking (e.g. code-reviewer) session would never see it. Rune-
-			// capped like the other value fields; the dispatcher whitelist-
-			// validates it against the known agent set before honouring it.
+			// agent_id routes the answer back to the asking agent session; the
+			// callback has no agent dimension and the dispatcher whitelist-
+			// validates the value before honouring it (#2148).
 			if card.AgentID != "" {
 				a.Value["agent_id"] = textutil.TruncateRunesNoEllipsis(card.AgentID, cardValueIDMaxRunes)
 			}
-			// Embed the originating chat type so the WebSocket card-action
-			// path (whose callback lacks chat_type and would otherwise infer
-			// "group" from the oc_ prefix even for 1:1 chats) routes the
-			// answer back to the same session key. Only the whitelisted
-			// values are emitted; anything else is omitted and the receiver
-			// falls back to its heuristic.
+			// chat_type lets the WebSocket card path (whose callback lacks it)
+			// route back to the same session key; only whitelisted values are emitted.
 			if ct := normalizeCardChatType(card.ChatType); ct != "" {
 				a.Value["chat_type"] = ct
 			}
@@ -248,8 +197,7 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 		"body":   map[string]any{"elements": elements},
 	}
 
-	// SetEscapeHTML(false) matches buildMarkdownCardJSON — preserve `<`, `>`,
-	// `&` verbatim so code snippets in option descriptions render cleanly.
+	// No HTML escaping so code snippets in option descriptions render cleanly.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -259,10 +207,8 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// markdownEscaper is reused across every escapeMarkdown call. NewReplacer
-// builds an internal trie per invocation; a multi-question card hits
-// escapeMarkdown O(questions × options) times and each call would otherwise
-// allocate a fresh replacer during the send hot path.
+// markdownEscaper is shared: NewReplacer builds a trie per call and a
+// multi-question card escapes O(questions × options) strings.
 var markdownEscaper = strings.NewReplacer(
 	"\\", "\\\\",
 	"`", "\\`",
@@ -270,10 +216,8 @@ var markdownEscaper = strings.NewReplacer(
 	"_", "\\_",
 )
 
-// normalizeCardChatType whitelists a chat-type string down to the two values
-// the session router understands. Anything outside {"direct","group"} returns
-// "" so callers fall back to their own heuristic rather than propagating an
-// unexpected (possibly attacker-relayed) value into the session key.
+// normalizeCardChatType whitelists to {"direct","group"}; anything else returns
+// "" so an attacker-relayed value never reaches the session key.
 func normalizeCardChatType(s string) string {
 	switch s {
 	case "direct", "group":
@@ -283,64 +227,36 @@ func normalizeCardChatType(s string) string {
 	}
 }
 
-// escapeMarkdown escapes the minimal set of markdown metacharacters that
-// could break the card body rendering if they appear literally in a user-
-// facing string. Feishu markdown is GitHub-flavoured; we only guard against
-// accidental emphasis / code-span triggers — real code blocks from CC
-// output are not expected here (headers and questions are short prose).
+// escapeMarkdown escapes the emphasis / code-span metacharacters that could
+// break card rendering in short prose (headers, questions).
 func escapeMarkdown(s string) string {
 	return markdownEscaper.Replace(s)
 }
 
-// cardActionPayload is the value object our SendQuestionCard emits and the
-// webhook handler expects. Kept package-private; dispatcher never reaches in.
-//
-// Fields are deliberately minimal — session routing is re-derived from the
-// click's chat context, not anything embedded here. A previous SessionKey
-// field was removed after security review: it was dead on the inbound path
-// but widened the attacker-controlled surface.
+// cardActionPayload is the button `value` object SendQuestionCard emits and
+// the card-action handlers decode. Deliberately minimal: session routing is
+// re-derived from the click's chat context, never from embedded state.
 type cardActionPayload struct {
 	Kind      string `json:"kind"`
 	ToolUseID string `json:"tool_use_id"`
 	Header    string `json:"header"`
 	Label     string `json:"label"`
-	// ChatType carries the originating session's chat type ("direct"/"group").
-	// Unlike the removed SessionKey field, this is not attacker-derived
-	// routing state: it is strictly whitelisted to {"direct","group"} on read
-	// (anything else is ignored) and only consulted by the WebSocket card
-	// path, whose callback envelope lacks a chat_type. The webhook path reads
-	// the real chat_type from the signed envelope and never trusts this.
-	// Feishu p2p (1:1) chats also use an "oc_" open_chat_id, so the old
-	// prefix heuristic mis-routed 1:1 card answers into a phantom group
-	// session — this field lets the answer land back in the direct session.
+	// ChatType ("direct"/"group") is whitelisted on read and consulted only by
+	// the WebSocket path, whose callback lacks chat_type; the webhook path
+	// reads the signed envelope instead. Needed because p2p chats also use an
+	// "oc_" open_chat_id, so a prefix heuristic mis-routes 1:1 answers.
 	ChatType string `json:"chat_type,omitempty"`
-	// AgentID carries the originating session's agent id ("general",
-	// "code-reviewer", …). Like ChatType this is whitelist-validated (against
-	// the dispatcher's known agent set) before it can influence routing, so a
-	// hostile relay can't inject an arbitrary agent. Feishu's card-action
-	// callback has no agent dimension and the synthesised answer text has no
-	// /agent prefix; without this the answer would default to "general" and
-	// the asking agent session would never receive it (#2148).
+	// AgentID routes the answer back to the asking agent session; the
+	// dispatcher whitelist-validates it against the known agent set before it
+	// can influence routing (#2148).
 	AgentID string `json:"agent_id,omitempty"`
 }
 
-// handleCardActionWebhook parses an im.card.action.v1_trigger envelope and
-// re-enters the normal MessageHandler path with a synthesised text message.
-// The caller is the webhook HTTP handler, which already validated token +
-// signature + replay.
-//
-// We tolerate two observed event shapes:
-//
-//  1. v1 card action: {"action":{"value":{...}},"open_chat_id":"oc_...",
-//     "open_message_id":"om_...","operator":{"open_id":"ou_..."}}
-//  2. v2 card action: {"action":{"value":{...}},"context":{
-//     "open_chat_id":"oc_...","open_message_id":"om_..."},"operator":{...}} —
-//     the larksuite oapi-sdk-go v3 CardActionTriggerRequest nests
-//     open_chat_id/open_message_id inside a `context` object; the top level
-//     carries neither. Without the fallback below the chat/message ids decode
-//     to "" and the answer routes into a phantom direct session (#2006).
-//
-// Both land on the same payload shape once `action.value` is pulled out.
+// handleCardActionWebhook parses an im.card.action.v1_trigger envelope (token
+// + signature + replay already validated by the caller) and re-enters the
+// MessageHandler path with a synthesised text message. Both the v1 shape
+// (ids at top level) and the v2 shape (ids nested under `context`) are
+// accepted; without the fallback v2 ids decode to "" (#2006).
 func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessage, handler platform.MessageHandler) {
 	var outer struct {
 		Action struct {
@@ -361,8 +277,6 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 		slog.Warn("feishu card_action: parse failed", "err", err)
 		return
 	}
-	// v2 envelopes nest the ids under `context`; fall back when the top-level
-	// (v1) fields are absent so both shapes resolve real routing ids (#2006).
 	chatID := outer.OpenChatID
 	if chatID == "" {
 		chatID = outer.Context.OpenChatID
@@ -376,8 +290,7 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 }
 
 // dispatchCardAction turns a validated card click into a synthesised
-// MessageHandler call. Shared between webhook + WebSocket card paths so both
-// transports produce identical IncomingMessage shapes.
+// MessageHandler call; shared by the webhook and WebSocket paths.
 func (f *Feishu) dispatchCardAction(
 	ctx context.Context,
 	val cardActionPayload,
@@ -395,11 +308,9 @@ func (f *Feishu) dispatchCardAction(
 			"tool_use_id", osutil.SanitizeForLog(val.ToolUseID, 64))
 		return
 	}
-	// Resolve chat type. The v2 card.action.trigger envelope carries no
-	// chat_type at any level, so the webhook path (like the WS path) must fall
-	// back to the chat_type embedded in the button value before defaulting to
-	// "direct" — otherwise a group card answer routes into a phantom direct
-	// session and the originating group session never sees the reply (#2007).
+	// The v2 envelope carries no chat_type at any level; fall back to the
+	// button value before defaulting to "direct", or a group answer routes
+	// into a phantom direct session (#2007).
 	ct := chatType
 	if ct == "" {
 		ct = normalizeCardChatType(val.ChatType)
@@ -407,19 +318,13 @@ func (f *Feishu) dispatchCardAction(
 	if ct != "group" {
 		ct = "direct"
 	}
-	// Stable-ish dedup key. Lark SDK can re-deliver the same card_action on
-	// WS reconnect; without this, a click gets forwarded twice. Derive the
-	// id from (open_message_id, operator, tool_use_id) — same card + same
-	// clicker + same question collapses to one key, so replays dedup.
-	// "card_action:" prefix guards against collision with message event IDs
-	// in the same Dedup bucket.
+	// Dedup key: the Lark SDK can re-deliver a card_action on WS reconnect.
+	// (message, operator, tool_use_id) collapses replays; the prefix avoids
+	// collisions with message event IDs in the same Dedup bucket.
 	eventID := ""
 	if messageID != "" {
-		// Cap each user-controlled component before composition so a
-		// pathological Feishu payload (e.g. an unusually long open_id)
-		// can't blow past the SanitizeForLog truncation cap and shadow
-		// the message ID in the dedup key. Real Feishu open_ids are
-		// well under 64 bytes; the 64-cap is permissive.
+		// Cap each component so a long open_id cannot shadow the message ID
+		// past the SanitizeForLog truncation.
 		op := operatorID
 		if len(op) > 64 {
 			op = op[:64]
@@ -438,41 +343,24 @@ func (f *Feishu) dispatchCardAction(
 		ChatID:    chatID,
 		ChatType:  ct,
 		Text:      text,
-		// #2148: pin the answer to the agent session that asked the question.
-		// The value is sanitised + capped here; the dispatcher additionally
-		// whitelist-validates it against the known agent set before routing,
-		// so an unexpected/relayed value is ignored (falls back to /agent
-		// resolution → "general").
+		// Sanitised here; the dispatcher whitelist-validates before routing (#2148).
 		AgentID: osutil.SanitizeForLog(val.AgentID, cardValueIDMaxRunes),
-		// Card click on a question targeted to this bot should always route
-		// through dispatch regardless of group mention_only gating — the
-		// user explicitly interacted with the bot's card.
+		// The user explicitly clicked the bot's card: bypass mention_only gating.
 		MentionMe: true,
 	}
-	// Best-effort: edit the original card so the chosen option is visible
-	// and buttons go away. Failures don't stop dispatching the answer —
-	// the conversation continuation matters more than UI polish.
+	// Best-effort edit of the original card; failures never block the answer.
 	if messageID != "" && f.cfg.AppID != "" {
-		// Strip control / bidi before interpolating into the edit markdown —
-		// escapeMarkdown only handles emphasis metacharacters, not C1 / bidi
-		// overrides / LS / PS that could corrupt Feishu's rendering.
+		// escapeMarkdown covers emphasis only, not C1/bidi/LS/PS.
 		safeText := osutil.SanitizeForLog(text, 1024)
 		go func() {
 			defer func() {
-				// A mid-goroutine panic (e.g. uninitialised client in tests)
-				// would otherwise crash the process; best-effort semantics
-				// say swallow quietly.
 				if r := recover(); r != nil {
 					slog.Debug("feishu card_action: edit panic recovered",
 						"msg_id", osutil.SanitizeForLog(messageID, 64), "panic", r)
 				}
 			}()
-			// Detach from the webhook/WS callback ctx — that ctx can be
-			// cancelled the moment the transport layer's outer handler
-			// returns, even though the message dispatch continues in its
-			// own goroutine. A 10s independent budget matches the Feishu
-			// EditMessage call timeout and keeps the "card visual update"
-			// best-effort semantics intact.
+			// Detached from the callback ctx, which may be cancelled as soon as
+			// the transport's outer handler returns.
 			editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := f.EditMessage(editCtx, messageID, "✅ 已回答：**"+escapeMarkdown(safeText)+"**"); err != nil {
@@ -484,15 +372,9 @@ func (f *Feishu) dispatchCardAction(
 	handler(ctx, msg)
 }
 
-// composeAskAnswerText turns a card-click payload into the plain user text
-// that gets injected as a new user message. Mirrors the dashboard's
-// composeAskAnswer format ("Header: Label.") so CC sees a stable reply shape
-// regardless of which surface the user answered from.
-//
-// Both header and label are rune-capped and control-character-stripped
-// before composition. A hostile Feishu relay or replayed mutation could
-// otherwise land 60 KB / bidi-injected strings on CC stdin. The caps match
-// send-time policy so round-trip drift stays bounded.
+// composeAskAnswerText renders a card click as the dashboard's "Header: Label."
+// reply shape. Header and label are rune-capped and control-stripped so a
+// hostile relay cannot land oversized or bidi-injected strings on CC stdin.
 func composeAskAnswerText(p cardActionPayload) string {
 	h := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Header, 0), cardValueHeaderMaxRunes))
 	l := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Label, 0), cardValueLabelMaxRunes))

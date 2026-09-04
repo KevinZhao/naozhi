@@ -19,35 +19,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// insecureReverseUpgradeTotal counts reverse-node WS upgrades accepted
-// over plain HTTP from a non-loopback host — i.e. connections where the
-// bearer token rides the first frame in cleartext, observable to any
-// passive on-path party (R226-SEC-3 / R229-SEC-5, #1026).
-//
-// The existing warnInsecureReverseUpgradeOnce log fires at most once per
-// process to avoid reconnect-storm log floods, which means an operator
-// who tails the journal after the first event sees nothing further and
-// has no way to gauge ongoing exposure. This monotonic expvar gauge fills
-// that gap: it is published on /debug/vars (the dashboard's existing
-// expvar endpoint) so a sustained non-zero delta is an actionable signal
-// that TLS is still missing in front of /ws-node. Counter semantics
-// (Add(1)) match the metric's "how many cleartext-token upgrades have we
-// accepted" question; a zero value means every reverse upgrade arrived
-// over TLS or from loopback.
+// insecureReverseUpgradeTotal counts reverse-node upgrades accepted over plain
+// HTTP from a non-loopback host (bearer token in cleartext on the first
+// frame). The once-per-process warn cannot show ongoing exposure; this
+// /debug/vars counter can (#1026).
 var insecureReverseUpgradeTotal = expvar.NewInt("naozhi_node_insecure_reverse_upgrade_total")
 
-// truncateLabelUTF8 truncates s to at most max bytes while preserving UTF-8
-// validity and stripping log-injection codepoints. Raw byte truncation is
-// unsafe when the cut falls mid-rune: the resulting string contains invalid
-// UTF-8 bytes that flow into slog attrs, JSON responses, and dashboard
-// renders. `strings.ToValidUTF8` strips any trailing invalid-byte fragment
-// after a byte-level cut, keeping the rest intact. R67-SEC-6.
-//
-// R180-SEC-M2: also strip C0/C1/bidi/LS-PS codepoints. A compromised reverse
-// node (with a valid token) could submit display_name / hostname containing
-// bidi overrides to flip the rendered name on every dashboard (/api/sessions
-// stats.nodes), or C1/newline bytes to corrupt slog attrs when the node
-// registers / disconnects. Mirrors the cron-validator and project-name policy.
+// truncateLabelUTF8 truncates s to at most max bytes without producing invalid
+// UTF-8 and strips C0/C1/bidi/LS-PS codepoints: a compromised reverse node
+// could otherwise flip rendered names on every dashboard or corrupt slog attrs.
 func truncateLabelUTF8(s string, max int) string {
 	if len(s) > max {
 		s = strings.ToValidUTF8(s[:max], "")
@@ -81,25 +61,11 @@ func truncateLabelUTF8(s string, max int) string {
 	return b.String()
 }
 
-// reverseUpgrader is the WebSocket upgrader for reverse node connections.
-// m2m connection: bearer token in the first WS message is the primary auth.
-// As a defence-in-depth measure, reject any request that carries an Origin
-// header — browsers always send Origin, machine-to-machine clients do not.
-//
-// R247-SEC-22 hardening: when a reverse proxy strips the Origin header
-// before forwarding the upgrade (some misconfigured TLS terminators do
-// this), a browser-driven XSS sender behind that same proxy could in
-// theory craft an Origin-less request that looks m2m. Mitigate by
-// requiring either:
-//   - the request arrived over TLS (r.TLS != nil — direct termination), or
-//   - the request came from a loopback host (dev / sidecar wiring), or
-//   - the deployment opted in to plain-HTTP m2m via insecureReverseUpgrade
-//     (set by NewReverseServer when explicitly configured).
-//
-// The bearer-token first-frame auth still gates connection acceptance
-// regardless of transport; the TLS check is purely an origin-spoof
-// hardening for proxies that strip Origin. The default of allowing
-// loopback keeps dev / single-host deployments working without config.
+// reverseUpgrader upgrades reverse-node connections. The first-frame bearer
+// token is the primary auth; as defence in depth any Origin header is rejected
+// (browsers always send one, m2m clients never do), and a plain-HTTP upgrade
+// is accepted only from loopback or a private-LAN Host — a proxy that strips
+// Origin could otherwise let a browser-driven sender look m2m.
 var reverseUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		if r.Header.Get("Origin") != "" {
@@ -111,28 +77,12 @@ var reverseUpgrader = websocket.Upgrader{
 		if isLoopbackHost(r.Host) {
 			return true
 		}
-		// Plain-HTTP, non-loopback. Bump the monotonic counter on every such
-		// upgrade (not just the first) so /debug/vars reflects ongoing
-		// cleartext-token exposure even after the once-guarded warn has
-		// already fired (#1026).
+		// Plain-HTTP, non-loopback: count every occurrence, not just the first.
 		insecureReverseUpgradeTotal.Add(1)
-		// R20260606-SEC-4 (#1824): split by host class with DIFFERENT outcomes.
-		//
-		// A bearer token sent in cleartext over a private LAN (RFC1918 / ULA /
-		// link-local) is exposed only to passive listeners on that segment —
-		// the documented no-TLS private-network / sidecar topology. Keep
-		// allowing it (bearer-token first-frame auth remains the primary gate)
-		// but warn once so operators know TLS is still recommended.
-		//
-		// A public/routable Host means the first-frame token traverses the open
-		// internet, observable to any passive on-path party who can then
-		// authenticate as the node and drive every session on the hub. There is
-		// no legitimate plain-HTTP-over-public-internet reverse-node topology,
-		// so HARD-REJECT the upgrade rather than log-and-continue: returning
-		// false makes websocket.Upgrade fail with a 403 before any frame (and
-		// thus the token) is read. Operators who terminate TLS in front of
-		// /ws-node are unaffected (r.TLS check above), and private/loopback
-		// wiring is unaffected (handled above / here).
+		// Private LAN: cleartext token is exposed only to that segment (the
+		// documented no-TLS sidecar topology) — allow with a one-time warn.
+		// Public/routable Host: the token would cross the open internet, so
+		// HARD-REJECT (403 before any frame is read) (#1824).
 		if isPrivateHost(r.Host) {
 			warnInsecureReversePrivateOnce(r.Host)
 			return true
@@ -142,8 +92,8 @@ var reverseUpgrader = websocket.Upgrader{
 	},
 }
 
-// insecureReverseWarnOnce ensures the plain-HTTP non-loopback warning
-// appears once per process to avoid log floods on reconnect storms.
+// insecureReverseWarnOnce bounds the public-host warning to once per process
+// (reconnect storms).
 var insecureReverseWarnOnce sync.Once
 
 func warnInsecureReverseUpgradeOnce(host string) {
@@ -153,10 +103,8 @@ func warnInsecureReverseUpgradeOnce(host string) {
 	})
 }
 
-// insecureReversePrivateWarnOnce mirrors insecureReverseWarnOnce for the
-// RFC1918 / ULA / link-local case, kept separate so the two host classes each
-// surface their own once-per-process line rather than racing for a single
-// sync.Once (whichever fires first would otherwise mask the other).
+// insecureReversePrivateWarnOnce is separate so each host class gets its own
+// once-per-process line instead of one masking the other.
 var insecureReversePrivateWarnOnce sync.Once
 
 func warnInsecureReversePrivateOnce(host string) {
@@ -166,21 +114,11 @@ func warnInsecureReversePrivateOnce(host string) {
 	})
 }
 
-// isPrivateHost reports whether host (Host header value, may include port)
-// refers to an RFC1918 private, IPv6 unique-local, or link-local UNICAST
-// address. Used to classify cleartext-token exposure on /ws-node: a
-// private-segment upgrade is a lower (but non-zero) exposure than a
-// public/routable one. Hostnames that are not IP literals are treated as
-// non-private since their resolution is not known at this layer.
-//
-// Range membership comes from envpolicy.ClassifyHost (#2300) so this site
-// cannot drift from the shim/envpolicy SSRF guards on what "private" means.
-// The POLICY here is deliberately narrower than those outbound guards: this
-// is an inbound Host header, and "private" == "accept plaintext with a
-// warning", so classifying MORE ranges as private would LOOSEN the gate.
-// Loopback is excluded (isLoopbackHost owns it), link-local multicast and the
-// unspecified address are excluded (never a legitimate LAN peer → fall
-// through to the public hard-reject).
+// isPrivateHost reports whether a Host header value is an RFC1918 / ULA /
+// link-local UNICAST literal; non-IP hostnames are non-private. Ranges come
+// from envpolicy.ClassifyHost (#2300), but the POLICY is deliberately narrower
+// than the outbound SSRF guards: here "private" means "accept plaintext with a
+// warning", so classifying more ranges as private would LOOSEN the gate.
 func isPrivateHost(host string) bool {
 	k, ok := envpolicy.ClassifyHost(stripHostPort(host))
 	if !ok {
@@ -189,11 +127,8 @@ func isPrivateHost(host string) bool {
 	return k.Any(envpolicy.IPPrivate | envpolicy.IPLinkLocalUnicast)
 }
 
-// stripHostPort reduces a Host header value to its bare host part for
-// net.ParseIP: "[::1]:8080" → "::1", "[fd00::1]" → "fd00::1",
-// "10.0.0.1:80" → "10.0.0.1". A bare unbracketed IPv6 literal (e.g.
-// "fd00::1") has multiple colons and is left intact (#2339). Hostnames pass
-// through with only a single trailing ":port" removed.
+// stripHostPort reduces a Host header to its bare host: "[::1]:8080" → "::1",
+// "10.0.0.1:80" → "10.0.0.1"; a bare unbracketed IPv6 literal is left intact (#2339).
 func stripHostPort(host string) string {
 	h := host
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {
@@ -211,17 +146,13 @@ func stripHostPort(host string) string {
 	return h
 }
 
-// isLoopbackHost reports whether host (Host header value, may include
-// port) refers to a loopback address. Used by reverseUpgrader's
-// defence-in-depth check.
+// isLoopbackHost reports whether a Host header value (may include port) is a
+// loopback address — the whole 127.0.0.0/8 range and ::1, not just the literals.
 func isLoopbackHost(host string) bool {
 	h := stripHostPort(host)
 	if strings.ToLower(h) == "localhost" {
 		return true
 	}
-	// Cover the entire 127.0.0.0/8 range and ::1, not just the canonical
-	// literals — 127.0.0.2, 127.255.255.254 etc. are valid loopback
-	// addresses (Linux can bind them) and must be treated as local.
 	k, ok := envpolicy.ClassifyHost(h)
 	return ok && k.Has(envpolicy.IPLoopback)
 }
@@ -233,56 +164,41 @@ type ReverseServer struct {
 	names map[string]string       // node_id → configured display_name
 	conns map[string]*ReverseConn // node_id → active connection
 
-	// authHash holds sha256(expected token) per node_id, precomputed at
-	// construction so the auth path only hashes the inbound probe token
-	// instead of re-hashing the (immutable) expected token every connect.
-	// Empty-token entries are omitted (those nodes can never authenticate).
-	// R231-PERF: mirrors the Hub dashTokenHash precompute (wshub.go).
+	// authHash holds sha256(expected token) per node_id, precomputed so the
+	// auth path hashes only the inbound probe. Empty-token entries are omitted.
 	authHash map[string][32]byte
 
-	// wsLimiter is an internal per-IP rate limiter store for /ws-node connections.
-	// Separate from the dashboard login limiter to prevent cross-endpoint interference.
-	// Higher burst (10) than login (5) since machine-to-machine reconnects are bursty.
+	// wsLimiter is a per-IP limiter for /ws-node, separate from the dashboard
+	// login limiter; higher burst because m2m reconnects are bursty.
 	wsLimiter *ratelimit.Limiter
 
-	// trustedProxy enables X-Forwarded-For last-hop IP extraction for rate limiting.
-	// When true (ALB/CloudFront in front), per-IP limits apply to the real client,
-	// not the proxy's single IP.
+	// trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
+	// limits apply to the real client behind ALB/CloudFront.
 	trustedProxy bool
 
 	OnRegister   func(id string, conn *ReverseConn)
 	OnDeregister func(id string)
 
-	// testHookBeforeAck, when non-nil, runs after rc is installed into
-	// s.conns and before the "registered" ack is written. Tests only: it
-	// widens the insert→ack window so a concurrent re-registration can be
-	// interleaved deterministically (#2458).
+	// testHookBeforeAck runs after rc is installed into s.conns and before the
+	// "registered" ack. Tests only: widens the insert→ack window (#2458).
 	testHookBeforeAck func(rc *ReverseConn)
 }
 
-// ReverseNodeAuth is the node-local, zero-dependency value shape that
-// NewReverseServer consumes for one allowed reverse-connecting node. It
-// mirrors the two fields this package actually needs (token + display
-// name) so internal/node no longer imports internal/config — a config.yaml
-// schema change no longer ripples down into this bottom-of-DAG package
-// (R040034-ARCH-1 / #1411). The cmd boundary translates
-// config.ReverseNodeEntry → ReverseNodeAuth.
+// ReverseNodeAuth is the zero-dependency auth entry for one allowed
+// reverse-connecting node; the cmd boundary translates config.ReverseNodeEntry
+// into it so internal/node does not import internal/config (#1411).
 type ReverseNodeAuth struct {
 	Token       string
 	DisplayName string
 }
 
-// NewReverseServer creates a server that accepts /ws-node connections.
-// auth maps node_id → ReverseNodeAuth (translated from the reverse_nodes
-// config block at the cmd boundary).
-// trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
-// rate limiting works correctly when deployed behind ALB/CloudFront.
+// NewReverseServer creates a server that accepts /ws-node connections; auth
+// maps node_id → ReverseNodeAuth, trustedProxy enables X-Forwarded-For.
 func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *ReverseServer {
 	names := make(map[string]string, len(auth))
 	hashes := make(map[string][32]byte, len(auth))
-	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare
-	// 只按值匹配，node_id 在 ReadJSON 那一刻由客户端自报。运维误配（复制粘贴）
-	// 最常见，启动时 WARN 一下，不拒启动（允许临时 rotate 场景）。
+	// 两个 node 共用一个 token 等于身份可互换（node_id 由客户端自报）；启动时 WARN，
+	// 不拒启动（允许临时 rotate）。
 	seen := make(map[string]string, len(auth))
 	for id, e := range auth {
 		names[id] = e.DisplayName
@@ -313,12 +229,10 @@ func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *Rever
 
 // ServeHTTP handles the /ws-node WebSocket endpoint.
 func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit to prevent token brute-force via rapid connect cycles.
-	// Uses trusted-proxy-aware client IP so ALB-fronted deployments limit the
-	// real caller, not the single ALB IP.
+	// Per-IP rate limit against token brute-force via rapid connect cycles.
 	ip := netutil.ClientIP(r, s.trustedProxy)
-	// Fallback to a shared bucket if IP resolution failed so ratelimit's
-	// empty-key hard-reject doesn't 429 a legitimate client forever.
+	// Shared bucket when IP resolution failed, so the limiter's empty-key
+	// hard-reject does not 429 a legitimate client forever.
 	limitKey := ip
 	if limitKey == "" {
 		limitKey = "_unknown_"
@@ -335,13 +249,8 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(4 << 10) // 4 KB — small limit for unauthenticated register message
 
-	// Read register message with timeout. R182-GO-P1-1: both SetReadDeadline
-	// returns were previously dropped. If the underlying net.Conn is already
-	// half-closed mid-handshake, SetReadDeadline fails and ReadJSON would
-	// block forever (deadline-less on a dead socket), leaking a goroutine
-	// on every failed handshake from the public /ws-node endpoint. Treat
-	// failure as "connection unusable" and bail fast, mirroring the
-	// symmetric SetWriteDeadline check at line 195.
+	// A failed SetReadDeadline means a half-closed socket; a deadline-less
+	// ReadJSON would leak a goroutine per failed handshake on this public endpoint.
 	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		slog.Debug("ws-node: set read deadline failed", "err", err)
 		conn.Close()
@@ -352,10 +261,8 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
-	// Sanitize remote-supplied label fields immediately after read so any
-	// future slog call before auth (e.g. an added forensic breadcrumb) is
-	// safe regardless of code order. Defense-in-depth — current code paths
-	// only log msg.NodeID before auth, but the invariant is brittle.
+	// Sanitize remote labels immediately so any pre-auth slog call is safe
+	// regardless of code order.
 	const maxLabel = 256
 	msg.DisplayName = truncateLabelUTF8(msg.DisplayName, maxLabel)
 	msg.Hostname = truncateLabelUTF8(msg.Hostname, maxLabel)
@@ -365,39 +272,21 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate token — constant-time comparison to prevent timing oracle.
-	// Generic error to avoid node_id enumeration. When the node_id is unknown
-	// we still run a fixed-length compare so the reject path does not leak (via
-	// response latency) whether the node_id exists at all. Pre-hashing both
-	// sides with SHA-256 normalises the compare length to 32 bytes regardless
-	// of the submitted token length — ConstantTimeCompare short-circuits on
-	// length mismatch, so comparing raw bytes would still leak "my stored
-	// expected is (or isn't) the same length as the probe token".
-	// R231-PERF: the expected-token hash is precomputed at construction
-	// (s.authHash), so each connect only hashes the inbound probe token.
+	// Constant-time token check with a generic error so neither timing nor the
+	// message reveals whether node_id exists. Both sides are SHA-256 hashed so
+	// the compare length is fixed (ConstantTimeCompare short-circuits on length
+	// mismatch); an unknown node_id still runs a dummy compare.
 	expectedHash, ok := s.authHash[msg.NodeID]
 	probeHash := sha256.Sum256([]byte(msg.Token))
 	if !ok {
-		// Unknown / empty-token node_id: still run a fixed-length compare
-		// against a zero hash so the reject path's latency does not leak
-		// whether the node_id exists.
 		var dummy [32]byte
 		_ = subtle.ConstantTimeCompare(dummy[:], probeHash[:])
 	}
 	matched := ok && subtle.ConstantTimeCompare(expectedHash[:], probeHash[:]) == 1
 	if !matched {
-		// R180-SEC-H2 / R181-GO-P2-1: msg.NodeID comes from an unauthenticated
-		// 4 KB frame on the public /ws-node endpoint. Anyone can probe with
-		// arbitrary bytes. SanitizeForLog keeps attr values machine-readable
-		// (strips C0/C1/bidi/LS-PS → '_') instead of the earlier %q path
-		// which produced Go-quoted strings that then got double-escaped by
-		// slog's JSON handler.
-		// RNEW-SEC-006: log r.Host as a forensic breadcrumb. The upgrader
-		// does not enforce a Host allowlist (no config surface today),
-		// so the only recourse for "is this IP talking to the expected
-		// virtual host?" triage is after-the-fact log inspection.
-		// Sanitized so a Host: header carrying bidi/C1/newline bytes
-		// cannot corrupt slog attrs.
+		// node_id and Host come from an unauthenticated frame on a public
+		// endpoint; sanitize. r.Host is the only forensic breadcrumb for
+		// "which virtual host was this IP probing" (no Host allowlist exists).
 		slog.Warn("reverse node auth failed",
 			"ip", ip,
 			"node_id", osutil.SanitizeForLog(msg.NodeID, 64),
@@ -407,14 +296,11 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth succeeded — raise limit for RPC payloads (session responses, event
-	// batches). One RPC frame carries at most one stream-json line, so this
-	// matches the shared upstream line cap (#2084).
+	// Authenticated: one RPC frame carries at most one stream-json line (#2084).
 	conn.SetReadLimit(limits.MaxStreamJSONLine)
 
-	// Use configured display name; fall back to what remote sent.
-	// msg.DisplayName / msg.Hostname were already truncated at read time
-	// (above). Configured-side names and r.RemoteAddr still need their cap.
+	// Configured display name wins; configured-side names and r.RemoteAddr
+	// still need the cap.
 	displayName := s.names[msg.NodeID]
 	if displayName == "" {
 		displayName = msg.DisplayName
@@ -429,32 +315,15 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		remoteLabel = r.RemoteAddr
 	}
 	remoteLabel = truncateLabelUTF8(remoteLabel, maxLabel)
-	// Forward the advertised capability set into the connection's
-	// NodeMeta so server-side dispatch can answer
-	// `Conn.Meta().HasCap("acp")` for backend-routing decisions
-	// (Sprint 6b of the multi-backend RFC). We pass the truncated
-	// hostname (msg.Hostname after maxLabel cut earlier) rather than
-	// remoteLabel so meta.Hostname stays distinct from RemoteAddr —
-	// only the former survives `r.RemoteAddr` fallback above.
+	// msg.Hostname (not remoteLabel) keeps meta.Hostname distinct from RemoteAddr.
 	rc := newReverseConnWithMeta(msg.NodeID, displayName, remoteLabel, conn, msg.Capabilities, msg.Hostname)
-	// Install rc into s.conns BEFORE writing the "registered" ack (#2458).
-	// The client treats the ack as "I am registered" and may drop + redial
-	// immediately after receiving it. With the old order (ack first, insert
-	// second) a fast reconnect could complete a whole new handshake in the
-	// gap: conn2 lands in the map with no old to close, then conn1's handler
-	// resumes and overwrites conn2 — conn2 becomes an orphan whose close
-	// never fires OnDeregister (owns == false) and the dead conn1 sits in
-	// the registry until its read deadline expires ("online but invisible").
-	//
-	// Invariant: s.conns[id] is always the conn that most recently reached
-	// the insert point — i.e. the newest successfully acked conn or the one
-	// currently mid-ack. Any conn that reaches the insert point closes the
-	// previous owner; the previous owner's deregister goroutine (and its own
-	// ack-failure rollback below) sees owns == false and does not touch the
-	// map or fire OnDeregister, so the newest conn alone owns the id.
-	//
-	// Lock order: s.mu → ReverseConn.closeMu (inside old.Close). No callback
-	// runs under s.mu; OnRegister/OnDeregister are invoked with s.mu released.
+	// Install into s.conns BEFORE the "registered" ack: the client may redial
+	// the instant it sees the ack, and ack-first ordering let a fast reconnect
+	// be overwritten by the stale handler ("online but invisible", #2458).
+	// Invariant: s.conns[id] is the conn that most recently reached this point;
+	// it closes the previous owner, whose deregister/rollback paths see
+	// owns == false and touch nothing. Lock order: s.mu → ReverseConn.closeMu;
+	// no callback runs under s.mu.
 	s.mu.Lock()
 	old, displaced := s.conns[msg.NodeID]
 	if displaced {
@@ -463,14 +332,9 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.conns[msg.NodeID] = rc
 	s.mu.Unlock()
 
-	// abortAck rolls the insert back when the ack cannot be delivered. Only
-	// remove the entry if it is still ours (identity check — a newer conn may
-	// already have displaced us, in which case it owns the id and we must not
-	// evict it). When we displaced an old conn its deregister path was
-	// suppressed by that same identity check, so the upper layer still holds
-	// the old (now closed) conn: emit OnDeregister on its behalf so a dead
-	// conn is never left registered. When nothing was displaced OnRegister
-	// never fired for this id and no deregister is owed.
+	// abortAck rolls the insert back (identity-checked: a newer conn may own
+	// the id). If we displaced an old conn, its own deregister was suppressed
+	// by that check, so emit OnDeregister on its behalf.
 	abortAck := func() {
 		s.mu.Lock()
 		owns := s.conns[msg.NodeID] == rc
@@ -488,11 +352,8 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.testHookBeforeAck(rc)
 	}
 
-	// Bound the register response write so a slow-read attacker can't
-	// park this goroutine indefinitely at the TCP window.
-	// newReverseConnWithMeta applies 10s per write thereafter; this
-	// pre-handoff write needs the same protection. If SetWriteDeadline fails (conn closed mid-handshake),
-	// abort before WriteJSON would block deadline-less on a dead socket.
+	// Bounded so a slow-read attacker cannot park this goroutine at the TCP
+	// window; a failed SetWriteDeadline means the conn is already dead.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		abortAck()
 		return
@@ -501,71 +362,47 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		abortAck()
 		return
 	}
-	// R183-GO-M1: clearing the write deadline can only fail on a broken /
-	// half-closed socket. Silently dropping the error mirrors a bug fixed
-	// symmetrically at line 144/155 for SetReadDeadline (R182-GO-P1-1):
-	// per-write deadline resets in newReverseConnWithMeta's writePump also fail,
-	// and without a deadline, a subsequent WriteJSON on this conn can
-	// block until TCP keepalive expires (minutes). Treat failure as
-	// "connection unusable", tear down, and bail.
+	// Clearing the deadline only fails on a broken socket, and a later
+	// WriteJSON on it could block until TCP keepalive expires.
 	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 		slog.Debug("ws-node: clear write deadline failed", "err", err)
 		abortAck()
 		return
 	}
 
-	// R181-SEC-P2-1: authenticated node_id matched a config key, but those
-	// keys are never run through truncateLabelUTF8 on load — an operator
-	// typo in config.yaml with a bidi/C1/newline char would reach slog
-	// attrs verbatim. Symmetric with the auth-failed path and cheap.
+	// Config keys are never sanitized on load; an operator typo with bidi/C1
+	// bytes must not reach slog verbatim.
 	safeNodeID := truncateLabelUTF8(msg.NodeID, 64)
-	// R212-ARCH-402: WARN (fires first, before the Info below) when the
-	// remote advertises capability tags outside this binary's known set.
-	// Pure observability — the node is still registered normally.
+	// Observability only — the node is still registered normally.
 	logUnknownCaps(safeNodeID, msg.Capabilities)
 
-	// If a newer conn displaced us between the insert and here, it has (or
-	// will have) called OnRegister itself and already closed rc; skipping
-	// avoids handing the upper layer a dead conn after the live one.
+	// A newer conn that displaced us already owns OnRegister and closed rc.
 	s.mu.RLock()
 	stillOwns := s.conns[msg.NodeID] == rc
 	s.mu.RUnlock()
 	if !stillOwns {
 		slog.Debug("reverse node superseded before register", "node_id", safeNodeID, "ip", ip)
 	} else {
-		// RNEW-SEC-006: symmetric with the auth-failed path above — log
-		// r.Host so operators can correlate registered nodes with the
-		// Host header they came in on.
+		// r.Host correlates registered nodes with the Host header they used.
 		slog.Info("reverse node registered",
 			"node_id", safeNodeID,
 			"ip", ip,
 			"host", osutil.SanitizeForLog(r.Host, 256))
 	}
 	if stillOwns && s.OnRegister != nil {
-		// msg.NodeID is kept verbatim here so downstream state
-		// (`s.conns[msg.NodeID]`, Server.nodes, knownNodes) is keyed with
-		// the authenticated-config id; OnDeregister below must pass the
-		// same value so the map entries round-trip correctly. Sanitizing
-		// only the slog.Info label (safeNodeID above) matches R181-SEC-P2-1.
+		// Verbatim msg.NodeID: downstream maps are keyed by the config id and
+		// OnDeregister must pass the same value.
 		s.OnRegister(msg.NodeID, rc)
 	}
 
 	go rc.readLoop()
 
-	// Wait for disconnect, then deregister
 	go func() {
 		<-rc.done
 		s.mu.Lock()
-		// R20260605B-CORR-14: only this connection's deregister may tear
-		// down shared state. On a quick reconnect under the same node_id,
-		// the registration handler closes the old conn, installs the NEW
-		// rc into s.conns, and calls OnRegister(new). The old conn's done
-		// channel then unblocks here. If OnDeregister(old) ran
-		// unconditionally it could race-win after OnRegister(new) and wipe
-		// the freshly reconnected, live node from Server.nodes + purge its
-		// cache, leaving it invisible until a full disconnect/reconnect.
-		// Gate the side effect with the same ownership check as the map
-		// delete so a stale deregister of a replaced conn is a no-op.
+		// Only the current owner may tear down shared state: a stale
+		// deregister of a replaced conn would wipe the freshly reconnected
+		// live node from Server.nodes until the next full reconnect.
 		owns := s.conns[msg.NodeID] == rc
 		if owns {
 			delete(s.conns, msg.NodeID)
@@ -576,7 +413,6 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.OnDeregister(msg.NodeID)
 		}
 	}()
-	// ServeHTTP returns; rc.readLoop keeps the WS alive on its own goroutine.
 }
 
 // AllNodes returns all configured node IDs mapped to their display names.

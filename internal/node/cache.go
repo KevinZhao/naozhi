@@ -19,11 +19,8 @@ type CacheManager struct {
 	getNodes func() map[string]Conn // returns snapshot of active nodes under lock
 	onChange func()                 // called after cache update (e.g. BroadcastSessionsUpdate)
 
-	// baseCtx is the parent context for per-refresh RPC timeouts so a
-	// graceful shutdown cancels in-flight FetchSessions/FetchProjects/
-	// FetchDiscovered calls instead of letting them run for another 5s
-	// past app teardown. Set once by StartLoop; RefreshAll/RefreshFor
-	// derive child timeouts from it.
+	// baseCtx parents per-refresh RPC timeouts so shutdown cancels in-flight
+	// fetches; set once by StartLoop.
 	baseCtx context.Context
 }
 
@@ -47,7 +44,6 @@ func (m *CacheManager) StartLoop(ctx context.Context) {
 	m.baseCtx = ctx
 	m.mu.Unlock()
 
-	// Eager first fetch in background (no-op if no nodes yet)
 	go m.RefreshAll()
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -63,10 +59,8 @@ func (m *CacheManager) StartLoop(ctx context.Context) {
 	}()
 }
 
-// refreshCtx returns a per-RPC timeout derived from the app lifecycle context
-// when StartLoop has been called, or from Background otherwise (bootstrap /
-// tests). Graceful shutdown therefore cancels in-flight fetches rather than
-// letting them run for another 5s after app teardown.
+// refreshCtx returns a per-RPC timeout derived from baseCtx when set, else
+// Background (bootstrap / tests).
 func (m *CacheManager) refreshCtx(timeout time.Duration) (context.Context, context.CancelFunc) {
 	m.mu.RLock()
 	parent := m.baseCtx
@@ -126,11 +120,8 @@ func (m *CacheManager) RefreshAll() {
 	newDiscovered := make(map[string][]map[string]any, len(nodesCopy))
 	newStatus := make(map[string]string, len(nodesCopy))
 
-	// Snapshot current cache so transient FetchSessions errors preserve the
-	// node's last-known sessions/projects/discovered instead of dropping them
-	// (matching RefreshFor's per-key preserve-on-error behavior). Without this,
-	// rebuilding the maps from scratch and skipping failed nodes would erase a
-	// node's data from the dashboard until the next successful refresh.
+	// Snapshot so a transient fetch error preserves the node's last-known data
+	// instead of erasing it from the dashboard until the next success.
 	m.mu.RLock()
 	prevSessions := m.sessions
 	prevProjects := m.projects
@@ -158,12 +149,8 @@ func (m *CacheManager) RefreshAll() {
 			rs["node"] = res.nodeID
 		}
 		newSessions[res.nodeID] = res.sessions
-		// projects/discovered are fetched by independent RPCs that can fail
-		// while sessions succeeds. Only overwrite on success; otherwise
-		// preserve the node's last-known cache (matching RefreshFor's
-		// per-field preserve-on-error behavior) so a transient
-		// /api/projects or /api/discovered failure doesn't blank the
-		// dashboard's sub-items every 10s tick.
+		// projects/discovered are independent RPCs; preserve last-known on
+		// failure so a transient error does not blank the sub-items.
 		if res.projErr == nil {
 			for _, rp := range res.projects {
 				rp["node"] = res.nodeID
@@ -232,13 +219,9 @@ func (m *CacheManager) RefreshFor(id string) {
 		status = "error"
 	}
 
-	// Only update successfully-fetched data; preserve existing cache on
-	// transient errors (matching RefreshAll's continue-on-error behavior).
-	//
-	// Copy-on-write: clone the current map, mutate the clone, then swap the
-	// field reference. Published maps are never mutated in place, so the
-	// getters (Sessions/Projects/Discovered) can hand out the live reference
-	// without a per-call full-map copy and readers still iterate race-free.
+	// Preserve existing cache on transient errors. Copy-on-write: published
+	// maps are never mutated in place, so the getters hand out the live
+	// reference and readers iterate race-free.
 	m.mu.Lock()
 	if sessErr == nil {
 		for _, rs := range sessions {
@@ -266,9 +249,8 @@ func (m *CacheManager) RefreshFor(id string) {
 	}
 }
 
-// PurgeNode removes all cached data for a node and marks it as error.
-// Called when a reverse-connected node disconnects. Copy-on-write so the
-// published maps stay immutable (see RefreshFor).
+// PurgeNode removes all cached data for a node and marks it as error
+// (copy-on-write, see RefreshFor).
 func (m *CacheManager) PurgeNode(id string) {
 	m.mu.Lock()
 	m.sessions = cloneDeleteSlice(m.sessions, id)
@@ -278,12 +260,9 @@ func (m *CacheManager) PurgeNode(id string) {
 	m.mu.Unlock()
 }
 
-// Sessions returns the cached sessions and node status maps.
-//
-// RefreshAll/RefreshFor/PurgeNode publish maps copy-on-write and never mutate
-// them in place afterwards, so callers may iterate the returned maps directly
-// without holding the lock and without a defensive copy. They MUST treat the
-// returned maps (and their slices/inner maps) as read-only.
+// Sessions returns the cached sessions and node status maps. Published
+// copy-on-write, so callers may iterate without the lock but MUST treat the
+// maps (and their slices/inner maps) as read-only.
 func (m *CacheManager) Sessions() (map[string][]map[string]any, map[string]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -304,8 +283,7 @@ func (m *CacheManager) Discovered() map[string][]map[string]any {
 	return m.discovered
 }
 
-// cloneSetSlice returns a copy of src with key=val set. src is left untouched
-// so any previously-published reference remains valid and immutable.
+// cloneSetSlice returns a copy of src with key=val set; src stays untouched.
 func cloneSetSlice(src map[string][]map[string]any, key string, val []map[string]any) map[string][]map[string]any {
 	dst := make(map[string][]map[string]any, len(src)+1)
 	for k, v := range src {

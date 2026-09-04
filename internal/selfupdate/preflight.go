@@ -1,14 +1,7 @@
-// preflight.go — "can this deployment actually apply an update?"
-//
-// The dashboard must not render a button that is guaranteed to fail. The
-// classic case is a binary owned by root in /usr/local/bin while the service
-// runs as an unprivileged user: Replace() cannot write there, so the honest UI
-// is "run `sudo naozhi upgrade`" rather than a button that always errors.
-//
-// This is ADVISORY, not a gate. It is inherently TOCTOU — permissions can
-// change between the check and the apply — so the authoritative error handling
-// stays on Replace()'s return value. Preflight exists to shape the UI, and a
-// positive result is not a promise of success.
+// preflight.go — "can this deployment actually apply an update?" so the
+// dashboard never renders a button guaranteed to fail (e.g. root-owned
+// binary, unprivileged service). ADVISORY only and inherently TOCTOU: the
+// authoritative error handling stays on Replace()'s return value.
 package selfupdate
 
 import (
@@ -27,44 +20,28 @@ type Preflight struct {
 	Reason   string
 }
 
-// preflightTTL caches the filesystem probe. The dashboard polls this endpoint
-// on a timer; without a cache every poll from every open browser would create
-// and delete a file in the install directory.
+// preflightTTL caches the filesystem probe so every browser poll does not
+// create and delete a file in the install directory.
 const preflightTTL = 60 * time.Second
 
-// probePattern is deliberately DIFFERENT from Replace()'s
-// `.naozhi-upgrade-*.staging`. Sharing the pattern would put a probe file in
-// the namespace a real concurrent install is using — and any future
-// "clean up stale staging files" sweep would treat the other's file as debris.
+// probePattern deliberately differs from Replace()'s staging pattern so a
+// stale-staging sweep never treats a probe (or vice versa) as debris.
 const probePattern = ".naozhi-writeprobe-*"
 
 var (
 	preflightMu     sync.Mutex
 	preflightCached *Preflight
 	preflightAt     time.Time
-	// preflightNow is indirected for tests that need to age the cache without
-	// sleeping. Tests that swap it must not run in parallel, matching the
-	// systemdUnitActive convention in this package.
+	// preflightNow is indirected so tests can age the cache; tests that swap
+	// it must not run in parallel.
 	preflightNow = time.Now
 )
 
-// CheckPreflight evaluates applicability for the given action. Results are
-// cached for preflightTTL, keyed by nothing — the inputs (platform, install
-// dir permissions) are process-global.
-//
-// The `action` argument matters because the blocking conditions differ: an
-// ActionRestart needs a manageable service but does NOT need a writable
-// install directory (no bytes are written), while ActionInstall needs the
-// directory and does not strictly need a running service.
-//
-// `serviceRunning` is passed IN rather than probed here, and the reason is cost,
-// not style: on darwin ServiceRunning() shells out to `launchctl list`, and
-// every caller already needs that same fact for its own response. Probing it
-// here as well made the status endpoint fork three times per poll (this gate,
-// the response's restart_supported field, and RollbackHint) for one answer that
-// cannot change between them. Note it must stay a live read at the CALL site —
-// caching it would make a just-installed launchd job invisible for a TTL, which
-// on the POST path means refusing an apply that would in fact work.
+// CheckPreflight evaluates applicability for action; the action-independent
+// probes are cached for preflightTTL. ActionRestart needs a manageable
+// service but no writable dir; ActionInstall needs the dir. serviceRunning is
+// passed in (a launchctl fork on darwin the caller already paid for) and must
+// stay a live read at the call site so a just-installed job is not hidden for a TTL.
 func CheckPreflight(action Action, current string, serviceRunning bool) Preflight {
 	if action == ActionNone {
 		return Preflight{CanApply: false, Reason: ""}
@@ -73,9 +50,8 @@ func CheckPreflight(action Action, current string, serviceRunning bool) Prefligh
 	preflightMu.Lock()
 	defer preflightMu.Unlock()
 	if preflightCached != nil && preflightNow().Sub(preflightAt) < preflightTTL {
-		// The cached entry covers the expensive, action-independent probes.
-		// Re-evaluate the action-specific gate below so switching from
-		// staged→install inside one TTL window cannot serve a stale verdict.
+		// The action-specific gate is re-evaluated so a staged→install switch
+		// inside one TTL cannot serve a stale verdict.
 		if p := actionGate(action, serviceRunning); !p.CanApply {
 			return p
 		}
@@ -98,8 +74,6 @@ func CheckPreflight(action Action, current string, serviceRunning bool) Prefligh
 func actionGate(action Action, serviceRunning bool) Preflight {
 	switch action {
 	case ActionRestart:
-		// Staged binary + no service we can drive = the operator has to
-		// restart the process themselves. Nothing is broken; say so plainly.
 		if !serviceRunning {
 			return Preflight{
 				CanApply: false,
@@ -121,8 +95,6 @@ func actionGate(action Action, serviceRunning bool) Preflight {
 
 // computePreflight runs the action-independent checks.
 func computePreflight(current string) Preflight {
-	// A dev build has no released tag to compare against and replacing it
-	// would silently discard a local build — the same rule checkOnce applies.
 	if current == "dev" || current == "" {
 		return Preflight{
 			CanApply: false,
@@ -148,13 +120,8 @@ func installDir() string {
 	return filepath.Dir(p)
 }
 
-// writableInstallDir probes the install directory the same way Replace() will
-// use it: create a file, then remove it.
-//
-// This is a real create rather than a permission-bit inspection (unix.Access
-// or a FileMode check) on purpose — those miss read-only mounts, macOS SIP,
-// and ACLs that deny write despite permissive mode bits. The probe is the only
-// thing that answers the actual question.
+// writableInstallDir probes by creating and removing a file, not by inspecting
+// mode bits — those miss read-only mounts, macOS SIP and ACLs.
 func writableInstallDir() bool {
 	dir := installDir()
 	if dir == "" {
@@ -170,17 +137,14 @@ func writableInstallDir() bool {
 	return true
 }
 
-// invalidatePreflight drops the cache. Called after an apply attempt so a
-// permission change made in response to a failure is picked up immediately
-// instead of after the TTL.
+// invalidatePreflight drops the cache after an apply attempt so a permission
+// fix is picked up immediately.
 func invalidatePreflight() {
 	preflightMu.Lock()
 	preflightCached = nil
 	preflightMu.Unlock()
 }
 
-// InvalidatePreflightCache is invalidatePreflight for callers outside this
-// package. The cache key ignores `current` (in production it never changes), so
-// a test that evaluates preflight for one version would otherwise leak its
-// verdict into the next — call this between cases.
+// InvalidatePreflightCache is invalidatePreflight for other packages' tests:
+// the cache ignores `current`, so verdicts would otherwise leak between cases.
 func InvalidatePreflightCache() { invalidatePreflight() }

@@ -11,16 +11,9 @@ import (
 	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
-// newUpdateChecker builds the auto-update checker without starting it. It
-// bridges config + the platform map into the platform-agnostic
-// selfupdate.Checker via a best-effort NotifyFunc.
-//
-// Construction is separate from launch because the dashboard needs the same
-// Checker instance the background loop uses: the HTTP layer holds it to fill
-// the cold-start window (Checker.CheckNow), and `status` is the object both
-// sides communicate through. Building it here — before the server — is what
-// lets one pointer reach both. Returns nil when the config is unusable, so
-// callers can pass the result straight through.
+// newUpdateChecker builds the auto-update checker without starting it, so the
+// same instance reaches both the HTTP layer (Checker.CheckNow) and the
+// background loop. Returns nil when the config is unusable.
 func newUpdateChecker(ctx context.Context, cfg *config.Config, platforms map[string]platform.Platform, status *selfupdate.Status) *selfupdate.Checker {
 	return selfupdate.NewChecker(selfupdate.CheckerConfig{
 		CurrentVersion: version,
@@ -56,8 +49,7 @@ func updateNotifyFunc(ctx context.Context, cfg *config.Config, platforms map[str
 			slog.Warn("auto-update notify: platform not found", "platform", plat)
 			return
 		}
-		// Bound the delivery so a wedged platform call can't pin the
-		// checker goroutine; independent of the parent check cycle ctx.
+		// Bounded so a wedged platform call cannot pin the checker goroutine.
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if _, err := platform.ReplyWithRetry(sendCtx, p, platform.OutgoingMessage{

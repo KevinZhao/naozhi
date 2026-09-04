@@ -1,21 +1,6 @@
 // cron_router_adapter.go translates between session.* and cron.* types so
-// internal/cron does not need to import internal/session.
-//
-// R260528-ARCH-23 (#1382): this adapter previously lived in cmd/naozhi, which
-// made the dependency seam upside-down — wireup.SchedulersDeps already imports
-// both internal/cron and internal/session (it carries Router *session.Router)
-// and forwards a caller-built cron.SessionRouter into cron.NewScheduler, yet
-// the adapter implementing that interface sat one layer ABOVE wireup in main.
-// cmd/naozhi therefore had to name cron.SessionRouter and hand-build the
-// adapter purely to feed wireup. Moving the adapter here (the layer that
-// already knows both type universes) lets wireup build it internally from
-// deps.Router, so main no longer references cron.SessionRouter at all and the
-// arrow points down: main → wireup → {cron, session}.
-//
-// The original "cron must NOT import session" invariant (cron-sysession-merge
-// RFC §3.3.3 Phase B) is preserved — cron still sees only cron-local types
-// (cron.AgentOpts / cron.Session / cron.SessionStatus / cron.InterruptOutcome);
-// wireup is the seam that owns the translation.
+// internal/cron never imports internal/session; wireup is the seam that knows
+// both type universes (main → wireup → {cron, session}).
 
 package wireup
 
@@ -27,12 +12,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Compile-time ordinal pins (R20260604-ARCH-8): if cron.* and session.*
-// iota values diverge the expressions below evaluate to a non-zero int, which
-// when cast to uint produces a large value that overflows uintptr on 32-bit or
-// becomes a giant constant on 64-bit — either way the compiler rejects it.
-// Cost: zero runtime overhead; catches iota reorders before any binary is built.
-// The init() panic below stays as a double guard for dynamic-link edge cases.
+// Compile-time ordinal pins: if cron.* and session.* iota values diverge the
+// difference is non-zero and the uint conversion of a negative constant fails
+// to compile. The init() panic below is a second guard.
 const (
 	// InterruptOutcome (5 values)
 	_ = uint(int(cron.InterruptSent) - int(session.InterruptSent))               // compile-time pin: diverge → negative → uint overflow
@@ -46,19 +28,9 @@ const (
 	_ = uint(int(cron.SessionNew) - int(session.SessionNew))           // compile-time pin
 )
 
-// init pins cron.InterruptOutcome ordinals against session.InterruptOutcome.
-// Diverging values would silently miscast in cronSessionAdapter.
-// InterruptViaControl below; init() panic crashes the binary at boot instead.
-// Panic message includes actual ordinals so on-call can diagnose without
-// re-running.
-//
-// R260528-GO-18: also pin cron.SessionStatus against session.SessionStatus.
-// GetOrCreate below does cron.SessionStatus(int(st)) without any value guard,
-// so a future iota reorder on either side would silently misreport the
-// session-creation kind to dispatcher run-history without test coverage
-// catching it. Production telemetry on inflight broadcasts also keys off this
-// value, so a panic-at-boot pin is the right level of protection. Cheap (a few
-// int compares at init).
+// init pins cron.InterruptOutcome / cron.SessionStatus ordinals against their
+// session counterparts: the adapters below cast by int without a value guard,
+// so divergence would silently miscast. Panic at boot with the actual ordinals.
 func init() {
 	if int(cron.InterruptSent) != int(session.InterruptSent) ||
 		int(cron.InterruptNoSession) != int(session.InterruptNoSession) ||
@@ -95,21 +67,13 @@ func init() {
 type cronRouterAdapter struct{ r *session.Router }
 
 // newCronRouterAdapter wraps a live *session.Router as a cron.SessionRouter.
-// WireSchedulers calls this from deps.Router so callers (cmd/naozhi) never
-// need to name cron.SessionRouter themselves. R260528-ARCH-23 (#1382).
 func newCronRouterAdapter(r *session.Router) cron.SessionRouter {
 	return cronRouterAdapter{r: r}
 }
 
-// Compile-time guard: cronRouterAdapter must satisfy cron.SessionRouter.
-// If cron.SessionRouter gains a method, this assertion makes the breakage land
-// here — next to the implementation — instead of at the distant NewScheduler
-// call site that takes a SessionRouter interface value.
+// Compile-time guards so method-set drift lands here, next to the adapters.
 var _ cron.SessionRouter = cronRouterAdapter{}
 
-// Compile-time guard: cronSessionAdapter must satisfy cron.Session
-// (Send + SessionID + InterruptViaControl). Catches drift if the cron.Session
-// method set expands but the adapter forgets to forward.
 var _ cron.Session = cronSessionAdapter{}
 
 func (a cronRouterAdapter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {
@@ -126,21 +90,12 @@ func (a cronRouterAdapter) GetOrCreate(ctx context.Context, key string, opts cro
 	return cronSessionAdapter{sess}, cron.SessionStatus(int(st)), nil
 }
 
-// toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts.
-//
-// ExtraArgs is cloned (not aliased) per session/router_lifecycle.go:267
-// contract: "callers populating AgentOpts to feed the router should treat
-// ExtraArgs as owned exclusively by them — do NOT keep aliases to slices held
-// by other goroutines (R215-ARCH-P2-8 / R37-CONCUR1)".
+// toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is
+// cloned: the router treats AgentOpts.ExtraArgs as exclusively owned.
 func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
-	// AccessProfile is intentionally NOT propagated here. Cron jobs run in the
-	// cron: exempt namespace and do NOT carry an access profile in this
-	// release — they spawn on the global settings.json baseline. Per RFC
-	// project-access-profile P1-b, cron × access-profile is out of scope for
-	// PR-B: cron.Job has no AccessProfile field, and resume-lock would freeze
-	// a first-run profile permanently with no cron-side UI to change it. A
-	// personal-account cron running on the company Bedrock default is the
-	// mis-charge this omission avoids until cron gets an explicit profile field.
+	// AccessProfile is intentionally NOT propagated: cron.Job has no profile
+	// field and resume-lock would freeze a first-run profile with no cron-side
+	// UI to change it, risking a mis-charge (RFC project-access-profile P1-b).
 	out := session.AgentOpts{
 		Model:        o.Model,
 		Workspace:    o.Workspace,
@@ -156,9 +111,7 @@ func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
 }
 
 // cronSessionAdapter wraps *session.ManagedSession behind the narrow
-// cron.Session contract (Send + SessionID + InterruptViaControl). cron does
-// not use attachments or per-turn event callbacks; passing nil/nil to Send
-// matches what cron has always done.
+// cron.Session contract; cron uses no attachments or per-turn callbacks.
 type cronSessionAdapter struct{ s *session.ManagedSession }
 
 func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendResult, error) {
@@ -166,16 +119,12 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	if r == nil {
 		return cron.SendResult{}, err
 	}
-	// R202606e-ARCH-1 (#2280): carry CostUSD across the cron boundary so
-	// local (non-sandbox) runs persist their cost instead of always 0.
+	// CostUSD crosses the boundary so local runs persist their cost (#2280).
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID, CostUSD: r.CostUSD}, err
 }
 
-// SessionID forwards to *session.ManagedSession.SessionID so the cron inflight
-// broadcast can fill in the running CLI session id mid-Send. Mirrors
-// fix(cron) #766 (commits 53981bf2 / 49bf32de). Like Send and
-// InterruptViaControl, this method assumes c.s is non-nil; the adapter is
-// always constructed with a live ManagedSession.
+// SessionID lets the cron inflight broadcast fill in the CLI session id
+// mid-Send. Assumes c.s is non-nil (always constructed with a live session).
 func (c cronSessionAdapter) SessionID() string {
 	return c.s.SessionID()
 }

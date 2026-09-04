@@ -1,11 +1,5 @@
-// File: main_upstream.go
-//
-// R237-ARCH-8 (#590): the upstream connector's Discover/Preview callbacks
-// were inline closures in main(). They are pure given (claudeDir, router,
-// projectMgr) and carry non-trivial fallback logic (empty-slice-on-error so
-// the connector never forwards a nil JSON payload, plus project-workspace
-// backfill). Lifting them to named constructors makes that logic unit-
-// testable without booting the upstream connector and trims main()'s body.
+// Upstream connector Discover/Preview callbacks, as named constructors so the
+// empty-slice-on-error and project-backfill logic is unit-testable.
 package main
 
 import (
@@ -17,12 +11,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// newUpstreamDiscoverFunc builds the connector's session-discovery callback.
-// It scans claudeDir excluding naozhi-managed pids/sessions/cwds, backfills
-// each discovered session's Project via projectMgr (when configured), and
-// always returns a non-nil JSON array — on scan error it marshals an empty
-// array rather than surfacing the error to the connector, matching the
-// original main() behavior.
+// newUpstreamDiscoverFunc builds the connector's session-discovery callback:
+// scans claudeDir minus naozhi-managed pids/sessions/cwds, backfills Project
+// via projectMgr, and always returns a non-nil JSON array (empty on scan error).
 func newUpstreamDiscoverFunc(claudeDir string, router *session.Router, projectMgr *project.Manager) func() (json.RawMessage, error) {
 	return func() (json.RawMessage, error) {
 		pids, sids, cwds := router.ManagedExcludeSets()
@@ -47,10 +38,8 @@ func newUpstreamDiscoverFunc(claudeDir string, router *session.Router, projectMg
 	}
 }
 
-// newUpstreamPreviewFunc builds the connector's history-preview callback.
-// Loads the session's transcript from claudeDir and always returns a
-// non-nil JSON array — empty on load error or nil result — so the connector
-// never forwards a null payload. R237-ARCH-8 (#590).
+// newUpstreamPreviewFunc builds the connector's history-preview callback; it
+// always returns a non-nil JSON array so the connector never forwards null.
 func newUpstreamPreviewFunc(claudeDir string) func(sessionID string) (json.RawMessage, error) {
 	return func(sessionID string) (json.RawMessage, error) {
 		entries, err := discovery.LoadHistory(claudeDir, sessionID, "")

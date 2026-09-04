@@ -17,10 +17,8 @@ import (
 
 const (
 	systemdUnitPath = "/etc/systemd/system/naozhi.service"
-	// systemdUnitBackupSuffix is appended to systemdUnitPath to form the
-	// rollback target. Kept next to the unit (not /tmp) so a crashing
-	// installer leaves the evidence in the canonical place operators
-	// check first. Cleared on successful install.
+	// systemdUnitBackupSuffix forms the rollback target next to the unit (not
+	// /tmp) so a crashing installer leaves evidence where operators look first.
 	systemdUnitBackupSuffix = ".naozhi-install.bak"
 )
 
@@ -36,30 +34,19 @@ func launchdPlistPath() string {
 // Under sudo, it returns the original invoking user.
 func serviceUser() (user, home string) {
 	if su := os.Getenv("SUDO_USER"); su != "" {
-		// POSIX login.defs LOGIN_NAME_MAX is 256; reject longer to bound argv/env growth.
+		// LOGIN_NAME_MAX is 256; bound argv/env growth.
 		if len(su) > 256 {
 			fatalf("SUDO_USER too long: %d bytes", len(su))
 		}
-		// Validate username format to prevent injection into systemd unit files.
+		// Prevents injection into systemd unit files.
 		for _, c := range su {
 			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
 				fatalf("SUDO_USER contains invalid characters: %q", su)
 			}
 		}
 		user = su
-		// Resolve home via os/user.Lookup so the install path does not
-		// depend on a `getent` binary being present on PATH and does
-		// not pay the fork+exec round-trip every install/uninstall
-		// cycle. os/user falls through nsswitch.conf entries on glibc
-		// hosts (compat -> files -> sssd -> ldap -> ...), so it
-		// already covers the LDAP/SSSD-only home directories that
-		// motivated the original getent shellout. (#391)
-		//
-		// Fallback to /home/<su> mirrors the prior behaviour: a
-		// Lookup failure (su not in any nsswitch backend, or a pure
-		// container with only minimal /etc/passwd entries) keeps the
-		// installer functional rather than aborting on the most
-		// common deployment path.
+		// os/user.Lookup walks nsswitch (files/sssd/ldap) without a getent
+		// shellout (#391); /home/<su> fallback keeps minimal containers working.
 		if u, err := osuser.Lookup(su); err == nil && u.HomeDir != "" {
 			home = u.HomeDir
 		}
@@ -81,11 +68,8 @@ func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
 	dryRun := fs.Bool("dry-run", false, "print what would change without writing unit file or invoking systemctl")
-	// -force overrides the idempotency shortcut that skips daemon-reload
-	// when the rendered unit matches the on-disk unit. Use when the unit
-	// file was hand-edited and must be restored, or when you want to
-	// re-run daemon-reload + restart after a binary swap with no unit
-	// churn. Orthogonal to -dry-run (the pair prints the forced plan).
+	// -force bypasses the unchanged-unit shortcut (hand-edited unit, or
+	// restart after a binary swap); orthogonal to -dry-run.
 	force := fs.Bool("force", false, "rewrite unit file and restart even if nothing changed (systemd only)")
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse install args: %v", err)
@@ -108,7 +92,7 @@ func runInstall(args []string) {
 	if err != nil {
 		fatalf("find binary path: %v", err)
 	}
-	// EvalSymlinks 失败时回退到原始路径（典型场景：binary 通过非符号链接路径运行）
+	// EvalSymlinks 失败时回退到原始路径
 	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
 		binary = resolved
 	}
@@ -186,7 +170,6 @@ func installLaunchd(binary, configPath string) {
 		fatalf("create LaunchAgents dir: %v", err)
 	}
 
-	// Unload existing if present (ignore errors).
 	if _, err := os.Stat(plistPath); err == nil {
 		_ = run("launchctl", "unload", plistPath)
 	}

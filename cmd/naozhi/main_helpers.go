@@ -1,22 +1,5 @@
-// File: main_helpers.go
-//
-// Phase 5-prep / R-cmd-main-helpers-extract (2026-05-28):
-// 把 main.go 后段的 lifecycle helpers 抽到独立文件。**纯物理切分，
-// 逐字保留原代码、零行为变化**。
-//
-// 抽出的内容（按 origin/master main.go line 1036-1335 原貌）：
-//   - initPlatforms              IM 平台 adapter 构造（CQ1 #396 testability）
-//   - parseDurationOrDefault     字符串 → time.Duration（带默认）
-//   - parseBytesOrDefault        "50MB" → int64（带默认）
-//   - stateDirWarnMB const       ~/.naozhi 软上限
-//   - warnIfStateDirLarge        启动期磁盘占用预警
-//   - chatIDSuffix               日志-only chat ID 截断 helper
-//   - logWebhookEndpoints        启动期 webhook URL 打印
-//   - buildSysessionManager      sysession.Manager 构造（含 Runner / Daemons 配置）
-//
-// 与 main_init.go (CQ1 #396) / main_claude_settings.go 同款 main_*.go
-// 切分模式：抽 main() 中 lifecycle 主线之外的 helper 出去。同包可见性
-// 让 main() caller 零改动。
+// main() 之外的 lifecycle helpers：平台 adapter 构造、解析 helper、磁盘预警、
+// sysession.Manager 构造。
 package main
 
 import (
@@ -43,12 +26,8 @@ import (
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
-// initPlatforms wires each configured IM platform adapter into a map.
-// Extracted from main() for testability + readability (CQ1). Callers
-// still own lifecycle — initPlatforms neither starts goroutines nor
-// touches globals; it just constructs the adapters and returns them.
-// The transcribe service is threaded through so Feishu can accept voice
-// messages; other adapters do not need it today.
+// initPlatforms constructs each configured IM platform adapter; it starts no
+// goroutines and touches no globals. stt lets Feishu accept voice messages.
 func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platform.Platform, error) {
 	platforms := make(map[string]platform.Platform)
 	if cfg.Platforms.Feishu != nil {
@@ -133,7 +112,7 @@ func parseBytesOrDefault(s string, def int64) int64 {
 }
 
 // stateDirWarnMB is the soft ceiling for ~/.naozhi/ total size; see
-// docs/ops/disk-budget.md. RNEW-OPS-415 tracks quota enforcement.
+// docs/ops/disk-budget.md.
 const stateDirWarnMB = 500
 
 // warnIfStateDirLarge walks stateDir once at startup and warns if total
@@ -159,9 +138,7 @@ func warnIfStateDirLarge(stateDir string) {
 }
 
 // chatIDSuffix returns the last 8 characters of a chat ID for logging,
-// prefixed with "…" so a grep on full IDs does not match. Empty input
-// returns an empty string. Kept local to this file since it is log-only
-// and does not need to round-trip.
+// prefixed with "…" so a grep on full IDs does not match.
 func chatIDSuffix(id string) string {
 	if id == "" {
 		return ""
@@ -172,9 +149,8 @@ func chatIDSuffix(id string) string {
 	return "…" + id[len(id)-8:]
 }
 
-// logWebhookEndpoints prints a one-line summary of the webhook URLs operators
-// need to paste into the IM vendor console. Platforms that do not expose a
-// webhook route (e.g. feishu websocket mode) are skipped.
+// logWebhookEndpoints logs the webhook URLs operators paste into the IM vendor
+// console; platforms without a webhook route (feishu websocket mode) are skipped.
 func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platform) {
 	addr := cfg.Server.Addr
 	if strings.HasPrefix(addr, ":") {
@@ -187,7 +163,7 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 				slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/feishu", "addr", addr)
 			}
 		case "slack":
-			// slack events api + socket mode: route is only exposed when not using socket mode
+			// Route is only exposed when not using socket mode.
 			if cfg.Platforms.Slack != nil && cfg.Platforms.Slack.AppToken == "" {
 				slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/slack", "addr", addr)
 			}
@@ -197,12 +173,10 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 	}
 }
 
-// workspaceRootLister unions the attachment-gc daemon's workspace-root
-// sources — router default + per-chat overrides, and bound project
-// paths — then normalises (abs + EvalSymlinks) and dedupes so the same
-// directory reached via two strings is swept once
-// (docs/rfc/attachment-gc-daemon.md §4.4 E1/E2). Either source may be
-// nil (e.g. projects disabled); the lister copes.
+// workspaceRootLister unions the attachment-gc daemon's workspace roots
+// (router default + per-chat overrides, bound project paths), normalised and
+// deduped so one directory reached via two strings is swept once. Either
+// source may be nil (docs/rfc/attachment-gc-daemon.md §4.4).
 type workspaceRootLister struct {
 	router     *session.Router
 	projectMgr *project.Manager
@@ -221,9 +195,8 @@ func (l workspaceRootLister) KnownWorkspaceRoots() []string {
 			}
 		}
 	}
-	// Normalise + dedupe. EvalSymlinks collapses symlink/.. aliases to a
-	// canonical path; failures (dir absent) fall back to the abs form so
-	// a not-yet-created root is still swept once it exists.
+	// EvalSymlinks failures (dir absent) fall back to the abs form so a
+	// not-yet-created root is still swept once it exists.
 	seen := make(map[string]struct{}, len(raw))
 	out := make([]string, 0, len(raw))
 	for _, p := range raw {
@@ -246,32 +219,11 @@ func (l workspaceRootLister) KnownWorkspaceRoots() []string {
 	return out
 }
 
-// buildSysessionManager wires sysession.Manager from cfg.Sysession.
-//
-// Returns (nil, nil) when the framework is disabled — that's the
-// happy path for deployments that don't want background daemons yet.
-//
-// Returns (nil, err) when enabled but unusable (e.g. work dir cannot
-// be chmodded 0700, default backend has no binary path).  Caller
-// should log the error and proceed without daemons rather than
-// aborting startup — sysession is opt-in infrastructure, not a
-// release-critical path.
-//
-// Run-lifecycle telemetry is wired post-construction via
-// Manager.SetTelemetry (server routes), routed through the shared
-// runtelemetry.Broadcaster seam (#1723); the dashboard reads also fall
-// back to polling /api/system/daemons.
 // sysSessionsWorkDir resolves the cwd for all naozhi-internal one-off CLI
-// invocations (sysession daemons + the image-orient vision runner): explicit
-// config override first, then a sibling of sessions.json
-// (= dataDir/sys-sessions/). Empty storePath means the operator opted out of
-// state persistence; fall back to ~/.naozhi to keep the directory under user
-// control.
-//
-// Both consumers MUST share this directory: it is the SkipWorkspace filter
-// target in the history panel, so any session whose JSONL lands here is
-// hidden. A vision runner pointed at the user workspace root would leak its
-// transcripts (and orientation-prompt fragments) into the history list.
+// invocations (sysession daemons + image-orient vision runner): config
+// override, else dataDir/sys-sessions/, else ~/.naozhi/sys-sessions. Both
+// consumers MUST share it — it is the history panel's SkipWorkspace filter
+// target, so JSONLs landing anywhere else leak into the history list.
 func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	if wd := osutil.ExpandHome(cfg.Sysession.Runner.WorkDir); wd != "" {
 		return wd
@@ -284,28 +236,23 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	return filepath.Join(base, "sys-sessions")
 }
 
+// buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns
+// (nil, "", nil) when disabled so the caller's nil guard stays meaningful, and
+// (nil, "", err) when enabled but unusable — the caller logs and continues
+// without daemons. Telemetry is wired later via Manager.SetTelemetry (#1723).
 func buildSysessionManager(cfg *config.Config, router *session.Router,
 	projectMgr *project.Manager, defaultWrapper *cli.Wrapper, storePath string,
 ) (*sysession.Manager, string, error) {
 	if !cfg.Sysession.Enabled {
-		// Return nil rather than a no-op Manager so the caller's nil
-		// guard is meaningful — main.go's Start/Stop loops both check
-		// `if sysMgr != nil`, and a stubbed always-non-nil result would
-		// turn that into dead code.
 		return nil, "", nil
 	}
 
-	// Resolve work dir via the shared helper so the image-orient vision
-	// runner (cmd/naozhi/main.go) lands its JSONLs in the SAME directory.
-	// That directory is also the SkipWorkspace filter target, so both
-	// daemon and vision sessions are hidden from the history panel.
 	resolvedWorkDir, err := sysession.EnsureWorkDir(sysSessionsWorkDir(cfg, storePath))
 	if err != nil {
 		return nil, "", fmt.Errorf("ensure sys-sessions dir: %w", err)
 	}
 
-	// Startup sweep — non-fatal; a busted directory should not block
-	// daemon startup.  Default 7 days when unset; "0" disables.
+	// Startup sweep is non-fatal. Default 7 days when unset; "0" disables.
 	jsonlMaxAge := 7 * 24 * time.Hour
 	if v := cfg.Sysession.Runner.JSONLMaxAge; v != "" {
 		parsed, err := time.ParseDuration(v)
@@ -319,7 +266,6 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		slog.Warn("sysession: startup sweep failed", "err", err, "dir", resolvedWorkDir)
 	}
 
-	// Build Runner from the default backend's binary.
 	binPath := ""
 	if defaultWrapper != nil {
 		binPath = defaultWrapper.CLIPath
@@ -328,14 +274,9 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		BinPath: binPath,
 		WorkDir: resolvedWorkDir,
 		Model:   cfg.Sysession.Runner.Model,
-		// claude -p needs the same Bedrock / Anthropic / proxy plumbing
-		// the main session-spawn path uses (applyClaudeEnvSettings
-		// pre-populated naozhi's own os.Environ from
-		// ~/.claude/settings.json at startup).  Trailing underscore =
-		// prefix match, see internal/sysession/env.go's filterEnv.
-		// AWS_ is bounded by the same denylist filterClaudeEnv uses for
-		// the parent — auth-source vars never make it into naozhi's
-		// env in the first place.
+		// Same Bedrock/Anthropic/proxy plumbing as session spawns. Trailing
+		// underscore = prefix match. AWS_ auth-source vars never reach naozhi's
+		// env in the first place (filterClaudeEnv denylist).
 		EnvAllowlist: []string{
 			"ANTHROPIC_",
 			"CLAUDE_",
@@ -358,7 +299,6 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		}
 	}
 
-	// Translate per-daemon configs.
 	daemons := make(map[string]sysession.DaemonRuntimeConfig, len(cfg.Sysession.Daemons))
 	for name, dcfg := range cfg.Sysession.Daemons {
 		tick := 30 * time.Second
@@ -418,9 +358,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			specific["dry_run"] = true
 		}
 
-		// Tick floor for the low-frequency attachment-gc sweeper: a
-		// misconfigured short tick would re-walk every attachment dir
-		// continuously. GC is fine running hourly at most.
+		// A short tick would re-walk every attachment dir continuously.
 		if name == sysession.DaemonAttachmentGC && tick < sysession.AttachmentGCMinTick {
 			slog.Warn("sysession: attachment-gc tick below floor; clamping",
 				"requested", tick, "floor", sysession.AttachmentGCMinTick)
@@ -441,10 +379,8 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		Runner:      runner,
 		Router:      router,
 		Daemons:     daemons,
-		// attachment-gc daemon sweeps these roots (router default +
-		// overrides ∪ project paths). nil-safe inside the lister.
+		// attachment-gc sweeps these roots; nil-safe inside the lister.
 		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
-		// Run-lifecycle telemetry is wired via Manager.SetTelemetry (#1723).
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new manager: %w", err)
@@ -452,11 +388,9 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	return mgr, resolvedWorkDir, nil
 }
 
-// absConfigPath resolves the -config flag value to an absolute path so the
-// access-profile create endpoint writes to a stable target even if the process
-// cwd differs from the invocation dir. Falls back to the original value if
-// resolution fails so behaviour never regresses to empty (which would disable
-// the endpoint). RFC project-access-profile P1-d.
+// absConfigPath resolves the -config flag to an absolute path so the
+// access-profile create endpoint writes to a stable target; falls back to the
+// original value rather than "" (which would disable the endpoint).
 func absConfigPath(p string) string {
 	if p == "" {
 		return ""
@@ -467,14 +401,10 @@ func absConfigPath(p string) string {
 	return p
 }
 
-// buildAccessProfiles translates the config.AccessProfile registry into the
-// session-layer view (RFC project-access-profile). The session package must not
-// import config, so the cmd wiring owns this translation. Returns nil for an
-// empty/absent map so the router keeps every session on the global baseline
-// (legacy behaviour). The env map is copied verbatim — *_FILE references are
-// expanded lazily at spawn time by the session layer, and every entry is
-// re-gated by the shim's filterShimEnv, so no validation is duplicated here
-// (validateConfig already rejected malformed profiles at load).
+// buildAccessProfiles translates config.AccessProfile into the session-layer
+// view (session must not import config). Nil for an empty map keeps every
+// session on the global baseline. Env is copied verbatim: *_FILE expands at
+// spawn time and the shim's filterShimEnv re-gates every entry.
 func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.AccessProfile {
 	if len(in) == 0 {
 		return nil

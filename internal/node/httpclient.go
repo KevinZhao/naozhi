@@ -26,52 +26,37 @@ type HTTPClient struct {
 	displayName string
 	httpClient  *http.Client
 
-	// urlErr is non-nil when the configured URL failed validatePeerURL at
-	// construction (bad scheme, no host, or link-local/IMDS target). doRequest
-	// short-circuits on it so a Bearer-token-carrying request never leaves the
-	// host toward an unvalidated/unsafe target. R20260601-SEC-2 (#1548).
+	// urlErr is non-nil when the URL failed validatePeerURL; doRequest
+	// short-circuits so a bearer-token request never leaves toward an
+	// unvalidated target (#1548).
 	urlErr error
 
-	// localPeer is true when the cleaned peer URL points at a loopback or
-	// RFC1918/ULA private literal IP. Those targets are intentionally allowed
-	// (documented multi-node loopback bridging / private-LAN topology), but a
-	// config-write attacker could repoint the URL at a co-located internal
-	// service (Redis 6379, Elasticsearch 9200, Docker 2375) and use the
-	// Bearer-token-carrying request body as an SSRF write primitive. doRequest
-	// caps the request body for such peers so the body can't be stuffed with a
-	// bulk exfil/inject payload. R20260606-SEC-5 (#1825).
+	// localPeer marks a loopback / private literal-IP peer. Allowed (documented
+	// LAN topology), but a config-write attacker could repoint it at a
+	// co-located service (Redis 6379, Elasticsearch 9200, Docker 2375) and use
+	// the request body as an SSRF write primitive, so doRequest caps the body
+	// for such peers (#1825).
 	localPeer bool
 
 	relayMu sync.Mutex
 	relay   *wsRelay
 }
 
-// maxLocalPeerBodyBytes caps the request body sent to a loopback/private peer
-// (#1825). Every real naozhi proxy payload (send text, takeover, session
-// label, project config update) is small JSON well under this bound; the cap
-// only bites a config-write attacker trying to push a large body into a
-// co-located internal service. Public peers are uncapped — the cap is purely
-// an SSRF-write blast-radius reduction for the always-allowed local ranges.
+// maxLocalPeerBodyBytes caps request bodies to loopback/private peers; real
+// proxy payloads are small JSON, public peers stay uncapped (#1825).
 const maxLocalPeerBodyBytes = 1 << 20 // 1 MiB
 
-// NewHTTPClient creates an HTTPClient with a 10s timeout. The peer URL is
-// screened by validatePeerURL: an http/https absolute URL whose host is not
-// link-local is accepted (loopback + RFC1918 are allowed for local/LAN
-// multi-node bridging). An invalid/unsafe URL does not panic — it is recorded
-// and every request via this client fails cleanly with that error, so a
-// tampered config cannot turn the dashboard token into an SSRF probe.
+// NewHTTPClient creates an HTTPClient with a 10s timeout. An invalid/unsafe
+// peer URL (validatePeerURL) does not panic: it is recorded and every request
+// fails cleanly, so a tampered config cannot turn the token into an SSRF probe.
 func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
 	cleanURL, urlErr := validatePeerURL(rawURL)
 	if urlErr != nil {
-		// Preserve the operator-supplied string for diagnostics/RemoteAddr,
-		// but doRequest will refuse to use it.
+		// Kept for diagnostics/RemoteAddr only; doRequest refuses to use it.
 		cleanURL = strings.TrimSpace(rawURL)
 		slog.Error("node peer URL rejected; client disabled",
 			"node", id, "url", rawURL, "err", urlErr)
 	}
-	// Classify loopback/private targets only when the URL validated — a
-	// rejected URL is already refused wholesale by doRequest's urlErr gate,
-	// and cleanURL then holds the raw operator string (not a clean base).
 	localPeer := urlErr == nil && isLocalPeerURL(cleanURL)
 	return &HTTPClient{
 		ID:          id,
@@ -86,23 +71,14 @@ func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
 				MaxIdleConns:        30,
 				MaxIdleConnsPerHost: 6,
 				IdleConnTimeout:     90 * time.Second,
-				// R20260603-SEC-2 (#1677): screen the *resolved* IP before
-				// opening TCP. validatePeerURL only sees the config string;
-				// a DNS hostname that resolves to 169.254.169.254 (IMDS) or
-				// another link-local address (DNS rebinding) would otherwise
-				// carry the dashboard Bearer token to the metadata service.
+				// Screens the RESOLVED IP: a hostname rebinding to IMDS would
+				// otherwise carry the bearer token there (#1677).
 				DialContext: safeDialContext,
-				// Pin a minimum TLS version so a future Go toolchain change
-				// or GODEBUG override cannot silently accept TLS 1.0/1.1.
+				// Pin the TLS floor.
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 			},
-			// R249-SEC-1: every doRequest attaches the dashboard Bearer token,
-			// so a 3xx response from a compromised peer (or DNS/MITM) could
-			// redirect the request — token and all — at IMDS or another
-			// internal address. Mirror the slack/feishu/discord/weixin
-			// hardening: surface the redirect to the caller via
-			// ErrUseLastResponse so the request fails cleanly instead of
-			// auto-following with credentials.
+			// A 3xx from a compromised peer must not redirect the bearer token
+			// to IMDS or an internal address.
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -118,13 +94,7 @@ func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io
 	if err != nil {
 		return nil, err
 	}
-	// R20260606-SEC-5 (#1825): for loopback/private peers, refuse to send a
-	// body larger than maxLocalPeerBodyBytes before the Bearer token leaves
-	// the host. All callers pass *bytes.Reader, so http.NewRequestWithContext
-	// has already populated req.ContentLength with the exact body length; this
-	// bounds an SSRF-write attempt (config-write attacker repointing the peer
-	// URL at a co-located internal service) without truncating legitimate
-	// small-JSON proxy payloads. Public peers stay uncapped.
+	// All callers pass *bytes.Reader, so ContentLength is exact here.
 	if n.localPeer && req.ContentLength > maxLocalPeerBodyBytes {
 		return nil, fmt.Errorf("node %s: request body %d bytes exceeds %d-byte cap for loopback/private peer (SSRF-write guard)",
 			n.ID, req.ContentLength, maxLocalPeerBodyBytes)
@@ -267,11 +237,8 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 	return result, nil
 }
 
-// FetchBackends fetches the remote node's CLI backend manifest via
-// GET /api/cli/backends and relays it verbatim as raw JSON (see the
-// NodeFetcher.FetchBackends contract). A non-200 (including 404 from a peer
-// that predates the endpoint) surfaces as an error so the caller degrades
-// to the local manifest.
+// FetchBackends relays GET /api/cli/backends verbatim as raw JSON (see
+// NodeFetcher.FetchBackends); any non-200 (incl. an older peer's 404) is an error.
 func (n *HTTPClient) FetchBackends(ctx context.Context) (json.RawMessage, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, "/api/cli/backends", nil)
 	if err != nil {
@@ -284,15 +251,11 @@ func (n *HTTPClient) FetchBackends(ctx context.Context) (json.RawMessage, error)
 		return nil, fmt.Errorf("fetch backends from %s: status %d", n.ID, resp.StatusCode)
 	}
 
-	// Bound the relayed body: the manifest is a handful of backends, well
-	// under 1 MiB. Cap matches the other Fetch* helpers.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read backends from %s: %w", n.ID, err)
 	}
-	// Validate it is well-formed JSON before relaying — a compromised or
-	// buggy peer must not let us stream arbitrary bytes to the dashboard
-	// under an application/json content type.
+	// A compromised peer must not stream arbitrary bytes to the dashboard as JSON.
 	if !json.Valid(raw) {
 		return nil, fmt.Errorf("fetch backends from %s: malformed JSON body", n.ID)
 	}
@@ -395,14 +358,8 @@ func (n *HTTPClient) ProxyRemoveSession(ctx context.Context, key string) (bool, 
 	}
 }
 
-// ProxySetSessionLabel forwards PATCH /api/sessions/label to the remote node.
-// Mirrors ProxyRemoveSession: (true, nil) on 200, (false, nil) on 404, and
-// (false, err) on any other response or transport failure. Older peers that do
-// not register the /api/sessions/label route will respond with 404 at the HTTP
-// layer, indistinguishable from "session not found" — this matches the
-// behavior of the other direct-HTTP proxy methods and is acceptable since the
-// primary "upgrade needed" surface is the reverse-RPC transport where peer
-// capability is known ahead of time.
+// ProxySetSessionLabel forwards PATCH /api/sessions/label: (true, nil) on 200,
+// (false, nil) on 404 (also what an older peer without the route returns).
 func (n *HTTPClient) ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error) {
 	data, err := json.Marshal(map[string]string{"key": key, "label": label})
 	if err != nil {
@@ -474,20 +431,9 @@ func (n *HTTPClient) DisplayName() string { return n.displayName }
 func (n *HTTPClient) Status() string      { return "ok" }
 func (n *HTTPClient) RemoteAddr() string  { return n.URL }
 
-// Meta returns a NodeMeta with no capabilities advertised. HTTPClient
-// peers (pull-mode, primary→peer HTTP) predate the capability
-// negotiation surface; the only safe default is "advertise nothing"
-// which makes selectNodeForBackend deny any backend whose
-// RequiredNodeCaps is non-empty (kiro). claude (RequiredNodeCaps==nil)
-// continues to dispatch to HTTPClient peers because HasCap returns
-// true for an empty cap query — preserving legacy single-backend
-// behaviour exactly.
-//
-// We allocate a fresh NodeMeta per call rather than caching one on the
-// receiver because HTTPClient is the cold path (legacy deployments)
-// and the savings would be invisible against the HTTP RPC cost. Tests
-// that need a cap-aware HTTPClient stub can wrap this and override
-// Meta themselves.
+// Meta returns a NodeMeta advertising no capabilities: pull-mode peers have
+// no negotiation surface, so backends with RequiredNodeCaps are denied while
+// claude (nil caps) still dispatches. Allocated per call (cold path).
 func (n *HTTPClient) Meta() *NodeMeta {
 	return &NodeMeta{
 		NodeID:      n.ID,
@@ -514,8 +460,7 @@ func (n *HTTPClient) Unsubscribe(c EventSink, key string) {
 	}
 }
 
-// RefreshSubscription is a no-op for HTTP nodes. The wsRelay polls events
-// via HTTP, so there is no persistent subscription to refresh.
+// RefreshSubscription is a no-op for HTTP nodes.
 func (n *HTTPClient) RefreshSubscription(key string) {}
 
 func (n *HTTPClient) RemoveClient(c EventSink) {

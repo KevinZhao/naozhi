@@ -33,42 +33,28 @@ type wsRelay struct {
 	connReady chan struct{}          // non-nil while a dial is in progress; closed when done
 	subs      map[string][]EventSink // remote session key -> local clients
 	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
-	// remoteDropped marks keys whose remote-side subscription the primary
-	// has discarded (it pushed session_state{reason:"subscription_timeout"}
-	// after its 60s resubscribeEvents window). r.subs[key] is still populated
-	// — the browsers are told and re-subscribe on the next running broadcast
-	// — so without this marker Subscribe would take the alreadySubscribed
-	// branch, hand back one HTTP history page and never rebuild the remote
-	// WS subscription; every later event for the key would be lost. The
-	// marker is single-shot: the next Subscribe on the key re-sends
-	// `subscribe` and clears it. (#2421 review F1)
+	// remoteDropped marks keys whose remote subscription the primary discarded
+	// (session_state{reason:"subscription_timeout"}) while r.subs[key] is still
+	// populated; without it Subscribe would take the alreadySubscribed branch
+	// and never rebuild the remote subscription. Single-shot: the next
+	// Subscribe re-sends `subscribe` and clears it (#2421).
 	remoteDropped map[string]bool
 	done          chan struct{}
 	closed        bool
-	// R190-LEAK-M1 / R188-CONC-H1: baseCtx unifies cancellation of in-flight
-	// sendHistoryToClient RPCs. Close() fires baseCancel so FetchEvents
-	// unwinds without needing a per-call watcher goroutine. Mirrors the
-	// pattern established in ReverseConn (reverseconn.go:103).
+	// baseCtx unifies cancellation of in-flight sendHistoryToClient RPCs;
+	// Close() fires baseCancel so FetchEvents unwinds without a watcher goroutine.
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
-	// wg tracks goroutines dispatched from Subscribe's second-subscriber
-	// path (sendHistoryToClient). R184-CONC-M1: without this, Close() can
-	// return while a history fetch is still in flight; its ctx is linked
-	// to r.done and cancels promptly, but SendJSON to the EventSink after
-	// Close relies on the sink's non-blocking semantics. Registering the
-	// goroutine and waiting in Close() future-proofs against any EventSink
-	// implementation change to blocking semantics.
+	// wg tracks sendHistoryToClient goroutines so Close() never returns while
+	// a history fetch could still SendJSON to a sink.
 	wg sync.WaitGroup
-	// reconnecting gates re-entrant reconnect loops. R184-CONC-H1:
-	// without this, a writeJSON failure inside a reconnect() resubscribe
-	// would close the conn, trigger readLoop's deferred reconnect, and
-	// spawn a second reconnect goroutine that runs concurrently with
-	// the first — producing duplicate `subscribe` frames on the remote.
+	// reconnecting gates re-entrant reconnect loops: a writeJSON failure inside
+	// a resubscribe closes the conn and readLoop's defer would otherwise spawn
+	// a second concurrent reconnect (duplicate `subscribe` frames).
 	reconnecting atomic.Bool
 }
 
 func newWSRelay(node *HTTPClient) *wsRelay {
-	// Pre-compute the JSON field injection bytes once per relay.
 	nodeJSON, _ := json.Marshal(node.ID)
 	nodeField := []byte(`"node":` + string(nodeJSON) + `,`)
 	baseCtx, baseCancel := context.WithCancel(context.Background())
@@ -99,31 +85,21 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 		return
 	}
 	alreadySubscribed := len(r.subs[key]) > 0
-	// Same client re-subscribing (re-click / recovery after the remote
-	// dropped us): keep exactly one entry. (#2421 review F1)
+	// Same client re-subscribing keeps exactly one entry.
 	if !containsSink(r.subs[key], c) {
 		r.subs[key] = append(r.subs[key], c)
 	}
-	// The remote told us it discarded this key's subscription; whoever
-	// re-subscribes first rebuilds it over the WS instead of taking the
-	// history-only branch. Clear the marker here so the rebuild happens
-	// once — later same-key subscribers go back to the HTTP history page.
+	// Whoever re-subscribes first after a remote drop rebuilds the WS
+	// subscription; clear the marker so the rebuild happens once.
 	rebuildRemote := alreadySubscribed && r.remoteDropped[key]
 	delete(r.remoteDropped, key)
-	// R184-REL-M2: seed r.lastEvent[key] with the caller's `after` on
-	// first subscribe. Without this, a racing reconnect() that snapshots
-	// r.subs/r.lastEvent between our append here and the server's first
-	// forwarded event would see lastEvent[key] = 0 and resend
-	// subscribe(key, after=0), causing the server to replay the entire
-	// session history and the browser to see duplicate events. Second
-	// and later subscribers go through sendHistoryToClient for their
-	// own initial backfill; they must not regress the seed because a
-	// smaller `after` here would reopen the same replay window.
+	// Seed lastEvent on first subscribe, or a reconnect() racing before the
+	// first forwarded event would resend after=0 and replay full history.
+	// Later subscribers must not regress the seed.
 	if !alreadySubscribed {
 		r.lastEvent[key] = after
 	}
-	// R184-CONC-M1: wg.Add under r.mu so Close() observing r.closed=true
-	// is guaranteed to see our Add; Close() sets r.closed before Wait().
+	// wg.Add under r.mu so a Close() that sees r.closed also sees the Add.
 	historyOnly := alreadySubscribed && !rebuildRemote
 	if historyOnly {
 		r.wg.Add(1)
@@ -131,16 +107,12 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	r.mu.Unlock()
 
 	if historyOnly {
-		// Key already subscribed on remote; send history via HTTP to just this client
 		go r.sendHistoryToClient(c, key, after)
 		return
 	}
 
-	// First subscriber for this key — or the remote discarded the shared
-	// subscription (subscription_timeout) and this is the rebuild: subscribe
-	// on the remote WS. The remote answers with `subscribed` + an Initial
-	// history frame, which readLoop fans out to every local subscriber of
-	// the key, so the rebuilding client gets its opening page from there.
+	// First subscriber or remote rebuild: the remote answers with `subscribed`
+	// + an Initial history frame that readLoop fans out to every local subscriber.
 	r.writeJSON(ClientMsg{Type: "subscribe", Key: key, After: after})
 }
 
@@ -191,19 +163,14 @@ func (r *wsRelay) Close() {
 	r.remoteDropped = make(map[string]bool)
 	r.mu.Unlock()
 
-	// R190-LEAK-M1: cancel baseCtx so any in-flight FetchEvents inside
-	// sendHistoryToClient unwinds immediately. This replaces the per-call
-	// watcher goroutine (see sendHistoryToClient below).
+	// Unwinds any in-flight FetchEvents inside sendHistoryToClient.
 	r.baseCancel()
 
 	if conn != nil {
 		conn.Close()
 	}
 
-	// R184-CONC-M1: wait for sendHistoryToClient goroutines to exit. Their
-	// FetchEvents ctx is linked to r.done (closed above) so they abort
-	// within milliseconds of HTTP cancellation; bounded by the 5s request
-	// timeout in the worst case.
+	// Bounded by the 5s request timeout in the worst case.
 	r.wg.Wait()
 }
 
@@ -224,9 +191,7 @@ func (r *wsRelay) ensureConnected() error {
 		<-ch
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		// Close() may have raced with the dial and torn down the relay while
-		// still observing a freshly stored conn; bail rather than hand a
-		// caller a conn on a relay being shut down. [R202606f-GO-002]
+		// Close() may have raced the dial; never hand out a conn on a closed relay.
 		if r.closed {
 			return fmt.Errorf("relay closed")
 		}
@@ -235,7 +200,6 @@ func (r *wsRelay) ensureConnected() error {
 		}
 		return fmt.Errorf("connection attempt failed")
 	}
-	// We are the dialer.
 	r.connReady = make(chan struct{})
 	r.mu.Unlock()
 
@@ -250,17 +214,13 @@ func (r *wsRelay) ensureConnected() error {
 }
 
 func (r *wsRelay) connect() error {
-	// R20260601-SEC-2 (#1548): the relay dials n.URL as ws://wss:// and writes
-	// the dashboard token over it — the same SSRF surface doRequest guards. If
-	// the peer URL failed validation at construction, refuse to dial so the
-	// token never goes to an unvalidated/link-local target.
+	// Same SSRF surface as doRequest: the dashboard token rides this dial, so
+	// never dial an unvalidated peer URL (#1548).
 	if r.node.urlErr != nil {
 		return fmt.Errorf("relay %s: refusing to dial unvalidated peer URL: %w", r.node.ID, r.node.urlErr)
 	}
-	// Use CutPrefix to avoid mid-URL mismatches: a host like
-	// "example.com/path-with-http://" would otherwise be mangled. Order
-	// matters — CutPrefix("https://") must come first since "http://" is
-	// also a prefix of "https://".
+	// Prefix match (not Replace) so a path containing "http://" is not mangled;
+	// https must be tested first.
 	var wsURL string
 	switch {
 	case strings.HasPrefix(r.node.URL, "https://"):
@@ -274,8 +234,7 @@ func (r *wsRelay) connect() error {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
-		// Pin TLS floor to 1.2; node-to-node traffic over wss:// must never
-		// accept legacy protocol versions regardless of Go default drift.
+		// Pin the TLS floor for node-to-node wss://.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	conn, _, err := dialer.Dial(wsURL, nil)
@@ -283,15 +242,12 @@ func (r *wsRelay) connect() error {
 		return fmt.Errorf("dial %s: %w", r.node.ID, err)
 	}
 
-	// Authenticate
 	if err := conn.WriteJSON(ClientMsg{Type: "auth", Token: r.node.Token}); err != nil {
 		conn.Close()
 		return fmt.Errorf("auth write %s: %w", r.node.ID, err)
 	}
 	var resp ServerMsg
-	// R184-IDIOM-L1: propagate SetReadDeadline errors (half-closed conn
-	// would otherwise stay in open-ended ReadJSON until TCP keepalive
-	// fires, matches R182-GO-P1-1 / R183-GO-M1 pattern on the server side).
+	// A failed SetReadDeadline (half-closed conn) would leave ReadJSON open-ended.
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		conn.Close()
 		return fmt.Errorf("auth set read deadline %s: %w", r.node.ID, err)
@@ -302,10 +258,7 @@ func (r *wsRelay) connect() error {
 	}
 	if resp.Type != "auth_ok" {
 		conn.Close()
-		// R187-SEC-L1: resp.Error comes from a remote (semi-trusted) node
-		// and flows into slog.Warn via reconnect's err wrap. Bidi/C1/newline
-		// in this field could forge journald structured fields. Align with
-		// R183-SEC-H1 / R184-SEC-M1 sanitize-wire-input policy.
+		// resp.Error is remote-supplied and reaches slog via the err wrap.
 		return fmt.Errorf("auth failed %s: %s", r.node.ID, osutil.SanitizeForLog(resp.Error, 256))
 	}
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
@@ -313,24 +266,20 @@ func (r *wsRelay) connect() error {
 		return fmt.Errorf("auth clear read deadline %s: %w", r.node.ID, err)
 	}
 
-	// Detect silent disconnections (NAT timeout, crash without FIN/RST)
-	// via read deadline + pong handler, matching reverseconn.go pattern.
+	// Read deadline + pong handler detect silent disconnects (NAT timeout).
 	if err := conn.SetReadDeadline(time.Now().Add(relayReadTimeout)); err != nil {
 		conn.Close()
 		return fmt.Errorf("set live read deadline %s: %w", r.node.ID, err)
 	}
 	conn.SetPongHandler(func(string) error {
-		// Pong-path failures can only arise from a half-closed conn; the
-		// readLoop's next ReadMessage will observe the error, so swallow
-		// here rather than kill the handler and leave the flag dangling.
+		// A failure here surfaces on the next ReadMessage; nothing to do.
 		_ = conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
 		return nil
 	})
 
 	r.mu.Lock()
 	if r.conn != nil || r.closed {
-		// Another goroutine already connected, or Close() ran during our dial.
-		// Either way, drop this conn rather than store it and spawn goroutines.
+		// Lost the race to another dialer, or Close() ran mid-dial.
 		r.mu.Unlock()
 		conn.Close()
 		return nil
@@ -346,7 +295,6 @@ func (r *wsRelay) connect() error {
 func (r *wsRelay) readLoop(conn *websocket.Conn) {
 	defer func() {
 		r.mu.Lock()
-		// Only nil out if this is still the active connection
 		if r.conn == conn {
 			r.conn = nil
 		}
@@ -363,12 +311,8 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			return
 		default:
 		}
-		// R184-CONC-H1: singleflight gate. A writeJSON failure inside the
-		// current reconnect() path can call conn.Close() before that
-		// goroutine finishes its resubscribe loop, causing the very same
-		// readLoop defer to enqueue another reconnect. The CAS blocks the
-		// second enqueue; the primary reconnect() clears the flag when it
-		// exits (see reconnect()).
+		// Singleflight: the CAS blocks a second reconnect enqueued by this same
+		// defer while the primary reconnect() is still resubscribing.
 		if r.reconnecting.CompareAndSwap(false, true) {
 			go func() {
 				defer r.reconnecting.Store(false)
@@ -388,10 +332,8 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		if err != nil {
 			return
 		}
-		// R185-CONC-M1: on half-closed TCP, SetReadDeadline can fail; if we
-		// ignore the error the next ReadMessage may block forever and the
-		// ping/pong sanity loop is silently defeated. Fail the readLoop so
-		// the defer triggers reconnect instead. Mirrors connect()'s pattern.
+		// A failed SetReadDeadline would let the next ReadMessage block forever;
+		// fail the loop so the defer reconnects.
 		if err := conn.SetReadDeadline(time.Now().Add(relayReadTimeout)); err != nil {
 			return
 		}
@@ -400,18 +342,13 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 	}
 }
 
-// forwardEvent parses the routing header from a raw remote message, updates
-// lastEvent under r.mu, snapshots the subscriber list, and fans out SendRaw
-// OUTSIDE the lock.
-//
-// R202606b-GO-002 (#2187): EventSink.SendRaw carries no non-blocking contract;
-// fanning out under r.mu would let a slow/blocked sink stall every
-// Subscribe/Unsubscribe/RemoveClient/Close waiting on the lock. Mirrors
-// ReverseConn.broadcastToSubs — the pooled snapshot keeps steady-state fan-out
-// alloc-free.
+// forwardEvent parses the routing header, updates lastEvent under r.mu,
+// snapshots the subscribers and fans out SendRaw OUTSIDE the lock — SendRaw
+// has no non-blocking contract, so a slow sink must not stall every
+// Subscribe/Unsubscribe/Close (#2187).
 func (r *wsRelay) forwardEvent(data []byte) {
-	// Parse only the key and type for routing + lastEvent tracking.
-	// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.
+	// Only the routing fields are parsed; the node field is injected into the
+	// raw bytes instead of a full unmarshal+remarshal.
 	var header struct {
 		Type   string `json:"type"`
 		Key    string `json:"key"`
@@ -430,12 +367,8 @@ func (r *wsRelay) forwardEvent(data []byte) {
 		r.lastEvent[header.Key] = header.Event.Time
 	}
 	subs := r.subs[header.Key]
-	// The remote's resubscribeEvents gave up on this key and dropped OUR
-	// (the relay connection's) subscription — see wshub_eventpush.go. Mark it
-	// so the next Subscribe rebuilds the remote subscription instead of
-	// treating the key as still live. Only while someone local still holds
-	// the key: a timeout for an already-unsubscribed key has nothing to
-	// recover and must not grow the map. (#2421 review F1)
+	// The remote dropped OUR subscription for this key; mark it for rebuild,
+	// but only while a local subscriber still holds the key (no map growth).
 	if header.Type == "session_state" && header.Reason == "subscription_timeout" && len(subs) > 0 {
 		r.remoteDropped[header.Key] = true
 	}
@@ -453,58 +386,36 @@ func (r *wsRelay) forwardEvent(data []byte) {
 		c.SendRaw(tagged)
 	}
 
-	// Clear pointers so disconnected EventSinks can be GC'd instead of being
-	// pinned in the pooled backing array until the next Get replaces them.
+	// Clear pointers so disconnected sinks are not pinned by the pool.
 	for i := range clients {
 		clients[i] = nil
 	}
-	// Drop oversized snapshots so the pool never pins an arbitrarily large
-	// backing array after a brief subscriber spike.
+	// Never pool an arbitrarily large backing array after a subscriber spike.
 	if cap(clients) <= 256 {
 		*snapPtr = clients[:0]
 		subSnapPool.Put(snapPtr)
 	}
 }
 
-// nodeKeyProbe is the package-level pattern injectNodeField scans for to
-// decide whether a remote message already carries a "node" key. Hoisting it
-// out of the function body avoids a per-event []byte allocation on the relay
-// readLoop hot path (dozens of events/s/session). R202606f-PERF-002 (#2296).
+// nodeKeyProbe is package-level to avoid a per-event allocation on the hot path.
 var nodeKeyProbe = []byte(`"node":`)
 
-// injectNodeField inserts a pre-computed "node":"id", field into raw JSON bytes
-// without full decode/encode. JSON objects always start with '{'.
-// If the message already contains a "node" key, it is returned as-is to prevent
-// duplicate-key ambiguity across JSON parsers.
-//
-// Allocation note (R202606f-PERF-002 / #2296): the result buffer is freshly
-// allocated per call and is NOT pooled. The returned slice is handed to
-// wsClient.SendRaw, which enqueues it by reference into each subscriber's send
-// channel (no copy) and is consumed asynchronously by the client write pump.
-// The same buffer is therefore shared across all fan-out subscribers and stays
-// live until every send channel drains it, so there is no safe point to return
-// it to a sync.Pool. Pooling here would risk reusing a buffer still queued for
-// a slow client and corrupting its outbound frame.
+// injectNodeField inserts the pre-computed "node":"id", field into raw JSON
+// without a decode/encode; a message that already carries a "node" key is
+// returned as-is (duplicate keys resolve parser-defined). The result is NOT
+// pooled: SendRaw enqueues it by reference into every subscriber's send channel,
+// so there is no safe point to reuse the buffer.
 func injectNodeField(data, nodeField []byte) []byte {
 	if len(data) == 0 || data[0] != '{' {
 		return data
 	}
-	// Skip injection if the remote message already has a "node" key.
-	// Match `"node":` (with colon) to avoid false positives where "node" appears
-	// only as a value inside another field.
-	//
-	// Window size: scans the whole payload. A short peek-window (previously
-	// 256B) could miss the "node" key when it's encoded after a long session
-	// key or large event body, causing double-injection → duplicate-key JSON
-	// whose resolution is parser-defined (often last-wins, clobbering the
-	// real node ID). A Contains scan on a ~KB to multi-KB slice is O(n) but
-	// runs once per inbound message; the bytes package uses SIMD-friendly
-	// search, so the cost is negligible versus the correctness gain.
+	// Whole-payload scan (a short peek window missed keys after a long
+	// session key and double-injected); `"node":` with colon avoids matching a
+	// value.
 	if bytes.Contains(data, nodeKeyProbe) {
 		return data
 	}
-	// Guard: empty object "{}" — nodeField ends with ',' which would produce
-	// invalid JSON like {"node":"id",}. Strip the trailing comma instead.
+	// "{}": nodeField ends with ',' which would yield {"node":"id",}.
 	if len(data) == 2 {
 		result := make([]byte, 0, 1+len(nodeField)-1+1)
 		result = append(result, '{')
@@ -547,10 +458,8 @@ func (r *wsRelay) reconnect() {
 	maxBackoff := 30 * time.Second
 
 	for {
-		// Jitter the sleep so N relays reconnecting to the same primary after
-		// a restart don't all hit the listener at identical offsets. backoff
-		// itself keeps the doubling shape; jitter only scatters the wall-time
-		// a single attempt fires at.
+		// Jitter so N relays reconnecting after a primary restart do not hit
+		// the listener at identical offsets.
 		t := time.NewTimer(osutil.JitterBackoff(backoff))
 		select {
 		case <-r.done:
@@ -565,7 +474,7 @@ func (r *wsRelay) reconnect() {
 			continue
 		}
 
-		// Resubscribe to all active keys with last-seen timestamps
+		// Resubscribe every active key from its last-seen timestamp.
 		r.mu.Lock()
 		type resub struct {
 			key   string
@@ -577,22 +486,15 @@ func (r *wsRelay) reconnect() {
 				resubscribes = append(resubscribes, resub{key, r.lastEvent[key]})
 			}
 		}
-		// Every held key is re-subscribed below on the fresh connection, so
-		// no remote-side drop is outstanding any more.
+		// Every held key is re-subscribed below, so no remote drop is outstanding.
 		clear(r.remoteDropped)
 		r.mu.Unlock()
 
 		for _, e := range resubscribes {
 			r.writeJSON(ClientMsg{Type: "subscribe", Key: e.key, After: e.after})
 		}
-		// R185-REL-M1: detect Close() racing resubscribes. writeJSON's
-		// closed-guard silently returns when r.closed=true, so if Close()
-		// landed between the snapshot and the loop above, some (or all)
-		// subscribe frames never left the process — yet the reconnect
-		// would otherwise log a misleading "reconnected" INFO while the
-		// relay is already in a half-state (connected but no events flow
-		// to remote subscribers). Re-check closed here; on race, log
-		// WARN so operators see the half-state rather than a false success.
+		// writeJSON silently returns once r.closed, so a Close() racing the
+		// loop above would otherwise be reported as a false "reconnected".
 		r.mu.Lock()
 		stillOpen := !r.closed
 		connAlive := r.conn != nil
@@ -601,14 +503,9 @@ func (r *wsRelay) reconnect() {
 			slog.Warn("relay reconnect aborted by close", "node", r.node.ID, "keys", len(resubscribes))
 			return
 		}
-		// R20260605B-CORR-15: connect() spawns a fresh readLoop before this
-		// goroutine writes the resubscribe frames. If that new socket dies
-		// during the resubscribe window, its readLoop nils r.conn and tries
-		// to enqueue another reconnect via CompareAndSwap — but THIS goroutine
-		// still holds the reconnecting flag, so that enqueue is silently
-		// dropped. Returning here would clear the flag with no live conn and
-		// no scheduled retry, leaving the relay permanently disconnected.
-		// Detect the nilled conn and loop to redial instead of returning.
+		// If the new socket died during the resubscribe window its readLoop
+		// could not enqueue a reconnect (this goroutine holds the flag);
+		// returning would leave the relay permanently disconnected, so redial.
 		if !connAlive {
 			slog.Warn("relay reconnect: new conn died during resubscribe, retrying", "node", r.node.ID, "keys", len(resubscribes))
 			backoff = min(backoff*2, maxBackoff)
@@ -619,18 +516,14 @@ func (r *wsRelay) reconnect() {
 	}
 }
 
-// sendHistoryToClient runs in a goroutine launched from Subscribe's
-// second-subscriber path. The caller is responsible for wg.Add(1); this
-// function owns the matching wg.Done() via defer so exit paths are uniform.
+// sendHistoryToClient serves the second-subscriber path; the caller does
+// wg.Add(1) and this function owns the matching Done.
 func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 	defer r.wg.Done()
 
 	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
-	// R190-LEAK-M1: derive the 5s RPC timeout from baseCtx so Close() can
-	// cancel every in-flight fetch by calling baseCancel() — no per-RPC
-	// watcher goroutine needed. Mirrors ReverseConn.Subscribe pattern that
-	// already passed reverseconn_basectx_test.go contract tests.
+	// Derived from baseCtx so Close() cancels every in-flight fetch.
 	ctx, cancel := context.WithTimeout(r.baseCtx, 5*time.Second)
 	defer cancel()
 
@@ -656,9 +549,8 @@ func (r *wsRelay) writeJSON(v any) {
 	if conn == nil || closed {
 		return
 	}
-	// If SetWriteDeadline fails (conn half-closed), close and trigger
-	// reconnect rather than letting WriteJSON block deadline-less on a
-	// dead socket until TCP keepalive expires.
+	// A failed SetWriteDeadline means a half-closed conn: close to reconnect
+	// rather than let WriteJSON block until TCP keepalive expires.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		slog.Warn("relay set write deadline failed, closing connection for reconnect", "node", r.node.ID, "err", err)
 		conn.Close()

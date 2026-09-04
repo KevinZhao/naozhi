@@ -13,13 +13,11 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// accessProfileIDRe bounds a new profile id to the same identifier charset the
-// project layer accepts (alphanumeric + _-., 1-64, no leading dash). Keeps the
-// id safe as a YAML key, a session-record value, and a log attr.
+// accessProfileIDRe bounds a profile id to the project layer's identifier
+// charset so it is safe as a YAML key, session-record value and log attr.
 var accessProfileIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// ValidateAccessProfileID reports whether id is a well-formed access-profile
-// name. Exported so the create-endpoint can reject bad ids before any file I/O.
+// ValidateAccessProfileID reports whether id is a well-formed access-profile name.
 func ValidateAccessProfileID(id string) error {
 	if !accessProfileIDRe.MatchString(id) {
 		return fmt.Errorf("access profile id %q invalid (allowed: 1-64 chars A-Za-z0-9._-, no leading dash)", id)
@@ -27,13 +25,9 @@ func ValidateAccessProfileID(id string) error {
 	return nil
 }
 
-// WriteSecretFile writes secret content to path with 0600 perms, creating the
-// parent dir (0700) if needed, using an atomic write so a concurrent reader
-// never sees a truncated token. path must be absolute + traversal-free (the
-// caller derives it under a trusted secrets dir, never from client input). The
-// trailing newline is intentionally NOT added — resolveEnvOverlay trims
-// trailing newlines on read, so the round-trip is byte-stable either way.
-// RFC project-access-profile P1-d (token file selector auto-chmod 0600).
+// WriteSecretFile atomically writes secret content to path with 0600 perms
+// (parent dir 0700). path must be absolute and derived by the caller under a
+// trusted secrets dir, never from client input. No trailing newline is added.
 func WriteSecretFile(path, content string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("secret path must be absolute")
@@ -48,21 +42,11 @@ func WriteSecretFile(path, content string) error {
 	return nil
 }
 
-// AppendAccessProfile inserts a new access profile into the config.yaml at
-// configPath, preserving the rest of the document (comments, ordering, and
-// unrelated keys) via yaml.Node surgery. It:
-//
-//   - rejects an id that already exists (no silent overwrite of an operator's
-//     hand-written profile);
-//   - validates every env entry through envpolicy.ValidateOverlayEntry (the
-//     SAME leaf the load-time validator uses), so the create path can never
-//     persist a profile the load path would reject;
-//   - writes atomically with 0600 (config.yaml holds no plaintext secrets — the
-//     env uses *_FILE references — but it is still operator-private).
-//
-// It does NOT touch the live Router registry; the caller sequences
-// (validate → WriteSecretFile → AppendAccessProfile → Router.AddAccessProfile)
-// so disk is durable before memory changes. RFC project-access-profile P1-d.
+// AppendAccessProfile inserts a new access profile into config.yaml via
+// yaml.Node surgery (preserving comments/ordering). It rejects an existing id,
+// validates env through the same envpolicy leaf as load, and writes atomically
+// 0600. It does NOT touch the live Router; the caller sequences disk before
+// memory (validate → WriteSecretFile → AppendAccessProfile → Router.AddAccessProfile).
 func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 	if err := ValidateAccessProfileID(id); err != nil {
 		return err
@@ -117,13 +101,8 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 		return fmt.Errorf("close encoder: %w", err)
 	}
 
-	// Re-parse the produced bytes and re-run the access-profile validator on the
-	// result — a belt-and-braces guard that the node surgery produced a document
-	// the load path accepts. yaml.Unmarshal catches structural corruption;
-	// validateAccessProfiles re-checks every profile's env keys/values, default
-	// model, and backend references (the same leaf the load path runs), so a
-	// surgery bug that emitted, e.g., a malformed env value cannot reach disk.
-	// Fail BEFORE writing.
+	// Re-parse and re-validate the produced bytes BEFORE writing so a surgery
+	// bug cannot put a document on disk that the load path would reject.
 	var check Config
 	if err := yaml.Unmarshal(buf.Bytes(), &check); err != nil {
 		return fmt.Errorf("re-parse produced config: %w", err)
@@ -139,8 +118,7 @@ func AppendAccessProfile(configPath, id string, ap AccessProfile) error {
 }
 
 // accessProfileToYAML renders an AccessProfile as a YAML mapping node with a
-// stable key order (display_name, chip_color, default_model, default_backend,
-// env). Only non-empty fields are emitted so the written block stays tidy.
+// stable key order; only non-empty fields are emitted.
 func accessProfileToYAML(ap AccessProfile) *yaml.Node {
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	put := func(k, v string) {
@@ -191,8 +169,7 @@ func yamlChildMap(parent *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// sortStringsLocal is a tiny insertion sort to avoid importing sort for a
-// single ≤2-element key slice (env maps carry at most a handful of keys).
+// sortStringsLocal is a tiny insertion sort for the handful of env keys.
 func sortStringsLocal(s []string) {
 	for i := 1; i < len(s); i++ {
 		for j := i; j > 0 && s[j-1] > s[j]; j-- {

@@ -24,29 +24,13 @@ import (
 
 // Config is the top-level naozhi configuration loaded from config.yaml.
 //
-// "workspace" naming caveat (R216-CR-5 / R217-CR-6): three distinct
-// concepts share the word "workspace" across Go fields and YAML keys —
-// they are NOT interchangeable, do not refactor without checking all
-// three:
-//
-//  1. Config.Workspace (yaml:"workspace") — this naozhi instance's own
-//     identity (ID / display name); see WorkspaceConfig.
-//  2. Config.Workspaces (yaml:"workspaces") — REMOTE-NODES map, an alias
-//     of Config.Nodes used for cross-node IM bridging. Plural.
-//  3. SessionConfig.Workspace (yaml:"workspace" inside `session:`) — a
-//     deprecated alias for SessionConfig.CWD (default cwd for spawned
-//     CLI processes). Single string, kept for backward compat.
-//
-// Consumers should read Workspace (1) for identity, Nodes (2) for the
-// remote-instance pool, and Session.CWD (3) for the spawn directory.
+// Three distinct concepts share the word "workspace" and are NOT
+// interchangeable: Config.Workspace (this instance's identity),
+// Config.Workspaces (remote-nodes map, alias of Nodes) and
+// SessionConfig.Workspace (deprecated alias of Session.CWD).
 type Config struct {
-	// SchemaVersion pins the config schema this file targets. Absent or 0 in
-	// older files is normalized to CurrentSchemaVersion by applyDefaults, so
-	// existing deployments keep loading unchanged. A future breaking change to
-	// the YAML shape bumps CurrentSchemaVersion and a migration pass can branch
-	// on the declared value. R243-ARCH-14 (#843): the config-side half of the
-	// config/v1 migration entry — establishes the version field that the
-	// sysession/scheduler/router migration logic will consult.
+	// SchemaVersion pins the config schema this file targets; absent/0 is
+	// normalized to CurrentSchemaVersion, newer than the binary is rejected.
 	SchemaVersion int `yaml:"schema_version,omitempty"`
 
 	Server        ServerConfig           `yaml:"server"`
@@ -55,46 +39,28 @@ type Config struct {
 	Platforms     PlatformConfigs        `yaml:"platforms"`
 	Agents        map[string]AgentConfig `yaml:"agents"`
 	AgentCommands map[string]string      `yaml:"agent_commands"`
-	// AccessProfiles are the named auth/upstream overlays a project or agent
-	// may reference by name (see AccessProfile). Empty in single-backend /
-	// single-auth deployments — those keep running on the global settings.json
-	// baseline unchanged. RFC project-access-profile.
+	// AccessProfiles are named auth/upstream overlays a project or agent may
+	// reference by name; empty keeps every session on the global settings.json
+	// baseline (RFC project-access-profile).
 	AccessProfiles map[string]AccessProfile `yaml:"access_profiles,omitempty"`
-	// DefaultAccessProfile names the access profile applied to any session that
-	// resolves to NO explicit profile (no per-request pick, no dashboard
-	// override, no project binding, no resume-locked prior profile). Empty =
-	// legacy behaviour (fall through to the global settings.json baseline). Set
-	// it to move provider selection entirely into the profile layer so
-	// ~/.claude/settings.json need not carry auth/upstream env. Must name a key
-	// present in AccessProfiles (validated at load). RFC project-access-profile.
+	// DefaultAccessProfile applies to any session with NO explicit profile
+	// (per-request, dashboard, project or resume-locked). Empty = global
+	// baseline. Must name a key in AccessProfiles (validated at load).
 	DefaultAccessProfile string `yaml:"default_access_profile,omitempty"`
-	// NaozhiSettings configures naozhi's own isolated Claude settings file (RFC
-	// naozhi-owned-settings-v3). Opt-in: when disabled (the default), naozhi
-	// keeps loading the operator's ~/.claude/settings.json via
-	// `--setting-sources user`, bit-identical to today. When enabled, naozhi
-	// spawns cc against a settings file it owns (seeded once from the local
-	// file, then decoupled) so it can be configured differently and survive a
-	// broken local file.
+	// NaozhiSettings opts in to a naozhi-owned isolated Claude settings file
+	// (seeded once from ~/.claude/settings.json, then decoupled); disabled keeps
+	// `--setting-sources user` (RFC naozhi-owned-settings-v3).
 	NaozhiSettings NaozhiSettingsConfig `yaml:"naozhi_settings,omitempty"`
 
-	// Nodes and Workspaces are two accepted YAML spellings for the same
-	// concept — the set of remote naozhi instances this node polls. Nodes is
-	// the legacy key; Workspaces is the preferred name. Consumers read from
-	// cfg.Nodes; after Load (or an explicit cfg.Normalize() call) both maps
-	// point to the same entries. Tests that build a Config literal directly
-	// MUST call cfg.Normalize() before handing it to downstream code, or
-	// validateConfig / main.go will silently skip the entries set only on
-	// Workspaces. R71-ARCH-L1.
-	//
-	// NOT to be confused with Config.Workspace (singular, this-instance
-	// identity) or Session.Workspace (deprecated CWD alias). See the
-	// Config godoc above.
+	// Nodes (legacy key) and Workspaces (preferred) are two spellings of the
+	// remote-instance map. Consumers read cfg.Nodes; Normalize() (called by
+	// Load) makes both point at the same entries — a Config literal built in
+	// tests MUST call it too or Workspaces-only entries are silently skipped.
 	Nodes        map[string]NodeConfig       `yaml:"nodes"`
 	Workspaces   map[string]NodeConfig       `yaml:"workspaces"`
 	ReverseNodes map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
 	Upstream     *UpstreamConfig             `yaml:"upstream"`
-	// Workspace identifies THIS naozhi instance. Distinct from Workspaces
-	// (remote nodes) and Session.Workspace (deprecated CWD alias).
+	// Workspace identifies THIS naozhi instance (not Workspaces / Session.Workspace).
 	Workspace   WorkspaceConfig   `yaml:"workspace"`
 	Transcribe  *TranscribeConfig `yaml:"transcribe"`
 	Cron        CronConfig        `yaml:"cron"`
@@ -104,7 +70,7 @@ type Config struct {
 	Update      UpdateConfig      `yaml:"update,omitempty"`
 	ImageOrient ImageOrientConfig `yaml:"image_orient,omitempty"`
 
-	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
+	// Parsed durations, populated once in Load.
 	cachedTTL             time.Duration `yaml:"-"`
 	cachedPruneTTL        time.Duration `yaml:"-"`
 	cachedNoOutputTimeout time.Duration `yaml:"-"`
@@ -124,23 +90,12 @@ type WorkspaceConfig struct {
 type ProjectsConfig struct {
 	Root            string          `yaml:"root"`                       // projects root directory
 	PlannerDefaults PlannerDefaults `yaml:"planner_defaults,omitempty"` // global planner defaults
-	// IncludeRoot registers the projects root directory itself as a project
-	// (named after its basename) in addition to its subdirectories. This lets
-	// files that live directly under root — not inside any subdirectory
-	// project — resolve to an owning project so the dashboard renders
-	// preview/download buttons for them. Default false.
-	//
-	// SECURITY / threat model: the root project's Path is the whole workspace
-	// tree, so its file endpoints can read files belonging to sibling
-	// subdirectory projects. The dashboard token is the only barrier, so this
-	// is a SINGLE-OPERATOR feature. To bound the blast radius the root project
-	// is treated like the __public_tmp__ pseudo-project on the file endpoints:
-	// the foreign-private-UID, denied-name (sockets/pid/core/ssh) and
-	// irregular-type gates apply, the credential-name filter
-	// (isSensitiveDownloadPath: .env / id_rsa / *.pem / .ssh/** / secrets/**)
-	// applies to BOTH the GET and the batch-exists paths, and every served
-	// file is audit-logged. Scan never writes a .naozhi/project.yaml into the
-	// root (the root project's CreatedAt is in-memory-only).
+	// IncludeRoot also registers the projects root itself as a project so files
+	// directly under root get preview/download buttons. Default false.
+	// SECURITY: the root project spans the whole tree (sibling projects
+	// included) and the dashboard token is the only barrier — SINGLE-OPERATOR
+	// feature. The file endpoints treat it like the __public_tmp__ pseudo-project
+	// (UID / denied-name / irregular-type / credential-name gates, audit log).
 	IncludeRoot bool `yaml:"include_root,omitempty"`
 }
 
@@ -157,9 +112,6 @@ type NodeConfig struct {
 }
 
 // LogValue implements slog.LogValuer so the bearer Token never lands in logs.
-// Any slog.* call that serializes a NodeConfig (e.g. slog.Warn("config",
-// "node", cfg)) renders the redacted form instead of the plaintext credential.
-// R20260607-SEC-3 (#1889).
 func (c NodeConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("url", c.URL),
@@ -179,7 +131,6 @@ type UpstreamConfig struct {
 }
 
 // LogValue implements slog.LogValuer so the bearer Token never lands in logs.
-// See NodeConfig.LogValue. R20260607-SEC-3 (#1889).
 func (c UpstreamConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("url", c.URL),
@@ -190,9 +141,8 @@ func (c UpstreamConfig) LogValue() slog.Value {
 	)
 }
 
-// redactSecret returns a fixed placeholder for non-empty secrets and the empty
-// string for unset ones, so logs distinguish "configured but hidden" from
-// "absent" without leaking length or content. R20260607-SEC-3 (#1889).
+// redactSecret returns a fixed placeholder for non-empty secrets and "" for
+// unset ones, so logs distinguish "configured" from "absent" without leaking length.
 func redactSecret(s string) string {
 	if s == "" {
 		return ""
@@ -203,61 +153,42 @@ func redactSecret(s string) string {
 type AgentConfig struct {
 	Model string   `yaml:"model"`
 	Args  []string `yaml:"args"`
-	// Backend pins the default CLI backend ("claude" | "kiro" | …) for
-	// sessions of this agent. Empty = router default. RFC
-	// project-access-profile PR-A.
+	// Backend pins the default CLI backend ("claude" | "kiro" | …) for this
+	// agent's sessions. Empty = router default.
 	Backend string `yaml:"backend,omitempty"`
-	// AccessProfile names the default access profile (auth/upstream env
-	// overlay + default model) for sessions of this agent. Empty = global
-	// default (settings.json baseline). RFC project-access-profile PR-B.
+	// AccessProfile names the default access profile for this agent's
+	// sessions. Empty = global default.
 	AccessProfile string `yaml:"access_profile,omitempty"`
-	// Effort overrides the backend's thinking-effort tier for sessions of
-	// this agent — the point of the per-agent layer is that a background
-	// sweeper and a planner want opposite ends of the scale. Empty = inherit
-	// cli.backends[].effort, then cli.effort.
-	// docs/rfc/kiro-effort-control.md
+	// Effort overrides the thinking-effort tier for this agent's sessions.
+	// Empty = inherit cli.backends[].effort, then cli.effort.
 	Effort string `yaml:"effort,omitempty"`
-	// SystemPrompt is appended to the CLI's system prompt for every session
-	// of this agent (`--append-system-prompt`, via
-	// session.AgentOpts.SystemPrompt → cli.SpawnOptions.AppendSystemPrompt).
-	// Project planner prompts and scratch quoted context stack on top of it
-	// ("\n\n"-separated). Multi-line YAML block scalars are fine; CR, NUL,
-	// other C0 controls, DEL, C1/bidi controls and a leading '-' are
-	// rejected at load (validateSystemPrompt), size is capped at
-	// MaxAgentSystemPromptBytes. Claude backend only — kiro / codex have no
-	// equivalent flag and ignore it.
-	//
-	// #2493: do NOT write `--append-system-prompt` under `args` instead —
-	// that flag is denylisted for args (cli.deniedExtraFlags) and was
-	// silently stripped at every spawn. Load() lifts a legacy occurrence
-	// into this field with a warning so existing configs keep working.
+	// SystemPrompt is appended to the CLI system prompt for every session of
+	// this agent (`--append-system-prompt`); planner prompts and scratch
+	// context stack on top ("\n\n"-separated). Multi-line is fine; CR/NUL/C0/
+	// DEL/C1/bidi and a leading '-' are rejected, capped at
+	// MaxAgentSystemPromptBytes. Claude backend only. Do NOT put the flag under
+	// `args` — it is denylisted there; Load lifts a legacy occurrence (#2493).
 	SystemPrompt string `yaml:"system_prompt,omitempty"`
 }
 
-// AccessProfile is a NAMED bundle of "how to reach the model" for a session:
-// a whitelisted env overlay (which auth chain / upstream), a default backend,
-// and a default model. It is ORTHOGONAL to backend — the same backend (claude)
-// can run on two auth chains (1P direct vs Bedrock proxy). Referenced by
-// projects/agents by name; the env values live only here (a trusted,
-// operator-authored file), while project.yaml (which may sync from git) only
-// carries the NAME. RFC project-access-profile §2/§6.1.
+// AccessProfile is a NAMED bundle of "how to reach the model": a whitelisted
+// env overlay (auth chain / upstream), default backend and default model.
+// Orthogonal to backend — claude can run on 1P direct or Bedrock proxy. The env
+// values live only in this operator-authored file; project.yaml (which may
+// sync from git) carries only the NAME (RFC project-access-profile §2/§6.1).
 type AccessProfile struct {
 	// DisplayName is the operator-facing label (dashboard chip / picker).
 	DisplayName string `yaml:"display_name,omitempty"`
 	// ChipColor is a CSS colour for the dashboard chip (e.g. "#d97757").
 	ChipColor string `yaml:"chip_color,omitempty"`
-	// Env is the whitelisted env overlay. Keys must pass
-	// envpolicy.ValidateOverlayEntry (a strict subset of the shim allowlist);
-	// *_FILE keys carry a host path whose contents are injected as the
-	// concrete secret at spawn time (never stored inline). The overlay is
-	// merged onto the shim baseline and STILL re-filtered by the shim — it is
-	// not a whitelist bypass.
+	// Env is the whitelisted overlay (envpolicy.ValidateOverlayEntry); *_FILE
+	// keys name a host path whose contents become the secret at spawn time.
+	// Merged onto the shim baseline and STILL re-filtered by the shim.
 	Env map[string]string `yaml:"env,omitempty"`
-	// DefaultModel participates in model resolution below an explicit
-	// per-request / PlannerModel choice and above backend.DefaultModel.
+	// DefaultModel sits below an explicit per-request / PlannerModel choice and
+	// above backend.DefaultModel.
 	DefaultModel string `yaml:"default_model,omitempty"`
-	// DefaultBackend optionally pins a backend inside the profile. A project's
-	// top-level `backend` still wins over this. RFC §13 D4.
+	// DefaultBackend optionally pins a backend; a project's `backend` still wins.
 	DefaultBackend string `yaml:"default_backend,omitempty"`
 }
 
@@ -268,82 +199,52 @@ type ServerConfig struct {
 }
 
 // NaozhiSettingsConfig configures the naozhi-owned isolated Claude settings
-// file (RFC naozhi-owned-settings-v3). Zero value = disabled = legacy
-// `--setting-sources user` behaviour.
+// file (RFC naozhi-owned-settings-v3). Zero value = disabled.
 type NaozhiSettingsConfig struct {
-	// Enabled turns on the naozhi-owned settings file. Default false keeps the
-	// legacy shared-with-local behaviour so existing deployments are unaffected.
+	// Enabled turns on the naozhi-owned settings file (default false).
 	Enabled bool `yaml:"enabled,omitempty"`
-	// Path overrides where the naozhi-owned settings file lives. Empty resolves
-	// to a default under the data root (see cmd wiring). Expanded via ExpandHome.
+	// Path overrides the file location; empty = default under the data root.
 	Path string `yaml:"path,omitempty"`
 }
 
 type CLIConfig struct {
-	// Backend names the primary/default backend ("claude" (default) | "kiro").
-	// When Backends is set, Backend is the one chosen when the dashboard
-	// does not explicitly pick a backend for a new session.
+	// Backend names the default backend ("claude" (default) | "kiro"), used
+	// when the dashboard does not pick one for a new session.
 	Backend string `yaml:"backend"`
 	Path    string `yaml:"path"`
-	// Backends enumerates every backend the server should enable. When
-	// empty, naozhi falls back to the legacy single-backend mode using
-	// only Backend/Path/Model/Args.
+	// Backends enumerates every backend to enable; empty = single-backend mode
+	// using Backend/Path/Model/Args.
 	Backends []CLIBackendConfig `yaml:"backends,omitempty"`
 	Model    string             `yaml:"model"`
 	Args     []string           `yaml:"args"`
-	// MCPConfig is the path to an MCP server definition file handed to the
-	// Claude CLI via `--mcp-config` (RFC cli-mcp-config). Empty — the default —
-	// passes no flag, leaving every spawn argv-identical to today.
-	//
-	// Needed when NaozhiSettings.Enabled is on: that path spawns cc with
-	// `--setting-sources ""`, which suppresses the `mcpServers` block of
-	// ~/.claude.json, and `--mcp-config` is then the only way to hand MCP
-	// servers to the session.
-	//
-	// Must be an absolute path (after ExpandHome) to an existing file that
-	// parses as JSON and contains an `mcpServers` object. cc REFUSES TO START
-	// if any of those fail, so cmd wiring validates all three up front and
-	// falls back to "no MCP" rather than letting a typo become a total spawn
-	// outage. Inline JSON (which the CLI flag also accepts) is deliberately
-	// NOT supported — file-only keeps the permission check and content
-	// handling tractable. Recommended mode 0600: whoever can write this file
-	// can make every cc session run arbitrary commands via a stdio server.
-	//
-	// Deliberately NOT available per-backend or per-agent: MCP server
-	// definitions are a high-privilege operator decision with a single
-	// injection point.
+	// MCPConfig is an absolute path to an MCP server definition file passed via
+	// `--mcp-config`; empty passes no flag. Needed when NaozhiSettings is
+	// enabled (that path suppresses ~/.claude.json mcpServers). Must be an
+	// existing JSON file with an `mcpServers` object — cc refuses to start
+	// otherwise, so cmd wiring validates and degrades to "no MCP". Inline JSON
+	// is not supported. Recommended mode 0600: writers get arbitrary command
+	// execution in every session. Deliberately global, not per-backend/agent.
 	MCPConfig string `yaml:"mcp_config,omitempty"`
-	// Effort is the default thinking-effort tier for backends that support
-	// one (kiro today: low/medium/high/xhigh/max). Empty — the default —
-	// passes no flag, leaving the backend to apply its own configured
-	// default; for kiro that is chat.modelDefaults[<model>].output_config
-	// .effort in ~/.kiro/settings/cli.json. Setting it here makes naozhi
-	// authoritative instead, without touching the operator's interactive kiro.
-	// docs/rfc/kiro-effort-control.md
+	// Effort is the default thinking-effort tier for backends that accept one
+	// (kiro: low/medium/high/xhigh/max). Empty passes no flag so the backend
+	// keeps its own default (docs/rfc/kiro-effort-control.md).
 	Effort string `yaml:"effort,omitempty"`
 }
 
 // CLIBackendConfig configures one backend in a multi-backend deployment.
-// ID is required; Path/Model/Args/Effort fall back to the top-level cli.*
-// values.
+// ID is required; Path/Model/Args/Effort fall back to the top-level cli.* values.
 type CLIBackendConfig struct {
 	ID    string   `yaml:"id"`              // "claude" | "kiro"
 	Path  string   `yaml:"path,omitempty"`  // overrides cli.path for this backend
 	Model string   `yaml:"model,omitempty"` // overrides cli.model for this backend
 	Args  []string `yaml:"args,omitempty"`  // overrides cli.args for this backend
-	// Effort overrides cli.effort for this backend. Only meaningful for
-	// backends whose CLI accepts a tier flag (kiro). Configuring it on one
-	// that does not is logged as a warning and dropped at startup — not a
-	// hard error, because cli.effort is propagated to EVERY backend by
-	// EnabledBackends, so refusing to boot would make a mixed claude+kiro
-	// deployment that sets the top-level default unstartable.
+	// Effort overrides cli.effort for this backend. On a backend without a
+	// tier flag it is warned and dropped at startup, not a hard error, because
+	// cli.effort propagates to EVERY backend via EnabledBackends.
 	Effort string `yaml:"effort,omitempty"`
-	// Models optionally declares the model list the dashboard's per-session
-	// model popover offers for this backend. Primarily for claude (whose CLI
-	// reports no manifest — the built-in alias fallback is sonnet/opus/haiku);
-	// for kiro the agent-reported availableModels from session/new|load wins
-	// over this list. Each entry is validated like `model` (flag-injection
-	// guard). docs/rfc/dashboard-model-effort-control.md §4.2.
+	// Models optionally declares the dashboard model-popover list for this
+	// backend (mainly claude; kiro's agent-reported list wins). Each entry is
+	// validated like `model`.
 	Models []string `yaml:"models,omitempty"`
 }
 
@@ -355,27 +256,19 @@ type SessionConfig struct {
 	Queue     QueueConfig    `yaml:"queue"`
 	StorePath string         `yaml:"store_path"`
 	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
-	// Deprecated: use CWD instead. Preserved for backward compatibility
-	// with existing config files; new fields should write only `cwd`.
+	// Deprecated: use CWD instead. Still parsed for existing config files.
 	Workspace string     `yaml:"workspace"`
 	Shim      ShimConfig `yaml:"shim"`
-	// Deprecated: the auto-workspace-chain feature was retired (RFC
-	// docs/rfc/project-stable-session-key.md §9.1). This block is still
-	// parsed so existing config files do not error, but it no longer has
-	// any effect; precise continuation is now carried by the project-stable
-	// session key. A non-default value triggers a one-line deprecation warn
-	// at load (see WarnDeprecated).
+	// Deprecated: auto_chain has no effect (see AutoChainYAMLConfig); still
+	// parsed so existing files load, with a one-line warning if set.
 	AutoChain        AutoChainYAMLConfig        `yaml:"auto_chain,omitempty"`
 	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
 }
 
 // ProjectStableKeyYAMLConfig controls the project-level stable session key
-// feature (RFC docs/rfc/project-stable-session-key.md). Default-on. When
-// disabled, the dashboard frontend falls back to the legacy timestamp-key
-// path for "continue" — existing stable-key sessions age out naturally.
-//
-// Enabled is *bool so an absent key falls back to def-true while preserving
-// the ability to explicitly write enabled: false.
+// (docs/rfc/project-stable-session-key.md). Default-on; when disabled the
+// dashboard falls back to the timestamp-key path for "continue". Enabled is
+// *bool so an absent key defaults true while `enabled: false` stays expressible.
 type ProjectStableKeyYAMLConfig struct {
 	Enabled *bool `yaml:"enabled,omitempty"`
 }
@@ -388,25 +281,11 @@ func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
 	return *c.Enabled
 }
 
-// AutoChainYAMLConfig represents the settings of the RETIRED
-// auto-workspace-chain feature (docs/rfc/auto-workspace-chain.md,
-// superseded by docs/rfc/project-stable-session-key.md §9).
-//
-// DEPRECATED / NO EFFECT: these fields are still parsed so that older
-// config files continue to load, but nothing consumes them — the
-// Resolved* accessors below have no production callers, and
-// Router.retireAutoChainOnce actively strips the chains the feature
-// produced. Normalize logs a one-line deprecation warning when an
-// operator has explicitly set any field. Precise continuation is now
-// carried by ProjectStableKeyYAMLConfig.
-//
-// Do NOT wire these back up without re-reading why the feature was
-// retired: "same workspace slug + time window" is a semantic guess that
-// chained topically unrelated one-off sessions together as each other's
-// history.
-//
-// Enabled stays *bool so the deprecation warn can distinguish an absent
-// key from an explicit `enabled: false`.
+// AutoChainYAMLConfig is the DEPRECATED, no-effect auto-workspace-chain block
+// (docs/rfc/project-stable-session-key.md §9). Fields are parsed so old files
+// load; nothing consumes them. Do NOT wire them back: "same slug + time window"
+// chained unrelated sessions as each other's history. Enabled is *bool so the
+// deprecation warn can tell an absent key from an explicit `enabled: false`.
 type AutoChainYAMLConfig struct {
 	Enabled     *bool `yaml:"enabled,omitempty"`
 	WindowHours int   `yaml:"window_hours,omitempty"` // 0 → 168 (7d)
@@ -439,22 +318,16 @@ func (c AutoChainYAMLConfig) ResolvedCap(def int) int {
 
 // QueueConfig controls IM message queuing when a session is busy.
 type QueueConfig struct {
-	// MaxDepth is the maximum number of messages to queue per session.
-	// nil (omitted) = use default (20).
-	// 0 = disable queuing (drop + "please wait", backward-compatible).
-	// Negative values are treated as 0.
+	// MaxDepth is the max queued messages per session: nil = default (20),
+	// 0 = disable queuing (drop + "please wait"), negative = 0.
 	MaxDepth *int `yaml:"max_depth"`
-	// CollectDelay is the time to wait after the current turn completes
-	// before draining queued messages. Allows capturing fast follow-up
-	// messages into the same batch. Default: "500ms".
+	// CollectDelay is the wait after a turn completes before draining the
+	// queue, so fast follow-ups batch together. Default "500ms".
 	CollectDelay string `yaml:"collect_delay"`
-	// Mode selects how new messages arriving during an active turn are
-	// handled. "collect" (default, backward-compatible) waits for the turn
-	// to finish naturally. "interrupt" sends an in-band control_request to
-	// the CLI so the active turn aborts promptly; the queued follow-ups are
-	// then coalesced and sent as the next prompt on the same live process.
-	// Only "stream-json" protocol sessions honour "interrupt"; other
-	// protocols (ACP) silently fall back to "collect".
+	// Mode handles messages arriving mid-turn: "collect" (default) waits for
+	// the turn; "interrupt" aborts it via control_request and sends the
+	// coalesced follow-ups next. Only stream-json honours "interrupt"; ACP
+	// falls back to "collect".
 	Mode string `yaml:"mode"`
 }
 
@@ -479,9 +352,8 @@ type PlatformConfigs struct {
 	Weixin  *WeixinConfig  `yaml:"weixin"`
 }
 
-// hasPlatform reports whether the named platform has a configured section.
-// Returns false for unknown names so new platforms are treated as
-// unconfigured rather than silently accepted. [R20260602-ARCH-1]
+// hasPlatform reports whether the named platform has a configured section;
+// unknown names are false rather than silently accepted.
 func (c *Config) hasPlatform(name string) bool {
 	switch name {
 	case "feishu":
@@ -504,18 +376,13 @@ type FeishuConfig struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLength    int    `yaml:"max_reply_length"`
-	// AllowInsecureWebhook opts in to verification_token-only webhook mode
-	// (no encrypt_key HMAC). R250531-SEC-1 (#1507): without this flag, a
-	// webhook configured with only verification_token refuses to start
-	// because plaintext-token-only auth is replay/forgery-prone if the
-	// token leaks. encrypt_key (HMAC) is the recommended secure config.
+	// AllowInsecureWebhook opts in to verification_token-only webhook mode (no
+	// encrypt_key HMAC), which is replay/forgery-prone if the token leaks;
+	// without it such a webhook refuses to start (#1507).
 	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
-// LogValue implements slog.LogValuer so the Feishu credentials never land in
-// logs. Any slog.* call that serializes a FeishuConfig renders the redacted
-// form instead of the plaintext AppSecret / VerificationToken / EncryptKey.
-// See NodeConfig.LogValue. R20260616-SEC-1.
+// LogValue implements slog.LogValuer so the Feishu credentials never land in logs.
 func (c FeishuConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("app_id", c.AppID),
@@ -532,33 +399,24 @@ type CronConfig struct {
 	StorePath        string `yaml:"store_path"`
 	MaxJobs          int    `yaml:"max_jobs"`
 	ExecutionTimeout string `yaml:"execution_timeout"`
-	// Timezone is the IANA name (e.g. "Asia/Shanghai") used to interpret cron
-	// schedule expressions. Empty or "Local" uses the machine's local time
-	// (respects $TZ). "UTC" forces UTC. Default: Local.
+	// Timezone is the IANA name (e.g. "Asia/Shanghai") for cron expressions.
+	// Empty or "Local" uses local time (respects $TZ); "UTC" forces UTC.
 	Timezone string `yaml:"timezone"`
-	// NotifyDefault is the fallback IM target used when a job has Notify=true
-	// but no per-job NotifyPlatform / NotifyChatID. Empty fields disable the
-	// default, in which case only per-job targets deliver notifications.
+	// NotifyDefault is the fallback IM target for jobs with Notify=true but no
+	// per-job target; empty fields disable the default.
 	NotifyDefault CronNotifyTarget `yaml:"notify_default,omitempty"`
-	// JitterMax caps the randomized delay applied before each scheduled
-	// tick fires, to flatten the "burst on the hour" CPU / API peak when
-	// many jobs share a schedule. Default 2m. "0" disables jitter entirely.
-	// The effective per-job jitter is min(JitterMax, period/4) so short
-	// schedules don't get swallowed by a long window. TriggerNow (manual
-	// "run now") bypasses jitter for responsiveness. See
-	// docs/rfc/cron-v2-polish.md §3.2.
+	// JitterMax caps the random delay before each tick to flatten on-the-hour
+	// bursts. Default 2m; "0" disables. Effective jitter is min(JitterMax,
+	// period/4); TriggerNow bypasses it (docs/rfc/cron-v2-polish.md §3.2).
 	JitterMax string `yaml:"jitter_max,omitempty"`
-	// Sandbox enables the AgentCore cloud-sandbox placement for cron jobs
-	// (docs/rfc/agentcore-cloud-sandbox.md). Both fields required to
-	// enable; leave empty to keep placement=sandbox jobs failing with a
-	// clear "not configured" error. Credentials come from the standard
-	// AWS chain (env → IAM role → profile) — never from this file.
+	// Sandbox enables AgentCore cloud-sandbox placement for cron jobs
+	// (docs/rfc/agentcore-cloud-sandbox.md); both fields required. AWS
+	// credentials come from the standard chain, never from this file.
 	Sandbox CronSandboxConfig `yaml:"sandbox,omitempty"`
 }
 
-// CronSandboxConfig points cron's sandbox placement at an AgentCore
-// Runtime. RuntimeARN identifies the runtime (its container must run the
-// naozhi bootstrap handler); Region is the runtime's AWS region.
+// CronSandboxConfig points cron's sandbox placement at an AgentCore Runtime
+// (its container must run the naozhi bootstrap handler).
 type CronSandboxConfig struct {
 	RuntimeARN string `yaml:"runtime_arn"`
 	Region     string `yaml:"region"`
@@ -571,141 +429,99 @@ type CronNotifyTarget struct {
 	ChatID   string `yaml:"chat_id"`
 }
 
-// UpdateConfig configures the in-process auto-update checker. When enabled,
-// a background goroutine periodically queries GitHub Releases and, per Mode,
-// notifies / downloads+installs / downloads+installs+restarts.
-//
-// Default is Enabled=true with Mode="download": pick up new releases and
-// stage them, but do NOT surprise-restart and drop live sessions — the new
-// binary takes effect on the next restart. The underlying selfupdate flow
-// (download → SHA-256 verify → atomic replace → backup) is shared with the
-// manual `naozhi upgrade` command.
+// UpdateConfig configures the in-process auto-update checker (GitHub
+// Releases). Default Enabled=true, Mode="download": stage new releases but do
+// NOT surprise-restart live sessions. Shares the selfupdate flow with `naozhi upgrade`.
 type UpdateConfig struct {
-	// Enabled is the master switch. nil (unset) defaults to true; set
-	// `enabled: false` to turn the checker off entirely.
+	// Enabled is the master switch; nil defaults to true.
 	Enabled *bool `yaml:"enabled,omitempty"`
 
-	// Mode selects what happens when a newer release is found:
-	//   "notify"             — log + optional IM notice, no binary change.
-	//   "download" (default) — download, verify, atomically replace the
-	//                          binary; do NOT restart (applies next boot).
-	//   "auto"               — download, verify, replace, AND restart.
-	// Unknown values fall back to "download" (the configured default).
+	// Mode on a newer release: "notify" (log + IM only), "download" (default;
+	// replace binary, apply on next boot), "auto" (replace AND restart).
+	// Unknown values fall back to "download".
 	Mode string `yaml:"mode,omitempty"`
 
-	// Interval is how often to check for a newer release (Go duration,
-	// e.g. "6h"). Default 6h. A value below the 1h floor is clamped up
-	// to protect GitHub from accidental tight loops.
+	// Interval between checks (Go duration). Default 6h; clamped up to the 1h
+	// floor to protect GitHub from tight loops.
 	Interval string `yaml:"interval,omitempty"`
 
-	// CheckOnStart runs one check shortly after startup instead of waiting
-	// a full Interval. Default false so a restart loop on a bad release
-	// can't immediately re-trigger an auto-update.
+	// CheckOnStart runs one check shortly after startup. Default false so a
+	// restart loop on a bad release cannot immediately re-trigger an update.
 	CheckOnStart bool `yaml:"check_on_start,omitempty"`
 
-	// Notify is the IM target for update notices (new version found, or
-	// a download/install outcome). Empty fields disable IM delivery
-	// (the check still logs).
+	// Notify is the IM target for update notices; empty disables IM delivery.
 	Notify CronNotifyTarget `yaml:"notify,omitempty"`
 
-	// DashboardInstall gates the dashboard's "apply now" button
-	// (POST /api/system/update/apply). nil (unset) defaults to true; an
-	// explicit `dashboard_install: false` keeps the read-only version chip
-	// working while making the apply endpoint return 403.
-	//
-	// Separate from Enabled on purpose. Seeing that a release exists and
-	// replacing the binary + restarting the service are different risk levels,
-	// and "do not auto-install in the background, but let me click it myself"
-	// is a coherent policy that a single switch could not express.
+	// DashboardInstall gates the dashboard "apply now" button; nil defaults to
+	// true, false makes the apply endpoint 403 while the version chip keeps
+	// working. Separate from Enabled: "no background install, but let me click
+	// it" is a coherent policy.
 	DashboardInstall *bool `yaml:"dashboard_install,omitempty"`
 }
 
-// UpdateEnabled reports whether the auto-update checker should run. nil
-// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+// UpdateEnabled reports whether the auto-update checker should run (nil = true).
 func (c *Config) UpdateEnabled() bool {
 	return c.Update.Enabled == nil || *c.Update.Enabled
 }
 
-// UpdateDashboardInstall reports whether the dashboard may trigger an install /
-// restart. nil (unset in YAML) defaults to true; an explicit
-// `dashboard_install: false` disables the apply endpoint while leaving the
-// read-only status endpoint intact.
+// UpdateDashboardInstall reports whether the dashboard may trigger an
+// install/restart (nil = true).
 func (c *Config) UpdateDashboardInstall() bool {
 	return c.Update.DashboardInstall == nil || *c.Update.DashboardInstall
 }
 
-// ImageOrientConfig configures auto-orientation of uploaded images that
-// carry no EXIF orientation flag (e.g. a sideways document photo). When
-// enabled, the dashboard fires a side vision call (small/Haiku-class model)
-// after upload that decides which way is up; the backend then bakes the
-// rotation into the stored bytes before send. Best-effort and fail-safe —
-// an unclear verdict or any error leaves the image untouched.
+// ImageOrientConfig configures auto-orientation of uploaded images lacking an
+// EXIF orientation flag via a side vision call; best-effort and fail-safe (an
+// unclear verdict leaves the image untouched).
 type ImageOrientConfig struct {
-	// Enabled gates the feature. nil (unset in YAML) defaults to TRUE so a
-	// fresh deployment gets auto-orient without config; an explicit
-	// `enabled: false` turns it off. Mirrors UpdateConfig's *bool idiom.
+	// Enabled gates the feature; nil defaults to TRUE.
 	Enabled *bool `yaml:"enabled,omitempty"`
 
-	// Model overrides the --model passed to the side vision call. Empty
-	// leaves it unset so the CLI uses its own default Haiku-class model
-	// (on Bedrock the deployment's ANTHROPIC_DEFAULT_HAIKU_MODEL). Keep it
-	// vendor-neutral here — do NOT hardcode a Bedrock ARN. See the
-	// sysession runner model note (RFC v2.1 §6.4).
+	// Model overrides --model for the side vision call; empty lets the CLI
+	// pick its Haiku-class default. Keep vendor-neutral — no Bedrock ARNs.
 	Model string `yaml:"model,omitempty"`
 }
 
-// ImageOrientEnabled reports whether image auto-orientation should run. nil
-// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+// ImageOrientEnabled reports whether image auto-orientation should run (nil = true).
 func (c *Config) ImageOrientEnabled() bool {
 	return c.ImageOrient.Enabled == nil || *c.ImageOrient.Enabled
 }
 
 // SysessionConfig configures the system-session daemon framework
-// (docs/rfc/system-session.md).  Phase 1 ships AutoTitler only;
-// future daemons land under Daemons[<name>].
+// (docs/rfc/system-session.md).
 type SysessionConfig struct {
-	// Enabled is the master switch.  When false (default), no daemon
-	// goroutines spin up regardless of per-daemon Enabled flags — a
-	// quick kill-switch operators can flip without losing per-daemon
-	// configuration.
+	// Enabled is the master switch; false (default) spins up no daemon
+	// regardless of per-daemon flags.
 	Enabled bool `yaml:"enabled,omitempty"`
 
-	// TickTimeout caps a single Tick.  Daemons that exceed it return
-	// DaemonRunTimedOut.  Default 30s.
+	// TickTimeout caps a single Tick (DaemonRunTimedOut beyond it). Default 30s.
 	TickTimeout string `yaml:"tick_timeout,omitempty"`
 
-	// Runner configures the shared LLM-call abstraction.  Empty values
-	// fall back to runtime defaults computed from the data dir +
-	// router.defaultBackend.
+	// Runner configures the shared LLM-call abstraction; empty values fall
+	// back to runtime defaults.
 	Runner SysessionRunnerConfig `yaml:"runner,omitempty"`
 
-	// Daemons enumerates per-daemon enable+tick+specific knobs.
-	// Keys must match a compiled-in daemon name; unknown keys are
-	// silently ignored to keep config forward-compatible.
+	// Daemons holds per-daemon knobs keyed by compiled-in daemon name; unknown
+	// keys are ignored for forward compatibility.
 	Daemons map[string]SysessionDaemonConfig `yaml:"daemons,omitempty"`
 }
 
 // SysessionRunnerConfig configures the transient-system-session Runner.
 type SysessionRunnerConfig struct {
-	// Model overrides --model.  Empty leaves --model off so the binary
-	// uses its own default.
+	// Model overrides --model; empty leaves it off.
 	Model string `yaml:"model,omitempty"`
 
-	// WorkDir is the cwd for spawned subprocesses.  Empty defaults to
-	// <dataDir>/sys-sessions/.  MUST be 0700 — Runner enforces.
+	// WorkDir is the cwd for spawned subprocesses; empty defaults to
+	// <dataDir>/sys-sessions/. MUST be 0700 — Runner enforces.
 	WorkDir string `yaml:"work_dir,omitempty"`
 
-	// JSONLMaxAge controls the startup sweep retention window.  Empty
-	// defaults to 168h (7 days).  Set "0" to disable sweep entirely
-	// (operators with their own gardening process).
+	// JSONLMaxAge is the startup sweep retention window. Empty = 168h; "0"
+	// disables the sweep.
 	JSONLMaxAge string `yaml:"jsonl_max_age,omitempty"`
 }
 
-// SysessionDaemonConfig holds the common-shape fields every daemon
-// consumes plus daemon-private knobs. Decoded into each daemon's
-// DaemonConfig in main_helpers.go's wiring. Concrete fields (not an
-// untyped map) because YAML decoding into Go works better that way;
-// each daemon reads only the keys it understands.
+// SysessionDaemonConfig holds the common daemon fields plus daemon-private
+// knobs; each daemon reads only the keys it understands.
 type SysessionDaemonConfig struct {
 	Enabled bool   `yaml:"enabled,omitempty"`
 	Tick    string `yaml:"tick,omitempty"`
@@ -717,13 +533,9 @@ type SysessionDaemonConfig struct {
 	BatchPerTick      int    `yaml:"batch_per_tick,omitempty"`
 	IncludeGroupChat  bool   `yaml:"include_group_chat,omitempty"`
 
-	// attachment-gc-specific fields (docs/rfc/attachment-gc-daemon.md).
-	// UploadTTL/RefTTL: "0" or unset → daemon default (NOT "disable" —
-	// contrast Runner.JSONLMaxAge where "0" disables). PerRootCap: 0 →
-	// default 500. DryRun: when true, log would-removes without
-	// deleting. RunOnStart: fire one sweep at startup (recommended for
-	// this low-frequency daemon so a restart-churning process still
-	// makes progress).
+	// attachment-gc fields (docs/rfc/attachment-gc-daemon.md). UploadTTL/RefTTL
+	// "0" or unset = daemon default (NOT disable); PerRootCap 0 = 500; DryRun
+	// logs would-removes; RunOnStart fires one sweep at startup.
 	UploadTTL  string `yaml:"upload_ttl,omitempty"`
 	RefTTL     string `yaml:"ref_ttl,omitempty"`
 	PerRootCap int    `yaml:"per_root_cap,omitempty"`
@@ -742,9 +554,7 @@ type SlackConfig struct {
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
-// LogValue implements slog.LogValuer so the Slack credentials never land in
-// logs. Any slog.* call that serializes a SlackConfig redacts BotToken /
-// AppToken while non-secret fields survive. R202606b-SEC-2.
+// LogValue implements slog.LogValuer so the Slack tokens never land in logs.
 func (c SlackConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("bot_token", redactSecret(c.BotToken)),
@@ -758,8 +568,7 @@ type DiscordConfig struct {
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
-// LogValue implements slog.LogValuer so the Discord bot token never lands in
-// logs. R202606b-SEC-2.
+// LogValue implements slog.LogValuer so the Discord bot token never lands in logs.
 func (c DiscordConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("bot_token", redactSecret(c.BotToken)),
@@ -774,7 +583,6 @@ type WeixinConfig struct {
 }
 
 // LogValue implements slog.LogValuer so the WeCom token never lands in logs.
-// The non-secret BaseURL / MaxReplyLength survive. R202606b-SEC-2.
 func (c WeixinConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("token", redactSecret(c.Token)),
@@ -791,21 +599,14 @@ type TranscribeConfig struct {
 
 // Load reads and parses a YAML config file.
 func Load(path string) (*Config, error) {
-	// Reject config file if readable by group or others BEFORE reading its
-	// contents into memory — the file may contain secrets (app_secret, tokens).
-	// Use Lstat (not Stat) so a symlink pointing at a 0644 file cannot bypass
-	// the check via a strict-mode symlink. Then open + Fstat to confirm the
-	// file we read is the same we Lstat'd (closes the TOCTOU window between
-	// the symlink/mode check and ReadFile).
+	// The file carries secrets: reject symlinks (Lstat, so a link to a 0644
+	// file cannot bypass the mode gate) and any group/world bit BEFORE reading;
+	// the fd re-check below closes the Lstat→open TOCTOU window.
 	if fi, statErr := os.Lstat(path); statErr == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("config file %s is a symlink; refusing to load (resolve the link or point --config at the target directly)",
 				path)
 		}
-		// Reject any group/world permission bit (read/write/execute).
-		// 0o044 only covered group-read + world-read; this widens to
-		// 0o077 so a chmod 0710 (group-execute) cannot bypass the
-		// gate, matching the policy used for shim state files.
 		if fi.Mode()&0o077 != 0 {
 			return nil, fmt.Errorf("config file %s is group/world-accessible (mode %04o); restrict with: chmod 0600 %s",
 				path, fi.Mode().Perm(), path)
@@ -817,13 +618,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	defer f.Close()
-	// Re-check on the open fd: if the path was swapped to a symlink between
-	// Lstat and OpenFile, Fstat sees the resolved target's mode. We cannot
-	// detect the symlink swap directly via Fstat, but a 0644 swap-target
-	// would trip the same world-readable gate. Treat fd-stat failure as
-	// fatal — silently skipping the regular-file / mode gates would let an
-	// attacker who can interrupt Fstat (signal storm, deliberate EBADF race)
-	// bypass the second permission check.
+	// Re-check on the open fd with the SAME 0o077 mask so a symlink swap in
+	// the Lstat→OpenFile gap cannot load a permissive target. fd-stat failure
+	// is fatal: skipping the gates would let an attacker who can interrupt
+	// Fstat bypass the second check.
 	fi, ferr := f.Stat()
 	if ferr != nil {
 		return nil, fmt.Errorf("stat config fd: %w", ferr)
@@ -831,28 +629,11 @@ func Load(path string) (*Config, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("config file %s is not a regular file", path)
 	}
-	// R237-SEC-8 / #654: align the fd-stat mask with the Lstat path's 0o077.
-	// The previous 0o044 only covered group-read + world-read, so a 0o650
-	// (group rwx + group-write only) symlink-swap target Lstat would have
-	// flagged via the wider mask still squeaked through this fd-stat
-	// re-check — a TOCTOU window where an attacker who can interrupt the
-	// Lstat→OpenFile gap with a symlink swap to a 0o650 file gets the file
-	// loaded into memory anyway. Widen to 0o077 so the two gates apply the
-	// SAME policy and the second check is a real backstop, not a narrower
-	// (and therefore weaker) one. Error string keeps "group/world-readable"
-	// because read-only is still the most common operator misstep; the
-	// extra coverage rejects rarer write/execute bits that have no business
-	// on a credential-bearing config file regardless of the read bit.
 	if fi.Mode()&0o077 != 0 {
 		return nil, fmt.Errorf("config file %s is group/world-accessible (mode %04o); restrict with: chmod 0600 %s",
 			path, fi.Mode().Perm(), path)
 	}
-	// Cap config reads at 1 MiB; the on-disk shape is ~hundreds of
-	// lines of YAML and a runaway file (or a hostile symlink to a
-	// large unrelated file) would otherwise force us to allocate the
-	// whole content unnecessarily. expandEnvVars now accepts []byte
-	// directly (R231-PERF-10) so we no longer pay an extra string
-	// copy on the data path before YAML unmarshal.
+	// 1 MiB cap: a runaway or hostile file must not be read whole into memory.
 	const maxConfigBytes = 1 << 20
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
@@ -862,16 +643,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file %s exceeds %d bytes", path, maxConfigBytes)
 	}
 
-	// Expand ${VAR} environment variables
 	expanded := expandEnvVars(data)
 
 	var cfg Config
 	if err := yaml.Unmarshal(expanded, &cfg); err != nil {
-		// yaml.v3 echoes the offending line in its error, which after
-		// ${VAR} expansion may contain decrypted secrets (app_secret,
-		// dashboard_token, etc.). Return a generic error to callers but
-		// keep the raw detail in logs, where operators can read it
-		// without the secret leaking into HTTP responses or monitoring.
+		// yaml.v3 echoes the offending line, which after ${VAR} expansion may
+		// contain secrets; keep the detail in logs only.
 		slog.Debug("config yaml parse failed", "err", err)
 		return nil, fmt.Errorf("parse config: yaml syntax error (check naozhi logs for details)")
 	}
@@ -892,18 +669,10 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Normalize reconciles the two-key YAML aliases (Nodes / Workspaces) so every
-// consumer downstream can read from cfg.Nodes without caring which spelling
-// the operator used. Load() calls this automatically; external code paths
-// (tests, programmatic config construction) MUST call it before handing the
-// Config to validateConfig or main.go, otherwise entries set only on
-// Workspaces are silently ignored.
-//
-// Precedence: when both are set, Workspaces wins and Nodes is overwritten.
-// A conflict log is emitted via slog.Warn so an operator who set both by
-// mistake sees the drop. Safe to call repeatedly.
-//
-// R71-ARCH-L1.
+// Normalize reconciles the Nodes / Workspaces YAML aliases so consumers read
+// cfg.Nodes regardless of spelling. Load calls it; programmatic Config
+// construction MUST call it too. When both are set Workspaces wins (with a
+// warning). Idempotent.
 func (cfg *Config) Normalize() {
 	switch {
 	case len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0:
@@ -919,8 +688,6 @@ func (cfg *Config) Normalize() {
 
 func applyDefaults(cfg *Config) {
 	if cfg.SchemaVersion == 0 {
-		// Absent schema_version means a pre-versioning config file; treat it
-		// as the current schema so existing deployments load unchanged.
 		cfg.SchemaVersion = CurrentSchemaVersion
 	}
 	if cfg.Server.Addr == "" {
@@ -948,34 +715,23 @@ func applyDefaults(cfg *Config) {
 	if cfg.Session.Queue.Mode == "" {
 		cfg.Session.Queue.Mode = defaultQueueMode
 	}
-	// Reconcile cwd / deprecated workspace using the operator's raw input —
-	// the default must NOT be pre-filled into either field before this, or a
-	// pure-default deployment would spuriously trip the deprecation warning
-	// below. R71-CONFIG-M1.
+	// Reconcile cwd / deprecated workspace on the operator's raw input — the
+	// default must NOT be pre-filled first or a pure-default deployment would
+	// trip the deprecation warning.
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
 			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
 		}
 		cfg.Session.Workspace = cfg.Session.CWD
 	} else if cfg.Session.Workspace != "" {
-		// Deprecation alias: warn symmetrically with the nodes→workspaces
-		// message below so users who only set `session.workspace` get the
-		// same nudge to migrate, instead of silently depending on the
-		// promotion forever. R71-CONFIG-M1.
 		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
 	} else {
-		// Neither set: fall back to the default. Write only to the canonical
-		// `cwd` field, then mirror to the deprecated alias so downstream
-		// readers of either field keep working.
+		// Mirror the default into the alias so readers of either field work.
 		cfg.Session.CWD = defaultSessionCWD
 		cfg.Session.Workspace = defaultSessionCWD
 	}
 
-	// Deprecation: the auto-workspace-chain feature was retired (RFC
-	// docs/rfc/project-stable-session-key.md §9.1). The config block is
-	// still parsed so old files don't error, but it has no effect — warn
-	// once if an operator explicitly set any field so they know to drop it.
 	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
 		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
 	}
@@ -1009,10 +765,8 @@ func applyDefaults(cfg *Config) {
 		cfg.Workspace.Name = cfg.Workspace.ID
 	}
 
-	// Normalize agent_commands keys to lowercase so dispatch can match against
-	// a user-typed "/Review" (CJK mobile IMEs auto-capitalize the first letter
-	// of a line). Conflicting keys ("review" and "Review") keep the last-
-	// written value with a warning.
+	// Lowercase agent_commands keys: CJK mobile IMEs auto-capitalize "/Review".
+	// Case conflicts keep the last-written value with a warning.
 	if len(cfg.AgentCommands) > 0 {
 		normalized := make(map[string]string, len(cfg.AgentCommands))
 		for cmd, agentID := range cfg.AgentCommands {
@@ -1050,8 +804,7 @@ func parseDurations(cfg *Config) error {
 	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", defaultCronJitterMax); err != nil {
 		return err
 	}
-	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，
-	// 不把配置错误升成启动失败。
+	// 硬上限 10m：clamp 并 warn，不把配置错误升成启动失败。
 	if cfg.cachedJitterMax > cronJitterMaxHardCap {
 		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
 			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
@@ -1061,8 +814,7 @@ func parseDurations(cfg *Config) error {
 		if cfg.cachedInterval, err = parseDurationRequired(cfg.Update.Interval, "update.interval", 6*time.Hour); err != nil {
 			return err
 		}
-		// 1h floor: a tighter loop hammers GitHub for no benefit (releases
-		// don't ship minute-to-minute). Clamp + warn rather than fail.
+		// 1h floor protects GitHub; clamp + warn rather than fail.
 		if cfg.cachedInterval < time.Hour {
 			slog.Warn("update.interval below 1h floor, clamping",
 				"requested", cfg.cachedInterval, "floor", time.Hour)
@@ -1077,10 +829,8 @@ func parseDurations(cfg *Config) error {
 func (c *Config) UpdateInterval() time.Duration { return c.cachedInterval }
 
 func validateConfig(cfg *Config) error {
-	// A config declaring a schema newer than this binary understands would be
-	// silently mis-parsed (unknown keys dropped, semantics shifted). Fail loud
-	// so an operator who downgrades the binary after editing config gets a
-	// clear message instead of subtle misbehaviour. R243-ARCH-14 (#843).
+	// A newer schema would be silently mis-parsed (unknown keys dropped);
+	// fail loud instead.
 	if cfg.SchemaVersion > CurrentSchemaVersion {
 		return fmt.Errorf("config schema_version %d is newer than this binary supports (max %d); upgrade naozhi or lower schema_version",
 			cfg.SchemaVersion, CurrentSchemaVersion)
@@ -1102,21 +852,10 @@ func validateConfig(cfg *Config) error {
 			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
 			return fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
 		}
-		// R20260604-SEC-2 (#1735): allow_insecure_webhook downgrades the feishu
-		// webhook to verification_token-only auth (no encrypt_key HMAC), so a
-		// leaked static token lets an attacker forge arbitrary feishu events
-		// (impersonate users, trigger session sends) within Feishu's 5-minute
-		// timestamp window. The prior behaviour (R20260603-SEC-6 #1656) only
-		// logged, which an operator copying a CI template could silently run in
-		// production. HARD FAIL instead.
-		//
-		// The gate deliberately does NOT exempt loopback binds: a webhook MUST
-		// be reachable from Feishu's public servers to function, and the
-		// documented home-deployment path puts naozhi on 127.0.0.1 behind a
-		// frp/ngrok/Cloudflare tunnel — so a loopback bind still receives
-		// internet-originating events and is fully exposed to forgery. The only
-		// escape is the explicit NAOZHI_ALLOW_INSECURE_WEBHOOK=true opt-in for
-		// CI/testing, matching the issue's "CI/testing-only" intent.
+		// verification_token-only auth lets a leaked token forge arbitrary
+		// feishu events, so HARD FAIL unless NAOZHI_ALLOW_INSECURE_WEBHOOK=true
+		// (CI/testing only). No loopback exemption: a webhook behind a tunnel
+		// still receives internet-originating events (#1735).
 		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
 			cfg.Platforms.Feishu.AllowInsecureWebhook &&
 			cfg.Platforms.Feishu.EncryptKey == "" {
@@ -1149,11 +888,8 @@ func validateConfig(cfg *Config) error {
 		if cfg.Platforms.Weixin.Token == "" {
 			return fmt.Errorf("weixin token is required")
 		}
-		// R191-SEC-M3: base_url flows into every platform HTTP call. Without
-		// this validation an operator could point it at http://169.254.169.254
-		// (EC2 IMDS) or http://localhost:9200 (internal services) and every
-		// long-poll/send request is weaponised into SSRF. node config already
-		// enforces scheme+host (see validateNodeURL); weixin was the gap.
+		// base_url flows into every platform HTTP call; pointing it at IMDS or
+		// an internal service would turn long-poll/send into SSRF.
 		if bu := cfg.Platforms.Weixin.BaseURL; bu != "" {
 			u, err := url.Parse(bu)
 			if err != nil {
@@ -1165,12 +901,8 @@ func validateConfig(cfg *Config) error {
 			if u.Host == "" {
 				return fmt.Errorf("weixin base_url must have a host")
 			}
-			// Literal-IP SSRF guard: a hostname like `wechat.example.com`
-			// still resolves at dial time via the OS resolver, so DNS-based
-			// SSRF requires a runtime Dialer hook; this stanza only blocks
-			// the cheap-and-common case of putting a raw private/loopback
-			// /link-local IP directly in config. CheckRedirect elsewhere
-			// blocks the redirect variant.
+			// Literal-IP guard only; DNS-based SSRF needs a runtime Dialer hook
+			// and the redirect variant is blocked by CheckRedirect elsewhere.
 			if host := u.Hostname(); host != "" {
 				if ip := net.ParseIP(host); ip != nil {
 					if ip.IsLoopback() || ip.IsPrivate() ||
@@ -1257,43 +989,28 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("server.dashboard_token contains unexpanded ${VAR} — check environment variables (refusing to run with a guessable token)")
 	}
 
-	// R191-ARCH-L12: cross-reference cron.notify_default.platform against
-	// configured platform sections. Without this check a typo silently falls
-	// into the per-tick warning path ("cron notify: platform not found") and
-	// operators only discover the misconfig once a notification actually
-	// fires. An empty platform disables the default entirely and is legal.
+	// A notify platform typo would otherwise only surface when a notification
+	// actually fires. Empty is legal (disables the default).
 	if np := cfg.Cron.NotifyDefault.Platform; np != "" {
 		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("cron.notify_default.platform %q is not a configured platform (set platforms.%s or clear notify_default)", np, np)
 		}
 	}
-
-	// R20260602141221-CR-1: mirror the cron.notify_default.platform check for
-	// update.notify.platform — an empty value is legal (disables IM delivery),
-	// but a non-empty value that names a platform without a configured section
-	// silently falls through all delivery attempts and the operator only
-	// discovers the typo when an upgrade occurs.
 	if np := cfg.Update.Notify.Platform; np != "" {
 		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("update.notify.platform %q is not a configured platform (set platforms.%s or clear update.notify)", np, np)
 		}
 	}
 
-	// CLI argv flows directly to exec.Command; reject NUL / C0 control bytes
-	// here so a compromised or mistaken config file cannot smuggle delimiters
-	// into argv that the OS would misinterpret. Primary argv injection gate
-	// lives in protocol/shim/session validators (R195-SEC), this adds a
-	// config-layer equivalent for configured args that never pass through
-	// user input validators.
+	// Configured argv never passes the user-input validators, so the
+	// NUL/C0 and flag-injection gates are applied here for every field that
+	// reaches exec.Command via BuildArgs (args, model, effort, prompts).
 	if err := validateArgvStrings("cli.args", cfg.CLI.Args); err != nil {
 		return err
 	}
 	if err := validateModelString("cli.model", cfg.CLI.Model); err != nil {
 		return err
 	}
-	// cli.effort / cli.backends[].effort / agents[].effort all reach
-	// SpawnOptions.Effort and then BuildArgs, so they get the same
-	// closed-set treatment as model. docs/rfc/kiro-effort-control.md §4.3
 	if err := validateEffortString("cli.effort", cfg.CLI.Effort); err != nil {
 		return err
 	}
@@ -1307,10 +1024,6 @@ func validateConfig(cfg *Config) error {
 		if err := validateEffortString(fmt.Sprintf("cli.backends[%s].effort", b.ID), b.Effort); err != nil {
 			return err
 		}
-		// Each declared popover model feeds the same --model argv path as
-		// cli.backends[].model when the operator picks it, so the same
-		// flag-injection allowlist applies per entry.
-		// docs/rfc/dashboard-model-effort-control.md §4.2.
 		for i, m := range b.Models {
 			if m == "" {
 				return fmt.Errorf("cli.backends[%s].models[%d] is empty", b.ID, i)
@@ -1320,10 +1033,6 @@ func validateConfig(cfg *Config) error {
 			}
 		}
 	}
-	// agents[*].args 同样会被拼进 exec.Command（session/router.go 按 agentID
-	// 合并 AgentOpts.ExtraArgs），配置层漏过等于放弃 NUL/控制字符防御。
-	// agents[*].model 走 SpawnOptions.Model 进 BuildArgs；同步 allowlist
-	// 防御 leading-`-` 等再被 flag-parser 误解析。R215-SEC-P2-1.
 	for id, a := range cfg.Agents {
 		if err := validateArgvStrings(fmt.Sprintf("agents[%s].args", id), a.Args); err != nil {
 			return err
@@ -1338,32 +1047,17 @@ func validateConfig(cfg *Config) error {
 			return err
 		}
 	}
-	// projects.planner_defaults.model 同走 BuildArgs（spawnSession 在 planner
-	// 路径覆盖 opts.Model），配置层 allowlist 与 cli.model 对齐。
 	if err := validateModelString("projects.planner_defaults.model", cfg.Projects.PlannerDefaults.Model); err != nil {
 		return err
 	}
-
-	// image_orient.model feeds the same --model argv as the side vision
-	// call; gate it with the shared allowlist so a malformed identifier
-	// can't slip into exec args.
 	if err := validateModelString("image_orient.model", cfg.ImageOrient.Model); err != nil {
 		return err
 	}
-
-	// sysession.runner.model feeds the same --model argv (sysession/runner.go
-	// appends `--model <value>` to the exec args). Without the shared
-	// allowlist, a leading-`-` / flag-shaped identifier (e.g.
-	// "--system-prompt evil") slips straight into argv as a flag injection.
 	if err := validateModelString("sysession.runner.model", cfg.Sysession.Runner.Model); err != nil {
 		return err
 	}
-
-	// projects.planner_defaults.prompt 经 AgentOpts.SystemPrompt 走 --append-system-prompt argv（#2493），
-	// 与 project.PlannerPrompt 完全同源。validateConfig 之前漏检此字段：
-	// 配置文件里写入 NUL / C0 / C1 / bidi / LS-PS 会绕过所有验证直接进 argv。
-	// 镜像 project.ValidateConfig 的同名规则；LF/CR 同样禁止——多行 prompt
-	// 必须经 CLAUDE.md 文件路径引入。
+	// 与 project.PlannerPrompt 同源进 --append-system-prompt argv；LF/CR 同样
+	// 禁止，多行 prompt 须经 CLAUDE.md 引入。
 	if err := validatePlannerPrompt("projects.planner_defaults.prompt", cfg.Projects.PlannerDefaults.Prompt); err != nil {
 		return err
 	}
@@ -1375,9 +1069,8 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-// knownBackendIDs returns the set of backend IDs this config enables, used to
-// referentially validate `backend` fields on agents / access profiles. Empty
-// map is never returned — EnabledBackends always yields at least the default.
+// knownBackendIDs returns the set of enabled backend IDs (never empty) for
+// referential validation of `backend` fields.
 func (c *Config) knownBackendIDs() map[string]bool {
 	ids := make(map[string]bool)
 	for _, b := range c.EnabledBackends() {
@@ -1386,17 +1079,10 @@ func (c *Config) knownBackendIDs() map[string]bool {
 	return ids
 }
 
-// validateAccessProfiles enforces the access-profile contract (RFC
-// project-access-profile §6.2):
-//   - each profile's env overlay passes envpolicy.ValidateOverlayEntry (key in
-//     the overlay allowlist, value SSRF/region/path-safe);
-//   - a profile's default_backend, and any agent's backend, names an enabled
-//     backend;
-//   - an agent's access_profile names a defined profile.
-//
-// Unknown names are ERRORS, not silent fallbacks — a typo that silently ran a
-// personal project on a company Bedrock account is exactly the mis-charge this
-// feature exists to prevent.
+// validateAccessProfiles checks env overlays (envpolicy.ValidateOverlayEntry)
+// and that every backend / access_profile reference names an enabled or
+// defined entry. Unknown names are ERRORS: a typo silently billing a personal
+// project to a company account is the mis-charge this feature prevents.
 func validateAccessProfiles(cfg *Config) error {
 	backends := cfg.knownBackendIDs()
 	for name, ap := range cfg.AccessProfiles {
@@ -1430,14 +1116,9 @@ func validateAccessProfiles(cfg *Config) error {
 	return nil
 }
 
-// validatePlannerPrompt enforces the same character-set policy as
-// project.ValidateConfig on PlannerPrompt: reject NUL, all C0 controls
-// (including LF/CR — multi-line prompts must come from CLAUDE.md), DEL,
-// C1 controls, bidi overrides/isolates, and LS/PS. Empty is accepted (means
-// "no global default"). R224-SEC-4 / R224-SEC-3.
-//
-// Reuses project.MaxPlannerPromptBytes so both paths share one cap and
-// can never drift silently.
+// validatePlannerPrompt mirrors project.ValidateConfig's PlannerPrompt policy:
+// reject NUL, all C0 (incl. LF/CR), DEL, C1, bidi and LS/PS; empty is allowed.
+// Shares project.MaxPlannerPromptBytes so the caps cannot drift.
 func validatePlannerPrompt(field, prompt string) error {
 	if prompt == "" {
 		return nil
@@ -1459,20 +1140,11 @@ func validatePlannerPrompt(field, prompt string) error {
 	return nil
 }
 
-// validateArgvStrings rejects control characters and NUL bytes inside argv
-// elements. Empty elements are rejected too so an accidental YAML "- " does
-// not silently pass an empty argument to the CLI. Kept narrow and local to
-// the config package; broader runtime validators (session.ValidateSessionKey,
-// shim.validateKeyForShim) cover user-controlled strings.
-//
-// It also WARNS (does not reject) on any element that cli.BuildArgs would
-// strip as a denied flag (#2493): `--effort`, `--model`, `--mcp-config`, …
-// each have a dedicated config field, and a flag written under args instead
-// used to vanish at spawn behind a generic per-spawn log line with no field
-// path. Warning rather than erroring keeps a config that loaded yesterday
-// loading today; the operator gets the exact field to fix. Note the one flag
-// with a lift instead of a warning: `--append-system-prompt` under
-// agents[].args is migrated by liftLegacySystemPromptArgs before this runs.
+// validateArgvStrings rejects empty elements (YAML "- " typo), NUL and control
+// bytes in argv. It WARNS (not errors) on flags cli.BuildArgs would strip as
+// denied, naming the field so the operator can move the value to its dedicated
+// config key (#2493); `--append-system-prompt` under agents[].args is lifted
+// by liftLegacySystemPromptArgs before this runs.
 func validateArgvStrings(field string, args []string) error {
 	for i, a := range args {
 		if a == "" {
@@ -1491,25 +1163,17 @@ func validateArgvStrings(field string, args []string) error {
 	return nil
 }
 
-// modelNameRe / validEffortTiers moved to internal/tuningspec (leaf) so the
-// session layer can reuse the SAME validators for dashboard tuning overrides
-// and sessions.json load-time re-validation without importing config
-// (config already reads session exports — the reverse import would cycle).
-// The wrappers below keep every existing call site and error string intact.
-// docs/rfc/dashboard-model-effort-control.md §4.3.
+// The validators live in internal/tuningspec (leaf) so the session layer can
+// reuse them without importing config (which would cycle).
 
-// validateEffortString gates a configured thinking-effort tier. Empty is
-// allowed and means "pass no flag" (backend keeps its own default), matching
-// the fallback semantics of validateModelString.
-// docs/rfc/kiro-effort-control.md §4.3
+// validateEffortString gates a configured thinking-effort tier; empty means
+// "pass no flag".
 func validateEffortString(field, value string) error {
 	return tuningspec.ValidateEffort(field, value)
 }
 
-// validateModelString gates a configured model identifier. Empty is allowed
-// (caller-defined fallback semantics: cli.model empty → backend default,
-// agent.model empty → cli.model). Non-empty values must match the
-// tuningspec model pattern. R215-SEC-P2-1.
+// validateModelString gates a configured model identifier; empty is allowed
+// (caller-defined fallback).
 func validateModelString(field, value string) error {
 	return tuningspec.ValidateModel(field, value)
 }
@@ -1530,9 +1194,7 @@ func parseDurationRequired(s, name string, fallback time.Duration) (time.Duratio
 	return d, nil
 }
 
-// parseDurationNonNegative 允许 "0" / "0s" 作为显式关闭的合法值，
-// 非零值必须为正。空字符串返回 fallback。用于 cron.jitter_max 这类
-// "默认开启、允许关闭" 的可选配置。
+// parseDurationNonNegative 允许 "0" 作为显式关闭的合法值；空字符串返回 fallback。
 func parseDurationNonNegative(s, name string, fallback time.Duration) (time.Duration, error) {
 	if s == "" {
 		return fallback, nil
@@ -1594,17 +1256,11 @@ func (c *Config) ParseCronJitterMax() time.Duration {
 	return c.cachedJitterMax
 }
 
-// EnabledBackends returns the normalized list of backends to enable.
-// When cli.backends is set it wins; otherwise the legacy single cli.backend
-// (defaulting to "claude") is returned. The default backend is always first
-// in the result so callers can treat position 0 as "pick when none chosen".
-// Duplicate IDs collapse to the first occurrence.
+// EnabledBackends returns the normalized list of backends to enable: cli.backends
+// if set, else the single cli.backend (default "claude"). The default backend is
+// always at position 0; duplicate IDs collapse to the first occurrence.
 func (c *Config) EnabledBackends() []CLIBackendConfig {
-	// Resolve the default ID consistently with DefaultBackendID: explicit
-	// cli.backend wins, then the first usable entry in cli.backends, then
-	// legacy "claude". Previously this hard-coded "claude" which caused
-	// EnabledBackends()[0].ID to disagree with DefaultBackendID() when
-	// cli.backend was unset and the first configured backend wasn't claude.
+	// Must resolve identically to DefaultBackendID so [0].ID agrees with it.
 	defaultID := c.CLI.Backend
 	if defaultID == "" {
 		for _, b := range c.CLI.Backends {
@@ -1635,8 +1291,6 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 			continue
 		}
 		seen[b.ID] = true
-		// Per-backend fields fall back to the top-level cli.* values so
-		// operators can keep a single Model/Args and only list IDs.
 		if b.Model == "" {
 			b.Model = c.CLI.Model
 		}
@@ -1649,8 +1303,7 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 		out = append(out, b)
 	}
 
-	// All entries had empty IDs: fall back to legacy single-backend so the
-	// server doesn't refuse to start with a confusing "no usable cli backend".
+	// All entries had empty IDs: fall back to single-backend mode.
 	if len(out) == 0 {
 		return []CLIBackendConfig{{
 			ID:     defaultID,
@@ -1661,8 +1314,7 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 		}}
 	}
 
-	// Float the default backend to position 0 so UI defaults stay stable
-	// regardless of YAML ordering.
+	// Default backend floats to position 0 regardless of YAML order.
 	for i, b := range out {
 		if b.ID == defaultID && i > 0 {
 			out[0], out[i] = out[i], out[0]
@@ -1684,10 +1336,8 @@ func (c *Config) DefaultBackendID() string {
 	return "claude"
 }
 
-// QueueMaxDepth returns the resolved queue max depth.
-// Negative values are clamped to 0 (disables queuing, degrades to drop+wait)
-// so a typo in config can't produce a negative cap that breaks Enqueue's
-// `len(msgs) >= maxDepth` guard.
+// QueueMaxDepth returns the resolved queue max depth; negative values clamp
+// to 0 so Enqueue's `len(msgs) >= maxDepth` guard stays sane.
 func (c *Config) QueueMaxDepth() int {
 	if c.Session.Queue.MaxDepth == nil {
 		return 20
@@ -1698,33 +1348,21 @@ func (c *Config) QueueMaxDepth() int {
 	return 0
 }
 
-// QueueMode returns the raw queue mode string from config ("collect" or
-// "interrupt"). Callers normalise via dispatch.ParseQueueMode so empty/unknown
-// values fall back to the safe default (collect). Keeping this as a string at
-// the config boundary avoids an import cycle (config → dispatch).
+// QueueMode returns the raw queue mode string; callers normalise via
+// dispatch.ParseQueueMode (a string here avoids a config → dispatch cycle).
 func (c *Config) QueueMode() string {
 	return c.Session.Queue.Mode
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
-// envExpansionDenyPrefixes lists env-var name prefixes that we refuse to
-// expand inside config.yaml even if the operator literally types the
-// placeholder. The threat model (R240-SEC-16 / #1047) is an operator who
-// mistakes ${ANTHROPIC_API_KEY} for a generic credential alias and
-// inadvertently materialises the upstream Claude API key into a string
-// field that may be echoed to logs (slog.Info("config loaded", "cfg",
-// ...)) or reflected back via the dashboard config inspector. None of
-// these prefixes have a legitimate naozhi-side use; if a future feature
-// genuinely needs one, prefer renaming the env (NAOZHI_-prefixed alias)
-// rather than relaxing this denylist. Match is case-insensitive against
-// the *full* env name; partial substring matches are NOT considered (so
-// the existing test fixture TEST_NAOZHI_VAR is unaffected).
+// envExpansionDenyPrefixes are upstream-credential env prefixes never expanded
+// in config.yaml: an operator mistaking ${ANTHROPIC_API_KEY} for a generic
+// alias would materialise the key into a string field that may be logged or
+// echoed by the dashboard. Case-insensitive prefix match on the full name; a
+// future need should add a NAOZHI_-prefixed alias, not relax this list (#1047).
 var envExpansionDenyPrefixes = []string{
 	"ANTHROPIC_",
-	// CLAUDE_* covers claude CLI credentials such as
-	// CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_API_KEY; an operator may mistake
-	// these for a generic credential alias. R20260614-SEC-5.
 	"CLAUDE_",
 	"AWS_",
 	"AZURE_",
@@ -1732,42 +1370,20 @@ var envExpansionDenyPrefixes = []string{
 	"GOOGLE_",
 	"OCI_",
 	"OPENAI_",
-	// Additional upstream-credential prefixes that have no legitimate
-	// naozhi-side config use. GITHUB_TOKEN / GH_TOKEN are matched as
-	// full names via this prefix (no partial suffixes follow). The
-	// OPENROUTER_ / MISTRAL_ / HUGGINGFACE_ / HUGGING_FACE_ prefixes
-	// guard against alternative-LLM provider keys that an operator
-	// might confuse with a generic alias slot. R240-SEC-16 / #1047.
 	"GITHUB_TOKEN",
 	"GH_TOKEN",
 	"OPENROUTER_",
 	"MISTRAL_",
 	"HUGGINGFACE_",
 	"HUGGING_FACE_",
-	// Generic org-secret name prefixes (SECRET_KEY / SECRET_KEY_BASE /
-	// PASSWORD_*). R202606h-SEC-6 (#2320). Suffix variants are handled by
-	// envExpansionDenySuffixes below.
 	"SECRET_",
 	"PASSWORD_",
 }
 
-// envExpansionDenySuffixes lists generic credential-naming suffixes that we
-// refuse to expand regardless of provider prefix. The prefix list above only
-// catches known LLM/cloud providers; organisations commonly name their own
-// secrets DATABASE_PASSWORD / SECRET_KEY_BASE / SOME_API_TOKEN, and an
-// operator writing `dashboard_token: ${DATABASE_PASSWORD}` would otherwise
-// materialise that value into a string field that may be logged
-// (slog.Info("config loaded")) or echoed by the dashboard config inspector.
-// Matched case-insensitively against the *full* env name. R202606h-SEC-6
-// (#2320). Keep these conservative: only suffixes that are near-universally
-// secret-bearing, so legitimate non-secret config aliases are unaffected.
-//
-// envExpansionAllowPrefixes overrides the suffix deny-list: naozhi-side
-// secret aliases (NAOZHI_DASHBOARD_TOKEN, FEISHU_APP_SECRET, SLACK_BOT_TOKEN,
-// …) DO have a legitimate config use — they ARE the values an operator wires
-// into dashboard_token / app_secret fields. These naozhi-owned namespaces are
-// not the upstream-credential leak vector the deny-list defends against, so a
-// matching prefix re-allows expansion even when the suffix looks secret.
+// envExpansionDenySuffixes are generic secret-naming suffixes (DATABASE_PASSWORD,
+// SOME_API_TOKEN) refused regardless of prefix, for the same leak reason.
+// Kept conservative so non-secret aliases stay usable; envExpansionAllowPrefixes
+// overrides them (#2320).
 var envExpansionDenySuffixes = []string{
 	"_SECRET",
 	"_PASSWORD",
@@ -1781,10 +1397,9 @@ var envExpansionDenySuffixes = []string{
 	"_CREDENTIALS",
 }
 
-// envExpansionAllowPrefixes are naozhi-owned env namespaces whose values are
-// legitimately injected into config string fields. A match here re-permits
-// expansion even if the name ends in a deny-suffix above. It does NOT override
-// envExpansionDenyPrefixes (upstream provider credentials stay blocked).
+// envExpansionAllowPrefixes are naozhi-owned namespaces (NAOZHI_DASHBOARD_TOKEN,
+// FEISHU_APP_SECRET, …) whose values ARE the legitimate config inputs; a match
+// re-permits a deny-suffix but never a deny-prefix.
 var envExpansionAllowPrefixes = []string{
 	"NAOZHI_",
 	"FEISHU_",
@@ -1793,10 +1408,9 @@ var envExpansionAllowPrefixes = []string{
 	"IM_",
 }
 
-// allowEnvExpansion reports whether key is safe to expand in config.yaml.
-// Returns false for known-secret upstream credential prefixes; the caller
-// leaves the placeholder un-expanded so the secret never reaches the
-// in-memory Config (and therefore never reaches log/echo paths).
+// allowEnvExpansion reports whether key is safe to expand in config.yaml; on
+// false the caller leaves the placeholder intact so the secret never reaches
+// the in-memory Config.
 func allowEnvExpansion(key string) bool {
 	upper := strings.ToUpper(key)
 	for _, p := range envExpansionDenyPrefixes {
@@ -1804,8 +1418,6 @@ func allowEnvExpansion(key string) bool {
 			return false
 		}
 	}
-	// naozhi-owned namespaces re-allow even when the suffix looks secret;
-	// these values are the legitimate dashboard_token / app_secret inputs.
 	for _, p := range envExpansionAllowPrefixes {
 		if strings.HasPrefix(upper, p) {
 			return true
@@ -1819,30 +1431,10 @@ func allowEnvExpansion(key string) bool {
 	return true
 }
 
-// expandEnvVars resolves ${VAR} placeholders inside the YAML payload.
-// It accepts []byte (R231-PERF-10) so Load can avoid materialising the
-// whole config file as a string just to feed the regex API; when no
-// placeholder is present we return data unchanged, and yaml.Unmarshal
-// also accepts []byte without further conversion.
-//
-// R240-SEC-16 / #1047: env-var names matching envExpansionDenyPrefixes
-// (ANTHROPIC_*, AWS_*, etc.) are deliberately NOT expanded, even if the
-// env is set. This keeps upstream credentials from being mistakenly
-// materialised into config string fields that downstream code may log or
-// echo back over the dashboard API. The placeholder is preserved as-is
-// so the bad config surfaces loudly (literal "${ANTHROPIC_API_KEY}"
-// inside e.g. dashboard_token will fail containsEnvPlaceholder validation
-// at startup) rather than silently leaking the key.
-//
-// R237-SEC-4 / #637: an env value containing a newline (or other control
-// byte) was previously substituted raw into the YAML payload, so an
-// attacker who controlled an env var could inject arbitrary YAML keys —
-// e.g. `FOO=$'value\ndashboard_token: pwned'` would inject a
-// `dashboard_token` field even into a single-line scalar. Refuse to
-// expand any value that contains a control byte; the placeholder is left
-// intact so the bad config surfaces loudly via downstream validation
-// (containsEnvPlaceholder) rather than silently turning into a forged
-// config.
+// expandEnvVars resolves ${VAR} placeholders in the YAML payload. Denied names
+// (allowEnvExpansion) and values containing control bytes (which could inject
+// sibling YAML keys, #637) are left as literal placeholders so the bad config
+// fails containsEnvPlaceholder validation loudly instead of leaking or forging.
 func expandEnvVars(data []byte) []byte {
 	if !bytes.Contains(data, []byte("${")) {
 		return data
@@ -1862,13 +1454,9 @@ func expandEnvVars(data []byte) []byte {
 	})
 }
 
-// containsYAMLBreakingByte reports whether s contains any byte that, when
-// substituted raw into a YAML payload, could break the original token's
-// scope and inject a sibling/parent-level key. Newlines (\n, \r) are the
-// primary vector; other ASCII control bytes are refused defensively (they
-// have no legitimate place in a config scalar). Tab is treated as
-// breaking too — YAML 1.2 forbids tabs inside indentation, so a tab inside
-// an expanded value can confuse a downstream parser. R237-SEC-4 / #637.
+// containsYAMLBreakingByte reports whether s has a byte that could break a
+// YAML token's scope when substituted raw: newlines are the vector, other
+// control bytes and tab (illegal in YAML indentation) are refused defensively.
 func containsYAMLBreakingByte(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]

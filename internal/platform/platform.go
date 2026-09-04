@@ -25,10 +25,8 @@ type Image struct {
 type IncomingMessage struct {
 	Platform string
 	EventID  string
-	// MessageID is the platform-native message identifier (e.g., Feishu
-	// message_id, Slack ts, Discord message ID). Optional: platforms that
-	// can't report it leave it empty. Used by Reactor-capable platforms so
-	// dispatch can react back on the user's original message.
+	// MessageID is the platform-native message id (optional); Reactor-capable
+	// platforms use it so dispatch can react on the user's original message.
 	MessageID string
 	UserID    string
 	ChatID    string
@@ -36,13 +34,9 @@ type IncomingMessage struct {
 	Text      string
 	MentionMe bool
 	Images    []Image
-	// AgentID, when non-empty, pins the target agent for this message,
-	// bypassing slash-command resolution (session.ResolveAgent). It is set
-	// by synthetic messages that already know their originating agent — e.g.
-	// a Feishu AskUserQuestion card click, whose answer must route back to
-	// the SAME agent session that asked the question rather than defaulting
-	// to "general" (#2148). The dispatcher whitelist-validates the value
-	// against the known agent set before honouring it.
+	// AgentID, when non-empty, pins the target agent (bypassing slash-command
+	// resolution) for synthetic messages such as an AskUserQuestion card click
+	// (#2148). The dispatcher whitelist-validates it before honouring it.
 	AgentID string
 }
 
@@ -63,106 +57,69 @@ type Platform interface {
 	MaxReplyLength() int
 }
 
-// InterimMessageCapable is an optional capability: platforms that can deliver
-// interim notifications (e.g. "thinking...", "new session") before the final
-// reply implement it. Platforms like WeChat iLink use single-use reply tokens
-// and deliberately omit it.
-//
-// R214-ARCH-2 (#402): promoted from an inline anonymous interface to a named
-// capability so it discovers through the same AsCapability[T] discriminator
-// (R239-ARCH-H) as Reactor / QuestionCardSender — one capability-extension
-// pattern instead of a bespoke per-capability type-assert.
+// InterimMessageCapable is an optional capability for platforms that can
+// deliver interim notifications ("thinking...") before the final reply.
 type InterimMessageCapable interface {
 	SupportsInterimMessages() bool
 }
 
 // SupportsInterimMessages reports whether a platform can handle interim
-// notifications before the final reply. Defaults to false (opt-in) for
-// platforms that do not implement InterimMessageCapable.
+// notifications; false (opt-in) when the capability is absent.
 func SupportsInterimMessages(p Platform) bool {
 	if i, ok := AsCapability[InterimMessageCapable](p); ok {
 		return i.SupportsInterimMessages()
 	}
-	return false // default: not supported (opt-in)
+	return false
 }
 
-// SingleUseReplyTokenCapable is an optional capability: platforms whose
-// outbound reply is authorised by a single-use context token (e.g. WeChat
-// iLink) can deliver only ONE reply per inbound message — the token is
-// consumed by the first send and the second send onward is rejected
-// upstream. #2136: SendSplitReply must NOT fan a long reply into N chunks
-// for these platforms; only chunk 1 would arrive and chunks 2..N would be
-// silently lost. Such platforms opt in here so the dispatcher collapses the
-// reply into a single (truncated) message instead.
+// SingleUseReplyTokenCapable is an optional capability for platforms whose
+// reply token is consumed by the first send (WeChat iLink): the dispatcher
+// must collapse a long reply into one truncated message instead of N chunks,
+// of which only the first would arrive (#2136).
 type SingleUseReplyTokenCapable interface {
 	UsesSingleUseReplyToken() bool
 }
 
 // UsesSingleUseReplyToken reports whether a platform can deliver only one
-// reply per inbound message because its reply token is single-use. Defaults
-// to false (opt-in) for platforms that do not implement the capability.
+// reply per inbound message; false (opt-in) when the capability is absent.
 func UsesSingleUseReplyToken(p Platform) bool {
 	if s, ok := AsCapability[SingleUseReplyTokenCapable](p); ok {
 		return s.UsesSingleUseReplyToken()
 	}
-	return false // default: multi-send allowed (opt-in)
+	return false
 }
 
-// ReactionType is a platform-agnostic reaction key. Adapters map each type
-// to a platform-specific emoji / reaction string.
+// ReactionType is a platform-agnostic reaction key mapped per adapter.
 type ReactionType string
 
 const (
-	// ReactionQueued signals "message received, waiting in queue". Placed on
-	// the user's incoming message when it gets enqueued, removed after the
-	// turn that consumes it completes.
+	// ReactionQueued marks "received, waiting in queue" on the user's message;
+	// removed after the consuming turn completes.
 	ReactionQueued ReactionType = "queued"
 )
 
-// DefaultMaxReplyLen is the fallback per-message split-length applied when
-// a platform adapter's MaxReplyLen config is not set. Matches Feishu's and
-// Slack's documented per-message text ceiling (~4000 bytes / ~1333 CJK
-// chars), which is also a safe default for Weixin's 5000-byte ceiling.
-// Promoted here so all three adapters share one source of truth.
+// DefaultMaxReplyLen is the fallback per-message split length (Feishu/Slack
+// ~4000-byte ceiling; safe for Weixin's 5000) when an adapter's MaxReplyLen is unset.
 const DefaultMaxReplyLen = 4000
 
-// DiscordMaxReplyLen is Discord's hard per-message content ceiling (2000
-// characters, BASE_TYPE_MAX_LENGTH). Unlike Feishu/Slack/Weixin — which
-// fall back to DefaultMaxReplyLen — Discord cannot exceed this API limit, so
-// the divergence is declared here in the policy package rather than buried as
-// an inline literal in the adapter, keeping all per-platform reply ceilings in
-// one source of truth. R202606c-ARCH-3 (#2236).
+// DiscordMaxReplyLen is Discord's hard 2000-character content ceiling
+// (BASE_TYPE_MAX_LENGTH), declared here so every reply ceiling has one home.
 const DiscordMaxReplyLen = 2000
 
-// DefaultMaxIncomingBytes caps the per-message text byte length that any
-// platform adapter forwards into dispatch. ~8 KiB is well above any
-// reasonable single-message payload from a human user and bounds the
-// worst-case path that flows into dispatch. The shim's 12 MB line ceiling
-// and the dispatch queue's 4 MB coalesce cap are final backstops, not the
-// intended security boundary — this constant is the policy entry point so
-// all adapters agree on a single value (R230C-ARCH-6).
+// DefaultMaxIncomingBytes caps inbound text forwarded into dispatch. The
+// shim's 12 MB line ceiling and the queue's 4 MB coalesce cap are backstops,
+// not the security boundary — this is the policy entry point for all adapters.
 const DefaultMaxIncomingBytes = 8 * 1024
 
 // EncodeMessageRef joins (chatID, msgID) into the composite "chatID:msgID"
-// form that Slack and Discord adapters use for outbound EditMessage and
-// reaction handles. Centralised so a future change to the separator (e.g.
-// to support chat IDs that may legitimately contain ':') only touches one
-// pair of helpers (R230C-ARCH-7).
-//
-// Both halves are joined verbatim — adapters validate inputs at construction
-// time (Slack channel IDs are uppercase alphanumeric; Discord channel IDs
-// are decimal snowflake digits), so a literal ':' inside either half is not
-// expected. Callers that want to round-trip arbitrary strings must escape
-// before passing in.
+// reference Slack and Discord use. Halves are joined verbatim — adapters'
+// IDs contain no ':' — so callers round-tripping arbitrary strings must escape.
 func EncodeMessageRef(chatID, msgID string) string {
 	return chatID + ":" + msgID
 }
 
-// DecodeMessageRef splits a composite "chatID:msgID" message reference into
-// its two halves. Returns ok=false when the input does not contain ':' — the
-// caller should treat that as a wire-format error rather than silently using
-// empty strings, since the split halves drive REST API calls keyed by both
-// IDs (e.g. Slack ChannelID + Timestamp, Discord ChannelID + MessageID).
+// DecodeMessageRef splits a composite "chatID:msgID" reference; ok=false when
+// ':' is absent, which callers must treat as a wire-format error.
 func DecodeMessageRef(ref string) (chatID, msgID string, ok bool) {
 	idx := strings.Index(ref, ":")
 	if idx < 0 {
@@ -172,69 +129,39 @@ func DecodeMessageRef(ref string) (chatID, msgID string, ok bool) {
 }
 
 // AsCapability is the generic discriminator for optional Platform
-// capabilities. Each capability is declared as its own interface;
-// callers query support via AsCapability[T](p). Adding a new
-// capability is now a single interface declaration in this package
-// and a typed call at the use-site — no per-capability AsX helper
-// required (R214-ARCH-2 #402 / R239-ARCH-H).
-//
-// All call sites query capabilities via AsCapability[T](p) directly;
-// the former per-capability AsReactor / AsQuestionCardSender wrappers
-// were removed once their last callers migrated, so a new capability
-// adds zero new helper functions.
+// capabilities: a new capability is one interface declaration plus a typed
+// call at the use-site, no per-capability helper.
 func AsCapability[T any](p Platform) (T, bool) {
 	c, ok := p.(T)
 	return c, ok
 }
 
-// Reactor is an optional capability: platforms that can add/remove reactions
-// on inbound messages implement it. Enables non-intrusive queue feedback —
-// a reaction on the user's own message instead of a separate bot reply.
-//
-// Implementations should be idempotent-tolerant: AddReaction on an existing
-// reaction or RemoveReaction on an absent one should return nil, since
-// dispatch treats reaction ops as best-effort.
+// Reactor is an optional capability for platforms that can add/remove
+// reactions on inbound messages. Implementations should tolerate repeats
+// (AddReaction on an existing reaction, RemoveReaction on an absent one → nil).
 type Reactor interface {
 	AddReaction(ctx context.Context, messageID string, reaction ReactionType) error
 	RemoveReaction(ctx context.Context, messageID string, reaction ReactionType) error
 }
 
-// QuestionCard is the platform-agnostic payload for an AskUserQuestion prompt.
-// Adapters turn this into a native interactive card (Feishu interactive
-// card, Slack block actions, etc.). See docs/rfc/askuser-question.md.
-//
-// SessionKey is intentionally absent — routing of card-click replies is
-// re-derived from the operator's own chat context, not carried in the
-// card payload. Embedding it would widen the attack surface without any
-// benefit on the inbound path.
+// QuestionCard is the platform-agnostic AskUserQuestion payload
+// (docs/rfc/askuser-question.md). SessionKey is intentionally absent: click
+// routing is re-derived from the chat context, never carried in the card.
 type QuestionCard struct {
-	// ToolUseID is the correlation id from the assistant tool_use block —
-	// carried into card action callbacks so the handler knows which
-	// question the user answered.
+	// ToolUseID correlates the card action back to the assistant tool_use block.
 	ToolUseID string
-	// ChatType is the originating session's chat type ("direct" or "group").
-	// Adapters whose card-action callback can't recover the chat type from
-	// the transport envelope (e.g. Feishu WebSocket, where the callback only
-	// carries open_chat_id) embed it in the button value so the answer routes
-	// back to the same session key the question was asked in. Empty when the
-	// originating chat type is unknown; adapters then fall back to their own
-	// heuristic.
+	// ChatType ("direct"/"group") is embedded by adapters whose card callback
+	// cannot recover it from the envelope (Feishu WebSocket); empty = unknown.
 	ChatType string
-	// AgentID is the originating session's agent id ("general", "code-reviewer",
-	// …). Adapters whose card-action callback can't recover the agent from the
-	// transport envelope (Feishu) embed it in the button value so the answer
-	// routes back to the SAME agent session that asked the question rather than
-	// defaulting to "general" (#2148). Empty when unknown; adapters then omit it
-	// and the receiver falls back to slash-command resolution.
+	// AgentID is the asking session's agent id, embedded for the same reason so
+	// the answer routes to the SAME agent session (#2148); empty = unknown.
 	AgentID string
-	// Items is one or more questions. Adapters render each as its own
-	// labelled block.
+	// Items is one or more questions, each rendered as its own block.
 	Items []QuestionItem
 }
 
-// QuestionItem mirrors clievent.AskQuestionItem but lives in the platform package
-// so adapters don't need a reverse dependency on internal/cli. Kept as a
-// plain struct so tests can build fixtures without importing cli.
+// QuestionItem mirrors clievent.AskQuestionItem without a reverse dependency
+// on internal/cli.
 type QuestionItem struct {
 	Question    string
 	Header      string
@@ -248,12 +175,9 @@ type QuestionOption struct {
 	Description string
 }
 
-// QuestionCardSender is an optional capability: platforms that support native
-// interactive cards for AskUserQuestion implement it. Missing implementations
-// degrade to a plain-text reply listing the options (handled in dispatch).
-//
-// SendQuestionCard returns the platform-native message id of the posted card
-// so dispatch can later edit it to "✅ 已回答 …" once the user selects.
+// QuestionCardSender is an optional capability for native AskUserQuestion
+// cards; without it dispatch falls back to a plain-text option list.
+// SendQuestionCard returns the card's message id so dispatch can edit it later.
 type QuestionCardSender interface {
 	SendQuestionCard(ctx context.Context, chatID string, card QuestionCard) (msgID string, err error)
 }
@@ -271,12 +195,9 @@ func SplitText(text string, maxRunes int) []string {
 	return SplitTextWithCount(text, maxRunes, utf8.RuneCountInString(text))
 }
 
-// SplitTextWithCount is SplitText for callers that have already computed the
-// rune count of text (e.g. dispatch.SendSplitReply, which needs the count to
-// size the page-suffix reservation). Passing it in avoids a second O(n)
-// utf8.RuneCountInString full scan of the same string. R202606e-PERF-002
-// (#2283). runeCount must equal utf8.RuneCountInString(text); a wrong value
-// only affects the single-chunk fast path, never chunk boundaries.
+// SplitTextWithCount is SplitText for callers that already computed
+// utf8.RuneCountInString(text), avoiding a second O(n) scan. A wrong
+// runeCount only affects the single-chunk fast path, never chunk boundaries.
 func SplitTextWithCount(text string, maxRunes, runeCount int) []string {
 	if runeCount <= maxRunes {
 		return []string{text}
@@ -319,81 +240,46 @@ func ImageExt(mimeType string) string {
 	}
 }
 
-// PermanentError is implemented by platform-specific errors that should
-// bypass retry loops (invalid credentials, chat removed, etc.). Callers
-// that want retry behaviour still wrap/compose; loops that respect this
-// interface break out early instead of exhausting backoff budget.
+// PermanentError is implemented by platform errors that should bypass retry
+// loops (invalid credentials, chat removed, etc.).
 type PermanentError interface {
 	error
 	IsPermanent() bool
 }
 
-// IsPermanent walks the error chain and reports whether any wrapped error
-// signals a permanent condition. Returns false for nil.
-//
-// errors.As already walks the full chain (including branches joined via
-// errors.Join) so a single call subsumes the earlier manual Unwrap loop.
-// The manual loop also exited early on errors.Join boundaries where
-// errors.Unwrap returns nil, which could miss a PermanentError buried in
-// a join branch.
+// IsPermanent reports whether any error in the chain (incl. errors.Join
+// branches) signals a permanent condition. False for nil.
 func IsPermanent(err error) bool {
 	var pe PermanentError
 	return errors.As(err, &pe) && pe.IsPermanent()
 }
 
-// TokenInvalidatedError is implemented by platform-specific errors that
-// indicate the cached auth token was rejected and has just been
-// invalidated. ReplyWithRetry uses this signal to (a) sleep briefly
-// before the next attempt so the freshly-issued token has time to
-// propagate at the upstream side, and (b) grant a one-shot extra retry
-// so the post-rotation attempt does not have to share the original
-// budget with attempts that all carried the same stale token. Modeled
-// after PermanentError; see RFC R83 / RETRY1 and issue #1339 for the
-// race that motivated this signal.
+// TokenInvalidatedError is implemented by platform errors meaning the cached
+// auth token was rejected and just invalidated; ReplyWithRetry then pauses
+// briefly and grants one extra retry so the fresh-token attempt does not
+// share its budget with the stale-token attempts (#1339).
 type TokenInvalidatedError interface {
 	error
 	IsTokenInvalidated() bool
 }
 
-// IsTokenInvalidated walks the error chain and reports whether any
-// wrapped error signals that an auth token was just invalidated.
-// Returns false for nil.
+// IsTokenInvalidated reports whether any error in the chain signals a
+// just-invalidated auth token. False for nil.
 func IsTokenInvalidated(err error) bool {
 	var te TokenInvalidatedError
 	return errors.As(err, &te) && te.IsTokenInvalidated()
 }
 
-// tokenRotationDelay is the short pause inserted before a retry that
-// follows a token-invalidation error. It gives the upstream platform a
-// chance to register the freshly-issued token before the next request
-// presents it. 50 ms is small enough to be invisible to users on the
-// happy path (one-shot, only on token rotation) and large enough to
-// cover typical Feishu open-API replication windows. Issue #1339.
+// tokenRotationDelay is the pause before the retry following a token
+// invalidation: invisible on the happy path, enough for typical Feishu
+// open-API replication (#1339).
 const tokenRotationDelay = 50 * time.Millisecond
 
-// ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
-// starting at 500 ms, doubling each retry up to 4 s. It returns on the first
-// success. If all attempts fail the last error is returned.
-//
-// Each backoff is scaled by a ±25% jitter so that many chats failing in the
-// same tick do not retry on synchronised wall-clock boundaries — the common
-// thundering-herd scenario when a shared upstream (e.g. Feishu open API)
-// briefly 5xxs.
-//
-// A PermanentError short-circuits the loop — retrying an "app disabled" or
-// "bot not in chat" error just burns time and amplifies load during an
-// outage without changing the outcome.
-//
-// A TokenInvalidatedError on attempt N is special-cased: the loop budget
-// is extended by one (capped, applied at most once per call) so the
-// post-rotation retry does not have to share its slot with attempts that
-// all carried the same stale token, and a short tokenRotationDelay is
-// inserted before that retry so the freshly-issued token has time to
-// propagate at the upstream side. Without this, a token rotation on
-// attempt 1 would consume two of three attempts to recover, leaving
-// only one shot for the actually-fresh-token request — which the
-// upstream might still reject in the millisecond window before
-// activation lands. Issue #1339.
+// ReplyWithRetry calls p.Reply up to maxAttempts times with ±25%-jittered
+// exponential backoff (500 ms doubling to 4 s) so a shared upstream 5xx does
+// not produce a synchronised thundering herd. A PermanentError short-circuits.
+// A TokenInvalidatedError extends the budget by one (at most once) and adds
+// tokenRotationDelay before the next attempt (#1339).
 func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAttempts int) (string, error) {
 	backoff := 500 * time.Millisecond
 	var lastErr error
@@ -403,10 +289,7 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 	for i := 0; i < limit; i++ {
 		if i > 0 {
 			wait := osutil.JitterBackoff(backoff)
-			// If the previous attempt invalidated a token, lengthen the
-			// pre-retry pause by tokenRotationDelay so the freshly-issued
-			// token has time to register upstream. Applied only to the
-			// retry that immediately follows the rotation.
+			// Only the retry immediately following a rotation gets the extra pause.
 			if rotationPendingFromAttempt == i-1 {
 				wait += tokenRotationDelay
 				rotationPendingFromAttempt = -1

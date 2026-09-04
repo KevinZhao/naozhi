@@ -8,26 +8,19 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// MaxAgentSystemPromptBytes caps agents[<id>].system_prompt. Larger than the
-// 8 KiB planner-prompt cap (project.MaxPlannerPromptBytes) because an agent's
-// standing instructions are legitimately longer than a one-line project
-// preamble, yet small enough that stacking it with a full scratch context
-// block (24 KiB) stays well inside cli.MaxAppendSystemPromptBytes (64 KiB).
+// MaxAgentSystemPromptBytes caps agents[<id>].system_prompt: larger than the
+// planner-prompt cap, yet with a full scratch block (24 KiB) still inside
+// cli.MaxAppendSystemPromptBytes (64 KiB).
 const MaxAgentSystemPromptBytes = 32 * 1024
 
-// legacySystemPromptFlag is the CLI flag operators used to (ineffectively)
-// write under agents[].args before agents[].system_prompt existed (#2493).
+// legacySystemPromptFlag is the flag Load lifts out of agents[].args (#2493).
 const legacySystemPromptFlag = "--append-system-prompt"
 
-// validateSystemPrompt gates agents[<id>].system_prompt. Empty is accepted
-// (no prompt). Unlike validatePlannerPrompt it ALLOWS LF — a system prompt is
-// naturally a multi-line YAML block scalar, and the value is passed to the
-// shim as one execve argv element (`--cli-arg <value>`), where LF is inert.
-// Everything else follows the argv-corruption / log-injection policy shared
-// with the planner prompt: NUL and the remaining C0 controls (incl. CR), DEL,
-// C1 controls, bidi overrides/isolates and LS/PS are rejected, as is a
-// leading '-' (cli.BuildArgs would drop the whole prompt as a flag-injection
-// attempt — better to tell the operator at load).
+// validateSystemPrompt gates agents[<id>].system_prompt. Unlike
+// validatePlannerPrompt it ALLOWS LF (multi-line block scalars reach the shim
+// as one argv element, where LF is inert); NUL, other C0 incl. CR, DEL, C1,
+// bidi, LS/PS and a leading '-' (BuildArgs would drop the whole prompt as
+// flag injection) are rejected at load.
 func validateSystemPrompt(field, prompt string) error {
 	if prompt == "" {
 		return nil
@@ -52,22 +45,13 @@ func validateSystemPrompt(field, prompt string) error {
 	return nil
 }
 
-// liftLegacySystemPromptArgs migrates `--append-system-prompt <p>` (or the
-// `--append-system-prompt=<p>` form) found under agents[<id>].args into
-// agents[<id>].system_prompt, removing it from args, and warns with the field
-// path so the operator can move it in the file.
-//
-// Why lift instead of reject: the flag under args never worked (#2493 — it
-// was denylisted and stripped at every spawn), so the operator's intent was
-// already being lost silently. Rejecting would turn the fix into a startup
-// failure on the next upgrade for exactly the configs the fix is meant to
-// repair; lifting makes them work and says so. Several occurrences are joined
-// "\n\n" in order. An explicit system_prompt alongside the legacy flag is a
-// conflict and is rejected — there is no right answer for which wins.
-//
-// Only agents[].args is lifted: cli.args / cli.backends[].args have no
-// per-backend system-prompt field to lift into, so there the flag is
-// reported by validateArgvStrings' denied-flag warning instead.
+// liftLegacySystemPromptArgs migrates `--append-system-prompt <p>` /
+// `--append-system-prompt=<p>` under agents[<id>].args into system_prompt
+// with a warning. Lift rather than reject: the flag under args is denylisted
+// at spawn, so rejecting would break exactly the configs the field repairs
+// (#2493). Multiple occurrences join with "\n\n"; an explicit system_prompt
+// alongside the flag is a conflict and rejected. cli.args / cli.backends[].args
+// have no field to lift into and get validateArgvStrings' warning instead.
 func liftLegacySystemPromptArgs(cfg *Config) error {
 	for id, ac := range cfg.Agents {
 		kept, lifted, ok := splitLegacySystemPromptArgs(ac.Args)
@@ -76,8 +60,7 @@ func liftLegacySystemPromptArgs(cfg *Config) error {
 		}
 		field := fmt.Sprintf("agents[%s]", id)
 		if lifted == "" {
-			// Bare trailing flag with no value: nothing to lift, but the
-			// dangling token must not stay in args either.
+			// Bare trailing flag: nothing to lift, but drop the dangling token.
 			slog.Warn("config: dropped bare "+legacySystemPromptFlag+" with no value",
 				"field", field+".args")
 		} else if ac.SystemPrompt != "" {
@@ -97,10 +80,9 @@ func liftLegacySystemPromptArgs(cfg *Config) error {
 	return nil
 }
 
-// splitLegacySystemPromptArgs returns args without any legacySystemPromptFlag
-// occurrences (both `--flag value` and `--flag=value` forms, mirroring
-// cli.filterDeniedFlags' shape rules), the joined prompt values, and whether
-// anything was removed. kept aliases args when found=false.
+// splitLegacySystemPromptArgs returns args minus legacySystemPromptFlag
+// occurrences (`--flag value` and `--flag=value`, mirroring
+// cli.filterDeniedFlags), the joined values, and whether anything was removed.
 func splitLegacySystemPromptArgs(args []string) (kept []string, lifted string, found bool) {
 	for _, a := range args {
 		if a == legacySystemPromptFlag || strings.HasPrefix(a, legacySystemPromptFlag+"=") {

@@ -27,9 +27,8 @@ const (
 	channelVersion         = "naozhi-1.0.0"
 )
 
-// baseInfo is attached to every outgoing API request.
-// Without this field, iLink server falls back to one-shot mode
-// and silently drops all sendMessage calls after the first one.
+// baseInfo is attached to every request; without it iLink falls back to
+// one-shot mode and silently drops every sendMessage after the first.
 type baseInfo struct {
 	ChannelVersion string `json:"channel_version"`
 }
@@ -41,19 +40,11 @@ type apiClient struct {
 	httpClient *http.Client
 }
 
-// ssrfDialGuard wraps a base DialContext so every resolved address is
-// re-validated against the loopback/private/link-local SSRF deny-set BEFORE
-// the TCP connection is established. The config-time guard in
-// internal/config/config.go only rejects *literal* private IPs in base_url;
-// a hostname like wechat.example.com sails past it and is resolved by the OS
-// resolver at dial time — so an attacker who controls the DNS record (or an
-// internal DNS misconfig) could still steer the request at 169.254.169.254
-// (EC2 IMDS) or an internal admin port. Hooking DialContext is the only place
-// that sees the *resolved* IP, so the guard belongs here. R20260603040203-SEC-10.
-//
-// enabled is false for explicitly-configured loopback dev mocks (httptest /
-// local relays) — validateBaseURLScheme already greenlights those, and a
-// blanket guard would refuse to dial 127.0.0.1, breaking local development.
+// ssrfDialGuard re-validates every RESOLVED address against the SSRF deny-set
+// before the TCP connect. The config-time guard only rejects literal private
+// IPs; a hostname under attacker DNS control could still resolve to IMDS or
+// an internal admin port, and DialContext is the only place that sees the IP.
+// Not installed for approved loopback dev mocks (see newAPIClient).
 func ssrfDialGuard(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return ssrfDialGuardWithResolver(base, func(ctx context.Context, network, host string) ([]net.IP, error) {
 		return net.DefaultResolver.LookupIP(ctx, network, host)
@@ -71,10 +62,8 @@ func ssrfDialGuardWithResolver(
 		if err != nil {
 			return nil, fmt.Errorf("weixin dial: split %q: %w", addr, err)
 		}
-		// addr handed to DialContext already has the host resolved to a
-		// literal IP only when the resolver ran; when it's still a name the
-		// default resolver is about to resolve it, so resolve here ourselves
-		// and validate every candidate IP.
+		// A literal IP is validated directly; a hostname is resolved here so
+		// every candidate IP can be checked.
 		if ip := net.ParseIP(host); ip != nil {
 			if err := rejectInternalIP(ip); err != nil {
 				return nil, err
@@ -85,17 +74,14 @@ func ssrfDialGuardWithResolver(
 		if err != nil {
 			return nil, fmt.Errorf("weixin dial: resolve %q: %w", host, err)
 		}
-		// DNS-rebinding defence: pass the already-validated IP literal to base
-		// instead of the original hostname. Without this, the OS resolver runs a
-		// second lookup inside base; a TTL=0 rebind can return 169.254.169.254
-		// on that second query even though our check above saw a public IP.
+		// DNS-rebinding defence: dial the validated IP literal, never the
+		// hostname, so no second lookup can return an internal address.
 		var lastRejectErr error
 		for _, ip := range ips {
 			if err := rejectInternalIP(ip); err != nil {
 				lastRejectErr = err
 				continue
 			}
-			// Use the validated IP directly — no second hostname resolution.
 			return base(ctx, network, net.JoinHostPort(ip.String(), port))
 		}
 		if lastRejectErr != nil {
@@ -105,9 +91,8 @@ func ssrfDialGuardWithResolver(
 	}
 }
 
-// rejectInternalIP returns a non-nil error iff ip falls in the SSRF deny-set:
-// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or
-// the unspecified address. Mirrors the config-time literal-IP guard.
+// rejectInternalIP errors iff ip is loopback, private, link-local (incl. IMDS)
+// or unspecified; mirrors the config-time literal-IP guard.
 func rejectInternalIP(ip net.IP) error {
 	if ip.IsLoopback() || ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
@@ -117,11 +102,9 @@ func rejectInternalIP(ip net.IP) error {
 	return nil
 }
 
-// isLoopbackBaseURL reports whether baseURL targets a loopback host
-// (localhost / 127.0.0.0/8 / ::1). These are the dev-mock URLs that
-// validateBaseURLScheme greenlights, so they must remain dialable with the
-// SSRF guard disabled. Any parse failure is treated as non-loopback so the
-// guard fails closed (a malformed URL gets the stricter treatment).
+// isLoopbackBaseURL reports whether baseURL targets a loopback host (the dev
+// mocks validateBaseURLScheme allows). Parse failure = non-loopback, so the
+// SSRF guard fails closed.
 func isLoopbackBaseURL(baseURL string) bool {
 	if baseURL == "" {
 		return false // empty → defaultBaseURL (public iLink host)
@@ -145,25 +128,18 @@ func newAPIClient(baseURL, token string) *apiClient {
 		baseURL = defaultBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	// Explicit Transport with idle-conn bounds: the default http.Transport
-	// only keeps 2 idle conns per host, which is fine for bursty traffic but
-	// without tuning we also inherit unlimited MaxIdleConns globally and a
-	// 90s IdleConnTimeout. Long-poll reconnects happen every ~35s so without
-	// keep-alive the client would open a fresh TCP+TLS handshake on every
-	// poll. Pinning a small per-host pool keeps reuse predictable.
+	// Small pinned idle pool: long-poll reconnects every ~35s and keep-alive
+	// avoids a fresh TCP+TLS handshake per poll.
 	transport := &http.Transport{
 		MaxIdleConns:        10,
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		// Refuse TLS 1.0/1.1 negotiation even if compiled against an older Go
-		// toolchain; matches feishu/slack/discord clients.
+		// Pin the TLS floor; matches the other adapters.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	// R20260603040203-SEC-10: install a DNS-aware SSRF dial guard for every
-	// non-loopback relay. Loopback dev mocks (validateBaseURLScheme-approved
-	// http://127.0.0.1 / localhost) are exempt so local development and the
-	// httptest-based test suite still dial the loopback server.
+	// DNS-aware SSRF dial guard for every non-loopback relay; loopback dev
+	// mocks (and the httptest suite) must stay dialable.
 	if !isLoopbackBaseURL(baseURL) {
 		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 		transport.DialContext = ssrfDialGuard(dialer.DialContext)
@@ -174,11 +150,8 @@ func newAPIClient(baseURL, token string) *apiClient {
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   defaultLongPollTimeout + 10*time.Second, // covers long-poll (35s) + margin
-			// Block redirects: a compromised or MITM'd relay could 3xx us
-			// to an IMDS address (169.254.169.254) or an internal admin
-			// port, with the Bearer token riding along. Feishu's client
-			// does the same. ErrUseLastResponse returns the 3xx body
-			// unchanged so callers see the upstream decision explicitly.
+			// No redirects: a MITM'd relay could 3xx the bearer token to IMDS
+			// or an internal admin port.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -207,7 +180,7 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 
-	// Use shorter timeout for non-polling endpoints
+	// Shorter timeout for non-polling endpoints.
 	if !strings.Contains(endpoint, "getupdates") {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultAPITimeout)
@@ -238,9 +211,7 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// data is the raw iLink API response body and may contain C1/bidi/
-		// control bytes; sanitize before embedding in the error string so it
-		// cannot poison structured logs / terminal rendering at the caller.
+		// Raw upstream body may carry C1/bidi/control bytes; sanitize.
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, osutil.SanitizeForLog(string(data), 256))
 	}
 	return data, nil

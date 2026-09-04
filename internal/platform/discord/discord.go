@@ -27,9 +27,8 @@ type Config struct {
 	MaxReplyLen int
 }
 
-// discordBotHealCooldown rate-limits the lazy bot-identity self-heal so a
-// sustained stream of group messages while botID is unknown can't hammer the
-// REST API. Mirrors slackBotHealCooldown. #2009.
+// discordBotHealCooldown rate-limits the lazy bot-identity self-heal so group
+// traffic while botID is unknown cannot hammer the REST API (#2009).
 const discordBotHealCooldown = time.Minute
 
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
@@ -39,28 +38,18 @@ type Discord struct {
 	handler platform.MessageHandler
 	startMu sync.Mutex
 	started bool
-	// botID is the bot's own user ID, set once after the gateway connects in
-	// Start() and read concurrently by onMessageCreate goroutines (discordgo
-	// dispatches each MESSAGE_CREATE on its own goroutine, and the listen
-	// goroutine is live before Open() returns). A plain string field would be
-	// a data race — Go string assignment is two words (ptr+len), not atomic —
-	// so we store it through an atomic.Pointer for a torn-read-free handoff.
-	// #1814.
+	// botID is written after the gateway connects and read concurrently by
+	// onMessageCreate goroutines; a plain string would be a torn-read data
+	// race (#1814).
 	botID atomic.Pointer[string]
-	// botHealAt is the next wall-clock time the lazy bot-identity self-heal is
-	// allowed to run, rate-limiting the re-fetch burst while botID is unknown.
-	// Guarded by botHealMu. #2009 (mirrors slack #1947).
+	// botHealAt is the next time the self-heal may run; guarded by botHealMu.
 	botHealMu sync.Mutex
 	botHealAt time.Time
 
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
-	// dispatch bounds concurrent inbound message-handler goroutines (shared
-	// platform.DefaultHandlerConcurrency cap) to bound memory + file
-	// descriptors under burst load — each goroutine may download up to
-	// maxDiscordAttachmentsPerMessage × 10 MB of attachments serially, so
-	// without the cap a high-traffic guild could pin many GB. Also tracks
-	// the bot-identity self-heal goroutine for Stop(). R235-SEC-3, #2254.
+	// dispatch bounds concurrent handler goroutines — each may download up to
+	// maxDiscordAttachmentsPerMessage × 10 MB — and tracks the self-heal for Stop().
 	dispatch platform.BoundedDispatch
 }
 
@@ -72,9 +61,7 @@ func New(cfg Config) *Discord {
 	return &Discord{cfg: cfg, dispatch: platform.BoundedDispatch{Name: "discord"}}
 }
 
-// getBotID returns the connected bot's user ID, or "" before the gateway
-// handshake has populated it. Race-free read paired with the atomic store in
-// Start(). #1814.
+// getBotID returns the bot's user ID, or "" before the gateway populated it.
 func (d *Discord) getBotID() string {
 	if p := d.botID.Load(); p != nil {
 		return *p
@@ -82,10 +69,7 @@ func (d *Discord) getBotID() string {
 	return ""
 }
 
-// setBotID stores the connected bot's user ID through the atomic pointer.
-// Shared by Start() and the Ready-event backfill so a late READY (after Open()
-// returned without State.User) still populates the id used for mention
-// matching. #2009.
+// setBotID stores the bot's user ID; shared by Start() and the late-READY backfill.
 func (d *Discord) setBotID(id string) {
 	if id == "" {
 		return
@@ -93,11 +77,9 @@ func (d *Discord) setBotID(id string) {
 	d.botID.Store(&id)
 }
 
-// maybeHealBotID kicks a single rate-limited background fetch of the bot's own
-// identity when botID is unknown, so the adapter recovers exact-mention
-// filtering after Open() returned without a READY frame (discordgo treats a
-// non-READY first packet as non-fatal). At most one re-fetch runs per cooldown
-// window. Mirrors slack.maybeHealBotID (#1947). #2009.
+// maybeHealBotID kicks one rate-limited background identity fetch while botID
+// is unknown (Open() can return without a READY frame), restoring exact
+// mention filtering (#2009).
 func (d *Discord) maybeHealBotID() {
 	if d.getBotID() != "" {
 		return
@@ -159,13 +141,8 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("create discord session: %w", err)
 	}
 
-	// Inject a no-redirect HTTP client for all REST calls made by the session
-	// (ChannelMessageSend, MessageReactionAdd, ChannelMessageEdit, etc.).
-	// discordgo.New sets sess.Client to &http.Client{Timeout:20s} with the
-	// default transport, which follows 3xx redirects while preserving the
-	// Authorization header — enabling SSRF / token-leakage via a hostile
-	// redirect.  Setting CheckRedirect to http.ErrUseLastResponse stops the
-	// redirect chain at the first hop.  (R20260603-SEC-2)
+	// discordgo's default client follows 3xx while keeping the Authorization
+	// header — SSRF / token leakage via a hostile redirect. Stop at hop one.
 	sess.Client = &http.Client{
 		Timeout: 20 * time.Second,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -178,12 +155,8 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		discordgo.IntentMessageContent
 
 	sess.AddHandler(d.onMessageCreate)
-	// Backfill botID from a (possibly late) READY frame. discordgo's Open()
-	// returns successfully even when the first gateway packet is not READY
-	// (documented Op 9 Invalid Session / Op 1 heartbeat-request cases), leaving
-	// State.User nil; the READY then arrives on the listen goroutine after
-	// Start() returned. Without this handler botID would stay empty and every
-	// guild message would be silently dropped by the mention gate. #2009.
+	// Open() can return before READY (Op 9 / Op 1 first packets), leaving
+	// State.User nil; backfill botID when READY arrives (#2009).
 	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		if r != nil && r.User != nil {
 			d.setBotID(r.User.ID)
@@ -193,8 +166,7 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		}
 	})
 
-	// Assign session BEFORE Open() so handlers don't hit nil d.session.
-	// If Open() fails, nil it out.
+	// Assigned BEFORE Open() so handlers never see a nil d.session.
 	d.session = sess
 
 	if err := sess.Open(); err != nil {
@@ -208,9 +180,7 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 			"bot_id", sess.State.User.ID,
 			"bot_name", osutil.SanitizeForLog(sess.State.User.Username, 128))
 	} else {
-		// Not fatal: the Ready handler above (or maybeHealBotID on the first
-		// group message) backfills botID. Until then group messages fail-open
-		// rather than being dropped. #2009.
+		// Not fatal: READY or maybeHealBotID backfills; group messages fail-open meanwhile.
 		slog.Warn("discord gateway connected but bot identity unavailable; will backfill on READY")
 	}
 
@@ -229,8 +199,6 @@ func (d *Discord) Stop() error {
 	}
 	done := make(chan struct{})
 	go func() { d.dispatch.Wait(); close(done) }()
-	// NewTimer + Stop: fast path (handlers exit cleanly) must not leave a
-	// 30s timer goroutine parked until the timeout elapses.
 	timer := time.NewTimer(30 * time.Second)
 	select {
 	case <-done:
@@ -243,7 +211,6 @@ func (d *Discord) Stop() error {
 
 // Reply sends a message to a Discord channel. Handles text and/or images.
 func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
-	// If images, send as file attachments
 	if len(msg.Images) > 0 {
 		var files []*discordgo.File
 		for i, img := range msg.Images {
@@ -284,9 +251,7 @@ func (d *Discord) EditMessage(ctx context.Context, msgID string, text string) er
 	return nil
 }
 
-// reactionEmoji maps platform-agnostic ReactionType to a Discord unicode
-// emoji. Discord's reaction API accepts raw unicode strings directly — no
-// aliasing needed. Empty return means unsupported.
+// reactionEmoji maps ReactionType to a raw unicode emoji; "" = unsupported.
 func reactionEmoji(r platform.ReactionType) string {
 	switch r {
 	case platform.ReactionQueued:
@@ -295,9 +260,7 @@ func reactionEmoji(r platform.ReactionType) string {
 	return ""
 }
 
-// AddReaction implements platform.Reactor. messageID is our composite
-// "channel:msg" format. We use the bot's own identity (@me) to add on behalf
-// of the bot account.
+// AddReaction implements platform.Reactor on a composite "channel:msg" id.
 func (d *Discord) AddReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
 	if messageID == "" {
 		return fmt.Errorf("discord AddReaction: empty messageID")
@@ -311,10 +274,8 @@ func (d *Discord) AddReaction(ctx context.Context, messageID string, r platform.
 		return fmt.Errorf("invalid discord msgID format: %q", messageID)
 	}
 	if err := d.session.MessageReactionAdd(channel, id, emoji, discordgo.WithContext(ctx)); err != nil {
-		// AddReaction is idempotent from the platform's perspective; swallow
-		// discord's "unknown emoji" / "already reacted" variants so dispatch
-		// does not fall back to a text notice on a queue-drain retry. This
-		// mirrors slack.go which already swallows "already_reacted".
+		// Idempotent: swallow the "already reacted" variants so dispatch does
+		// not fall back to a text notice on retry.
 		var restErr *discordgo.RESTError
 		if errors.As(err, &restErr) && restErr.Message != nil {
 			switch restErr.Message.Code {
@@ -372,24 +333,14 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 			}
 		}
 	} else {
-		// #2009: Open() returned without a READY frame so we don't know our own
-		// user ID and cannot match the exact mention token. Leaving
-		// mentionMe=false here is fail-CLOSED: dispatch's group gate
-		// (ChatType=="group" && !MentionMe) would then silently drop every
-		// guild message until a restart, with no log or metric. Mirror the
-		// slack #1947 fix — fail-open (treat as mentioned) and kick a
-		// rate-limited background self-heal so botID recovers and strict
-		// matching resumes. DMs are unaffected (they don't gate on mention).
+		// botID unknown: mentionMe=false would fail CLOSED (dispatch's group
+		// gate drops every guild message until restart). Fail open and kick a
+		// rate-limited self-heal instead (#2009).
 		mentionMe = true
 		d.maybeHealBotID()
 	}
 	text = strings.TrimSpace(text)
-	// Match platform.DefaultMaxIncomingBytes: bots posting via the Discord API
-	// can exceed the 2000-char user UX limit, and any oversized prompt would
-	// bypass the HTTP-surface maxWSSendTextBytes guard. The shim's 12 MB
-	// line ceiling and the dispatch queue's 4 MB coalesce cap are final
-	// backstops, not the intended security boundary. R71-SEC-M4.
-	// R230C-ARCH-6: aliased to platform.DefaultMaxIncomingBytes.
+	// API-posted messages can exceed the 2000-char UX limit; cap before dispatch.
 	const maxDiscordInboundBytes = platform.DefaultMaxIncomingBytes
 	if len(text) > maxDiscordInboundBytes {
 		slog.Warn("discord message exceeds inbound text cap, dropping",
@@ -397,17 +348,13 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Collect image attachment metadata; download happens asynchronously
+	// Attachment metadata is collected here; downloads happen asynchronously.
 	type pendingImage struct {
 		url         string
 		contentType string
 	}
-	// Cap the number of images per inbound message to bound the async
-	// download goroutine's footprint: Discord allows up to 10 attachments
-	// per message and each may be up to 10 MB, so without a cap a hostile
-	// or misbehaving client could pin ~100 MB per event in flight while
-	// the goroutine downloads them serially. The CLI prompt rarely
-	// benefits from more than a handful of images. (R227-SEC-6)
+	// Discord allows 10 × 10 MB attachments per message; cap the in-flight
+	// footprint a hostile client can pin.
 	const maxDiscordAttachmentsPerMessage = 5
 	var pending []pendingImage
 	for _, att := range m.Attachments {
@@ -444,10 +391,7 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		MentionMe: mentionMe,
 	}
 
-	// R235-SEC-3: cap concurrent handler goroutines. When saturated, drop the
-	// message + slog.Warn so a flood cannot spawn unbounded goroutines, each
-	// of which may sequentially download up to 5 × 10 MB of attachments.
-	// Download images in the async goroutine, not in discordgo's event dispatch.
+	// Downloads run in the bounded goroutine, not discordgo's event dispatch.
 	d.dispatch.TryGo("discord", func() {
 		var total int
 		for _, p := range pending {
@@ -473,12 +417,9 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	}, "channel", m.ChannelID, "user", m.Author.ID)
 }
 
-// maxDiscordTotalAttachmentBytes caps the aggregate downloaded bytes per
-// inbound message in addition to the per-image 10 MB cap inside downloadURL.
-// At maxDiscordAttachmentsPerMessage (5) × 10 MB the worst-case is 50 MB
-// pinned in heap until the dispatcher consumes the message; 32 MiB still
-// accommodates ordinary screenshots while limiting the amplification factor
-// a hostile client can cause. (R226-SEC-5)
+// maxDiscordTotalAttachmentBytes caps aggregate bytes per inbound message on
+// top of the per-image 10 MB cap: 32 MiB fits ordinary screenshots while
+// bounding heap pinned until the dispatcher consumes the message.
 const maxDiscordTotalAttachmentBytes = 32 * 1024 * 1024
 
 // aggregateAttachmentBytesAllow reports whether adding next bytes to soFar
@@ -498,19 +439,14 @@ func isImageContentType(ct string) bool {
 	return false
 }
 
-// discordDialTestBypass disables the private-IP dial guard so httptest servers
-// (which run on loopback) are not rejected. Set ONLY by discord_test.go;
-// production code MUST leave this false so blockPrivateDial enforces the
-// reserved-IP guard. (R20260603-SEC-3)
+// discordDialTestBypass disables the private-IP dial guard for loopback
+// httptest servers. Set ONLY by discord_test.go; production MUST leave it false.
 var discordDialTestBypass bool
 
-// blockPrivateDial returns a DialContext that resolves the target hostname and
-// refuses any IP in a reserved range (loopback, link-local, private,
-// unspecified). This closes the DNS rebinding / SSRF vector where a host that
-// passed the CDN allowlist check at url.Parse time later resolves to an
-// internal address such as 169.254.169.254 (cloud IMDS). The connection is
-// dialed to the already-validated IP rather than the original host, so the
-// resolver is not consulted a second time. (R20260603-SEC-3)
+// blockPrivateDial returns a DialContext that resolves the host and refuses
+// reserved IPs (loopback, link-local, private, unspecified), closing the DNS
+// rebinding vector where an allowlisted CDN host later resolves to IMDS. The
+// validated IP is dialed directly so the resolver is not consulted twice.
 func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 15 * time.Second}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -534,17 +470,13 @@ func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Con
 				return nil, fmt.Errorf("discord: refused connection to reserved IP %s (DNS rebinding guard)", ip)
 			}
 		}
-		// Dial the first validated IP directly to avoid a second DNS lookup
-		// (TOCTOU) on the original hostname.
+		// Dial the validated IP directly (no second DNS lookup / TOCTOU).
 		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
 	}
 }
 
-// discordHTTPClient disables redirects so the CDN host allowlist cannot be
-// bypassed via a 302 to an internal address (SSRF). Discord's CDN serves
-// attachments directly and never requires cross-host redirects. The Transport
-// injects blockPrivateDial so a host that resolves to an internal address
-// (DNS rebinding) is refused after resolution, before any bytes are exchanged.
+// discordHTTPClient disables redirects (a 302 could bypass the CDN allowlist
+// into an internal address) and dials through blockPrivateDial.
 var discordHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -572,12 +504,8 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid attachment URL: %w", err)
 	}
-	// Discord legitimate CDN URLs are always https; refuse plaintext so a MITM
-	// or malicious crafted message cannot serve substituted bytes that would
-	// then be forwarded as if they were a trusted Discord attachment. Also
-	// prevents a future Discord CDN downgrade or a crafted javascript:// URL
-	// from bypassing TLS verification on the attachment download path.
-	// (R227-SEC-13)
+	// CDN URLs are always https; plaintext would let a MITM substitute bytes
+	// that are then forwarded as a trusted attachment.
 	if u.Scheme != "https" {
 		return nil, "", fmt.Errorf("attachment URL must be https, got %q", u.Scheme)
 	}
@@ -604,13 +532,9 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	return data, ct, nil
 }
 
-// resolveImageContentType decides the Content-Type forwarded downstream for a
-// downloaded attachment. It always derives the type from the bytes (sniffing),
-// never from the upstream header, because the header is CDN-controlled and a
-// malicious edge could declare e.g. text/html to attempt XSS on IM clients that
-// render inline HTML. An empty body is treated as an error: an image download
-// that yields zero bytes is anomalous, and forwarding the upstream header for a
-// bodyless response would re-open exactly that header-trust hole.
+// resolveImageContentType derives the forwarded Content-Type from the bytes,
+// never the CDN-controlled header (a malicious edge could claim text/html for
+// XSS on IM clients). An empty body is an error, not a header fallback.
 func resolveImageContentType(data []byte, headerCT, host string) (string, error) {
 	if len(data) == 0 {
 		return "", fmt.Errorf("download: empty body from %s", host)

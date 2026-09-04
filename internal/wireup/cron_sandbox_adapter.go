@@ -19,18 +19,15 @@ import (
 )
 
 // stopConfirmTimeout bounds the post-transport-failure StopRuntimeSession
-// call. Validation V4 measured Stop taking effect within seconds; 30s
-// covers API retry slack without wedging the cron worker.
+// call: Stop takes effect within seconds, 30s covers API retry slack.
 const stopConfirmTimeout = 30 * time.Second
 
 // agentcoreSandboxRunner implements cron.SandboxRunner over agentcore.Client.
 type agentcoreSandboxRunner struct {
 	client *agentcore.Client
-	// settings is the tenant config layer injected into every microVM
-	// (~/.claude/settings.json — RFC §2.1 runtime-injection column).
-	// Built once at construction: CC inside the microVM talks to Bedrock
-	// via the Runtime IAM execution role, so the only required keys are
-	// the Bedrock switch + region. No credentials ever ride here.
+	// settings is the settings.json injected into every microVM: only the
+	// Bedrock switch + region — CC uses the Runtime IAM role, so no
+	// credentials ever ride here.
 	settings json.RawMessage
 }
 
@@ -48,10 +45,9 @@ func sandboxSettings(region string) (json.RawMessage, error) {
 	return b, nil
 }
 
-// newAgentcoreSandboxRunner builds the production SandboxRunner, or
-// (nil, nil) when BOTH fields are empty (feature off). A half-filled
-// config (one field set) is an operator mistake, not "off" — it returns
-// an error so WireSchedulers WARNs instead of silently disabling.
+// newAgentcoreSandboxRunner builds the SandboxRunner, or (nil, nil) when BOTH
+// fields are empty. A half-filled config is an operator mistake and errors so
+// WireSchedulers WARNs instead of silently disabling.
 func newAgentcoreSandboxRunner(ctx context.Context, runtimeARN, region string) (cron.SandboxRunner, error) {
 	if runtimeARN == "" && region == "" {
 		return nil, nil // sandbox placement not configured — feature off
@@ -67,9 +63,9 @@ func newAgentcoreSandboxRunner(ctx context.Context, runtimeARN, region string) (
 	return &agentcoreSandboxRunner{client: client, settings: settings}, nil
 }
 
-// RunJob executes one run-once job: invoke, hold the stream (fanning raw
-// envelope lines to eventSink), classify, and — on transport failure —
-// attempt the §6.2 rule-1 StopRuntimeSession containment before returning.
+// RunJob executes one run-once job: invoke, fan raw envelope lines to
+// eventSink, classify, and on transport failure attempt StopRuntimeSession
+// containment (RFC §6.2 rule 1) before returning.
 func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob, eventSink func(line []byte) error) (cron.SandboxOutcome, error) {
 	payload := &agentcore.Payload{
 		Settings: r.settings,
@@ -77,13 +73,9 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		Model:    job.Model,
 	}
 
-	// runtimeSessionId is derived by cron (sandboxRuntimeSessionID) so the
-	// §6.5 pending record can hold it before the invoke. [R202606-ARCH-1]
-	// Fail closed on an empty value rather than synthesising a fallback id:
-	// a generated id would never match the id persisted in the pending
-	// record, so a later reconcile/Stop would target the wrong (or no)
-	// session and permanently orphan the real microVM. Production cron
-	// always populates RuntimeSessionID; an empty value is a caller bug.
+	// cron derives the id so the pending record holds it before the invoke.
+	// Fail closed rather than synthesise one: a generated id would never match
+	// the pending record and a later reconcile/Stop would orphan the microVM.
 	runtimeID := job.RuntimeSessionID
 	if runtimeID == "" {
 		return cron.SandboxOutcome{}, fmt.Errorf("wireup: sandbox job %s has empty RuntimeSessionID", job.RunID)
@@ -91,9 +83,8 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 
 	var resultText string
 	sink := func(env *agentcore.Envelope) error {
-		// Track the latest result-bearing CLI line's text for the cron
-		// run record. Cheap probe: full parsing stays with the dashboard
-		// (Phase 2 run-detail view reads the persisted event log).
+		// Latest result-bearing CLI line feeds the run record; full parsing
+		// stays with the dashboard.
 		if env.Kind == agentcore.KindCLI {
 			if txt, ok := agentcore.ResultText(env.Line); ok {
 				resultText = txt
@@ -111,14 +102,11 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 
 	res, err := r.client.Run(ctx, runtimeID, payload, sink)
 	if err != nil {
-		// Never-attempted contract (PR-2a): invalid payload, nothing
-		// reached the platform.
+		// Never attempted: nothing reached the platform.
 		return cron.SandboxOutcome{}, err
 	}
 
-	// Cloud-execution receipt (RFC §7.3): map the agentcore result into
-	// cron's SDK-free meta struct. RuntimeARN comes from the client config
-	// (the run targeted r.client's runtime); the rest from the stream.
+	// Cloud-execution receipt in cron's SDK-free shape (RFC §7.3).
 	meta := cron.SandboxRunMeta{
 		RuntimeARN:      r.client.RuntimeARN(),
 		ImageVersion:    res.ImageVersion,
@@ -147,10 +135,8 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 		if res.Err != nil {
 			out.ErrMsg = res.Err.Error()
 		}
-		// §6.2 rule 1: the microVM may still be running; Stop before this
-		// run can ever be replayed. Use a fresh short-lived ctx — the run
-		// ctx may already be cancelled (that cancellation may be WHY we
-		// are here), and the containment call must not inherit it.
+		// The microVM may still be running; Stop before any replay. Fresh ctx:
+		// the run ctx may be cancelled (possibly WHY we are here).
 		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopConfirmTimeout)
 		defer cancel()
 		if stopErr := r.client.Stop(stopCtx, runtimeID); stopErr != nil {
@@ -163,13 +149,10 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 	}
 }
 
-// StopSession implements the cron.SandboxRunner §6.5 reconcile primitive:
-// terminate a runtime session by its platform id (orphan cleanup after a
-// naozhi restart). ResourceNotFoundException maps to success: a pending
-// record can be written microseconds before the invoke RPC ever reaches
-// the platform — Stop-of-never-started means there is nothing to contain,
-// and treating it as an error would park that pending file in an infinite
-// every-boot retry loop (review §6.5 F3).
+// StopSession terminates a runtime session by platform id (orphan cleanup
+// after restart, RFC §6.5). ResourceNotFoundException maps to success: a
+// pending record can predate the invoke ever reaching the platform, and an
+// error would park that file in an every-boot retry loop.
 func (r *agentcoreSandboxRunner) StopSession(ctx context.Context, runtimeSessionID string) error {
 	err := r.client.Stop(ctx, runtimeSessionID)
 	var nf *bedrockagentcoretypes.ResourceNotFoundException

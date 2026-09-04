@@ -86,16 +86,10 @@ Flags:
 		fatalf("replace binary: %v\n", err)
 	}
 
-	// 6. Restart service (unless skipped or not running).
-	//
-	// We deliberately do NOT roll back the binary when the restart step
-	// returns an error. The binary is already SHA-256 verified and made
-	// executable by Replace, so a restart problem is almost always a slow
-	// cold start (Type=notify + a loaded host taking longer than
-	// TimeoutStartSec to send READY=1) rather than a bad binary. Rolling
-	// back a healthy binary on that false signal is exactly what broke the
-	// v0.0.27 upgrade. systemd's Restart=always keeps bringing the new
-	// binary up; the operator just needs to be told to check on it.
+	// 6. Restart service (unless skipped or not running). Deliberately NO
+	// rollback on restart error: the binary is already verified, and a restart
+	// failure is almost always a slow Type=notify cold start rather than a bad
+	// binary; Restart=always keeps bringing it up.
 	serviceWasRunning := selfupdate.ServiceRunning()
 	restartWarned := false
 	if !*noRestart && serviceWasRunning {
@@ -107,11 +101,7 @@ Flags:
 			fmt.Fprintf(os.Stderr, "(slow cold start) OR may be failing to start. Check which:\n")
 			fmt.Fprintf(os.Stderr, "    systemctl status naozhi\n")
 			fmt.Fprintf(os.Stderr, "    journalctl -u naozhi -n 50 --no-pager\n")
-			// The backup is a 0600, non-executable copy of the PRIOR binary
-			// (copyFileBackup), so a bare `cp` back reproduces the 203/EXEC
-			// failure — the restore MUST re-apply the executable bit. There is
-			// no `naozhi upgrade --tag` to downgrade with, so spell out the
-			// manual path explicitly.
+			// The backup is 0600 non-executable, so the restore MUST chmod.
 			fmt.Fprintf(os.Stderr, "To roll back to the previous binary:\n")
 			fmt.Fprintf(os.Stderr, "    sudo cp %s %s && sudo chmod 0755 %s && sudo systemctl restart naozhi\n",
 				backupPath, selfPath, selfPath)
@@ -120,8 +110,7 @@ Flags:
 		fmt.Printf("Service not running — skipping restart.\n")
 	}
 
-	// 7. Clean up backup on success. Keep it when the restart was not
-	// confirmed so the operator has a manual rollback artifact.
+	// 7. Keep the backup when the restart was not confirmed (manual rollback).
 	if !restartWarned {
 		_ = os.Remove(backupPath)
 	}

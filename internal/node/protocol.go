@@ -18,74 +18,33 @@ type ServerMsg struct {
 	Reason string                `json:"reason,omitempty"` // additional context
 	Error  string                `json:"error,omitempty"`  // error message
 	Node   string                `json:"node,omitempty"`   // source node
-	// RetryAfter is advisory: when set on auth_fail rate-limit replies, the
-	// client should wait at least this many seconds before retrying. Mirrors
-	// the HTTP Retry-After header the /api/auth/login 429 branch emits, so
-	// WS auth and HTTP login lockouts surface identical UX affordances.
-	// Omitted on non-rate-limit auth_fail (e.g. invalid token) and on all
-	// other message types — older clients silently ignore the unknown field.
+	// RetryAfter (seconds, advisory) is set only on rate-limit auth_fail,
+	// mirroring the HTTP Retry-After header on /api/auth/login 429.
 	RetryAfter int `json:"retry_after,omitempty"`
 
-	// Agent-team fields (RFC v4 agent-team-ui §3.5.2). All omitempty; older
-	// clients silently ignore unknown fields and older servers never emit
-	// the "agent_*" message types to trigger them.
-	//
-	// TODO(RFC v4 phase 3, tracked in docs/TODO.md R214-CODE-6): agent_event
-	// has no per-message seq; on client reconnect during a buffered-replay +
-	// live-push overlap, the dashboard must de-dup via
-	// (time, type, tool_use_id) composite key. Consider adding a monotonic
-	// seq here if Phase 3 observes duplicates in practice.
+	// Agent-team fields (RFC v4 agent-team-ui §3.5.2), all omitempty.
+	// TODO(docs/TODO.md): agent_event has no per-message seq; the dashboard
+	// de-dups replay/live overlap via (time, type, tool_use_id).
 	TaskID    string          `json:"task_id,omitempty"`
 	AgentMeta *AgentMetaPatch `json:"meta,omitempty"`
 
-	// HasMore is set on the initial "history" frame to tell the dashboard
-	// whether any event strictly older than the slice still exists (ring or
-	// disk). It replaces the client-side `len(events) >= INITIAL_HISTORY_LIMIT`
-	// heuristic, which guessed wrong when a session had more visible bubbles
-	// than DefaultVisibleTarget but fewer total events than the page-size hint —
-	// hiding the "load earlier" affordance and stranding the opening messages.
-	//
-	// It is a *bool so the modern "no more history" answer (false) still
-	// serializes — a plain bool with omitempty would drop false and leave the
-	// client unable to distinguish "server says no more" from "legacy server
-	// said nothing". nil (all non-initial-history frames, and older servers) is
-	// omitted; those clients fall back to the length heuristic. Older clients
-	// ignore the unknown field either way.
+	// HasMore, on the initial "history" frame, says whether events older than
+	// the slice exist, replacing the client's length heuristic. *bool so an
+	// explicit false still serializes; nil (older servers, non-initial frames)
+	// means "fall back to the heuristic".
 	HasMore *bool `json:"has_more,omitempty"`
 
-	// Initial marks a "history" frame as the opening page of a subscription —
-	// the one the dashboard renders by replacing the whole events pane. Every
-	// other history frame (eventPushLoop backfill, a remote node's streamEvents
-	// batch relayed as "events") is an incremental append and MUST leave this
-	// false.
-	//
-	// The client cannot infer this from arrival order. Two independent reasons:
-	//
-	//   - ReverseConn.Subscribe's first-subscriber path fetches history from a
-	//     LOCAL goroutine while the "subscribed" ack round-trips through the
-	//     remote's readLoop, so history can legitimately precede the ack (the
-	//     ordering is called out at that call site).
-	//   - A superseded subscription's eventPushLoop is a separate goroutine and
-	//     unsub() does not drain an in-flight backfill, so its frames can land
-	//     either side of the new ack.
-	//
-	// Without an explicit marker the dashboard consumed whichever history frame
-	// arrived first as the opening page: a handful of live events replaced the
-	// whole conversation and pushed the render watermark to the newest entry,
-	// after which the real opening page was dropped wholesale by the client's
-	// timestamp guard. Keying the decision on this flag instead makes it
-	// order-independent.
-	//
-	// omitempty: only initial frames carry it. Incremental frames stay
-	// byte-identical to before, which keeps them poolable and lets
-	// historyMarshalCache go on sharing one buffer across a multi-tab fan-out
-	// (the flag is per-frame, never per-client).
+	// Initial marks a "history" frame as the opening page the dashboard renders
+	// by replacing the pane; every other history frame is an incremental
+	// append and MUST leave it false. Arrival order cannot be used: the first
+	// subscriber's history fetch and the remote `subscribed` ack race, as can a
+	// superseded subscription's in-flight backfill. omitempty keeps incremental
+	// frames byte-identical (poolable, shared across a multi-tab fan-out).
 	Initial bool `json:"initial,omitempty"`
 }
 
-// AgentMetaPatch carries aggregator-side counters the server_tailer pushes
-// out-of-band of the raw event stream. Consumed by the dashboard to refresh
-// a banner row's "N calls · 2.1s" without re-rendering the entire agent view.
+// AgentMetaPatch carries aggregator counters pushed out-of-band so the
+// dashboard can refresh a banner row without re-rendering the agent view.
 type AgentMetaPatch struct {
 	LastTool   string `json:"last_tool,omitempty"`
 	LastDetail string `json:"last_detail,omitempty"`
@@ -107,36 +66,25 @@ type ClientMsg struct {
 	Workspace string `json:"workspace,omitempty"` // workspace override for new sessions
 	ResumeID  string `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
 	Backend   string `json:"backend,omitempty"`   // backend ID picked by dashboard for new sessions
-	// AccessProfile is the access-profile ID picked by the dashboard for new
-	// LOCAL sessions (RFC project-access-profile §8.2). Only meaningful for
-	// local dispatch — remote dispatch of a non-default profile is refused at
-	// the primary by gateRemoteAccessProfile (the overlay is host-local), so
-	// this field is not consumed on the remote-forward path.
+	// AccessProfile is the profile picked for new LOCAL sessions; remote
+	// dispatch of a non-default profile is refused (the overlay is host-local).
 	AccessProfile string   `json:"access_profile,omitempty"`
 	FileIDs       []string `json:"file_ids,omitempty"` // pre-uploaded image IDs from /api/sessions/upload
-	// Agent-team subscribe target (RFC v4 agent-team-ui §3.5.2). Set on
-	// agent_subscribe / agent_unsubscribe only; unused by legacy message
-	// types which ignore the extra field.
+	// TaskID is the agent-team subscribe target (agent_subscribe / agent_unsubscribe).
 	TaskID string `json:"task_id,omitempty"`
 }
 
-// ReverseMsg is the framing message for the reverse-connect WebSocket protocol.
-// It is used for both primary→node requests and node→primary responses/events.
-//
-// Forward-compat markers (ProtocolVersion / Capabilities) are set on the
-// register handshake only. A peer omitting them is treated as version 1 with
-// empty capabilities. Server-side MUST NOT fail-close on unknown capability
-// strings — consumers intersect advertised caps with their known set and
-// gracefully degrade for anything missing. This keeps newer nodes/primaries
-// interoperating with older peers without a flag-day upgrade.
+// ReverseMsg frames the reverse-connect WebSocket protocol in both
+// directions. ProtocolVersion / Capabilities appear on the register handshake
+// only; a peer omitting them is version 1 with no caps. The server MUST NOT
+// fail-close on unknown capability strings so mixed versions interoperate.
 type ReverseMsg struct {
 	Type string `json:"type"`
-	// ProtocolVersion is the reverse-node wire version the sender speaks.
-	// Current implicit version is 1. Bumped on breaking framing changes only;
-	// additive fields continue to use omitempty without a version bump.
+	// ProtocolVersion is the wire version (implicit 1); bumped on breaking
+	// framing changes only, additive fields stay omitempty.
 	ProtocolVersion int `json:"protocol_version,omitempty"`
-	// Capabilities advertises optional feature tags (e.g. "gemini", "acp",
-	// "askuser") on register. Unknown tags are ignored, not rejected.
+	// Capabilities advertises optional feature tags ("acp", "askuser", …);
+	// unknown tags are ignored, not rejected.
 	Capabilities []string              `json:"capabilities,omitempty"`
 	NodeID       string                `json:"node_id,omitempty"`
 	Token        string                `json:"token,omitempty"`

@@ -35,7 +35,7 @@ func TestWSRelay_Source_ReconnectClosedRecheck(t *testing.T) {
 	// (R20260605B-CORR-15 added a connAlive snapshot in the same critical
 	// section; allow optional extra reads before the Unlock so this anchor
 	// stays valid alongside that fix.)
-	pat1 := regexp.MustCompile(`(?s)for _, e := range resubscribes \{.*?\}\s*//[^\n]*R185-REL-M1.*?r\.mu\.Lock\(\)\s*\n\s*stillOpen := !r\.closed\s*\n(?:[^\n]*\n)*?\s*r\.mu\.Unlock\(\)`)
+	pat1 := regexp.MustCompile(`(?s)for _, e := range resubscribes \{.*?\}.*?r\.mu\.Lock\(\)\s*\n\s*stillOpen := !r\.closed\s*\n(?:[^\n]*\n)*?\s*r\.mu\.Unlock\(\)`)
 	if !pat1.MatchString(src) {
 		t.Error("reconnect must re-check r.closed under r.mu after the resub loop (R185-REL-M1)")
 	}
