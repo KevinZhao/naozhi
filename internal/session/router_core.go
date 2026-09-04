@@ -33,6 +33,7 @@ import (
 	// (#403, #567) so this file no longer needs the naozhilog import.
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/session/workspacestore"
 	"github.com/naozhi/naozhi/internal/sessionconst"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
@@ -293,15 +294,18 @@ type Router struct {
 	codexSessionsDir string
 
 	// wsStore is the per-chat workspace-override facet (Router P1, #383):
-	// the overrides map plus its dirty flag and mutation gen, extracted into
-	// workspaceStore (router_workspace.go) which carries the verbatim
-	// two-key-invariant godoc. No lock of its own — read/written only under
-	// r.mu (RFC §3 candidate A, single r.mu retained). The annotation below
-	// must cover ALL 5 accessing domains: the lint recurses one level so each
-	// inner field (overrides/dirty/gen) ALSO carries its own per-domain
-	// annotation on workspaceStore.
+	// the overrides map plus its LRU seq, dirty flag and mutation gen,
+	// encapsulated in internal/session/workspacestore (#2495 step 1). Its
+	// fields are private to that package, so Router can only reach them via
+	// the Store methods — the compiler enforces the boundary and the
+	// per-inner-field `// 读写:` annotations are gone (only this outer
+	// annotation remains lint-tracked). No lock of its own — every method is
+	// called under r.mu (RFC §3 candidate A, single r.mu retained) because
+	// override mutations must be atomic with session mutations (#2342,
+	// Round-207 SM1) and eviction reads r.ss.byChat. Zero value is usable;
+	// no explicit map allocation is needed in NewRouter or in tests.
 	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
-	wsStore workspaceStore
+	wsStore workspacestore.Store
 
 	// pp is the process-pool / shim-reconciler facet (Router P5, #805): the
 	// in-flight Spawn() counter (pendingSpawns), the in-flight spawn-key →
@@ -931,10 +935,8 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.ss.byChat = make(map[string]map[string]struct{})
 	r.ss.keyhash = make(map[string]string)
 	r.ss.idToKey = make(map[string]string)
-	// wsStore is a value field (no lock of its own); its override map must be
-	// allocated explicitly since composite-literal sub-struct field init is
-	// not used here (Router P1 facet, #383).
-	r.wsStore.overrides = make(map[string]string)
+	// wsStore (workspacestore.Store) is zero-value usable: its maps are
+	// allocated lazily on first write, so no init is needed here.
 	// kid is a value field (no lock of its own); its IDs map must be
 	// allocated explicitly since composite-literal sub-struct field init is
 	// not used here (Router P2 facet, #600).
@@ -1035,11 +1037,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	// Load persisted workspace overrides (/cd settings)
-	if loaded := loadWorkspaceOverrides(r.storePath); loaded != nil {
-		for k, v := range loaded {
-			r.wsStore.overrides[k] = v
-		}
-	}
+	r.wsStore.Seed(loadWorkspaceOverrides(r.storePath))
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {

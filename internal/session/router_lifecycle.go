@@ -203,31 +203,17 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 		// on chat prefix reset which is rare (user /reset action).
 		r.reconcileSessionActiveByBackendLocked()
 	}
-	if _, existed := r.wsStore.overrides[chatKeyPrefix]; existed {
-		delete(r.wsStore.overrides, chatKeyPrefix)
-		delete(r.wsStore.seq, chatKeyPrefix) // keep LRU recency map from outliving its override
-		// Without wsStore.dirty, the delete is only written back when some
-		// other code path bumps the flag; a crash before that would reload
-		// the override on restart and silently undo the user's reset.
-		r.wsStore.dirty = true
-		r.wsStore.gen.Add(1)
-	}
+	// Delete marks the store dirty so the removal is persisted even if no
+	// other path flips the flag before a crash (which would otherwise
+	// reload the override on restart and silently undo the user's reset).
+	r.wsStore.Delete(chatKeyPrefix)
 	if setWorkspace && chatKeyPrefix != "" {
 		// Install the new override in the SAME locked section as the reset
 		// above so no concurrent GetOrCreate observes the chat reset but the
 		// override still gone (#2342). We just deleted any existing override
-		// for this key, so this is always a fresh insert; mirror
-		// SetWorkspace's bookkeeping (cap eviction, seq, dirty, gen).
-		if len(r.wsStore.overrides) >= maxWorkspaceOverrides {
-			if !r.evictWorkspaceOverrideLocked() {
-				slog.Warn("workspaceOverrides at capacity and no session-less entry to evict; dropping override",
-					"chat_key", chatKeyPrefix, "cap", maxWorkspaceOverrides)
-			} else {
-				r.setWorkspaceOverrideLocked(chatKeyPrefix, path)
-			}
-		} else {
-			r.setWorkspaceOverrideLocked(chatKeyPrefix, path)
-		}
+		// for this key, so this is always a fresh insert; the shared helper
+		// applies SetWorkspace's bookkeeping (cap eviction, seq, dirty, gen).
+		r.putWorkspaceOverrideLocked(chatKeyPrefix, path)
 	}
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
@@ -477,7 +463,7 @@ type spawnParams struct {
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
 // session. The caller MUST hold r.mu (write lock) because this reads
-// r.bkStore.backendOverrides, r.wsStore.overrides, r.ss.sessions and mutates
+// r.bkStore.backendOverrides, the wsStore overrides, r.ss.sessions and mutates
 // r.bkStore.backendOverrides (consuming the one-shot dashboard pick).
 //
 // Pure-ish: no I/O except resolveResumeID's resume-target stat and
@@ -640,7 +626,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	//
 	// R245-ARCH-32 (#883): the per-chat-override > default base tier is
 	// resolved through resolveWorkspaceLocked — the single chat-level
-	// resolution point — instead of re-reading r.wsStore.overrides /
+	// resolution point — instead of re-reading the wsStore overrides /
 	// r.defaultCWD inline here. This kills the second source of truth that
 	// previously derived the same base independently and could drift from
 	// GetWorkspace. The opts and resume tiers still layer ON TOP of that
@@ -655,7 +641,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		// Only treat as "overridden" (pinning out the resume tier) when an
 		// explicit per-chat override actually exists; a bare default must
 		// still allow the resume-session workspace to win below.
-		if _, ok := r.wsStore.overrides[chatKey]; ok {
+		if _, ok := r.wsStore.Lookup(chatKey); ok {
 			workspaceOverridden = true
 		}
 	} else {
@@ -1567,12 +1553,7 @@ func (r *Router) Reset(key string) {
 func (r *Router) ResetAndDiscardOverride(key string) {
 	r.mu.Lock()
 	proc, sessionID, hadSession := r.resetLocked(key)
-	if _, existed := r.wsStore.overrides[key]; existed {
-		delete(r.wsStore.overrides, key)
-		delete(r.wsStore.seq, key) // keep LRU recency map from outliving its override
-		r.wsStore.dirty = true
-		r.wsStore.gen.Add(1)
-	}
+	r.wsStore.Delete(key)
 	r.mu.Unlock()
 	if !hadSession {
 		return

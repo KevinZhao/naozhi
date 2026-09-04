@@ -9,7 +9,7 @@ import (
 )
 
 // newStoppedGateRouter builds a fully map-initialized Router (via NewRouter, so
-// wsStore.overrides / spawningKeys / sessions are all non-nil) wired to a
+// spawningKeys / sessions are non-nil; wsStore is zero-value usable) wired to a
 // non-existent CLI binary. The stopped gate in spawnSession returns before any
 // real spawn, so the bogus binary is never executed.
 func newStoppedGateRouter() *Router {

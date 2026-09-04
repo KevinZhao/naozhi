@@ -26,7 +26,6 @@ func mkTuningRouter(t *testing.T) *Router {
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.backendEfforts = map[string]string{"kiro": "high"}
 	r.bkStore.model = "claude-fable-5"
-	r.wsStore.overrides = make(map[string]string)
 	r.claudeDir = t.TempDir()
 	r.kiroSessionsDir = t.TempDir()
 	return r

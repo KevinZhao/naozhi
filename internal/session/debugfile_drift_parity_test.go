@@ -48,7 +48,6 @@ func mkClaudeDriftRouter(t *testing.T, debugDir string) *Router {
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.backendEfforts = make(map[string]string)
 	r.bkStore.model = "claude-sonnet-5"
-	r.wsStore.overrides = make(map[string]string)
 	r.claudeDir = t.TempDir()
 	r.cliDebugDir = debugDir
 	return r

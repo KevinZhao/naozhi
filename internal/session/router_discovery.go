@@ -687,15 +687,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			r.ss.gen.Add(1)
 		}
 	}
-	// Set workspace override for the chat key prefix. Must bump the dirty
-	// flag so the override is persisted; otherwise a crash before another
-	// flushing path fires would lose the takeover's chosen workspace.
+	// Set workspace override for the chat key prefix. Adopt marks the store
+	// dirty (only when the value changed) so the override is persisted;
+	// otherwise a crash before another flushing path fires would lose the
+	// takeover's chosen workspace.
 	if chatKey := chatKeyFor(key); chatKey != key {
-		if prev, ok := r.wsStore.overrides[chatKey]; !ok || prev != workspace {
-			r.wsStore.overrides[chatKey] = workspace
-			r.wsStore.dirty = true
-			r.wsStore.gen.Add(1)
-		}
+		r.wsStore.Adopt(chatKey, workspace)
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)
 	if err != nil {

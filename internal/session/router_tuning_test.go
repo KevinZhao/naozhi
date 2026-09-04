@@ -44,7 +44,6 @@ func mkTuningTestRouter(t *testing.T) *Router {
 	r.bkStore.defaultBackend = "claude"
 	r.bkStore.backendOverrides = make(map[string]string)
 	r.bkStore.backendEfforts = map[string]string{}
-	r.wsStore.overrides = make(map[string]string)
 	return r
 }
 

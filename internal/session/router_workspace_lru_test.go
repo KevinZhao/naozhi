@@ -18,7 +18,7 @@ func TestSetWorkspace_EvictsLRUWhenAtCapacity(t *testing.T) {
 	for i := 0; i < maxWorkspaceOverrides; i++ {
 		r.SetWorkspace(fmt.Sprintf("dashboard:direct:k%d", i), fmt.Sprintf("/ws/%d", i))
 	}
-	if got := len(r.wsStore.overrides); got != maxWorkspaceOverrides {
+	if got := r.wsStore.Len(); got != maxWorkspaceOverrides {
 		t.Fatalf("precondition: overrides=%d want %d", got, maxWorkspaceOverrides)
 	}
 
@@ -38,12 +38,12 @@ func TestSetWorkspace_EvictsLRUWhenAtCapacity(t *testing.T) {
 		t.Errorf("k500 should survive eviction; got %q", got)
 	}
 	// Size invariant: still bounded.
-	if got := len(r.wsStore.overrides); got != maxWorkspaceOverrides {
+	if got := r.wsStore.Len(); got != maxWorkspaceOverrides {
 		t.Errorf("size after eviction=%d want %d (cap held)", got, maxWorkspaceOverrides)
 	}
 	// seq map must not outlive its override.
-	if len(r.wsStore.seq) != len(r.wsStore.overrides) {
-		t.Errorf("seq map drift: seq=%d overrides=%d (must stay in lockstep)", len(r.wsStore.seq), len(r.wsStore.overrides))
+	if err := r.wsStore.CheckInvariants(); err != nil {
+		t.Errorf("seq map drift after eviction: %v", err)
 	}
 }
 
@@ -88,7 +88,7 @@ func TestSetWorkspace_DropsWhenAllLive(t *testing.T) {
 	if got := r.Workspace("dashboard:direct:overflow"); got != "/default" {
 		t.Errorf("with all overrides live, new key must be dropped (DoS bound): got %q want /default", got)
 	}
-	if got := len(r.wsStore.overrides); got != maxWorkspaceOverrides {
+	if got := r.wsStore.Len(); got != maxWorkspaceOverrides {
 		t.Errorf("size=%d want %d — must never exceed cap", got, maxWorkspaceOverrides)
 	}
 }
@@ -101,13 +101,15 @@ func TestSetWorkspace_DiskLoadedKeysEvictedFirst(t *testing.T) {
 	r := NewRouter(RouterConfig{Workspace: "/default"})
 
 	// Simulate disk-loaded keys: present in overrides, absent from seq.
+	disk := make(map[string]string, maxWorkspaceOverrides-1)
 	for i := 0; i < maxWorkspaceOverrides-1; i++ {
-		r.wsStore.overrides[fmt.Sprintf("dashboard:direct:disk%d", i)] = fmt.Sprintf("/disk/%d", i)
+		disk[fmt.Sprintf("dashboard:direct:disk%d", i)] = fmt.Sprintf("/disk/%d", i)
 	}
+	r.wsStore.Seed(disk)
 	// One key set the normal way (has a seq → newest).
 	seqKey := "dashboard:direct:seqd"
 	r.SetWorkspace(seqKey, "/ws/seqd")
-	if got := len(r.wsStore.overrides); got != maxWorkspaceOverrides {
+	if got := r.wsStore.Len(); got != maxWorkspaceOverrides {
 		t.Fatalf("precondition: overrides=%d want %d", got, maxWorkspaceOverrides)
 	}
 

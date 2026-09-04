@@ -1,49 +1,16 @@
 package session
 
-import (
-	"log/slog"
-	"sync/atomic"
-)
+import "log/slog"
 
-// workspaceStore groups the three correlated per-chat workspace-override
-// fields (Router P1 facet, #383). It is a value field on Router, carries NO
-// lock of its own, and is read/written ONLY under Router.mu — the lock
-// topology is unchanged (RFC §3 candidate A: single r.mu retained).
-//
-// overrides stores per-chat workspace overrides.
-// Key format: "platform:chatType:chatID" (3-segment chat key —
-// distinct from the 4-segment session key used in r.ss.sessions).
-//
-// Two-key invariant: every chatKey present in sessionsByChat may
-// have an overrides entry; ResetChat clears both maps.
-// SetWorkspace creates only the override entry (no session yet),
-// and Reset(key)/evictOldest must NOT touch this map — it is
-// driven by user intent (SetWorkspace) rather than the session
-// lifecycle.
-type workspaceStore struct {
-	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save), discovery (Takeover), workspace (resolveWorkspaceLocked/WorkspaceRoots)
-	overrides map[string]string
-	// seq records the SetWorkspace insertion order per chatKey, used as the
-	// LRU recency signal for capacity self-healing (#cwd-overflow). A key with
-	// NO seq entry (e.g. loaded from disk on restart, or installed via Takeover)
-	// is treated as oldest — exactly the eviction priority we want, since the
-	// stale historical one-shot keys that fill the map are precisely those
-	// loaded from disk. Maintained only by SetWorkspace; cleared on delete in
-	// the override-delete sites (ResetChat / ResetAndDiscardOverride) and
-	// pruned during eviction (evictWorkspaceOverrideLocked) so it cannot
-	// outgrow `overrides`. (RenameSession carries the workspace on the
-	// ManagedSession, not via wsStore.overrides, so it has no seq to clear.)
-	// 读写: workspace (SetWorkspace / evictWorkspaceOverrideLocked), lifecycle (ResetChat / ResetAndDiscardOverride delete)
-	seq map[string]uint64
-	// seqNext is the monotonic counter handed to the next SetWorkspace write.
-	// 读写: workspace (SetWorkspace)
-	seqNext uint64
-	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume), workspace (SetWorkspace mutation)
-	dirty bool // true when workspace overrides changed since last save
-	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save), workspace (SetWorkspace mutation)
-	gen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
-}
+// The per-chat workspace-override facet (Router P1, #383) lives in
+// internal/session/workspacestore as of #2495 step 1: its fields are private
+// to that package, so every access from Router goes through the Store method
+// surface and the compiler — not the `// 读写:` inner-field annotations —
+// enforces the boundary. The store owns NO lock; every call below happens
+// under r.mu (see the workspacestore package doc for why the cross-facet
+// atomicity requirements of #2342 / Round-207 SM1 keep it there).
 
+// maxWorkspaceOverrides bounds the per-chat override map. Same rationale
 // as maxBackendOverrides (R55-SEC-001): authenticated callers can POST unique
 // chat keys to /api/sessions/send and each valid call grows the map by one
 // entry with no natural pruning. 1024 comfortably exceeds realistic operator
@@ -79,73 +46,21 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Existing keys update in place (no growth, no eviction). A brand-new key
-	// at capacity triggers an LRU eviction of a session-less override; only if
-	// nothing is evictable do we drop the new write (every remaining override
-	// belongs to a live chat — a genuine over-cap fleet, the DoS case the
-	// bound is for).
-	if _, existing := r.wsStore.overrides[chatKey]; !existing && len(r.wsStore.overrides) >= maxWorkspaceOverrides {
-		if !r.evictWorkspaceOverrideLocked() {
-			slog.Warn("workspaceOverrides at capacity and no session-less entry to evict; dropping override",
-				"chat_key", chatKey, "cap", maxWorkspaceOverrides)
-			return
-		}
-	}
-	r.setWorkspaceOverrideLocked(chatKey, path)
+	r.putWorkspaceOverrideLocked(chatKey, path)
 }
 
-// setWorkspaceOverrideLocked writes the override entry plus its LRU seq stamp
-// and bumps dirty/gen. Caller holds r.mu and has already enforced the capacity
-// bound. Shared by SetWorkspace and the atomic ResetChatAndSetWorkspace path
-// (#2342) so the seq/dirty/gen bookkeeping lives in one place.
-func (r *Router) setWorkspaceOverrideLocked(chatKey, path string) {
-	if r.wsStore.seq == nil {
-		r.wsStore.seq = make(map[string]uint64)
-	}
-	r.wsStore.overrides[chatKey] = path
-	r.wsStore.seqNext++
-	r.wsStore.seq[chatKey] = r.wsStore.seqNext
-	r.wsStore.dirty = true
-	r.wsStore.gen.Add(1)
-}
-
-// evictWorkspaceOverrideLocked removes the least-recently-set override whose
-// chat has NO live session, freeing one slot. Returns false when every
-// override belongs to a live chat (nothing safe to evict). Caller holds r.mu.
-//
-// Recency = wsStore.seq (SetWorkspace insertion order); a key absent from seq
-// (disk-loaded / Takeover-installed) sorts as oldest, which is the desired
-// priority — the stale one-shot keys that overflow the map are exactly those.
-// "No live session" is len(r.ss.byChat[chatKey])==0, so an active conversation
-// never loses its cwd. O(n) scan over a bounded map (<=1024) on the rare
-// at-capacity path only.
-func (r *Router) evictWorkspaceOverrideLocked() bool {
-	const noSeq = uint64(0) // keys without a seq entry sort oldest
-	victim := ""
-	var victimSeq uint64
-	found := false
-	for k := range r.wsStore.overrides {
-		if r.ss.byChat != nil && len(r.ss.byChat[k]) > 0 {
-			continue // live session — never evict
-		}
-		s := noSeq
-		if r.wsStore.seq != nil {
-			s = r.wsStore.seq[k] // 0 when absent → oldest
-		}
-		if !found || s < victimSeq {
-			victim, victimSeq, found = k, s, true
-		}
-	}
-	if !found {
-		return false
-	}
-	delete(r.wsStore.overrides, victim)
-	if r.wsStore.seq != nil {
-		delete(r.wsStore.seq, victim)
-	}
-	slog.Info("workspaceOverrides at capacity; evicted least-recently-set session-less override",
-		"evicted_chat_key", victim, "cap", maxWorkspaceOverrides)
-	return true
+// putWorkspaceOverrideLocked installs the override under the capacity
+// policy (existing key: update in place; new key at cap: LRU-evict a
+// session-less override, else drop). Shared by SetWorkspace and the atomic
+// ResetChatAndSetWorkspace path (#2342) so the "is this chat live" predicate
+// — the one piece of cross-facet state the eviction needs — is bound in
+// exactly one place. Caller holds r.mu. Reports whether the write landed.
+func (r *Router) putWorkspaceOverrideLocked(chatKey, path string) bool {
+	// "No live session" is len(r.ss.byChat[chatKey])==0, so an active
+	// conversation never loses its cwd. Indexing a nil byChat map yields a
+	// nil set (len 0), so no nil guard is needed.
+	isLive := func(k string) bool { return len(r.ss.byChat[k]) > 0 }
+	return r.wsStore.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
@@ -162,7 +77,7 @@ func (r *Router) Workspace(chatKey string) string {
 // resolveSpawnParamsLocked layers the additional opts/resume tiers ON TOP
 // of this chat-level base rather than re-deriving it independently.
 func (r *Router) resolveWorkspaceLocked(chatKey string) string {
-	if ws, ok := r.wsStore.overrides[chatKey]; ok {
+	if ws, ok := r.wsStore.Lookup(chatKey); ok {
 		return ws
 	}
 	return r.defaultCWD
@@ -177,8 +92,8 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 func (r *Router) WorkspaceRoots() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	seen := make(map[string]struct{}, len(r.wsStore.overrides)+1)
-	out := make([]string, 0, len(r.wsStore.overrides)+1)
+	seen := make(map[string]struct{}, r.wsStore.Len()+1)
+	out := make([]string, 0, r.wsStore.Len()+1)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -190,8 +105,6 @@ func (r *Router) WorkspaceRoots() []string {
 		out = append(out, p)
 	}
 	add(r.defaultCWD)
-	for _, ws := range r.wsStore.overrides {
-		add(ws)
-	}
+	r.wsStore.Range(func(_, ws string) { add(ws) })
 	return out
 }
