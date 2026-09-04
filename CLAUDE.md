@@ -315,6 +315,17 @@ Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `
 - Node cache is a separate `nodeCacheMu` to avoid blocking dashboard API.
 - Process Close() is always called outside router lock to prevent deadlock.
 
+## Code Comments
+
+Comments describe the *current* code: the invariant that holds, why a non-obvious choice was made, what a caller must not do. Everything else belongs in git history, PR descriptions and GitHub issues. (#2497)
+
+- **No history in comments.** No "previously / used to / was removed / historical note", no review-round narrative, no rejected-alternative essays. If the story matters, link it once: `// see #800`.
+- **No review anchors in code.** Never paste cron-cr finding IDs (`R<nnn>-<AREA>-<n>`) or issue titles into comments. Reference the issue/PR number once, at the end of the rationale. The commit message and PR body carry `(#N)`.
+- **Length limits.** In-function comment block ≤ 5 lines. Godoc on one identifier ≤ 10 lines. Package doc (`doc.go`) ≤ 60 lines. Longer means the function should be split or the design belongs in `docs/rfc/`.
+- **No comment-backed invariants.** If an invariant needs a CI lint to keep a comment honest, express it as a type or package boundary instead (#2495 / #2499 is the pattern). Do not add new lints that validate comments. The existing `// 读写:` annotations on Router facets stay only until each facet is extracted (`tools/check-router-fields`).
+- **Keep:** the godoc first sentence on exported identifiers, `//go:` directives, `//nolint`, build tags, `TODO` with an issue link, and security rationale that cannot be derived from the code.
+- **Automated fixers** (cron code-review / issue-fix agents) follow the same rules; a PR that adds anchors or history comments is a review BLOCK.
+
 ## Deployment
 
 Production: CloudFront -> ALB (SG: CloudFront-only) -> EC2 t4g.small :8180 -> systemd. Bedrock auth via IAM role (no AKSK). The EC2 needs access to the `bedrock-runtime` VPC endpoint (check SG on the endpoint).
