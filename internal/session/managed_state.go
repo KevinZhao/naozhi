@@ -1,21 +1,14 @@
 package session
 
-// ManagedState is the explicit lifecycle state of a ManagedSession.
+// ManagedState is the explicit lifecycle state of a ManagedSession (#432),
+// the single derived accessor (ManagedSession.ManagedState) consumers use
+// instead of stitching `loadProcess() == nil` / `isAlive()` / `getSessionID()`
+// / `exempt` together themselves.
 //
-// R176-ARCH-N4 (#432): historically the four/five logical states were
-// reconstructed ad-hoc at every consumer (dashboard, cron, discovery) by
-// stitching together `loadProcess() == nil`, `isAlive()`, `getSessionID()`
-// and the `exempt` flag. That field-stitching duplicated the inference rules
-// and let them drift. ManagedState collapses the inference into a single
-// derived accessor (ManagedSession.ManagedState) so callers read one value
-// instead of re-deriving the matrix.
-//
-// The state is DERIVED on read from the existing atomic fields — it is NOT a
-// new persisted field, so there is no store-format bump and no migration. The
-// existing String()-based State() ("ready"/"busy"/…) accessor keeps reporting
-// the live *process* state for the high-frequency connector push path; this
-// enum answers the orthogonal "where is this session in its lifecycle"
-// question that the dashboard and catalog views actually need.
+// The state is DERIVED on read from the existing atomic fields — NOT a
+// persisted field, so there is no store-format bump. State() ("ready"/"busy"/…)
+// keeps reporting the live *process* state for the connector push path; this
+// enum answers the orthogonal "where is this session in its lifecycle" question.
 type ManagedState int
 
 const (
@@ -60,25 +53,15 @@ func (m ManagedState) String() string {
 }
 
 // ManagedState derives the session's lifecycle state from its current fields.
-// Single source of truth for the inference that consumers previously
-// open-coded (R176-ARCH-N4 / #432).
 //
-// Locking: this method is NOT lock-free. The final fallback branch calls
-// hasInjectedHistory(), which acquires s.historyMu.RLock(). Callers must
-// not hold a higher-layer lock (e.g. router.mu) when invoking this method;
-// the documented contract (router_core.go) is that historyMu is never held
-// together with r.mu — nesting them here would silently create one half of
-// a potential AB-BA deadlock against any future historyMu → r.mu path.
+// Locking: NOT lock-free — the final fallback calls hasInjectedHistory(),
+// which takes s.historyMu.RLock(). Callers must not hold a higher-layer lock
+// (e.g. router.mu): historyMu is never held together with r.mu (router_core.go),
+// and nesting here would create one half of an AB-BA deadlock.
 //
-// Precedence:
-//  1. exempt wins (planner/scratch are badged distinctly regardless of proc),
-//  2. a live process → alive,
-//  3. no live process but a captured session ID → suspended (resumable),
-//  4. no live process and no session ID → stub if never spawned, else dead.
-//
-// "never spawned" is approximated by "no session ID AND no persisted history":
-// a session that once ran always either captured a session ID or accumulated
-// event history, so the absence of both is the stub signature.
+// Precedence: exempt → alive (live process) → suspended (session ID captured)
+// → dead (history but no session ID) → stub. "Never spawned" is approximated
+// by "no session ID AND no persisted history".
 func (s *ManagedSession) ManagedState() ManagedState {
 	if s.exempt {
 		return StateExempt

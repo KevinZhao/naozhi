@@ -36,15 +36,10 @@ func ValidateUserLabel(s string) (string, error) {
 		return "", errors.New("invalid utf-8")
 	}
 	for _, r := range s {
-		// Reject C0 (U+0000..U+001F), DEL (U+007F), C1 (U+0080..U+009F)
-		// control ranges, plus bidi overrides/isolates and LS/PS. Tab is
-		// NOT exempted: slog.TextHandler uses tab as its key/value
-		// separator, so a tab inside a label that later flows into a log
-		// attr would fragment the output. Mirrors sanitizeKeyComponent's
-		// gate and — R181-SEC-P2-3 — folds in IsLogInjectionRune so bidi
-		// overrides (U+202A..U+202E), bidi isolates (U+2066..U+2069),
-		// and LS/PS (U+2028/U+2029) cannot flip the rendered sidebar /
-		// /api/sessions broadcast order on dashboards.
+		// Reject C0, DEL, C1 control ranges plus bidi overrides/isolates and
+		// LS/PS (IsLogInjectionRune), which could flip the rendered sidebar
+		// order. Tab is NOT exempted: slog.TextHandler uses tab as its
+		// key/value separator, so a tab in a label would fragment log output.
 		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) || osutil.IsLogInjectionRune(r) {
 			return "", errors.New("control characters not allowed")
 		}

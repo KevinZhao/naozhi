@@ -12,25 +12,16 @@ import (
 // safe to call from Hub handlers and other call sites that don't hold r.mu.
 func (s *ManagedSession) Workspace() string { return loadAtomicString(&s.workspace) }
 
-// setWorkspace stores the workspace path atomically. Router-internal helper —
-// all writers already hold r.mu, but we route through the helper so the string
-// is always handed to the atomic.Pointer via one place (matches
-// storeAtomicString convention for backend/cliName/cliVersion).
+// setWorkspace stores the workspace path atomically. Writers hold r.mu; the
+// atomic store lets lock-free readers (Workspace) stay race-free.
 func (s *ManagedSession) setWorkspace(ws string) { storeAtomicString(&s.workspace, ws) }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
 
-// loadAtomicString and storeAtomicString are thin wrappers around the shared
-// textutil.LoadAtomicString / textutil.StoreAtomicString helpers. Kept as
-// package-private aliases so the surrounding accessor methods read cleanly.
-// Behavioural contract — fast-path short-circuit on equal value,
-// last-writer-wins — is documented on the textutil helpers; do not
-// re-document it here to keep the two in sync.
-//
-// Naming follows the textutil canonical (action-type) so cli and session
-// thin wrappers no longer have inverted word order. R219-CR-1 closed the
-// duplication; this rename closes the naming inconsistency.
+// loadAtomicString and storeAtomicString are thin package-private wrappers
+// around textutil.LoadAtomicString / StoreAtomicString; the behavioural
+// contract (equal-value short-circuit, last-writer-wins) is documented there.
 func loadAtomicString(v *atomic.Pointer[string]) string {
 	return textutil.LoadAtomicString(v)
 }
@@ -40,27 +31,14 @@ func storeAtomicString(v *atomic.Pointer[string], s string) {
 }
 
 // loadTotalCost reads the float64 cumulative cost from an atomic.Uint64
-// field, decoding the IEEE-754 bit pattern via math.Float64frombits.
-// Returns 0 when the field has never been written (Load() → 0 maps to
-// float64 zero, same default the plain-float64 field had).
-//
-// Cross-ref: textutil exposes LoadAtomicString / StoreAtomicString for the
-// `atomic.Pointer[string]` mirror pattern (R219-CR-1) but does not yet
-// cover the `atomic.Uint64`-encoded float64 case used here. These helpers
-// stay package-local until a second call site emerges; lifting them into
-// textutil now would invert the dependency (textutil is a leaf package
-// that must not import session-specific contracts). R230-CQ-18.
+// field (IEEE-754 bits). An unwritten field loads as 0 → float64 zero.
+// Package-local until a second call site appears.
 func loadTotalCost(v *atomic.Uint64) float64 {
 	return math.Float64frombits(v.Load())
 }
 
-// storeTotalCost writes a float64 cumulative cost via atomic.Uint64,
-// encoding through math.Float64bits. Paired with loadTotalCost to keep the
-// packing/unpacking convention in one place — R183-CONCUR-M2 made the
-// field atomic to harden against future post-publication writers, and
-// having a helper keeps call sites free of bit-level noise.
-//
-// See loadTotalCost for the textutil cross-reference.
+// storeTotalCost writes a float64 cumulative cost via atomic.Uint64; paired
+// with loadTotalCost so the bit-packing convention lives in one place.
 func storeTotalCost(v *atomic.Uint64, cost float64) {
 	v.Store(math.Float64bits(cost))
 }
@@ -73,19 +51,16 @@ type cliIdentityBox struct {
 	backend    string // "" = router default
 	cliName    string // e.g. "claude-code", "kiro"
 	cliVersion string // semver from --version
-	// accessProfile is the resolved access-profile ID this session spawned
-	// under ("" = global default). Packed here (rather than a separate atomic)
-	// so resume-lock reads observe backend+profile as one consistent snapshot —
-	// the two are jointly the "auth identity" a dead session must resume on.
-	// RFC project-access-profile §7.
+	// accessProfile is the resolved access-profile ID ("" = global default).
+	// Packed here rather than in a separate atomic so resume-lock reads see
+	// backend+profile — jointly the auth identity a dead session must resume
+	// on — as one consistent snapshot (RFC project-access-profile §7).
 	accessProfile string
 }
 
-// loadCLIIdentity returns a copy of the current backend/cliName/cliVersion
-// triple in one atomic Load. Returns the zero box (all fields "") when
-// the session was constructed bare and nothing has been set yet — callers
-// must treat that as "use router default", same as the legacy nil-pointer
-// path did.
+// loadCLIIdentity returns a copy of the current identity box in one atomic
+// Load. The zero box (all "") means nothing has been set; callers treat it
+// as "use router default".
 func (s *ManagedSession) loadCLIIdentity() cliIdentityBox {
 	if box := s.cliIdentity.Load(); box != nil {
 		return *box
@@ -93,14 +68,11 @@ func (s *ManagedSession) loadCLIIdentity() cliIdentityBox {
 	return cliIdentityBox{}
 }
 
-// updateCLIIdentity is the CAS-loop primitive that all Set* helpers below
-// funnel through. mut takes the current box (zero value when unset) and
-// returns the desired next box; we retry until the CAS succeeds. This
-// keeps independent SetBackend / SetCLIName / SetCLIVersion calls
-// composable — concurrent writers from spawn / reconnect under r.mu plus
-// occasional shim-discovery writes don't drop fields. The fast path
-// short-circuits when mut returns an unchanged box, mirroring the
-// loadAtomicString convention (see textutil.LoadAtomicString docs).
+// updateCLIIdentity is the CAS-loop primitive all Set* helpers funnel
+// through: mut maps the current box (zero when unset) to the next one and
+// the CAS retries until it wins, so concurrent writers (spawn / reconnect
+// under r.mu, shim discovery) never drop each other's fields. Unchanged
+// boxes short-circuit without a store.
 func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityBox) {
 	for {
 		cur := s.cliIdentity.Load()
@@ -172,11 +144,8 @@ func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLab
 
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
-//
-// Deprecated for daemon callers: prefer Router.SetUserLabelWithOrigin so the
-// LabelOrigin field stays consistent. This bare setter is preserved for
-// internal callers (router restore, tests) that already know the origin
-// context they want to preserve.
+// Daemon callers should prefer Router.SetUserLabelWithOrigin so LabelOrigin
+// stays consistent; this bare setter is for router restore and tests.
 func (s *ManagedSession) SetUserLabel(v string) { storeAtomicString(&s.userLabel, v) }
 
 // LabelOrigin returns the recorded origin of the current UserLabel:
@@ -190,12 +159,11 @@ func (s *ManagedSession) LabelOrigin() string { return loadAtomicString(&s.label
 func (s *ManagedSession) setLabelOrigin(v string) { storeAtomicString(&s.labelOrigin, v) }
 
 // Model returns the persisted last-known CLI model identifier ("" when
-// not yet captured from system/init / SpawnOptions). UI Round 5 R5-3.
+// not yet captured from system/init / SpawnOptions).
 func (s *ManagedSession) Model() string { return loadAtomicString(&s.model) }
 
-// SetModel records the latest known model id. Called by the readLoop
-// snapshotter when proc.Model() flips from "" to a real value, AND by
-// the store-restore path in NewRouter when seeding from sessions.json.
+// SetModel records the latest known model id (readLoop snapshotter and the
+// store-restore path in NewRouter).
 func (s *ManagedSession) SetModel(v string) { storeAtomicString(&s.model, v) }
 
 // TuningModel returns the operator's per-session model override ("" = no
@@ -215,11 +183,9 @@ func (s *ManagedSession) TuningEffort() string { return loadAtomicString(&s.tuni
 // have validated via tuningspec.ValidateEffort; "" clears the override.
 func (s *ManagedSession) SetTuningEffort(v string) { storeAtomicString(&s.tuningEffort, v) }
 
-// SetHistorySource installs the backend-specific disk-tier Source. Called
-// by the router at session construction; safe to call after the session is
-// published (atomic store) but callers should not rely on mid-flight
-// swaps being observed by a pagination request already in progress.
-// nil disables disk fallback (equivalent to history.Noop).
+// SetHistorySource installs the backend-specific disk-tier Source. Atomic, so
+// safe after publication, but a pagination request already in progress may
+// not observe a mid-flight swap. nil disables disk fallback (history.Noop).
 func (s *ManagedSession) SetHistorySource(src history.Source) {
 	s.historySource.Store(&historySourceBox{src: src})
 }

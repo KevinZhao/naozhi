@@ -10,87 +10,49 @@ import (
 )
 
 // MaxSessionKeyBytes caps the byte length of a session key accepted over any
-// trust boundary. A key has the shape `{platform}:{chatType}:{id}:{agentID}`,
-// and each component is individually capped at maxKeyComponent (128 bytes) by
-// sanitizeKeyComponent on IM-path construction. The `4 * 128 + 3 separators`
-// ceiling gives a safe upper bound for validators at RPC / HTTP entrypoints.
+// trust boundary: 4 components of maxKeyComponent bytes each (enforced by
+// sanitizeKeyComponent on IM-path construction) plus 3 separators.
 const MaxSessionKeyBytes = 4*maxKeyComponent + 3
 
 // Reserved session-key namespace prefixes.
 //
-// The canonical IM session key shape is `{platform}:{chatType}:{id}:{agentID}`
-// (DESIGN.md §"Session key"), but several internal subsystems synthesise keys
-// that deliberately escape this schema — their platform slot is not a real IM
-// platform name and they must be filtered / routed specially. Listing the
-// prefixes in one place lets feature code consult a single source of truth
-// instead of re-growing the same strings.HasPrefix check in every new
-// subsystem. R176-ARCH-M1.
-//
-// Each prefix is a full token (trailing colon) so substring collisions cannot
-// accidentally misclassify a key like "cronographer:..." as cron-owned.
-// Reserved-namespace prefix constants are now owned by the leaf
-// internal/sessionkey package; the session-local constants alias them
-// so existing callers (internal/session keyNamespaces table; external
-// dispatch / server / project callers) keep referring to session.X
-// during the migration window. After the alias deprecation cycle these
-// re-exports go away and external callers shift to sessionkey.X.
-//
-// Refs: docs/rfc/cron-sysession-merge.md Phase A2 + Phase B §3.3.5.
+// Canonical IM keys are `{platform}:{chatType}:{id}:{agentID}` (DESIGN.md
+// §"Session key"); these namespaces deliberately escape that schema and must
+// be filtered / routed specially. Each prefix is a full token (trailing colon)
+// so "cronographer:..." cannot be misclassified as cron-owned. The constants
+// are owned by the leaf internal/sessionkey package and re-exported here for
+// external callers (docs/rfc/cron-sysession-merge.md Phase A2 / B §3.3.5).
 const (
 	// CronKeyPrefix re-exports sessionkey.CronKeyPrefix.
 	CronKeyPrefix = sessionkey.CronKeyPrefix
-	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
-	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
-	// Canonical declaration lives in internal/sessionkey.ProjectKeyPrefix
-	// (R040034-ARCH-2 / #1412 consolidated the former internal/keyspec leaf
-	// into sessionkey so cron / sys / scratch / project share one owner).
+	// ProjectKeyPrefix is used for project-scoped planner sessions
+	// ("project:{name}:planner", see internal/project.IsPlannerKey) (#1412).
 	ProjectKeyPrefix = sessionkey.ProjectKeyPrefix
 	// SysKeyPrefix re-exports sessionkey.SysKeyPrefix.
 	SysKeyPrefix = sessionkey.SysKeyPrefix
 )
 
-// keyNamespace captures the per-prefix policy bits in one row so the reserved
-// + exempt classifications stay co-defined. R239-ARCH-L: previously the
-// "is this a reserved namespace" list lived in key.go and the "is this a
-// TTL-exempt namespace" list lived in router_core.go, with comments asking
-// each side to update the other. They drifted in practice — adding a new
-// reserved prefix without updating exemptKeyPrefixes silently routed the
-// new namespace through the regular TTL eviction path even though the
-// namespace was "non-IM-shape" by definition (cron / project / sys are
-// exempt; only scratch is reserved-but-not-exempt because it's
-// deliberately short-lived).
-//
-// Single source of truth: keyNamespaces below. Both reservedKeyPrefixes
-// (key.go) and exemptKeyPrefixes (router_core.go) derive from it so a
-// new namespace is added in exactly one row.
+// keyNamespace is one row of the reserved-namespace policy table. Reserved
+// and TTL-exempt classification are co-defined here so a new namespace cannot
+// be added to one list and forgotten in the other.
 type keyNamespace struct {
 	prefix string
-	// exempt means alive sessions under this prefix bypass TTL eviction,
-	// LRU pressure, and the active-process counter. ScratchKeyPrefix is
-	// the canonical reserved-but-not-exempt entry: scratch sessions are
-	// ephemeral and MUST stay subject to TTL so abandoned scratch
-	// conversations release their process slot.
+	// exempt: alive sessions under this prefix bypass TTL eviction, LRU
+	// pressure and the active-process counter. Scratch is reserved but NOT
+	// exempt so abandoned scratch conversations release their process slot.
 	exempt bool
-	// kind is the per-namespace bucket label used by the exempt sub-quota
-	// gate (R242-ARCH-2 / exemptCapFor). For non-exempt namespaces this is
-	// the empty string and exemptKind never observes the row.
+	// kind is the bucket label used by the exempt sub-quota gate
+	// (exemptCapFor); "" for non-exempt rows.
 	kind string
 }
 
-// keyNamespaces is the authoritative table of reserved-namespace prefixes.
-// `reservedKeyPrefixes` (consumer: IsReservedNamespace) and
-// `exemptKeyPrefixes` + `exemptKind` (consumers: isExemptKey,
-// router_core.go::exemptKind, exemptCapFor) derive from this table.
-// Kept sorted for grep stability.
+// keyNamespaces is the authoritative reserved-namespace table; reservedKeyPrefixes,
+// exemptKeyPrefixes and exemptKind derive from it. Kept sorted.
 //
-// When adding a new entry, update:
-//   - DESIGN.md §"Session key namespace"
-//   - the exempt flag below (true = bypass TTL/LRU; default false)
-//   - kind below if exempt=true (label flows into exemptCapFor switch)
-//   - the sidebar / persistence filter if the new namespace should not be
-//     persisted / displayed in the default UI
-//   - if exempt=true, add a sub-quota cap in router_core.go's exemptCapFor
-//     (otherwise spawnSession routes through maxExemptSessions fallback).
+// When adding an entry also update: DESIGN.md §"Session key namespace"; the
+// sidebar / persistence filter if it must not be shown by default; and, if
+// exempt=true, a sub-quota cap in router_core.go's exemptCapFor (otherwise
+// spawnSession falls back to maxExemptSessions).
 var keyNamespaces = []keyNamespace{
 	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
@@ -98,11 +60,8 @@ var keyNamespaces = []keyNamespace{
 	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},
 }
 
-// reservedKeyPrefixes is the list of namespaces that do NOT follow the
-// standard IM key shape, derived from keyNamespaces. Use the slice rather
-// than iterating keyNamespaces directly for hot-path callers — Go does not
-// elide the struct-field load even on each iteration of a small slice, and
-// grep-locality matches the prior single-file declaration.
+// reservedKeyPrefixes lists the namespaces that do NOT follow the standard IM
+// key shape, derived from keyNamespaces (flat slice for hot-path callers).
 var reservedKeyPrefixes = func() []string {
 	out := make([]string, len(keyNamespaces))
 	for i, ns := range keyNamespaces {
@@ -112,10 +71,8 @@ var reservedKeyPrefixes = func() []string {
 }()
 
 // IsReservedNamespace reports whether the given key belongs to any reserved
-// namespace (cron / project / scratch). Callers should prefer the namespace-
-// specific helpers (IsCronKey / project.IsPlannerKey / IsScratchKey) when
-// they care which one; this umbrella check is for validators and tooling
-// that only need "is this the standard IM shape or not".
+// namespace. Prefer IsCronKey / project.IsPlannerKey / IsScratchKey when the
+// specific namespace matters.
 func IsReservedNamespace(key string) bool {
 	for _, prefix := range reservedKeyPrefixes {
 		if strings.HasPrefix(key, prefix) {
@@ -126,8 +83,6 @@ func IsReservedNamespace(key string) bool {
 }
 
 // IsCronKey reports whether the key belongs to the cron namespace.
-// Aliases sessionkey.IsCronKey; kept for one release window so external
-// callers (dispatch / server / cmd) can migrate gradually.
 //
 // Deprecated: use sessionkey.IsCronKey.
 func IsCronKey(key string) bool { return sessionkey.IsCronKey(key) }
@@ -142,66 +97,45 @@ func CronKey(id string) string { return sessionkey.CronKey(id) }
 // Deprecated: use sessionkey.IsSysKey.
 func IsSysKey(key string) bool { return sessionkey.IsSysKey(key) }
 
-// plannerKeyFor is the session-package local accessor for the planner
-// key shape. Kept unexported because external callers should continue
-// to use internal/project's public API. KeyResolver needs to construct
-// planner keys without importing project (reverse dependency), so the
-// session package delegates to internal/sessionkey for the canonical
-// constructor — that package is zero-dep so any consumer can take it
-// without an import cycle.
-//
-// R239-ARCH-G (#900): pre-extraction this function held the literal
-// "project:{name}:planner" in two places (here and in internal/project)
-// kept in sync only via cross-module hardcoded tests. The literal now
-// lives once in internal/sessionkey.PlannerKeyFor; both call sites
-// delegate. R040034-ARCH-2 (#1412): the canonical declaration moved
-// from the former internal/keyspec into sessionkey so the project
-// prefix lives next to cron/sys/scratch.
+// plannerKeyFor builds the planner key shape. Unexported: external callers use
+// internal/project's API; KeyResolver needs the constructor without importing
+// project (reverse dependency), so it delegates to the zero-dep
+// internal/sessionkey package (#900, #1412).
 func plannerKeyFor(name string) string {
 	return sessionkey.PlannerKeyFor(name)
 }
 
-// isPlannerKey is the session-package local accessor for planner-key
-// detection. Delegates to internal/sessionkey.IsPlannerKey so the
-// "project:" + ":planner" + non-empty-name rule is encoded exactly
-// once. R239-ARCH-G (#900) / R040034-ARCH-2 (#1412).
+// isPlannerKey delegates to sessionkey.IsPlannerKey so the
+// "project:" + ":planner" + non-empty-name rule is encoded once.
 func isPlannerKey(key string) bool {
 	return sessionkey.IsPlannerKey(key)
 }
 
 // plannerNameFromKey extracts {name} from "project:{name}:planner". Callers
 // must have verified isPlannerKey(key) first; otherwise behaviour is undefined.
-// R239-ARCH-G (#900) / R040034-ARCH-2 (#1412): delegates to
-// internal/sessionkey.PlannerNameFromKey so the slice math lives once.
 func plannerNameFromKey(key string) string {
 	return sessionkey.PlannerNameFromKey(key)
 }
 
 // DeniedKeyRuneRanges returns the inclusive [lo, hi] codepoint ranges that
 // ValidateSessionKey rejects, as a fresh slice so callers cannot mutate the
-// table. Exposed for cross-layer contract tests (dashboard sanitizeKeySlug
-// parity); production code should call ValidateSessionKey.
-//
-// R202606f-ARCH-6 (#2301): the table itself is owned by internal/sessionkey
-// (denyset.go) so shim.validateKeyForShim, sanitizeKeyComponent and
-// SanitizeQuote share one deny-set instead of four hand copies. The
-// dashboard's client-side sanitizeKeySlug must strip the same set (#2429) —
-// the Go contract test in internal/server parses its regex against this
-// accessor, so growing the sessionkey table tells you to update dashboard.js.
+// table. Exposed for cross-layer contract tests; production code should call
+// ValidateSessionKey. The table is owned by internal/sessionkey (denyset.go)
+// and shared with shim.validateKeyForShim / sanitizeKeyComponent /
+// SanitizeQuote (#2301); the dashboard's sanitizeKeySlug must strip the same
+// set, which the internal/server contract test checks against this accessor (#2429).
 func DeniedKeyRuneRanges() [][2]rune {
 	return sessionkey.DeniedKeyRuneRanges()
 }
 
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
-// sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate
-// enforced by sanitizeKeyComponent for IM-originated keys — the IM path
-// silently sanitizes (because operators cannot influence inbound chat IDs),
-// but the reverse-RPC / HTTP paths must reject outright so a compromised
-// control-node or dashboard caller cannot inject keys that corrupt slog
-// output, terminal log viewers, or sessions.json storage. R65-SEC-M-2.
+// sequences, or exceed MaxSessionKeyBytes. The IM path silently sanitizes
+// (sanitizeKeyComponent) because operators cannot influence inbound chat IDs;
+// reverse-RPC / HTTP paths must reject outright so a compromised control-node
+// or dashboard caller cannot inject keys that corrupt slog output, terminal
+// log viewers, or sessions.json storage.
 //
-// Empty and missing keys are rejected — callers that want to short-circuit
-// empty keys must do so themselves before calling this.
+// Empty keys are rejected — callers wanting to short-circuit them must do so first.
 func ValidateSessionKey(k string) error {
 	if k == "" {
 		return errors.New("empty session key")
@@ -220,12 +154,9 @@ func ValidateSessionKey(k string) error {
 			return errors.New("session key contains invisible control character")
 		}
 	}
-	// Note: ValidateSessionKey does NOT enforce that the key has exactly 4
-	// colon-separated segments. Cross-node protocols (internal/upstream)
-	// forward operator-supplied keys whose shape may be unknown — the
-	// "unknown key" path expects validation to accept arbitrary strings so
-	// that downstream router.GetSession can report the absence. Call sites
-	// that rely on a 4-segment shape (promote, ChatKey extraction) must do
-	// their own split check.
+	// Deliberately does NOT enforce a 4-segment shape: cross-node protocols
+	// (internal/upstream) forward operator-supplied keys of unknown shape so
+	// router.GetSession can report the absence. Call sites relying on 4
+	// segments (promote, ChatKey extraction) must do their own split check.
 	return nil
 }

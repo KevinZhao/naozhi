@@ -1,18 +1,10 @@
 // Package session router lifecycle methods.
 //
-// Extracted from router.go on 2026-05-19 as part of the router-split
-// refactor (docs/design/router-split-design.md). For history prior to
-// commit 74085ac923b4d0153ae968e1b9a01e075afb7200, see:
-//
-//	git log --follow internal/session/router.go
-//
 // This file holds session lifecycle: GetOrCreate / spawn / Reset / Rename /
 // workspace overrides / history wiring. router.go retains the Router struct
 // definition, NewRouter, and infrastructure helpers (panicSafeSpawn etc.).
-//
-// All methods here read/write fields on Router (defined in router.go). Lock
-// contracts are documented per-method via "// LOCK:" annotations on `*Locked`
-// suffix functions.
+// Lock contracts are documented per-method via "// LOCK:" annotations on
+// `*Locked` suffix functions.
 package session
 
 import (
@@ -32,46 +24,22 @@ import (
 )
 
 // publishSessionLocked is the single funnel for installing a freshly-built
-// ManagedSession into the router's lookup tables. R215-ARCH-P2-2: callers
-// were previously expected to remember the (attachHistorySource → sessions
-// map → indexAdd) triple at every spawn / discovery / rename / takeover
-// site. Five production paths plus several tests had to keep the pattern
-// in sync; missing the attachHistorySource step at any one of them would
-// leave EventEntriesBeforeCtx returning empty and the dashboard "history"
-// drawer silently blank for that session.
+// ManagedSession into the router's lookup tables (attachHistorySource →
+// sessions map → indexAdd). Every spawn / discovery / rename / takeover path
+// must go through it so no site can forget the history source, which would
+// leave the dashboard "history" drawer silently blank. Callers that already
+// attached the source pass alreadyAttached=true to avoid double-attach.
 //
-// Funneling them through one helper makes the invariant a property of the
-// publish step instead of "five copy-paste sites that the contract test
-// has to chase". Callers that already attached the source explicitly (rename
-// path: attaches the *renamed* fresh session, then we just need the map
-// entries) pass alreadyAttached=true so we do not double-attach.
+// Post-condition: s.loadHistorySource() is non-nil (Noop at worst).
 //
 // LOCK: caller must hold r.mu (write).
-//
-// Post-condition: s.loadHistorySource() returns non-nil. R215-ARCH-P2-2
-// asks for "ManagedSession constructor mandates history.Source injection".
-// Adding a true mandatory-arg constructor would force a sweep of 20+
-// `&ManagedSession{key:...}` test literals, so we instead enforce the
-// invariant at the single canonical insertion funnel: any path that
-// publishes a session into r.ss.sessions through this helper is guaranteed
-// to leave it with a usable history source. attachHistorySource itself
-// is nil-safe (degrades to history.Noop) and the alreadyAttached branch
-// trusts the caller — the post-publish guard below catches the case
-// where alreadyAttached==true was set by mistake / the pre-attach path
-// silently skipped the SetHistorySource call. EventEntriesBeforeCtx's
-// disk fallback then degrades gracefully to "no entries" instead of
-// silently returning empty because src==nil short-circuits.
 func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAttached bool) {
 	if !alreadyAttached {
 		r.attachHistorySource(s)
 	}
 	if s.loadHistorySource() == nil {
-		// Defence-in-depth: alreadyAttached==true with no actual
-		// SetHistorySource call would otherwise silently leave the
-		// dashboard "history" drawer blank. Emit the diagnostic that
-		// would have been needed to debug it AND install a Noop so
-		// callers downstream of EventEntriesBeforeCtx don't have to
-		// nil-check.
+		// Defence-in-depth against a mistaken alreadyAttached=true: log the
+		// diagnostic and install a Noop so downstream callers need not nil-check.
 		slog.Error("publishSessionLocked: history source missing after attach — falling back to Noop",
 			"key", key, "alreadyAttached", alreadyAttached)
 		s.SetHistorySource(history.Noop{})
@@ -81,26 +49,12 @@ func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAtta
 }
 
 // attachHistorySource picks the right history.Source for a session based on
-// its backend ID and installs it. Called immediately after every
-// ManagedSession allocation in this file so EventEntriesBeforeCtx's disk
-// fallback is live before the first pagination request can arrive.
-//
-// Composition (RFC §3.4 / §3.5):
-//   - The local tier is naozhilog.Source (empty when eventLogDir is
-//     unset). It reads naozhi-native per-session logs that carry full
-//     EventEntry fidelity including Images, ImagePaths, and agent-team
-//     linkage.
-//   - The fallback tier comes from the backend's *cli.Wrapper via
-//     Wrapper.NewHistorySource (Sprint 1a). The wrapper holds a
-//     per-backend factory that knows which on-disk format to read —
-//     claudejsonl and kirojsonl are both registered via blank imports
-//     in router_core.go — so adding a new backend's history reader
-//     does not require an edit here. Unknown / unregistered backends
-//     degrade to NoopHistorySource. R228-CR-P3-3.
-//   - MergedSource wraps both tiers and returns a UUID-deduped,
-//     time-sorted result. Skipping the merge when the local tier is
-//     disabled keeps the old single-source path live for deployments
-//     that opt out.
+// its backend ID and installs it, so EventEntriesBeforeCtx's disk fallback is
+// live before the first pagination request. Composition (RFC §3.4 / §3.5):
+// the local tier is the naozhi event log (empty when eventLogDir is unset);
+// the fallback tier is the backend wrapper's per-format reader
+// (Wrapper.NewHistorySource, Noop for unknown backends); MergedSource
+// UUID-dedupes and time-sorts both.
 func (r *Router) attachHistorySource(s *ManagedSession) {
 	if s == nil {
 		return
@@ -110,10 +64,8 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		backend = r.bkStore.defaultBackend
 	}
 
-	// Resolve the wrapper for this backend. wrappers may be nil (legacy
-	// single-wrapper deployments) and an unknown backend ID falls back to
-	// the router's default wrapper so a misconfigured Backend() still
-	// gets a usable source instead of silently routing to Noop.
+	// Unknown backend ID falls back to the default wrapper so a misconfigured
+	// Backend() still gets a usable source instead of Noop.
 	wrapper := r.bkStore.wrappers[backend]
 	if wrapper == nil {
 		wrapper = r.bkStore.wrapper
@@ -126,20 +78,15 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		EventLogDir:      r.eventLogDir,
 	}
 
-	// Wrapper.NewHistorySource is nil-safe and never returns nil; the
-	// extra guard below pins the contract at the boundary so future
-	// refactors of the cli package can't silently regress callers here.
+	// Wrapper.NewHistorySource never returns nil; the guard pins that
+	// contract at the boundary.
 	var fallback history.Source = wrapper.NewHistorySource(s, deps)
 	if fallback == nil {
 		fallback = history.Noop{}
 	}
 
-	// mergeWithEventLog returns the fallback unchanged when r.eventLogDir
-	// is empty (event-log persistence opted out → old single-source
-	// behaviour) and otherwise composes the naozhi event-log local tier in
-	// front of it. The naozhilog/merged construction now lives in
-	// eventlog_bridge.go (#403, #567) so this generic path stays free of
-	// concrete history-backend imports.
+	// mergeWithEventLog returns fallback unchanged when r.eventLogDir is
+	// empty, otherwise layers the event-log local tier in front of it.
 	s.SetHistorySource(mergeWithEventLog(r.eventLogDir, s.key, fallback))
 }
 
@@ -150,12 +97,8 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 
 // ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
 // and installs a new workspace override for it under a single r.mu critical
-// section. The /cd command needs this: doing ResetChat() then SetWorkspace()
-// as two separate locked calls opens a window (R202606j-CR-006, #2342) where a
-// concurrent message for the same chat key sees the key idle (already reset)
-// AND the override already deleted, so GetOrCreate spawns a session in the OLD
-// (default) workspace before SetWorkspace re-installs the new path. Folding
-// both mutations into one locked section closes that gap.
+// section. Two separate locked calls would let a concurrent GetOrCreate see the
+// key idle with the override deleted and spawn in the OLD workspace (#2342).
 func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
 	r.resetChatAndMaybeSetWorkspace(chatKeyPrefix, path, true)
 }
@@ -169,18 +112,14 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 	var toClose []processIface
 	var closedActive int
 	if r.ss.byChat != nil {
-		// O(k) path via index (k = agents per chat, typically 1-3).
-		// resetSessionLocked deletes from r.ss.sessions only; we drop the
-		// whole index entry below. Iteration order over a map set is not
-		// guaranteed but each resetSessionLocked is independent. R226-CR-15.
+		// resetSessionLocked deletes from r.ss.sessions only; the whole
+		// index entry is dropped below.
 		for key := range r.ss.byChat[chatKeyPrefix] {
 			r.resetSessionLocked(key, &toClose, &closedActive)
 		}
 		delete(r.ss.byChat, chatKeyPrefix)
 	} else {
 		// Fallback O(n) scan for test-created routers without index.
-		// Pre-compute the prefix once so the loop body doesn't re-allocate
-		// `chatKeyPrefix + ":"` on every iteration.
 		prefix := chatKeyPrefix + ":"
 		var toDelete []string
 		for key := range r.ss.sessions {
@@ -197,24 +136,17 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 		if newCount < 0 {
 			r.ss.activeCount.Store(0)
 		}
-		// Multi-Backend RFC §10 (Sprint 6a): reconcile the per-backend
-		// labeled gauge against the residual sessions. Per-key Dec
-		// instrumentation in the loop above would require carrying each
-		// session's backend through toClose; the batched recount is
-		// O(n) over r.ss.sessions but n is bounded (~100s) and only runs
-		// on chat prefix reset which is rare (user /reset action).
+		// Reconcile the per-backend labeled gauge by batched recount; O(n)
+		// but only on the rare chat-prefix reset.
 		r.reconcileSessionActiveByBackendLocked()
 	}
-	// Delete marks the store dirty so the removal is persisted even if no
-	// other path flips the flag before a crash (which would otherwise
-	// reload the override on restart and silently undo the user's reset).
+	// Delete marks the store dirty so the removal survives a crash before
+	// any other path flips the flag.
 	r.wsStore.Delete(chatKeyPrefix)
 	if setWorkspace && chatKeyPrefix != "" {
-		// Install the new override in the SAME locked section as the reset
-		// above so no concurrent GetOrCreate observes the chat reset but the
-		// override still gone (#2342). We just deleted any existing override
-		// for this key, so this is always a fresh insert; the shared helper
-		// applies SetWorkspace's bookkeeping (cap eviction, seq, dirty, gen).
+		// Same locked section as the reset so no concurrent GetOrCreate sees
+		// the chat reset with the override gone (#2342). The override was just
+		// deleted, so this is always a fresh insert.
 		r.putWorkspaceOverrideLocked(chatKeyPrefix, path)
 	}
 	r.ss.dirty = true
@@ -224,19 +156,11 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 	for _, proc := range toClose {
 		proc.Close()
 	}
-	// R191-CONC-H1-e: Broadcast under r.mu (see evictOldest comment).
-	//
-	// R242-ARCH-25: this is two distinct locked sections by design — the
-	// first (above) commits the routing-table mutations, then we drop the
-	// lock so proc.Close() (which can block on shim socket teardown,
-	// goroutine joins, etc.) does not pin every other Router caller. Only
-	// AFTER Close() flips IsRunning() to false is it safe to wake
-	// shutdownCond waiters: they re-evaluate the predicate
-	// `loadProcess().IsRunning() == false`, so broadcasting before Close
-	// returns is a missed-wakeup window (waiter sees true, sleeps again,
-	// never re-woken). The same Unlock→Close→relock-Broadcast pattern is
-	// used by evictOldest (line ~1075) and resetSessionLocked-style
-	// callers — keep the shape consistent so reviewers can pattern-match.
+	// Two locked sections by design: proc.Close() can block, so it runs
+	// unlocked. Broadcast must happen under r.mu and only AFTER Close() flips
+	// IsRunning() to false — shutdownCond waiters re-evaluate that predicate,
+	// so broadcasting earlier is a missed-wakeup window. Same
+	// Unlock→Close→relock-Broadcast shape as evictOldest.
 	if r.shutdownCond != nil {
 		r.mu.Lock()
 		r.shutdownCond.Broadcast()
@@ -246,12 +170,11 @@ func (r *Router) resetChatAndMaybeSetWorkspace(chatKeyPrefix, path string, setWo
 	r.notifyChange()
 }
 
-// resetSessionLocked tears down a single session for ResetChat: closes any
-// live process (caller will Close() outside r.mu via toClose), drops the
+// resetSessionLocked tears down a single session for ResetChat: collects any
+// live process into toClose (caller Close()s it outside r.mu), drops the
 // session's record + sessionID and backend-override mappings, and bumps
 // closedActive when the session counted toward maxProcs. Caller MUST hold
-// r.mu and is responsible for cleaning up r.ss.byChat (the indexed and
-// fallback paths drop their own bookkeeping in distinct ways). R226-CR-15.
+// r.mu and is responsible for cleaning up r.ss.byChat.
 func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedActive *int) {
 	s := r.ss.sessions[key]
 	if s == nil {
@@ -267,58 +190,45 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 		delete(r.ss.idToKey, id)
 	}
 	delete(r.ss.sessions, key)
-	// #1646: drop the keyhash → key fast-path entry. The chat index
-	// (sessionsByChat) is dropped in bulk by the ResetChat caller, so we only
-	// clean the keyhash map here. Equality-guarded so a rename collision can't
-	// remove the wrong entry.
+	// Drop the keyhash → key fast-path entry; equality-guarded so a rename
+	// collision can't remove the wrong entry (#1646).
 	if r.ss.keyhash != nil {
 		kh := persist.KeyHash(key)
 		if r.ss.keyhash[kh] == key {
 			delete(r.ss.keyhash, kh)
 		}
 	}
-	// Drop any per-session backend pick queued via SetSessionBackend. Without
-	// this, an abandoned dashboard "choose backend" pick for a key that is
-	// then reset leaks an entry into backendOverrides that is only cleared by
-	// a later spawnSession for the same key, which may never happen.
+	// Drop any one-shot backend pick so an abandoned dashboard choice does
+	// not leak into backendOverrides.
 	delete(r.bkStore.backendOverrides, key)
 }
 
 // AgentOpts provides per-agent overrides for session creation.
 //
-// ExtraArgs aliasing contract:  callers receiving AgentOpts from
-// KeyResolver get a freshly-cloned ExtraArgs (safe to append).  Callers
-// populating AgentOpts to feed the router should treat ExtraArgs as
-// owned exclusively by them — do NOT keep aliases to slices held by
-// other goroutines (R215-ARCH-P2-8 / R37-CONCUR1).
+// ExtraArgs aliasing contract: callers receiving AgentOpts from KeyResolver
+// get a freshly-cloned ExtraArgs (safe to append). Callers populating
+// AgentOpts must own ExtraArgs exclusively — do NOT alias slices held by
+// other goroutines.
 type AgentOpts struct {
 	Model     string
 	ExtraArgs []string
 	Workspace string // override workspace (empty = use default/chat override)
 	Backend   string // backend ID ("claude" / "kiro" / …); empty = router default
 	// AccessProfile names the access profile (auth/upstream env overlay +
-	// default model) to spawn under. Empty = global default (settings.json
-	// baseline, no overlay). Resolved in resolveSpawnParamsLocked with resume
-	// continuity taking precedence over the caller's value (RFC
-	// project-access-profile §7 — a dead session must resume on the SAME
-	// auth chain it was created on). RFC PR-B.
+	// default model) to spawn under. Empty = global default. Resume
+	// continuity takes precedence over the caller's value: a dead session
+	// must resume on the SAME auth chain it was created on (RFC
+	// project-access-profile §7).
 	AccessProfile string
-	// Effort overrides the backend's thinking-effort tier for this session
-	// (agents[<id>].effort). Empty = inherit the backend / router default.
-	// Only ACP-protocol backends act on it. docs/rfc/kiro-effort-control.md
+	// Effort overrides the backend's thinking-effort tier for this session.
+	// Empty = inherit. Only ACP-protocol backends act on it.
 	Effort string
-	// SystemPrompt is the text naozhi appends to the CLI's system prompt for
-	// this session (`--append-system-prompt`, via
-	// cli.SpawnOptions.AppendSystemPrompt). Sources, lowest layer first:
-	// agents[<id>].system_prompt, then the project planner prompt
-	// (ResolveForChat / ResolveForPlannerKey), then the scratch quoted
-	// context (ScratchPool.Open). Layers stack by JoinSystemPrompts — base
-	// first, "\n\n"-separated — into this single string; the CLI sees one
-	// flag. Empty = no flag.
-	//
-	// #2493: never put `--append-system-prompt` into ExtraArgs instead — it
-	// is denylisted there (cli.deniedExtraFlags) and silently stripped.
-	// Only the Claude backend renders it; ACP / codex ignore it.
+	// SystemPrompt is the text appended to the CLI's system prompt
+	// (`--append-system-prompt` via cli.SpawnOptions.AppendSystemPrompt).
+	// Layers (agents[<id>].system_prompt → planner prompt → scratch context)
+	// are pre-joined by JoinSystemPrompts into this one string. Empty = no
+	// flag. Never put the flag into ExtraArgs instead — it is denylisted
+	// there and silently stripped (#2493). Only the Claude backend renders it.
 	SystemPrompt string
 	Exempt       bool // exempt from TTL, eviction, and activeCount (planner sessions)
 }
@@ -335,36 +245,22 @@ const (
 // GetOrCreate returns an existing session or creates a new one.
 // AgentOpts overrides the router defaults for model and args.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
-	// R188-SEC-M2: flag-injection guard on the per-request Model override.
-	// Router-global r.bkStore.model is operator-configured in config.yaml and trusted;
-	// opts.Model originates from dashboard WS messages, upstream RPC, or
-	// planner project config and must be validated at the router boundary.
+	// Flag-injection guard: opts.Model originates from dashboard WS, upstream
+	// RPC, or planner config and must be validated at the router boundary.
 	if err := validateModel(opts.Model); err != nil {
 		return nil, 0, err
 	}
-	// Same boundary guard for Backend: flows into slog attrs and persisted
-	// state JSON. wrapperFor already tolerates unknown backends by falling
-	// back to the default wrapper; this gate only rejects shape-invalid
-	// input (control chars, whitespace, overlength).
+	// Backend flows into slog attrs and persisted state JSON; this gate only
+	// rejects shape-invalid input (wrapperFor tolerates unknown backends).
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, 0, err
 	}
 	r.mu.Lock()
 
-	// Passthrough exposes a concurrency pattern that the old Send path never
-	// did: N goroutines call GetOrCreate on the same key simultaneously for a
-	// fresh (not-yet-existing) session. Without coordination each goroutine
-	// calls spawnSession → wrapper.Spawn → shim.StartShim and only one wins
-	// the shim-socket dial guard; the rest fail with "refusing to clobber".
-	// Drop and retry while spawnSession for this key is in flight so the late
-	// callers just pick up the session the winner creates.
-	//
-	// R243-ARCH-4: wait via the per-spawn done-channel that spawnSession
-	// closes from its defer instead of a 20ms tick poll. Late callers wake
-	// the instant the winner finishes (success or failure) rather than after
-	// the next tick — typical shim spawn is 100-300ms, so removing the poll
-	// drops the late caller's wakeup latency from ~10-20ms (half a tick) to
-	// near-zero. Also frees one *time.Timer alloc per waiter.
+	// N concurrent GetOrCreate on the same fresh key would each call
+	// spawnSession and only one would win the shim-socket dial guard. Park on
+	// the per-spawn done-channel (closed by spawnSession's defer) while a
+	// spawn is in flight, then relock and re-evaluate.
 	for {
 		if s, ok := r.ss.sessions[key]; ok {
 			if s.isAlive() {
@@ -372,18 +268,10 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				r.mu.Unlock()
 				return s, SessionExisting, nil
 			}
-			// #2221: the resume branch (dead session, StateSuspended
-			// mid-state) must honour the SAME spawningKeys coalesce guard
-			// the not-found path uses below. Two concurrent GetOrCreate on
-			// the same dead key would otherwise BOTH call spawnSession; the
-			// second reuses the in-flight done-channel (spawnSession prologue
-			// reused=true) and its defer would close an already-closed
-			// channel → "close of closed channel" panic. Park on the
-			// existing channel exactly like the fresh-spawn path: the winner
-			// (creator, reused=false) owns the close, and after it finishes
-			// we relock and re-evaluate — picking up its freshly-installed
-			// alive session (SessionExisting) or, on its spawn failure,
-			// resuming ourselves.
+			// The resume branch must honour the SAME coalesce guard as the
+			// not-found path: a second concurrent spawnSession would reuse the
+			// in-flight channel and its defer would close an already-closed
+			// channel → panic (#2221). The winner owns the close.
 			if ch, inflight := r.pp.spawningKeys[key]; inflight {
 				r.mu.Unlock()
 				select {
@@ -405,12 +293,8 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		if !inflight {
 			break
 		}
-		// Someone else is spawning this key right now. Release the router
-		// mutex and wait for them to finish; spawnSession's defer closes
-		// `ch` after deleting the map entry, so the next loop iteration
-		// either picks up the freshly installed r.ss.sessions[key]
-		// (SessionExisting / SessionResumed) or — on spawn failure — falls
-		// through to spawn its own.
+		// Someone else is spawning this key; wait unlocked, then re-evaluate
+		// (pick up their session, or spawn our own on their failure).
 		r.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -420,17 +304,11 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		r.mu.Lock()
 	}
 
-	// Debug (not Info): spawnSession will emit "session spawned" at Info
-	// with the same key + active count moments later; a preceding Info at
-	// the same key would double the per-spawn row in the systemd journal
-	// with no additional signal. Keep Debug for the "brand-new vs resume"
-	// distinction when operators opt into verbose logging.
+	// Debug, not Info: spawnSession logs "session spawned" at Info moments later.
 	slog.Debug("creating new session", "key", key)
-	// (#1324) Consume the per-key shimStuckOnReset flag — set to true by a
-	// recent Reset / ResetAndRecreate whose waitSocketGoneForKey timed out.
-	// Read+delete under r.mu (already held). spawnSession unlocks/relocks
-	// internally so we cannot consume it after spawnSession returns; do it
-	// up front and apply the wrap on the error path below.
+	// Consume the per-key shimStuckOnReset flag (set by a Reset whose
+	// socket-gone wait timed out, #1324) under r.mu BEFORE spawnSession,
+	// which unlocks/relocks internally; apply the wrap on the error path.
 	stuck := r.pp.shimStuckOnReset[key]
 	if stuck {
 		delete(r.pp.shimStuckOnReset, key)
@@ -438,9 +316,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		if stuck {
-			// errors.Is chain: callers (cron freshContextPreflightP0)
-			// can pin on ErrShimStuck for actionable classification
-			// while still seeing the underlying spawn error message.
+			// errors.Is chain lets callers pin on ErrShimStuck.
 			return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 		}
 		return nil, 0, fmt.Errorf("session %s: %w", key, err)
@@ -450,85 +326,50 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 
 // spawnParams carries the pure-computation output of resolveSpawnParamsLocked:
 // the merged backend, model, args, workspace, and (possibly downgraded)
-// resumeID that spawnSession feeds into cli.SpawnOptions. Extracting this
-// struct keeps spawnSession's branching narrow and lets the merge rules be
-// table-tested in isolation (R70-ARCH-H2).
+// resumeID that spawnSession feeds into cli.SpawnOptions.
 type spawnParams struct {
-	BackendID string // effective backend ID after override/fallback resolution (may differ from opts.Backend)
+	BackendID string // effective backend ID after override/fallback resolution
 	Wrapper   *cli.Wrapper
 	Model     string
 	Args      []string
 	// Effort is the resolved thinking-effort tier ("" = pass no flag).
 	Effort string
-	// SystemPrompt is AgentOpts.SystemPrompt passed through unchanged: the
-	// layering (agent → planner → scratch) happens in the resolvers that
-	// build AgentOpts, and there is no backend- or router-level tier for it.
+	// SystemPrompt is AgentOpts.SystemPrompt passed through unchanged; there
+	// is no backend- or router-level tier for it.
 	SystemPrompt string
 	Workspace    string
 	// ResumeID after workspace/jsonl guard. Empty means "spawn fresh".
 	ResumeID string
 	// AccessProfileID is the resolved access-profile name ("" = global
-	// default). Recorded on the fresh session for resume continuity (§7) and
-	// persisted to the store so a post-restart resume relocks the same auth
-	// chain. RFC project-access-profile PR-B.
+	// default), recorded on the session and persisted so a post-restart
+	// resume relocks the same auth chain.
 	AccessProfileID string
 	// AccessProfileEnv is the RAW profile env map (still holding *_FILE
-	// references). Nil when AccessProfileID is "". spawnSession expands the
-	// *_FILE references into the concrete overlay AFTER releasing r.mu (file
-	// reads must not happen under the lock). Kept raw here because
-	// resolveSpawnParamsLocked runs under r.mu.
+	// references); nil when AccessProfileID is "". spawnSession expands it
+	// AFTER releasing r.mu — file reads must not happen under the lock.
 	AccessProfileEnv map[string]string
-	// Overlay is the per-request layer that went into Model/Effort/Args
-	// (opts.Model/Effort/ExtraArgs + the resolved AccessProfileID). spawnSession
-	// hands it to the shim, which persists it in its state file, so the
-	// arg-drift comparison on the next restart can re-merge it against
-	// current config instead of misreading every agent-level override as
-	// drift (#2494). Always populated — a spawn with no overrides yields the
-	// zero value, which the shim records as "known and empty".
+	// Overlay is the per-request layer that went into Model/Effort/Args. The
+	// shim persists it so the arg-drift comparison on the next restart can
+	// re-merge it against current config (#2494). Always populated: a spawn
+	// with no overrides yields the zero value ("known and empty").
 	Overlay shim.SpawnOverlay
 }
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
-// session. The caller MUST hold r.mu (write lock) because this reads
-// r.bkStore.backendOverrides, the wsStore overrides, r.ss.sessions and mutates
-// r.bkStore.backendOverrides (consuming the one-shot dashboard pick).
-//
-// Pure-ish: no I/O except resolveResumeID's resume-target stat and
-// osutil.CanonicalCase's per-component ReadDir walk (both bounded, once per
-// spawn). No log output beyond downgrade warnings, no process spawn — a test
-// can exercise the merge rules without standing up wrappers or filesystems
-// beyond what those probes already need.
-//
-// CONTRACT (R222-ARCH-12 / #735): this function is the SINGLE source of
-// truth for workspace + backend + model + args + resumeID resolution.
-// Earlier rounds had the same precedence rules copy-pasted across
-// spawnSession / Resume / ResetAndRecreate; pinning the merge here keeps
-// reset/recreate/resume from drifting. Any new spawn-adjacent path
-// (Takeover, Reattach, etc.) MUST route through this function rather
-// than re-implement the precedence inline. workspace_resolver_contract_test.go
-// guards the invariant by asserting exactly one `workspace = opts.Workspace`
-// site survives in router_lifecycle.go.
+// session. It is the SINGLE source of truth for workspace + backend + model +
+// args + resumeID resolution; any spawn-adjacent path (Takeover, Reattach…)
+// MUST route through it rather than re-implement the precedence (#735).
+// workspace_resolver_contract_test.go asserts exactly one
+// `workspace = opts.Workspace` site survives in this file. No I/O beyond
+// bounded stat/ReadDir probes; consumes the one-shot dashboard backend pick.
 //
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
-	// Backend pick precedence (highest to lowest):
-	//  1. AgentOpts.Backend                — explicit per-request choice
-	//  2. one-shot r.bkStore.backendOverrides[key] — dashboard "pick backend"
-	//  3. existing r.ss.sessions[key].Backend — resume continuity
-	//  4. r.bkStore.defaultBackend (via wrapperFor) — router fallback
-	//
-	// The override is consumed so a later Reset→spawn for the same key does
-	// not silently carry the old pick. The session-backend fallback closes
-	// a kiro→cc downgrade bug: a kiro session whose CLI process exited
-	// (TTL idle, ACP transport drop) but whose ManagedSession is still in
-	// r.ss.sessions would, on the next message, call back through GetOrCreate
-	// → spawnSession with an empty opts.Backend and a one-shot override
-	// already consumed by the first spawn. Without the existing-session
-	// fallback the second spawn picks r.bkStore.defaultBackend (typically claude),
-	// resolveResumeID then ENOENTs the kiro session_id under
-	// ~/.claude/projects/, downgrades resume to "fresh", and the dashboard
-	// silently flips the backend chip from kiro→cc — losing both the
-	// conversation and the operator's original pick.
+	// Backend precedence: opts.Backend > one-shot backendOverrides[key]
+	// (consumed here) > existing session's Backend (resume continuity) >
+	// defaultBackend. Without the existing-session tier a dead kiro session
+	// would respawn on the default backend, fail the resume probe, and
+	// silently downgrade to a fresh claude session.
 	reqBackend := opts.Backend
 	if len(r.bkStore.backendOverrides) > 0 {
 		if reqBackend == "" {
@@ -545,25 +386,11 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
-	// Access-profile resolution (RFC project-access-profile §2/§7). Precedence
-	// (highest to lowest):
-	//  1. existing session's recorded profile — RESUME LOCK. A dead session
-	//     must resume on the SAME auth chain it was created on; the CLI
-	//     session_id / resume history is auth-specific, and re-resolving from a
-	//     since-changed project binding would cross accounts. This wins over
-	//     every fresh-pick source precisely because it is a continuity
-	//     invariant, not a preference (mirrors backend's existing-session
-	//     fallback above).
-	//  2. one-shot dashboard override (SetSessionAccessProfile) — an explicit
-	//     new-session pick, consumed here so a later Reset→spawn does not
-	//     silently carry it. Beats opts (the project-binding default) because
-	//     the user explicitly chose it in the new-session picker.
-	//  3. opts.AccessProfile — the per-request / project-binding default.
-	//  4. "" — global default (settings.json baseline, no overlay).
-	//
-	// An unknown ID (typo, deleted profile) resolves to "" with a warning
-	// rather than a hard spawn failure so a project whose profile was removed
-	// still starts — but on the SAFE global default, never a wrong account.
+	// Access-profile precedence (RFC project-access-profile §2/§7): existing
+	// session's recorded profile (RESUME LOCK — a dead session must resume on
+	// the SAME auth chain; re-resolving would cross accounts) > one-shot
+	// dashboard override (consumed here) > opts.AccessProfile > "". An unknown
+	// ID resolves to "" with a warning: the SAFE default, never a wrong account.
 	accessProfileID := opts.AccessProfile
 	if len(r.bkStore.accessProfileOverrides) > 0 {
 		if ov, ok := r.bkStore.accessProfileOverrides[key]; ok {
@@ -576,13 +403,8 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 			accessProfileID = ap
 		}
 	}
-	//  5. defaultAccessProfile — lowest precedence. Applies ONLY when every
-	//     source above left the ID empty, so an explicit pick / override / a
-	//     resume-locked prior profile always wins. This moves provider
-	//     selection into the profile layer: a deployment can drop auth/upstream
-	//     env from ~/.claude/settings.json and let every otherwise-unprofiled
-	//     session (ad-hoc dashboard chats, cron) land on a named default
-	//     instead of the bare global baseline. RFC project-access-profile.
+	// defaultAccessProfile is the lowest tier: applies ONLY when every source
+	// above left the ID empty, so picks and resume-locked profiles always win.
 	if accessProfileID == "" && r.defaultAccessProfile != "" {
 		accessProfileID = r.defaultAccessProfile
 	}
@@ -597,39 +419,24 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		}
 	}
 
-	// Per-request overlay: what THIS spawn layered above the backend defaults.
-	// Recorded on spawnParams so the shim can persist it and the drift check
-	// can re-merge it later (#2494). AccessProfile is the RESOLVED id (after
-	// the fallbacks above), so the drift side resolves the profile's
-	// default_model exactly the way mergeArgvLayers does here. ExtraArgs is
-	// cloned: the overlay outlives r.mu (spawnSession JSON-encodes it after
-	// the unlock, inside StartShimWithBackend), so it must not alias the
-	// caller's slice.
+	// Per-request overlay the shim persists for the drift re-merge (#2494).
+	// AccessProfile is the RESOLVED id so the drift side resolves default_model
+	// the same way. ExtraArgs is cloned: the overlay outlives r.mu (JSON-encoded
+	// after the unlock), so it must not alias the caller's slice.
 	overlay := shim.SpawnOverlay{
 		Model:         opts.Model,
 		Effort:        opts.Effort,
 		ExtraArgs:     slices.Clone(opts.ExtraArgs),
 		AccessProfile: accessProfileID,
-		// #2493: the layered system prompt is argv-bearing and per-session,
-		// so it must ride in the overlay for the drift rebuild to reproduce it.
+		// Argv-bearing and per-session, so it must ride in the overlay (#2493).
 		AppendSystemPrompt: opts.SystemPrompt,
 	}
 
-	// Model / effort / args merge lives in mergeArgvLayers, shared verbatim
-	// with driftCompareArgs so the two argv cannot diverge on precedence.
-	// Backend tier: router default ← backend override; args REPLACE (not
-	// append) at the backend level per RouterConfig.BackendExtraArgs
-	// (R53-ARCH-002), folded into backendDefaultsFor (R222-ARCH-14, #739).
-	// Access-profile default_model layers above the backend default but below
-	// any explicit per-request / PlannerModel choice (opts.Model). RFC §2
-	// model chain. Effort has deliberately NO access-profile tier
-	// (docs/rfc/kiro-effort-control.md §4.2). Session tuning sits on TOP of
-	// both chains — the operator's dashboard pick for THIS session outranks
-	// every config tier and the per-request opts; values were
-	// tuningspec-validated at write (SetSessionTuning) and re-validated at
-	// store load, so they are safe to feed BuildArgs. Fresh keys have no
-	// entry and therefore no override, by construction.
-	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	// mergeArgvLayers is shared verbatim with driftCompareArgs so the two argv
+	// cannot diverge. Chain: backend defaults < access-profile default_model <
+	// opts < session tuning (operator's dashboard pick for THIS session,
+	// tuningspec-validated at write and at store load). Effort deliberately has
+	// NO access-profile tier (docs/rfc/kiro-effort-control.md §4.2).
 	var tuningModel, tuningEffort string
 	if old := r.ss.sessions[key]; old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
@@ -640,15 +447,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		overlay, tuningModel, tuningEffort)
 	model, effort, args := merged.Model, merged.Effort, merged.Args
 
-	// Workspace: opts override > per-chat override > old session workspace > default.
-	//
-	// R245-ARCH-32 (#883): the per-chat-override > default base tier is
-	// resolved through resolveWorkspaceLocked — the single chat-level
-	// resolution point — instead of re-reading the wsStore overrides /
-	// r.defaultCWD inline here. This kills the second source of truth that
-	// previously derived the same base independently and could drift from
-	// GetWorkspace. The opts and resume tiers still layer ON TOP of that
-	// base, matching the documented priority order above.
+	// Workspace: opts override > per-chat override > old session workspace >
+	// default. The chat tier goes through resolveWorkspaceLocked — the single
+	// chat-level resolution point — so it cannot drift from GetWorkspace (#883).
 	workspaceOverridden := false
 	var workspace string
 	if opts.Workspace != "" {
@@ -656,9 +457,8 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		workspaceOverridden = true
 	} else if chatKey := chatKeyFor(key); chatKey != key {
 		workspace = r.resolveWorkspaceLocked(chatKey)
-		// Only treat as "overridden" (pinning out the resume tier) when an
-		// explicit per-chat override actually exists; a bare default must
-		// still allow the resume-session workspace to win below.
+		// Only an explicit per-chat override pins out the resume tier; a bare
+		// default must still let the resume-session workspace win below.
 		if _, ok := r.wsStore.Lookup(chatKey); ok {
 			workspaceOverridden = true
 		}
@@ -674,25 +474,15 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 
 	// ResumeID guard: drop when the backend's on-disk resume target is missing
-	// so the spawn falls through to a fresh session instead of exit-1'ing on
-	// "No conversation found" (claude) or failing session/load (kiro). The
-	// probe is backend-aware — see resolveResumeID for the per-layout rules
-	// (incident 2026-07-14: the previously claude-only probe downgraded every
-	// kiro resume to a fresh session, losing the conversation context).
+	// so the spawn falls through to a fresh session instead of failing on
+	// "No conversation found". The probe is backend-aware (see resolveResumeID).
 	resumeID = resolveResumeID(backendID, r.claudeDir, r.kiroSessionsDir, workspace, key, resumeID)
 
-	// Canonicalize on-disk case for fresh spawns (incident 2026-07-14): on
-	// macOS's case-insensitive APFS a config/API spelling of
-	// /Users/x/Workspace with an on-disk /Users/x/workspace forks two
-	// parallel identities for the same tree — distinct Claude project slugs,
-	// distinct kiro session cwd strings, failed workspace-equality checks —
-	// even though every file operation succeeds. Ordering contract: this runs
-	// AFTER the resume guard so a surviving resume keeps the spelling its
-	// previous incarnation stored (claude's --resume looks up the jsonl under
-	// the slug derived from that exact spelling; re-casing would orphan the
-	// transcript the guard just verified). Once the guard downgrades to
-	// fresh — or the session was fresh to begin with — the canonical spelling
-	// is safe and stops the fork from propagating further.
+	// Canonicalize on-disk case for fresh spawns: on case-insensitive APFS a
+	// differently-cased spelling forks two project identities for one tree.
+	// Ordering contract: runs AFTER the resume guard, because claude's --resume
+	// looks up the jsonl under the slug derived from the exact spelling the
+	// previous incarnation stored; re-casing would orphan that transcript.
 	if resumeID == "" {
 		workspace = osutil.CanonicalCase(workspace)
 	}
@@ -712,10 +502,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 }
 
-// sessionOverrides is the operator-owned per-session state that must
-// outlive the process it was set on: the dashboard tuning override
-// (docs/rfc/dashboard-model-effort-control.md §4.3 / §4.5) and the user
-// label with its origin (label+origin travel as one unit). Captured by
+// sessionOverrides is the operator-owned per-session state that must outlive
+// the process it was set on: dashboard tuning override and user label with its
+// origin (label+origin travel as one unit). Captured by
 // snapshotOldSessionLocked and re-applied by installFreshSessionLocked.
 type sessionOverrides struct {
 	tuningModel  string
@@ -725,19 +514,11 @@ type sessionOverrides struct {
 }
 
 // snapshotOldSessionLocked captures the per-session fields that spawnSession
-// needs to read AFTER it releases r.mu. Returns (prevIDs copy, totalCost,
-// createdAtNanos). Pure read; safe to call with old == nil (returns zero
-// values for all three).
+// needs to read AFTER it releases r.mu. Pure read; nil-safe.
 //
 // LOCK: caller MUST hold r.mu — these fields are written under r.mu by
-// sibling paths (RegisterCronStub touches workspace, evictOldest touches
-// totalCost via Process accessors, spawnSession itself stamps createdAt).
-// Reading them after r.mu is released races those writers.
-//
-// CQ2 (R194 / Round 174-194): extracted from spawnSession so the long
-// validate → reserve → spawn → register sequence does not require the
-// reader to scroll through the snapshot block to find the next phase.
-// Behavior is byte-for-byte identical to the previous inline copy.
+// sibling paths (RegisterCronStub, evictOldest, spawnSession itself), so
+// reading them after r.mu is released races those writers.
 func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {
 	if old == nil {
 		return nil, 0, 0, 0, sessionOverrides{}
@@ -747,11 +528,9 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 		oldPrevIDs = make([]string, len(old.prevSessionIDs))
 		copy(oldPrevIDs, old.prevSessionIDs)
 	}
-	// Preserve the cumulative cost across process replacement so the
-	// dashboard doesn't flash $0.00 between spawn and the first result
-	// event. Prefer the live process's value (freshest) over the
-	// store-restored s.totalCost; fall back to the latter when no
-	// process is attached (restored-from-disk sessions).
+	// Preserve cumulative cost across process replacement so the dashboard
+	// doesn't flash $0.00. Prefer the live process's value; fall back to the
+	// store-restored total when no process is attached.
 	var oldTotalCost float64
 	if p := old.loadProcess(); p != nil {
 		oldTotalCost = p.TotalCost()
@@ -759,37 +538,19 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 	if oldTotalCost == 0 {
 		oldTotalCost = loadTotalCost(&old.totalCost)
 	}
-	// Carry the original creation timestamp across spawn so resume /
-	// reset-and-recreate / takeover paths keep the session in its
-	// established sidebar position. installFreshSessionLocked stamps now
-	// when this is zero (genuinely-new key).
+	// Carry the original creation timestamp so the session keeps its sidebar
+	// position; installFreshSessionLocked stamps now when zero.
 	oldCreatedAt := old.createdAt.Load()
-	// costSpent is the genuine monotonic total; it MUST carry across the
-	// process replacement (a resume keeps the same logical session, so the
-	// money already spent stays spent). lastCumulativeCost is deliberately NOT
-	// carried: the new incarnation's CLI re-counts its running total from ~0,
-	// so the fresh session's baseline must start at 0 for the first
-	// post-spawn delta to be computed correctly (see TurnCostDelta).
-	//
-	// KNOWN LOSS WINDOW (R202606e-CR-004 / #2284): this reads old.costSpent at
-	// spawn time. If a passthrough turn is still in flight on the OLD process
-	// when spawn happens (resume-triggered respawn races an unfinished turn),
-	// that turn's finishRun lands its cost delta on the now-orphaned old
-	// *ManagedSession — which is no longer in r.ss.sessions — so the new
-	// session never sees it and the last few cents are silently undercounted.
-	// Closing the window cleanly requires a process-level "no in-flight turn"
-	// barrier before snapshotting, which the current lock model does not
-	// provide; documented here so the divergence is intentional, not a missing
-	// carry. The error is bounded (only turns straddling the spawn instant) and
-	// cost is advisory, not billing-authoritative.
+	// costSpent MUST carry across the replacement (same logical session).
+	// lastCumulativeCost is deliberately NOT carried: the new CLI re-counts
+	// from ~0, so the baseline must restart at 0 (see TurnCostDelta). Known
+	// bounded loss: a turn still in flight on the OLD process lands its delta
+	// on the orphaned struct; cost is advisory, not billing-authoritative (#2284).
 	oldCostSpent := loadTotalCost(&old.costSpent)
-	// Operator-owned overrides (tuning model/effort, user label+origin) are
-	// snapshotted HERE, under the same r.mu hold as everything else, so they
-	// come from the same object as the history/cost/createdAt above.
-	// installFreshSessionLocked must not re-read r.ss.sessions[key]: the map
-	// entry may have been swapped (RegisterForResume stub) or removed
-	// (Remove) during the unlocked history copy, which would pair one
-	// session's history with another's tuning.
+	// Overrides are snapshotted HERE, under the same r.mu hold, from the same
+	// object as history/cost/createdAt. installFreshSessionLocked must not
+	// re-read r.ss.sessions[key]: the entry may be swapped or removed during
+	// the unlocked history copy, pairing one session's history with another's tuning.
 	ov := sessionOverrides{
 		tuningModel:  old.TuningModel(),
 		tuningEffort: old.TuningEffort(),
@@ -800,48 +561,24 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 }
 
 // collectPreviousHistory gathers JSONL-backed history entries and the
-// session ID chain for a respawn. Returns (entries, chain, userTurns) where
-// userTurns is the number of Type=="user" entries in entries — computed here
-// (cached value for the persisted-snapshot branch, single pass for the
-// dead-process EventEntries branch) so the spawn path seeds persistedUserTurns
-// without an independent O(n) rescan (#2089). Pure computation — no mutation
-// of r.ss.sessions; caller must hold r.mu if it needs serialisation w.r.t.
-// sibling spawn attempts.
-//
-// Extracted from spawnSession (R70-ARCH-H2 paired with
-// resolveSpawnParamsLocked). The dead-process branch prefers
-// EventEntries() over persistedHistory because EventEntries includes
-// live events accumulated since the JSONL snapshot was last loaded;
-// the live-but-suspended branch (no process, or alive waiting) falls
-// back to the persisted snapshot.
+// session ID chain for a respawn. Returns (entries, chain, userTurns);
+// userTurns is computed here so the spawn path seeds persistedUserTurns
+// without an independent O(n) rescan (#2089). Pure computation; caller must
+// hold r.mu if it needs serialisation w.r.t. sibling spawn attempts. The
+// dead-process branch prefers EventEntries() over persistedHistory because it
+// includes live events accumulated since the JSONL snapshot was loaded.
 func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]clievent.EventEntry, []string, int64) {
 	if oldSess == nil {
 		return nil, nil, 0
 	}
 
-	// R215-GO-P1-1: split the historyMu critical section so that p.EventEntries()
-	// is invoked WITHOUT holding session.historyMu. EventEntries acquires
-	// cli.Process.eventLog.mu internally; if any future caller decides to call
-	// back into a session method while holding eventLog.mu (e.g. a sink that
-	// asks the owner session for its persistedHistory) the previous order
-	// (historyMu → eventLog.mu) would deadlock against the reverse path.
-	//
-	// Two-phase pattern:
-	//  1. Under historyMu.RLock: snapshot whatever we need from session-owned
-	//     state — here, the live process pointer and a copy of persistedHistory.
-	//     Critical-section boundary is tight and only touches session fields.
-	//  2. After releasing historyMu: invoke EventEntries() on the snapshotted
-	//     process, which is safe because *cli.Process is immutable once
-	//     loadProcess returns (the pointer can only be replaced by storeProcess
-	//     under sendMu, which we don't acquire — but the old Process keeps its
-	//     own eventLog alive until GC, so reading entries from it is sound).
+	// p.EventEntries() must be invoked WITHOUT holding historyMu: it takes
+	// eventLog.mu internally, and a historyMu → eventLog.mu order would
+	// deadlock against any sink calling back into the session. So: snapshot
+	// the process pointer + persistedHistory under RLock, release, then read
+	// entries (the old Process keeps its eventLog alive until GC).
 	var entries []clievent.EventEntry
-	// #2089: capture the user-turn count alongside the snapshot so the spawn
-	// path can seed persistedUserTurns without a second independent O(n)
-	// rescan. For the persisted-snapshot branch the count is the already
-	// maintained cached value (read under the same RLock so it matches the
-	// cloned slice). userTurns == -1 signals "unknown" — the dead-process
-	// branch below counts EventEntries() once instead.
+	// userTurns == -1 signals "unknown"; the dead-process branch counts once.
 	userTurns := int64(-1)
 	oldSess.historyMu.RLock()
 	p := oldSess.loadProcess()
@@ -854,17 +591,13 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	oldSess.historyMu.RUnlock()
 
 	if p != nil && !p.Alive() {
-		// Dead process: EventEntries() includes both injected history and live events
-		// logged during the last run. Use this instead of persistedHistory, which only
-		// holds the JSONL-loaded snapshot and misses events accumulated since that load.
 		entries = p.EventEntries()
 	} else {
 		entries = persistedSnapshot
 	}
 
-	// Build session chain: inherit old chain and append old session ID,
-	// but only when the old ID differs from resumeID (i.e. a truly new
-	// CLI session is replacing the old one, not just resuming the same one).
+	// Append the old session ID to the chain only when it differs from
+	// resumeID (a new CLI session replaces the old one, not a same-ID resume).
 	var prevIDs []string
 	if oldID := oldSess.getSessionID(); oldID != "" && oldID != resumeID {
 		prevIDs = make([]string, len(oldPrevIDs), len(oldPrevIDs)+1)
@@ -873,24 +606,19 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	} else {
 		prevIDs = oldPrevIDs
 	}
-	// Cap the chain to bound sessions.json size and JSONL load time on
-	// long-lived chats; oldest entries are the cheapest to drop because
-	// the retained tail carries the most recent conversational context.
+	// Cap the chain to bound sessions.json size and JSONL load time; the
+	// retained tail carries the most recent context.
 	if len(prevIDs) > maxPrevSessionIDs {
 		prevIDs = prevIDs[len(prevIDs)-maxPrevSessionIDs:]
 	}
-	// #2089: if the count is still unknown (dead-process EventEntries branch,
-	// which has no cached count), do the single necessary pass here so the
-	// caller never rescans. Empty/nil entries trivially have zero user turns.
 	if userTurns < 0 {
 		userTurns = countUserTurns(entries)
 	}
 	return entries, prevIDs, userTurns
 }
 
-// countUserTurns returns the number of Type=="user" entries in entries.
-// Shared by collectPreviousHistory (#2089) and the recount contract so the
-// "what counts as a user turn" rule lives in one place.
+// countUserTurns returns the number of Type=="user" entries in entries; the
+// single definition of "what counts as a user turn".
 func countUserTurns(entries []clievent.EventEntry) int64 {
 	var n int64
 	for i := range entries {
@@ -902,12 +630,9 @@ func countUserTurns(entries []clievent.EventEntry) int64 {
 }
 
 // markSpawnDoneLocked closes the per-spawn done channel and removes the
-// spawningKeys map entry for key. Caller MUST hold r.mu. Single point of
-// truth for the close-before-delete sequence so no future caller can swap
-// the order accidentally — both ops are commutative under r.mu (waiters
-// observe close via the channel reference they already hold, not via
-// map lookup) but the convention matters for grep-ability and review.
-// R248-ARCH-10.
+// spawningKeys map entry for key. Caller MUST hold r.mu. Both ops are
+// commutative under r.mu (waiters observe the close via the channel reference
+// they already hold, not via map lookup); close-before-delete is convention.
 func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
 	close(ch)
 	delete(r.pp.spawningKeys, key)
@@ -919,48 +644,26 @@ func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
 // goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT
 // hold any other lock when invoking; the defer reacquires r.mu only.
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
-	// #1822 (Option B): spawnSession is the single funnel for all reverse-RPC
-	// spawn paths (send/takeover/restart_planner via GetOrCreate / Takeover /
-	// ResetAndRecreate). Reject any spawn once Shutdown has published the
-	// stopped gate, so a spawn arriving after Shutdown's snapshot cannot install
-	// a fresh shim+CLI that the snapshot already missed (leaked subtree + writes
-	// to a persister Shutdown is about to Stop). r.stopped is set under r.mu
-	// immediately before that snapshot, and we read it here with r.mu held on
-	// entry — gate and snapshot are mutually exclusive, eliminating the TOCTOU.
-	//
-	// This check sits BEFORE the spawningKeys lazy-init / done-channel defer so
-	// no guard channel is installed and no markSpawnDone defer is left dangling.
-	// It follows the unlock-on-error convention shared by every error path
-	// below: r.mu is held on entry and must be released before returning.
+	// Shutdown gate (#1822): r.stopped is set under r.mu immediately before
+	// Shutdown's snapshot and read here with r.mu held on entry, so gate and
+	// snapshot are mutually exclusive (no TOCTOU) and a late spawn cannot
+	// install a shim+CLI the snapshot missed. Sits BEFORE the done-channel
+	// defer so nothing is left dangling; unlock-on-error like every path below.
 	if r.stopped.Load() {
 		r.mu.Unlock()
 		return nil, ErrRouterStopped
 	}
 
-	// Mark this key as spawning so ReconnectShims does not mistake the freshly
-	// started shim's state file for an orphan. Every return path below leaves
-	// r.mu unlocked, so the defer reacquires it to delete the marker. Lazy
-	// init tolerates test-only Routers constructed with &Router{...}.
-	//
-	// R243-ARCH-4: the map value is a per-spawn done-channel rather than a
-	// presence-only struct{}. close(ch) wakes any GetOrCreate caller parked
-	// on the same key in O(1) regardless of waiter count, replacing the
-	// previous 20ms tick poll. close-before-delete is for readability, not
-	// correctness — both run under r.mu, and any waiter observes the close
-	// via the channel reference it already holds (not via map lookup), so
-	// the two ops are commutative. Kept in this order purely as a uniform
-	// convention. R248-GO-3.
+	// Mark this key as spawning so ReconnectShims does not mistake the fresh
+	// shim's state file for an orphan. Every return path below leaves r.mu
+	// unlocked, so the defer reacquires it. The value is a per-spawn
+	// done-channel: close(ch) wakes every GetOrCreate parked on the key.
 	if r.pp.spawningKeys == nil {
 		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
-	// R62-GO-3 (#775): if a caller (e.g. ResetAndRecreate) pre-installed a
-	// guard channel before releasing r.mu, reuse that channel so the
-	// "spawn-in-flight" marker is continuous from the caller's unlock
-	// through this defer. Concurrent GetOrCreate parked on the guardCh
-	// will never observe a `inflight=false` window in r.pp.spawningKeys[key]
-	// before this function's prologue, so it cannot race in and spawn its
-	// own session with mismatched opts. If no pre-existing entry, install
-	// a fresh per-spawn channel as before.
+	// Reuse a guard channel pre-installed by the caller (ResetAndRecreate)
+	// so the in-flight marker is continuous from the caller's unlock through
+	// this defer and no concurrent GetOrCreate can spawn with other opts (#775).
 	doneCh, reused := r.pp.spawningKeys[key]
 	if !reused {
 		doneCh = make(chan struct{})
@@ -972,16 +675,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		r.mu.Unlock()
 	}()
 
-	// Exempt sessions (planners) bypass maxProcs capacity check but have their own limit
+	// Exempt sessions (planners) bypass maxProcs but have their own limit.
 	if !opts.Exempt {
-		// Fast path: the incremental activeCount is accurate under normal operation
-		// (Reset/Remove/evictOldest/Cleanup maintain it). Avoid the O(n) countActive
-		// scan on every spawn. Only recount when we appear to be at capacity, to
-		// detect drift from undetected process exits (OOM, SIGKILL) before refusing.
-		// All three checks run under r.mu (write lock); storing the Load into a
-		// local keeps the comparison in int64 (so no 32-bit wrap on exotic cross
-		// builds) and avoids re-issuing the atomic read between the rechecks.
-		// R62-PERF-7 / R62-SEC-4.
+		// Only recount (O(n)) when we appear to be at capacity, to detect
+		// drift from undetected process exits before refusing. All three
+		// checks run under r.mu; int64 locals avoid 32-bit wrap.
 		maxProcs64 := int64(r.maxProcs)
 		pending64 := int64(r.pp.pendingSpawns)
 		if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
@@ -992,14 +690,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
-			// evictOldest() releases and re-acquires r.mu around proc.Close()
-			// (router_capacity.go), so a concurrent spawnSession can ++/-- the
-			// pendingSpawns counter inside that window. Re-read it here instead
-			// of reusing the line-707 snapshot: a stale (smaller) value would
-			// under-count and let us over-spawn past maxProcs, while a stale
-			// (larger) value would falsely refuse with ErrMaxProcs. Both
-			// activeCount and pendingSpawns must reflect the post-evict state for
-			// the invariant "all three checks run under r.mu" to hold (#2082).
+			// evictOldest() drops r.mu around proc.Close(), so pendingSpawns
+			// may have changed; re-read it or a stale value over-spawns past
+			// maxProcs / falsely refuses (#2082).
 			pending64 = int64(r.pp.pendingSpawns)
 			if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
 				r.mu.Unlock()
@@ -1007,17 +700,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			}
 		}
 	} else {
-		// Guard against unbounded exempt session growth (e.g., many projects).
-		//
-		// R242-ARCH-2 hard isolation: the per-namespace sub-quota check
-		// runs FIRST so a noisy cron chat (DefaultMaxJobsPerChat × N
-		// chats) can no longer push planner / sys stubs out of the
-		// shared pool. Only after the sub-quota passes do we apply the
-		// global maxExemptSessions ceiling as a relief valve for a
-		// future namespace added without explicit sub-quota wiring.
-		// R20260603-PERF-1: single combined walk yields both the per-kind
-		// sub-quota count and the global exempt total, replacing the former
-		// back-to-back countExemptByKind + countExempt double O(N) sweep.
+		// Per-namespace sub-quota runs FIRST so a noisy cron chat cannot push
+		// planner / sys stubs out of the shared pool; the global
+		// maxExemptSessions ceiling is a relief valve for namespaces without
+		// sub-quota wiring. One combined walk yields both counts.
 		kind := exemptKind(key)
 		perKind, totalExempt := r.countExemptCombined(kind)
 		if kind != "" {
@@ -1032,9 +718,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	}
 
-	// Merge backend / model / args / workspace / resumeID into a single
-	// struct so the branching below stays linear. Under r.mu; consumes the
-	// one-shot backendOverrides entry for `key`. R70-ARCH-H2.
+	// Under r.mu; consumes the one-shot backendOverrides entry for `key`.
 	sp := r.resolveSpawnParamsLocked(key, resumeID, opts)
 	wrapper := sp.Wrapper
 	backendID := sp.BackendID
@@ -1044,18 +728,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	accessProfileEnv := sp.AccessProfileEnv
 
 	// argv-bearing fields come from the shared constructor so this path and
-	// the arg-drift comparison cannot diverge (see argvSpawnOptions). DebugFile
-	// uses the side-effecting cliDebugFileFor here — the spawned CLI needs the
-	// log pre-created 0600 — where drift uses the read-only cliDebugPathFor.
+	// the arg-drift comparison cannot diverge. DebugFile uses the
+	// side-effecting cliDebugFileFor (log pre-created 0600) where drift uses
+	// the read-only cliDebugPathFor.
 	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
-	// ResumeID is argv-bearing (BuildArgs emits --resume) but stays out of the
-	// shared constructor: it is session state, not config, and the drift side
-	// strips it from the stored argv (stripResumeArgs) precisely so a resumed
-	// session is not read as drift.
+	// ResumeID is session state, not config: the drift side strips it
+	// (stripResumeArgs) so a resumed session is not read as drift.
 	spawnOpts.ResumeID = resumeID
-	// Per-request overlay for the shim's state file (#2494). Always non-nil:
-	// an empty overlay must be recorded as "known and empty", not omitted,
-	// or the drift check would treat this shim as pre-#2494 legacy.
+	// Always non-nil: an empty overlay must be recorded as "known and empty"
+	// or the drift check treats this shim as legacy (#2494).
 	spawnOverlay := sp.Overlay
 	spawnOpts.SpawnOverlay = &spawnOverlay
 	// Process wiring BuildArgs never reads.
@@ -1064,29 +745,20 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	spawnOpts.NoOutputTimeout = r.noOutputTimeout
 	spawnOpts.TotalTimeout = r.totalTimeout
 
-	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
-	// We release r.mu to avoid holding it during I/O. pendingSpawns prevents
-	// a concurrent Cleanup from pruning slots we're about to fill.
-	//
-	// R215-ARCH-P1-2: acquire via RAII token + defer slot.release(). The
-	// happy-path still decrements via releaseLocked() at the original site
-	// (preserves the existing lock-state contract — the second
-	// pendingSpawns-- happens after we re-take r.mu for the install path),
-	// and the defer absorbs any future panic / forgotten early-return on the
-	// other 3 segments between ++ and the original --. Idempotent: the
-	// defer's release() is a no-op once releaseLocked() has flipped the flag.
+	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup),
+	// so r.mu is released around it. pendingSpawns keeps a concurrent Cleanup
+	// from pruning the slot we are about to fill. The happy path decrements via
+	// releaseLocked() once r.mu is re-taken; the deferred release() is an
+	// idempotent safety net for panics / early returns.
 	slot := r.acquirePendingSpawnSlotLocked()
 	defer slot.release()
 	r.mu.Unlock()
 	if wrapper == nil {
-		// slot.release() in defer will reacquire r.mu and decrement.
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
-	// Expand the access-profile env overlay OUTSIDE r.mu: resolveEnvOverlay
-	// reads *_FILE secrets from disk (I/O forbidden under the lock). FAIL-LOUD
-	// on a missing/unreadable secret — we must NOT silently spawn on the global
-	// default, which would run this session on the wrong account. slot.release()
-	// in the defer reacquires r.mu and frees the reserved pending slot.
+	// Expand the access-profile env overlay OUTSIDE r.mu (reads *_FILE secrets
+	// from disk). FAIL-LOUD on a missing secret — silently spawning on the
+	// global default would run this session on the wrong account.
 	if len(accessProfileEnv) > 0 {
 		overlay, err := resolveEnvOverlay(accessProfileEnv)
 		if err != nil {
@@ -1094,14 +766,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 		spawnOpts.EnvOverlay = overlay
 	}
-	// Panic-safe Spawn: if the spawn path panics (shim exec failure, protocol
-	// Init crash, etc.) pendingSpawns must still be decremented or this
-	// router permanently refuses new sessions with ErrMaxProcs until the
-	// process restarts. Extracted to panicSafeSpawn so tests can exercise
-	// the recover path directly (wrapper itself has no panic injection
-	// seam). RES1. Goes through wrapper.Runner() — the placement seam
-	// (agentcore-cloud-sandbox RFC §4.2); local placement delegates to
-	// (*Wrapper).Spawn unchanged.
+	// Panic-safe: if Spawn panics, pendingSpawns must still be decremented or
+	// the router permanently refuses new sessions with ErrMaxProcs.
+	// wrapper.Runner() is the placement seam (agentcore-cloud-sandbox RFC §4.2).
 	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), spawnOpts, key, backendID)
 	r.mu.Lock()
 	slot.releaseLocked()
@@ -1110,26 +777,22 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
 
-	// ── TOCTOU guard 1: Defends against concurrent spawnSession for the same key.
-	// While we were unlocked for Spawn(), another goroutine may have completed
-	// spawnSession and installed a live session. If so, discard our process.
+	// ── TOCTOU guard 1: while unlocked for Spawn(), a concurrent spawnSession
+	// may have installed a live session for this key; if so discard ours.
 	if existing, ok := r.ss.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
-		proc.Close() // discard the redundant process
+		proc.Close()
 		return existing, nil
 	}
 
-	// ── Lock release 2: Copy old session history under historyMu only (not r.mu).
-	// Holding both r.mu and historyMu would violate lock ordering (historyMu is
-	// acquired independently by event injection). The old reference is safe to
-	// read because sessions are never mutated after creation, only replaced.
+	// ── Lock release 2: copy old session history under historyMu only.
+	// Holding both r.mu and historyMu would violate lock ordering (historyMu
+	// is acquired independently by event injection). The old reference is
+	// safe to read because sessions are never mutated after creation, only replaced.
 	old := r.ss.sessions[key]
-	// #2093: capture the SID of the session we are about to replace. If the
-	// respawn lands on a different effectiveSID (e.g. resolveResumeID
-	// downgraded a missing JSONL to fresh, rotating SID A→B), the old SID's
-	// idToKey[A]=key entry would otherwise dangle forever and later mis-route
-	// a resume of A into the unrelated session that reuses this deterministic
-	// key. installFreshSessionLocked clears it when oldSID != effectiveSID.
+	// Capture the SID being replaced: if the respawn rotates to a different
+	// effectiveSID, idToKey[oldSID] would dangle and later mis-route a resume;
+	// installFreshSessionLocked clears it (#2093).
 	var oldSID string
 	if old != nil {
 		oldSID = old.getSessionID()
@@ -1139,20 +802,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
 
-	// Auto-workspace-chain spawn-attach was REMOVED here (RFC
-	// docs/rfc/project-stable-session-key.md §9.1). It used to machine-guess
-	// a chain from "same workspace dir + 7d window", which mis-merged
-	// unrelated conversations (e.g. a one-off question chained onto a coding
-	// session merely because both lived under the same parent directory).
-	// Precise continuation is now carried by the project-stable session key
-	// (dashboard:pj:<wshash>:<agent>) whose same-key sessionID rotation chain
-	// is the single source of truth — no scan, no guess. prevIDs here holds
-	// ONLY the real rotation chain from collectPreviousHistory.
+	// prevIDs holds ONLY the real same-key sessionID rotation chain; no
+	// workspace-based chain guessing (docs/rfc/project-stable-session-key.md §9.1).
 
 	r.mu.Lock()
-	// ── TOCTOU guard 2: Defends against concurrent spawnSession during history copy.
-	// While we held historyMu (not r.mu), another goroutine may have completed
-	// spawnSession for this key. Same check as guard 1, different unlock window.
+	// ── TOCTOU guard 2: same check as guard 1 for the history-copy unlock window.
 	if existing, ok := r.ss.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
 		proc.Close()
@@ -1166,12 +820,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	)
 	r.mu.Unlock()
 
-	// R242-ARCH-11 (#733): the resume-history load and the persist-sink
-	// install are sequenced by bindNewSessionHistory so the
-	// "InjectHistory-then-SetPersistSink" ordering contract lives in one
-	// named API rather than relying on adjacent call sites staying in the
-	// right order. Reordering these two now requires editing the helper,
-	// where the ordering is asserted and documented.
 	r.bindNewSessionHistory(ctx, s, proc, key, resumeID, workspace, prevIDs, oldHistory)
 
 	r.notifyChange()
@@ -1179,19 +827,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 }
 
 // bindNewSessionHistory loads the resume-history chain into a freshly-spawned
-// session and THEN installs the event-log persist sink, in that exact order.
+// session and THEN installs the event-log persist sink, in that exact order:
+// SetPersistSink must run only AFTER every InjectHistory call, otherwise the
+// bulk replay entries are written back to disk instead of being dropped as
+// replayPhase (RFC §3.2.2 / §3.2.3, #733).
 //
-// R242-ARCH-11 (#733): SetPersistSink (via installPersistSink) must run only
-// AFTER every InjectHistory call for the session has completed — otherwise the
-// bulk replay entries are written back to disk instead of being recognised as
-// replayPhase=true and dropped (RFC §3.2.2 / §3.2.3). Previously this ordering
-// was held together only by two adjacent statements in spawnSession plus a
-// comment; this helper makes the contract a single named call so the two steps
-// cannot be reordered or interleaved by accident.
-//
-// LOCK: must NOT be called with r.mu held — loadResumeHistoryOnSpawn injects
-// history under historyMu, and the documented contract (router_core.go) is
-// that historyMu is never held together with r.mu.
+// LOCK: must NOT be called with r.mu held — history is injected under
+// historyMu, which is never held together with r.mu (router_core.go).
 func (r *Router) bindNewSessionHistory(
 	ctx context.Context,
 	s *ManagedSession,
@@ -1206,11 +848,9 @@ func (r *Router) bindNewSessionHistory(
 	r.installPersistSink(proc, key)
 }
 
-// installFreshSessionLocked attaches a freshly-spawned process to the
-// router indices + event log. Extracted from spawnSession (CQ2 Round 213);
-// pure state-mutation block with no I/O. Ordering matches the original
-// inlined block verbatim; callers must still invoke installPersistSink AFTER
-// this returns (RFC §3.2.2).
+// installFreshSessionLocked attaches a freshly-spawned process to the router
+// indices + event log. Pure state mutation, no I/O. Callers must invoke
+// installPersistSink AFTER this returns (RFC §3.2.2).
 //
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) installFreshSessionLocked(
@@ -1246,27 +886,18 @@ func (r *Router) installFreshSessionLocked(
 			r.mu.Unlock()
 		},
 	}
-	// Seed persistedUserTurns from the restored history so the proc==nil
-	// snapshot branch (managed_query.go:206) and AutoTitler min-turn gate see
-	// the correct count immediately. R20260603040203-CODE-002: s is unpublished
-	// so no concurrent readers.
-	// #2089: oldUserTurns was already computed by collectPreviousHistory
-	// (cached value for the persisted-snapshot branch, single pass for the
-	// dead-process EventEntries branch), so we store it directly instead of an
-	// independent O(n) rescan of oldHistory on every spawn.
+	// Seed persistedUserTurns so the proc==nil snapshot branch and AutoTitler
+	// min-turn gate see the correct count immediately; s is unpublished so
+	// there are no concurrent readers. oldUserTurns was computed by
+	// collectPreviousHistory (#2089).
 	if len(oldHistory) > 0 {
 		s.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
-	// Carry the genuine cumulative spend across the process replacement so the
-	// session total never regresses on resume. lastCumulativeCost stays 0 in
-	// the fresh struct on purpose: the new CLI incarnation re-counts its
-	// running total from scratch, so the first post-spawn turn's raw reading is
-	// itself the delta (TurnCostDelta).
+	// lastCumulativeCost stays 0 on purpose: the new CLI incarnation re-counts
+	// from scratch, so the first post-spawn reading is itself the delta.
 	storeTotalCost(&s.costSpent, oldCostSpent)
-	// Sidebar order anchor: inherit oldCreatedAt when this spawn replaces a
-	// prior incarnation (resume / ResetAndRecreate / takeover); fall back to
-	// now for genuinely-new keys via initCreatedAtIfUnset.
+	// Sidebar order anchor: inherit oldCreatedAt when replacing a prior incarnation.
 	if oldCreatedAt != 0 {
 		s.createdAt.Store(oldCreatedAt)
 	} else {
@@ -1274,65 +905,42 @@ func (r *Router) installFreshSessionLocked(
 	}
 	s.setWorkspace(workspace)
 	s.SetBackend(backendID)
-	// Record the resolved access profile so a later resume relocks the same
-	// auth chain (§7) and the store persists it. RFC project-access-profile.
+	// Recorded so a later resume relocks the same auth chain (§7).
 	s.SetAccessProfile(accessProfileID)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
-	// Operator-owned per-session state must outlive the process it was set
-	// on. resolveSpawnParamsLocked already read the OLD entry's tuning to
-	// build this spawn's argv (--model/--effort); if the fresh entry does not
-	// carry the same values, sessions.json is rewritten without them, the
-	// next TTL recycle spawns back on the config default, and a naozhi
-	// restart in between reads the surviving shim as arg-drift
-	// (driftCompareArgs) and rebuilds it as default. The user label is the
-	// same shape of state (dashboard rename) and rides along. Values come
-	// from the snapshotOldSessionLocked capture (same object as the
-	// history/cost above), never from a re-read of r.ss.sessions[key].
-	// docs/rfc/dashboard-model-effort-control.md §4.3 / §4.5.
+	// Operator-owned state must outlive the process: this spawn's argv was
+	// built from the OLD entry's tuning, and without carrying it the next TTL
+	// recycle drops back to config default and a restart reads the shim as
+	// arg-drift. Values come from the snapshotOldSessionLocked capture, never
+	// from a re-read of r.ss.sessions[key].
 	s.SetTuningModel(overrides.tuningModel)
 	s.SetTuningEffort(overrides.tuningEffort)
 	s.SetUserLabel(overrides.userLabel)
 	s.setLabelOrigin(overrides.labelOrigin) // label+origin travel as one unit
-	// attachProcessAndSnapshotPersisted: serialises storeProcess + seededLen
-	// reset under historyMu so a concurrent InjectHistory observes the
-	// (process, seededLen=len(persistedHistory)) pair and forwards only
-	// genuinely-new tail. The returned snapshot is the same content as
-	// oldHistory but goes through the same lock-protected path that the
-	// reconnect branch uses, keeping the semantics symmetric.
+	// Serialises storeProcess + seededLen reset under historyMu so a concurrent
+	// InjectHistory observes the (process, seededLen) pair and forwards only
+	// genuinely-new tail; same lock-protected path as the reconnect branch.
 	snapshot := s.attachProcessAndSnapshotPersisted(proc)
-	// Matches the reconnect path (ReconnectShims): notify the dashboard when
-	// a turn completes out-of-band (e.g. result arrives via readLoop without
-	// an active Send capturing it). SetOnTurnDone is mu-guarded inside Process,
-	// so calling it after storeProcess is safe.
+	// Notify the dashboard on out-of-band turn completion (as ReconnectShims
+	// does). SetOnTurnDone is mu-guarded inside Process, so post-storeProcess is safe.
 	proc.SetOnTurnDone(func() { r.notifyChange() })
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
-	// Effective session ID: prefer the resumeID the caller asked us to
-	// resume, but if there isn't one, fall back to whatever the protocol
-	// captured during Init / fresh handshake (ACP `session/new` returns a
-	// UUID synchronously; claude leaves it empty until the first turn's
-	// system/init event lands and process_send.go.SetSessionID kicks in).
-	//
-	// Without this fallback, a freshly-spawned kiro session has empty
-	// ManagedSession.sessionID until the user sends their first message,
-	// and the periodic saveStore loop (store.go:135 `if sid != ""`) drops
-	// the entry on the floor — losing the session across naozhi restarts.
-	// claude is unaffected because no resume + no first turn → empty sid
-	// matches its legacy behaviour.
+	// Prefer resumeID, else whatever the protocol captured during Init (ACP
+	// returns a UUID synchronously; claude stays empty until the first turn).
+	// Without the fallback a fresh kiro session has an empty sessionID and
+	// saveStore drops it, losing the session across restarts.
 	effectiveSID := resumeID
 	if effectiveSID == "" {
 		effectiveSID = proc.SessionID()
 	}
 	s.setSessionID(effectiveSID)
-	// #2093: when a respawn rotates the SID (oldSID != effectiveSID), the old
-	// SID's idToKey entry would otherwise dangle. Drop it iff it still points
-	// at this key so a later RegisterForResume dedup cannot mis-route a resume
-	// of the retired SID into whatever session next reuses this deterministic
-	// key. Guard on "still maps to key" to avoid clobbering an entry another
-	// live session legitimately re-claimed (oldSID == effectiveSID is skipped
-	// so we never delete the entry we are about to write).
+	// When a respawn rotates the SID, drop the old idToKey entry iff it still
+	// points at this key, so a resume of the retired SID cannot be mis-routed;
+	// the "still maps to key" guard avoids clobbering another live session's
+	// entry (#2093).
 	if oldSID != "" && oldSID != effectiveSID {
 		if mapped, ok := r.ss.idToKey[oldSID]; ok && mapped == key {
 			delete(r.ss.idToKey, oldSID)
@@ -1343,8 +951,6 @@ func (r *Router) installFreshSessionLocked(
 		r.ss.idToKey[effectiveSID] = key
 	}
 	s.touchLastActive()
-	// R215-ARCH-P2-2: single publish funnel ensures attachHistorySource is
-	// never forgotten alongside the sessions-map insert.
 	r.publishSessionLocked(key, s, false)
 	if !exempt {
 		r.ss.activeCount.Add(1)
@@ -1353,34 +959,22 @@ func (r *Router) installFreshSessionLocked(
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
 	logSessionLifecycle("spawned", key, "active", r.ss.activeCount.Load(), "exempt", exempt)
-	// OBS2: counter bumped inside the write-lock so it reflects the authoritative
-	// "spawn succeeded" point (past both TOCTOU guards, past storeProcess). Exempt
-	// sessions are excluded — they don't consume a normal session slot and
-	// inflating session_create_total with planner/scratch churn muddies the signal.
+	// Counters bumped inside the write-lock at the authoritative "spawn
+	// succeeded" point. Exempt sessions are excluded: they don't consume a
+	// slot and planner/scratch churn would muddy the signal.
 	if !exempt {
 		metrics.SessionCreateTotal.Add(1)
-		// Multi-Backend RFC §10 (Sprint 6a): track per-backend gauge of
-		// active sessions. Mirrors r.ss.activeCount.Add(1) above but split
-		// by backend so dashboards can answer "how many kiro vs claude
-		// sessions are live?". Decrement happens at all the same sites
-		// that decrement activeCount (resetLocked / Remove / evict /
-		// recompute paths).
+		// Per-backend mirror of activeCount; decremented at every site that
+		// decrements activeCount.
 		metrics.RecordSessionActive(s.Backend(), 1)
 	}
 	return s
 }
 
-// installPersistSink wires the event-log persister into the given
-// Process's EventLog. No-op when the persister is disabled. Called
-// exclusively from spawnSession / ReattachProcess AFTER any
-// InjectHistory calls have completed, per the ordering contract in
-// RFC §3.2.2.
-//
-// Called with a nil proc in some test harnesses; we guard because
-// Process is behind an interface (processIface) and the hook is
-// only meaningful for real CLI-backed processes. Fake processes
-// used in router_test.go don't expose SetPersistSink; they're
-// caught by the type assertion below and silently skipped.
+// installPersistSink wires the event-log persister into the given Process's
+// EventLog. No-op when the persister is disabled or proc is not a real
+// *cli.Process (test fakes). Must be called AFTER any InjectHistory calls
+// have completed (RFC §3.2.2).
 func (r *Router) installPersistSink(proc processIface, key string) {
 	if r.eventLogPersister == nil {
 		return
@@ -1396,45 +990,22 @@ func (r *Router) installPersistSink(proc processIface, key string) {
 	persisterSink := r.eventLogPersister.SinkFor(key)
 	keyhash := persist.KeyHash(key)
 	sink := newEventLogSink(persisterSink, r.attachmentTracker, keyhash)
-	// #410: pair a single-entry sink so EventLog.Append can skip the
-	// 1-slot []EventEntry{e} literal it would otherwise pass through
-	// the slice sink. Both sinks point at the same persisterSink; the
-	// persister sees identical byte stream regardless of which
-	// dispatch path EventLog used. AppendBatch keeps using `sink`
-	// (slice form), preserving contiguous batch ordering for the
-	// persister.
+	// Single-entry sink lets EventLog.Append skip a 1-slot slice literal;
+	// both sinks feed the same persisterSink (#410).
 	sinkOne := newEventLogSinkOne(persisterSink, r.attachmentTracker, keyhash)
 	log.SetPersistSinkPair(sink, sinkOne)
 }
 
-// loadResumeHistoryOnSpawn walks the previous CLI session-ID chain and, when
-// a resume is in progress with no in-memory history yet, synchronously loads
-// the JSONL chain from r.claudeDir and injects it into s. No-op when the
-// resume conditions are not met.
+// loadResumeHistoryOnSpawn synchronously loads the JSONL chain for a resume
+// with no in-memory history yet and injects it into s. No-op otherwise.
 //
-// Synchronous — runs on the spawnSession caller goroutine. The historyWg
-// Add/Done dance still tracks the call so Shutdown.Wait can drain in-flight
-// loads before tearing down dependent state (R229-GO-4: 15s budget per
-// spawn could stretch past the 30s drain window when several concurrent
-// spawnSession calls each open large JSONL chains). The IIFE surrounding
-// the body scopes the deferred historyWg.Done / context cancels so they
-// fire on every return path without leaking past the load attempt.
+// historyWg tracks the call so Shutdown can drain in-flight loads. The load
+// ctx is parented on r.historyCtx (Shutdown's historyCancel wakes the reader
+// immediately) with the caller ctx fanned in via context.AfterFunc, and is
+// skipped entirely once historyCtx is already cancelled.
 //
-// Cancellation contract:
-//   - Parent on r.historyCtx so Shutdown's historyCancel() wakes the reader
-//     immediately rather than waiting for the 15s per-spawn timeout
-//     (R229-GO-4 follow-up).
-//   - Caller ctx (typically GetOrCreate's request ctx) is fanned in via
-//     context.AfterFunc so a cancelled GetOrCreate also releases the reader
-//     (R225-GO-8 invariant).
-//   - Skipped entirely once historyCtx is already cancelled (Shutdown started
-//     before this spawn reached the load step).
-//
-// Lock contract: must NOT be called with r.mu held — InjectHistory acquires
-// session.historyMu independently, and the inner reader can take seconds.
-//
-// Extracted from spawnSession so the per-fix churn stays inside this dedicated
-// helper instead of forcing readers to scroll past it in the long spawn path.
+// LOCK: must NOT be called with r.mu held — InjectHistory acquires
+// session.historyMu independently, and the reader can take seconds.
 func (r *Router) loadResumeHistoryOnSpawn(
 	ctx context.Context,
 	s *ManagedSession,
@@ -1446,21 +1017,10 @@ func (r *Router) loadResumeHistoryOnSpawn(
 		return
 	}
 
-	// #1813 / R20260603-CODE-3 (#1655): decide skip-or-load BEFORE Add(1),
-	// mirroring runHistoryTask (router_core.go). The previous "Add(1) then
-	// compensate with Done() on the cancelled path" shape opened a TOCTOU:
-	// once Shutdown has called historyCancel() and launched the detached
-	// historyWg.Wait() goroutine with the counter already drained to 0, this
-	// late Add(1) at counter==0 races that concurrent Wait() — a sync.WaitGroup
-	// misuse that can panic ("WaitGroup is reused before previous Wait has
-	// returned") or let Wait return between the Add and the compensating Done.
-	// Checking Err() first means Add(1) only ever happens when we are certainly
-	// loading, so the counter never transiently rises after a cancel.
-	// R202606b-GO-001 (#2186): the check and the Add must be one critical
-	// section vs Shutdown's historyCancel() — the Err()-first ordering alone
-	// still leaves a nanosecond window where a cancel landing after the check
-	// but before the Add re-adds to a drained WaitGroup. historyWgMu closes
-	// it; see its godoc in router_core.go.
+	// Decide skip-or-load BEFORE Add(1), and make check+Add one critical
+	// section vs Shutdown's historyCancel() under historyWgMu: an Add(1) on a
+	// WaitGroup already drained to 0 while Shutdown's Wait() runs is a
+	// WaitGroup misuse that can panic (#1655, #2186). Mirrors runHistoryTask.
 	r.historyWgMu.Lock()
 	if r.historyCtx != nil && r.historyCtx.Err() != nil {
 		r.historyWgMu.Unlock()
@@ -1513,15 +1073,11 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	delete(r.ss.sessions, key)
 	if !keepBackendOverride {
 		delete(r.bkStore.backendOverrides, key)
-		// Access-profile override is a one-shot dashboard pick with the same
-		// lifecycle as backendOverrides — a terminal removal must clear it so
-		// an abandoned pick (chosen, never spawned) does not leak. RFC
-		// project-access-profile §8.2.
+		// One-shot dashboard pick with the same lifecycle as backendOverrides;
+		// terminal removal must clear it so an abandoned pick does not leak.
 		delete(r.bkStore.accessProfileOverrides, key)
-		// R090031-CR-5: shimStuckOnReset is only consumed by GetOrCreate, so
-		// terminal removals (keepBackendOverride=false) must also clear it.
-		// Sessions that are deleted and never reopened would otherwise leave
-		// their entry in the map for the lifetime of the process.
+		// shimStuckOnReset is only consumed by GetOrCreate, so terminal
+		// removals must clear it or the entry lives for the process lifetime.
 		delete(r.pp.shimStuckOnReset, key)
 	}
 }
@@ -1550,9 +1106,6 @@ func (r *Router) resetLocked(key string) (processIface, string, bool) {
 		if r.ss.activeCount.Add(-1) < 0 {
 			r.ss.activeCount.Store(0)
 		}
-		// Multi-Backend RFC §10 (Sprint 6a): mirror the activeCount
-		// decrement into the labeled gauge so per-backend dashboards
-		// stay in sync with the legacy unlabeled total.
 		metrics.RecordSessionActive(backend, -1)
 	}
 	r.ss.dirty = true
@@ -1572,9 +1125,8 @@ func (r *Router) Reset(key string) {
 }
 
 // ResetAndDiscardOverride atomically resets the session AND deletes the
-// per-chat workspace override, closing the race where a concurrent
-// SetWorkspace would otherwise survive a bare Reset+delete pair and leak
-// into the next session (Round-207 SM1).
+// per-chat workspace override, so a concurrent SetWorkspace cannot survive a
+// bare Reset+delete pair and leak into the next session.
 func (r *Router) ResetAndDiscardOverride(key string) {
 	r.mu.Lock()
 	proc, sessionID, hadSession := r.resetLocked(key)
@@ -1595,23 +1147,16 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	if proc != nil && proc.Alive() {
 		proc.Close()
 	}
-	// Belt-and-suspenders: Close waits for proc.done which fires on shim
-	// EOF, and in the normal path the shim's Run() defer chain unlinks the
-	// socket before EOF propagates. But proc could be nil/!Alive (shim
-	// still live after CLI crash, or a stale pointer we never wired a
-	// readLoop to). Give the socket a short window to actually disappear
-	// before downstream GetOrCreate attempts a same-key StartShim, which
-	// would otherwise hit the dial-first guard ("refusing to clobber")
-	// described in shim/server.go. Bounded at 2s so a truly stuck shim
-	// falls through and the caller sees the real error instead of hanging.
+	// proc may be nil/!Alive with the shim socket still bound (CLI crash,
+	// stale pointer); give it a short window to disappear so a same-key
+	// StartShim does not hit the dial-first "refusing to clobber" guard.
+	// Bounded so a truly stuck shim surfaces the real error instead of hanging.
 	gone := waitSocketGoneForKey(key, 2*time.Second)
-	// R191-CONC-H1-b: Broadcast under r.mu (see evictOldest comment).
+	// Broadcast must happen under r.mu (see evictOldest).
 	r.mu.Lock()
 	if !gone {
-		// (#1324) Flag the key so the next GetOrCreate wraps any spawn
-		// error with ErrShimStuck — operator-actionable diagnosis
-		// instead of the generic ErrClassSessionError + "执行跳过，请稍
-		// 后重试。" notice. Cleared by the next GetOrCreate for this key.
+		// Flag the key so the next GetOrCreate wraps any spawn error with
+		// ErrShimStuck (#1324); cleared by that GetOrCreate.
 		if r.pp.shimStuckOnReset == nil {
 			r.pp.shimStuckOnReset = make(map[string]bool)
 		}
@@ -1629,46 +1174,19 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	r.notifyChange()
 }
 
-// waitSocketGoneForKey bridges router-level session keys to the shim
-// socket path derived from KeyHash, so callers don't need to plumb a
-// shim.Manager reference through every Reset path. Returns quickly if
-// the socket was never created.
-//
-// R222-ARCH-2 (#711): the actual socket-path computation + filesystem
-// poll lives behind cli.WaitSocketGoneForKey so the session package no
-// longer reaches directly into internal/shim for socket naming. Keep
-// this thin shim (pun intended) so existing call sites stay unchanged.
-//
-// Returns true when the socket disappeared within maxWait, false on
-// timeout. Reset callers use the false branch to flag the per-key
-// shimStuckOnReset state so the next GetOrCreate can wrap its spawn
-// error with ErrShimStuck (#1324). Reset itself proceeds regardless —
-// a truly stuck shim still falls through to spawnSession's StartShim
-// "refusing to clobber" path, but with the wrap the operator gets an
-// actionable error class instead of the generic session_error.
+// waitSocketGoneForKey waits up to maxWait for the shim socket derived from
+// key to disappear; returns false on timeout. Socket naming lives behind
+// cli.WaitSocketGoneForKey so this package does not reach into internal/shim
+// (#711). Reset callers use the false branch to flag shimStuckOnReset (#1324).
 func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 	return cli.WaitSocketGoneForKey(key, maxWait)
 }
 
-// ResetAndRecreate atomically resets a session and spawns a new one for the same key.
-// This avoids the race window between Reset and GetOrCreate where a concurrent
-// message could create a session with wrong opts.
-//
-// R62-GO-3 (#775) FIX: ResetAndRecreate now installs a guard channel in
-// r.pp.spawningKeys[key] BEFORE releasing r.mu for proc.Close(). Concurrent
-// GetOrCreate callers parking in the (key not present, but inflight)
-// window will block on the guardCh until spawnSession's defer closes it
-// (whether spawn succeeded or failed). spawnSession's prologue reuses
-// an existing channel rather than overwriting it, so the guardCh is
-// continuously installed from this function's first unlock through
-// spawnSession's defer — no concurrent caller can observe "no session,
-// no inflight marker" and spawn its own with different opts.
-//
-// Historical NOTE: prior to the #775 fix the gap allowed a concurrent
-// GetOrCreate to win and spawn with its own opts. Callers that needed
-// opts fidelity were directed to ResetAndDiscardOverride (R209 SM1).
-// With the guard in place, ResetAndRecreate now provides the same
-// "MY opts" guarantee for the simple reset+recreate case.
+// ResetAndRecreate atomically resets a session and spawns a new one for the
+// same key, so no concurrent message can create a session with other opts. A
+// guard channel is installed in r.pp.spawningKeys[key] BEFORE r.mu is released
+// for proc.Close(); spawnSession reuses it, so the in-flight marker is
+// continuous from the first unlock through spawnSession's defer (#775).
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
 
@@ -1686,22 +1204,17 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			if r.ss.activeCount.Add(-1) < 0 {
 				r.ss.activeCount.Store(0)
 			}
-			// Multi-Backend RFC §10 (Sprint 6a): per-backend gauge mirror.
-			// The follow-up spawnSession will Inc the gauge for the new
-			// backend (which may differ from oldBackend if opts.Backend
-			// changed) — net change is 0 if same backend, +1/-1 otherwise.
+			// spawnSession below Incs the gauge for the (possibly different)
+			// new backend.
 			metrics.RecordSessionActive(oldBackend, -1)
 		}
 		r.ss.dirty = true
 		r.ss.gen.Add(1)
 
 		if proc != nil && proc.Alive() {
-			// R62-GO-3 (#775): install a guardCh in r.pp.spawningKeys[key]
-			// BEFORE we release r.mu. Concurrent GetOrCreate that
-			// observes (no session, but inflight marker) will park on
-			// guardCh and not race in to spawn its own session with
-			// different opts. spawnSession below reuses this same
-			// channel and its defer closes+removes it.
+			// Install the guardCh BEFORE releasing r.mu so a concurrent
+			// GetOrCreate parks instead of spawning with different opts;
+			// spawnSession reuses it and its defer closes+removes it (#775).
 			if r.pp.spawningKeys == nil {
 				r.pp.spawningKeys = make(map[string]chan struct{})
 			}
@@ -1710,18 +1223,13 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			}
 			r.mu.Unlock()
 			proc.Close()
-			// Same rationale as Router.Reset: make sure the shim
-			// socket is gone before spawnSession's StartShim dials
-			// it. Without this, ResetAndRecreate races the 30s
-			// zombie window and fails with "refusing to clobber"
-			// on the immediate re-bind.
+			// As in Reset: the shim socket must be gone before spawnSession's
+			// StartShim dials it, or the re-bind fails with "refusing to clobber".
 			gone := waitSocketGoneForKey(key, 2*time.Second)
 			r.mu.Lock()
 			if !gone {
-				// (#1324) Flag for ErrShimStuck wrap on the
-				// spawnSession failure path below. spawnSession
-				// will be the consumer here (not GetOrCreate) so
-				// the wrap is applied directly inline.
+				// Flag for the ErrShimStuck wrap on the spawn failure path
+				// below (#1324); consumed inline here, not by GetOrCreate.
 				if r.pp.shimStuckOnReset == nil {
 					r.pp.shimStuckOnReset = make(map[string]bool)
 				}
@@ -1729,17 +1237,15 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
 					"key", key)
 			}
-			// R191-CONC-H1-f: Broadcast under r.mu (see evictOldest comment).
+			// Broadcast must happen under r.mu (see evictOldest).
 			if r.shutdownCond != nil {
 				r.shutdownCond.Broadcast()
 			}
 		}
 	}
 
-	// Spawn new session while still holding mu (spawnSession handles unlock/relock).
-	// (#1324) Consume the per-key shimStuckOnReset flag set above when the
-	// socket-gone wait timed out. r.mu is currently held; read+delete here
-	// is safe.
+	// Still holding r.mu (spawnSession handles unlock/relock); consume the
+	// shimStuckOnReset flag set above.
 	stuck := r.pp.shimStuckOnReset[key]
 	if stuck {
 		delete(r.pp.shimStuckOnReset, key)
@@ -1755,26 +1261,17 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		}
 		return nil, err
 	}
-	// (#1702) TOCTOU guard 1 in spawnSession can return an existing alive
-	// session with err==nil (a concurrent caller won the race). In that case
-	// the err!=nil block above never runs, so a set stuck flag would be
-	// silently consumed and the ErrShimStuck diagnostic lost. We cannot wrap
-	// a successful reuse as an error (the session is usable), but we must not
-	// swallow the signal that the shim socket was still bound after the wait,
-	// so surface it via a Warn instead.
+	// spawnSession's TOCTOU guard can return a concurrently-spawned session
+	// with err==nil; the stuck flag must not be silently swallowed (#1702).
 	warnShimStuckReuse(stuck, key)
 	// spawnSession already called notifyChange on success
 	return s, nil
 }
 
-// warnShimStuckReuse surfaces the #1702 diagnostic: when ResetAndRecreate set
-// the per-key shimStuckOnReset flag (the shim socket was still bound after the
-// gone-wait) but spawnSession nonetheless returned a usable session without
-// error (TOCTOU guard reused a concurrently-spawned session), the stuck flag
-// would otherwise be silently consumed. Emitting a Warn keeps the actionable
-// "socket was stuck" signal visible to operators even on the success path.
-// Extracted as a free function so the decision is unit-testable without driving
-// the full concurrent spawn race.
+// warnShimStuckReuse logs the shim-stuck diagnostic when ResetAndRecreate set
+// shimStuckOnReset but spawnSession returned a usable session without error
+// (TOCTOU guard reused a concurrently-spawned session), so the signal is not
+// lost on the success path (#1702).
 func warnShimStuckReuse(stuck bool, key string) {
 	if !stuck {
 		return
@@ -1784,26 +1281,15 @@ func warnShimStuckReuse(stuck bool, key string) {
 }
 
 // RenameSession moves a session entry from oldKey to newKey, preserving the
-// running process, sessionID, history, and totalCost. Used by the scratch
-// promote flow to turn an ephemeral aside into a regular sidebar session
-// without killing the CLI process underneath.
+// running process, sessionID, history, and totalCost (scratch promote flow).
+// Returns false when oldKey == newKey, oldKey does not exist, newKey already
+// exists (a collision would drop an active session), or newKey fails
+// session-key validation.
 //
-// Returns false when:
-//   - oldKey == newKey
-//   - oldKey does not exist
-//   - newKey already exists (collision would otherwise drop an active session)
-//   - newKey fails session-key validation
-//
-// The caller must ensure no Send is actively in flight for oldKey. In the
-// scratch promote flow the drawer UI disables the save button while a turn
-// is running, so the handler only invokes this when the session is idle.
-//
-// The onSessionID closure on the fresh ManagedSession captures newKey by
-// value. A second RenameSession on the promoted key would leave that closure
-// writing the pre-second-rename newKey into sessionIDToKey; today only the
-// scratch → sidebar promote path invokes this, so that race is not reachable.
-// If a future caller chains renames on the same session, rebuild onSessionID
-// inside the destination struct or switch it to read s.key lazily.
+// The caller must ensure no Send is in flight for oldKey. The onSessionID
+// closure captures newKey by value, so chaining a second rename on the same
+// session would write a stale key into idToKey; rebuild the closure if a
+// future caller needs that.
 func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if oldKey == newKey {
 		return false
@@ -1825,22 +1311,10 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	}
 
 	// Session key is immutable on ManagedSession (parseKeyParts caches via
-	// sync.Once; Snapshot depends on those cached parts). A fresh struct is
-	// the only safe way to change the key.
-	// R184-IDIOM-L2: clone prevSessionIDs so a subsequent spawnSession path
-	// that appends to old.prevSessionIDs (in-place if cap permits) cannot
-	// silently mutate fresh.prevSessionIDs. spawnSession already clones at
-	// its construction site; Rename must do the same for symmetry.
-	// persistedHistory: clone the backing array too. NewRouter launches an
-	// async history-load goroutine that holds the `s` pointer; if the load
-	// completes after Rename swapped keys, s.InjectHistory appends to
-	// old.persistedHistory. When len<cap in that backing array, the append
-	// writes into bytes that fresh.persistedHistory also points to.
-	// #2089: snapshot the persisted history and its already-maintained
-	// user-turn count together under historyMu so the cloned slice and the
-	// count cannot diverge (injectHistory updates both under this lock). This
-	// lets the seed below copy the cached count (O(1)) instead of rescanning
-	// the whole slice for "user" entries (O(n)).
+	// sync.Once), so a fresh struct is the only safe way to change it. Clone
+	// prevSessionIDs/persistedHistory: an in-place append on old (later spawn
+	// or the async history-load goroutine) would write into a backing array
+	// fresh shares. History + user-turn count snapshot together under historyMu.
 	old.historyMu.RLock()
 	freshHistory := slices.Clone(old.persistedHistory)
 	oldUserTurns := old.persistedUserTurns.Load()
@@ -1860,56 +1334,41 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			r.mu.Unlock()
 		},
 	}
-	// Seed persistedUserTurns so snapshot().MessageCount is correct on the
-	// renamed session before any new turns arrive. R20260603040203-CODE-002.
-	// #2089: freshHistory is an exact clone of old.persistedHistory captured
-	// atomically with oldUserTurns under historyMu, so the user-turn count is
-	// identical — copy the cached value (O(1)) instead of an O(n) rescan.
+	// Seed persistedUserTurns so snapshot().MessageCount is correct before
+	// any new turns arrive.
 	if len(freshHistory) > 0 {
 		fresh.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
-	// Rename keeps the SAME live process (only the key changes), so both the
-	// genuine total AND the delta baseline carry over verbatim — the CLI's
-	// running total keeps climbing in the same incarnation, so resetting the
-	// baseline here would double-count the next turn.
+	// Rename keeps the SAME live process, so the delta baseline carries over
+	// too — resetting it would double-count the next turn.
 	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
 	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
 	fresh.setWorkspace(old.Workspace())
-	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
-	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an
-	// atomic.Pointer[string] so plain Load/Store round-trips are race-safe;
-	// we hold r.mu which blocks concurrent writers of everything except the
-	// Send hot path (lastPrompt / lastActivity), which are idempotent on copy.
+	// Atomic fields: plain Load/Store round-trips are race-safe; r.mu blocks
+	// all concurrent writers except the Send hot path (lastPrompt /
+	// lastActivity), which are idempotent on copy.
 	fresh.SetBackend(old.Backend())
 	fresh.SetCLIName(old.CLIName())
 	fresh.SetCLIVersion(old.CLIVersion())
 	fresh.SetUserLabel(old.UserLabel())
 	fresh.setLabelOrigin(old.LabelOrigin()) // label+origin travel as one unit
-	// Tuning overrides are keyed to the conversation, not the key string —
-	// the renamed session keeps running under the same argv, so dropping
-	// them here would make the next respawn/drift check flip it to default.
+	// Tuning overrides follow the conversation: dropping them would make the
+	// next respawn/drift check flip the session to default.
 	fresh.SetTuningModel(old.TuningModel())
 	fresh.SetTuningEffort(old.TuningEffort())
 	if dr := loadAtomicString(&old.deathReason); dr != "" {
 		storeAtomicString(&fresh.deathReason, dr)
 	}
 	fresh.lastActive.Store(old.lastActive.Load())
-	// Carry the original creation timestamp so the renamed row keeps its
-	// established sidebar position. Zero-fallback to now would shove the
-	// row to the bottom — surprising for the scratch-promote flow where
-	// the user is preserving an existing conversation.
+	// Carry the creation timestamp so the renamed row keeps its sidebar position.
 	if oldCreatedAt := old.createdAt.Load(); oldCreatedAt != 0 {
 		fresh.createdAt.Store(oldCreatedAt)
 	} else {
 		fresh.initCreatedAtIfUnset()
 	}
-	// Go through storeAtomicString so each write allocates a fresh *string —
-	// direct `.Store(lp)` would share the underlying pointer with `old` and
-	// diverge from the rest of the codebase's "always helper" convention.
-	// Currently safe because strings are immutable, but keeping the invariant
-	// uniform avoids confusion if a future refactor ever makes the pointee
-	// mutable.
+	// storeAtomicString allocates a fresh *string per write rather than
+	// sharing old's pointer, matching the codebase-wide convention.
 	if lp := loadAtomicString(&old.lastPrompt); lp != "" {
 		storeAtomicString(&fresh.lastPrompt, lp)
 	}
@@ -1918,26 +1377,19 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	}
 	fresh.setSessionID(old.getSessionID())
 
-	// Move the process pointer so the running CLI keeps serving requests
-	// under the new key. The old struct becomes an orphan with process=nil,
-	// so any goroutine holding a stale reference to `old` that attempts Send
-	// fails cleanly with "no active process".
-	//
-	// The proc's EventLog already carries the entries that match
-	// fresh.persistedHistory (they were forwarded earlier under `old`), so
-	// fresh.persistedSeededLen must mirror len(fresh.persistedHistory) — a
-	// fresh.InjectHistory after takeover should forward only newly-arrived
-	// tail. adoptProcessAlreadySeeded handles that under historyMu.
+	// Move the process pointer; old becomes an orphan with process=nil so a
+	// stale Send fails cleanly. The proc's EventLog already holds the entries
+	// matching fresh.persistedHistory, so persistedSeededLen must mirror its
+	// length (adoptProcessAlreadySeeded does that under historyMu) and a later
+	// InjectHistory forwards only newly-arrived tail.
 	if proc := old.loadProcess(); proc != nil {
 		fresh.adoptProcessAlreadySeeded(proc)
 	}
 	old.storeProcess(nil)
 
-	// Rebind the history source to the renamed session — the old Source
-	// captured `old.SnapshotChainIDs` which reads the now-orphaned struct.
-	// publishSessionLocked installs the rebound source + map entry; oldKey's
-	// map entry and index slot are cleaned up next so the rename is atomic
-	// under r.mu. R215-ARCH-P2-2.
+	// Rebind the history source (the old Source reads the orphaned struct);
+	// oldKey's map entry and index slot are removed next so the rename is
+	// atomic under r.mu.
 	r.publishSessionLocked(newKey, fresh, false)
 	delete(r.ss.sessions, oldKey)
 	r.indexDel(oldKey)
@@ -1961,16 +1413,11 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	return true
 }
 
-// stripResumeArgs removes --resume <id> pairs from a CLI arg slice.
-// Used by drift check: --resume is session-specific, not a config change.
-// (`--append-system-prompt` is NOT stripped: since #2493 the prompt travels
-// in shim.SpawnOverlay.AppendSystemPrompt, so the drift rebuild reproduces
-// it through mergeArgvLayers and a changed prompt correctly reads as drift.)
-//
-// Fast path: return the original slice unchanged if --resume is absent.
-// reconnectShims calls this once per discovered shim during startup; for
-// deployments with many shims where no session was mid-turn the arg is
-// absent and we avoid the O(N) slice alloc + copy. R64-PERF-9.
+// stripResumeArgs removes --resume <id> pairs from a CLI arg slice for the
+// drift check: --resume is session-specific, not a config change.
+// `--append-system-prompt` is NOT stripped — it travels in the overlay and a
+// changed prompt correctly reads as drift (#2493). Returns the original slice
+// unchanged when --resume is absent.
 func stripResumeArgs(args []string) []string {
 	hasResume := false
 	for _, a := range args {
@@ -1985,11 +1432,8 @@ func stripResumeArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--resume" {
-			// Skip the bare flag. If a value follows, skip that too. A
-			// trailing `--resume` with no value must also be dropped —
-			// otherwise it survives into the drift-check compare and
-			// spuriously shuts down the shim on args equality mismatch.
-			// R65-GO-M-2.
+			// Skip the flag and its value; a trailing bare `--resume` must
+			// also go or it spuriously reads as drift.
 			if i+1 < len(args) {
 				i++
 			}

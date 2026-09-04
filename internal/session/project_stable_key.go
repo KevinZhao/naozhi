@@ -20,19 +20,11 @@ const projectStableKeyHashLen = 16
 //
 //	dashboard:pj:<sha256(filepath.Clean(absPath))[:16]>:<agent>
 //
-// Determinism: the same (absPath, agent) always yields the same key, so the
-// chain it carries survives process restarts (unlike an in-memory
-// workspace→key map). filepath.Clean normalises trailing slashes / "." /
-// ".." so "/a/" and "/a" map to one key.
-//
-// Uniqueness: the hash is taken over the FULL absolute path, not the
-// basename — this is what fixes the historical basename collision where
-// "/x/foo" and "/y/foo" both produced the slug "foo" (RFC §4.1).
-//
-// agent is sanitised through the same component gate as every other key
-// segment; empty agent falls back to "general" to match the dashboard
-// default. Returns "" when absPath is empty (caller has no workspace to
-// anchor to — fall back to the timestamp-key path).
+// The same (absPath, agent) always yields the same key, so the chain it
+// carries survives restarts; filepath.Clean makes "/a/" and "/a" one key. The
+// hash covers the FULL absolute path, so "/x/foo" and "/y/foo" do not collide
+// (RFC §4.1). agent goes through the usual key-component gate; empty agent
+// falls back to "general". Returns "" when absPath is empty.
 func ProjectStableKey(absPath, agent string) string {
 	if absPath == "" {
 		return ""

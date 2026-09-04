@@ -18,24 +18,18 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// maxStoreFileBytes caps how much data we read from any session-store file
-// during Load. sessions.json for 1000 sessions with full PrevSessionIDs stays
-// well under 500 KB; 4 MB gives ample headroom without letting a corrupt or
-// maliciously extended file OOM the process during startup.
+// maxStoreFileBytes caps how much Load reads from any session-store file so a
+// corrupt or maliciously extended file cannot OOM the process during startup.
 const maxStoreFileBytes = 4 * 1024 * 1024
 
-// readCappedFile reads up to maxStoreFileBytes from path. Returns nil, nil if
-// the file does not exist so callers can treat a missing store as "empty".
-// A file that exceeds the cap is logged and rejected — the caller falls back
-// to an empty store rather than parsing a truncated JSON prefix.
+// readCappedFile reads up to maxStoreFileBytes from path. Returns nil, nil for
+// a missing file ("empty" store); a file over the cap is rejected outright.
 func readCappedFile(path string, label string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		// R180-GO-P2: wrap so the loadStore slog attr identifies the specific
-		// path + open-phase failure instead of the bare os.PathError text.
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
@@ -43,9 +37,6 @@ func readCappedFile(path string, label string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	// R180-GO-P2: drop the unnecessary int64 cast. maxStoreFileBytes is an
-	// untyped constant and len returns int; the comparison cannot overflow
-	// on any 64-bit platform. Matches the unadorned len(data) below.
 	if len(data) > maxStoreFileBytes {
 		slog.Warn(label+" exceeds size cap; refusing to load",
 			"path", path, "cap_bytes", maxStoreFileBytes, "observed_bytes", len(data))
@@ -55,12 +46,8 @@ func readCappedFile(path string, label string) ([]byte, error) {
 }
 
 // preserveCorruptFile renames a file that failed to JSON-parse to a
-// timestamped ".corrupt.<ts>" sibling so the next atomic save does not
-// silently overwrite it, keeping the bad bytes available for forensic
-// analysis. parseErr is the original unmarshal error (logged for context).
-// Used by every loader in this package — sessions.json, known IDs, and
-// workspace overrides — so a partial-write / disk-corruption event leaves a
-// consistent, recoverable breadcrumb across all three sidecar stores (#673).
+// ".corrupt.<ts>" sibling so the next atomic save does not silently overwrite
+// it. Used by every loader in this package for a consistent breadcrumb (#673).
 func preserveCorruptFile(path, label string, parseErr error) {
 	corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
 	if renameErr := os.Rename(path, corruptPath); renameErr != nil {
@@ -76,96 +63,61 @@ type storeEntry struct {
 	Key            string   `json:"key"`
 	SessionID      string   `json:"session_id"`
 	PrevSessionIDs []string `json:"prev_session_ids,omitempty"` // oldest → newest
-	// PrevSessionOrigins is parallel to PrevSessionIDs and records who
-	// added each chain entry: "manual" / "auto-spawn" / "auto-backfill"
-	// / "resume". Empty / shorter-than-PrevSessionIDs is forward-compatible
-	// with pre-feature stores (loadStore materialises the missing tail as
-	// "manual"). See docs/rfc/auto-workspace-chain.md §4.6.
+	// PrevSessionOrigins is parallel to PrevSessionIDs: "manual" / "auto-spawn"
+	// / "auto-backfill" / "resume". A shorter slice is forward-compatible
+	// (loadStore fills the tail with "manual"). docs/rfc/auto-workspace-chain.md §4.6.
 	PrevSessionOrigins []string `json:"prev_session_origins,omitempty"`
 	TotalCost          float64  `json:"total_cost,omitempty"`
-	// CostSpent is the genuine cumulative spend (sum of per-turn deltas),
-	// monotonic across resume/restart — the authoritative session total. It
-	// supersedes TotalCost (which mirrors the CLI's per-incarnation running
-	// total). LastCumulativeCost is the baseline the next per-turn delta diffs
-	// against, persisted so resume continues the delta chain correctly. Both
-	// omitempty + forward-compatible: legacy stores lack them and the restore
-	// path seeds costSpent from TotalCost. See runhistory.TurnCostDelta.
+	// CostSpent is the authoritative cumulative spend (monotonic across
+	// resume/restart); TotalCost mirrors the CLI's per-incarnation total.
+	// LastCumulativeCost is the baseline the next per-turn delta diffs against.
+	// Legacy stores lack both; restore seeds costSpent from TotalCost.
 	CostSpent          float64 `json:"cost_spent,omitempty"`
 	LastCumulativeCost float64 `json:"last_cumulative_cost,omitempty"`
 	Workspace          string  `json:"workspace,omitempty"`
 	Backend            string  `json:"backend,omitempty"` // "claude" | "kiro" | ...
-	// AccessProfile is the access-profile ID this session spawned under
-	// ("" = global default). Persisted so a post-restart resume relocks the
-	// same auth chain — resuming a Bedrock conversation against a 1P endpoint
-	// would cross-charge and fail. Forward-compatible: pre-feature stores lack
-	// it, restoring to "" (global default). RFC project-access-profile §7.
+	// AccessProfile is the access-profile ID this session spawned under ("" =
+	// global default), so a post-restart resume relocks the same auth chain —
+	// resuming a Bedrock conversation against a 1P endpoint would cross-charge and fail.
 	AccessProfile string `json:"access_profile,omitempty"`
 	LastActive    int64  `json:"last_active,omitempty"` // unix nano
-	// CreatedAt anchors the session's sidebar position; written once at
-	// creation and persisted across restarts. unix nano. Pre-feature stores
-	// have CreatedAt==0, in which case the router restore copies LastActive
-	// into the in-memory createdAt so the upgraded binary keeps existing
-	// sessions in roughly their previous order before the comparator
-	// switched to ascending.
+	// CreatedAt anchors the sidebar position (unix nano, written once). When 0,
+	// restore copies LastActive into createdAt so existing sessions keep their order.
 	CreatedAt int64  `json:"created_at,omitempty"`
 	UserLabel string `json:"user_label,omitempty"` // operator-set display name override
-	// LabelOrigin records who set UserLabel: "" / "user" (human-set) or
-	// "auto" (sysession daemon-set). See ManagedSession.LabelOrigin and
-	// docs/rfc/system-session.md §7.3. Empty is forward-compatible with
-	// pre-v2.1 stores (treated as "user" — daemons must leave it alone).
+	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
+	// (sysession daemon). Empty is treated as "user" — daemons must leave it alone.
 	LabelOrigin string `json:"label_origin,omitempty"`
-	// Model is the last-known CLI model identifier captured from
-	// system/init (claude) or SpawnOptions.Model (kiro). Persisted so
-	// the dashboard can keep showing the right model after naozhi
-	// restart, before the next turn re-emits init. UI Round 5 R5-3.
+	// Model is the last-known CLI model (system/init for claude, SpawnOptions
+	// for kiro) so the dashboard shows it after a restart before the next init.
 	Model string `json:"model,omitempty"`
-	// TuningModel / TuningEffort are the operator's per-session dashboard
-	// overrides ("" = none). Persisted so the override survives naozhi
-	// restarts — the kiro-side switch is process-bound (F2), so this file
-	// is the only durable record. Forward-compatible: pre-feature stores
-	// lack them (restore to ""), old binaries ignore unknown keys. Values
-	// are re-validated on load (loadStore) so a hand-edited file cannot
-	// smuggle argv-shaped strings into --model/--effort (§4.6).
-	// docs/rfc/dashboard-model-effort-control.md §4.3.
+	// TuningModel / TuningEffort are the operator's per-session overrides ("" =
+	// none); the only durable record since the kiro-side switch is process-bound.
+	// Re-validated on load so a hand-edited file cannot smuggle argv into --model/--effort.
 	TuningModel  string `json:"tuning_model,omitempty"`
 	TuningEffort string `json:"tuning_effort,omitempty"`
 
-	// prevGen is the ManagedSession.prevHistoryGen value observed when the
-	// PrevSessionIDs / PrevSessionOrigins slices above were snapshotted. It is
-	// unexported so encoding/json never serialises it (on-disk shape is
-	// unchanged). equalStoreEntry compares this O(1) counter instead of running
-	// slices.Equal over the chain slices on every 30s saveIfDirty tick
-	// (R202606j-PERF-014, #2346). Because the gen is bumped under historyMu on
-	// every chain mutation, equal gen ⇒ identical chain contents.
+	// prevGen is ManagedSession.prevHistoryGen when the chain slices above were
+	// snapshotted (unexported: never hits disk). Bumped under historyMu on every
+	// chain mutation, so equal gen ⇒ identical chains; see equalStoreEntry (#2346).
 	prevGen uint64
 }
 
-// storeFormatVersion is the current schema version for `sessions.json`.
-// Bump this constant when the JSON shape changes in a way that older
-// naozhi binaries cannot safely parse (e.g. adding a required field,
-// renaming a key). Additive fields with `omitempty` do NOT require a bump
-// — old binaries tolerate unknown fields.
-//
-// The version is NOT embedded in sessions.json itself (that file is a
-// bare JSON array for back-compat with every prior release); instead it
-// lives in a sidecar `sessions.meta.json`. loadStore reads the sidecar,
-// warns if the observed version is newer than this constant, and then
-// proceeds — operators get a heads-up that their binary may mis-parse
-// the on-disk data, but the load never fails hard on a missing sidecar
-// (treated as v1, the initial format).
+// storeFormatVersion is the schema version for `sessions.json`; bump only for
+// changes older binaries cannot parse (additive `omitempty` fields need none).
+// It lives in the sidecar `sessions.meta.json` (sessions.json stays a bare
+// array for back-compat); loadStore warns on a newer version and never fails
+// on a missing sidecar (treated as v1).
 const storeFormatVersion = 1
 
-// storeMeta is the payload written to sessions.meta.json alongside the
-// main store file. Kept in its own struct so future schema signalling
-// (compression, sharding, etc.) can grow here without touching storeEntry.
+// storeMeta is the sessions.meta.json payload.
 type storeMeta struct {
 	Version   int    `json:"version"`
 	WrittenAt int64  `json:"written_at"`          // unix nano when saveStore last succeeded
 	Generator string `json:"generator,omitempty"` // human-readable "naozhi <tag>"; omitempty for test paths
 }
 
-// storeMetaPath returns the sidecar meta path derived from the main
-// store path: `.../sessions.json` → `.../sessions.meta.json`.
+// storeMetaPath derives the sidecar path: `.../sessions.json` → `.../sessions.meta.json`.
 func storeMetaPath(storePath string) string {
 	if storePath == "" {
 		return ""
@@ -176,54 +128,31 @@ func storeMetaPath(storePath string) string {
 	return filepath.Join(filepath.Dir(storePath), stem+".meta"+ext)
 }
 
-// sessionToStoreEntry converts a ManagedSession to its on-disk storeEntry
-// representation, returning (_, false) when the session is intentionally
-// skipped from persistence (scratch / sys daemon stub / no SessionID yet).
+// sessionToStoreEntry converts a ManagedSession to its on-disk storeEntry,
+// returning (_, false) when the session is intentionally not persisted
+// (scratch / sys daemon stub / no SessionID yet).
 //
-// Pulled out of saveStore (R241-PERF-8) so:
-//   - the per-session conversion logic is independently unit-testable
-//     and benchmarkable;
-//   - a future parallel saveStore can fan-out N entries to a worker
-//     pool (the only mutable shared state was `entries` in the caller —
-//     pure read on the ManagedSession side except for atomic loads);
-//   - the saveStore body shrinks to its actual job (gather + marshal +
-//     atomic write + meta sidecar).
-//
-// CONTRACT: callers MUST hold no Router-level lock here. sessionToStoreEntry
-// takes ManagedSession.historyMu RLock for the prevSession* read (race-safe
-// with SetPrevSessionOrigins) and reads all other fields via accessor methods
-// (Workspace / UserLabel / etc.) which each take their own per-field atomic
-// or mutex. Holding r.mu during this call would violate the documented
-// contract (Router doc, router_core.go) that historyMu is never held
-// together with r.mu.
+// CONTRACT: callers MUST hold no Router-level lock. This takes
+// ManagedSession.historyMu RLock for the prevSession* read and per-field
+// atomics/mutexes via accessors; holding r.mu here would violate the Router
+// contract (router_core.go) that historyMu is never held together with r.mu.
 func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
-	// Scratch (ephemeral aside) sessions are deliberately volatile: they
-	// must not persist across restarts, or loadStore would resurrect a
-	// zombie scratch whose quoted-context --append-system-prompt is long
-	// gone and whose dashboard tab has been closed. Skip them here — the
-	// pool TTL sweeper handles live cleanup; persistence simply never
-	// records them.
+	// Scratch (ephemeral aside) sessions must not persist, or loadStore would
+	// resurrect a zombie whose quoted-context system prompt is gone and whose
+	// dashboard tab is closed. The pool TTL sweeper handles live cleanup.
 	if IsScratchKey(s.key) {
 		return storeEntry{}, false
 	}
-	// System daemon stubs (sys:{name}) are register-on-startup (see
-	// docs/rfc/system-session.md §3.4). Skipping persistence here is an
-	// independent guard from isExemptKey (which only governs TTL/LRU);
-	// a future stub-using daemon would otherwise leave dangling entries
-	// in sessions.json that the next naozhi binary may not know how to
-	// resurrect — and persisting them would broaden the attack surface
-	// for sessions.json tampering (RFC §14).
+	// System daemon stubs (sys:{name}) are register-on-startup. Independent of
+	// isExemptKey (TTL/LRU only): persisting them would leave dangling entries
+	// and broaden the sessions.json tampering surface (system-session RFC §14).
 	if IsSysKey(s.key) {
 		return storeEntry{}, false
 	}
-	// Use getSessionID to avoid data race with concurrent Send.
-	// Fallback to process's SessionID which is set earlier (on system/init),
-	// before Send() completes and propagates it to ManagedSession.
-	// Snapshot loadProcess() once — calling it twice (once for sid,
-	// again for cost) can observe different processes across a
-	// concurrent spawnSession, where the second call hits a fresh
-	// process whose TotalCost() is 0 and silently clobbers the real
-	// historical cost that should have been persisted.
+	// getSessionID avoids a data race with concurrent Send; fall back to the
+	// process's SessionID (set on system/init, before Send propagates it).
+	// Snapshot loadProcess() once: a second call could observe a fresh process
+	// from a concurrent spawnSession whose TotalCost() is 0 and clobber the real cost.
 	proc := s.loadProcess()
 	sid := s.getSessionID()
 	if sid == "" && proc != nil {
@@ -238,21 +167,15 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	} else {
 		cost = loadTotalCost(&s.totalCost)
 	}
-	// Clone PrevSessionIDs / PrevSessionOrigins under historyMu so
-	// the persistence path does not share the backing array with
-	// live session mutations (spawnSession reassigns s.prevSessionIDs
-	// but callers could in theory hold the original slice; clone is
-	// cheap and forward-safe). Both slices are read in the same
-	// critical section so a concurrent SetPrevSessionOrigins cannot
-	// publish a half-mutated pair.
+	// Clone both chain slices in ONE historyMu critical section so the
+	// persistence path never aliases live mutations and a concurrent
+	// SetPrevSessionOrigins cannot publish a half-mutated pair.
 	var prevIDs []string
 	var prevOrigins []string
 	var prevGen uint64
 	s.historyMu.RLock()
-	// Read prevHistoryGen inside the same RLock that snapshots the slices so
-	// the (gen, slices) pair is mutually consistent: a writer that bumps gen
-	// holds historyMu.Lock, so we cannot observe a gen that does not match the
-	// slice contents captured here. (#2346)
+	// Read prevHistoryGen inside the same RLock so the (gen, slices) pair is
+	// mutually consistent: a writer that bumps gen holds historyMu.Lock (#2346).
 	prevGen = s.prevHistoryGen.Load()
 	if len(s.prevSessionIDs) > 0 {
 		prevIDs = slices.Clone(s.prevSessionIDs)
@@ -283,17 +206,11 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	}, true
 }
 
-// equalStoreEntry reports whether two storeEntry values are field-for-field
-// identical, including the slice fields that make `==` illegal. Used by the
-// per-session marshal cache (R20260531A-PERF-2) to decide whether the cached
-// JSON encoding can be reused.
-//
-// R202606j-PERF-014 (#2346): the PrevSessionIDs / PrevSessionOrigins chains are
-// compared via the prevGen counter (bumped under historyMu on every chain
-// mutation) rather than slices.Equal. Equal gen ⇒ identical chain contents, so
-// the O(1) counter compare replaces the per-tick O(len) slice scan. Both
-// entries here always originate from sessionToStoreEntry (the cache stores one,
-// the candidate is freshly built), so both carry a populated prevGen.
+// equalStoreEntry reports whether two storeEntry values are identical; used by
+// the per-session marshal cache to decide whether cached JSON can be reused.
+// The chain slices are compared via prevGen (bumped under historyMu on every
+// chain mutation, so equal gen ⇒ identical contents); both entries come from
+// sessionToStoreEntry, so both carry a populated prevGen (#2346).
 func equalStoreEntry(a, b storeEntry) bool {
 	return a.Key == b.Key &&
 		a.SessionID == b.SessionID &&
@@ -313,16 +230,14 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.prevGen == b.prevGen
 }
 
-// encodeStoreEntryCached returns the JSON object encoding for s's current
-// storeEntry, reusing the per-session memo when the entry is unchanged since
-// the last save. Returns (_, false) when the session is skipped from
-// persistence (delegating to sessionToStoreEntry). The returned slice is owned
-// by the cache and must NOT be mutated by the caller (marshalStoreEntries only
-// appends a copy of the bytes into the output buffer).
+// encodeStoreEntryCached returns the JSON encoding of s's current storeEntry,
+// reusing the per-session memo when unchanged since the last save. Returns
+// (_, false) when the session is not persisted. The returned slice is owned by
+// the cache and must NOT be mutated by the caller.
 //
 // CONTRACT mirrors sessionToStoreEntry: callers MUST hold no Router-level lock.
-// The cache pointer itself is only touched on the save path, which is
-// single-goroutine (cleanup loop), so no synchronisation is needed for it.
+// The cache pointer is only touched on the single-goroutine save path
+// (cleanup loop), so it needs no synchronisation.
 func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
 	entry, ok := sessionToStoreEntry(s)
 	if !ok {
@@ -333,11 +248,8 @@ func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
-		// A storeEntry is plain JSON-safe scalars + string slices; Marshal
-		// cannot fail in practice. Drop the cache and signal skip rather than
-		// poison the whole save with one bad entry. [R103901-CODE-6] Log the
-		// drop so an operator can see that this session has silently stopped
-		// being persisted instead of it vanishing without a trace.
+		// Cannot fail in practice (plain scalars + string slices). Drop the cache
+		// and skip this entry rather than poison the whole save; log the drop.
 		slog.Error("encodeStoreEntryCached: marshal failed, session dropped from persistence", "key", s.key, "err", err)
 		s.storeMarshalCache.Store(nil)
 		return nil, false
@@ -346,14 +258,9 @@ func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
 	return data, true
 }
 
-// marshalStoreEntries builds the sessions.json array body by concatenating
-// each persisted session's cached object encoding. Equivalent on-the-wire to
-// json.Marshal([]storeEntry{...}) but skips re-encoding sessions whose
-// persisted state is unchanged (R20260531A-PERF-2 / #1523).
-//
-// Iteration order is non-deterministic (Go map), matching the previous
-// json.Marshal(entries) behaviour where entries were appended in map-range
-// order; loadStore is order-insensitive (keys into a map).
+// marshalStoreEntries builds the sessions.json array by concatenating each
+// session's cached encoding — on-the-wire equal to json.Marshal([]storeEntry)
+// but skipping unchanged sessions (#1523). Map order is fine: loadStore is order-insensitive.
 func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
 	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
 		for _, s := range sessions {
@@ -362,11 +269,8 @@ func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
 	})
 }
 
-// marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries. It
-// lets the periodic save path snapshot r.ss.sessions into a single []*ManagedSession
-// rather than re-allocating a whole map[string]*ManagedSession every tick
-// (R20260602190132-PERF-4 / #1606). The on-the-wire output is identical — both
-// just range the session set and concatenate each session's cached encoding.
+// marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries so the
+// periodic save path avoids allocating a map every tick (#1606). Output is identical.
 func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
 	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
 		for _, s := range sessions {
@@ -375,20 +279,11 @@ func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
 	})
 }
 
-// storeMarshalBufPool recycles the assembly buffer that marshalStoreEntriesFunc
-// concatenates each session's cached object encoding into. R20260613-PERF-3
-// (#2073): the previous code did `make([]byte, 0, 256*N)` on every save tick —
-// at 200 sessions that is a ~51 KB allocation used once and discarded each 30s
-// saveIfDirty cycle. The per-session marshal cache (R20260531A-PERF-2) already
-// avoids re-encoding unchanged sessions, but the full N×256 assembly buffer was
-// still freshly allocated every tick. Pooling it keeps the backing array alive
-// across saves so the steady-state save path is allocation-free. Mirrors the
-// bridgeEncPool / batchScratchPool idiom in eventlog_bridge.go.
-//
-// The buffer is fully consumed before it is returned to the pool: the save
-// paths hand the returned slice straight to writeStoreData (a synchronous
-// WriteFileAtomic that copies the bytes to disk and does not retain the slice),
-// then call putStoreMarshalBuf. Nothing aliases the slice past that point.
+// storeMarshalBufPool recycles the assembly buffer of marshalStoreEntriesFunc
+// so the steady-state save tick is allocation-free (#2073). Safe because the
+// buffer is fully consumed before return: save paths hand it to writeStoreData
+// (synchronous WriteFileAtomic that does not retain the slice), then call
+// putStoreMarshalBuf. Mirrors bridgeEncPool in eventlog_bridge.go.
 var storeMarshalBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 4096)
@@ -396,24 +291,18 @@ var storeMarshalBufPool = sync.Pool{
 	},
 }
 
-// storeMarshalBufMaxCap caps buffer reuse so a one-off oversized store (e.g. a
-// transient burst of thousands of sessions) does not permanently pin a large
-// backing array in the pool. A buffer that grew past this is dropped on return
-// instead of being recycled. Same rationale as bridgeEncMaxCap.
+// storeMarshalBufMaxCap caps buffer reuse so a one-off oversized store does not
+// permanently pin a large backing array in the pool. Same rationale as bridgeEncMaxCap.
 const storeMarshalBufMaxCap = 256 * 1024
 
-// storeMarshalBufRecyclable reports whether a buffer of the given capacity is
-// small enough to return to the pool. Split out as a pure predicate so the
-// cap-gating decision is unit-testable without going through sync.Pool (whose
-// Get/Put give no reuse guarantee under GC, making pool-roundtrip assertions
-// inherently flaky). See putStoreMarshalBuf.
+// storeMarshalBufRecyclable is the cap gate as a pure predicate, testable
+// without sync.Pool (whose Get/Put give no reuse guarantee under GC).
 func storeMarshalBufRecyclable(capacity int) bool {
 	return capacity <= storeMarshalBufMaxCap
 }
 
-// putStoreMarshalBuf returns an assembly buffer to the pool after the caller is
-// done with it (i.e. after writeStoreData has copied the bytes to disk). Buffers
-// that grew past the cap are dropped so the pool never pins an oversized array.
+// putStoreMarshalBuf returns an assembly buffer to the pool once writeStoreData
+// has copied the bytes to disk. Buffers that grew past the cap are dropped.
 func putStoreMarshalBuf(buf []byte) {
 	if !storeMarshalBufRecyclable(cap(buf)) {
 		return
@@ -423,13 +312,10 @@ func putStoreMarshalBuf(buf []byte) {
 }
 
 // marshalStoreEntriesFunc assembles the JSON array from each session's cached
-// object encoding, driven by an iteration closure so both the map- and
-// slice-shaped snapshots share one code path.
-//
+// encoding, driven by an iteration closure shared by the map and slice inputs.
 // The returned slice is borrowed from storeMarshalBufPool; the caller MUST
-// return it via putStoreMarshalBuf once the bytes have been written (see
-// writeStoreData call sites). Callers that do not return it simply forfeit the
-// reuse — correctness is unaffected.
+// return it via putStoreMarshalBuf once written (not returning it only
+// forfeits reuse).
 func marshalStoreEntriesFunc(n int, iter func(yield func(*ManagedSession))) ([]byte, error) {
 	bufp := storeMarshalBufPool.Get().(*[]byte)
 	buf := (*bufp)[:0]
@@ -454,30 +340,20 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
-	// R20260531A-PERF-2 (#1523): assemble the JSON array from per-session
-	// cached object encodings instead of re-marshalling the whole []storeEntry
-	// every 30s tick. Each session memoizes its last (entry → JSON) pair; a
-	// session whose persisted fields are unchanged since the previous save
-	// reuses its cached bytes and pays zero marshal cost. On a steady-state
-	// deployment only the sessions that saw traffic in the last window are
-	// re-encoded, turning the per-tick marshal from O(N) into O(changed).
+	// Per-session cached encodings: per tick O(changed), not O(N) (#1523).
 	data, err := marshalStoreEntries(sessions)
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
 	}
-	// data is borrowed from storeMarshalBufPool; writeStoreData copies it to
-	// disk synchronously and does not retain it, so it is safe to recycle once
-	// the write returns (success or failure — the bytes are not reused either way).
+	// data is a pooled buffer; writeStoreData copies it synchronously and does
+	// not retain it, so recycling after the write returns is safe either way.
 	writeErr := writeStoreData(path, data)
 	putStoreMarshalBuf(data)
 	return writeErr
 }
 
-// saveStoreSlice persists a slice snapshot of sessions. The periodic Cleanup /
-// saveIfDirty paths use this so they can copy r.ss.sessions into a single
-// []*ManagedSession under the lock instead of re-allocating a whole map every
-// tick (R20260602190132-PERF-4 / #1606). On-disk output is identical to
-// saveStore.
+// saveStoreSlice persists a slice snapshot of sessions (periodic Cleanup /
+// saveIfDirty paths, #1606). On-disk output is identical to saveStore.
 func saveStoreSlice(path string, sessions []*ManagedSession) error {
 	if path == "" {
 		return nil
@@ -492,37 +368,25 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 	return writeErr
 }
 
-// storeDirEnsured memoizes, per store directory, whether datadir.EnsureDir has
-// already succeeded for that directory in this process. R202606-GO-014: the
-// periodic save tick (saveIfDirty, every 30s) previously paid EnsureDir's
-// MkdirAll + Lstat + (possible) Chmod syscalls unconditionally on every save,
-// even though the directory is created once and then never disappears in steady
-// state. Caching by path keeps the hardening correct when multiple Routers use
-// distinct store directories (a package-level sync.Once would wrongly skip the
-// MkdirAll for the second path), and only the first successful save per path
-// touches the filesystem layout. A failed EnsureDir is NOT recorded, so a later
-// save retries until the directory is in place.
+// storeDirEnsured memoizes, per store directory, that datadir.EnsureDir has
+// succeeded so the 30s save tick skips its syscalls. Keyed by path (not a
+// sync.Once) so Routers with distinct store dirs each get their own MkdirAll.
+// A failed EnsureDir is NOT recorded, so a later save retries.
 var storeDirEnsured sync.Map // map[string]struct{}
 
-// storeMetaWritten tracks which store paths have had their advisory version
-// sidecar written at least once in this process. The sidecar content (Version
-// field = storeFormatVersion) is a compile-time constant and never changes
-// while the process is running, so writing it once per path is sufficient.
-// R20260614-PERF-005: avoids ~4 syscalls + 2 fsyncs on every 30s saveIfDirty
-// tick. A failed write is NOT recorded, allowing retry on the next tick.
+// storeMetaWritten tracks store paths whose advisory version sidecar was
+// written in this process; its content is a compile-time constant, so once per
+// path suffices. writeStoreMeta is best-effort (no error return), so the path
+// is recorded after the first attempt regardless of outcome.
 var storeMetaWritten sync.Map // map[string]struct{}
 
 // writeStoreData ensures the store directory exists, atomically writes the
-// pre-marshalled bytes, then writes the advisory version sidecar. Shared by
-// saveStore (map input) and saveStoreSlice (slice input).
+// pre-marshalled bytes, then writes the advisory version sidecar.
 func writeStoreData(path string, data []byte) error {
 	if dir := filepath.Dir(path); dir != "" {
 		if _, done := storeDirEnsured.Load(dir); !done {
-			// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
-			// symlink/non-dir guard + perm-tightening chmod) instead of a bare
-			// MkdirAll, so the session store inherits the same hardening the
-			// cron run store already had. R202606-GO-014: only run on the first
-			// save per directory; steady-state ticks skip the syscalls.
+			// Shared dir policy (MkdirAll 0700 + symlink/non-dir guard + chmod)
+			// so the session store gets the cron run store's hardening (#1175).
 			if err := datadir.EnsureDir(dir); err != nil {
 				return fmt.Errorf("create store directory: %w", err)
 			}
@@ -532,14 +396,8 @@ func writeStoreData(path string, data []byte) error {
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)
 	}
-	// Best-effort write of the sidecar meta file. A failure here does NOT
-	// fail the save: the main store is already durable, and the meta is
-	// advisory (used to detect cross-version downgrades). Log so operators
-	// catch partial-filesystem issues during normal ops.
-	// R20260614-PERF-005: skip on subsequent ticks — Version is a compile-time
-	// constant so the sidecar content never changes within a process lifetime.
-	// writeStoreMeta is best-effort (no error return), so we store after the
-	// call unconditionally; a failed write is logged by writeStoreMeta itself.
+	// Best-effort sidecar: a failure does NOT fail the save (main store is
+	// already durable; meta is advisory). Written once per path; see storeMetaWritten.
 	if _, done := storeMetaWritten.Load(path); !done {
 		writeStoreMeta(path)
 		storeMetaWritten.Store(path, struct{}{})
@@ -547,22 +405,10 @@ func writeStoreData(path string, data []byte) error {
 	return nil
 }
 
-// writeStoreMeta writes the version sidecar next to the main store. Called
-// after a successful saveStore so the two files stay correlated. Uses the
-// same atomic-write primitive so a crash between the two writes leaves the
-// main store consistent even if the meta is stale by one cycle.
-//
-// R233B-ARCH-6 (#1023): switched from os.WriteFile to osutil.WriteFileAtomic
-// so a partial write under power loss can no longer leave a half-written
-// JSON object on disk that readStoreMeta then fails to unmarshal. Although
-// the sidecar is advisory and a missing meta is treated as legacy v1 (so a
-// truncated meta would not crash the loader), a corrupt half-line meta
-// emits the "parse session store meta failed" warn on every load — operators
-// then chase a phantom error. Atomic write ensures the meta is either the
-// previous version or the new version, never a torn middle state. The
-// 2-fsync overhead (tmp file + SyncDir) is paid at most once per saveStore
-// and runs *after* the main store is already durable, so the user-visible
-// save latency is dominated by the main-store write.
+// writeStoreMeta writes the version sidecar after the main store is durable so
+// the two stay correlated. Uses WriteFileAtomic so a crash mid-write leaves the
+// previous or the new meta, never a torn one that would make readStoreMeta warn
+// on every load (#1023). Its fsyncs run after the main write, so save latency is unaffected.
 func writeStoreMeta(storePath string) {
 	metaPath := storeMetaPath(storePath)
 	if metaPath == "" {
@@ -582,10 +428,9 @@ func writeStoreMeta(storePath string) {
 	}
 }
 
-// readStoreMeta loads the sidecar. Returns the meta plus a flag indicating
-// whether a sidecar was present at all. A missing sidecar is treated as
-// "unknown / legacy" — the caller handles it as format v1, preserving the
-// contract that sessions.json from any prior naozhi version is readable.
+// readStoreMeta loads the sidecar, reporting whether one was present. A missing
+// sidecar is "legacy" — the caller treats it as v1 so sessions.json from any
+// prior naozhi version stays readable.
 func readStoreMeta(storePath string) (storeMeta, bool) {
 	metaPath := storeMetaPath(storePath)
 	if metaPath == "" {
@@ -611,13 +456,9 @@ func loadStore(path string) map[string]*storeEntry {
 	if path == "" {
 		return nil
 	}
-	// Read the sidecar first so we can warn about future-version downgrades
-	// BEFORE the main parse runs. If the meta claims a version newer than
-	// we know, the parse below may still succeed (the entry schema has only
-	// grown additively so far), but operators should be aware they may be
-	// silently dropping fields the new naozhi binary wrote. Missing meta is
-	// fine — that's the legacy case (sessions.json written by any naozhi
-	// older than the sidecar introduction).
+	// Warn about a future-version downgrade BEFORE the main parse: it may still
+	// succeed (schema grows additively) while silently dropping fields the
+	// newer binary wrote. Missing meta is the legacy case.
 	if meta, ok := readStoreMeta(path); ok && meta.Version > storeFormatVersion {
 		slog.Warn("session store was written by a newer naozhi; downgrade in progress?",
 			"path", path,
@@ -650,8 +491,7 @@ func loadStore(path string) map[string]*storeEntry {
 	return m
 }
 
-// knownIDsPath returns the path to the known session IDs file,
-// derived from the store path (e.g. sessions.json → session-ids.json).
+// knownIDsPath derives the known session IDs path (sessions.json → session-ids.json).
 func knownIDsPath(storePath string) string {
 	if storePath == "" {
 		return ""
@@ -688,14 +528,9 @@ func loadKnownIDs(storePath string) map[string]bool {
 }
 
 // saveKnownIDs persists the set of all session IDs ever used by naozhi.
-//
-// The caller passes a slice that is ALREADY sorted ascending (see
-// Router.snapshotKnownIDsSortedLocked, which caches the sort across throttled
-// save ticks — R220123-PERF-19 / #1638). The sort is the R180-GO-P2
-// stable-bytes contract: a deterministic on-disk order keeps backups / audit
-// diffs noise-free across saves of the same logical set. saveKnownIDs does
-// NOT re-sort; it trusts the precondition so the O(N log N) cost is paid once
-// per mutation generation rather than on every 5-minute save tick.
+// PRECONDITION: sortedIDs is ALREADY sorted ascending (see
+// Router.snapshotKnownIDsSortedLocked, memoised by gen, #1638). Deterministic
+// on-disk order keeps backup/audit diffs noise-free; this does NOT re-sort.
 func saveKnownIDs(storePath string, sortedIDs []string) error {
 	data, err := json.Marshal(sortedIDs)
 	if err != nil {
@@ -704,28 +539,17 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 	return saveKnownIDsBytes(storePath, data)
 }
 
-// saveKnownIDsBytes persists already-marshaled known-ID JSON to disk.
-//
-// R20260616-PERF-009 (#2143): saveKnownIDs re-ran json.Marshal on every
-// throttled 5-minute save tick even when the (already sorted, already memoised)
-// ID set had not changed since the previous save — a ~50KB array of 1000
-// strings re-serialized for nothing. The marshal is now memoised by gen in
-// knownIDsStore.marshaledCache (see snapshotKnownIDsMarshaledLocked), and the
-// periodic save path hands the cached bytes straight here. saveKnownIDs is
-// retained as a thin marshal+delegate wrapper for callers/tests that pass a
-// []string directly.
+// saveKnownIDsBytes persists already-marshaled known-ID JSON. The periodic save
+// path hands it the gen-memoised bytes from snapshotKnownIDsMarshaledLocked
+// (#2143); saveKnownIDs is the thin marshal+delegate wrapper for []string callers.
 func saveKnownIDsBytes(storePath string, data []byte) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		// R20260614-GO-003: reuse storeDirEnsured (same map as writeStoreData)
-		// so the 5-minute knownIDsSaveInterval tick skips MkdirAll+Lstat+Chmod
-		// after the first successful write. Both functions target the same
-		// directory (filepath.Dir of the store path), so one successful
-		// writeStoreData call already guards this save. A failed EnsureDir
-		// is NOT recorded, allowing retry on the next tick.
+		// Shares storeDirEnsured with writeStoreData (same directory). A failed
+		// EnsureDir is NOT recorded, allowing retry next tick.
 		if _, done := storeDirEnsured.Load(dir); !done {
 			if err := datadir.EnsureDir(dir); err != nil {
 				return fmt.Errorf("create known IDs directory: %w", err)
@@ -739,143 +563,78 @@ func saveKnownIDsBytes(storePath string, data []byte) error {
 	return nil
 }
 
-// sessionStore groups the seven correlated session-table fields (Router P4
-// facet, #383): the primary session table, its two secondary indices
-// (chat→keys, keyhash→key), the reverse session-ID→key index, the alive-process
-// counter, the store-dirty flag, and the store mutation generation. It is a
-// value field on Router, carries NO lock of its own, and is read/written ONLY
-// under Router.mu — the lock topology is unchanged (RFC §3 candidate A: single
-// r.mu retained).
-//
-// CRITICAL — TRIPLE-INDEX ATOMIC SYNCHRONIZATION (RFC §5, highest-risk
-// invariant): sessions + byChat + keyhash + idToKey are a four-way correlated
-// index that MUST mutate together inside ONE r.mu write critical section.
-// indexAdd / indexDel remain the keyhash+byChat funnel; the five direct
-// r.ss.sessions[key]=s / delete(r.ss.sessions, key) sites stay paired with
-// indexAdd / indexDel (and with the idToKey set/clear helpers) in UNCHANGED
-// order. Any reordering or split between these mutations would let a reader
-// observe a torn index (e.g. a session present in the primary table but missing
-// from byChat, or a stale keyhash pointing at an evicted key). P4 only renames
-// field references — install/unregister/rename ordering stays byte-identical.
-//
-// CRITICAL — LOCK-FREE READER FIELDS STAY ATOMIC: activeCount (read by Stats())
-// and gen (read by Version()) are accessed lock-free from the dashboard hot
-// path, so they remain atomic.Int64 / atomic.Uint64 INSIDE this sub-struct
-// (access r.ss.activeCount.Load() / r.ss.gen.Add(1) etc). They are deliberately
-// NOT demoted to plain ints. dirty is a plain bool (always under r.mu).
-//
-// The annotation on the Router embed line covers the UNION of all accessing
-// domains; the lint recurses one level so each inner field below ALSO carries
+// sessionStore groups the correlated session-table fields (#383). Value field
+// on Router, NO lock of its own, read/written ONLY under Router.mu.
+// INVARIANT: sessions + byChat + keyhash + idToKey MUST mutate together inside
+// ONE r.mu write critical section (indexAdd/indexDel paired with each
+// r.ss.sessions set/delete and the idToKey helpers) or a reader observes a torn
+// index. activeCount/gen are read lock-free by Stats()/Version() and MUST stay
+// atomic; dirty is a plain bool. The annotation on the Router embed line covers
+// the UNION of all accessing domains; the lint recurses so each field carries
 // its own per-domain `// 读写:` annotation, copied verbatim from the original
 // router_core.go field docs.
 type sessionStore struct {
 	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register), capacity (reconcile active-gauge scan)
 	sessions map[string]*ManagedSession
-	// byChat is a secondary index: chat key → set of session keys.
-	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
-	// Inner type is a set (map[string]struct{}) so indexAdd does O(1) dedupe
-	// and indexDel does O(1) removal — the prior []string variant scanned the
-	// slice on every Add/Del. R225-PERF-18.
-	// Nil in test-created routers; all helpers below are nil-safe.
+	// byChat: chat key → set of session keys, for O(k) ResetChat with O(1)
+	// dedupe/removal. Nil in test-created routers; all helpers are nil-safe.
 	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
 	byChat map[string]map[string]struct{}
-	// keyhash is a secondary index: persist.KeyHash(sessionKey) → sessionKey.
-	// #1646: the attachment tracker's workspace resolver runs on every
-	// persisted image-bearing event (potentially several per Send) and used to
-	// hold r.mu.RLock while linearly scanning r.ss.sessions, recomputing a SHA-256
-	// KeyHash for every session, to find the one whose hash matched. This index
-	// turns that O(N)-hashes scan into an O(1) lookup. Maintained at the publish
-	// funnel + indexDel; the resolver self-heals on miss (it re-verifies the
-	// hit against r.ss.sessions and falls back to a one-off scan that re-populates
-	// this map), so a delete site that bypasses indexDel only costs one extra
-	// scan rather than returning a wrong workspace.
-	// Nil in test-created routers; helpers are nil-safe.
+	// keyhash: persist.KeyHash(sessionKey) → sessionKey, an O(1) lookup for the
+	// attachment tracker's workspace resolver (#1646). Maintained at the publish
+	// funnel + indexDel; the resolver self-heals on a miss by re-verifying
+	// against r.ss.sessions and re-populating via a one-off scan. Nil in tests.
 	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
 	keyhash map[string]string
-	// idToKey is a reverse index from session ID to session key.
-	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
+	// idToKey: session ID → session key, for O(1) RegisterForResume dedupe.
 	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
 	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume), shim (reconnectShims index write)
 	idToKey map[string]string
-	// activeCount tracks currently alive processes (non-exempt only).
-	// Writes happen under r.mu (write lock); atomic access lets Stats()
-	// read lock-free so the dashboard /api/sessions hot path does not
-	// take a second r.mu RLock right after ListSessions() released one.
-	// R58-PERF-F1.
+	// activeCount counts alive non-exempt processes. Writes happen under r.mu;
+	// atomic so Stats() reads lock-free on the dashboard /api/sessions hot path.
 	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install), capacity (reconcile Store), cleanup (remove/reconcile Add/Store), discovery (Takeover orphan Add), shim (reconnect Add)
 	activeCount atomic.Int64
 	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume), capacity (evictOldest mutation)
 	dirty bool // true when sessions changed since last save
-	// gen increments on each mutation. Writes happen under r.mu (write
-	// lock) but atomic.Uint64 also lets Version() read lock-free — the
-	// dashboard polls Version() every few seconds from the /api/sessions
-	// hot path, and the previous RLock layered on top of ListSessions'
-	// RLock made each poll take two contended trips through r.mu.
+	// gen increments on each mutation under r.mu; atomic so Version() reads
+	// lock-free on the dashboard poll path.
 	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	gen atomic.Uint64
 }
 
-// knownIDsStore groups the seven correlated known-session-ID fields (Router P2
-// facet, #600). It is a value field on Router, carries NO lock of its own, and
-// is read/written ONLY under Router.mu — the lock topology is unchanged (RFC §3
-// candidate A: single r.mu retained).
-//
-// The gen-invalidation chain lives entirely inside this struct under one lock:
-// trackSessionID bumps gen (the SOLE mutator) and snapshotKnownIDsSortedLocked
-// rebuilds + re-sorts only when sortedGen != gen, then sets sortedGen = gen.
-// Because all seven fields move together under r.mu, the bump and the recompute
-// stay in the same struct/lock/order and the invalidation cannot tear.
-//
-// CRITICAL: gen and sortedGen are PLAIN uint64, NOT atomic — every access is
-// under r.mu (no lock-free reader), unlike workspacestore.Store's gen which
-// stayed an atomic.Uint64 for parity with its pre-extraction field.
-// Converting them to atomic.Uint64 would be an unnecessary semantic change.
+// knownIDsStore groups the correlated known-session-ID fields (#600). Value
+// field on Router, NO lock of its own, read/written ONLY under Router.mu.
+// The gen-invalidation chain lives inside this struct under one lock:
+// trackSessionID bumps gen (the SOLE mutator) and the snapshot helpers rebuild
+// only when their cached gen != gen, so the invalidation cannot tear.
+// gen and sortedGen are PLAIN uint64, NOT atomic — there is no lock-free reader.
 type knownIDsStore struct {
-	// ids tracks ALL session IDs ever used by naozhi, including
-	// sessions that have been removed/reset/evicted. Used by the
-	// discovered-session scanner to match CLI processes to naozhi keys,
-	// and as a secondary filter for filesystem-based recent sessions.
+	// ids tracks ALL session IDs ever used, including removed/reset/evicted
+	// ones, so discovery can match CLI processes to naozhi keys.
 	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
 	ids map[string]bool
-	// order preserves insertion order so overflow eviction drops the
-	// oldest (FIFO) rather than picking randomly via map iteration — random
-	// eviction could drop a still-active session ID, causing discovery to
-	// misclassify its CLI process as an external (non-naozhi) session.
-	// The live window is order[orderHead:]: orderHead marks the front of
-	// still-present IDs, advancing on each eviction so the common path is
-	// amortized O(1) (no per-eviction shift). The dead prefix is compacted
-	// into a fresh buffer only when it grows large (see trackSessionID).
+	// order preserves insertion order so overflow eviction is FIFO: random
+	// map-order eviction could drop a still-active ID and make discovery
+	// misclassify its CLI process as external. Live window is order[orderHead:]
+	// (amortized O(1) eviction); the dead prefix is compacted when large.
 	// 读写: core (init), discovery (trackSessionID)
 	order []string
-	// orderHead is the index of the oldest live entry in order; entries
-	// before it have been evicted and cleared. order[orderHead:] are the
-	// live IDs (mirroring the keys of ids) in insertion order.
+	// orderHead is the index of the oldest live entry in order; entries before
+	// it are evicted and cleared. order[orderHead:] mirrors the keys of ids.
 	// 读写: core (init reset), discovery (trackSessionID)
 	orderHead int
 	// 读写: discovery, cleanup
 	dirty bool
 	// 读写: discovery, cleanup
 	gen uint64 // incremented on each ids mutation (add/evict)
-	// sortedCache caches the deterministic (sorted) serialization
-	// input for saveKnownIDs so the O(N log N) sort is paid once per
-	// mutation generation rather than on every throttled save tick.
-	// R220123-PERF-19 (#1638): the known-IDs set is append-only-ish and the
-	// save is throttled to knownIDsSaveInterval (5 min), so the common case
-	// is "save N unchanged IDs again" — for which a full re-sort is pure
-	// waste. sortedGen records the gen the cache was built
-	// at; snapshotKnownIDsSortedLocked rebuilds + re-sorts only on a gen
-	// mismatch, otherwise returning the cached sorted slice (which the
-	// caller copies under the lock). The sorted output preserves the
-	// R180-GO-P2 stable-bytes-on-disk contract.
+	// sortedCache memoises the sorted input for saveKnownIDs by gen so the sort
+	// is paid once per mutation generation, not per save tick (#1638).
 	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via gen)
 	sortedCache []string
 	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
 	sortedGen uint64 // gen the cache slice was sorted at; 0 = unbuilt
-	// marshaledCache caches the JSON serialization of sortedCache so the
-	// throttled save path does not re-run json.Marshal on every 5-minute
-	// tick for an unchanged set. R20260616-PERF-009 (#2143): a 1000-ID set
-	// is ~50KB of JSON re-built for nothing each tick; this memoises it by
-	// gen exactly like sortedCache. nil = unbuilt.
+	// marshaledCache memoises the JSON of sortedCache by gen so an unchanged set
+	// is not re-marshaled every throttled tick (#2143). nil = unbuilt.
 	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild; invoked from cleanup saveIfDirty/Shutdown)
 	marshaledCache []byte
 	// 读写: store.go (snapshotKnownIDsMarshaledLocked rebuild/compare)
@@ -885,25 +644,17 @@ type knownIDsStore struct {
 }
 
 // snapshotKnownIDsSortedLocked returns a sorted copy of the known-session-ID
-// set suitable for handing to saveKnownIDs. Caller MUST hold r.mu.
-//
-// R220123-PERF-19 (#1638): the prior save path copied r.knownIDs into a
-// map[string]bool under the lock and saveKnownIDs then re-ranged + sorted it
-// on every throttled tick — O(N log N) per save for an append-only-ish set
-// that rarely changes between the 5-minute save windows. This memoises the
-// sort: the sorted slice is rebuilt only when r.knownIDsGen advanced since
-// the last build (any add/evict bumps the gen), otherwise the cached slice is
-// returned. We always hand back a fresh copy so the returned slice can be
-// serialized outside the lock without aliasing the cache (a concurrent
-// trackSessionID would otherwise mutate it via a future rebuild). The common
-// "nothing changed" tick is now an O(N) copy with no sort.
+// set for saveKnownIDs. Caller MUST hold r.mu. The sort is memoised by gen
+// (#1638), so an unchanged tick is an O(N) copy with no sort. A fresh copy is
+// always returned so it can be serialized outside the lock without aliasing
+// the cache, whose backing array a later rebuild would replace.
 func (r *Router) snapshotKnownIDsSortedLocked() []string {
 	if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
 		sorted := make([]string, 0, len(r.kid.ids))
 		for id := range r.kid.ids {
 			sorted = append(sorted, id)
 		}
-		// R180-GO-P2: deterministic on-disk order — see saveKnownIDs.
+		// Deterministic on-disk order — see saveKnownIDs.
 		slices.Sort(sorted)
 		r.kid.sortedCache = sorted
 		r.kid.sortedGen = r.kid.gen
@@ -913,33 +664,21 @@ func (r *Router) snapshotKnownIDsSortedLocked() []string {
 	return slices.Clone(r.kid.sortedCache)
 }
 
-// snapshotKnownIDsMarshaledLocked returns the JSON serialization of the
-// known-session-ID set suitable for handing directly to saveKnownIDsBytes.
-// Caller MUST hold r.mu.
-//
-// R20260616-PERF-009 (#2143): the prior periodic save path re-ran json.Marshal
-// inside saveKnownIDs on every throttled 5-minute tick, even though the ID set
-// is append-only-ish and almost never changes between windows (a ~50KB array of
-// 1000 strings re-serialized for nothing). This memoises the marshal by gen the
-// same way sortedCache memoises the sort: the bytes are rebuilt only when the
-// gen advanced since the last marshal, otherwise the cached bytes are returned.
-// The sorted slice is materialised via the same gen-keyed cache, so a single
-// gen bump invalidates both the sort and the marshal.
-//
-// Returns a copy of the cached bytes so callers can write them outside r.mu
-// without aliasing the cache (a concurrent trackSessionID would otherwise
-// replace the backing array on a future rebuild).
+// snapshotKnownIDsMarshaledLocked returns the JSON of the known-session-ID set
+// for saveKnownIDsBytes. Caller MUST hold r.mu. The marshal is memoised by gen
+// like sortedCache (#2143); one gen bump invalidates both. Returns a copy so
+// callers can write outside r.mu without aliasing the cache, whose backing
+// array a concurrent trackSessionID-triggered rebuild would replace.
 func (r *Router) snapshotKnownIDsMarshaledLocked() ([]byte, error) {
 	if r.kid.marshaledCache == nil || r.kid.marshaledGen != r.kid.gen {
-		// Build/refresh the sorted cache first (shares the same gen gate), then
-		// marshal it. We marshal the cache directly rather than the cloned
-		// snapshot to avoid an extra slice copy on the rebuild path.
+		// Refresh the sorted cache first (same gen gate) and marshal it directly
+		// rather than a clone, avoiding an extra copy on the rebuild path.
 		if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
 			sorted := make([]string, 0, len(r.kid.ids))
 			for id := range r.kid.ids {
 				sorted = append(sorted, id)
 			}
-			// R180-GO-P2: deterministic on-disk order — see saveKnownIDsBytes.
+			// Deterministic on-disk order — see saveKnownIDsBytes.
 			slices.Sort(sorted)
 			r.kid.sortedCache = sorted
 			r.kid.sortedGen = r.kid.gen
@@ -954,8 +693,7 @@ func (r *Router) snapshotKnownIDsMarshaledLocked() ([]byte, error) {
 	return slices.Clone(r.kid.marshaledCache), nil
 }
 
-// workspaceOverridesPath returns the path to the workspace overrides file,
-// derived from the store path (e.g. sessions.json → workspace-overrides.json).
+// workspaceOverridesPath derives the overrides path (sessions.json → workspace-overrides.json).
 func workspaceOverridesPath(storePath string) string {
 	if storePath == "" {
 		return ""
@@ -979,10 +717,8 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
-		// #673: preserve the corrupt file rather than silently discarding it.
-		// The next saveWorkspaceOverrides would otherwise overwrite the bad
-		// bytes, hiding a partial-write / corruption event an operator needs
-		// to investigate — and matching the sessions.json loader's behaviour.
+		// Preserve the corrupt file: the next save would otherwise overwrite
+		// the evidence of a partial write (#673).
 		preserveCorruptFile(path, "workspace overrides", err)
 		return nil
 	}
@@ -1002,27 +738,18 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 	if len(overrides) == 0 {
 		if err := os.Remove(path); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
-				// #2337: a non-ENOENT failure (EACCES/EROFS/EIO under a
-				// degraded disk/permission condition) leaves the stale
-				// overrides file on disk. Propagate the error the same way the
-				// WriteFileAtomic path below does so the caller keeps its dirty
-				// flag set and retries; swallowing it (return nil) clears dirty
-				// and lets the cleared override resurrect on restart via
-				// loadWorkspaceOverrides.
+				// A non-ENOENT failure leaves the stale file on disk. Propagate
+				// like the WriteFileAtomic path so the caller keeps dirty set and
+				// retries; returning nil would let the override resurrect on restart (#2337).
 				return fmt.Errorf("remove empty workspace overrides: %w", err)
 			}
 			// ENOENT: already absent — nothing to remove or fsync.
 			return nil
 		}
-		// Crash-durability parity with the WriteFileAtomic path below
-		// (#673): the rename path fsyncs the parent directory so the new
-		// state survives a crash, but an unlink left the directory entry
-		// un-fsynced — after a power loss the deleted overrides file could
-		// resurrect, re-applying overrides the user just cleared. fsync the
-		// parent so the removal is as durable as a write. SyncDir already
-		// degrades gracefully on EPERM/EINVAL (FUSE/older fs). Reached only
-		// when os.Remove succeeded (ENOENT and hard errors returned early),
-		// so the unlink we are syncing actually happened.
+		// Crash-durability parity with WriteFileAtomic (#673): an unlink leaves
+		// the directory entry un-fsynced, so after power loss the deleted file
+		// could resurrect. SyncDir degrades gracefully on EPERM/EINVAL. Reached
+		// only when os.Remove succeeded, so the unlink being synced happened.
 		if err := osutil.SyncDir(filepath.Dir(path)); err != nil {
 			slog.Warn("fsync dir after workspace overrides removal", "path", path, "err", err)
 		}

@@ -9,13 +9,10 @@ import (
 // loadProcess returns the currently attached processIface, or nil when
 // the session is detached (paused, reclaimed, or never spawned).
 //
-// Implementation note: s.process is an atomic.Pointer[processBox] — we
-// wrap the iface in a one-field struct because Go's atomic.Pointer is
-// generic over a concrete type and requires non-nil iface assertions to
-// store directly. The "load box, dereference" indirection is the cost
-// of getting lock-free read/write semantics for an interface value.
-// Callers that only need liveness should prefer isAlive() over
-// loadProcess() != nil to also catch dead-but-attached processes.
+// s.process is an atomic.Pointer[processBox]: the iface is boxed in a
+// one-field struct because atomic.Pointer needs a concrete type, giving
+// lock-free reads/writes of an interface value. Callers that only need
+// liveness should prefer isAlive(), which also catches dead-but-attached.
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
 		return box.p
@@ -23,18 +20,14 @@ func (s *ManagedSession) loadProcess() processIface {
 	return nil
 }
 
-// storeProcess atomically replaces the attached process. Passing nil
-// detaches; passing a non-nil iface re-wraps in a fresh processBox so
-// concurrent loadProcess callers see a consistent (box, p) pair without
-// torn reads. Must be paired with sendMu / spawnMu by the caller — this
-// function only handles the atomic publication, not the lifecycle
-// invariant that only one process is attached at a time.
+// storeProcess atomically replaces the attached process; nil detaches. A
+// fresh processBox per store means loadProcess never sees a torn (box, p)
+// pair. Caller must hold sendMu / spawnMu — this only handles atomic
+// publication, not the one-process-attached-at-a-time invariant.
 func (s *ManagedSession) storeProcess(p processIface) {
-	// Drop the metering view built for the outgoing process so a detached
-	// session does not pin it. Best-effort GC hygiene, not correctness: a
-	// Snapshot racing this detach can re-publish a view of the old proc and
-	// briefly pin it; the next Snapshot misses on process identity and
-	// replaces it (see meteringView).
+	// Drop the outgoing process's metering view so a detached session does
+	// not pin it. Best-effort GC hygiene: a racing Snapshot may briefly
+	// re-publish the old view; the next Snapshot replaces it (see meteringView).
 	s.meteringCache.Store(nil)
 	if p == nil {
 		s.process.Store(nil)
@@ -43,11 +36,9 @@ func (s *ManagedSession) storeProcess(p processIface) {
 	}
 }
 
-// isAlive returns true only when a process is attached AND its Alive()
-// reports the underlying handle has not exited. Lock-free; uses
-// loadProcess() so it is safe to call from any goroutine. The dual
-// nil + Alive check is required because the readLoop transitions
-// process state to dead before storeProcess(nil) detaches.
+// isAlive returns true only when a process is attached AND Alive(). Lock-free.
+// Both checks are needed because the readLoop marks the process dead before
+// storeProcess(nil) detaches it.
 func (s *ManagedSession) isAlive() bool {
 	p := s.loadProcess()
 	return p != nil && p.Alive()
@@ -64,8 +55,7 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 
-	// attachProcessAndSnapshotPersisted returns nil snapshot when proc is nil,
-	// so len(snapshot) > 0 already implies proc != nil. R231-CQ-3.
+	// len(snapshot) > 0 implies proc != nil (snapshot is nil for nil proc).
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
@@ -76,51 +66,36 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 }
 
 // ReattachProcessNoCallback is like ReattachProcess but skips the onSessionID
-// callback. Used when the caller already holds router.mu and will track the
-// session ID directly (avoids deadlock since onSessionID acquires router.mu).
+// callback; for callers that already hold router.mu (onSessionID acquires it).
+// Does NOT acquire sendMu: the lock order is sendMu → router.mu and the caller
+// holds router.mu, so taking sendMu here would risk ABBA deadlock with Send()
+// (sendMu → onSessionID → router.mu).
 //
-// Does NOT acquire sendMu: all operations here are atomic stores, and the
-// caller already holds router.mu (write). Acquiring sendMu here would violate
-// the documented lock ordering (sendMu → router.mu) and risk ABBA deadlock
-// with Send() which holds sendMu then calls onSessionID → router.mu.
-//
-// SAFETY CONSTRAINT: this function must only be called when Send() cannot be
-// in flight for this session (e.g., during ReconnectShims at startup, or while
-// the session's process is known-dead). If Send() were concurrently executing,
-// the deathReason.Store("") here could silently erase a diagnostic death reason
-// that Send() just set. The lack of sendMu makes this a logical race on the
-// deathReason value, even though each individual Store is atomic.
+// SAFETY CONSTRAINT: only call when Send() cannot be in flight for this
+// session (ReconnectShims at startup, or a known-dead process). Otherwise the
+// deathReason.Store("") here can erase a death reason Send() just set — a
+// logical race even though each Store is atomic.
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
 	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	s.setSessionID(sessionID)
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
-	// attachProcessAndSnapshotPersisted returns nil snapshot when proc is nil,
-	// so len(snapshot) > 0 already implies proc != nil. R231-CQ-3.
+	// len(snapshot) > 0 implies proc != nil (snapshot is nil for nil proc).
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
 }
 
-// tryReattachProcessNoCallback is the runtime-reconcile-safe variant of
-// ReattachProcessNoCallback. It guards the swap behind a *non-blocking*
-// sendMu.TryLock so the documented SAFETY CONSTRAINT (no in-flight Send) is
-// enforced rather than merely assumed.
+// tryReattachProcessNoCallback is the runtime-reconcile variant of
+// ReattachProcessNoCallback: it enforces the no-in-flight-Send constraint via
+// a non-blocking sendMu.TryLock. The reconcile loop holds r.mu, and a Send may
+// still hold sendMu while unwinding on a just-died process, so its
+// timeout/death write would race the swap + deathReason reset (#750).
 //
-// R51-CONCUR-002 (#750): StartShimReconcileLoop calls reconnectShims every
-// 30s and, while holding r.mu, reattaches a fresh process to a dead session.
-// The earlier isAlive() guard rejects sessions whose process is still alive,
-// but a Send() may still hold sendMu while unwinding on a process that has
-// just died — and ReattachProcessNoCallback's storeProcess swap +
-// deathReason.Store("") would then race that Send's timeout/death write
-// (a logical race: each store is atomic, but the pair is not coordinated).
-//
-// TryLock is the right primitive here: a *blocking* sendMu.Lock would violate
-// the sendMu→r.mu lock ordering (the caller already holds r.mu) and risk an
-// ABBA deadlock against Send→onSessionID→r.mu. TryLock never blocks, so it
-// cannot deadlock; if it fails, a Send is genuinely in flight and the caller
-// skips this session — the next reconcile tick (30s) retries once the Send
-// has released sendMu. Returns true when the reattach completed.
+// A blocking sendMu.Lock would invert the sendMu → r.mu order and risk ABBA
+// deadlock against Send → onSessionID → r.mu; TryLock cannot. On failure the
+// caller skips this session and the next reconcile tick retries. Returns true
+// when the reattach completed.
 func (s *ManagedSession) tryReattachProcessNoCallback(proc processIface, sessionID string) bool {
 	if !s.sendMu.TryLock() {
 		return false
@@ -132,19 +107,11 @@ func (s *ManagedSession) tryReattachProcessNoCallback(proc processIface, session
 
 // adoptProcessAlreadySeeded publishes proc and marks the entire current
 // persistedHistory as already-seeded into proc.EventLog. Used by Rename /
-// takeover paths where the proc was running under a different ManagedSession
-// and already has the matching entries in its ring; we must NOT re-inject
-// (would duplicate every bubble) but we DO need persistedSeededLen aligned
-// so the next InjectHistory tail still forwards.
-//
-// R231-CQ-5: the verb pair "adopt … AlreadySeeded" vs
-// "attach … AndSnapshotPersisted" intentionally diverges to encode the two
-// distinct semantics — adopt = "treat persistedHistory as if proc has it
-// already, do not return a snapshot"; attach = "publish proc + return the
-// persistedHistory slice so the caller can re-seed". A blanket rename to
-// match the styles would lose that signal at the call site, so this godoc
-// pins the contrast instead. See attachProcessAndSnapshotPersisted's godoc
-// for the symmetric path.
+// takeover paths where proc ran under a different ManagedSession and already
+// holds the matching entries: re-injecting would duplicate every bubble, but
+// persistedSeededLen must be aligned so the next InjectHistory tail forwards.
+// Contrast attachProcessAndSnapshotPersisted, which returns the slice for
+// the caller to re-seed.
 func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 	s.historyMu.Lock()
 	s.storeProcess(proc)
@@ -153,43 +120,22 @@ func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 }
 
 // attachProcessAndSnapshotPersisted publishes proc as the session's live
-// process and atomically snapshots the persistedHistory prefix that the new
-// proc still needs to be seeded with. The two writes share historyMu so
-// concurrent InjectHistory calls observe a consistent (process, seededLen)
-// pair: an InjectHistory that wins the lock first sees seededLen=0 and the
-// old (likely nil) process, appends to persistedHistory, and forwards to the
-// fresh process if one is already attached; an InjectHistory that loses the
-// race sees seededLen == len(persistedHistory) so its forwarding loop only
-// pushes the truly new tail (no double-injection).
+// process and snapshots the persistedHistory prefix the new proc must be
+// seeded with. Both writes happen under historyMu so a concurrent
+// InjectHistory sees a consistent (process, seededLen) pair: one that loses
+// the race sees seededLen == len(persistedHistory) and forwards only the new
+// tail (no double-injection).
 //
-// Returns a defensive copy because proc.InjectHistory consumes the slice and
-// runs after we release historyMu — handing it the live persistedHistory
-// backing array would race with subsequent appends.
-//
-// R231-CQ-5: the verb pair "attach … AndSnapshotPersisted" vs
-// "adopt … AlreadySeeded" intentionally diverges — attach returns the
-// persistedHistory slice so the caller re-seeds; adopt treats the slice as
-// already in proc.EventLog and returns nothing. See adoptProcessAlreadySeeded
-// for the symmetric path.
+// Returns a defensive copy: proc.InjectHistory consumes the slice after
+// historyMu is released, so handing it the live backing array would race
+// with subsequent appends.
 func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []clievent.EventEntry {
 	s.historyMu.Lock()
 	if proc == nil {
-		// R231-CQ-2: nil parameter = "session is now process-less" (detach
-		// path used by ResetAndRecreate / Cleanup / Remove). The decision to
-		// also reset persistedSeededLen=0 is deliberate: when a fresh process
-		// later attaches via this same function, it MUST be re-seeded with
-		// the full persistedHistory snapshot, otherwise the dashboard
-		// renders empty until new live events arrive. Leaving seededLen at
-		// its prior non-zero value would make the next attach skip the
-		// snapshot and the new proc's EventLog would start blank against
-		// the persisted history that the session still remembers.
-		//
-		// persistedHistory itself is NOT cleared — the chat key + workspace
-		// stay the same across the detach/reattach pair, so its content is
-		// still valid. Only the "what proc has been seeded with" pointer
-		// resets. Mirrors adoptProcessAlreadySeeded's symmetric contract:
-		// adopt = "proc already has the events"; attach(nil) = "no proc,
-		// next attach must re-seed from scratch".
+		// Detach (ResetAndRecreate / Cleanup / Remove). persistedSeededLen MUST
+		// reset to 0 so the next attach re-seeds the full snapshot, otherwise
+		// the new proc's EventLog starts blank. persistedHistory itself stays:
+		// chat key + workspace are unchanged across detach/reattach.
 		s.storeProcess(nil)
 		s.persistedSeededLen = 0
 		s.historyMu.Unlock()

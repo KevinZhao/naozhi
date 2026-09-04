@@ -15,139 +15,83 @@ import (
 const (
 	maxPersistedHistory = 500
 
-	// maxPrevSessionIDs caps the session chain length so long-lived chats
-	// don't grow storeEntry.PrevSessionIDs without bound (each "/new" or
-	// workspace switch appends one). 32 retains enough chain for multi-day
-	// context recovery while keeping sessions.json size bounded.
+	// maxPrevSessionIDs caps the session chain (each "/new" or workspace
+	// switch appends one) so sessions.json stays bounded while retaining
+	// enough for multi-day context recovery.
 	maxPrevSessionIDs = 32
 
-	// Visible-aware initial-history tuning. The dashboard's initial subscribe
-	// asks for a page that must render at least DefaultVisibleTarget chat
-	// bubbles even when a parallel agent team has flooded the trailing window
-	// with internal (tool_use / task_progress / …) events. See
-	// ManagedSession.EventLastNVisibleCtx.
-	//
-	//   DefaultVisibleTarget — ~one screenful of bubbles; the reader stops
-	//                          once this many visible entries are collected.
-	//   maxVisibleTotal      — hard cap on the returned slice length (== the
-	//                          ring size and HTTP maxEventsPageLimit) so a
-	//                          mostly-internal tail can't return an unbounded
-	//                          payload.
-	//   visibleDiskPageSize  — entries pulled per disk-tier LoadBefore page.
-	//   maxVisibleDiskPages  — disk pages walked before giving up, bounding
-	//                          worst-case JSONL I/O on a slow filesystem.
+	// Visible-aware initial-history tuning (ManagedSession.EventLastNVisibleCtx):
+	// DefaultVisibleTarget ≈ one screenful of chat bubbles; maxVisibleTotal
+	// caps the returned slice (== ring size and HTTP maxEventsPageLimit);
+	// visibleDiskPageSize is entries per disk LoadBefore page; and
+	// maxVisibleDiskPages bounds worst-case JSONL I/O on a slow filesystem.
 	DefaultVisibleTarget = 30
 	maxVisibleTotal      = 500
 	visibleDiskPageSize  = 200
 	maxVisibleDiskPages  = 5
 )
 
-// ProcessSender is the send-path facet of processIface — the first
-// incremental split of the long-flagged god-interface (R215-ARCH-P1-3 /
-// R219-ARCH-7 / R224-ARCH-5 / R230C-ARCH-4 / R242-GO-12 [REPEAT-5]). It
-// covers Send / SendPassthrough / Interrupt / passthrough lifecycle —
-// the methods a caller needs to deliver one user turn and unwind it on
-// abort. Lifecycle (Alive/Close/Kill) and event/introspection methods
-// stay on the wider processIface for now and will be split into
-// ProcessLifecycle / EventSource / Introspection facets in subsequent
-// rounds. Defined as an exported type-level contract so downstream
-// callers (cron, dispatch, upstream) can declare a narrower dependency
-// over time without forcing a single-cut refactor.
-//
-// processIface embeds ProcessSender, so any concrete implementation of
-// processIface (only *cli.Process in production; testutil.TestProcess
-// in tests) automatically satisfies ProcessSender — no additional
-// adapter required.
-//
-// Cross-ref: R242-ARCH-4 catalogues the planned full split into
-// ProcessLifecycle / EventSource / ProcessSender / Introspection.
+// ProcessSender is the send-path facet of processIface: the methods a caller
+// needs to deliver one user turn and unwind it on abort. Exported so
+// downstream callers (cron, dispatch, upstream) can declare a narrower
+// dependency; processIface embeds it, so *cli.Process and
+// testutil.TestProcess satisfy it with no adapter.
 type ProcessSender interface {
-	// Send delivers a user turn and streams events through onEvent
-	// until the result entry arrives. Single-shot; serialised by
-	// caller-side mutex (sendMu in ManagedSession).
+	// Send delivers a user turn and streams events through onEvent until
+	// the result entry arrives. Single-shot; serialised by the caller-side
+	// sendMu in ManagedSession.
 	Send(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
-	// SendPassthrough is the passthrough-mode Send. Callers must
-	// ensure the underlying protocol reports SupportsReplay()==true;
-	// otherwise this returns an error. Unlike Send, multiple
-	// goroutines may call this concurrently on the same process —
-	// ordering is handled by the CLI's internal commandQueue plus a
-	// naozhi-side sendSlot FIFO.
+	// SendPassthrough is the passthrough-mode Send; errors unless the
+	// protocol reports SupportsReplay()==true. Unlike Send, multiple
+	// goroutines may call it concurrently — ordering is handled by the
+	// CLI's commandQueue plus a naozhi-side sendSlot FIFO.
 	SendPassthrough(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
-	// SupportsPassthrough reports whether this process's protocol
-	// can operate in passthrough mode (i.e. Protocol.SupportsReplay()).
-	// Dispatch uses this to fall back to legacy Send when the protocol
-	// can't provide the replay events passthrough matching relies on.
+	// SupportsPassthrough reports whether the protocol can operate in
+	// passthrough mode (Protocol.SupportsReplay()); dispatch falls back to
+	// Send otherwise.
 	SupportsPassthrough() bool
-	// PassthroughDepth returns the current pending-slot count for
-	// dashboard / status display.
+	// PassthroughDepth returns the current pending-slot count.
 	PassthroughDepth() int
-	// DiscardPassthroughPending cancels all in-flight passthrough
-	// sends and fires the given error to each caller. Used on /new,
-	// /clear, or forced session reset.
+	// DiscardPassthroughPending cancels all in-flight passthrough sends and
+	// fires the given error to each caller (/new, /clear, forced reset).
 	DiscardPassthroughPending(reason error)
 	// Interrupt requests OS-signal-style abort of the active turn.
 	// Best-effort: protocol may not honour SIGINT.
 	Interrupt()
-	// InterruptViaControl asks the CLI to abort the active turn via
-	// an in-band stream-json control_request (no SIGINT, no process
-	// kill). Returns cli.ErrInterruptUnsupported for protocols
-	// without this primitive.
+	// InterruptViaControl aborts the active turn via an in-band stream-json
+	// control_request (no SIGINT, no kill). Returns
+	// cli.ErrInterruptUnsupported for protocols without this primitive.
 	InterruptViaControl() error
 }
 
-// ProcessEventReader is the second facet of the planned processIface split
-// (R242-ARCH-4 / R20260527122801-ARCH-10, #1319). It exposes the read-side
-// of the in-process EventLog ring — the methods Snapshot / dashboard
-// pagination / cron history fan-out / discovery already consume but which
-// are presently entangled with lifecycle / identity / metering on the wider
-// processIface god-interface.
-//
-// Pure additive split. processIface embeds ProcessEventReader so the
-// concrete *cli.Process implementation and testutil.TestProcess fakes keep
-// satisfying both interfaces unchanged. Callers ready to narrow can switch
-// from processIface (~25 methods) to ProcessEventReader (~5) one site at
-// a time.
+// ProcessEventReader is the read-side facet of processIface over the
+// in-process EventLog ring (#1319). processIface embeds it, so *cli.Process
+// and testutil.TestProcess satisfy both; callers may narrow one site at a time.
 type ProcessEventReader interface {
 	// EventEntries returns a defensive copy of every entry currently in
-	// the live EventLog ring (chronological order). Used by the dashboard
-	// "full history" path before pagination cut over to EventEntriesBefore.
+	// the live EventLog ring (chronological order).
 	EventEntries() []clievent.EventEntry
-	// EventLastN returns the last N entries (chronological). Used by IM
-	// reply rendering to assemble the trailing thinking / tool_use chain.
+	// EventLastN returns the last N entries (chronological).
 	EventLastN(n int) []clievent.EventEntry
-	// EventEntriesSince returns entries with Time > afterMS, used by the
-	// dashboard 1Hz incremental poll path.
+	// EventEntriesSince returns entries with Time > afterMS.
 	EventEntriesSince(afterMS int64) []clievent.EventEntry
-	// EventEntriesSinceAppend is the buffer-reusing variant of
-	// EventEntriesSince: matched entries are appended into dst (callers pass
-	// dst[:0] from a per-subscription buffer so the common 0-5-entry
-	// incremental poll reuses capacity instead of allocating). Passing nil
-	// preserves EventEntriesSince's "nil when empty" contract. The returned
-	// slice is owned by the caller; the reader retains no reference.
-	// R20260604-PERF-25 (#1740).
+	// EventEntriesSinceAppend appends matched entries into dst so 1Hz
+	// pollers reuse capacity (#1740). Passing nil preserves the "nil when
+	// empty" contract. The returned slice is owned by the caller; the
+	// reader retains no reference.
 	EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry
 	// EventEntriesBefore returns up to `limit` entries with Time < beforeMS
-	// drawn from the live ring (chronological). Used by the dashboard
-	// pagination handler when a tab scrolls back past the in-memory tail.
+	// from the live ring (chronological).
 	EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry
 	// LastEventAt returns the wall-clock time of the most recent live event
 	// appended to the EventLog, or zero when nothing has arrived yet.
 	LastEventAt() time.Time
 }
 
-// ProcessLifecycle is the third facet of the planned processIface split
-// (R176-ARCH-M2 / R214-ARCH-8, #430), following the ProcessSender and
-// ProcessEventReader precedent. It exposes the liveness + teardown subset
-// that Router.Cleanup, evictOldest, Remove/Reset and the shim reconciler
-// consume — the parts entangled with event-read / identity / metering on
-// the wider processIface god-interface.
-//
-// Pure additive split. processIface embeds ProcessLifecycle so the concrete
-// *cli.Process implementation and testutil.TestProcess fakes keep satisfying
-// both interfaces unchanged. Callers ready to narrow can switch from
-// processIface (~25 methods) to ProcessLifecycle (4) one site at a time —
-// e.g. the ACP/Gemini backend onboarding the issue is gated on no longer
-// needs to mock the full god-interface just to prove liveness behaviour.
+// ProcessLifecycle is the liveness + teardown facet of processIface
+// consumed by Router.Cleanup, evictOldest, Remove/Reset and the shim
+// reconciler (#430). processIface embeds it, so *cli.Process and
+// testutil.TestProcess satisfy both.
 type ProcessLifecycle interface {
 	// Alive reports whether the underlying CLI/shim process handle is still
 	// usable (not Closed/Killed). Lock-free poll.
@@ -163,65 +107,33 @@ type ProcessLifecycle interface {
 	Kill()
 }
 
-// HistoryInjector is the fourth facet of the planned processIface split
-// (R176-ARCH-M2 / R214-ARCH-8, #430). It exposes the prev-session history
-// replay seam that Router.attachHistorySource / InjectHistory and the
-// auto-chain resume path consume on spawn, plus the subagent-roster read
-// the turn-agent fan-out uses. Splitting it out lets the history-injection
-// unit tests mock just these two methods instead of the full ~25-method
-// god-interface.
-//
-// Pure additive split — processIface embeds HistoryInjector so *cli.Process
-// and testutil.TestProcess keep satisfying both unchanged.
+// HistoryInjector is the prev-session history replay facet of processIface
+// used on spawn, plus the subagent-roster read for the turn-agent fan-out
+// (#430). processIface embeds it.
 type HistoryInjector interface {
 	// InjectHistory replays prior-session EventEntries into the process's
-	// EventLog before the first live turn so dashboard/IM history renders
-	// continuously across a resume. Called once, under the spawn path,
-	// before SetPersistSink flips sinkReady true.
+	// EventLog so history renders continuously across a resume. Called
+	// once, on the spawn path, before SetPersistSink flips sinkReady true.
 	InjectHistory(entries []clievent.EventEntry)
-	// TurnAgents returns the subagent roster the process has observed this
-	// turn (task_started → agent linkage). Feeds the dashboard agent-team
-	// view; empty for backends without a subagent concept.
+	// TurnAgents returns the subagent roster observed this turn; empty for
+	// backends without a subagent concept.
 	TurnAgents() []cli.SubagentInfo
 }
 
-// processIface abstracts the CLI process lifecycle methods used across the
-// session-aware code paths. Despite the package name, callers extend beyond
-// internal/session itself: internal/server (Hub broadcast + dashboard
-// snapshots), internal/dispatch (turn coalescing), internal/cron (cron Send
-// with ack), and internal/upstream (reverse-node RPC) all reach a Process
-// through ManagedSession.loadProcess() and consume this interface. Keep new
-// methods minimal — the surface has already been flagged as a god-interface
-// (R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5) pending a future split into
-// ProcessLifecycle / EventSource / ProcessSender facets.
-//
-// First facet split landed in R242-GO-12: ProcessSender covers the
-// send-path subset (Send / SendPassthrough / Interrupt / passthrough
-// lifecycle). processIface embeds it so existing call sites keep working
-// untouched while new narrow consumers can depend on ProcessSender alone.
-//
-// *cli.Process is the only production implementation; testutil.TestProcess is
-// the test fake.
-// R230-CQ-16.
+// processIface abstracts the CLI process methods used by session-aware code
+// in internal/session, internal/server, internal/dispatch, internal/cron and
+// internal/upstream (all via ManagedSession.loadProcess()). Keep new methods
+// minimal — prefer the embedded facets (ProcessSender, ProcessLifecycle,
+// ProcessEventReader, HistoryInjector). *cli.Process is the only production
+// implementation; testutil.TestProcess is the test fake.
 type processIface interface {
-	// Send / SendPassthrough / Interrupt / InterruptViaControl /
-	// PassthroughDepth / SupportsPassthrough / DiscardPassthroughPending
-	// live on ProcessSender (R242-GO-12, first facet split). Embed it
-	// rather than duplicate.
 	ProcessSender
-	// Alive / IsRunning / Close / Kill live on ProcessLifecycle (R176-ARCH-M2
-	// facet split, #430). Embed it rather than duplicate.
 	ProcessLifecycle
-	// Dashboard introspection.
-	//
-	// SessionID / State follow the Go convention of dropping the `Get`
-	// prefix on accessors. The coordinated cross-package rename from the
-	// former GetSessionID() / GetState() (R219-CR-9 #665) shipped under
-	// ADR-0001 PR-2 (#463); TestProcessIfaceGetterRenamePlanned now pins
-	// the idiomatic names so a Get* regression cannot slip through.
+	// Dashboard introspection. SessionID / State drop the `Get` prefix per
+	// Go convention; TestProcessIfaceGetterRenamePlanned pins the names.
 	SessionID() string
 	State() cli.ProcessState
-	// DeathReason returns the process-level reason string recorded when the
+	// DeathReason returns the process-level reason recorded when the
 	// shim-backed CLI exited (passive death). Empty while alive or when the
 	// reason has not been classified yet.
 	DeathReason() string
@@ -229,34 +141,29 @@ type processIface interface {
 	EventEntries() []clievent.EventEntry
 	EventLastN(n int) []clievent.EventEntry
 	// EventLastNVisible returns a contiguous tail carrying at least
-	// visibleTarget visible entries (or up to maxTotal). Backs the
-	// dashboard's visible-aware initial-history read so a parallel agent
-	// team's internal-event flood can't blank the first paint.
+	// visibleTarget visible entries (or up to maxTotal), so an
+	// internal-event flood can't blank the dashboard's first paint.
 	EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry
 	EventEntriesSince(afterMS int64) []clievent.EventEntry
 	EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry
 	EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry
 	LastActivitySummary() string
 	// LastResponseSummary returns the summary of the most recent assistant
-	// "text" entry the process's EventLog has seen. Used by Snapshot to feed
-	// SessionSnapshot.LastResponse for the sidebar 30-rune dim preview line
-	// (R110-P1). Empty until at least one assistant text block has streamed.
+	// "text" entry; empty until one has streamed. Feeds
+	// SessionSnapshot.LastResponse.
 	LastResponseSummary() string
-	// LastEventAt returns the wall-clock time of the most recent live event
-	// appended to the process's EventLog, or zero Time when nothing has
-	// arrived yet. Router.Cleanup uses it as a fallback activity signal so
-	// a long-running turn that streams tool_use / thinking events is not
-	// misclassified as stuck when the session-level lastActive timestamp
-	// (only refreshed at Send entry) has aged past the stuck threshold.
+	// LastEventAt returns the wall-clock time of the most recent live event,
+	// or zero when nothing has arrived yet. Router.Cleanup uses it as a
+	// fallback activity signal so a long turn streaming tool_use / thinking
+	// events is not misclassified as stuck once the session-level
+	// lastActive (refreshed only at Send entry) has aged.
 	LastEventAt() time.Time
-	// UserTurnCount returns the cumulative count of "user" entries the
-	// process's EventLog has seen since spawn. Feeds SessionSnapshot.MessageCount.
+	// UserTurnCount returns the cumulative count of "user" entries seen
+	// since spawn. Feeds SessionSnapshot.MessageCount.
 	UserTurnCount() int64
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
-	// InjectHistory / TurnAgents live on HistoryInjector (R176-ARCH-M2
-	// facet split, #430). Embed it rather than duplicate.
 	HistoryInjector
 	// Normalize-layer accessors (docs/rfc/multi-backend.md §8.8). kiro fills
 	// these from _kiro.dev/metadata; claude leaves zero values until an
@@ -264,89 +171,45 @@ type processIface interface {
 	ContextUsagePercent() float64
 	TurnDurationMs() int64
 	MeteringUsage() []cli.MeteringEntry
-	// MeteringGen versions MeteringUsage: it advances on every metering
-	// write and stays 0 while the backend has reported none. Snapshot caches
-	// its MeteringUsage copy per (process, gen) so an unchanged gen skips the
-	// defensive copy (#2345). Implementations that do not version their
-	// rows must return 0, which disables the cache.
+	// MeteringGen versions MeteringUsage so Snapshot can cache its copy per
+	// (process, gen) (#2345). Implementations that do not version their rows
+	// must return 0, which disables the cache.
 	MeteringGen() uint64
 	// Effort returns the backend-reported thinking-effort tier (kiro:
 	// low/medium/high/xhigh/max), "" when unreported.
 	Effort() string
-	// Model returns the spawn-time CLI model identifier (e.g.
-	// "claude-opus-4.7", "claude-sonnet-4.6") or "" when unconfigured.
-	// UI Round 5 R5-3.
+	// Model returns the spawn-time CLI model identifier or "" when
+	// unconfigured.
 	Model() string
 	// LiveVersion returns the CLI binary version self-reported in the
 	// process's system/init frame (claude_code_version), or "" before the
 	// init frame arrives / on backends that don't self-report.
-	// R20260612-live-version.
 	LiveVersion() string
 }
 
-// Compile-time guarantee that ProcessEventReader is a strict subset of
-// processIface — every concrete implementation of processIface (production
-// *cli.Process, test fakes) automatically satisfies ProcessEventReader so
-// callers can narrow without an adapter. Pinning this with a var keeps
-// drift from creeping in if either interface evolves. R20260527122801-ARCH-10
-// (#1319): future facet rounds (ProcessLifecycle / ProcessIdentity) will
-// follow this same pattern — define the narrow facet, prove subset by
-// satisfaction var, narrow consumers one site at a time.
+// Compile-time pins: each facet must stay a strict subset of processIface so
+// callers can narrow without an adapter; a signature drift on either side
+// fails the build instead of silently desyncing.
 var _ ProcessEventReader = (processIface)(nil)
-
-// Compile-time guarantee that ProcessLifecycle is a strict subset of
-// processIface (R176-ARCH-M2 facet split, #430). Mirrors the
-// ProcessEventReader pin above so a future edit that drops one of
-// Alive/IsRunning/Close/Kill from processIface — or changes a signature on
-// either side — fails the package build instead of silently desyncing the
-// facet from the god-interface.
 var _ ProcessLifecycle = (processIface)(nil)
-
-// Compile-time guarantee that HistoryInjector is a strict subset of
-// processIface (R176-ARCH-M2 facet split, #430). Same drift-guard role as
-// the ProcessEventReader / ProcessLifecycle pins above.
 var _ HistoryInjector = (processIface)(nil)
 
 // processBox wraps processIface for use with atomic.Pointer (which
-// requires a concrete type).
-//
-// R242-ARCH-30 considered replacing the per-storeProcess alloc with
-// either atomic.Value or a sync.Pool. Both options were rejected after
-// analysis:
-//
-//   - atomic.Value rejects a Store of a different dynamic type than the
-//     first non-nil Store (panic on inconsistent type). Production has
-//     a single dynamic type (*cli.Process), but tests inject several
-//     fakes (TestProcess, hookCloseProc, fakeProcess). atomic.Value
-//     would force every test to use the production concrete type, an
-//     unreasonable test-fake constraint.
-//
-//   - sync.Pool would let storeProcess re-use boxes, but loadProcess
-//     handlers may retain the *processBox pointer across goroutine
-//     boundaries (Hub broadcast, dispatch turn coalescing, cron Send).
-//     Putting the box back to the pool while a reader still holds it
-//     would be a use-after-free racing the next Get + Store. Tracking
-//     the readers' lifetimes requires reference counting we don't have.
-//
-// storeProcess is only called on cold paths (spawn, attach, kill, /new,
-// /clear) — typically once per minute per active session — so the
-// 16-byte alloc per call is dwarfed by the surrounding goroutine and
-// process-lifecycle work. The wrapper stays.
+// requires a concrete type). Not atomic.Value: it panics on a Store of a
+// different dynamic type, and tests inject several fakes. Not sync.Pool:
+// loadProcess callers retain the *processBox across goroutine boundaries,
+// so recycling it would be a use-after-free. storeProcess runs only on cold
+// paths, so the 16-byte alloc per call is negligible.
 type processBox struct{ p processIface }
 
 // cancelBox binds a Send()'s context cancel func to the process pointer that
-// Send loaded for that turn. Interrupt() consults it so it only fires cancel
-// when the live process still matches the one the in-flight Send targets.
-//
-// SM3 (#381): Send() stores the cancel func before loadProcess(); in the
-// narrow window where a concurrent spawnSession replaces the process pointer,
-// a bare cancel func could target the previous process's ctx — cancelling it
-// is a no-op against the new live process, silently weakening Interrupt. By
-// recording the bound process here, Interrupt skips a stale cancel (whose
-// proc no longer matches the live process) and reports failure instead of a
-// misleading success. nil proc means "not yet bound to a process" (Send has
-// stored the box but not reached loadProcess yet) — Interrupt still fires it
-// because that turn is about to run on the current live process.
+// Send loaded for that turn, so Interrupt() only fires cancel when the live
+// process still matches the in-flight Send's target (#381). Send stores the
+// cancel func before loadProcess(); if a concurrent spawnSession replaces
+// the process in that window, a bare cancel would target the old ctx and
+// silently no-op. Interrupt skips a stale box and reports failure instead.
+// nil proc means "not yet bound" — Interrupt still fires it because that
+// turn is about to run on the current live process.
 type cancelBox struct {
 	cancel context.CancelFunc
 	proc   processIface
@@ -356,31 +219,27 @@ type cancelBox struct {
 type ManagedSession struct {
 	key string
 
-	// sessionID stores the CLI session ID atomically.
-	// Written once during first successful Send, read by Snapshot lock-free.
-	// atomic.Pointer[string] is type-safe: Load returns *string (nil when never
-	// stored, distinct from a stored empty string).
+	// sessionID is written once during the first successful Send and read
+	// by Snapshot lock-free. Load returns nil when never stored, distinct
+	// from a stored empty string.
 	sessionID atomic.Pointer[string]
 
 	// onSessionID is called when a session ID is first captured from Send().
 	// Set by the Router to track known IDs for history exclusion.
 	onSessionID func(string)
 
-	// runStore records per-run wall-clock timing for the dashboard's run
-	// history / stats. Shared across all sessions (owned by the Router).
-	// nil in tests / no-persist configs — all call sites are nil-safe, so
-	// the timing instrumentation simply no-ops when unset.
+	// runStore records per-run timing for the dashboard. Shared across all
+	// sessions (owned by the Router); nil in tests / no-persist configs and
+	// every call site is nil-safe.
 	runStore *runhistory.Store
 
 	// lastActive stores time.UnixNano atomically to avoid data races
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
 
-	// createdAt anchors the session's sidebar position. Set once at construction
-	// (or carried over via Rename) and never touched again, so neither activity
-	// nor process state changes shift the row. Persisted via storeEntry; on
-	// load, missing values fall back to LastActive so older sessions retain
-	// their relative order across the upgrade.
+	// createdAt anchors the session's sidebar position: set once at
+	// construction (or carried over via Rename) and never touched again.
+	// On store load, missing values fall back to LastActive.
 	createdAt atomic.Int64
 
 	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
@@ -389,12 +248,9 @@ type ManagedSession struct {
 	// lastActivity caches the most recent tool_use/thinking summary.
 	lastActivity atomic.Pointer[string]
 
-	// lastResponse caches the most recent assistant text summary so the
-	// sidebar can render a 30-rune dim preview line under the prompt
-	// (R110-P1). Mirrors lastPrompt's lock-free Snapshot read pattern.
-	// Live updates flow from proc.LastResponseSummary; the cache exists for
-	// dead/suspended sessions whose process is gone (parallels lastPrompt's
-	// extractLastPromptFromProcess seeding path).
+	// lastResponse caches the most recent assistant text summary for the
+	// sidebar preview line. Live updates flow from proc.LastResponseSummary;
+	// the cache exists for dead/suspended sessions whose process is gone.
 	lastResponse atomic.Pointer[string]
 
 	// Cached key parts, parsed once via keyOnce. Key is immutable.
@@ -411,105 +267,57 @@ type ManagedSession struct {
 	sendMu        sync.Mutex   // serializes messages to the same session
 	historyMu     sync.RWMutex // protects persistedHistory reads/writes (independent of sendMu)
 	// costMu serializes the read-modify-write of costSpent/lastCumulativeCost
-	// in finishRun. finishRun runs OUTSIDE sendMu on both paths (Send releases
-	// sendMu before returning, and the passthrough path is lock-free), so this
-	// dedicated mutex is the only serializer for the per-turn delta
-	// accumulation and is required for race-freedom.
+	// in finishRun, which runs OUTSIDE sendMu on both paths (Send releases
+	// sendMu before returning; passthrough is lock-free), so this mutex is
+	// the only serializer for the per-turn delta and required for
+	// race-freedom.
 	costMu sync.Mutex
 	// sendCancel holds the in-flight Send()'s cancel func bound to the process
-	// it targets (see cancelBox). Bound so Interrupt() can skip a cancel whose
-	// process has been replaced by a concurrent spawnSession (SM3 / #381).
+	// it targets (see cancelBox), so Interrupt() can skip a cancel whose
+	// process has been replaced by a concurrent spawnSession (#381).
 	sendCancel atomic.Pointer[cancelBox]
 	// workspace is the effective cwd at spawn time. Writers hold r.mu in the
-	// router (spawnSession / RegisterCronStub / SetWorkspace), but Snapshot()
-	// is called from Hub handlers WITHOUT r.mu (see wshub.go:466, 520). Direct
-	// string read there races the write — harmless today (word-sized assign),
-	// but flagged by -race and future-unsafe if pointee ever grows. Go through
-	// atomic.Pointer[string] to match the backend/cliName/cliVersion pattern
-	// already established above.
+	// router, but Snapshot() is called from Hub handlers WITHOUT r.mu, so
+	// the read must be atomic.
 	workspace atomic.Pointer[string]
-	// cliIdentity packs backend / cliName / cliVersion into a single
-	// atomic.Pointer so Snapshot() (1 Hz × N tabs × N sessions hot path —
-	// see R215-ARCH-P2-7 / R219-PERF-3 / R222-PERF-7) reads all three with
-	// one atomic.Load instead of three sequential Loads. The fields are
-	// written together at every spawn / reconnect / restore site (each
-	// triple is "snapshot of the wrapper that owns this session"), so
-	// packing them is also closer to the actual invariant. Updaters use
-	// updateCLIIdentity (CAS loop) so partial updates from the legacy
-	// SetBackend / SetCLIName / SetCLIVersion paths still compose
-	// safely. Read paths go through Backend() / CLIName() / CLIVersion()
-	// for callers that need only one field, or loadCLIIdentity() for
-	// Snapshot which needs all three.
+	// cliIdentity packs backend / cliName / cliVersion (always written
+	// together) so Snapshot reads all three with one Load. Updaters use
+	// updateCLIIdentity (CAS loop) so single-field setters compose safely.
 	cliIdentity atomic.Pointer[cliIdentityBox]
 	deathReason atomic.Pointer[string] // why process died, empty if alive
-	// userLabel is an operator-set display name that overrides summary/last_prompt
-	// in the dashboard sidebar and header. Empty = unset, fall back to
-	// summary → last_prompt. Lock-free reads from Snapshot() mirror the
-	// backend/cliName/cliVersion pattern.
+	// userLabel is an operator-set display name overriding summary/last_prompt
+	// in the dashboard. Empty = unset.
 	userLabel atomic.Pointer[string]
-	// labelOrigin records who set userLabel: "" / "user" (operator-driven)
-	// or "auto" (sysession daemon). The empty/"user" cases are equivalent
-	// (legacy compatibility); only "auto" identifies a daemon-written label
-	// that may be overwritten by future daemon ticks. Once a human writes
-	// (origin="user"), daemons must permanently leave that session alone
-	// unless ClearUserLabelOrigin resets it back to "". See
-	// docs/rfc/system-session.md §7.3. Read paths are lock-free; writes
-	// must go through Router.SetUserLabelWithOrigin so the r.mu-protected
-	// re-read closes the daemon-vs-user race window (RFC §11.1).
+	// labelOrigin records who set userLabel: ""/"user" (operator) or "auto"
+	// (sysession daemon). Once a human writes, daemons must leave the session
+	// alone unless ClearUserLabelOrigin resets it (docs/rfc/system-session.md
+	// §7.3). Writes must go through Router.SetUserLabelWithOrigin so the r.mu
+	// re-read closes the daemon-vs-user race (RFC §11.1).
 	labelOrigin atomic.Pointer[string]
-	// model is the most-recent CLI model identifier captured from
-	// system/init (claude) or SpawnOptions.Model (kiro), persisted to
-	// sessions.json so it survives naozhi restart even when the next
-	// turn hasn't re-emitted init yet. Live process value (from
-	// proc.Model()) wins over this when both are available; this field
-	// is the fallback for restart / pre-init windows. UI Round 5 R5-3.
+	// model is the most-recent CLI model identifier (system/init for claude,
+	// SpawnOptions.Model for kiro), persisted to sessions.json as the
+	// fallback for restart / pre-init windows; live proc.Model() wins.
 	model atomic.Pointer[string]
 	// tuningModel / tuningEffort are the operator's per-session overrides
-	// picked in the dashboard (docs/rfc/dashboard-model-effort-control.md
-	// §4.3). "" = no override (config chain applies). They sit at the TOP of
-	// resolveSpawnParamsLocked's model/effort precedence chains and persist
-	// to sessions.json — unlike the one-shot backendOverrides map, a tuning
-	// override is a durable declaration of how this session should run, so
-	// it must survive TTL recycles and naozhi restarts (the CLI-side switch
-	// is process-bound on kiro, F2 — persistence lives HERE or nowhere).
-	// Distinct from `model` above: that mirrors what the CLI REPORTED
-	// (display), these record what the operator DEMANDED (control).
-	// Values are tuningspec-validated at every write (SetSessionTuning) and
-	// re-validated at store load so a hand-edited sessions.json cannot
-	// inject argv (§4.6).
+	// (docs/rfc/dashboard-model-effort-control.md §4.3); "" = none. They top
+	// resolveSpawnParamsLocked's precedence and persist to sessions.json.
+	// Unlike `model` (REPORTED) they record what the operator DEMANDED;
+	// tuningspec-validated on write and store load so a hand-edited
+	// sessions.json cannot inject argv (§4.6).
 	tuningModel  atomic.Pointer[string]
 	tuningEffort atomic.Pointer[string]
-	// totalCost is the cumulative cost carried over from a previous process
-	// incarnation: written at construction (either in NewRouter() when
-	// restoring from store, or in spawnSession() when inheriting from the
-	// replaced session) and effectively read-only thereafter. Snapshot()
-	// falls back to this value when the live process hasn't yet reported a
-	// result event — this avoids the $0.00 flash after resume/reconnect.
-	//
-	// R183-CONCUR-M2: stored as atomic.Uint64 holding math.Float64bits()
-	// pack of the float64 value, mirroring the pattern the other 9 atomic
-	// fields use. The struct's lifecycle guarantees saveStore snapshots the
-	// *ManagedSession pointer under r.mu before reading cost, but the
-	// plain-float64 layout left the type-level contract "implicit sync-only"
-	// — any future refactor that adds a post-publication writer (e.g. a
-	// live-cost updater) would silently introduce a torn-read race. Making
-	// the field atomic at the type level prevents that regression.
-	// Read/write via loadTotalCost/storeTotalCost to avoid spreading the
-	// math.Float64bits incantation across call sites.
+	// totalCost is the cost inherited from a previous process incarnation,
+	// written at construction; Snapshot() falls back to it before the live
+	// process reports a result (no $0.00 flash after resume). Atomic so a
+	// future post-publication writer cannot introduce a torn read; access
+	// via loadTotalCost/storeTotalCost (math.Float64bits packing).
 	totalCost atomic.Uint64
 
-	// costSpent is the genuine cumulative spend of this session, accumulated
-	// as a sum of per-turn deltas (see runhistory.TurnCostDelta). Unlike
-	// totalCost — which mirrors the CLI's per-incarnation running total and
-	// RESETS on every resume/restart — costSpent is monotonic across process
-	// replacements, so it is the authoritative value for the dashboard's
-	// session-total cost. lastCumulativeCost is the baseline (the previous
-	// turn's raw CLI cumulative reading) the next delta diffs against.
-	//
-	// Both are atomic.Uint64-packed float64 (loadTotalCost/storeTotalCost
-	// convention) and written only from finishRun, which already runs once
-	// per completed turn. Carried across spawnSession and restored from the
-	// store the same way totalCost is.
+	// costSpent is the genuine cumulative spend (sum of per-turn deltas, see
+	// runhistory.TurnCostDelta): monotonic across process replacements,
+	// unlike totalCost which RESETS on resume. lastCumulativeCost is the
+	// previous raw CLI reading the next delta diffs against. Both are
+	// Float64bits-packed and written only from finishRun.
 	costSpent          atomic.Uint64
 	lastCumulativeCost atomic.Uint64
 
@@ -517,117 +325,71 @@ type ManagedSession struct {
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []clievent.EventEntry
 
-	// persistedUserTurns caches the number of Type=="user" entries currently
-	// present in persistedHistory. Recomputed under historyMu whenever
-	// persistedHistory is mutated (append / cap-trim / sort) so the
-	// proc==nil snapshot branch can populate SessionSnapshot.MessageCount
-	// lock-free without an O(n) scan on every poll. A live proc still wins
-	// (proc.UserTurnCount()); this only covers evicted / suspended / stub
-	// sessions whose MessageCount would otherwise be a constant 0 and starve
-	// AutoTitler's min-turn gate (#1644).
+	// persistedUserTurns caches the Type=="user" count in persistedHistory,
+	// recomputed under historyMu on every mutation so the proc==nil snapshot
+	// branch fills MessageCount lock-free without an O(n) scan (#1644).
 	persistedUserTurns atomic.Int64
 
-	// persistedSeededLen is the prefix length of persistedHistory that has
-	// already been forwarded into the current proc.EventLog. Reset whenever a
-	// fresh proc is published, so InjectHistory only forwards the unseeded
-	// tail rather than re-injecting the already-seeded prefix. Read/written
-	// under historyMu in sync with persistedHistory. See
+	// persistedSeededLen is the prefix length of persistedHistory already
+	// forwarded into the current proc.EventLog; reset whenever a fresh proc
+	// is published so InjectHistory forwards only the unseeded tail.
+	// Read/written under historyMu in sync with persistedHistory; see
 	// attachProcessAndSnapshotPersisted for the publish/snapshot ordering.
-	// R231-CQ-6.
 	persistedSeededLen int
 
 	// persistedHistorySorted is true when persistedHistory is known to be
-	// sorted ascending by Time. Default false (zero value) keeps the legacy
-	// "sort on every read" behaviour for test fixtures that assign the
-	// slice directly; production mutations go through InjectHistory which
-	// computes monotonicity vs the existing tail and only flips the flag
-	// to true once a reader has paid the one-off sort. EventEntriesSince
-	// (1Hz dashboard push hot path × N tabs × M dead sessions) checks the
-	// flag and skips the stable sort once it lands true. Maintained under
-	// historyMu in lockstep with persistedHistory mutations. R237-PERF-12.
+	// Time-ascending, letting EventEntriesSince skip the stable sort on the
+	// 1Hz dashboard hot path. Zero value (false) means readers sort once and
+	// flip it; InjectHistory maintains it against the existing tail.
+	// Maintained under historyMu in lockstep with persistedHistory.
 	persistedHistorySorted bool
 
-	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
-	// Used on startup to load the full conversation chain from JSONL files.
-	// Capped at maxPrevSessionIDs to bound long-lived session memory and
-	// sessions.json size. Overflow drops oldest entries; history still loads
-	// from the retained tail which carries the most recent context.
+	// prevSessionIDs tracks previous session IDs for this key (oldest →
+	// newest), used on startup to load the conversation chain from JSONL.
+	// Capped at maxPrevSessionIDs; overflow drops the oldest entries.
 	prevSessionIDs []string
 
-	// prevSessionOrigins is parallel to prevSessionIDs and records who
-	// added each entry: "manual" (default for legacy / /clear / chain
-	// rotation), "auto-spawn" (auto-workspace-chain feature, new spawn
-	// path), "auto-backfill" (auto-workspace-chain startup backfill),
-	// or "resume" (RegisterForResume). Read/written under historyMu in
-	// lockstep with prevSessionIDs.
-	//
-	// Length contract: len(prevSessionOrigins) <= len(prevSessionIDs).
-	// Missing tail entries default to "manual" on read. The append-only
-	// invariant on prevSessionIDs (auto-workspace-chain RFC §4.6) lets
-	// SetPrevSessionOrigins extend the slice in lockstep without
-	// re-deriving positions across the whole chain. A length drift is
-	// detected, metric'd, and bounce-rebuilt to all-"manual" rather than
-	// allowed to silently misalign origin labels with their session IDs.
+	// prevSessionOrigins is parallel to prevSessionIDs ("manual" default,
+	// "auto-spawn", "auto-backfill", "resume"); read/written under historyMu
+	// in lockstep. Contract: len(origins) <= len(ids), missing tail reads as
+	// "manual" (relies on ids being append-only, RFC §4.6); a length drift is
+	// detected, metric'd and rebuilt to all-"manual", never left misaligned.
 	prevSessionOrigins []string
 
 	// prevHistoryGen increments on every mutation of prevSessionIDs /
-	// prevSessionOrigins (under historyMu, by SetPrevSessionOrigins /
-	// ReplacePrevSessionIDs / RebuildChainFiltered). The per-session
-	// marshal cache (R202606j-PERF-014, #2346) stamps the gen it observed
-	// so equalStoreEntry can compare an O(1) counter instead of running
-	// slices.Equal over the (≤32-entry) parallel chain slices on every 30s
-	// saveIfDirty tick. Construction-time direct field writes leave gen at
-	// 0, which is correct: the cache starts empty so the first encode always
-	// rebuilds. Atomic so SnapshotPrevSessionIDs-class readers that hold only
-	// historyMu.RLock observe a torn-free value.
+	// prevSessionOrigins (under historyMu) so equalStoreEntry compares an
+	// O(1) counter instead of slices.Equal (#2346). Atomic so readers holding
+	// only historyMu.RLock observe a torn-free value.
 	prevHistoryGen atomic.Uint64
 
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool
 
-	// historySource backs EventEntriesBeforeCtx's disk-tier fallback. Set by
-	// the router at session construction based on the backend: claude sessions
-	// get a claudejsonl.Source; other backends currently get history.Noop so
-	// the call site never has to nil-check.
-	//
-	// Atomic because SetHistorySource is exported and can race with in-flight
-	// pagination reads: the router attaches the source before publishing the
-	// session to r.ss.sessions, but tests and potential future reconfig paths
-	// may reset it after the session is reachable. atomic.Pointer makes the
-	// hand-off race-free without requiring historyMu on every read.
+	// historySource backs EventEntriesBeforeCtx's disk-tier fallback (claude
+	// gets claudejsonl.Source; other backends history.Noop so no nil-check).
+	// Atomic because SetHistorySource is exported and may race with in-flight
+	// pagination reads after the session is reachable.
 	historySource atomic.Pointer[historySourceBox]
 
-	// storeMarshalCache memoizes the last (storeEntry → JSON) result for this
-	// session so saveStore can skip re-marshalling a session whose persisted
-	// fields are unchanged since the previous save. R20260531A-PERF-2 (#1523):
-	// the periodic 30s saveIfDirty tick previously re-marshalled every entry
-	// even though, on a typical deployment, only the handful of sessions that
-	// received traffic in the last window actually changed. Idle sessions now
-	// hit the cache and pay zero marshal cost. The cache is keyed on the
-	// storeEntry value itself (compared with ==) so any persisted-field change
-	// — LastActive, cost, label, model, workspace, session chain — invalidates
-	// it without per-mutation-site bookkeeping (equality checked with
-	// equalStoreEntry, since storeEntry carries slice fields). The save path
-	// (saveStore) holds no Router lock; saveIfDirty/Cleanup serialise through
-	// the cleanup-loop goroutine, but Shutdown also calls saveStore, so the
-	// cache is an atomic.Pointer to stay race-free if a final shutdown save
-	// overlaps an in-flight periodic save on the same session.
+	// storeMarshalCache memoizes the last (storeEntry → JSON) result so
+	// saveStore skips re-marshalling unchanged sessions (#1523). Keyed on the
+	// storeEntry value via equalStoreEntry, so any persisted-field change
+	// invalidates it without per-site bookkeeping. Atomic because Shutdown's
+	// final saveStore can overlap an in-flight periodic save.
 	storeMarshalCache atomic.Pointer[storeEntryCache]
 }
 
-// storeEntryCache is the per-session memo described on
-// ManagedSession.storeMarshalCache. entry is the storeEntry that produced
-// data; data is its standalone JSON object encoding (NOT array-wrapped) ready
-// to be concatenated into the sessions.json array.
+// storeEntryCache is the per-session memo behind storeMarshalCache: entry
+// produced data, a standalone JSON object (NOT array-wrapped) ready to be
+// concatenated into the sessions.json array.
 type storeEntryCache struct {
 	entry storeEntry
 	data  []byte
 }
 
-// historySourceBox wraps history.Source so atomic.Pointer can store it.
-// atomic.Pointer[T] requires a concrete type; an interface-typed field
-// can't be stored directly.
+// historySourceBox wraps history.Source so atomic.Pointer (which requires a
+// concrete type) can store it.
 type historySourceBox struct{ src history.Source }
 
 // SessionKey returns the immutable session key.
@@ -645,32 +407,20 @@ type SessionSnapshot struct {
 	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro"
 	CLIVersion string `json:"cli_version,omitempty"` // e.g. "2.1.92"
 	// AccessProfile is the access-profile ID this session spawned under
-	// ("" = global default). The dashboard renders a chip from the id via
-	// the /api/access-profiles registry (label/colour live there, NOT here —
-	// the snapshot never carries env values or secrets). RFC
-	// project-access-profile §8.3.
+	// ("" = global default). Label/colour live in the /api/access-profiles
+	// registry, NOT here — the snapshot never carries env values or secrets
+	// (RFC project-access-profile §8.3).
 	AccessProfile string `json:"access_profile,omitempty"`
-	// Model is the spawn-time CLI model identifier resolved from
-	// cli.backends[].model → SpawnOptions.Model → Process.Model. Empty
-	// when the operator did not configure one. The dashboard renders
-	// "(模型未配置)" in that case (UI Round 5 R5-3).
-	//
-	// Backend-specific behaviour:
-	//   - claude (stream-json): the configured model flows through as-is;
-	//     the value matches what the operator set in cli.backends[].model.
-	//   - kiro / ACP: this field still reflects the spawn-time configured
-	//     value (or empty). The real model id reported by ACP
-	//     `session/new`'s `result.models.currentModelId` is currently NOT
-	//     read back into Process.Model — see R225-ACP-MODEL-INIT in
-	//     docs/TODO.md. Until that lands, dashboards consuming Snapshot
-	//     for ACP backends should expect the configured value, not the
-	//     in-effect runtime model. R225-CR-8.
+	// Model is the CLI model identifier (live process value, else the
+	// persisted spawn-time value). Empty when the operator did not configure
+	// one; the dashboard renders "(模型未配置)". For ACP backends the runtime
+	// model from session/new is not read back (see docs/TODO.md), so this
+	// reflects the configured value.
 	Model      string `json:"model,omitempty"`
 	LastActive int64  `json:"last_active"` // unix ms
-	// CreatedAt anchors sidebar order: the dashboard sorts sessions by this
-	// value ascending so newly-created rows always land at the bottom and
-	// existing rows never shift on activity. unix ms, 0 only if the loadStore
-	// fallback couldn't infer one (treated as "very old" by the comparator).
+	// CreatedAt anchors sidebar order (ascending, so new rows land at the
+	// bottom and rows never shift on activity). unix ms; 0 only if loadStore
+	// couldn't infer one (treated as "very old").
 	CreatedAt    int64   `json:"created_at,omitempty"`
 	TotalCost    float64 `json:"total_cost"`
 	Workspace    string  `json:"workspace,omitempty"`
@@ -680,62 +430,44 @@ type SessionSnapshot struct {
 	Node         string  `json:"node,omitempty"`
 	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
 	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
-	// LastResponse is the truncated summary of the most recent assistant
-	// text reply, used by the dashboard sidebar's 30-rune dim second-line
-	// preview (R110-P1). Sourced from proc.LastResponseSummary when a live
-	// process is attached; falls back to s.lastResponse atomic cache for
-	// suspended/dead sessions, mirroring LastPrompt's resolution path.
+	// LastResponse is the truncated summary of the most recent assistant text
+	// reply for the sidebar preview: live proc.LastResponseSummary, falling
+	// back to the s.lastResponse cache for suspended/dead sessions.
 	LastResponse string `json:"last_response,omitempty"`
 	Summary      string `json:"summary,omitempty"`    // Claude-generated session title
 	UserLabel    string `json:"user_label,omitempty"` // operator-set override for sidebar/header title
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
-	// (sysession daemon). Frontend uses this to show a small bot icon on
-	// auto-labeled sessions and to enable the "restore auto naming"
-	// action (POST /api/system/labels/clear-origin). See
-	// docs/rfc/system-session.md §7.3 / §9.3.
+	// (sysession daemon); drives the bot icon and "restore auto naming"
+	// action (docs/rfc/system-session.md §7.3 / §9.3).
 	LabelOrigin     string             `json:"label_origin,omitempty"`
 	Project         string             `json:"project,omitempty"`          // project name (filled by server)
 	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
 	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
 	Subagents       []cli.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
-	// MessageCount is the cumulative "user" turn count observed by the live
-	// Process event log since the current spawn. Zero when no process is
-	// attached (persistedHistory only sessions). Not persisted to sessions.json:
-	// after shim reconnect, InjectHistory → EventLog.AppendBatch re-applies
-	// the historical user entries so the counter rebuilds to the historical
-	// value as part of normal startup.
+	// MessageCount is the cumulative "user" turn count: from the live Process
+	// event log since spawn, else the persistedHistory count. Not persisted;
+	// InjectHistory → EventLog.AppendBatch rebuilds it on reconnect.
 	MessageCount int64 `json:"message_count,omitempty"`
 
-	// Normalized cross-backend status fields (docs/rfc/multi-backend.md §8.8).
-	// Filled by Snapshot from Process accessors so dashboard / IM / cron all
-	// consume normalized data without parsing backend-private events.
+	// Normalized cross-backend status fields (docs/rfc/multi-backend.md §8.8)
+	// so dashboard / IM / cron never parse backend-private events.
 	//
-	// CostUnit is "USD" for claude-class backends and the unit reported by
-	// the backend for ACP-class (kiro reports "credits"). Empty when no
-	// known backend (dashboard hides the cell).
+	// CostUnit is "USD" for claude-class backends and the backend-reported
+	// unit for ACP-class (kiro: "credits"). Empty when no known backend.
 	CostUnit string `json:"cost_unit,omitempty"`
-	// ContextUsagePercent is 0-100 conversation context utilisation. kiro
-	// reports a real value via _kiro.dev/metadata; claude leaves 0 until
-	// estimator lands.
+	// ContextUsagePercent is 0-100 context utilisation (kiro only; claude 0).
 	ContextUsagePercent float64 `json:"context_usage_percent,omitempty"`
-	// TurnDurationMs is the duration of the most recently completed turn.
-	// kiro: from _kiro.dev/metadata. claude: 0 until estimator wires up.
+	// TurnDurationMs is the last completed turn's duration (kiro only; claude 0).
 	TurnDurationMs int64 `json:"turn_duration_ms,omitempty"`
-	// MeteringUsage carries backend-reported per-turn billing rows when
-	// available (kiro). Each entry is one billing dimension, e.g.
-	// {value: 0.024, unit: "credit"}.
-	//
-	// READ-ONLY, shared across snapshots: while the process's MeteringGen is
-	// unchanged every Snapshot returns the same backing array (meteringCache,
-	// #2345). Consumers — SnapshotEnricher hooks included — must not modify
-	// elements in place; copy first if a mutated view is needed.
+	// MeteringUsage carries backend-reported per-turn billing rows (kiro).
+	// READ-ONLY, shared across snapshots: while MeteringGen is unchanged
+	// every Snapshot returns the same backing array (#2345). Consumers,
+	// SnapshotEnricher hooks included, must copy before mutating.
 	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
 	// Effort is the backend's thinking-effort tier for the latest turn
-	// ("low" / "medium" / "high" / "xhigh" / "max" on kiro). Empty for
-	// backends that report none (claude, codex), for sessions whose process
-	// has been evicted, and before the first turn's metadata frame lands —
-	// the dashboard hides the header tag in all three cases. Not persisted
-	// to sessions.json, so it resets across restarts like TurnDurationMs.
-	// docs/rfc/kiro-effort-visibility.md
+	// (low/medium/high/xhigh/max on kiro). Empty for backends that report
+	// none, evicted sessions, and before the first metadata frame; the
+	// dashboard hides the tag. Not persisted, so it resets across restarts
+	// (docs/rfc/kiro-effort-visibility.md).
 	Effort string `json:"effort,omitempty"`
 }

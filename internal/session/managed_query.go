@@ -17,33 +17,18 @@ import (
 
 // getSessionID returns the session ID lock-free via atomic.Pointer[string].
 //
-// R230C-CR-5: there are three SessionID-shaped accessors across two
-// packages — keep them in mind so future refactors don't accidentally
-// drop one or introduce a fourth:
-//
-//   - ManagedSession.getSessionID — package-private; canonical lock-free
-//     read of the session-level atomic. Used internally inside this file.
-//   - ManagedSession.SessionID — public alias of getSessionID; satisfies
-//     the cli.HistorySessionView interface (Wrapper.NewHistorySource
-//     factory wiring) and is the right entry point for cross-package
-//     callers in internal/server / internal/dispatch.
-//   - cli.Process.GetSessionID — different layer entirely. Reads the CLI
-//     subprocess's most-recently-observed session ID off the live event
-//     stream. The two layers may briefly disagree during a /resume
-//     handshake or first-Send capture; callers picking between them
-//     should choose by intent: "what does naozhi remember for this chat
-//     key" → ManagedSession.SessionID; "what does the CLI think the
-//     active session is right now" → Process.GetSessionID.
+// Distinct from cli.Process.GetSessionID, which reads the CLI subprocess's
+// most-recently-observed ID off the live event stream; the two may briefly
+// disagree during a /resume handshake or first-Send capture. Pick by
+// intent: "what naozhi remembers for this chat key" → this / SessionID;
+// "what the CLI thinks is active right now" → Process.GetSessionID.
 func (s *ManagedSession) getSessionID() string {
 	return loadAtomicString(&s.sessionID)
 }
 
-// SessionID returns the current CLI session ID, lock-free. Public alias
-// for getSessionID used by the cli.HistorySessionView interface
-// (Sprint 1a, Wrapper.NewHistorySource factory wiring) and any future
-// caller that needs the current ID without taking r.mu. See
-// getSessionID's godoc for the relationship with cli.Process.GetSessionID
-// (R230C-CR-5).
+// SessionID returns the current CLI session ID, lock-free. Public alias for
+// getSessionID satisfying cli.HistorySessionView and cross-package callers
+// that need the ID without taking r.mu.
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
 // setSessionID stores the session ID atomically.
@@ -52,9 +37,8 @@ func (s *ManagedSession) setSessionID(id string) {
 }
 
 // parseKeyParts lazily parses the immutable session key into cached components.
-// Hand-rolled split avoids the []string allocation that strings.SplitN would
-// produce — every new session triggers exactly one parseKeyParts on its first
-// Snapshot, and dashboards poll dozens of sessions per second. (R227-PERF-13)
+// Hand-rolled split avoids the []string allocation of strings.SplitN on the
+// dashboard poll hot path.
 func (s *ManagedSession) parseKeyParts() {
 	s.keyOnce.Do(func() {
 		k := s.key
@@ -83,21 +67,16 @@ func (s *ManagedSession) parseKeyParts() {
 }
 
 // HasProcess reports whether a process is currently attached to this
-// session, regardless of liveness. Returns true even for processes
-// that have exited but not yet been detached by the readLoop cleanup.
-// Callers needing liveness should use isAlive() (private) or check
-// State() == "ready"/"busy" via the Snapshot path. Lock-free read of
-// the atomic.Pointer[processBox] backing field.
+// session, regardless of liveness: true even for an exited process not yet
+// detached by readLoop cleanup. Use isAlive() or State() for liveness.
 func (s *ManagedSession) HasProcess() bool {
 	return s.loadProcess() != nil
 }
 
 // State returns just the live process state ("ready" / "busy" / etc.)
-// without performing the SetModel mirror or building a full
-// SessionSnapshot. Lock-free hot path for high-frequency observers
-// (R230C-PERF-1: connector_subscribe ticks per agent_message_chunk
-// event ~10-50/s and only needs State + DeathReason). Returns "ready"
-// when no process is attached, mirroring Snapshot's no-proc branch.
+// without the SetModel mirror or a full SessionSnapshot — lock-free hot
+// path for high-frequency observers. Returns "ready" when no process is
+// attached, mirroring Snapshot's no-proc branch.
 func (s *ManagedSession) State() string {
 	proc := s.loadProcess()
 	if proc == nil {
@@ -107,69 +86,41 @@ func (s *ManagedSession) State() string {
 }
 
 // DeathReason returns the recorded death cause string ("" when the
-// session is healthy or has not died yet). Companion to State() for
-// connector_subscribe's session_state push so the change-detection
-// branch can avoid a full Snapshot. R230C-PERF-1.
+// session is healthy or has not died yet).
 func (s *ManagedSession) DeathReason() string {
 	return loadAtomicString(&s.deathReason)
 }
 
 // Snapshot returns a point-in-time view of this session.
 //
-// Side effect (R230C-CR-Diag / R229-GO-2): when a live process reports a
-// non-empty Model() that disagrees with the persisted s.model field,
-// Snapshot writes the live value back via SetModel before returning the
-// view. This keeps the dashboard's model chip in sync with what the CLI
-// is actually using (kiro reports the model only after session/new
-// completes, not at spawn time). Callers that need a strictly read-only
-// snapshot should not rely on this path; a future SnapshotReadOnly
-// variant is tracked under R229-GO-2 once the dashboard polling cadence
-// is moved to a dedicated mirror.
+// Side effect: a live process Model() that differs from the persisted
+// s.model is mirrored back via SetModel so the dashboard chip tracks what
+// the CLI actually uses. Use snapshotReadOnly for a pure read.
 //
-// Performance contract (R214-PERF-2 #411): Snapshot MUST NOT copy
-// persistedHistory or any other O(N) backing structure. Dashboards poll
-// at 1Hz × N tabs × M sessions, and at 500 entries × ~400 B each the
-// per-call copy would burn ~200 KB of allocation per session per second.
-// Scalar fields are cached via atomic.Pointer[string] (lastPrompt,
-// lastActivity, lastResponse, deathReason, model) so the snapshot is
-// O(1) regardless of session age. Callers that need the full event log
-// must call EventEntries / EventLastN / EventEntriesSince explicitly,
-// which is the cheap-rare-call path versus this hot poll path.
-// snapshot_no_history_copy_test.go pins the contract.
+// Performance contract (#411): Snapshot MUST NOT copy persistedHistory or
+// any other O(N) structure — dashboards poll at 1Hz × N tabs × M sessions.
+// Scalar fields are atomic caches so the call is O(1); the event log is
+// reached via EventEntries / EventLastN / EventEntriesSince.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	return s.snapshot(true)
 }
 
-// snapshotReadOnly returns the same point-in-time view as Snapshot but
-// guarantees no read-side writes: it never calls SetModel to mirror the
-// live proc.Model() back into the persisted field. It still resolves
-// snap.Model from the live process (falling back to the persisted value),
-// so callers see the up-to-date model id — they just don't trigger the
-// atomic store that dirties the cache line.
-//
-// R20260602-PERF-3 (#1577): VisitSessions runs fn under r.mu.RLock for
-// every live session on the AutoTitler tick. Mirroring inside that loop
-// is both an unnecessary write on a read path and makes concurrency
-// reasoning harder. The dashboard poll path (router.Snapshots /
-// wshub / connector_subscribe) keeps the mirroring Snapshot() so the
-// live model still lands in sessions.json (UI Round 5 R5-3); only the
-// daemon-iterator path opts into this pure-read variant.
+// snapshotReadOnly is Snapshot without the SetModel mirror: snap.Model is
+// still resolved from the live process (falling back to the persisted
+// value) but nothing is written. VisitSessions runs under r.mu.RLock for
+// every live session, and a write on that read path is both unnecessary
+// and harder to reason about (#1577). The dashboard poll path keeps the
+// mirroring Snapshot() so the live model still lands in sessions.json.
 func (s *ManagedSession) snapshotReadOnly() SessionSnapshot {
 	return s.snapshot(false)
 }
 
-// snapshot is the shared core for Snapshot / snapshotReadOnly. When
-// mirrorModel is true and the live process reports a model that differs
-// from the persisted value, it mirrors the live value back via SetModel
-// (the one intentional read-side write, see Snapshot godoc / R226-CR-13).
-// When false it skips that store entirely; snap.Model resolution is
+// snapshot is the shared core for Snapshot / snapshotReadOnly; mirrorModel
+// gates the one intentional read-side write. snap.Model resolution is
 // identical in both modes.
 func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	s.parseKeyParts()
-	// R215-ARCH-P2-7: pull backend/cliName/cliVersion in one atomic Load
-	// instead of three sequential Loads — Snapshot is the 1 Hz × N tabs ×
-	// N sessions hot path, so collapsing redundant atomic reads here
-	// adds up at scale.
+	// One atomic Load for backend/cliName/cliVersion instead of three.
 	id := s.loadCLIIdentity()
 	snap := SessionSnapshot{
 		Key:           s.key,
@@ -187,33 +138,23 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		CLIVersion:    id.cliVersion,
 		UserLabel:     s.UserLabel(),
 		LabelOrigin:   s.LabelOrigin(),
-		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the
-		// proc-bearing branch below will overwrite if live proc has a
-		// fresher value. No-proc snapshots (evicted / pre-spawn) keep
-		// the persisted value so dashboard doesn't blink to
-		// "(模型未配置)" during restart-reattach.
+		// Seed from the persisted value; the proc branch below overwrites
+		// with a fresher live value. No-proc snapshots (evicted / pre-spawn)
+		// keep it so the dashboard doesn't blink to "(模型未配置)".
 		Model: s.Model(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)
-	// meteringCredits is the credit-unit sum of snap.MeteringUsage, computed
-	// once per metering generation alongside the cached rows (#2345).
+	// Credit-unit sum of snap.MeteringUsage, computed once per metering
+	// generation alongside the cached rows (#2345).
 	var meteringCredits float64
-	// costSpent is the genuine cumulative spend (sum of per-turn deltas),
-	// monotonic across resume/restart. It is the authoritative session total.
-	// Fall back to sessCost only for legacy sessions whose store predates the
-	// cost_spent field (and for the brief pre-first-turn window after a resume,
-	// where totalCost carries the inherited display value so the header doesn't
-	// flash $0.00). See runhistory.TurnCostDelta and finishRun.
-	//
-	// NOTE: float64 + omitempty cannot distinguish "legacy store (field
-	// absent)" from "post-upgrade session that has genuinely spent 0". Both
-	// map to spent==0 → fall back to sessCost. This is benign: a zero-spend
-	// session's sessCost is also ~0, so the displayed total is correct either
-	// way. The ambiguity only matters if a real spend were ever exactly 0.0,
-	// which TurnCostDelta never produces for a costed turn.
+	// costSpent (sum of per-turn deltas, monotonic across resume/restart) is
+	// the authoritative total. spent==0 also covers legacy stores without
+	// cost_spent and the pre-first-turn window after resume, so fall back to
+	// sessCost there; a zero-spend session's sessCost is ~0 too, so the
+	// ambiguity is benign. See runhistory.TurnCostDelta and finishRun.
 	spent := loadTotalCost(&s.costSpent)
 	if spent <= 0 {
 		spent = sessCost
@@ -221,42 +162,20 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	if proc == nil {
 		snap.TotalCost = spent
 		snap.State = "ready"
-		// #1644: a live proc reports UserTurnCount; an evicted / suspended /
-		// stub session has no proc, so fall back to the count of persisted
-		// "user" entries. Without this MessageCount stayed 0 forever and
-		// AutoTitler's minUserTurns gate skipped the session unconditionally,
-		// so a fully-conversed-but-idle-evicted session never got auto-named.
+		// No proc to report UserTurnCount: count persisted "user" entries
+		// so AutoTitler's minUserTurns gate still sees idle-evicted
+		// sessions (#1644).
 		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
 		snap.State = proc.State().String()
 		snap.Protocol = proc.ProtocolName()
-		// UI Round 5 R5-3: model resolution priority
-		//   1. live proc.Model() (claude system/init or kiro SpawnOptions)
-		//   2. persisted s.Model() (post-restart, before next init)
-		// When proc reports a model and it differs from / is more
-		// recent than what we persisted, mirror it back so the next
-		// saveStore tick captures it. Empty live → keep persisted.
-		//
-		// R226-CR-13: this SetModel is an intentional read-side write —
-		// dashboard polls Snapshot at 1Hz and proc-reported model is the
-		// authoritative source we need to ship into sessions.json.
-		// Snapshot is otherwise read-only; if a future caller needs a
-		// pure-read variant, factor a SnapshotReadOnly that skips this
-		// mirror rather than dropping it (skipping silently regresses to
-		// the symptom Round 5 R5-3 fixed: dashboard "model 未配置" blink
-		// after spawn until the first result event triggered a save).
+		// Model priority: live proc.Model() over persisted s.Model(). A
+		// differing live value is mirrored back so the next saveStore
+		// captures it; empty live keeps persisted. Compare before storing:
+		// storeAtomicString always swaps the pointer, and an unconditional
+		// store per 1Hz poll dirties the cache line for nothing (#534).
 		liveModel := proc.Model()
 		if liveModel != "" {
-			// R236-PERF-13 (#534): the previous comment claimed SetModel
-			// short-circuits internally — it does NOT. storeAtomicString
-			// always swaps the pointer, which dirties the cache line and
-			// at 1Hz × N tabs × M sessions costs an avoidable atomic
-			// store per poll on what is otherwise a pure-read path.
-			// Compare the cached value first and only mirror on change.
-			//
-			// R20260602-PERF-3 (#1577): the read-only variant
-			// (snapshotReadOnly, used by VisitSessions) skips the mirror
-			// entirely so the daemon iterator never writes under RLock.
 			if mirrorModel {
 				if cached := s.Model(); cached != liveModel {
 					s.SetModel(liveModel)
@@ -266,15 +185,10 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		} else {
 			snap.Model = s.Model()
 		}
-		// R20260612-live-version: CLI binary version resolution, same
-		// priority + mirror discipline as model above —
-		//   1. live proc.LiveVersion() (claude system/init claude_code_version)
-		//   2. persisted id.cliVersion (spawn-time Wrapper.CLIVersion, also
-		//      the only source for ACP backends that don't self-report)
-		// The spawn-time value is detected once at naozhi startup, so after
-		// a host claude upgrade it goes stale; the init frame is the
-		// authoritative version of the binary THIS process actually exec'd.
-		// Empty live (init not yet arrived / ACP) → keep the persisted value.
+		// CLI version: live proc.LiveVersion() (system/init frame, the
+		// binary THIS process exec'd) over persisted id.cliVersion (detected
+		// once at naozhi startup, so stale after a host upgrade; also the
+		// only source for ACP backends). Same mirror discipline as model.
 		if liveVersion := proc.LiveVersion(); liveVersion != "" {
 			if mirrorModel {
 				if id.cliVersion != liveVersion {
@@ -283,65 +197,42 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 			}
 			snap.CLIVersion = liveVersion
 		}
-		// Authoritative total is the monotonic costSpent (sum of per-turn
-		// deltas), which — unlike proc.TotalCost(), the CLI's per-incarnation
-		// running total that RESETS on resume — never regresses across a
-		// process replacement. The old max(proc.TotalCost(), sessCost) logic
-		// was wrong precisely because the CLI re-counts from ~0 after resume,
-		// so the session total would freeze at the pre-resume value until the
-		// new incarnation's running total climbed back past it. costSpent is
-		// updated in finishRun on every completed turn.
+		// Use the monotonic costSpent, not proc.TotalCost(): the CLI's
+		// per-incarnation running total RESETS on resume, so it would freeze
+		// the session total at the pre-resume value until it climbed back.
 		snap.TotalCost = spent
 		snap.Subagents = proc.TurnAgents()
-		// Prefer the EventLog-maintained summary (updated lock-free on every
-		// event) so we don't need a wrapper closure around Send just to track
-		// lastActivity.
+		// EventLog-maintained summaries (updated lock-free on every event).
 		snap.LastActivity = proc.LastActivitySummary()
-		// R110-P1: live process is the authoritative source for the most-recent
-		// assistant text reply. Empty when no text block has streamed yet
-		// (post-spawn pre-result window); the s.lastResponse fallback below
-		// covers the post-restart / pre-replay case via scanLastSummaries seed.
+		// Empty until a text block has streamed; the s.lastResponse fallback
+		// below covers the post-restart / pre-replay case.
 		snap.LastResponse = proc.LastResponseSummary()
-		// MessageCount is the cumulative user turn count observed by the
-		// current Process since its last spawn. proc==nil branch leaves the
-		// field at zero so UI code can gate visibility on `> 0` and skip the
-		// chip for brand-new sessions that haven't yet received a prompt.
+		// User turns observed by the current Process since its spawn; the
+		// dashboard gates the chip on `> 0`.
 		snap.MessageCount = proc.UserTurnCount()
 
-		// Normalize layer (docs/rfc/multi-backend.md §8.8). Process getters
-		// return zero values for fields the backend never reports, so
-		// `> 0` gating in dashboard.js works for both claude (most fields
-		// zero today) and kiro (all fields populated).
+		// Normalize layer (docs/rfc/multi-backend.md §8.8): getters return
+		// zero for fields the backend never reports so `> 0` gating in
+		// dashboard.js works for both claude and kiro.
 		snap.ContextUsagePercent = proc.ContextUsagePercent()
 		snap.TurnDurationMs = proc.TurnDurationMs()
 		snap.MeteringUsage, meteringCredits = s.meteringView(proc)
-		// Effort stays inside the proc != nil branch (unlike CostUnit below):
-		// it is a runtime observation, not a static label derived from
-		// Backend, so an evicted session has no "current effort" to show.
-		// The dashboard tag then hides, matching TurnDurationMs. Deliberately
-		// NOT seeded from persisted state the way Model is — effort is never
-		// written to sessions.json, so there is no stored value to fall back
-		// on. docs/rfc/kiro-effort-visibility.md §9
-		// For EffortTier backends the process pre-seeds this from the spawn
-		// pin (cli.Process.seedEffort), so claude shows its --effort tier
-		// without ever reporting one; kiro's metadata report overwrites.
+		// Effort is a runtime observation, never persisted to sessions.json,
+		// so unlike Model there is nothing to seed for an evicted session and
+		// the dashboard tag hides (docs/rfc/kiro-effort-visibility.md §9).
+		// EffortTier backends pre-seed it from the spawn pin
+		// (cli.Process.seedEffort); kiro's metadata report overwrites.
 		snap.Effort = proc.Effort()
 	}
 
-	// CostUnit is derived from backend even when proc is nil so an evicted
-	// session still renders the right cost label until pruning. claude is
-	// the default for legacy stores predating the Backend field.
+	// Derived from backend even when proc is nil so an evicted session still
+	// renders the right cost label; claude is the default for legacy stores.
 	snap.CostUnit = costUnitForBackend(snap.Backend)
 
-	// UI Round 5 R5-4: when CostUnit is "credits" (kiro family) the
-	// dashboard's header cost cell should show the SESSION-level total,
-	// not per-turn. claude path keeps snap.TotalCost from CLI's own
-	// running total (USD). For kiro we derive it from the accumulated
-	// MeteringUsage (Process.applyMetadata is now session-level).
-	// Only override when a credit-typed entry exists; if kiro ever emits
-	// a non-credit unit (token / cost) under cost_unit=credits, don't
-	// silently zero the running total. The sum comes from meteringView's
-	// per-generation cache (#2345) — see sumMeteringCredits.
+	// For credit-unit backends (kiro) the header shows the SESSION-level
+	// credit sum from the metering cache (#2345); claude keeps the USD total.
+	// Only override when a credit-typed entry exists so a non-credit unit
+	// under cost_unit=credits doesn't silently zero the running total.
 	if snap.CostUnit == "credits" && meteringCredits > 0 {
 		snap.TotalCost = meteringCredits
 	}
@@ -355,10 +246,8 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 			snap.LastActivity = la
 		}
 	}
-	// R110-P1: only fall back to the cached lastResponse when the live process
-	// hasn't yet reported one. Mirrors the LastPrompt/LastActivity priority
-	// (live wins, cache survives restart). Empty cache + empty live leaves the
-	// field unset → JSON omitempty hides the dim line on brand-new sessions.
+	// Live wins, cache survives restart; both empty leaves the field unset
+	// so JSON omitempty hides the dim line on brand-new sessions.
 	if snap.LastResponse == "" {
 		if lr := loadAtomicString(&s.lastResponse); lr != "" {
 			snap.LastResponse = lr
@@ -368,12 +257,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	return snap
 }
 
-// hasInjectedHistory reports whether persistedHistory contains any entries.
-// Used by the startup history loader (R53-ARCH-001 fix) to decide whether
-// the deferred JSONL backfill path is needed: if ReconnectShims already
-// injected history via proc.InjectHistory → s.InjectHistory's
-// persistedHistory append, the flag is set and we skip the redundant FS
-// read. Read-only, no copy — callers just need a boolean.
+// hasInjectedHistory reports whether persistedHistory contains any entries,
+// letting the startup history loader skip the JSONL backfill when
+// ReconnectShims already injected history. Read-only, no copy.
 func (s *ManagedSession) hasInjectedHistory() bool {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
@@ -382,9 +268,8 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 
 // recountPersistedUserTurnsLocked recomputes persistedUserTurns from the
 // current persistedHistory slice. Caller MUST hold s.historyMu (read or
-// write — the scan only reads the slice, the result is stored atomically).
-// Invoked after every persistedHistory mutation in InjectHistory so the
-// proc==nil snapshot branch (#1644) can read the count lock-free.
+// write — the scan only reads the slice, the result is stored atomically)
+// so the proc==nil snapshot branch can read the count lock-free (#1644).
 func (s *ManagedSession) recountPersistedUserTurnsLocked() {
 	s.persistedUserTurns.Store(countUserTurns(s.persistedHistory))
 }
@@ -404,20 +289,12 @@ func (s *ManagedSession) EventEntries() []clievent.EventEntry {
 }
 
 // EventEntriesAppend is the buffer-reusing variant of EventEntries: it appends
-// this session's full event log onto dst and returns the grown slice instead of
-// always allocating a fresh []clievent.EventEntry + full copy.
-//
-// R20260607-PERF-6 (#1885): EventEntries() allocates make([]clievent.EventEntry,len)
-// + copy on every call. The startup-discovery scan (EventEntriesForKey, called
-// per-session in router_discovery) and collectPreviousHistory (every spawn/reset)
-// run it across O(N sessions) of dead sessions, each ~120 KB for 500-entry
-// histories. Callers that iterate sessions can pass a single pooled buffer
-// (buf[:0]) and reuse its backing array between sessions.
+// this session's full event log onto dst and returns the grown slice, so
+// callers iterating O(N) dead sessions can reuse one pooled buffer (#1885).
 //
 // Ownership mirrors EventEntriesSinceAppend: the caller must not retain dst
-// across calls; the returned slice shares the backing array with dst. The
-// live-process branch forwards through proc.EventEntries() (the ring's own
-// snapshot) and appends it, so dst's prefix is preserved in every branch.
+// across calls; the returned slice shares the backing array with dst. dst's
+// prefix is preserved in every branch.
 func (s *ManagedSession) EventEntriesAppend(dst []clievent.EventEntry) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
@@ -430,31 +307,13 @@ func (s *ManagedSession) EventEntriesAppend(dst []clievent.EventEntry) []clieven
 }
 
 // SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
-// or nil when the session is not backed by a live Claude-CLI process (fake
-// test process, dead process, ACP protocol, etc.). Callers must guard the
-// nil return — the agent-team UI endpoints downgrade to 404 in that case.
+// or nil when the session is not backed by one (fake test process, dead
+// process, ACP protocol). Callers must guard the nil return.
 //
-// Intentionally type-asserts rather than widening processIface so the fake
-// processes in router/managed tests don't need to implement the full Linker
-// surface. The downside — a test process that wants real linker behaviour
-// must wrap *cli.Process directly — is acceptable because the linker's own
-// unit tests in internal/cli/subagent_link_test.go are the canonical spot
-// for that coverage.
-//
-// R239-ARCH-I: the consumer-facing interface lives at
-// internal/session/agentlink.AgentLinker — server stores wired linkers
-// keyed on that interface. ManagedSession still returns the concrete
-// *cli.SubagentLinker so callers that need the full linker surface
-// (SeedFromHistory / Resolve / SetContext / ConfigureForTest, used by
-// the cli package itself plus its tests) keep working without an extra
-// type assertion. The interface widens only at the server boundary.
-//
-// TODO: introduce AgentIntrospector interface when a second backend needs
-// agent-view support. Tracked in docs/TODO.md (R214-CODE-6 / R217-ARCH-2 /
-// R219-ARCH-3 — the lifecycle question, distinct from the consumer-side
-// interface R239-ARCH-I now solves). The three live anchors above cover
-// the same root; the orphan-id reference (R245-CR-008) was retired in
-// favour of pointing at the live anchors directly.
+// Intentionally type-asserts rather than widening processIface so fake test
+// processes need not implement the Linker surface; the agentlink.AgentLinker
+// interface widens only at the server boundary. TODO: AgentIntrospector
+// interface when a second backend needs agent-view support (docs/TODO.md).
 func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()
@@ -505,16 +364,12 @@ func (s *ManagedSession) EventLastN(n int) []clievent.EventEntry {
 	return out
 }
 
-// sortEntriesByTimeStable sorts entries in-place by Time ascending using a
-// stable sort so that entries sharing the same Time keep their insertion
-// order (matters for InjectHistory batches where a whole chain replay may
-// collapse to a single default timestamp). Callers of EventEntriesSince /
-// EventEntriesBefore depend on chronological output — the ring buffer and
-// persistedHistory themselves don't guarantee strict ordering because
-// (a) InjectHistory may interleave segments from multiple session chains
-// and (b) AppendBatch assigns a single wall-clock to zero-Time entries
-// while older entries might still arrive with real earlier timestamps
-// from resume paths.
+// sortEntriesByTimeStable sorts entries in-place by Time ascending. Stable so
+// entries sharing a Time keep insertion order (InjectHistory batches may
+// collapse a whole chain replay to one timestamp). persistedHistory is not
+// ordered by construction: InjectHistory may interleave segments from
+// multiple session chains, and AppendBatch stamps zero-Time entries with a
+// single wall-clock while resume paths deliver real earlier timestamps.
 func sortEntriesByTimeStable(entries []clievent.EventEntry) {
 	if len(entries) < 2 {
 		return
@@ -527,41 +382,21 @@ func sortEntriesByTimeStable(entries []clievent.EventEntry) {
 // EventEntriesSince returns the event log entries with Time > afterMS in
 // chronological order.
 //
-// Live-process branch: proc.EventEntriesSince is backed by cli.EventLog's
-// ring buffer, which records entries in strict append order. Append stamps
-// zero-Time entries with now and AppendBatch uses a single now for the
-// batch, so Time is weakly monotonic by construction and no re-sort is
-// needed. This is the WS push hot path (wshub.go emits on every notify
-// tick), so avoiding an O(n)+sort here matters.
-//
-// Dead-session branch: persistedHistory is NOT guaranteed sorted because
-// InjectHistory may interleave segments from multiple session chains
-// (startup backfill replays prev-session IDs in reverse-chain order).
-// We do a full linear scan + stable sort so paginated fetches see
-// chronological output.
+// Live branch: cli.EventLog's ring is weakly Time-monotonic by construction
+// (Append stamps zero-Time entries with now; AppendBatch uses one now), so
+// no re-sort on this WS push hot path. Dead branch: persistedHistory is
+// sorted lazily under historyMu if the sorted flag is unset.
 func (s *ManagedSession) EventEntriesSince(afterMS int64) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
-	// Skip the stable sort once the maintained invariant says
-	// persistedHistory is already in Time order. Steady-state dashboard
-	// polling (1Hz × N tabs × M dead sessions) used to pay this every
-	// call; the in-place sort under historyMu also blocks concurrent
-	// readers. R237-PERF-12.
-	//
-	// R040034-PERF-6 (#1405): production mutations now sort eagerly in
-	// InjectHistory under the existing write lock, so this fallback only
-	// fires for test fixtures that assign s.persistedHistory directly and
-	// leave the flag false. Promote to the write lock once, sort in place,
-	// set the flag, and downgrade — subsequent reads then take the cheap
-	// RLock-only path.
+	// InjectHistory sorts eagerly under the write lock (#1405), so the
+	// promote-sort-downgrade fallback below only fires for fixtures that
+	// assign persistedHistory directly; steady-state reads stay RLock-only.
 	s.historyMu.RLock()
-	// Fast path: empty history needs no work; when sorted, the last entry
-	// holds the max Time so we can skip the linear scan if it's already
-	// <= afterMS. Idle dashboard poll (afterMS = last seen) on dead
-	// sessions used to scan the entire persistedHistory every tick even
-	// though every entry was older than afterMS. R260528-PERF-4.
+	// Fast path: when sorted, the last entry holds the max Time, so an idle
+	// poll (afterMS = last seen) skips the linear scan entirely.
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
 		s.historyMu.RUnlock()
 		return nil
@@ -577,23 +412,15 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []clievent.EventEntry 
 		}
 		s.historyMu.Unlock()
 		s.historyMu.RLock()
-		// Re-check the short-circuit now that we're sorted — the sort
-		// could only have rearranged entries, not added new ones, but
-		// take the same fast exit if last.Time <= afterMS to avoid the
-		// scan-and-allocate on the steady-state poll.
+		// Same fast exit now that we're sorted (the sort rearranged, never
+		// added, entries).
 		if n := len(s.persistedHistory); n == 0 || s.persistedHistory[n-1].Time <= afterMS {
 			s.historyMu.RUnlock()
 			return nil
 		}
 	}
-	// R20260531-PERF-1: small initial cap and let append grow naturally.
-	// The steady-state dashboard poll (1Hz × N-tab × dead-session) is an
-	// incremental query with a recent afterMS that matches only the last
-	// handful of entries, so presizing to len(persistedHistory) (up to the
-	// full ring, default 500) over-allocates ~500 slots per poll for a
-	// 0-5-entry result. afterMS=0 full replay still happens (e.g. first
-	// load of a dead session) and will pay a few reallocations growing past
-	// 16, but that path is rare; we trade it for the common case.
+	// Small cap: the steady-state poll matches only the last few entries,
+	// so presizing to len(persistedHistory) would over-allocate per poll.
 	out := make([]clievent.EventEntry, 0, 16)
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
@@ -605,44 +432,23 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []clievent.EventEntry 
 }
 
 // EventEntriesSinceAppend is the buffer-reusing variant of EventEntriesSince
-// for both the live-process and dead-session (persistedHistory) paths.
-//
-// R20260604-PERF-25 (#1740): ProcessEventReader now exposes
-// EventEntriesSinceAppend, so the live path forwards dst straight into the
-// EventLog's append-mode query and reuses the caller's buffer — previously
-// this branch allocated a fresh []clievent.EventEntry on every notify wave (5 evt/s
-// × N sessions × per-tab subscribers).
-//
-// Callers that poll at 1Hz per N WS tabs (backfillSubscriberEvents) can pass
-// a per-client dst buffer so the common incremental case (0-5 new entries)
-// appends into existing capacity instead of allocating. Ownership: the caller
-// must not retain dst across calls; the returned slice shares backing array
-// with dst.
+// for both the live-process and dead-session (persistedHistory) paths, so
+// 1Hz WS pollers can append the common 0-5 new entries into existing
+// capacity (#1740). Ownership: the caller must not retain dst across calls;
+// the returned slice shares its backing array with dst.
 func (s *ManagedSession) EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
-		// Empty dst is the hot path (backfillSubscriberEvents always passes
-		// buf[:0]): forward straight into the process's append-mode query so
-		// the EventLog reuses dst's backing capacity — the #1740 win.
+		// Empty dst is the hot path: forward straight into the append-mode
+		// query so the EventLog reuses dst's backing capacity.
 		if len(dst) == 0 {
 			return proc.EventEntriesSinceAppend(dst, afterMS)
 		}
-		// Non-empty dst (resubscribe catch-up): the prefix must be preserved.
-		// EventLog.EntriesSinceAppend re-slices from its argument's [:0] and
-		// appends forward, so handing it dst directly would OVERWRITE the
-		// prefix. Instead hand it dst[len(dst):] — a zero-length view anchored
-		// at dst's tail that writes into dst's spare capacity past the prefix,
-		// reusing the backing array when capacity allows (the #1740 win).
-		// R20260607-PERF-002 (#1922): the previous
-		// append(dst, proc.EventEntriesSince(afterMS)...) made EventLog
-		// allocate a fresh []clievent.EventEntry, silently defeating the
-		// buffer-reuse optimization whenever dst had residual entries.
-		//
-		// When the spare capacity sufficed, `appended` already occupies dst's
-		// tail and append is an in-place no-op (copy handles the overlap); when
-		// it didn't, EntriesSinceAppend returned a fresh slice and append grows
-		// dst to fold it in. Either way the prefix is preserved and the result
-		// spans prefix + appended tail.
+		// Non-empty dst: EventLog.EntriesSinceAppend re-slices its argument
+		// to [:0], so passing dst would OVERWRITE the prefix. dst[len(dst):]
+		// writes into spare capacity past the prefix instead; the final
+		// append is then an in-place no-op (capacity sufficed) or a grow
+		// that folds in the fresh slice. Prefix preserved either way (#1922).
 		appended := proc.EventEntriesSinceAppend(dst[len(dst):], afterMS)
 		return append(dst, appended...)
 	}
@@ -671,12 +477,9 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []clievent.EventEntry, afte
 			return dst[:0]
 		}
 	}
-	// R20260613-PERF-1: persistedHistory is guaranteed sorted at this point —
-	// the !persistedHistorySorted branch above sorted and re-checked, and the
-	// n==0 / last<=afterMS early-return guards mean we only reach here with a
-	// non-empty sorted slice whose last element is strictly > afterMS.
-	// Binary-search for the first entry with Time > afterMS, then bulk-append
-	// the tail instead of scanning every element individually.
+	// Here persistedHistory is sorted, non-empty, and its last element is
+	// strictly > afterMS, so binary-search the first Time > afterMS and
+	// bulk-append the tail.
 	i, _ := slices.BinarySearchFunc(s.persistedHistory, afterMS, func(e clievent.EventEntry, t int64) int {
 		if e.Time <= t {
 			return -1
@@ -689,23 +492,10 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []clievent.EventEntry, afte
 }
 
 // EventEntriesBefore returns up to `limit` entries with Time < beforeMS
-// drawn from the in-memory log (live process ring or persistedHistory).
-// Entries are returned in chronological order.
-//
-// Scope: memory-tier only. Does NOT consult the backend's disk-tier
-// history.Source — callers that need complete historical coverage should
-// use EventEntriesBeforeCtx which falls back to disk when memory is
-// exhausted. This split preserves the legacy call sites (tests, internal
-// helpers) that can't easily thread a context through.
-//
-// The live-process branch relies on EventLog's insertion-order ring which
-// is already chronological (Append/AppendBatch assign monotonic Time to
-// zero-Time entries), so it returns without re-sorting. Only the
-// persistedHistory branch pays for a stable sort because startup chain
-// replay may interleave segments.
-//
-// beforeMS <= 0 is treated as "no upper bound" — equivalent to the tail
-// of the log, matching EventLastN semantics. limit <= 0 returns nil.
+// from the in-memory log (live ring or persistedHistory), chronological.
+// Memory-tier only: use EventEntriesBeforeCtx for the disk fallback.
+// beforeMS <= 0 means "no upper bound" (tail of the log, like EventLastN);
+// limit <= 0 returns nil.
 func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
@@ -716,9 +506,8 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 	}
 	out, descSorted := s.persistedHistoryBefore(beforeMS, limit)
 	if descSorted {
-		// persistedHistory was Time-ascending; the backward walk yielded
-		// Time-descending output. A single O(n) reverse gives ascending order,
-		// skipping the O(n log n) stable sort.
+		// Backward walk over ascending input yields descending output; an
+		// O(n) reverse beats the O(n log n) stable sort.
 		slices.Reverse(out)
 	} else {
 		sortEntriesByTimeStable(out)
@@ -727,18 +516,14 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 }
 
 // EventEntriesBeforeCtx extends EventEntriesBefore with a disk-tier
-// fallback. When the in-memory log has no entries strictly older than
-// beforeMS, the session's history.Source is consulted. This is the path
-// the dashboard pagination handler takes; legacy non-ctx callers still
-// use the memory-only variant.
+// fallback: when memory has no entries strictly older than beforeMS, the
+// session's history.Source is consulted.
 //
-// The two tiers are never merged: the memory tier is authoritative for
-// any range it covers (since it includes naozhi-synthesized events like
-// LogSystemEvent that never reach disk), and falling through to disk
-// only when memory is empty keeps the result strictly chronological
-// without a deduplication step. The trade-off is one extra round trip
-// on the page that straddles the memory-bottom; on all subsequent pages
-// memory returns empty and disk is queried directly.
+// The two tiers are never merged: memory is authoritative for any range it
+// covers (it includes naozhi-synthesized events like LogSystemEvent that
+// never reach disk), and falling through only when memory is empty keeps
+// the result chronological without dedup. Cost: one extra round trip on
+// the page that straddles the memory bottom.
 func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
@@ -752,9 +537,7 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 	}
 	entries, err := src.LoadBefore(ctx, beforeMS, limit)
 	if err != nil {
-		// Treat as end-of-history — logging (not propagating) matches the
-		// existing JSONL load sites in router.go which also degrade silently
-		// on read errors.
+		// Treat as end-of-history, matching the JSONL load sites in router.go.
 		slog.Warn("history source load failed", "key", s.key, "err", err)
 		return nil
 	}
@@ -763,8 +546,7 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 }
 
 // countVisibleEntries returns how many entries the dashboard would render as
-// chat bubbles (the inverse of the INTERNAL_EVENT_TYPES filter). Shared by the
-// visible-aware reader below.
+// chat bubbles (the inverse of the INTERNAL_EVENT_TYPES filter).
 func countVisibleEntries(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
@@ -775,53 +557,27 @@ func countVisibleEntries(entries []clievent.EventEntry) int {
 	return n
 }
 
-// EventLastNVisibleCtx is the initial-history entry point for the dashboard.
-// It returns the tail of the session's history guaranteed to carry enough
-// VISIBLE entries (chat bubbles) that the dashboard's initial render never
-// degrades to the blank "该会话最近仅有 agent 活动" placeholder — the symptom
-// of a parallel agent team flooding the trailing window with internal events.
+// EventLastNVisibleCtx is the dashboard's initial-history entry point: the
+// history tail carrying enough VISIBLE entries (chat bubbles) that the
+// initial render never degrades to the blank "该会话最近仅有 agent 活动"
+// placeholder when internal events flood the trailing window.
 //
-// Two tiers, mirroring EventEntriesBeforeCtx's memory-then-disk strategy:
-//
-//  1. Memory tier: the live ring (Process.EventLastNVisible) or, for a
-//     suspended/dead session, the tail of persistedHistory. The memory slice
-//     is a contiguous run so the dashboard can rebuild turnState / the running
-//     banner from the interleaved internal events.
-//  2. Disk tier: when the ring alone can't reach visibleTarget (the 500-entry
-//     ring is entirely internal — exactly the bug scenario), walk backward
-//     through the backend's history.Source one page at a time, prepending
-//     older entries until the combined visible count reaches the target or a
-//     page/total/byte ceiling trips.
-//
-// The two tiers never overlap: disk is queried strictly older than the
-// earliest in-memory Time, reusing the non-merging contract documented on
-// EventEntriesBeforeCtx, so no dedup is required. Non-claude backends carry a
-// Noop source and simply return the memory tier.
-//
-// visibleTarget <= 0 falls back to a plain EventLastN(maxTotal). The ctx
-// bounds disk I/O — callers on the WS subscribe handshake pass a short
-// timeout so a slow filesystem can't stall the first frame.
+// Memory tier first (contiguous, so the dashboard can rebuild turnState),
+// then disk pages strictly older than the earliest in-memory Time are
+// prepended until visibleTarget or a page/total/byte ceiling is reached;
+// tiers never overlap. visibleTarget <= 0 falls back to EventLastN(maxTotal).
+// ctx bounds disk I/O so a slow filesystem can't stall the WS first frame.
 func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {
 	return s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 }
 
-// EventInitialPageCtx returns the dashboard's initial-history slice together
-// with a hasMore flag stating whether any entry strictly older than the slice
-// still exists (in the ring or on disk). It is the authoritative replacement
-// for the client-side `len(events) >= INITIAL_HISTORY_LIMIT` heuristic, which
-// guessed "more history exists" from the *total* event count while the server
-// truncates the slice by *visible-bubble* count (DefaultVisibleTarget). When a
-// session has more visible bubbles than DefaultVisibleTarget but fewer total
-// events than the client's page-size hint, that heuristic wrongly suppressed
-// the "load earlier" affordance, stranding the opening messages with no way to
-// reach them. Deciding hasMore on the server — which is the side that performed
-// the truncation — closes that gap.
-//
-// The probe is one extra limit=1 reverse lookup anchored at the earliest entry
-// in the returned slice; EventEntriesBeforeCtx handles the ring→disk fallback,
-// so the probe sees disk history even when the ring is short. An empty slice
-// (idle/empty session) reports hasMore=false. The ctx bounds both the initial
-// visible-aware read and the probe.
+// EventInitialPageCtx returns the dashboard's initial-history slice plus a
+// hasMore flag: whether any entry strictly older than the slice exists (ring
+// or disk). Decided server-side because the server truncates by visible
+// bubble count, which a client total-count heuristic cannot see. The probe
+// is one limit=1 reverse lookup anchored at the earliest returned entry via
+// EventEntriesBeforeCtx (so it sees disk even when the ring is short). An
+// empty slice reports hasMore=false. ctx bounds both the read and the probe.
 func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]clievent.EventEntry, bool) {
 	entries := s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 	if len(entries) == 0 {
@@ -831,17 +587,11 @@ func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget,
 	if older := s.EventEntriesBeforeCtx(ctx, oldest, 1); len(older) > 0 {
 		return entries, true
 	}
-	// The probe came back empty. EventEntriesBeforeCtx swallows ctx
-	// cancellation and disk errors as "nil" — indistinguishable from a genuine
-	// end-of-history. The visible-aware walk above shares this same ctx (bounded
-	// by initialHistoryDiskTimeout on the WS handshake), so on a slow filesystem
-	// the walk can drain the budget and starve the probe. Fail OPEN in that
-	// case: report hasMore=true so the dashboard still mounts "load earlier"
-	// rather than authoritatively hiding it and re-stranding the opening
-	// messages — the exact regression this whole change exists to prevent. A
-	// button that pages into an already-exhausted history is a benign no-op
-	// (loadEarlierEvents marks it "done"); a wrongly hidden button is not
-	// recoverable. Only a clean (non-cancelled) empty probe means "no more".
+	// EventEntriesBeforeCtx swallows ctx cancellation as nil, and the walk
+	// above shares the ctx budget, so a starved probe looks like end-of-
+	// history. Fail OPEN: a "load earlier" button on exhausted history is a
+	// benign no-op, a wrongly hidden one is unrecoverable. Only a clean
+	// (non-cancelled) empty probe means "no more".
 	if ctx.Err() != nil {
 		return entries, true
 	}
@@ -878,14 +628,9 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 	if len(mem) > 0 {
 		before = mem[0].Time
 	}
-	// Accumulate pages newest-first; each page is strictly older than the
-	// previous. After the loop we reverse-iterate pages to produce the final
-	// older slice in ascending-Time order, avoiding the O(n²) cost of
-	// prepending each chunk into a growing slice on every iteration.
+	// Pages accumulate newest-first and are concatenated in reverse after the
+	// loop, avoiding O(n²) prepends. runningOlder keeps the ceiling check O(1).
 	var pages [][]clievent.EventEntry
-	// runningOlder tracks len(pages[0])+…+len(pages[k]) incrementally so the
-	// total-payload ceiling check is O(1) per iteration instead of O(pages).
-	// R20260603-PERF-9.
 	runningOlder := 0
 	for page := 0; page < maxVisibleDiskPages && vis < visibleTarget; page++ {
 		if ctx.Err() != nil {
@@ -911,8 +656,6 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 	if len(pages) == 0 {
 		return mem
 	}
-	// Build older in ascending-Time order: pages were collected newest-first,
-	// so iterate in reverse (oldest page first).
 	totalOlder := 0
 	for _, p := range pages {
 		totalOlder += len(p)
@@ -970,21 +713,12 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 }
 
 // LogSystemEvent appends a single "system"-typed EventEntry with the given
-// summary text to this session's event log and notifies subscribers. Used by
-// off-main-path writers (e.g. upstream/connector's async Send goroutine)
-// that would otherwise lose errors to log.Warn while the primary has
-// already told the UI "accepted". Dashboard renders system events as
-// esc(e.summary), so the text is safe to contain arbitrary error messages.
-//
-// Semantics:
-//   - proc != nil: appends to the live EventLog; push-subscribers (WS
-//     eventPushLoop) wake immediately.
-//   - proc == nil (suspended session): appends to persistedHistory so the
-//     entry shows up on the next subscribe/snapshot. Still bounded by
-//     maxPersistedHistory; the oldest entry is dropped if full.
-//
-// Empty summary is rejected (no-op) to avoid polluting the log with blank
-// system lines on programmer error. R49-REL-CONNECTOR-SEND-RESULT-LOSS.
+// summary to this session's event log and notifies subscribers, so
+// off-main-path writers (e.g. the connector's async Send goroutine) surface
+// errors in the UI instead of only in logs. The dashboard renders system
+// events escaped, so arbitrary error text is safe. With a live proc it goes
+// to the EventLog (WS subscribers wake); without one it lands in
+// persistedHistory (bounded by maxPersistedHistory). Empty summary is a no-op.
 func (s *ManagedSession) LogSystemEvent(summary string) {
 	if summary == "" {
 		return
@@ -994,21 +728,15 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 		Type:    "system",
 		Summary: summary,
 	}
-	// Reuse InjectHistory so proc/persistedHistory routing stays in one
-	// place and subscribers wake via the existing notifySubscribers path.
+	// InjectHistory owns proc/persistedHistory routing and subscriber wakeup.
 	s.InjectHistory([]clievent.EventEntry{entry})
 }
 
-// extractLastPromptFromProcess scans the attached process's event log to populate
-// lastPrompt, lastActivity, and lastResponse when they haven't been set yet
-// (e.g. after shim reconnect where events were injected directly into the
-// process, bypassing InjectHistory).
-//
-// R20260603000023-PERF-12: only the tail of the log is needed — scanLastSummaries
-// walks backward and stops as soon as all three summaries are found (at most 3
-// matching entries, bounded by the scan horizon). Using EventLastN avoids the
-// full-ring copy (up to 500 EventEntry slots, ~140 KB) that EventEntries
-// allocates unconditionally.
+// extractLastPromptFromProcess scans the attached process's event log to
+// populate lastPrompt, lastActivity, and lastResponse when unset (e.g. after
+// shim reconnect where events bypassed InjectHistory). Only the tail is
+// needed since scanLastSummaries stops once all three are found; EventLastN
+// avoids the full-ring copy EventEntries would allocate.
 const extractLastPromptScanN = 64
 
 func (s *ManagedSession) extractLastPromptFromProcess() {
@@ -1035,12 +763,8 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 
 // scanLastSummaries walks entries in reverse, returning the most-recent
 // user-prompt summary, activity summary, and assistant response summary.
-// Stops early once all three are found. Used by InjectHistory and
-// extractLastPromptFromProcess to seed the atomic caches after replay.
-//
-// R110-P1: response capture extends the existing prompt/activity scan so
-// suspended/dead sessions still surface a sidebar second-line preview after
-// shim reconnect (which replays history into a fresh EventLog).
+// Stops early once all three are found. Seeds the atomic caches after
+// replay so suspended/dead sessions still show a sidebar preview.
 func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, response string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
@@ -1063,46 +787,29 @@ func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, respons
 }
 
 // costUnitForBackend returns the SessionSnapshot.CostUnit value for a given
-// backend. claude-class backends report cost in USD via Process.TotalCost();
-// ACP-class kiro reports per-turn metering in credits via _kiro.dev/metadata.
-// Empty backend (legacy stores predating the Backend field) defaults to USD
-// because such stores are necessarily claude-only.
-//
-// The actual unit string lives on backend.Profile.CostUnit, looked up via
-// backend.Get. Adding a new backend means setting CostUnit on its profile —
-// no edit here required (R225-CR-4 / R224-ARCH-1). The dashboard reads this
-// value as the source of truth for cost-cell formatting (see
-// docs/rfc/multi-backend.md §8.3 D5).
+// backend, read from backend.Profile.CostUnit (docs/rfc/multi-backend.md
+// §8.3 D5). Empty backend (legacy stores predating the Backend field) means
+// claude, hence USD.
 func costUnitForBackend(backendID string) string {
-	// Legacy stores predating the Backend field — claude-only.
 	if backendID == "" {
 		backendID = "claude"
 	}
-	// Fast path: production wires backend.RegisterDefaults() (via
-	// wireup.RegisterCLIBackends) before any session is constructed, so the
-	// lookup normally succeeds without touching the lazy-bootstrap below.
+	// Fast path: production registers defaults before any session exists.
 	if p, ok := backend.Get(backendID); ok {
 		return p.CostUnit
 	}
-	// Lazy bootstrap (R239-ARCH-D / #890): tests that build a Snapshot
-	// without calling RegisterDefaults would otherwise see backend.Get
-	// return false and lose the unit. We only bootstrap when the registry is
-	// completely empty — a partially-populated registry (sibling test
-	// registered a custom backend but not the defaults) must NOT trigger a
-	// RegisterDefaults that would panic on the duplicate custom ID. The
-	// recover guards the residual race where wireup.RegisterCLIBackends runs
-	// concurrently between the empty-check and RegisterDefaults: a duplicate
-	// panic there is benign (the registry ends up populated either way).
+	// Lazy bootstrap for tests that never call RegisterDefaults (#890). Only
+	// when the registry is completely empty: a partially-populated one (a
+	// sibling test's custom backend) would panic on duplicate IDs. recover
+	// covers the race with a concurrent wireup.RegisterCLIBackends between
+	// the empty-check and RegisterDefaults — benign, registry ends populated.
 	costUnitForBackendOnce.Do(func() {
 		if len(backend.All()) != 0 {
 			return
 		}
 		defer func() {
 			if r := recover(); r != nil {
-				// Duplicate-registration panic from a concurrent
-				// wireup.RegisterCLIBackends call is benign (registry ends up
-				// populated either way), but log it so unexpected panics are
-				// visible. R112714-GO-6.
+				// Logged so unexpected (non-duplicate) panics stay visible.
 				slog.Debug("costUnitForBackend: recovered panic in RegisterDefaults",
 					"recovered", r)
 			}
@@ -1112,8 +819,7 @@ func costUnitForBackend(backendID string) string {
 	if p, ok := backend.Get(backendID); ok {
 		return p.CostUnit
 	}
-	// Unregistered backend ID (e.g. config typo, in-progress backend not
-	// yet wired into RegisterDefaults). Returning "" makes the dashboard
+	// Unregistered ID (config typo, unwired backend): "" makes the dashboard
 	// hide the cost cell rather than render a misleading unit.
 	return ""
 }

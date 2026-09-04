@@ -15,67 +15,49 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ScratchKeyPrefix re-exports sessionkey.ScratchKeyPrefix so existing
-// callers (saveStore filter / dashboard handleList / scratch construction
-// sites) keep using session.ScratchKeyPrefix during the alias deprecation
-// window. Canonical declaration lives in internal/sessionkey.
+// ScratchKeyPrefix re-exports sessionkey.ScratchKeyPrefix.
 //
 // Deprecated: use sessionkey.ScratchKeyPrefix.
 const ScratchKeyPrefix = sessionkey.ScratchKeyPrefix
 
-// MaxScratchQuoteBytes caps the quoted context passed to --append-system-prompt.
-// 8 KiB covers several paragraphs of ordinary text while keeping the spawn
-// arg list from bloating NDJSON frames on ACP protocols that mirror CLI args
-// into control messages.
+// MaxScratchQuoteBytes caps the quoted context passed to --append-system-prompt;
+// 8 KiB keeps the spawn arg list from bloating NDJSON frames on ACP protocols
+// that mirror CLI args into control messages.
 const MaxScratchQuoteBytes = 8 * 1024
 
-// MaxScratchContextBytes caps the total rendered size of the conversation-context
-// block (user/assistant turns surrounding the quote) + the quote itself inside
-// the --append-system-prompt arg. 24 KiB stays well under POSIX ARG_MAX while
-// fitting ~5 turns of ordinary English plus a full 8 KiB quote.
+// MaxScratchContextBytes caps the rendered conversation-context block plus the
+// quote inside the --append-system-prompt arg (well under POSIX ARG_MAX).
 const MaxScratchContextBytes = 24 * 1024
 
-// DefaultScratchContextTurns is the default number of user/assistant turns to
-// pull from the source session on either side of the quoted message. A "turn"
-// here counts a single user or assistant entry (not a matched pair), so 5
-// yields roughly 2-3 exchanges before + 2-3 after.
+// DefaultScratchContextTurns is the default number of user/assistant entries
+// (not pairs) pulled from the source session on either side of the quote.
 const DefaultScratchContextTurns = 5
 
-// MaxScratchContextTurns caps the client-requested turn count so a malicious
-// or buggy client cannot force the server to serialize hundreds of entries
-// just to have them thrown away by the byte budget.
+// MaxScratchContextTurns caps the client-requested turn count so a client
+// cannot force the server to serialize hundreds of entries the byte budget
+// would discard anyway.
 const MaxScratchContextTurns = 20
 
-// DefaultScratchTTL is how long an idle scratch session can live before the
-// pool sweeper kills it. Shorter than Router.DefaultTTL because scratches are
-// meant to be used and discarded — a forgotten tab shouldn't tie up a CLI
-// process slot for half an hour.
+// DefaultScratchTTL is how long an idle scratch lives before the sweeper kills
+// it. Shorter than Router.DefaultTTL: a forgotten tab must not hold a CLI slot.
 const DefaultScratchTTL = 10 * time.Minute
 
-// DefaultScratchMax is the global concurrent-scratch cap. Each scratch owns
-// a real CLI process, so the pool shares Router.MaxProcs headroom — pick a
-// value that leaves room for main sessions. 20 mirrors maxExemptSessions
-// (the global exempt ceiling; sub-quotas live in router_core.go now).
+// DefaultScratchMax is the global concurrent-scratch cap. Each scratch owns a
+// real CLI process sharing Router.MaxProcs headroom; 20 mirrors maxExemptSessions.
 const DefaultScratchMax = 20
 
-// Errors surfaced by ScratchPool callers. Kept as sentinels so HTTP handlers
-// can translate them into 4xx / 429 responses without string matching.
+// Errors surfaced by ScratchPool callers; sentinels so HTTP handlers can map
+// them to 4xx / 429 without string matching.
 var (
 	ErrScratchPoolFull = errors.New("scratch pool full")
 	ErrScratchNotFound = errors.New("scratch not found")
 	ErrQuoteEmpty      = errors.New("quote is empty after sanitization")
 )
 
-// Scratch is a single ephemeral aside session.
-//
-// It inherits the source session's AgentOpts (backend, model, extra args,
-// workspace) and prepends a `--append-system-prompt` carrying the quoted
-// context so the CLI answers with knowledge of what the user selected,
-// without the quote ever being echoed in the visible transcript.
-//
-// The router owns the process lifecycle once the scratch is registered;
-// ScratchPool keeps only metadata and a router key it can use to tear the
-// session down on Close or TTL expiry.
+// Scratch is a single ephemeral aside session. It inherits the source
+// session's AgentOpts and carries the quoted context in the system prompt. The
+// router owns the process lifecycle; the pool keeps only metadata and the
+// router key it tears the session down with on Close or TTL expiry.
 type Scratch struct {
 	ID           string    // 16-byte hex (32 chars)
 	Key          string    // full router key: "scratch:<id>:general:<sourceAgentID>"
@@ -98,24 +80,16 @@ func (s *Scratch) LastUsed() time.Time {
 	return time.Unix(0, s.lastUsed.Load())
 }
 
-// Touch updates the last-used timestamp. Called on every send so the sweeper
-// treats an actively used scratch as fresh.
+// Touch updates the last-used timestamp so the sweeper treats an actively
+// used scratch as fresh.
 func (s *Scratch) Touch() {
 	s.lastUsed.Store(time.Now().UnixNano())
 }
 
-// ScratchPool manages the set of live ephemeral scratch sessions.
-//
-// The pool does NOT spawn processes itself — it registers opts so that when
-// the first dashboard send hits the router with a `scratch:` key, the router's
-// GetOrCreate path spawns a real CLI exactly like any other session. This
-// keeps the spawn/send/event paths identical to managed sessions (same SSE
-// streaming, same state broadcasts, same InjectHistory semantics) and avoids
-// a parallel protocol stack.
-//
-// On Close / TTL expiry the pool calls router.Remove(key) which kills the
-// process and drops the session entry — scratches never persist through a
-// restart.
+// ScratchPool manages the set of live ephemeral scratch sessions. It does NOT
+// spawn processes: it registers opts so the router's GetOrCreate path spawns a
+// real CLI on the first `scratch:` send. Close / TTL expiry call
+// router.Remove(key); scratches never persist through a restart.
 type ScratchPool struct {
 	mu       sync.Mutex
 	items    map[string]*Scratch // ID -> Scratch
@@ -129,7 +103,7 @@ type ScratchPool struct {
 }
 
 // NewScratchPool constructs a pool bound to router. max and ttl are clamped
-// to sensible defaults when non-positive.
+// to defaults when non-positive.
 func NewScratchPool(router *Router, max int, ttl time.Duration) *ScratchPool {
 	if max <= 0 {
 		max = DefaultScratchMax
@@ -147,8 +121,8 @@ func NewScratchPool(router *Router, max int, ttl time.Duration) *ScratchPool {
 	}
 }
 
-// StartSweeper launches the background TTL goroutine. Safe to call once.
-// The sweeper runs until Stop() is invoked; sweep cadence is ttl/2.
+// StartSweeper launches the background TTL goroutine (cadence ttl/2, min 30s).
+// Call once; runs until Stop().
 func (p *ScratchPool) StartSweeper() {
 	p.sweepWG.Add(1)
 	go func() {
@@ -176,19 +150,9 @@ func (p *ScratchPool) Stop() {
 	p.sweepWG.Wait()
 }
 
-// sweep removes scratches idle past TTL. Router.Remove() is called outside
-// the pool lock to avoid holding our mutex during potentially slow process
-// teardown.
-//
-// SCALE NOTE: the inner loop uses Go's well-known range+delete pattern, which
-// is safe for builtin maps but degrades to a full O(N) walk per call. This is
-// acceptable here because the pool is hard-capped at DefaultScratchMax (20)
-// entries — even a degenerate sweep visits at most 20 keys. If that cap ever
-// grows past O(100), switch to a two-pass approach (collect IDs in pass one,
-// delete in pass two) or to a min-heap keyed by lastUsed so the sweeper can
-// stop as soon as it sees a non-expired entry. Don't ignore: at max=1000+ the
-// hot-loop allocation pattern (slice growth from `var expired`) and lock-hold
-// time both become operator-visible during heavy sweep windows.
+// sweep removes scratches idle past TTL. Router.Remove() runs outside the pool
+// lock so slow process teardown never holds p.mu. The O(N) walk is fine while
+// the pool is capped at DefaultScratchMax.
 func (p *ScratchPool) sweep(now time.Time) {
 	cutoff := now.Add(-p.ttl).UnixNano()
 	var expired []*Scratch
@@ -216,22 +180,16 @@ type OpenOptions struct {
 	Workspace string    // source session's workspace
 	BaseOpts  AgentOpts // router-resolved AgentOpts for the source agent (model / extra args / workspace)
 	Quote     string    // the text the user selected
-	// ContextBefore/ContextAfter are event entries surrounding the quoted
-	// message in the source session's event log, in chronological order.
-	// Callers should pre-filter to user/text/result types only — Open
-	// defensively re-filters for safety but trusts the caller's ordering.
-	// These feed the <conversation_context> block in the system prompt so
-	// the CLI sees a few turns of surrounding conversation rather than a
-	// lone quoted snippet. Either slice may be empty.
+	// ContextBefore/ContextAfter surround the quoted message in chronological
+	// order; Open re-filters types but trusts the caller's ordering.
 	ContextBefore []clievent.EventEntry
 	ContextAfter  []clievent.EventEntry
 }
 
-// Open creates a new scratch session and returns it. The quote is sanitized
-// and truncated; the resulting prompt is layered onto BaseOpts.SystemPrompt
-// (JoinSystemPrompts) and reaches the CLI as --append-system-prompt via
-// cli.SpawnOptions.AppendSystemPrompt. The caller is responsible for first
-// validating that opts.SourceKey refers to a real session.
+// Open creates a new scratch session. The quote is sanitized and truncated;
+// the resulting prompt is layered onto BaseOpts.SystemPrompt and reaches the
+// CLI via cli.SpawnOptions.AppendSystemPrompt. The caller must first validate
+// that opts.SourceKey refers to a real session.
 func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	clean, truncated := SanitizeQuote(opts.Quote)
 	if clean == "" {
@@ -246,22 +204,12 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	if agentID == "" {
 		agentID = "general"
 	}
-	// Key shape: scratch:<id>:general:<sourceAgent>
-	//
-	// Session key is still 4 segments so ValidateSessionKey and every
-	// {platform}:{chatType}:{id}:{agentID} parser that splits by ':'
-	// keeps working. "scratch" holds the platform slot, the scratch ID
-	// holds the chat-type slot (dedup-safe), "general" holds the chat-ID
-	// slot (fixed filler so chat-key extraction yields "scratch:<id>:general"),
-	// and the agent slot records the source agent for telemetry + promote.
+	// Key stays 4 segments so every {platform}:{chatType}:{id}:{agentID} parser
+	// keeps working; "general" is a fixed chat-ID filler and the agent slot
+	// records the source agent for telemetry + promote.
 	key := ScratchKeyPrefix + id + ":general:" + sanitizeKeyComponent(agentID)
 
-	// Render the surrounding-turn context block under a shared byte budget
-	// with the quote: quote takes priority (bounded at MaxScratchQuoteBytes),
-	// context gets whatever is left of MaxScratchContextBytes. The renderer
-	// drops noisy event types (tool_use / thinking / init / system / todo)
-	// and fills from the turns closest to the quote outward so truncation
-	// lops off the most distant history first.
+	// Quote takes priority; the context block gets what is left of the budget.
 	contextBudget := MaxScratchContextBytes - len(clean)
 	if contextBudget < 0 {
 		contextBudget = 0
@@ -270,13 +218,10 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 		opts.ContextBefore, opts.ContextAfter, contextBudget,
 	)
 
-	// Build BaseOpts: copy the source opts (ExtraArgs deep-copied so a later
-	// append cannot reach the agent registry's backing array) and layer the
-	// quoted context on top of whatever system prompt the agent already has
-	// (agents[].system_prompt). #2493: this used to be appended to ExtraArgs
-	// as `--append-system-prompt <quote>`, where cli.deniedExtraFlags
-	// silently stripped it — the aside never actually saw the quote.
-	// Assigning into the local copy leaves the registry map value untouched.
+	// Copy the source opts (ExtraArgs deep-copied so a later append cannot
+	// reach the agent registry's backing array) and layer the quoted context
+	// onto the agent's own system prompt. The prompt must NOT go into ExtraArgs,
+	// where cli.deniedExtraFlags strips --append-system-prompt (#2493).
 	cloned := opts.BaseOpts
 	cloned.ExtraArgs = append([]string(nil), opts.BaseOpts.ExtraArgs...)
 	cloned.SystemPrompt = JoinSystemPrompts(
@@ -289,8 +234,8 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	if opts.Backend != "" {
 		cloned.Backend = opts.Backend
 	}
-	// Scratches must never be exempt — we want them to count against maxProcs
-	// and get evicted on TTL, not enter the planner-only code paths.
+	// Scratches must never be exempt: they count against maxProcs and get
+	// evicted on TTL rather than entering the planner-only code paths.
 	cloned.Exempt = false
 
 	sc := &Scratch{
@@ -328,16 +273,12 @@ func (p *ScratchPool) Get(id string) *Scratch {
 }
 
 // OptsForKey returns the registered BaseOpts for a router key, or zero-value
-// + false when the key is not a scratch managed by this pool. Called from
-// hub.sessionOptsFor so the router receives the inherited agent configuration
-// on first spawn.
+// + false when the key is not a scratch managed by this pool.
 //
-// SWEEP-DEFENSE INVARIANT: this method calls sc.Touch() on every hit so the
-// very first /api/sessions/send for a freshly-opened scratch cannot lose a
-// race with the TTL sweeper. If a future refactor removes the Touch here,
-// introduce an equivalent guard BEFORE dropping it — otherwise a scratch
-// whose open-to-first-send latency exceeds the sweep interval (e.g. the
-// user took a bathroom break) will silently 404 on send.
+// SWEEP-DEFENSE INVARIANT: every hit calls sc.Touch() so the very first send
+// for a freshly-opened scratch cannot lose a race with the TTL sweeper. Any
+// refactor removing the Touch must add an equivalent guard first, or a scratch
+// whose open-to-first-send latency exceeds the sweep interval 404s on send.
 func (p *ScratchPool) OptsForKey(key string) (AgentOpts, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -350,7 +291,6 @@ func (p *ScratchPool) OptsForKey(key string) (AgentOpts, bool) {
 }
 
 // Touch updates the last-used timestamp for a scratch keyed by router key.
-// Called on every send so the sweeper treats active scratches as fresh.
 func (p *ScratchPool) Touch(key string) {
 	p.mu.Lock()
 	sc, ok := p.byKey[key]
@@ -379,9 +319,7 @@ func (p *ScratchPool) Close(id string) error {
 }
 
 // Detach removes the scratch metadata WITHOUT killing the router session.
-// Used by Promote: the caller is about to repurpose the live CLI process
-// under a new session key, so the pool relinquishes ownership without
-// tearing the process down. Returns the scratch for inspection.
+// Used by Promote, which repurposes the live CLI process under a new key.
 func (p *ScratchPool) Detach(id string) (*Scratch, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -394,8 +332,7 @@ func (p *ScratchPool) Detach(id string) (*Scratch, error) {
 	return sc, nil
 }
 
-// List returns a snapshot of all live scratches. Used by tests and debug
-// endpoints; production callers should prefer Get / OptsForKey.
+// List returns a snapshot of all live scratches (tests / debug endpoints).
 func (p *ScratchPool) List() []*Scratch {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -414,8 +351,7 @@ func (p *ScratchPool) Len() int {
 }
 
 // ForceExpireForTest backdates a scratch's lastUsed timestamp so the next
-// sweep evicts it. Test-only seam — production callers should never move
-// timestamps backwards.
+// sweep evicts it. Test-only seam.
 func (p *ScratchPool) ForceExpireForTest(id string, t time.Time) {
 	p.mu.Lock()
 	sc, ok := p.items[id]
@@ -425,33 +361,25 @@ func (p *ScratchPool) ForceExpireForTest(id string, t time.Time) {
 	}
 }
 
-// SweepForTest runs one eviction pass synchronously. Exported so tests can
-// exercise the cleanup path without waiting on the ticker goroutine.
+// SweepForTest runs one eviction pass synchronously.
 func (p *ScratchPool) SweepForTest(now time.Time) { p.sweep(now) }
 
 // IsScratchKey reports whether a session key belongs to the scratch pool.
-// Aliases sessionkey.IsScratchKey for the alias deprecation window.
 //
 // Deprecated: use sessionkey.IsScratchKey.
 func IsScratchKey(key string) bool { return sessionkey.IsScratchKey(key) }
 
 // SanitizeQuote strips control characters and invisible Unicode formatting
-// codepoints from s, truncating the result at MaxScratchQuoteBytes along a
-// valid UTF-8 boundary. Newlines and horizontal tabs are preserved — quoted
-// text often depends on line breaks for readability.
-//
-// Returns the cleaned string and a flag indicating whether the original
-// exceeded MaxScratchQuoteBytes.
+// codepoints from s, truncating at MaxScratchQuoteBytes on a valid UTF-8
+// boundary. Newlines and tabs are preserved. Returns the cleaned string and
+// whether the original exceeded MaxScratchQuoteBytes.
 func SanitizeQuote(s string) (string, bool) {
 	if s == "" {
 		return "", false
 	}
-	// Drop the C0 control set except \n (U+000A) and \t (U+0009), DEL, and
-	// the C1 control range. Bidi / zero-width / BOM codepoints are removed
-	// with the same rule sanitizeKeyComponent uses for log attrs — without
-	// them a quoted shell prompt could rewrite operator journalctl output
-	// via ANSI / bidi overrides. The deny-set is sessionkey.IsForbiddenKeyRune
-	// (R202606f-ARCH-6, #2301); only the \n / \t exemption is local.
+	// Deny-set is sessionkey.IsForbiddenKeyRune (C0/C1/DEL/bidi/zero-width/BOM,
+	// #2301); only the \n / \t exemption is local. Without it a quoted shell
+	// prompt could rewrite operator journalctl output via ANSI / bidi overrides.
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -469,45 +397,28 @@ func SanitizeQuote(s string) (string, bool) {
 	truncated := false
 	if len(cleaned) > MaxScratchQuoteBytes {
 		truncated = true
-		// Walk back to the previous valid rune boundary so the truncated
-		// string stays valid UTF-8. The stdlib does this for us via DecodeLastRune
-		// but the explicit loop avoids allocating a rune slice.
+		// Walk back to a rune boundary so the result stays valid UTF-8.
 		cut := MaxScratchQuoteBytes
 		for cut > 0 && !utf8.RuneStart(cleaned[cut]) {
 			cut--
 		}
 		cleaned = cleaned[:cut]
 	}
-	// Final trim of trailing ASCII whitespace so truncation doesn't leave a
-	// dangling half-line the CLI might interpret as meaningful framing.
+	// Trim trailing whitespace so truncation cannot leave a dangling half-line.
 	cleaned = strings.TrimRight(cleaned, " \t\n")
 	return cleaned, truncated
 }
 
-// buildScratchSystemPrompt formats the quoted context for --append-system-prompt.
-// The prompt explicitly instructs the model NOT to echo the quote back so the
-// aside transcript stays focused on the answer.
+// buildScratchSystemPrompt formats the quoted context for --append-system-prompt,
+// instructing the model NOT to echo the quote back.
 //
-// When contextBlock is non-empty it is inserted as a <conversation_context>
-// section preceding the <selected_quote>, giving the model the surrounding
-// turns the user was reading when they clicked "aside".
+// PRIVACY TRADE-OFF: the string is an argv element, visible via
+// /proc/<pid>/cmdline, `ps`, journal snapshots and shim state files. Acceptable
+// for single-operator deployments; multi-tenant must use stdin or an env var.
 //
-// PRIVACY TRADE-OFF: the returned string is handed to the child CLI as a
-// distinct argv element. On Linux this is visible to any process on the same
-// host that can read /proc/<pid>/cmdline — by default world-readable for the
-// same UID via /proc, and surfaced by `ps`, systemd journal snapshots, and
-// any shim state file that records argv. For naozhi's single-operator
-// deployment model this is acceptable (no other tenants share the host),
-// but any future multi-tenant deployment must route the quoted context
-// through stdin or an env var instead of argv.
-//
-// R218-SEC-2 / R215-SEC-P2-2 defense-in-depth: the final string passes
-// through stripArgvControlBytes so a NUL byte (which would silently
-// truncate the argv element at execve) cannot survive even if a future
-// caller skips SanitizeQuote / renderTurnLine. Both upstream paths
-// already scrub NULs, but the cost of a second O(n) sweep is trivial
-// compared to the failure mode (CLI receives a half-truncated prompt
-// and answers the wrong question, with no error).
+// Defense-in-depth: stripArgvControlBytes ensures a NUL (which silently
+// truncates the argv element at execve) cannot survive even if a future caller
+// skips SanitizeQuote / renderTurnLine.
 func buildScratchSystemPrompt(quote string, truncated bool, contextBlock string) string {
 	var b strings.Builder
 	b.WriteString("用户正在就主对话中选中的以下内容进行追问。请基于此内容回答后续问题，不要在回复中重复引用原文。")
@@ -525,13 +436,10 @@ func buildScratchSystemPrompt(quote string, truncated bool, contextBlock string)
 	return stripArgvControlBytes(b.String())
 }
 
-// stripArgvControlBytes drops bytes that would corrupt argv when passed to
-// execve: NUL (\x00) truncates the argument, and bare C0 control bytes
-// (other than \t \n \r, which buildScratchSystemPrompt deliberately uses
-// for layout) can confuse argument parsers in downstream CLIs. Mirrors the
-// gate enforced by config.validateArgvStrings on YAML-supplied argv.
+// stripArgvControlBytes drops bytes that corrupt argv at execve (NUL truncates
+// the argument; bare C0 other than \t \n \r confuses downstream parsers).
+// Mirrors config.validateArgvStrings for YAML argv.
 func stripArgvControlBytes(s string) string {
-	// Fast path: most calls pass already-clean text.
 	clean := true
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -554,43 +462,24 @@ func stripArgvControlBytes(s string) string {
 	return string(out)
 }
 
-// renderContextTurns serialises a handful of user/assistant turns surrounding
-// the quoted message into a plain-text block suitable for embedding in the
-// system prompt.
-//
-// Event type filter: only `user`, `text`, and `result` entries contribute.
-// Tool-use / thinking / init / system / todo / agent events are dropped
-// because they bloat the budget with machine-oriented noise the model does
-// not need to reconstruct the conversational gist.
-//
-// Budget policy: we fill from the turns closest to the quote outward (last
-// entries of `before`, first entries of `after`) and stop as soon as adding
-// another turn would exceed budgetBytes. The returned ctxTurns counts how
-// many entries actually made it in; ctxTrunc reports whether any candidate
-// entries were rejected. An empty block (no candidates survived filtering)
-// returns ("", 0, false).
+// renderContextTurns serialises user/assistant turns surrounding the quoted
+// message into a plain-text block. Turns are filled from the quote outward
+// (tail of before, head of after) until adding one would exceed budgetBytes.
+// Returns (block, included count, whether any candidate was rejected).
 func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (string, int, bool) {
-	// Filter once up front so both the zero-budget short-circuit and the
-	// normal-budget walk share a single allocation. Previously the zero-
-	// budget arm re-filtered just to check len() > 0, wasting two slices
-	// on the hot path.
 	beforeFiltered := filterContextEntries(before)
 	afterFiltered := filterContextEntries(after)
 	totalCandidates := len(beforeFiltered) + len(afterFiltered)
 
 	if budgetBytes <= 0 {
-		// No room even for a single byte. Signal truncated=true when we had
-		// candidates so the UI / logs can mention context was suppressed.
+		// truncated=true when candidates existed so UI / logs can say so.
 		return "", 0, totalCandidates > 0
 	}
 	if totalCandidates == 0 {
 		return "", 0, false
 	}
 
-	// Walk outward from the quote: before is consumed newest-first (tail),
-	// after is consumed oldest-first (head). Rendered strings are cached
-	// alongside a byte count so we can decide inclusion without rendering
-	// twice.
+	// before is consumed newest-first (tail), after oldest-first (head).
 	type rendered struct {
 		text  string
 		bytes int
@@ -606,19 +495,15 @@ func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (s
 		afterQueue = append(afterQueue, rendered{text: line, bytes: len(line)})
 	}
 
-	// Reconstruct chronological order on the fly using two pointers. `used`
-	// tracks the actual output length — we only charge a join-newline when
-	// there is already content, so N entries cost sum(len(line)) + (N-1)
-	// bytes rather than +N. Earlier code overcounted by 1 byte and could
-	// reject an entry that actually fit, producing a spurious truncated=true.
+	// `used` tracks the actual output length: a join-newline is charged only
+	// when content already exists, so N entries cost sum(len) + (N-1), never +N.
 	includedBefore := make([]string, 0, len(beforeStack))
 	includedAfter := make([]string, 0, len(afterQueue))
 	used := 0
 	bi, ai := 0, 0
-	// Alternate: prefer the side with more remaining candidates so extreme
-	// imbalance (e.g. no `before` events) still fills the budget. Ties go to
-	// `before` because the most recent prior turn is usually more relevant
-	// than the next reply.
+	// Prefer the side with more remaining candidates so extreme imbalance
+	// still fills the budget; ties go to `before` (the most recent prior turn
+	// is usually more relevant than the next reply).
 	for bi < len(beforeStack) || ai < len(afterQueue) {
 		var pick *rendered
 		var isBefore bool
@@ -634,9 +519,6 @@ func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (s
 				pick, isBefore = &afterQueue[ai], false
 			}
 		}
-		// Join-newline is only charged when there is already content in
-		// either side's inclusion list — avoids the +1 overcount that
-		// used to make `used` N bytes higher than actual output length.
 		cost := pick.bytes
 		if len(includedBefore)+len(includedAfter) > 0 {
 			cost++ // newline between this entry and the previous one
@@ -658,8 +540,7 @@ func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (s
 		return "", 0, totalCandidates > 0
 	}
 
-	// includedBefore was collected tail-first (newest prior turn first). Flip
-	// it back to chronological order before concatenation.
+	// includedBefore was collected tail-first; flip back to chronological order.
 	for i, j := 0, len(includedBefore)-1; i < j; i, j = i+1, j-1 {
 		includedBefore[i], includedBefore[j] = includedBefore[j], includedBefore[i]
 	}
@@ -687,10 +568,8 @@ func renderContextTurns(before, after []clievent.EventEntry, budgetBytes int) (s
 	return b.String(), turns, truncated
 }
 
-// filterContextEntries keeps only event types that carry conversational
-// meaning (user prompts and assistant text / result replies). Everything
-// else — tool_use, thinking, init, system, todo, agent, task_* — is dropped.
-// The returned slice is a new allocation, not aliased.
+// filterContextEntries keeps only user prompts and assistant text / result
+// replies with a non-empty payload. The returned slice is a new allocation.
 func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 	if len(in) == 0 {
 		return nil
@@ -699,16 +578,11 @@ func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 	for _, e := range in {
 		switch e.Type {
 		case "user", "text", "result":
-			// "result" and "text" can both appear in the same turn (text is
-			// the streaming block, result is the final envelope); we keep
-			// both because either may carry the visible reply depending on
-			// when the source session was captured.
+			// Either text (streaming) or result (final envelope) may carry
+			// the visible reply, so both are kept.
 		default:
 			continue
 		}
-		// Skip entries whose textual payload is empty after picking the
-		// preferred field — rendering them would emit a naked role label
-		// and waste budget.
 		if pickEntryText(e) == "" {
 			continue
 		}
@@ -717,10 +591,8 @@ func filterContextEntries(in []clievent.EventEntry) []clievent.EventEntry {
 	return out
 }
 
-// renderTurnLine formats a single event entry as a role-tagged line suitable
-// for the <conversation_context> block. The role comes from the entry type;
-// the payload is sanitized (control chars / bidi stripped) and truncated so
-// one noisy multi-KB entry cannot eat the whole budget on its own.
+// renderTurnLine formats one event entry as a role-tagged line. The payload is
+// sanitized and capped so a single multi-KB entry cannot eat the whole budget.
 func renderTurnLine(e clievent.EventEntry) string {
 	role := "assistant"
 	if e.Type == "user" {
@@ -738,9 +610,7 @@ func renderTurnLine(e clievent.EventEntry) string {
 	return "[" + role + "] " + payload
 }
 
-// pickEntryText returns the best textual payload for a context entry,
-// preferring Detail (fuller form used by dashboard) and falling back to
-// Summary when Detail is empty.
+// pickEntryText returns Detail (fuller form) or Summary when Detail is empty.
 func pickEntryText(e clievent.EventEntry) string {
 	if e.Detail != "" {
 		return e.Detail
@@ -749,8 +619,6 @@ func pickEntryText(e clievent.EventEntry) string {
 }
 
 // newScratchID returns a 32-char lowercase hex string backed by crypto/rand.
-// 128 bits of entropy is sufficient: the ID is ephemeral, scoped to a single
-// pool, and lookups are keyed by the full string.
 func newScratchID() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {

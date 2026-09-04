@@ -4,11 +4,9 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// eventLogMetricsObserver is the production Observer that forwards
-// persist.Observer callbacks to the process-wide expvar counters in
-// internal/metrics. Kept in the session package (not persist) so the
-// persist package stays independent of the metrics library —
-// per-test Persisters can still run with a nil / custom observer.
+// eventLogMetricsObserver forwards persist.Observer callbacks to the
+// process-wide expvar counters in internal/metrics. Kept here (not in persist)
+// so the persist package stays independent of the metrics library.
 type eventLogMetricsObserver struct{}
 
 func (eventLogMetricsObserver) OnWrite(n int) {

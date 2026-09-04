@@ -5,21 +5,18 @@ package session
 //
 // Apply matrix (§4.4), by field × process state:
 //
-//	model, no effective effort, live proc → RPC (session/set_model /
-//	    set_model control_request), no restart. F1/F6/F13/F14.
+//	model, no effective effort, live proc → RPC (set_model), no restart.
 //	model, effective effort non-empty, EffortTier backend, live proc →
 //	    respawn: kiro's set_model resets the tier to the new model's
-//	    default and v2 has no runtime restore channel (F9/F4), so the RPC
-//	    fast path would silently drop the tier.
+//	    default and has no runtime restore channel, so the RPC fast path
+//	    would silently drop the tier.
 //	effort (any change), live proc → respawn.
 //	suspended (no live proc) → record only; next spawn injects via flags.
 //
-// "Respawn" here is the LAZY variant: gracefully Close the CLI process and
-// leave the ManagedSession in place, so the next message (or dashboard
-// send) resumes through the normal suspended→GetOrCreate path with the new
-// argv. This deliberately reuses the TTL-recycle machinery instead of
-// spawning eagerly — the queue/drain semantics (RFC §6 R6) come for free,
-// and "生效时机 = 下一轮" matches what the popover promises anyway.
+// "Respawn" is LAZY: Close the CLI process and keep the ManagedSession, so
+// the next message resumes through the normal suspended→GetOrCreate path
+// with the new argv. Reusing the TTL-recycle machinery gives the queue/drain
+// semantics (RFC §6 R6) for free and matches the popover's "生效时机 = 下一轮".
 
 import (
 	"context"
@@ -33,11 +30,10 @@ import (
 )
 
 // Tuning apply modes returned to the override API and surfaced to the
-// dashboard as `applied_via` — the popover renders its ⓘ hint from this
-// instead of re-deriving the path client-side (§4.1).
+// dashboard as `applied_via` (§4.1).
 const (
 	// TuningAppliedRPC: the live process acknowledged the switch; effective
-	// for the next turn (kiro, F13) or possibly the current one (claude, F14).
+	// for the next turn (kiro) or possibly the current one (claude).
 	TuningAppliedRPC = "rpc"
 	// TuningAppliedRespawn: the CLI process was closed; the next message
 	// respawns with the new flags, context restored via resume.
@@ -52,31 +48,21 @@ const (
 var ErrTuningUnknownSession = errors.New("no session for key")
 
 // ErrTuningEffortUnsupported is returned when an effort tier is set for a
-// session whose backend protocol does not honour SpawnOptions.Effort
-// (codex; claude accepts `--effort` since CLI 2.1.226, see
-// ClaudeProtocol.Capabilities). Mapped to 400 by the API handler — silently recording it
-// would let the operator believe a tier is in force when it is not (same
-// rationale as kiro-effort-control §4.3's warn-and-drop, but this is an
-// interactive path where an error is actionable).
+// session whose backend protocol does not honour SpawnOptions.Effort (see
+// ClaudeProtocol.Capabilities). Mapped to 400 by the API handler — silently
+// recording it would let the operator believe a tier is in force when it is not.
 var ErrTuningEffortUnsupported = errors.New("backend does not support effort tiers")
 
 // SetSessionTuning validates, records, persists and applies a per-session
-// model/effort override. nil = leave the field unchanged; pointer to "" =
-// clear the override (config chain reapplies on next spawn); pointer to a
-// value = set it.
-//
-// Returns the apply mode actually taken (TuningApplied*) so the API ack can
-// tell the operator what to expect, or an error when nothing was recorded:
-//   - validation failure (tuningspec / ErrTuningEffortUnsupported /
-//     ErrTuningUnknownSession) → nothing happened;
-//   - cli.ErrSetModelRejected (claude org-policy / unknown model, F7/F15) →
-//     the override is NOT recorded (§6 R8 ack-before-persist) and the CLI's
-//     rejection text is in the error for the dashboard toast.
+// model/effort override. nil = leave unchanged; pointer to "" = clear (config
+// chain reapplies on next spawn); pointer to a value = set. Returns the apply
+// mode taken (TuningApplied*), or an error when nothing was recorded —
+// validation failures, or cli.ErrSetModelRejected, where the override is NOT
+// recorded (§6 R8 ack-before-persist) and the CLI's rejection text is in the error.
 //
 // Concurrency: r.mu is held for the decide+record phase only. The RPC wait
-// (up to setModelAckTimeout) and proc.Close run unlocked — a concurrent
-// mutation between phases resolves as last-write-wins (RFC §6 R5), with the
-// confirmation loop making the final state visible.
+// and proc.Close run unlocked — a concurrent mutation between phases resolves
+// as last-write-wins (RFC §6 R5).
 func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort *string) (string, error) {
 	if model == nil && effort == nil {
 		return "", fmt.Errorf("no tuning field provided")
@@ -100,10 +86,9 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		return "", ErrTuningUnknownSession
 	}
 	wrapper, backendID := r.wrapperFor(sess.Backend())
-	// A missing wrapper (misconfigured backend id, or a test router without
-	// one) degrades to zero caps: recording a model override is still safe
-	// (it only feeds the next spawn's flags), while an effort tier — which
-	// requires a capability we cannot confirm — is rejected below.
+	// A missing wrapper degrades to zero caps: a model override is still safe
+	// to record (only feeds the next spawn's flags); an effort tier needs a
+	// capability we cannot confirm, so it is rejected below.
 	var caps cli.Caps
 	if wrapper != nil {
 		caps = cli.ProtocolCaps(wrapper.Protocol)
@@ -120,16 +105,11 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		return TuningAppliedDeferred, nil // no-op: already at the requested values
 	}
 
-	// Effective tier the session will run under AFTER this call — decides
-	// the F9 path split. Visible layers: backend default (cli.effort /
-	// cli.backends[].effort via backendDefaultsFor) and the tuning override.
-	// The agents[].effort layer arrives via AgentOpts at send time and is
-	// NOT visible here — an agent-tiered session on an otherwise tier-less
-	// kiro backend could take the RPC path and have its agent tier reset by
-	// F9 until the next respawn. Same family as the drift check's
-	// agent-layer blind spot (kiro-effort-control §4.5.1); accepted and
-	// documented rather than plumbed, because AgentOpts construction lives
-	// in the dispatch layer.
+	// Effective tier AFTER this call decides the RPC-vs-respawn split. Only
+	// the backend default and the tuning override are visible here; the
+	// agents[].effort layer arrives via AgentOpts at send time, so an
+	// agent-tiered session on a tier-less kiro backend may take the RPC path
+	// and lose its agent tier until the next respawn (kiro-effort-control §4.5.1).
 	effectiveEffort := r.backendDefaultsFor(backendID).Effort
 	if effort != nil {
 		if *effort != "" {
@@ -139,12 +119,10 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		effectiveEffort = te
 	}
 
-	// Clearing the model override ("恢复默认", pointer to "") has no model id
-	// to hand the CLI: set_model("") would blank kiro's header and make
-	// claude reject the request, leaving a live session that can never be
-	// restored to default. It therefore always takes the respawn/deferred
-	// path — the next spawn simply omits the override and the config chain
-	// reapplies (RFC §4.3 清除语义).
+	// Clearing the model override ("恢复默认") has no model id to hand the CLI
+	// (set_model("") blanks kiro's header / is rejected by claude), so it
+	// always takes the respawn/deferred path and the config chain reapplies
+	// on the next spawn (RFC §4.3 清除语义).
 	modelCleared := modelChanged && *model == ""
 	respawnNeeded := effortChanged || modelCleared ||
 		(modelChanged && caps.EffortTier && effectiveEffort != "")
@@ -152,10 +130,10 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 	proc := sess.loadProcess()
 	alive := proc != nil && proc.Alive()
 
-	// RPC fast path defers recording until the CLI acks (§6 R8). Every
-	// other path records now, under the same r.mu hold as the decision.
-	// `*model != ""` is implied by !respawnNeeded but spelled out so the
-	// invariant "never RPC an empty model" survives a future refactor.
+	// RPC fast path defers recording until the CLI acks (§6 R8); every other
+	// path records now, under the same r.mu hold as the decision. `*model != ""`
+	// is implied by !respawnNeeded but spelled out so "never RPC an empty
+	// model" survives refactors.
 	rpcPath := modelChanged && *model != "" && !respawnNeeded && alive
 	if !rpcPath {
 		if modelChanged {
@@ -189,8 +167,8 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 			slog.Info("session tuning applied via rpc", "key", logKey, "model", *model)
 			return TuningAppliedRPC, nil
 		case errors.Is(err, cli.ErrSetModelRejected):
-			// F7/F15: CLI refused. Nothing was recorded; surface verbatim
-			// (text already sanitized at the protocol layer).
+			// CLI refused. Nothing was recorded; surface verbatim (text
+			// already sanitized at the protocol layer).
 			slog.Warn("session tuning rejected by CLI", "key", logKey, "err", err)
 			return "", err
 		default:
@@ -212,21 +190,16 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 	}
 
 	if respawnNeeded && alive {
-		// Lazy respawn: stamp a recognisable deathReason and close. The
-		// session entry survives, so the next message resumes through
-		// GetOrCreate with the new argv (tuning tier sits atop
-		// resolveSpawnParamsLocked's chains). Mirrors the TTL-recycle
-		// teardown; queued messages drain through the existing
-		// suspended→spawn path (RFC §6 R6).
+		// Lazy respawn: stamp a recognisable deathReason and close; the
+		// session entry survives so the next message resumes through
+		// GetOrCreate with the new argv. Queued messages drain through the
+		// existing suspended→spawn path (RFC §6 R6).
 		storeAtomicString(&sess.deathReason, "tuning_respawn")
 		proc.Close()
-		// Capacity bookkeeping, same shape as evictOldest / Cleanup's
-		// TTL path (close-but-keep-entry): recount instead of a manual
-		// activeCount.Add(-1) so the per-backend gauge and the total stay
-		// in lockstep with what the map actually holds. Without this every
-		// tuning respawn leaks one slot (the follow-up spawn Adds 1).
-		// Broadcast under r.mu so Shutdown's cond.Wait predicate cannot
-		// re-evaluate between Close and the wakeup (R191-CONC-H1).
+		// Recount (not activeCount.Add(-1)) so the per-backend gauge and total
+		// stay in lockstep with the map; otherwise every tuning respawn leaks
+		// one slot. Broadcast under r.mu so Shutdown's cond.Wait predicate
+		// cannot re-evaluate between Close and the wakeup.
 		r.mu.Lock()
 		if r.shutdownCond != nil {
 			r.shutdownCond.Broadcast()
