@@ -1,12 +1,4 @@
-// Package session router backend selection methods.
-//
-// Extracted from router.go on 2026-05-19 as part of the router-split
-// refactor (docs/design/router-split-design.md). For history prior to
-// commit 1ec3b3cf058ccbdca6283bdf713160e13e7b0489, see:
-//
-//	git log --follow internal/session/router.go
-//
-// This file holds backend wrapper selection: wrapperFor / managerFor /
+// Package session router backend selection: wrapperFor / managerFor /
 // BackendIDs / BackendWrapper / per-session backend overrides + the
 // validators (validateModel / validateBackend) that gate per-request input.
 package session
@@ -22,17 +14,11 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
-// backendStore groups the 9 backend/policy fields (Router P3 facet, #383). It
-// is a value field on Router, carries NO lock of its own, and is read/written
-// ONLY under Router.mu — the lock topology is unchanged (RFC §3 candidate A:
-// single r.mu retained). The 8 config fields
-// (wrapper/wrappers/defaultBackend/backendIDs/model/extraArgs/backendModels/
-// backendExtraArgs) are read-only after NewRouter and read lock-free;
-// backendOverrides is the only mutable field (SetSessionBackend under write
-// lock, GetSessionBackend under RLock, lifecycle mutations under r.mu write
-// lock). Moving these into a no-lock value sub-struct preserves both classes
-// exactly. The lint recurses one level so each inner field below ALSO carries
-// its own per-domain `// 读写:` annotation.
+// backendStore groups the backend/policy fields of Router (#383). It carries
+// NO lock of its own: config fields are read-only after NewRouter and read
+// lock-free; the override / manifest maps are mutated only under r.mu write
+// lock. The lint recurses one level so each inner field carries its own
+// per-domain annotation.
 type backendStore struct {
 	// 读写: backend (wrapperFor/CLIName/CLIVersion/CLIPath), core (init), lifecycle (spawn), shim (shimManagers)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
@@ -40,87 +26,56 @@ type backendStore struct {
 	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
 	// 读写: backend (DefaultBackend/wrapperFor/BackendWrapper/BackendIDs), core (init), lifecycle (resolveSpawnParams)
 	defaultBackend string // backend ID used when AgentOpts.Backend is empty
-	// backendIDs caches the dashboard-stable ordering returned by BackendIDs:
-	// default backend first, remaining IDs sorted ascending. wrappers is
-	// constructed once in NewRouter and never mutated, so this slice is
-	// computed once at construction and read-only thereafter — saves a
-	// per-call O(N) sort + 2 small allocations on the dashboard /api/sessions
-	// hot path.
+	// backendIDs caches BackendIDs' ordering; computed once in NewRouter.
 	// 读写: backend (BackendIDs), core (init)
 	backendIDs []string
 	// 读写: backend (backendDefaultsFor base), core (init)
 	model string
 	// 读写: backend (backendDefaultsFor base), core (init)
 	extraArgs []string
-	// backendModels / backendExtraArgs optionally override model and args
-	// per backend ID. Read-only after NewRouter.
+	// backendModels / backendExtraArgs override model and args per backend ID.
 	// 读写: backend (backendDefaultsFor override), core (init)
 	backendModels map[string]string
 	// 读写: backend (backendDefaultsFor override), core (init)
 	backendExtraArgs map[string][]string
 	// backendEfforts holds the thinking-effort tier per backend ID. No
-	// router-wide base field on purpose: the composition root already folded
-	// cli.effort in and filtered out backends whose protocol ignores the tier,
-	// so for the BACKEND layer this map is the whole truth. AgentOpts.Effort
-	// layers above it in resolveSpawnParamsLocked and is NOT capability-
-	// filtered — harmless, since BuildArgs ignores the field on protocols that
-	// take no tier. Read-only after NewRouter.
-	// docs/rfc/kiro-effort-control.md
+	// router-wide base on purpose: the composition root already folded
+	// cli.effort in and dropped tier-less backends. AgentOpts.Effort layers
+	// above it unfiltered (harmless). docs/rfc/kiro-effort-control.md
 	// 读写: backend (backendDefaultsFor), core (init)
 	backendEfforts map[string]string
-	// backendOverrides stores per-session backend preferences picked by
-	// the dashboard at session-creation time. Keyed by full session key
-	// (including agent suffix) so two sessions on the same chat can run
-	// against different backends.
+	// backendOverrides: per-session backend picks keyed by full session key
+	// (with agent suffix) so two sessions on one chat can run different backends.
 	// 读写: backend (Set/GetSessionBackend), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume / RenameSession)
 	backendOverrides map[string]string
-	// accessProfileOverrides stores per-session access-profile picks made by
-	// the dashboard at session-creation time (RFC project-access-profile §8.2).
-	// Same one-shot semantics as backendOverrides: keyed by full session key,
-	// consumed on first spawnSession, cleared on Reset/Remove. Empty value =
-	// "global default" (explicit clear). Mirrors backendOverrides so the two
-	// stay structurally identical.
+	// accessProfileOverrides: per-session access-profile picks (RFC
+	// project-access-profile §8.2), one-shot like backendOverrides. Empty
+	// value = global default.
 	// 读写: backend (Set/GetSessionAccessProfile), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume)
 	accessProfileOverrides map[string]string
-	// configuredModelLists is the operator-declared model manifest per
-	// backend ID (cli.backends[].models) — the fallback tier the dashboard
-	// model popover shows when no agent-reported manifest exists (claude,
-	// or kiro before its first spawn). Read-only after NewRouter.
-	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// configuredModelLists: operator-declared manifest per backend ID
+	// (cli.backends[].models). docs/rfc/dashboard-model-effort-control.md §4.2.
 	// 读写: backend (BackendModelManifest), core (init)
 	configuredModelLists map[string][]string
-	// modelManifests caches the agent-reported model list per backend ID,
-	// refreshed opportunistically from any live process of that backend
-	// whenever BackendModelManifest is called (manifest reads are rare —
-	// dashboard picker/popover opens — so the per-call session scan is
-	// cheap). Survives process death so a suspended-only deployment still
-	// serves the last known list. Mutated under r.mu write lock.
-	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// modelManifests caches the agent-reported model list per backend ID;
+	// survives process death. Mutated under r.mu write lock.
 	// 读写: backend (BackendModelManifest), core (init)
 	modelManifests map[string][]cli.ModelInfo
 }
 
-// R188-SEC-M2: model identifiers flow into the `--model` argv of the CLI child
-// process. An authenticated dashboard user (or a malicious IM planner reply)
-// could inject additional flags via a whitespace-containing model string. The
-// project package's plannerModelRe enforces the same pattern for planner
-// config; keep the regex in sync if either changes.
+// maxModelBytes caps model identifiers, which flow into the CLI child's
+// `--model` argv. Keep in sync with project's plannerModelRe.
 const maxModelBytes = 128
 
-// modelRe constrains the `--model` argument to a charset that is non-flag-like.
-// The leading anchor `^[A-Za-z0-9]` (no leading `-`) prevents flag injection
-// (e.g. `--model -rce` could otherwise be parsed by the CLI as a separate flag).
-// `:` and `/` are allowed because AWS Bedrock model IDs and inference profile
-// ARNs use them (e.g. `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0`).
-// `[` `]` are allowed for the claude CLI's context-window suffix
-// (`…-fable-5-1[1m]`), which the CLI reports as the session's model and the
-// dashboard popover offers back (see tuningspec.modelNameRe).
-// R218-SEC-3 / R218B-SEC-3: keep the leading char gate strict; relaxing it to
-// allow `:` or `/` at the start would re-open the flag-injection surface.
+// modelRe constrains `--model` to a non-flag-like charset. The leading
+// `^[A-Za-z0-9]` prevents flag injection (`--model -rce`); relaxing it would
+// re-open that surface. `:` and `/` are allowed inside for Bedrock IDs / ARNs;
+// `[` `]` for the claude CLI's context-window suffix (`…-fable-5-1[1m]`),
+// which the CLI reports back as the session model (see tuningspec.modelNameRe).
 var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\[\]\-]*$`)
 
-// validateModel returns nil for empty (use router default) or any string
-// matching modelRe under the byte cap; otherwise returns ErrInvalidModel.
+// validateModel returns nil for empty (router default) or any string matching
+// modelRe under the byte cap; otherwise ErrInvalidModel.
 func validateModel(model string) error {
 	if model == "" {
 		return nil
@@ -135,19 +90,15 @@ func validateModel(model string) error {
 }
 
 // ValidateModelID is the exported form of validateModel for callers that
-// pre-flight a model identifier before handing it to GetOrCreate (e.g. the
-// scratch handler inheriting a CLI-reported model, #2433). Same modelRe /
-// byte cap — a value accepted here will not fail the router's own gate.
+// pre-flight a model identifier before GetOrCreate (#2433).
 func ValidateModelID(model string) error { return validateModel(model) }
 
 // ErrInvalidModel is returned when AgentOpts.Model fails validateModel.
 // Callers should map it to an HTTP 400 or IM error reply.
 var ErrInvalidModel = errors.New("invalid model identifier")
 
-// backendRe mirrors the model identifier pattern but with a tighter 64-byte
-// cap since backend IDs are short tags ("claude", "kiro", "gemini"). Value
-// flows into slog attrs, session state JSON, and shim state file; without
-// this gate a WS client could land C0/C1 bytes into structured logs.
+// backendRe mirrors modelRe with a tighter cap. The value flows into slog attrs
+// and state files; without this gate a WS client could land C0/C1 bytes in logs.
 var backendRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\-]*$`)
 
 const maxBackendBytes = 64
@@ -155,11 +106,8 @@ const maxBackendBytes = 64
 // ErrInvalidBackend is returned when AgentOpts.Backend fails validateBackend.
 var ErrInvalidBackend = errors.New("invalid backend identifier")
 
-// validateBackend returns nil for empty (router default) or any string
-// matching backendRe under the byte cap; otherwise ErrInvalidBackend. The
-// actual backend->wrapper resolution still goes through wrapperFor which
-// falls back to the default wrapper when the backend is unknown; this gate
-// only stops shape-invalid input, not unknown backends.
+// validateBackend returns nil for empty or any string matching backendRe under
+// the cap. Unknown-but-well-formed backends still fall back via wrapperFor.
 func validateBackend(backend string) error {
 	if backend == "" {
 		return nil
@@ -168,9 +116,7 @@ func validateBackend(backend string) error {
 		return fmt.Errorf("%w: exceeds %d bytes", ErrInvalidBackend, maxBackendBytes)
 	}
 	if !backendRe.MatchString(backend) {
-		// Don't echo the regex pattern itself — this error surfaces in IM
-		// replies and slog attrs where the cryptic literal pattern adds
-		// noise without helping users self-diagnose. Mirrors validateModel.
+		// Don't echo the regex: this surfaces in IM replies and slog attrs.
 		return fmt.Errorf("%w: must be alphanumeric with optional dots, hyphens or underscores", ErrInvalidBackend)
 	}
 	return nil
@@ -185,14 +131,8 @@ func (r *Router) CLIName() string {
 	return ""
 }
 
-// CLIVersion exposes the default backend's CLI version for status endpoints.
-// Returns empty when no wrapper is wired.
-//
-// R20260612-global-version: prefers the live version observed from a spawned
-// process (init frame) over the spawn-time CLIVersion detected once at startup,
-// so the global dashboard banner reflects a host claude upgrade under a
-// long-lived naozhi without a restart. Falls back to the spawn-time value
-// before any process has reported (and for backends that never self-report).
+// CLIVersion exposes the default backend's CLI version, preferring the live
+// version observed from a spawned process so host upgrades show without restart.
 func (r *Router) CLIVersion() string {
 	if r.bkStore.wrapper != nil {
 		return r.bkStore.wrapper.EffectiveVersion()
@@ -200,9 +140,9 @@ func (r *Router) CLIVersion() string {
 	return ""
 }
 
-// wrapperFor selects the wrapper for the requested backend ID.
-// Empty backend picks the router default. Returns (wrapper, effectiveID).
-// Callers must treat a nil wrapper as "no backend available" and fail fast.
+// wrapperFor selects the wrapper for the requested backend ID (empty = router
+// default) and returns (wrapper, effectiveID). Callers must treat a nil
+// wrapper as "no backend available" and fail fast.
 func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
 	if len(r.bkStore.wrappers) == 0 {
 		id := backend
@@ -221,21 +161,16 @@ func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
 			return w, r.bkStore.defaultBackend
 		}
 	}
-	// Last-resort fallback: return r.bkStore.wrapper paired with its own
-	// BackendID (not r.bkStore.defaultBackend) so callers never see a non-empty
-	// ID paired with a nil wrapper — that combination produced confusing
-	// error messages like `spawn process (backend "claude"): no wrapper`.
+	// Last resort pairs r.bkStore.wrapper with its OWN BackendID so callers
+	// never see a non-empty ID alongside a nil wrapper.
 	if r.bkStore.wrapper != nil {
 		return r.bkStore.wrapper, r.bkStore.wrapper.BackendID
 	}
 	return nil, ""
 }
 
-// managerFor returns the shim.Manager associated with the given backend ID.
-// Empty backend picks the router default via wrapperFor's fallback rules.
-// Used by reconnectShims's ENOENT-cleanup path (F6) to purge zombies
-// without having to thread a manager reference through every call site.
-// Returns nil when no wrapper/manager is configured, so callers must guard.
+// managerFor returns the shim.Manager for the given backend ID (empty = router
+// default). Returns nil when none is configured, so callers must guard.
 func (r *Router) managerFor(backend string) *shim.Manager {
 	w, _ := r.wrapperFor(backend)
 	if w == nil {
@@ -244,14 +179,8 @@ func (r *Router) managerFor(backend string) *shim.Manager {
 	return w.ShimManager
 }
 
-// BackendIDs returns the list of backend IDs the router can spawn against,
-// with the default backend first. Suitable for UI enumeration.
-//
-// Returns a defensive copy of the cached r.bkStore.backendIDs slice so callers
-// cannot mutate the cache (no caller in the tree mutates today, but the
-// dashboard enumeration handler does iterate without an explicit copy).
-// Test routers built by struct literal skip computeBackendIDs and fall
-// through to the legacy compute path below.
+// BackendIDs returns the backend IDs the router can spawn against, default
+// first. Returns a defensive copy so callers cannot mutate the cache.
 func (r *Router) BackendIDs() []string {
 	if r.bkStore.backendIDs != nil {
 		out := make([]string, len(r.bkStore.backendIDs))
@@ -273,9 +202,8 @@ func (r *Router) DefaultBackend() string {
 	return ""
 }
 
-// BackendWrapper returns the wrapper registered for the given backend ID,
-// or nil if the router has no matching backend. Intended for callers that
-// need read-only metadata (CLIName, CLIVersion, CLIPath) per backend.
+// BackendWrapper returns the wrapper registered for the given backend ID, or
+// nil if none matches. For read-only metadata (CLIName, CLIVersion, CLIPath).
 func (r *Router) BackendWrapper(id string) *cli.Wrapper {
 	if len(r.bkStore.wrappers) == 0 {
 		if id == "" || r.bkStore.wrapper == nil || r.bkStore.wrapper.BackendID == id || (id == "claude" && r.bkStore.wrapper.BackendID == "") {
@@ -290,9 +218,7 @@ func (r *Router) BackendWrapper(id string) *cli.Wrapper {
 }
 
 // computeBackendIDs builds the dashboard-stable ordering used by BackendIDs:
-// default backend first, remaining IDs sorted ascending. wrappers is
-// constructed once in NewRouter and never mutated, so the slice is computed
-// here once and cached on r.bkStore.backendIDs.
+// default backend first, remaining IDs sorted ascending.
 func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, defaultBackend string) []string {
 	if len(wrappers) == 0 {
 		if wrapper != nil {
@@ -322,20 +248,14 @@ func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, d
 	return out
 }
 
-// maxBackendOverrides caps the per-key backend override map so an
-// authenticated dashboard user cannot exhaust memory by POSTing unique keys.
-// backendOverrides entries are cleared on first spawnSession / Reset /
-// Remove / ResetChat for the key; abandoned picks (key chosen then never
-// spawned) would otherwise accumulate indefinitely — the 30/min send-limiter
-// bounds burst rate but not cumulative growth. Pick a limit that comfortably
-// exceeds realistic outstanding picks (a single operator seldom has >100
-// unresolved picks) while making the DoS surface trivially bounded.
+// maxBackendOverrides caps the per-key override maps so an authenticated
+// dashboard user cannot exhaust memory by POSTing unique keys: abandoned picks
+// are only cleared on spawn / Reset / Remove and the send-limiter bounds burst
+// rate, not cumulative growth.
 const maxBackendOverrides = 1024
 
-// SetSessionBackend remembers the backend the dashboard picked for a new
-// session keyed by its full session key (including agent suffix). Only
-// applied the next time spawnSession runs — existing live sessions are not
-// migrated. Empty backend clears the override.
+// SetSessionBackend remembers the backend picked for a new session. Applied on
+// the next spawnSession only; live sessions are not migrated. Empty clears.
 func (r *Router) SetSessionBackend(key, backend string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -343,9 +263,7 @@ func (r *Router) SetSessionBackend(key, backend string) {
 		delete(r.bkStore.backendOverrides, key)
 		return
 	}
-	// Allow existing keys to be updated without bumping against the cap
-	// (operator changing their mind mid-flow) — only reject when inserting
-	// a brand-new key after the limit is hit.
+	// Updating an existing key never hits the cap; only brand-new inserts do.
 	if _, existing := r.bkStore.backendOverrides[key]; !existing && len(r.bkStore.backendOverrides) >= maxBackendOverrides {
 		slog.Warn("backendOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
@@ -361,10 +279,9 @@ func (r *Router) SessionBackend(key string) string {
 	return r.bkStore.backendOverrides[key]
 }
 
-// SetSessionAccessProfile remembers the access profile the dashboard picked
-// for a new session (RFC project-access-profile §8.2). One-shot: applied the
-// next time spawnSession runs, then consumed. Empty clears the override.
-// Mirrors SetSessionBackend including the capacity guard.
+// SetSessionAccessProfile remembers the access profile picked for a new
+// session (RFC project-access-profile §8.2). One-shot: consumed on the next
+// spawnSession. Empty clears. Mirrors SetSessionBackend including the cap.
 func (r *Router) SetSessionAccessProfile(key, profile string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -398,39 +315,21 @@ func (r *Router) CLIPath() string {
 	return r.bkStore.wrapper.CLIPath
 }
 
-// backendDefaults is the merged per-backend spawn configuration returned by
-// backendDefaultsFor. Grouped into a struct rather than a widening tuple so
-// adding a field does not churn every call site — the migration the
-// R222-ARCH-14 note below anticipated.
+// backendDefaults is the merged per-backend spawn configuration.
 type backendDefaults struct {
 	Model string
-	// Args is returned WITHOUT copying — callers that mutate (append per-
-	// request flags) must copy first; callers that only forward may use it
-	// directly.
+	// Args is returned WITHOUT copying — callers that mutate must copy first.
 	Args []string
-	// Effort is "" for backends that report no tier support, since the
-	// composition root drops the setting before it reaches the router.
+	// Effort is "" for backends that report no tier support.
 	Effort string
 }
 
-// backendDefaultsFor returns the merged spawn configuration the router uses
-// when spawning under backendID. Precedence:
-//
-//	router-level r.bkStore.model / .extraArgs (base)
-//	← r.bkStore.backendModels[backendID]    (replace, when non-empty)
-//	← r.bkStore.backendExtraArgs[backendID] (replace, when non-empty)
-//
-// Effort has no router-level base — see the backendEfforts field comment.
-//
-// R222-ARCH-14 (#739): the same lookup pattern previously appeared inline
-// in resolveSpawnParamsLocked AND router_shim.classifyShimState (drift
-// detection). Centralising the merge here means a future migration to a
-// single Backend struct can change one helper instead of grep-replacing
-// across two hot paths.
-//
-// Both callers matter for effort: the drift path feeds BuildArgs too, so
-// omitting the tier there would make every restart read the surviving kiro
-// shims as arg-drift and needlessly restart them.
+// backendDefaultsFor returns the merged spawn configuration for backendID:
+// router-level model / extraArgs as base, replaced by the per-backend
+// backendModels / backendExtraArgs entry when non-empty. Effort has no base
+// (see backendEfforts). Both resolveSpawnParamsLocked and the shim drift
+// detector must use this helper, or every restart would read surviving kiro
+// shims as arg-drift and needlessly restart them (#739).
 func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 	model := r.bkStore.model
 	if bm, ok := r.bkStore.backendModels[backendID]; ok && bm != "" {
@@ -446,32 +345,11 @@ func (r *Router) backendDefaultsFor(backendID string) backendDefaults {
 	}
 }
 
-// BackendModelManifest returns the model list the dashboard's per-session
-// model popover should offer for a backend ("" = router default backend).
-// docs/rfc/dashboard-model-effort-control.md §4.2.
-//
-// Three tiers, agent-reported first:
-//
-//  1. Runtime manifest: any LIVE process of this backend is asked for the
-//     availableModels it captured at Init (kiro session/new|load, F5/F12).
-//     A hit refreshes bkStore.modelManifests, so the list survives after
-//     every process of the backend is recycled — and tracks kiro upgrades,
-//     because each fresh spawn re-reports (RFC §6 R4).
-//  2. Configured fallback: cli.backends[].models (claude's alias list, or
-//     any operator-pinned set) when no runtime manifest was ever seen.
-//  3. Observed fallback: the models this deployment has actually run under
-//     the backend — router default model, every session's live/persisted
-//     Model(), every TuningModel() override — see observedModelsLocked.
-//     Backends that never report a manifest (claude) and have no
-//     cli.backends[].models configured would otherwise leave the popover
-//     with only the manual-input box.
-//
-// Returns nil when no tier has data — the popover then shows its
-// manual-input fallback with a per-protocol hint.
-//
-// Takes r.mu for WRITING because a runtime hit updates the cache; manifest
-// reads are dashboard-popover-frequency (rare), so the write lock and the
-// O(sessions) scan cost nothing that matters.
+// BackendModelManifest returns the model list the dashboard popover offers for
+// a backend ("" = router default). Tiers: (1) runtime manifest from any LIVE
+// process, cached in bkStore.modelManifests; (2) configured
+// cli.backends[].models; (3) observedModelsLocked. Nil when no tier has data.
+// Takes r.mu for WRITING because a runtime hit updates the cache.
 func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -513,13 +391,9 @@ func (r *Router) BackendModelManifest(backendID string) []cli.ModelInfo {
 	return r.observedModelsLocked(backendID)
 }
 
-// observedModelsLocked is BackendModelManifest's third tier: the deduped set
-// of model ids seen for backendID in this deployment. Order is stable for the
-// dashboard — router default first (it is what a fresh session runs under),
-// then every session's Model() / TuningModel() sorted ascending; map
-// iteration order never leaks out. Nothing is hardcoded: an alias like
-// "sonnet" appears only because some session actually ran under it.
-// Caller holds r.mu. Returns nil when nothing was observed.
+// observedModelsLocked returns the deduped model ids seen for backendID in a
+// stable order (router default first, then sessions' Model() / TuningModel()
+// sorted). Caller holds r.mu. Nil when nothing observed.
 func (r *Router) observedModelsLocked(backendID string) []cli.ModelInfo {
 	seen := make(map[string]bool)
 	var out []cli.ModelInfo

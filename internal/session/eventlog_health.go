@@ -34,14 +34,9 @@ type EventLogHealth struct {
 	FSSupported bool
 }
 
-// EventLogStats returns a snapshot of the persister's observability
-// state. Handles the disabled case gracefully: callers get
-// EventLogHealth{Enabled:false} and can skip the sub-object.
-//
-// This helper exists so /health (in the server package) doesn't have
-// to import persist directly — it would require an import cycle on
-// any future change that adds session→server plumbing. Session owns
-// the persister, session surfaces the health view.
+// EventLogStats returns a snapshot of the persister's observability state;
+// EventLogHealth{Enabled:false} when disabled. Lives here so /health (server
+// package) need not import persist directly.
 func (r *Router) EventLogStats() EventLogHealth {
 	if r == nil || r.eventLogPersister == nil {
 		return EventLogHealth{}
@@ -68,26 +63,21 @@ func (r *Router) EventLogStats() EventLogHealth {
 	}
 }
 
-// Ensure the persist package symbol is referenced so editors don't
-// trim the import when the public Stats struct is all that's used
-// here. Keeps the dependency explicit.
+// Keeps the persist import live (only its Stats struct is used here).
 var _ = persist.Stats{}
 
-// EventLogWriterHealthy returns a single boolean suitable for a
-// monitor rule. Wraps EventLogStats so external callers don't need
-// to interpret the liveness formula.
+// EventLogWriterHealthy returns a single boolean suitable for a monitor rule.
 func (r *Router) EventLogWriterHealthy() bool {
 	s := r.EventLogStats()
 	return !s.Enabled || s.WriterAlive
 }
 
-// _ ensures the `time` import remains live; refactors sometimes
-// leave imports stranded when stats fields migrate.
+// Keeps the `time` import live.
 var _ = time.Nanosecond
 
-// AttachmentTrackerHealth is the /health.attachment_tracker
-// sub-object shape. Callers must not mutate; the Router re-builds
-// it on every request. See docs/rfc/attachment-refcount.md §3.2.
+// AttachmentTrackerHealth is the /health.attachment_tracker sub-object shape.
+// Callers must not mutate; the Router re-builds it on every request. See
+// docs/rfc/attachment-refcount.md §3.2.
 type AttachmentTrackerHealth struct {
 	Enabled      bool
 	WriterAlive  bool
@@ -101,9 +91,8 @@ type AttachmentTrackerHealth struct {
 	Pending      int
 }
 
-// AttachmentTrackerStats mirrors EventLogStats's shape but wraps the
-// tracker instead of the persister. Returns Enabled=false when no
-// tracker was constructed (eventLogDir="").
+// AttachmentTrackerStats mirrors EventLogStats for the tracker. Returns
+// Enabled=false when no tracker was constructed (eventLogDir="").
 func (r *Router) AttachmentTrackerStats() AttachmentTrackerHealth {
 	if r == nil || r.attachmentTracker == nil {
 		return AttachmentTrackerHealth{}

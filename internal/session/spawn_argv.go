@@ -3,37 +3,15 @@ package session
 import "github.com/naozhi/naozhi/internal/cli"
 
 // argvSpawnOptions builds the SpawnOptions subset that Protocol.BuildArgs turns
-// into argv. It exists to keep the two callers bit-identical:
+// into argv, keeping the real spawn (spawnSession) and the arg-drift comparison
+// (driftCompareArgs) bit-identical. Any argv-bearing field set on only one path
+// reads as permanent drift and kills every surviving shim on each naozhi
+// restart, so the argv inputs are positional parameters: a caller that forgets
+// one does not compile. Add new argv-bearing fields HERE, not at a call site.
 //
-//   - the real spawn (spawnSession), which layers the non-argv fields (Key,
-//     ResumeID, WorkingDir, timeouts) on top of the returned value, and
-//   - the arg-drift comparison (driftCompareArgs), which reconstructs the argv a
-//     fresh spawn WOULD use and restarts the session when it differs from the
-//     argv its surviving shim recorded.
-//
-// Any field that lands in argv but is set on only one of those paths reads as
-// permanent drift, so every naozhi restart shuts down the surviving shims and
-// kills their CLIs. That has now happened four times — model/effort ("切过模型
-// 的会话一重启全刷"), SettingsFile, MCPConfigFile, and DebugFile — each fixed by
-// adding one more field to a hand-written struct literal and one more "must stay
-// mirrored" comment. Routing both paths through this function converts the next
-// occurrence from a silent zero-value into a compile error: the argv-bearing
-// inputs are positional parameters, so a caller that forgets one does not build.
-//
-// debugFile is a parameter rather than a r.cliDebug*For(key) call inside the
-// function because the two paths need different side effects for the same value:
-// the spawn path pre-creates and hardens the log (cliDebugFileFor), while the
-// drift path must stay read-only (cliDebugPathFor). See cli_debug.go.
-//
-// systemPrompt is the layered AgentOpts.SystemPrompt (#2493). Both paths take
-// it from mergeArgvLayers: the spawn from the overlay it just built, the drift
-// side from the overlay the shim persisted (shim.SpawnOverlay.AppendSystemPrompt),
-// so a prompted session compares equal on restart and a changed prompt reads
-// as drift. Keeping it positional here means a new consumer cannot forget it.
-//
-// PermissionMode is deliberately absent: BuildArgs emits
-// --dangerously-skip-permissions for the zero value, so both paths agree today.
-// A caller that starts varying it must add it here, not at one call site.
+// debugFile is a parameter because the two paths need different side effects
+// (spawn pre-creates/hardens via cliDebugFileFor; drift stays read-only via
+// cliDebugPathFor). PermissionMode is absent: both paths use the zero value.
 func (r *Router) argvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string) cli.SpawnOptions {
 	return cli.SpawnOptions{
 		Model:              model,
@@ -44,8 +22,7 @@ func (r *Router) argvSpawnOptions(model, effort, debugFile, systemPrompt string,
 		// "" unless the operator opted into naozhi-owned isolated settings
 		// (RFC naozhi-owned-settings-v3); only ClaudeProtocol acts on it.
 		SettingsFile: r.naozhiSettingsFile,
-		// "" unless the operator configured cli.mcp_config (RFC
-		// cli-mcp-config); only ClaudeProtocol acts on it.
+		// "" unless the operator configured cli.mcp_config; only ClaudeProtocol acts on it.
 		MCPConfigFile: r.mcpConfigFile,
 	}
 }

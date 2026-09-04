@@ -2,38 +2,13 @@
 
 // Package session test utilities for cross-package consumers.
 //
-// IMPORTANT (R226-CR-14 / R227-CR-2 / R230-CQ-5 / R232-ARCH-4): this file
-// is named testutil.go (not testutil_test.go) on purpose — Go only
-// compiles *_test.go files when the *enclosing* package is being tested,
-// so types/functions defined there are NOT visible to other packages'
-// tests. This package's TestProcess + Router.InjectSession are consumed
-// by internal/server/*_test.go and internal/upstream/*_test.go, which
-// forces the cross-package-visible "testutil.go" naming.
-//
-// Side effect: this file would otherwise ship in the production binary.
-// The `//go:build !release` constraint at the top of this file excludes
-// it whenever a release binary is built with `-tags release`, addressing
-// R246-ARCH-8 / R234-ARCH-18 / R239-ARCH-O without splitting the file
-// into a subpackage.
-//
-//   - go build / go test                  → compiled (default)
-//   - go build -tags release ./cmd/naozhi → excluded (production)
-//
-// The constraint is a no-op for current callers (no Makefile target sets
-// `-tags release` today), but lets ops opt in to a release build that
-// strips the test stub when paranoid about a future plugin system. The
-// TestProcess type, NewTestProcess constructor, and Router.InjectSession
-// method are all defined in this file, so a release build will fail-fast
-// at link time if anything reachable from cmd/naozhi/main.go ever
-// reaches for them.
-//
-// Migration note: a follow-up subpackage carve-out is the canonical fix.
-// The blocker is `Router.InjectSession`, which touches r.mu / r.ss.sessions
-// / r.attachHistorySource (all unexported). A clean split would either
-// export a narrow seam (e.g. `Router.injectForTest(processIface)` +
-// matching helper in sessiontest) or move the InjectSession glue here
-// and ship TestProcess from the subpackage. Defer until a release-build
-// matrix actually exercises the `-tags release` path.
+// This file is named testutil.go (not *_test.go) on purpose: Go only compiles
+// *_test.go files for the enclosing package's own tests, and TestProcess +
+// Router.InjectSession are consumed by internal/server and internal/upstream
+// tests. The `//go:build !release` constraint keeps it out of a binary built
+// with `-tags release`; a release build fails at link time if anything
+// reachable from cmd/naozhi ever references these symbols. A subpackage
+// carve-out is blocked on Router.InjectSession touching unexported state.
 package session
 
 import (
@@ -51,15 +26,12 @@ type TestProcess struct {
 	AliveVal       bool
 	DeathReasonVal string
 	// ModelVal lets snapshot tests drive proc.Model() without subclassing.
-	// Default "" matches the pre-R236-PERF-13 behaviour. Used by
-	// snapshot_setmodel_idempotent_test.go to assert Snapshot's mirror
-	// short-circuits when the cached model already equals proc.Model().
 	ModelVal string
 	// LiveVersionVal lets snapshot tests drive proc.LiveVersion() — the
-	// CLI binary version self-reported in system/init. R20260612-live-version.
+	// CLI binary version self-reported in system/init.
 	LiveVersionVal string
 	// EffortVal lets snapshot tests drive proc.Effort() — the backend-reported
-	// thinking-effort tier. docs/rfc/kiro-effort-visibility.md
+	// thinking-effort tier.
 	EffortVal string
 	SendFunc  func(ctx context.Context, text string, images []cli.Attachment, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
@@ -101,13 +73,9 @@ func (p *TestProcess) DiscardPassthroughPending(reason error) {}
 func (p *TestProcess) PassthroughDepth() int { return 0 }
 
 // SupportsPassthrough defaults to false so tests that don't opt in use the
-// legacy Send path. A test wanting to exercise passthrough can assign a
-// TestProcess whose wrapper overrides this (or supply a real *cli.Process).
+// legacy Send path; wrap TestProcess or use a real *cli.Process to exercise it.
 func (p *TestProcess) SupportsPassthrough() bool { return false }
 
-// SessionID / State mirror the idiomatic processIface accessor names
-// established by the R219-CR-9 (#665) rename, shipped under ADR-0001
-// PR-2 (#463).
 func (p *TestProcess) SessionID() string                      { return "" }
 func (p *TestProcess) State() cli.ProcessState                { return p.StateVal }
 func (p *TestProcess) DeathReason() string                    { return p.DeathReasonVal }
@@ -140,9 +108,8 @@ func (p *TestProcess) InjectHistory(entries []clievent.EventEntry) {
 }
 func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAgents() }
 
-// Normalize-layer stubs (docs/rfc/multi-backend.md §8.8). Tests don't drive
-// metadata through TestProcess; zero values match the pre-multi-backend
-// SessionSnapshot output so existing assertions continue to pass.
+// Normalize-layer stubs (docs/rfc/multi-backend.md §8.8); zero values keep
+// SessionSnapshot assertions stable.
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
@@ -172,8 +139,6 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	return s
 }
 
-// SetWorkspaceForTest stamps the session-level workspace (the cwd a live CLI
-// process runs in) on an injected session. Production sets this through the
-// spawn / takeover paths; tests that assert workspace-precedence behaviour
-// need it without a real process.
+// SetWorkspaceForTest stamps the session-level workspace on an injected
+// session; production sets it through the spawn / takeover paths.
 func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }

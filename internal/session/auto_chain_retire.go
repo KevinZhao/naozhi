@@ -7,35 +7,24 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// autoChainRetiredOrigins is the set of prev_session_origins labels written by
-// the now-retired auto-workspace-chain feature. Any chain segment carrying one
-// of these origins was machine-guessed by "same workspace dir + time window"
-// (docs/rfc/auto-workspace-chain.md) rather than a real session-ID rotation,
-// and is stripped by retireAutoChainOnce at startup.
+// autoChainRetiredOrigins is the set of prev_session_origins labels that mark
+// a chain segment as machine-guessed ("same workspace dir + time window",
+// docs/rfc/auto-workspace-chain.md) rather than a real session-ID rotation;
+// retireAutoChainOnce strips them at startup.
 var autoChainRetiredOrigins = map[string]bool{
 	"auto-spawn":    true,
 	"auto-backfill": true,
 }
 
-// retireAutoChainOnce strips auto-spawn / auto-backfill segments from every
-// session's prev_session_ids chain at startup, replacing the old
-// runAutoChainBackfillOnce. It is the data-cleanup half of retiring the
-// auto-workspace-chain feature (RFC docs/rfc/project-stable-session-key.md
-// §9.2): the feature produced semantically-wrong chains (e.g. a one-off
-// "什么药治拉肚子" conversation chained onto a coding session merely because
-// both lived under /home/ec2-user/workspace), and this removes that pollution
-// while preserving the real rotation chain (origin manual / resume / empty).
-//
-// Per session, the kept indices are those whose origin is NOT an auto-* label;
-// RebuildChainFiltered then rewrites prevSessionIDs + prevSessionOrigins
+// retireAutoChainOnce strips auto-* segments from every session's
+// prev_session_ids chain at startup while preserving the real rotation chain
+// (origin manual / resume / empty); see docs/rfc/project-stable-session-key.md
+// §9.2. RebuildChainFiltered rewrites prevSessionIDs + prevSessionOrigins
 // atomically under one historyMu hold so no reader observes a misaligned pair.
+// Idempotent: once clean, later startups strip nothing and skip the dirty bump.
 //
-// Idempotent: after a first run no auto-* origins remain, so subsequent
-// startups strip nothing and skip the dirty/store bump.
-//
-// CALLER CONTRACT: invoked from NewRouter BEFORE the background history
-// loaders launch (same slot the old backfill occupied) and while the router
-// is single-threaded, so it does not take r.mu — it snapshots r.ss.sessions
+// CALLER CONTRACT: invoked from NewRouter BEFORE the background history loaders
+// launch, while the router is single-threaded — it snapshots r.ss.sessions
 // under r.mu briefly, then mutates each session via historyMu only.
 func (r *Router) retireAutoChainOnce() {
 	startedAt := time.Now()
@@ -68,9 +57,8 @@ func (r *Router) retireAutoChainOnce() {
 		}
 		removed := s.RebuildChainFiltered(keep)
 		if removed == 0 {
-			// keepMask length must match the live chain; a concurrent
-			// mutation (none expected at startup) or already-clean chain
-			// means nothing to do.
+			// keepMask length must match the live chain; a mismatch means a
+			// concurrent mutation (none expected at startup).
 			slog.Warn("auto-chain retire: RebuildChainFiltered returned 0 with pending auto-chain origins; possible misaligned keep mask", "key", s.key)
 			continue
 		}

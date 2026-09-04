@@ -10,14 +10,12 @@ import (
 
 // runTimer measures one run's wall-clock and first-event latency.
 //
-// The wrapped onEvent callback may fire on a DIFFERENT goroutine than the one
-// that calls finishRun: on the passthrough path onEvent runs on the CLI
-// readLoop goroutine, and on the cancel/bail return path finishRun can read
-// the first-event stamp while a late readLoop event is still writing it.
+// The wrapped onEvent callback may fire on a DIFFERENT goroutine (the CLI
+// readLoop) than the one calling finishRun, which on the cancel/bail path can
+// read the first-event stamp while a late event is still writing it.
 // firstByteNano is therefore an atomic stamped exactly once via CompareAndSwap
-// — never a plain field — so the cross-goroutine read in finishRun is
-// race-free regardless of send path. started is set once before the callback
-// is wired and only read after the round-trip returns, so it needs no atomic.
+// — never a plain field. started is set before the callback is wired and only
+// read after the round-trip returns, so it needs no atomic.
 type runTimer struct {
 	started       time.Time
 	firstByteNano atomic.Int64 // unix-nano of first event; 0 = not yet seen
@@ -26,9 +24,7 @@ type runTimer struct {
 // instrumentRun begins timing a run and returns the timer plus an onEvent
 // callback to pass to the underlying process. When runStore is nil (tests /
 // no-persist) it returns the original callback unwrapped, preserving the
-// existing zero-allocation nil-callback fast path. The wrapper records the
-// first event's timestamp exactly once (CAS 0 -> now), tolerating concurrent
-// fan-out from the readLoop goroutine on the passthrough path.
+// zero-allocation nil-callback fast path.
 func (s *ManagedSession) instrumentRun(onEvent cli.EventCallback) (*runTimer, cli.EventCallback) {
 	if s.runStore == nil {
 		return nil, onEvent
@@ -47,10 +43,8 @@ func (s *ManagedSession) instrumentRun(onEvent cli.EventCallback) (*runTimer, cl
 
 // finishRun computes the run record from the timer + outcome and enqueues it
 // for async persistence. No-op when timing was not instrumented (nil timer /
-// nil store). The only work it does is cheap (time.Now, Classify, an 8-byte
-// crypto/rand read) followed by a NON-BLOCKING channel enqueue, so calling it
-// while sendMu is still held (the Send path) does not extend the lock window
-// in any observable way; the SendPassthrough path is already lock-free.
+// nil store). Its work is cheap and the enqueue is NON-BLOCKING, so calling it
+// while sendMu is still held (the Send path) does not extend the lock window.
 func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err error) {
 	if rt == nil || s.runStore == nil {
 		return
@@ -73,8 +67,7 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err err
 		Outcome:    oc,
 		ErrorClass: cls,
 	}
-	// Atomic load: race-free even if a late readLoop event is concurrently
-	// CAS-stamping it on the passthrough cancel/bail path.
+	// Atomic load: a late readLoop event may still be CAS-stamping it.
 	if fb := rt.firstByteNano.Load(); fb != 0 {
 		rec.FirstByteMS = time.Unix(0, fb).Sub(rt.started).Milliseconds()
 		if rec.FirstByteMS < 0 {
@@ -82,14 +75,11 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *cli.SendResult, err err
 		}
 	}
 	if result != nil {
-		// result.CostUSD is the CLI's cumulative total_cost_usd for the
-		// current process incarnation, which resets on resume/restart. Convert
-		// it to the genuine per-turn delta and fold that into the session's
-		// monotonic running total. costMu serialises the whole read-compute-
-		// store: under passthrough, concurrent same-session turns call finishRun
-		// on separate goroutines, so without the lock two deltas could interleave
-		// and lose an update (or regress the baseline). TurnCostDelta's monotonic
-		// rule additionally makes the result order-independent.
+		// result.CostUSD is the CLI's cumulative cost for the current process
+		// incarnation (resets on resume/restart); convert to a per-turn delta and
+		// fold into the monotonic total. costMu serialises the read-compute-store:
+		// under passthrough concurrent same-session turns call finishRun on
+		// separate goroutines and would otherwise interleave and lose an update.
 		s.costMu.Lock()
 		prev := loadTotalCost(&s.lastCumulativeCost)
 		delta, next := runhistory.TurnCostDelta(result.CostUSD, prev)

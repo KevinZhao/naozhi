@@ -1,11 +1,5 @@
 // Package session router label / interrupt / discovery / takeover.
 //
-// Extracted from router.go on 2026-05-19 as part of the router-split
-// refactor (docs/design/router-split-design.md). For history prior to
-// commit 880f15f8482b51ebf4db7066583ab1b4ff18f1ba, see:
-//
-//	git log --follow internal/session/router.go
-//
 // This file holds operator-facing controls (SetUserLabel, the Interrupt
 // family) and discovery integration (DiscoveryExcludeIDs, trackSessionID,
 // RegisterForResume, RegisterCronStub*, ManagedExcludeSets, Takeover).
@@ -22,39 +16,22 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// SetUserLabel is the human-driven label setter (dashboard rename, IM
-// /label commands, upstream RPC). It always records origin="user", which
-// permanently locks out sysession daemon overwrites until ClearUserLabelOrigin
-// resets it (RFC v2.1 §7.3).
-//
-// Passing an empty label clears the prior value. Callers are responsible for
-// validating length/charset via ValidateUserLabel.
-//
-// Returns false when the session key is unknown (no mutation performed).
-//
-// No-op fast path: when the requested label equals the current value AND
-// origin is already "user", skip the dirty flag + version bump + WS broadcast.
-// R176-PERF-P1.
+// SetUserLabel is the human-driven label setter (dashboard rename, IM /label,
+// upstream RPC). It records origin="user", which locks out sysession daemon
+// overwrites until ClearUserLabelOrigin resets it (RFC v2.1 §7.3). An empty
+// label clears the prior value. Returns false when the key is unknown.
 func (r *Router) SetUserLabel(key, label string) bool {
 	return r.SetUserLabelWithOrigin(key, label, "user")
 }
 
-// SetUserLabelWithOrigin is the lower-level label writer that also records
-// who set the label. origin must be "user" or "auto"; any other value is
-// treated as "user" (defensive — only the human-facing API and AutoTitler
-// reach this path, and accidentally widening the namespace must not silently
-// mark something as daemon-overwritable).
-//
-// Crucially, when origin=="auto" and the current LabelOrigin is "user",
-// the write is rejected (returns false). This closes the daemon-vs-user
-// race window from RFC v2.1 §11.1: AutoTitler reads a Snapshot showing
-// origin="auto", invokes a 5–25s LLM call, and during that window a human
-// rename via SetUserLabel can flip origin to "user" — we MUST re-read
-// origin atomically under r.mu before letting the daemon overwrite, or
-// the user's manual edit gets silently lost.
-//
-// Returns false when the session key is unknown OR when the daemon-vs-user
-// race-protection rejects the write.
+// SetUserLabelWithOrigin is the lower-level label writer that also records who
+// set the label. origin must be "user" or "auto"; anything else is treated as
+// "user" so a widened namespace cannot silently mark a label daemon-overwritable.
+// When origin=="auto" and the current LabelOrigin is "user", the write is
+// rejected: AutoTitler reads a Snapshot, then spends 5–25s in an LLM call, and
+// a human rename in that window flips origin to "user", so origin MUST be
+// re-read under r.mu before the daemon overwrites (RFC v2.1 §11.1). Returns
+// false when the key is unknown or the write is rejected.
 func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	if origin != "user" && origin != "auto" {
 		origin = "user"
@@ -65,12 +42,10 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 		r.mu.Unlock()
 		return false
 	}
-	// Race-window close: re-read origin under the lock. Empty origin is
-	// equivalent to "user" (legacy / pre-v2.1 stores), so daemons must
-	// also leave those alone.
+	// Re-read origin under the lock. Empty origin is equivalent to "user"
+	// (stores without an origin field), so daemons must leave those alone too.
 	currentOrigin := s.LabelOrigin()
 	if origin == "auto" && (currentOrigin == "user" || currentOrigin == "") && s.UserLabel() != "" {
-		// User had set a label (or legacy entry counts as user); daemon stops.
 		r.mu.Unlock()
 		return false
 	}
@@ -84,24 +59,16 @@ func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
 	r.mu.Unlock()
-	// Match every other mutator (Reset/Remove/ResetChat/spawnSession...): the
-	// dashboard's onChange WebSocket broadcast needs a kick so the sidebar
-	// refreshes instantly rather than waiting up to one poll interval. R64-GO-H1.
+	// Kick the dashboard's onChange WS broadcast like every other mutator.
 	r.notifyChange()
 	return true
 }
 
-// ClearUserLabelOrigin clears both the LabelOrigin and the UserLabel so a
-// sysession daemon (e.g. AutoTitler) can take back over. We clear the label
-// AS WELL so the "empty origin = legacy/user-set" backward-compat rule in
-// SetUserLabelWithOrigin remains unambiguous: legacy stores have non-empty
-// label + empty origin, and that's still treated as user-set; explicit
-// Clear has empty label + empty origin, and that's the daemon's signal to
-// retake control.
-//
-// Dashboard "restore auto naming" action calls this via
-// POST /api/system/labels/clear-origin (RFC v2.1 §9.3).
-//
+// ClearUserLabelOrigin clears both LabelOrigin and UserLabel so a sysession
+// daemon (e.g. AutoTitler) can take back over. The label is cleared AS WELL so
+// the "empty origin = user-set" rule in SetUserLabelWithOrigin stays
+// unambiguous: non-empty label + empty origin is user-set; empty label + empty
+// origin is the daemon's signal to retake control (RFC v2.1 §9.3).
 // Returns false when the session key is unknown.
 func (r *Router) ClearUserLabelOrigin(key string) bool {
 	r.mu.Lock()
@@ -123,25 +90,12 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 	return true
 }
 
-// VisitSessions iterates over all live sessions in the router, invoking fn
-// for each one. fn returning false stops iteration early. The visit is
-// lock-protected (RLock) so the session map cannot mutate mid-iteration,
-// but each Snapshot is computed inline without leaking the *ManagedSession
-// to the caller.
-//
-// This is the daemon-friendly read path: AutoTitler's tick filters >100
-// sessions and only acts on at most one per tick, so a streaming visit
-// avoids the GC overhead of the slice-returning Snapshot() variant. RFC
-// v2.1 §8 / §M8.
-//
-// Note: fn must not call back into Router methods that take r.mu (it runs
-// under RLock). Idiomatic usage is to copy the SessionSnapshot fields the
-// daemon needs and resume work after VisitSessions returns.
-//
-// R20260602-PERF-3 (#1577): this uses snapshotReadOnly, NOT Snapshot, so
-// the per-session view computed under RLock is strictly side-effect free
-// (no SetModel mirror write on the read path). The dashboard poll path
-// keeps the mirroring Snapshot() so live model still reaches sessions.json.
+// VisitSessions iterates over all live sessions, invoking fn for each; fn
+// returning false stops early. The visit runs under RLock so the map cannot
+// mutate mid-iteration, and each snapshot is computed inline without leaking
+// the *ManagedSession (RFC v2.1 §8). fn must not call back into Router methods
+// that take r.mu. It uses snapshotReadOnly, NOT Snapshot, so the view computed
+// under RLock is side-effect free (no SetModel mirror write) (#1577).
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -153,14 +107,9 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 }
 
 // EventEntriesForKey returns the full event-log entries for the given session
-// key, or nil when the key is unknown. AutoTitler uses this so the rename
-// prompt can review every user turn in the conversation rather than just the
-// LastPrompt cached on SessionSnapshot.
-//
-// Live-process branch goes through ManagedSession.EventEntries(), which itself
-// prefers the live process's ring buffer and falls back to persistedHistory
-// when the session is dead/suspended. r.mu is released before the read so the
-// inner historyMu acquisition does not nest under r.mu.
+// key, or nil when the key is unknown (AutoTitler reviews every user turn).
+// r.mu is released before the read so the inner historyMu acquisition does
+// not nest under r.mu.
 func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
@@ -173,13 +122,9 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 
 // EventEntriesForKeyAppend is the buffer-reusing variant of EventEntriesForKey:
 // it appends the keyed session's event log onto dst and returns the grown slice,
-// or dst unchanged when the key is unknown. Callers that scan many keys in a
-// loop (AutoTitler's per-tick rename batch, startup discovery) can pass a single
-// dst[:0] buffer so the common case appends into existing capacity instead of
-// allocating a fresh ~120 KB slice per session. R20260607-PERF-6 (#1885).
-//
-// Ownership matches ManagedSession.EventEntriesAppend: the caller must not
-// retain dst across calls; the returned slice shares dst's backing array.
+// or dst unchanged when the key is unknown (#1885). Ownership matches
+// ManagedSession.EventEntriesAppend: the caller must not retain dst across
+// calls; the returned slice shares dst's backing array.
 func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string) []clievent.EventEntry {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
@@ -192,13 +137,9 @@ func (r *Router) EventEntriesForKeyAppend(dst []clievent.EventEntry, key string)
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
 // Returns true if the session was found and interrupted.
-//
-// WARNING: SIGINT terminates the whole CLI process on Claude `-p` mode (and
-// any non-REPL CLI), which both kills the live shim conversation and burns a
-// fresh shim slot on the next message. Prefer InterruptSessionSafe for
-// operator-facing actions (dashboard "interrupt" button); this function is
-// kept for callers that truly need process-level signalling (tests, forced
-// teardown) or for the fallback branch inside InterruptSessionSafe itself.
+// WARNING: SIGINT terminates the whole CLI process on Claude `-p` mode, killing
+// the live shim conversation. Prefer InterruptSessionSafe for operator-facing
+// actions; this is for process-level signalling and the fallback branch.
 func (r *Router) InterruptSession(key string) bool {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
@@ -210,39 +151,15 @@ func (r *Router) InterruptSession(key string) bool {
 }
 
 // InterruptSessionSafe is the preferred entry point for dashboard/HTTP/WS
-// interrupt requests. It first attempts the in-band stream-json
-// control_request path (InterruptViaControl), which aborts the active turn
-// WITHOUT terminating the CLI subprocess, so the shim, socket, and session
-// ID all survive for the next message. When the CLI protocol does not
-// support control_request (ACP), it falls back to SIGINT via Interrupt();
-// other non-Sent outcomes are returned unchanged.
-//
-// Returns the outcome so callers can surface accurate UI (e.g. "aborted"
-// vs. "nothing was running").
-//
-// Design note — when to fall back to SIGINT:
-//
-//   - InterruptUnsupported (ACP protocol has no stdin-level interrupt): we
-//     have to SIGINT; there is no other mechanism. SIGINT on ACP is also
-//     not known to be destructive (ACP agents don't exit on signal), so
-//     this fallback has a legitimate home.
-//   - InterruptNoTurn (session alive but no active turn): do NOT fall back.
-//     Raw SIGINT on an idle Claude `-p` subprocess terminates it, which
-//     forces a brand-new shim on the next message. A button press on an
-//     idle session should report "nothing was running" (→ `not_running` in
-//     the HTTP layer), not silently close the session.
-//   - InterruptError (transport write failed): do NOT fall back. The
-//     failure almost certainly means the shim socket is broken; SIGINT
-//     would travel the same broken transport and also fail. Surface the
-//     error so F6's reconcile path has a chance to purge the zombie.
-//
-// For the Claude CLI `-p` mode — our primary use case — SIGINT terminates
-// the CLI process entirely (not just the current turn). That cascades into
-// shim sending cli_exited, naozhi's Alive() flipping to false, and the next
-// user message starting a brand-new shim, leaking the previous socket path
-// and sometimes losing resume context. control_request on CLI 2.1.119 has
-// been verified to kill the in-flight tool invocation and emit a result
-// event without killing the process.
+// interrupt requests. It first tries the in-band stream-json control_request
+// path, which aborts the active turn WITHOUT terminating the CLI subprocess,
+// so shim, socket and session ID survive. It falls back to SIGINT only for
+// InterruptUnsupported (ACP has no stdin-level interrupt and does not exit on
+// signal). InterruptNoTurn does NOT fall back: SIGINT on an idle Claude `-p`
+// subprocess terminates it, so an idle press must report "nothing was running".
+// InterruptError does NOT fall back either: the shim socket is almost certainly
+// broken and SIGINT would travel the same transport; surfacing the error lets
+// the reconcile path purge the zombie.
 func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 	outcome := r.InterruptSessionViaControl(key)
 	switch outcome {
@@ -253,30 +170,22 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 		}
 		return InterruptNoSession
 	case InterruptSent, InterruptNoSession, InterruptNoTurn, InterruptError:
-		// Callers handle each outcome verbatim. The HTTP and WS handlers map
-		// {InterruptNoTurn, InterruptError} to "not_running" so the dashboard
-		// re-queries state.
+		// HTTP/WS handlers map {InterruptNoTurn, InterruptError} to "not_running".
 		return outcome
 	default:
-		// A new outcome was added to the enum without updating this switch.
-		// Log once and map to InterruptNoSession so the dashboard shows
-		// "not_running" rather than silently passing through an outcome the
-		// HTTP layer doesn't know how to render. R65-GO-L-3.
+		// Unhandled enum value: map to InterruptNoSession so the dashboard shows
+		// "not_running" instead of an unrenderable outcome.
 		slog.Warn("interrupt session safe: unhandled interrupt outcome", "outcome", outcome, "key", key)
 		return InterruptNoSession
 	}
 }
 
 // InterruptSessionViaControl requests the CLI to abort the active turn via the
-// stream-json control_request protocol (no SIGINT, no process kill). Unlike
-// InterruptSession, the in-flight Send() observes the CLI's natural result
-// event and returns normally, so ownership of the session stays with the
-// current dispatch owner loop which can then process queued follow-up messages
-// on the same live CLI.
-//
-// Returns an InterruptOutcome so callers can log accurately (a session that
-// exists but has no active turn yet returns InterruptNoTurn, not
-// InterruptNoSession — logging "aborted turn" in that case would be a lie).
+// stream-json control_request protocol (no SIGINT, no process kill). The
+// in-flight Send() observes the CLI's natural result event and returns
+// normally, so the dispatch owner loop keeps the session and can process
+// queued follow-ups on the same live CLI. Alive-but-idle returns
+// InterruptNoTurn, not InterruptNoSession.
 func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	r.mu.RLock()
 	s := r.ss.sessions[key]
@@ -285,11 +194,8 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 		return InterruptNoSession
 	}
 	outcome := s.InterruptViaControl()
-	// R172-ARCH-D10: counter per outcome class. NoSession is deliberately
-	// NOT counted here — that path returns early above, and a
-	// key-does-not-exist lookup isn't a signal about interrupt behaviour.
-	// Sent is counted so operators have a denominator for "what fraction of
-	// interrupts actually reached the CLI?".
+	// NoSession is deliberately NOT counted (an unknown key says nothing about
+	// interrupt behaviour); Sent gives operators the denominator.
 	switch outcome {
 	case InterruptSent:
 		metrics.InterruptSentTotal.Add(1)
@@ -304,9 +210,9 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 }
 
 // DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.
-// Only sessions with a running process are excluded to prevent duplicates.
-// Suspended sessions (no process) are allowed through so their underlying
-// session files appear in the history popover (deduplicated against the workspace).
+// Only sessions with a running process are excluded to prevent duplicates;
+// suspended sessions are allowed through so their session files appear in the
+// history popover (deduplicated against the workspace).
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -331,12 +237,8 @@ const maxKnownIDs = 10000
 
 // trackSessionID adds a session ID to the persistent known-IDs set.
 // Caller must hold r.mu OR call before any concurrent access (e.g. NewRouter init).
-//
-// Eviction policy: FIFO by insertion order. Previous implementation relied on
-// Go's random map iteration which could drop a still-active session ID, and
-// the discovery scanner would then misclassify its live CLI process as an
-// unknown external session. Maintaining an order slice alongside the map
-// costs ~80KB at 10K entries — acceptable for the correctness win.
+// Eviction is FIFO by insertion order: random eviction could drop a still-active
+// session ID and make discovery misclassify its live CLI as an external session.
 func (r *Router) trackSessionID(id string) {
 	if id == "" {
 		return
@@ -345,22 +247,16 @@ func (r *Router) trackSessionID(id string) {
 		return
 	}
 	if len(r.kid.ids) >= maxKnownIDs {
-		// Drop the oldest entry. The live window is order[orderHead:] and
-		// mirrors the keys of r.kid.ids in insertion order. Evict in
-		// amortized O(1) by clearing the front slot and advancing orderHead
-		// rather than shifting the whole slice (the prior copy(order, order[1:])
-		// paid an O(N) ~80KB move under the hot r.mu write lock on every new ID
-		// past the cap).
+		// Drop the oldest entry. The live window is order[orderHead:]; clearing
+		// the front slot and advancing orderHead is amortized O(1) instead of
+		// an O(N) ~80KB shift under the hot r.mu write lock.
 		oldest := r.kid.order[r.kid.orderHead]
 		delete(r.kid.ids, oldest)
 		r.kid.order[r.kid.orderHead] = ""
 		r.kid.orderHead++
-		// Compact only when the dead prefix grows to half the slice, so the
-		// reclaim cost is amortized O(1) per eviction. Copy the live window
-		// into a FRESH buffer: reslicing (`order = order[orderHead:]`) would
-		// pin the original backing array and let the header drift rightward,
-		// so the leading dead portion could never be reused — eventually
-		// forcing re-allocation anyway and leaking the dead-prefix strings.
+		// Compact only when the dead prefix reaches half the slice. Copy into a
+		// FRESH buffer: reslicing would pin the original backing array and leak
+		// the dead-prefix strings.
 		if r.kid.orderHead >= len(r.kid.order)/2 {
 			live := r.kid.order[r.kid.orderHead:]
 			compacted := make([]string, len(live), maxKnownIDs+1)
@@ -388,26 +284,16 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	// Deduplicate: if another session already targets this sessionID, reuse it.
 	if existingKey, ok := r.ss.idToKey[sessionID]; ok {
 		if existing, exists := r.ss.sessions[existingKey]; exists {
-			// R20260614-LB-idtokey (#2093): the key string is deterministic
-			// (ProjectStableKey / cron:<jobID> always reproduce the same
-			// string) and idToKey is NOT cleaned for rotated/prev session IDs
-			// when installFreshSessionLocked replaces a session under the same
-			// key, nor when unregisterSessionLocked deletes only the current
-			// SID. So idToKey[sessionID]=K can dangle while sessions[K] now
-			// holds an UNRELATED session (the key was deleted, then reused for
-			// a fresh conversation). Reusing existingKey blindly would route a
-			// resume of the old sessionID into that unrelated live session —
-			// cross-session bleed. Only dedup when the found session genuinely
-			// owns this sessionID (current SID or anywhere in its rotation
-			// chain). Otherwise the index entry is a leaked residue: drop it
-			// and fall through to build a fresh resume entry under `key`.
+			// idToKey is not cleaned for rotated IDs, so idToKey[sessionID]=K can
+			// dangle while sessions[K] holds an UNRELATED session (key reused).
+			// Only dedup when the found session genuinely owns this sessionID;
+			// a blind reuse would cross-session bleed (#2093).
 			if slices.Contains(existing.SnapshotChainIDs(), sessionID) {
 				r.mu.Unlock()
 				return existingKey
 			}
 		}
-		// Stale or leaked index entry (key gone, or it points at a session
-		// that no longer owns this sessionID); clean up and continue.
+		// Stale or leaked index entry; clean up and continue.
 		delete(r.ss.idToKey, sessionID)
 	}
 	s := &ManagedSession{
@@ -428,7 +314,6 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	// R215-ARCH-P2-2: single publish funnel.
 	r.publishSessionLocked(key, s, false)
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
@@ -439,15 +324,10 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 }
 
 // RegisterCronStub creates a suspended exempt session for a cron job so the
-// job appears in the dashboard workspace list before its first execution.
-// Key format is "cron:<jobID>". If an entry already exists, workspace and
-// lastPrompt are refreshed in place (to reflect edits via dashboard).
-// The stub has no process and no session ID; the first GetOrCreate call
-// (at cron execute time) will spawn a real CLI process and reuse this entry.
-//
-// Misuse (key not IsCronKey) panics: callsites that pass a wrong-prefix
-// key would otherwise silently leave dangling no-op stubs that fail later
-// in obscure ways (RFC v2.1 §8.1).
+// job appears in the dashboard before its first execution. Key format is
+// "cron:<jobID>"; an existing entry has workspace/lastPrompt refreshed in
+// place. The stub has no process or session ID; the first GetOrCreate reuses
+// it. A non-cron key panics rather than leaving a dangling no-op stub (RFC v2.1 §8.1).
 func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 	if !IsCronKey(key) {
 		panic(fmt.Sprintf("session: RegisterCronStub called with non-cron key %q", key))
@@ -455,13 +335,10 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 	r.registerStub(key, workspace, lastPrompt, nil)
 }
 
-// RegisterCronStubWithChain 在 RegisterCronStub 的基础上注入一个
-// session-ID 链：stub 没有自己的 sessionID（exempt=true，无进程），但
-// historySource 查 JSONL 时要用到 chain。对于 cron 任务，chain 就是
-// 上一次成功执行留下的 session_id（cron.Job.LastSessionID）。没有它，
-// fresh_context=true 场景每次 Reset 都会让 stub 的 chain 为空，dashboard
-// 点击定时任务只能看到一个空白的事件面板。
-//
+// RegisterCronStubWithChain 在 RegisterCronStub 的基础上注入 session-ID 链：
+// stub 没有自己的 sessionID（exempt=true，无进程），但 historySource 查 JSONL
+// 要用 chain（cron 即上一次成功执行的 cron.Job.LastSessionID），否则
+// fresh_context=true 每次 Reset 后 dashboard 只能看到空白事件面板。
 // chainIDs 空 / nil 时行为与 RegisterCronStub 相同。
 func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 	if !IsCronKey(key) {
@@ -470,15 +347,9 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 	r.registerStub(key, workspace, lastPrompt, chainIDs)
 }
 
-// RegisterSystemStub creates a suspended exempt session for a sysession
-// daemon. Key format is "sys:<daemon-name>" (validated via IsSysKey;
-// callsite misuse panics, mirroring RegisterCronStub).
-//
-// Phase 1 daemons typically do NOT register a stub — Runner-style daemons
-// (AutoTitler) only spawn transient claude -p subprocesses (RFC v2.1 §6).
-// This entry point is reserved for future daemons that need a long-lived
-// ManagedSession (e.g. a stateful aggregator that survives across ticks).
-//
+// RegisterSystemStub creates a suspended exempt session for a sysession daemon
+// that needs a long-lived ManagedSession (RFC v2.1 §6). Key format is
+// "sys:<daemon-name>"; misuse panics, mirroring RegisterCronStub.
 // existing 分支下如果 workspace/lastPrompt 没变就 no-op（避免每 tick 强刷
 // 触发不必要的 saveIfDirty + WS fanout）。
 func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
@@ -488,24 +359,16 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 	r.registerStub(key, workspace, lastPrompt, nil)
 }
 
-// registerStub is the shared exempt-stub registration path used by
-// RegisterCronStub / RegisterCronStubWithChain / RegisterSystemStub.
-// Callers must validate the key namespace before invoking this; the
-// helper itself does no namespace check (its single shared implementation
-// is intentionally namespace-agnostic so cron and sys can co-evolve their
-// public wrappers without a fork in this body — RFC v2.1 §8.1).
+// registerStub is the shared, namespace-agnostic exempt-stub registration path
+// for RegisterCronStub* / RegisterSystemStub; callers validate the key
+// namespace (RFC v2.1 §8.1). existing 分支下新 chain 与旧 chain 不同时同步刷新
+// prevSessionIDs 并重挂 historySource，保证 cron recordResult 后侧边栏立刻
+// 能查到最新 JSONL。
 //
-// existing 分支下如果新 chain 与旧 chain 不同，会同步刷新 prevSessionIDs
-// 并重挂 historySource，保证 cron 每次执行完 recordResult 后侧边栏立刻
-// 能查到最新一次的 JSONL（而不是等下次重启）。
-//
-// prevSessionIDs 的所有历史写路径（spawnSession / RenameSession / 本函数
-// new 分支）都在 r.mu 下做，读路径同样在 r.mu 下。managed.go:SnapshotChainIDs
-// 虽然用 historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
-// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。因此
-// chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入混合锁协议；
-// attachHistorySource 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，同样
-// 安全可以在 r.mu 下调。
+// prevSessionIDs 的所有写路径都在 r.mu 下做，读路径同样在 r.mu 下；
+// SnapshotChainIDs 的 historyMu.RLock 对该字段不构成真正同步，invariant 是
+// "r.mu 写/r.mu 读"，chain 刷新因此在 r.mu 临界区内做。attachHistorySource
+// 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，在 r.mu 下调用同样安全。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
 	r.mu.Lock()
 	if existing, ok := r.ss.sessions[key]; ok {
@@ -521,48 +384,33 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 				changed = true
 			}
 			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
-				// R230C-GO-1 hardening (#1777): route the chain swap through
-				// the historyMu-guarded setter rather than a bare write under
-				// r.mu alone. existing is already published, so SnapshotChainIDs
-				// (invoked from cli history-source factories that do NOT hold
-				// r.mu, only historyMu.RLock) can race this refresh; writing
-				// under historyMu makes that RLock a real happens-before instead
-				// of the "defensive rope" the SnapshotChainIDs doc describes.
+				// existing is already published, so SnapshotChainIDs (holding only
+				// historyMu.RLock) can race this refresh; the historyMu-guarded
+				// setter makes that RLock a real happens-before (#1777).
 				existing.ReplacePrevSessionIDs(chainIDs)
 				// workspace 变了 historySource 里也要刷（cwd 变化会导致
-				// projDirName 命中不同的 claude 项目目录）；一并重装最省心。
+				// projDirName 命中不同的 claude 项目目录）。
 				r.attachHistorySource(existing)
 				changed = true
 			}
-			// R176-PERF-P1: only mark dirty + bump version when something
-			// actually changed. Cron scheduler calls RegisterCronStub on
-			// every reload of cron.yaml, and most reloads are a no-op — the
-			// stubs already reflect the file's contents. Without this gate
-			// each reload forced a saveIfDirty fsync (2-5 ms on SSD) and a
-			// sessions_update fanout with no observable effect.
+			// Only mark dirty when something changed: the cron scheduler
+			// re-registers stubs on every cron.yaml reload, and an unconditional
+			// dirty would force a saveIfDirty fsync + WS fanout for nothing.
 			if changed {
 				r.ss.dirty = true
 				r.ss.gen.Add(1)
 			}
 		}
 		r.mu.Unlock()
-		// Preserve the original "always notify on refresh" behaviour so the
-		// dashboard's sidebar edit flow (rename → save → reload) gets an
-		// immediate WS kick rather than waiting up to one poll interval.
-		// notifyChange is cheap; the expensive path (saveIfDirty) is what we
-		// just guarded above.
+		// Always notify on refresh so the sidebar edit flow gets an immediate
+		// WS kick; notifyChange is cheap, saveIfDirty is what the gate guards.
 		r.notifyChange()
 		return
 	}
-	// R242-ARCH-2 (#720): the per-namespace exempt sub-quota gate lives in
-	// spawnSession, but stub registration creates an exempt entry WITHOUT
-	// spawning a process, so it never crosses that gate. A misbehaving cron
-	// scheduler (or a config with many jobs / projects) could therefore grow
-	// r.ss.sessions with exempt stubs past the bucket's intended ceiling and
-	// silently starve the other namespaces' alive-spawn budget. We do not
-	// hard-reject here (dropping a cron/sys stub would lose its history-chain
-	// and break dashboard panels), but we surface the over-quota condition so
-	// the exhaustion the issue flags is observable instead of invisible.
+	// The per-namespace exempt sub-quota gate lives in spawnSession; stub
+	// registration creates an exempt entry WITHOUT spawning and never crosses
+	// it, so it could starve other namespaces' alive-spawn budget. Not
+	// hard-rejected (dropping a stub loses its history chain); surfaced (#720).
 	if kind := exemptKind(key); kind != "" {
 		if existing := r.countExemptByKind(kind); existing >= exemptCapFor(kind) {
 			slog.Warn("exempt stub registration exceeds namespace sub-quota",
@@ -586,7 +434,6 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	// R215-ARCH-P2-2: single publish funnel.
 	r.publishSessionLocked(key, s, false)
 	r.ss.dirty = true
 	r.ss.gen.Add(1)
@@ -624,8 +471,7 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 // for dashboard display. The caller must ensure the original process has been
 // terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
-	// R188-SEC-M2: same flag-injection guard as GetOrCreate. Takeover flows
-	// from upstream RPC with caller-supplied AgentOpts.
+	// Same flag-injection guard as GetOrCreate: AgentOpts is caller-supplied.
 	if err := validateModel(opts.Model); err != nil {
 		return nil, err
 	}
@@ -635,12 +481,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
 	if s, ok := r.ss.sessions[key]; ok {
-		// Decrement deltas mirror the resetLocked pattern: only sessions
-		// that were non-exempt AND alive contributed to activeCount, so
-		// only those need a -1. R220-PERF-1 fast path: replaces an O(n)
-		// countActive() recount that fired even when at most one session
-		// transitioned, which scaled poorly past ~500 sessions on Takeover
-		// hot paths.
+		// Mirror resetLocked: only non-exempt AND alive sessions contributed to
+		// activeCount, so only those get a -1 (no O(n) countActive recount).
 		if p := s.loadProcess(); p != nil && p.Alive() {
 			oldSession := s
 			proc := p
@@ -648,10 +490,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			oldExempt := s.exempt
 			r.mu.Unlock()
 			proc.Close()
-			// Takeover reuses the same key, so the next spawnSession below
-			// will StartShim against the same socket path. Wait for the
-			// shim to release it (same race as Reset / ResetAndRecreate,
-			// see UCCLEP-2026-04-26 design).
+			// spawnSession below will StartShim against the same socket path;
+			// wait for the shim to release it (same race as Reset).
 			waitSocketGoneForKey(key, 2*time.Second)
 			r.mu.Lock()
 			// Only delete if no concurrent goroutine replaced this session.
@@ -673,12 +513,9 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				r.mu.Unlock()
 				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 			}
-			// Implicit else: concurrent goroutine replaced the session with an exited
-			// one. Leave r.ss.sessions[key] as-is — spawnSession below will overwrite
-			// it and call indexAdd, keeping the index consistent. No indexDel here
-			// because we are not removing from r.ss.sessions. The activeCount delta
-			// is also skipped because spawnSession will Store(+1) for the new
-			// process if applicable.
+			// Implicit else: a concurrent goroutine replaced the session with an
+			// exited one. Leave it — spawnSession below overwrites it, calls
+			// indexAdd and Stores +1 if applicable, so no indexDel/delta here.
 		} else {
 			// Dead session branch: same keepBackendOverride=true rationale.
 			// Dead sessions weren't in activeCount, so no decrement is needed.
@@ -687,10 +524,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			r.ss.gen.Add(1)
 		}
 	}
-	// Set workspace override for the chat key prefix. Adopt marks the store
-	// dirty (only when the value changed) so the override is persisted;
-	// otherwise a crash before another flushing path fires would lose the
-	// takeover's chosen workspace.
+	// Workspace override for the chat key prefix. Adopt marks the store dirty
+	// (only when changed) so the override survives a crash before another flush.
 	if chatKey := chatKeyFor(key); chatKey != key {
 		r.wsStore.Adopt(chatKey, workspace)
 	}

@@ -1,19 +1,8 @@
 package session
 
-// SessionRole tags the semantic role of a ManagedSession. R222-ARCH-10
-// (#728) called out that the role was previously inferred from a tangle
-// of low-level fields (`exempt` flag, key prefix, RegisterCronStub call
-// site, process==nil for paused) — adding a typed accessor gives
-// callers one canonical query without forcing a wholesale rewrite of
-// every site that already inlines the prefix check.
-//
-// This is the minimal P0 step from the issue's "Extract SessionRole +
-// SessionMode enums" proposal: callers that want a structural test
-// (e.g. "is this an IM-shape session?", "is this a cron stub?") can
-// switch on Role() instead of re-deriving the same `IsCronKey || ...`
-// expression locally. A follow-up pass can migrate existing sites and
-// introduce SessionMode (Live / Stub / Paused / Scratch) once enough
-// callers have settled on Role.
+// SessionRole tags the semantic role of a ManagedSession (#728): callers that
+// want a structural test ("is this a cron stub?") switch on Role() instead of
+// re-deriving the `IsCronKey || ...` prefix expression locally.
 type SessionRole int
 
 const (

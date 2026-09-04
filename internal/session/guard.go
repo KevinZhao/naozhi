@@ -37,17 +37,14 @@ const waitReplyDedupeWindow = 3 * time.Second
 
 // lastWaitSweepThreshold triggers an opportunistic O(N) cleanup of the
 // lastWait map once it crosses this size. Entries are normally pruned by
-// Release, but TryAcquire-then-bail paths (busy queues that never reach
-// Release) can leak entries. The threshold is tuned for single-operator
-// deployments where steady-state chat count is well under 256; bursts
-// above that trigger the sweep, amortising to O(1) per ShouldSendWait
-// call under sustained load.
+// Release, but TryAcquire-then-bail paths never reach Release and leak
+// entries. Steady-state chat count is well under 256, so the sweep
+// amortises to O(1) per ShouldSendWait call.
 const lastWaitSweepThreshold = 256
 
 // lastWaitStaleMultiplier defines stale-entry age relative to the dedupe
-// window. 10× gives us a comfortable margin: any entry older than this
-// can no longer affect ShouldSendWait's return value, so it is safe to
-// drop without changing observable behaviour.
+// window. Any entry older than 10× the window cannot affect
+// ShouldSendWait's return value, so dropping it is unobservable.
 const lastWaitStaleMultiplier = 10
 
 // ShouldSendWait returns true if enough time has passed since the last
@@ -59,10 +56,7 @@ func (g *Guard) ShouldSendWait(key string) bool {
 		return false
 	}
 	g.lastWait[key] = time.Now()
-	// Opportunistic sweep: TryAcquire-then-bail paths leak entries because
-	// only Release deletes them. Once the map exceeds the threshold, drop
-	// entries older than 10× the dedupe window — they cannot affect future
-	// ShouldSendWait decisions and amortise the cost across busy bursts.
+	// Opportunistic sweep of leaked entries; see lastWaitSweepThreshold.
 	if len(g.lastWait) > lastWaitSweepThreshold {
 		cutoff := time.Now().Add(-lastWaitStaleMultiplier * waitReplyDedupeWindow)
 		for k, ts := range g.lastWait {
@@ -106,11 +100,9 @@ func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Dur
 	})
 	localDone := make(chan struct{})
 	defer close(localDone)
-	// Also broadcast on context cancellation to unblock Wait promptly.
-	// Skip the goroutine entirely when ctx is non-cancellable (e.g.
-	// context.Background or a context.WithoutCancel-derived ctx with a
-	// nil Done channel) — receiving from a nil channel blocks forever
-	// and the wakeup arm is structurally unreachable.
+	// Also broadcast on context cancellation to unblock Wait promptly. Skip
+	// the goroutine when ctx is non-cancellable (nil Done channel) — receiving
+	// from a nil channel blocks forever.
 	if ctx.Done() != nil {
 		go func() {
 			select {

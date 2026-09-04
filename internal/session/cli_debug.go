@@ -11,30 +11,20 @@ import (
 )
 
 // cliDebugEnvVar is the operator opt-in switch for per-session Claude CLI
-// debug capture. It is read once at NewRouter time. When truthy (any
-// non-empty, non-"0"/"false"/"off" value — see envpolicy.EnvTruthy) the
-// router asks each spawned CLI to write its `--debug-file` log under
-// <dataDir>/cli-debug/. Default (unset) keeps debug off: no flags are added
-// and no directory is created, so other deployments are unaffected.
+// debug capture, read once at NewRouter time. When truthy (envpolicy.EnvTruthy)
+// each spawned CLI writes its `--debug-file` log under <dataDir>/cli-debug/.
+// Unset keeps debug off: no flags added, no directory created.
 const cliDebugEnvVar = "NAOZHI_CLI_DEBUG"
 
 // resolveCLIDebugDir decides where (if anywhere) spawned CLIs should write
-// their debug logs. It returns "" — debug disabled — in every case except a
-// clean opt-in:
+// their debug logs. It returns "" (debug disabled) unless the opt-in is clean:
+// env unset/falsey → ""; eventLogDir empty (no data root to anchor under) → ""
+// with an info log; directory creation fails → "" with a warning — a debug-dir
+// problem must never block session spawning.
 //
-//   - NAOZHI_CLI_DEBUG unset / falsey → "".
-//   - eventLogDir empty (event log disabled → no data root to anchor under)
-//     → "" with an info log so the operator knows why the opt-in no-op'd.
-//   - directory creation/hardening fails → "" with a warning; a debug-dir
-//     problem must never block session spawning.
-//
-// The CLI debug root is a sibling of the event-log dir under the same data
-// root (<dataDir>/events and <dataDir>/cli-debug), so it is derived from the
-// event-log dir's parent rather than threading a separate dataDir field
-// through RouterConfig.
-//
-// getenv is injected so tests can drive the env without os.Setenv races; the
-// production caller passes os.Getenv.
+// The debug root is a sibling of the event-log dir under the same data root
+// (<dataDir>/events and <dataDir>/cli-debug), derived from the event-log dir's
+// parent. getenv is injected so tests can drive the env without os.Setenv races.
 func resolveCLIDebugDir(eventLogDir string) string {
 	return resolveCLIDebugDirWith(eventLogDir, os.Getenv)
 }
@@ -49,12 +39,10 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 		return ""
 	}
 	dataDir := filepath.Dir(eventLogDir)
-	// SEC-8 (#2133): the debug-file path is handed to the CLI subprocess as
-	// --debug-file. A relative path resolves against the subprocess CWD —
-	// the session workspace — so a relatively-configured EventLogDir would
-	// land the debug log (which may contain API keys) inside the session
-	// workspace. Anchor the debug root to an absolute path so the file is
-	// pinned to a stable location regardless of where the CLI is spawned.
+	// A relative --debug-file resolves against the subprocess CWD — the session
+	// workspace — so a relatively-configured EventLogDir would land the debug
+	// log (which may contain API keys) inside the workspace. Anchor to an
+	// absolute path so the file is pinned regardless of spawn CWD (#2133).
 	if !filepath.IsAbs(dataDir) {
 		if abs, err := filepath.Abs(dataDir); err == nil {
 			dataDir = abs
@@ -76,14 +64,10 @@ func resolveCLIDebugDirWith(eventLogDir string, getenv func(string) string) stri
 }
 
 // cliDebugPathFor returns the per-session debug-file path WITHOUT touching the
-// filesystem, or "" when CLI debug capture is off (cliDebugDir empty). The file
-// name reuses the event-log key-hash stem so operators can line a session's
-// debug log up with its <stem>.log event file.
-//
-// Split out of cliDebugFileFor so the arg-drift comparison (driftCompareArgs)
-// can reproduce the spawn-side argv without the pre-create side effect: drift
-// runs over every surviving shim at startup, including sessions that will never
-// respawn, and must not conjure debug logs for them.
+// filesystem, or "" when CLI debug capture is off. The file name reuses the
+// event-log key-hash stem so a session's debug log lines up with its <stem>.log
+// event file. driftCompareArgs uses this (not cliDebugFileFor) so the startup
+// drift pass never conjures debug logs for sessions that will not respawn.
 func (r *Router) cliDebugPathFor(key string) string {
 	if r.cliDebugDir == "" {
 		return ""
@@ -92,23 +76,18 @@ func (r *Router) cliDebugPathFor(key string) string {
 }
 
 // cliDebugFileFor returns cliDebugPathFor's path after pre-creating and
-// hardening the file, for the spawn path. The path is regenerated
-// (overwritten) on every spawn — debug capture is a live-tail diagnostic, not
-// an audit trail, so the latest spawn's log is the one that matters.
+// hardening the file, for the spawn path. The file is overwritten on every
+// spawn — debug capture is a live-tail diagnostic, not an audit trail.
 func (r *Router) cliDebugFileFor(key string) string {
 	path := r.cliDebugPathFor(key)
 	if path == "" {
 		return ""
 	}
-	// SEC (#2171): the spawned claude child creates --debug-file under its own
-	// umask, so the log (which may contain API keys) can land 0644 / world-
-	// readable even though the parent dir is 0700. Pre-create and harden to
-	// 0600 here. No O_EXCL — the file legitimately pre-exists from a prior
-	// spawn (capture overwrites on each run). The follow-up Chmod repairs a
-	// pre-existing world-readable file that O_CREATE leaves untouched. All
-	// errors are fail-open (warn + still return path): debug hardening must
-	// never block a session spawn, matching resolveCLIDebugDirWith's posture.
-	// 0600 open mirrors internal/cron/sandbox.go (without O_EXCL).
+	// The claude child creates --debug-file under its own umask, so the log
+	// (which may contain API keys) can land world-readable; pre-create at 0600
+	// and Chmod to repair a pre-existing file O_CREATE leaves untouched (#2171).
+	// No O_EXCL — the file legitimately pre-exists from a prior spawn. Errors
+	// are fail-open (warn + still return path): hardening must never block a spawn.
 	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
 		slog.Warn("cli debug file pre-create failed; continuing without hardening",
 			"path", path, "err", err)

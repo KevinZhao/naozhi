@@ -1,18 +1,15 @@
 // Package session backend-manifest assembly.
 //
-// BackendsManifest / BackendsList centralise the {backends, default,
-// detected} payload that /api/cli/backends serves. Extracted so BOTH the
+// BackendsManifest / BackendsList are the single source of the {backends,
+// default, detected} payload that /api/cli/backends serves, shared by the
 // dashboard HTTP handler (internal/dashboard/ext/cli) and the reverse-RPC
-// "fetch_backends" branch (internal/upstream) render an identical shape
-// from a single source of truth — a reverse node must report the same
-// backend list the primary would show for a local session, or the
-// node-aware picker (which drove this extraction) would still pick the
-// wrong default. See the picker node-aware fix.
+// "fetch_backends" branch (internal/upstream): a reverse node must report the
+// same backend list the primary would show, or the node-aware picker picks
+// the wrong default.
 //
-// This assembly lives in session (not cli) because it reads the per-backend
-// Profile (ReplyTag / ChipColor / Features) via internal/cli/backend, which
-// the cli package cannot import without an import cycle (see the BackendInfo
-// godoc in internal/cli/detect.go). session already depends on backend.
+// This lives in session (not cli) because it reads the per-backend Profile via
+// internal/cli/backend, which cli cannot import without a cycle (see the
+// BackendInfo godoc in internal/cli/detect.go).
 package session
 
 import (
@@ -20,9 +17,8 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
-// BackendManifest is the wire shape of GET /api/cli/backends. Field tags
-// mirror the map[string]any the handler used to build inline so the
-// dashboard.js contract ({backends, default, detected}) is unchanged.
+// BackendManifest is the wire shape of GET /api/cli/backends; the field tags
+// are the dashboard.js contract ({backends, default, detected}).
 type BackendManifest struct {
 	Backends []cli.BackendInfo `json:"backends"`
 	Default  string            `json:"default"`
@@ -34,27 +30,20 @@ type BackendManifest struct {
 // dashboard-facing Profile fields (ReplyTag / ChipColor / Features).
 //
 // The ordering is BackendIDs()'s: default backend first, remainder sorted.
-// This is the exact loop the dashboard handler previously inlined; it is
-// now the single source both the handler and the reverse-RPC branch call.
 func (r *Router) BackendsList() []cli.BackendInfo {
 	ids := r.BackendIDs()
 	backends := make([]cli.BackendInfo, 0, len(ids))
 	for _, id := range ids {
 		info := cli.BackendInfo{ID: id, Available: true}
-		// Model manifest for the per-session model popover: runtime
-		// (agent-reported) tier first, configured fallback second — see
-		// BackendModelManifest. Takes r.mu internally; BackendsList runs
+		// BackendModelManifest takes r.mu internally; BackendsList runs
 		// unlocked (handler / reverse-RPC context), so no lock nesting.
 		info.Models = r.BackendModelManifest(id)
 		if wr := r.BackendWrapper(id); wr != nil {
 			info.DisplayName = wr.CLIName
-			// Path intentionally omitted — revealing installed-binary paths
-			// to any authenticated dashboard user leaks host filesystem
-			// layout (mirrors the handler's redaction rationale).
-			//
-			// EffectiveVersion (not the spawn-time CLIVersion) so a host
-			// CLI upgrade under a long-lived naozhi surfaces here too; the
-			// dashboard's pending-session card falls back to this value.
+			// Path intentionally omitted — installed-binary paths leak host
+			// filesystem layout to any authenticated dashboard user.
+			// EffectiveVersion (not spawn-time CLIVersion) so a host CLI
+			// upgrade under a long-lived naozhi surfaces here too.
 			ver := wr.EffectiveVersion()
 			info.Version = ver
 			if wr.Protocol != nil {
@@ -64,17 +53,14 @@ func (r *Router) BackendsList() []cli.BackendInfo {
 			// not masquerade as Available=true — dashboard greys it out.
 			info.Available = ver != ""
 		}
-		// Multi-Backend RFC §8.2: chip color + reply tag + features come
-		// from the per-backend Profile registry. Unknown ids leave the
-		// fields empty — dashboard falls back to default tokens and treats
-		// every feature as false (most conservative degrade).
+		// Unknown ids leave the Profile fields empty — dashboard falls back
+		// to default tokens and treats every feature as false.
 		if p, ok := backend.Get(id); ok {
 			info.ReplyTag = p.DefaultTag
 			info.ChipColor = p.ChipColor
 			if len(p.Features) > 0 {
 				// Defensive copy — Profile.Features is the registry's
-				// authoritative map; serialising the same reference into
-				// every response would let a buggy caller mutate it.
+				// authoritative map; never hand out the shared reference.
 				info.Features = make(map[string]bool, len(p.Features))
 				for k, v := range p.Features {
 					info.Features[k] = v
@@ -87,17 +73,13 @@ func (r *Router) BackendsList() []cli.BackendInfo {
 }
 
 // BackendsManifest assembles the full {backends, default, detected} payload.
-// detected is passed in (not probed here) because probing spawns a
-// --version subprocess per backend binary and callers pre-compute it once
-// at construction to avoid a fork-storm on every request — the handler
-// caches it on Handler.detected, the reverse connector on its own field.
-// Callers that have no detected list pass nil (serialises to an empty
-// "detected" via the struct's slice zero value handling below).
+// detected is passed in (not probed here) because probing spawns a --version
+// subprocess per backend binary; callers pre-compute it once at construction
+// to avoid a fork-storm per request. nil serialises as an empty "detected".
 func (r *Router) BackendsManifest(detected []cli.BackendInfo) BackendManifest {
 	if detected == nil {
 		// Keep the JSON array non-null so the frontend's Array.isArray
-		// guard on `detected` holds even for a reverse node that chose
-		// not to ship a detected probe.
+		// guard on `detected` holds.
 		detected = []cli.BackendInfo{}
 	}
 	return BackendManifest{

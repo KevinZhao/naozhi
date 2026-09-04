@@ -48,17 +48,14 @@ func (attachmentMetricsObserver) OnDrop(n int) {
 	metrics.AttachmentRefDropTotal.Add(int64(n))
 }
 
-// workspaceResolverForTracker returns a WorkspaceResolver closure
-// keyed by session key-hash. Matches the tracker's contract: empty
-// string on unknown keyhash → tracker drops the bump silently.
+// workspaceResolverForTracker returns a WorkspaceResolver closure keyed by
+// session key-hash. Matches the tracker's contract: empty string on unknown
+// keyhash → tracker drops the bump silently.
 //
-// #1646: this runs on every persisted image-bearing event (potentially
-// several per Send) on the tracker worker goroutine. It used to hold
-// r.mu.RLock and linearly scan r.ss.sessions, recomputing a SHA-256 KeyHash
-// per session, which is O(N)-hashes per bump on image-rich / cron-heavy
-// stores. It now consults r.ss.keyhash for an O(1) lookup and only falls
-// back to the scan when the index misses or points at a since-removed key
-// (self-healing — the index is a pure fast-path, never the source of truth).
+// Runs on every persisted image-bearing event on the tracker worker goroutine,
+// so it consults r.ss.keyhash for an O(1) lookup and only falls back to the
+// O(N)-hash scan when the index misses (the index is a pure fast-path, never
+// the source of truth) (#1646).
 func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 	return func(keyhash string) string {
 		if keyhash == "" {
@@ -66,17 +63,15 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 		}
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		// Fast path: O(1) index lookup, re-verified against r.ss.sessions so a
-		// stale entry (delete site that bypassed indexDel) degrades to the
-		// scan below rather than returning a workspace for a dead session.
+		// Fast path re-verified against r.ss.sessions so a stale index entry
+		// degrades to the scan rather than returning a dead session's workspace.
 		if key, ok := r.ss.keyhash[keyhash]; ok {
 			if s := r.ss.sessions[key]; s != nil && persist.KeyHash(key) == keyhash {
 				return s.Workspace()
 			}
 		}
-		// Fallback: linear scan (legacy behaviour). Covers test routers with a
-		// nil index and the rare stale-index case. Read-only — repairing the
-		// index would need the write lock we deliberately don't take here.
+		// Fallback scan covers test routers with a nil index and the stale-index
+		// case. Read-only — repairing the index would need the write lock.
 		for k, s := range r.ss.sessions {
 			if persist.KeyHash(k) == keyhash {
 				return s.Workspace()
@@ -86,20 +81,15 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 	}
 }
 
-// startAttachmentTracker spins up the tracker bound to r's
-// eventLogDir + session table. Called from NewRouter AFTER the
-// persister + session map are constructed so the resolver closure
-// is ready to serve lookups.
-//
-// When the tracker fails to start (unusual — only happens if
-// Options validation is wrong) we log + continue without tracking.
-// Attachments then fall back to pure upload-TTL GC, so the service
-// still works, just without the refcount retention bonus.
+// startAttachmentTracker spins up the tracker bound to r's eventLogDir +
+// session table. Called from NewRouter AFTER the persister + session map are
+// constructed so the resolver closure is ready to serve lookups. On init
+// failure we log + continue without tracking; attachments then fall back to
+// pure upload-TTL GC.
 func (r *Router) startAttachmentTracker() {
 	if r.eventLogDir == "" {
-		// Refcount tracking only makes sense when we have the
-		// event-log persistence tier emitting OnPersistedEntry
-		// signals. Without it, the tracker would never bump.
+		// Without the event-log persistence tier no OnPersistedEntry signals
+		// arrive, so the tracker would never bump.
 		return
 	}
 	t, err := tracker.NewTracker(tracker.Options{
@@ -114,17 +104,13 @@ func (r *Router) startAttachmentTracker() {
 	r.attachmentTracker = t
 }
 
-// stopAttachmentTracker flushes pending bumps and releases the
-// worker goroutine. Called from Router.shutdown AFTER the persister
-// itself has stopped so no more OnPersistedEntry callbacks arrive
-// while we're trying to drain.
+// stopAttachmentTracker flushes pending bumps and releases the worker
+// goroutine. Called from Router.shutdown AFTER the persister has stopped so no
+// more OnPersistedEntry callbacks arrive while draining.
 //
-// Intentionally parents on context.Background, NOT r.historyCtx:
-// shutdown's first action cancels historyCtx, so deriving from it
-// here would yield an already-cancelled context and the tracker
-// drain loop would get zero time to flush pending bumps. R230-GO-5
-// tracks splitting shutdown into a dedicated stop-ctx; until that
-// lands the 5s budget is the load-bearing bound.
+// Intentionally parents on context.Background, NOT r.historyCtx: shutdown's
+// first action cancels historyCtx, so deriving from it would give the drain
+// loop zero time to flush. The 5s budget is the load-bearing bound.
 func (r *Router) stopAttachmentTracker() {
 	if r.attachmentTracker == nil {
 		return

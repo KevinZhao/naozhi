@@ -1,11 +1,5 @@
 // Package session router shim reconcile + reconnect loop.
 //
-// Extracted from router.go on 2026-05-19 as part of the router-split
-// refactor (docs/design/router-split-design.md). For history prior to
-// commit 4c81da5006a9e9caaa57102d6a6a92ef11370555, see:
-//
-//	git log --follow internal/session/router.go
-//
 // This file holds shim management: discovering surviving shim processes,
 // classifying their state, reconnecting (or shutting down) them on startup,
 // and the periodic reconcile loop.
@@ -51,15 +45,9 @@ func (r *Router) shimManagedKeys() map[string]bool {
 }
 
 // shimManagers returns the distinct ShimManager instances across wrappers.
-// Deduplication is by `*shim.Manager` pointer identity: two wrappers
-// (e.g. claude + kiro) configured to share a single ShimManager instance
-// — typical when both backends point at the same state dir — appear once
-// in the result. Wrappers that hold structurally-equivalent but separately-
-// constructed managers (different *shim.Manager addresses, even if every
-// field matches) appear twice; this is intentional, since each manager
-// owns its own UNIX socket / cgroup pool and Discover()/handshake calls
-// must hit each one.
-// R230-CQ-17.
+// Dedup is by *shim.Manager pointer identity: wrappers sharing one manager
+// appear once; separately-constructed managers appear separately, since each
+// owns its own UNIX socket / cgroup pool and Discover()/handshake must hit each.
 func (r *Router) shimManagers() []*shim.Manager {
 	var out []*shim.Manager
 	seen := make(map[*shim.Manager]bool)
@@ -78,24 +66,21 @@ func (r *Router) shimManagers() []*shim.Manager {
 }
 
 // ReconnectShims discovers surviving shim processes and reconnects sessions.
-// Called after NewRouter to restore sessions that were active before naozhi restart.
-// Uses the router's historyCtx so SIGTERM during startup aborts the per-shim
-// handshakes (15s each) instead of blocking shutdown until every reconnect
-// times out. R216-GO-4.
+// Called after NewRouter. Uses the router's historyCtx so SIGTERM during
+// startup aborts the per-shim handshakes instead of blocking shutdown.
 func (r *Router) ReconnectShims() {
 	r.reconnectShims(r.historyCtx)
 }
 
 // ReconnectShimsCtx is the context-aware variant used by the reconcile loop so
-// SIGTERM during a 15 s handshake aborts promptly instead of waiting per session.
+// SIGTERM during a handshake aborts promptly instead of waiting per session.
 func (r *Router) ReconnectShimsCtx(ctx context.Context) {
 	r.reconnectShims(ctx)
 }
 
 // shimState classifies how reconnectShims should dispatch a discovered shim.
-// The zero value (shimStateSkip) is the safe no-op, so adding a new bool
-// flag that defaults false will not silently reroute an existing case.
-// R70-ARCH-H4.
+// The zero value (shimStateSkip) is the safe no-op, so a new bool flag that
+// defaults false cannot silently reroute an existing case.
 type shimState int
 
 const (
@@ -106,9 +91,8 @@ const (
 	shimStateReconnect                  // ready for Reattach
 )
 
-// classifyShimState is a pure boolean decision tree over the five inputs
-// reconnectShims observes per discovered shim. Extracted so the branch
-// matrix can be table-tested without standing up processes or wrappers.
+// classifyShimState is a pure decision tree over the inputs reconnectShims
+// observes per discovered shim, kept separate so it can be table-tested.
 //
 // Order matters: spawning > orphan > hasLiveProc > wrapperNil > argsDrift.
 // A spawn in flight always wins because the new shim's state file may race
@@ -133,19 +117,12 @@ func classifyShimState(spawning, sessFound, hasLiveProc, wrapperNil, argsDrift b
 	return shimStateReconnect
 }
 
-// shutdownShimViaReconnect briefly reconnects to an existing shim and
-// asks it to Shutdown gracefully, with a timeout guard so a hung
-// socket cannot stall the caller. When sigusr2Fallback is true, a
-// failed Reconnect triggers SIGUSR2 on the shim PID (shim's
-// reload-and-die signal); with sigusr2Fallback false, failure is
-// silent (drift path: wrapper is guaranteed non-nil by classify, and
-// we let the 30s discovery tick revisit on next failure).
-//
-// IIFE-with-defer style in-place equivalent; the helper owns context
-// cancel so callers cannot forget it (R32-REL1 invariant).
-//
-// Returns no error: the original branches were fire-and-forget and
-// preserving that keeps the extraction behaviour-identical.
+// shutdownShimViaReconnect briefly reconnects to an existing shim and asks it
+// to Shutdown gracefully, timeout-guarded so a hung socket cannot stall the
+// caller. With sigusr2Fallback, a failed Reconnect sends SIGUSR2 (the shim's
+// reload-and-die signal) to the shim PID; otherwise failure is silent and the
+// next discovery tick revisits. The helper owns context cancel so callers
+// cannot forget it. Fire-and-forget: returns no error.
 func shutdownShimViaReconnect(
 	parentCtx context.Context,
 	wrapper *cli.Wrapper,
@@ -175,37 +152,15 @@ func shutdownShimViaReconnect(
 }
 
 // driftCompareArgs reconstructs the argv a fresh spawn of this session would
-// use, for comparison against the shim-recorded argv in the drift check.
-// Extracted from the classifyShimState prep loop so the parity with the real
-// spawn path is testable in one call (tuning_drift_parity_test.go).
-//
-// backendDefaultsFor centralises the model/extraArgs lookup that otherwise
-// duplicated the resolveSpawnParamsLocked logic (R222-ARCH-14, #739). On top
-// of the backend layer, the session's tuning overrides are applied — they
-// sit at the top of resolveSpawnParamsLocked's chains and land in argv
-// (--model/--effort), so omitting them here would misclassify every tuned
-// session as arg-drift on every naozhi restart ("切过模型的会话一重启全丢").
-// sess may be nil (adopt path: shim survived a crash that predated the first
-// store save) — no session, no tuning, backend defaults apply.
-// docs/rfc/dashboard-model-effort-control.md §4.5.
-//
-// The config-derived argv fields (SettingsFile, MCPConfigFile, DebugFile, and
-// effort) are supplied by argvSpawnOptions rather than spelled out here — see
-// that function for why mirroring them by hand kept regressing.
-//
-// overlay is the per-request layer the surviving shim recorded at spawn
-// (shim.State.SpawnOverlay, #2494): agents[].model / .effort / .extra_args
-// and the resolved access profile. The Router does not own config.Agents, so
-// it cannot re-derive that layer — it reads back what the spawn persisted and
-// re-merges it with CURRENT backend defaults through the same mergeArgvLayers
-// the spawn used. A config edit therefore still reads as drift; an
-// agent-level override no longer does. nil (state written by a pre-#2494
-// shim) degrades to the pre-fix backend-defaults-only comparison — the
-// caller logs that once per shim so the resulting restart is attributable.
-//
-// Lock: called WITHOUT r.mu (reconnectShims releases it before this runs);
-// the only lock-guarded read is the access-profile registry, taken under
-// RLock inside accessProfileDefaultModel.
+// use, for comparison against the shim-recorded argv (tuning_drift_parity_test.go).
+// Backend defaults, the session's tuning overrides (--model/--effort — omitting
+// them would flag every tuned session as drift on restart) and the overlay the
+// shim persisted at spawn (agents[].model/.effort/.extra_args + access profile,
+// #2494) are re-merged through the same mergeArgvLayers the spawn used. sess
+// may be nil (adopt path). A nil overlay (pre-#2494 state) degrades to a
+// backend-defaults-only comparison; the caller logs that once per shim.
+// Lock: called WITHOUT r.mu; the only guarded read is under RLock inside
+// accessProfileDefaultModel.
 func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string, sess *ManagedSession, overlay *shim.SpawnOverlay) []string {
 	var ov shim.SpawnOverlay
 	if overlay != nil {
@@ -219,32 +174,22 @@ func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string
 		r.backendDefaultsFor(backendID),
 		r.accessProfileDefaultModel(ov.AccessProfile),
 		ov, tuningModel, tuningEffort)
-	// Every argv-bearing field is mirrored by construction — see
-	// argvSpawnOptions for why this is a shared function and not another
-	// hand-copied struct literal. cliDebugPathFor (not cliDebugFileFor) keeps
-	// the comparison read-only: this runs for every surviving shim at startup.
-	//
-	// systemPrompt is "" by design: AgentOpts.SystemPrompt is per-session
-	// (agent / planner / scratch) and not reconstructible from backend
-	// defaults, so stripResumeArgs removes the `--append-system-prompt`
-	// pair from the STORED side instead (#2493; per-agent visibility is
-	// #2494's scope, see KNOWN LIMITATION above).
+	// Every argv-bearing field is mirrored by construction via argvSpawnOptions.
+	// cliDebugPathFor (not cliDebugFileFor) keeps the comparison read-only.
+	// systemPrompt is "" by design: AgentOpts.SystemPrompt is per-session and
+	// not reconstructible here, so stripResumeArgs removes the stored
+	// --append-system-prompt pair instead (#2493).
 	return recWrapper.Protocol.BuildArgs(
 		r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.SystemPrompt, merged.Args))
 }
 
-// shimArgsDrift is the arg-drift predicate reconnectShims feeds
-// classifyShimState: does the argv the surviving shim recorded (minus the
-// session-specific --resume pair) still equal what a fresh spawn of the same
-// session would use today? Returns both argv so the caller can log the first
-// divergence. Never drifts on an empty stored argv (a state file that predates
-// CLIArgs recording has nothing to compare).
-//
-// state.SpawnOverlay == nil marks a shim spawned before the overlay was
-// persisted (#2494 upgrade window): the comparison then cannot see
-// agents[].model/.effort and may restart that session ONCE; its replacement
-// shim records the overlay and is exempt from then on. Logged here, once per
-// shim, so the operator can attribute that single restart.
+// shimArgsDrift is the arg-drift predicate for classifyShimState: does the
+// argv the surviving shim recorded (minus the session-specific --resume pair)
+// still equal what a fresh spawn would use today? Returns both argv so the
+// caller can log the first divergence. Never drifts on an empty stored argv.
+// A nil state.SpawnOverlay (shim spawned before the overlay was persisted,
+// #2494) cannot see agents[].model/.effort and may restart that session ONCE;
+// logged here so the operator can attribute the restart.
 func (r *Router) shimArgsDrift(recWrapper *cli.Wrapper, backendID string, state shim.State, sess *ManagedSession) (drift bool, storedBase, currentArgs []string) {
 	storedBase = stripResumeArgs(state.CLIArgs)
 	if len(storedBase) == 0 {
@@ -259,14 +204,9 @@ func (r *Router) shimArgsDrift(recWrapper *cli.Wrapper, backendID string, state 
 }
 
 // firstArgvDivergence returns the first differing token of two argv slices as
-// an (old, new) pair, for logging why a shim was classified as drifted.
-// "(absent)" marks a slice that ended first. Both empty means the slices are
-// equal — callers only reach here when they are not, but the helper stays
-// total so a future caller cannot trip on it.
-//
-// Values are argv tokens the operator wrote in config.yaml (model ids, effort
-// tiers, flags), so they are safe to log verbatim; sanitising is unnecessary
-// and would obscure the very token being reported.
+// an (old, new) pair; "(absent)" marks a slice that ended first, both empty
+// means equal. Tokens come from config.yaml (model ids, effort tiers, flags),
+// so logging them verbatim is safe.
 func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
 	const absent = "(absent)"
 	n := max(len(oldArgs), len(newArgs))
@@ -286,14 +226,10 @@ func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
 }
 
 // adoptableShimKey reports whether a live shim whose key is absent from
-// sessions.json may be rebuilt + reconnected rather than killed as an orphan
-// (#1875). It rejects the same key classes that sessionToStoreEntry refuses to
-// persist (sys:/scratch:) — those are register-on-startup or deliberately
-// volatile, so a live shim under such a key is a genuine anomaly that should
-// not be resurrected from disk — and rejects keys that fail session-key
-// validation, mirroring the trust boundary the shim layer already enforces in
-// validateKeyForShim. A malformed key on a shim state file is evidence of
-// tampering or corruption, not a session worth saving.
+// sessions.json may be rebuilt + reconnected rather than killed (#1875). It
+// rejects sys:/scratch: keys (never persisted, so a live shim there is an
+// anomaly) and keys failing validation, mirroring validateKeyForShim: a
+// malformed key on a shim state file is evidence of tampering, not a session.
 func adoptableShimKey(key string) bool {
 	if IsSysKey(key) || IsScratchKey(key) {
 		return false
@@ -301,22 +237,15 @@ func adoptableShimKey(key string) bool {
 	return ValidateSessionKey(key) == nil
 }
 
-// adoptLiveShimLocked rebuilds a ManagedSession for a discovered live shim that
-// is missing from sessions.json and publishes it into the router maps, so the
-// subsequent classifyShimState sees sessFound=true and routes to reconnect
-// instead of orphan-kill (#1875).
+// adoptLiveShimLocked rebuilds a ManagedSession for a live shim missing from
+// sessions.json and publishes it, so classifyShimState sees sessFound=true and
+// reconnects instead of orphan-killing (#1875). The shim state file is the
+// source of truth (key, workspace, backend, session_id); it is adapted to a
+// storeEntry and built via restoreSessionFromEntry so the adopted session is
+// wired identically to persisted ones. Cost/label/model re-populate from the
+// first post-reconnect system/init + result events.
 //
-// The shim state file is the source of truth here: it carries the session key,
-// workspace, backend, and (once system/init has fired) the session_id — every
-// field restoreSessionFromEntry needs. We adapt State → storeEntry and delegate
-// to the same construction path NewRouter uses for persisted sessions, so the
-// adopted session is wired identically (CLI identity, idToKey index,
-// trackSessionID, publishSessionLocked). Cost/label/model are unknown at adopt
-// time and left zero/empty; they re-populate from the first post-reconnect
-// system/init + result events.
-//
-// LOCK: caller MUST hold r.mu (restoreSessionFromEntry's publishSessionLocked +
-// idToKey writes require it). Returns the published *ManagedSession.
+// LOCK: caller MUST hold r.mu (publishSessionLocked + idToKey writes).
 func (r *Router) adoptLiveShimLocked(state shim.State, backendID string, _ *cli.Wrapper) *ManagedSession {
 	entry := &storeEntry{
 		Key:       state.Key,
@@ -363,51 +292,40 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if ok && sess.isAlive() {
 			hasLiveProcess = true
 		}
-		// Snapshot prevSessionIDs while still holding r.mu; the field is
-		// guarded by r.mu and the async history-load goroutine (see
-		// NewRouter) plus concurrent spawnSession both write to it. Reading
-		// after Unlock would data-race with those writers.
+		// Snapshot prevSessionIDs while still holding r.mu: the field is
+		// guarded by r.mu and written by the async history-load goroutine and
+		// concurrent spawnSession, so reading after Unlock would data-race.
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
 		_, spawning := r.pp.spawningKeys[state.Key]
 		r.mu.Unlock()
 
-		// Resolve the wrapper recorded at shim startup so reconnect uses
-		// the matching Protocol and binary. An empty Backend in the state
-		// file predates multi-backend support and falls back to the
+		// Resolve the wrapper recorded at shim startup so reconnect uses the
+		// matching Protocol and binary; an empty Backend falls back to the
 		// router default.
 		recWrapper, recBackendID := r.wrapperFor(state.Backend)
 
-		// Compute args drift up-front (only meaningful when we have a wrapper);
-		// classifyShimState picks the branch. Strip --resume <id> from stored
-		// args since it's session-specific, not config.
+		// Args drift is only meaningful when we have a wrapper;
+		// classifyShimState picks the branch.
 		var argsDrift bool
 		var storedBase, currentArgs []string
 		if recWrapper != nil {
 			argsDrift, storedBase, currentArgs = r.shimArgsDrift(recWrapper, recBackendID, state, sess)
 		}
 
-		// Adopt-before-classify (#1875): a live shim whose key is absent from
-		// sessions.json is NOT necessarily an orphan. The store is written
-		// lazily (spawn only marks dirty; saveIfDirty runs every 30s) and
-		// sessionToStoreEntry drops any entry whose session_id is still empty
-		// — so a session spawned <30s before a crash (or one that never
-		// received its system/init session_id) leaves a fully-alive shim with
-		// no store record. The shim state file itself carries everything we
-		// need to rebuild the ManagedSession (key + workspace + backend), so
-		// adopt it here rather than killing a live conversation. Only adopt
-		// when a wrapper exists for the backend (recWrapper != nil) and the
-		// key is adoptable (not sys:/scratch:, passes validation); otherwise
-		// fall through to the existing orphan/no-wrapper handling unchanged.
+		// Adopt-before-classify (#1875): a live shim absent from sessions.json is
+		// not necessarily an orphan — the store is written lazily (saveIfDirty
+		// every 30s, entries with empty session_id dropped), so a session spawned
+		// just before a crash has a live shim and no record. Adopt only when a
+		// wrapper exists and the key is adoptable; otherwise fall through.
 		if !ok && !spawning && recWrapper != nil && adoptableShimKey(state.Key) {
 			r.mu.Lock()
 			// Re-check under lock: a concurrent spawnSession may have installed
 			// the session (or its spawning marker) between the snapshot above
 			// and now.
 			if existing, exists := r.ss.sessions[state.Key]; exists {
-				// A concurrent spawnSession won the race and installed the
-				// session. Re-snapshot from it instead of adopting a duplicate.
+				// A concurrent spawnSession won; re-snapshot instead of adopting a duplicate.
 				sess = existing
 				ok = true
 				sessPrevIDs = slices.Clone(sess.prevSessionIDs)
@@ -416,11 +334,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				}
 			} else if _, racingSpawn := r.pp.spawningKeys[state.Key]; racingSpawn {
 				// spawnSession started inside the adopt window but hasn't
-				// published its ManagedSession yet. Hand the shim to that spawn
-				// rather than adopting a competing copy: promote spawning so
-				// classifyShimState routes to skip (its highest-priority
-				// branch), exactly as if the marker had been visible at the
-				// top-of-loop snapshot. The next reconcile tick re-evaluates.
+				// published yet: promote spawning so classifyShimState routes
+				// to skip rather than adopting a competing copy.
 				spawning = true
 			} else {
 				// Genuinely absent + no spawn in flight: rebuild from the shim
@@ -439,14 +354,12 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 
 		switch classifyShimState(spawning, ok, hasLiveProcess, recWrapper == nil, argsDrift) {
 		case shimStateSkip:
-			// spawnSession in flight, or session already has a live process.
-			// Next tick will re-evaluate if anything changed.
+			// Next tick re-evaluates if anything changed.
 			continue
 		case shimStateOrphan:
 			slog.Info("orphan shim found, shutting down", "key", state.Key)
-			// Connect briefly to send shutdown. Bound the reconnect so a
-			// hung shim socket cannot stall NewRouter startup — we fall
-			// through to SIGUSR2 if the timeout fires.
+			// Bounded reconnect so a hung shim socket cannot stall startup;
+			// falls through to SIGUSR2 if the timeout fires.
 			shutdownShimViaReconnect(parentCtx, recWrapper, state, shimReconnectTimeout, true)
 			continue
 		case shimStateNoWrapper:
@@ -455,10 +368,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			continue
 		case shimStateDrift:
 			// Naming the first divergence lets an operator tell an EXPECTED
-			// restart ("I changed cli.backends[].effort") from a spurious one
-			// (a pre-#2494 shim whose state carries no overlay — see the
-			// legacy_state attr). Lengths alone left both looking identical
-			// in the log.
+			// restart (config edit) from a spurious one (a pre-#2494 shim whose
+			// state carries no overlay — see the legacy_state attr).
 			oldTok, newTok := firstArgvDivergence(storedBase, currentArgs)
 			slog.Info("shim config drifted, shutting down old shim",
 				"key", state.Key,
@@ -467,25 +378,19 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				"first_diff_old", oldTok,
 				"first_diff_new", newTok,
 				"legacy_state", state.SpawnOverlay == nil)
-			// Drift path: classify guarantees recWrapper is non-nil, so no
-			// SIGUSR2 fallback needed — if Reconnect fails, the 30s tick
-			// will revisit.
+			// classify guarantees recWrapper is non-nil, so no SIGUSR2
+			// fallback; if Reconnect fails, the next tick revisits.
 			shutdownShimViaReconnect(parentCtx, recWrapper, state, shimReconnectTimeout, false)
-			// After killing the old shim the session becomes suspended until the
-			// next user message spawns a fresh process. NewRouter's async JSONL
-			// load loop skips this key because shimManagedKeys() already claimed
-			// it, so without an explicit backfill here the dashboard panel stays
-			// blank until the user sends something. Load JSONL directly into
-			// persistedHistory (InjectHistory is proc-nil safe) so the sidebar
-			// shows the last conversation while the session waits for revival.
+			// The session is now suspended until the next user message. NewRouter's
+			// async JSONL load skipped this key (shimManagedKeys claimed it), so
+			// backfill persistedHistory here (InjectHistory is proc-nil safe) or
+			// the dashboard panel stays blank until the user sends something.
 			if r.claudeDir != "" && state.SessionID != "" {
 				ids := make([]string, 0, len(sessPrevIDs)+1)
 				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
-				// Wrap in an IIFE so a panic inside InjectHistory /
-				// extractLastPromptFromProcess still releases the context's
-				// timer. Mirrors the pattern used in spawnSession's history
-				// load. R218-GO-10.
+				// IIFE so a panic inside InjectHistory / extractLastPromptFromProcess
+				// still releases the context's timer.
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 					defer histCancel()
@@ -502,12 +407,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			}
 			continue
 		}
-		// shimStateReconnect falls through here; the reconnect path is too
-		// long to nest inside the switch, so we exit on every other case and
-		// let the reconnect body run at the loop's natural indent level.
+		// shimStateReconnect falls through: the reconnect body is too long to
+		// nest inside the switch.
 
-		// Reconnect. Timeout-bounded so a stuck shim handshake cannot stall
-		// NewRouter indefinitely; on timeout we log and keep iterating.
+		// Timeout-bounded so a stuck shim handshake cannot stall NewRouter
+		// indefinitely; on timeout we log and keep iterating.
 		lastSeq := int64(0) // full replay on restart
 		spawnCtx, spawnCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 		proc, replays, err := recWrapper.SpawnReconnect(
@@ -516,15 +420,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		)
 		spawnCancel()
 		if err != nil {
-			// ENOENT on the socket path = zombie shim (live PID, missing
-			// filesystem entry). Discover's F4 check will prune it on the
-			// next 30s tick, but that means 30s of WARN spam AND every
-			// dashboard retry in between also fails. Eagerly clean up so
-			// the next user message spawns a fresh shim instead of hitting
-			// the same dead path. isENOENTErr unwraps any wrapper layers
-			// (fmt.Errorf → net.OpError → os.SyscallError) and avoids
-			// matching against the strerror text — that string is locale-
-			// dependent and silently mismatches under LANG=zh_CN.UTF-8.
+			// ENOENT on the socket path = zombie shim (live PID, missing socket).
+			// Discover prunes it on the next tick, but eager cleanup spares 30s
+			// of WARN spam and failing dashboard retries. isENOENTErr unwraps
+			// wrapper layers rather than matching strerror text, which is
+			// locale-dependent (mismatches under LANG=zh_CN.UTF-8).
 			if isENOENTErr(err) {
 				slog.Warn("shim reconnect: socket missing, cleaning up zombie",
 					"key", state.Key, "pid", state.ShimPID, "err", err)
@@ -537,39 +437,29 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			continue
 		}
 
-		// Install the turn-done callback before any history/JSONL work
-		// completes so result events arriving during the JSONL-load window
-		// (the readLoop is already running inside SpawnReconnect) do not
-		// fire the nil-callback path and leave the dashboard stuck on a
-		// "running" spinner until the next unrelated broadcast.
+		// Bind before any JSONL work: readLoop is already running inside
+		// SpawnReconnect, and a result event hitting the nil-callback path
+		// leaves the dashboard stuck on a "running" spinner.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
 
-		// Wrapper.SpawnReconnect has no SpawnOptions, so the spawn-pinned
-		// effort tier is recovered from the argv the shim recorded at spawn
-		// (same tokens BuildArgs emitted, same source driftCompareArgs
-		// compares against). Fill-if-unset: a metadata report the readLoop
-		// already consumed from the replay stays authoritative.
+		// SpawnReconnect has no SpawnOptions, so the spawn-pinned effort tier is
+		// recovered from the argv the shim recorded. Fill-if-unset: a metadata
+		// report already consumed from the replay stays authoritative.
 		proc.SeedEffortFromArgs(state.CLIArgs)
 
-		// Wrapper.SpawnReconnect has no cwd (shim owns it), so its
-		// proc.InitLinker("") left the SubagentLinker with empty
-		// projectDir and Resolve bails on every team agent task_id.
-		// Replay the workspace from the persisted session record so the
-		// Linker can locate ~/.claude/projects/<encoded-cwd>/<session>/
-		// subagents/ for any in-flight teammate tasks.
+		// SpawnReconnect has no cwd (shim owns it), so the SubagentLinker has an
+		// empty projectDir and Resolve bails on every team agent task_id. Replay
+		// the workspace so it can locate
+		// ~/.claude/projects/<encoded-cwd>/<session>/subagents/.
 		if ws := sess.Workspace(); ws != "" {
 			proc.SetCwdForLinker(ws)
 		}
 
-		// Shim replays (DrainReplay output) are intentionally NOT injected
-		// into EventLog — they lack per-event timestamps and would corrupt
-		// chronology. But they DO carry the `system.task_started` markers
-		// for any in-process teammate / sidechain agent the shim saw before
-		// naozhi restart. Without plumbing those markers to the Linker, the
-		// dashboard drill-in serves 202 forever because Linker.Query has
-		// never seen the task_id. Walk the replay once, extract each
-		// task_started, and kick an async Resolve — Resolve is idempotent
-		// + cached, so this costs at most one stat per unique task_id.
+		// Replays are NOT injected into EventLog (no per-event timestamps), but
+		// they carry `system.task_started` markers for teammate/sidechain agents
+		// the shim saw before restart. Without feeding those to the Linker the
+		// dashboard drill-in serves 202 forever. Walk the replay once and kick an
+		// async Resolve per unique task_id (Resolve is idempotent + cached).
 		if linker := proc.Linker(); linker != nil && len(replays) > 0 {
 			seen := make(map[string]struct{})
 			for _, replay := range replays {
@@ -580,11 +470,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				if err != nil || len(events) == 0 {
 					continue
 				}
-				// Replay frames map 1:1 to a single semantic event in
-				// practice (the multi-event ACP turn-end response is not
-				// captured as a replay), but iterating the slice keeps the
-				// linker resilient if a future protocol fans out from one
-				// frame.
+				// Replay frames map 1:1 to a semantic event in practice; iterating
+				// keeps the linker resilient if a protocol fans out from one frame.
 				for _, ev := range events {
 					if ev.Type != "system" || ev.SubType != "task_started" {
 						continue
@@ -606,104 +493,41 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
 					desc := ev.Description
-					// R224-GO-3: pass 0 instead of time.Now().UnixMilli().
-					// subagent_link.Resolve uses agentToolUseMS to filter
-					// out subagent jsonl files whose first row predates
-					// agentTS-10s ("same-name reuse" staleness guard).
-					// Replay frames in this branch have no preserved
-					// per-event timestamp (cli.Event.recvAt is unexported
-					// and only stamped at live readLoop time), so any
-					// time.Now()-derived value here is fiction relative
-					// to the historical task — and a fiction that's
-					// always *newer* than the real task, which means
-					// every candidate jsonl passes the guard and the
-					// filter is effectively disabled with a misleading
-					// non-zero argument. Resolve treats
-					// agentToolUseMS<=0 as "skip the time filter"
-					// (subagent_link.go:328), which is the honest
-					// fail-open for the replay path: we're consciously
-					// declining to enforce staleness because we lack
-					// the data to do so. Same-name reuse on replay is
-					// extremely rare (would require a parent agent
-					// finishing an old task, the exact sub-task name
-					// being reused after >10s, and the shim restart
-					// surfacing both in one DrainReplay), and Resolve's
-					// other guards (sessionID match, toolUseID dedup,
-					// per-jsonl modtime ordering) still apply.
+					// wallclock 0 = skip Resolve's staleness filter: replay frames
+					// carry no per-event timestamp, and any time.Now()-derived value
+					// would be newer than the real task and let every candidate
+					// pass anyway. Fail open honestly; Resolve's other guards
+					// (sessionID match, toolUseID dedup, modtime order) still apply.
 					wallclock := int64(0)
 					go linker.Resolve(parentCtx, taskID, toolUseID, name, desc, wallclock)
 				}
 			}
 		}
 
-		// Restore dashboard history from JSONL only.
-		//
-		// Replay events are intentionally NOT injected into persistedHistory:
-		// they originate from the shim stdout ring buffer, which has no native
-		// per-event timestamp, so EventEntriesFromEvent stamps them all with
-		// time.Now() at reconnect moment — this breaks chronological ordering
-		// against user entries loaded from JSONL (which carry real ts).
-		//
-		// Replay is still useful for runtime state (isMidTurn detection inside
-		// SpawnReconnect, and any live bytes readLoop picks up post-reconnect).
-		// For long-term history, JSONL is authoritative — it records both
-		// user input (stdin) and assistant output with accurate timestamps.
-		//
-		// Tradeoff: if naozhi restarts within seconds of the last turn, the
-		// current session's JSONL may not yet be flushed to disk; assistant
-		// entries for that turn are transiently absent from the dashboard
-		// until the next live event repopulates them. Self-healing.
-		//
-		// R52-CONCUR-004 sub-issue: histEntries is loaded from JSONL fresh
-		// rather than merged with sess.persistedHistory. If the in-memory
-		// persistedHistory contains entries that never made it to JSONL
-		// (e.g. an interim user prompt or assistant chunk that crashed
-		// before disk flush), the new proc.eventLog will not see those
-		// entries and EventEntriesSince's "proc != nil → proc.EventEntries"
-		// fast path may under-return briefly. The fallback path
-		// (EventEntriesBeforeCtx, dashboard scrollback) merges
-		// sess.persistedHistory with the on-disk tier so the user-visible
-		// history converges; the gap is only in the live "since X" stream
-		// during the reconnect window. A proper merge here requires first
-		// landing R51-CONCUR-002 (sendMu protection on
-		// ReattachProcessNoCallback) so we can guarantee no in-flight Send
-		// is racing the merge. Tracked under R51-CONCUR-002 as the master
-		// sendMu refactor.
-		//
-		// R231-CQ-1: only load+inject when persistedHistory is empty.
-		// If tier1/tier2 (NewRouter startup goroutine via s.InjectHistory)
-		// already populated it, the upcoming ReattachProcessNoCallback at
-		// the bottom of this branch will snapshot persistedHistory into
-		// the fresh proc — re-injecting the same JSONL entries here would
-		// double-fill proc.EventLog (direct proc.InjectHistory append +
-		// snapshot copy via attachProcessAndSnapshotPersisted's seed).
-		// Route through sess.InjectHistory so persistedHistory stays the
-		// single source of truth and seededLen accounting protects against
-		// duplicate forwarding.
+		// Restore dashboard history from JSONL only. Replay events are NOT
+		// injected into persistedHistory: they lack native timestamps and would
+		// break ordering against JSONL user entries. Only load when
+		// persistedHistory is empty — ReattachProcessNoCallback below snapshots
+		// it into the fresh proc, so re-injecting would double-fill proc.EventLog.
 		if r.claudeDir != "" && !sess.hasInjectedHistory() {
 			ids := make([]string, 0, len(sessPrevIDs)+1)
 			ids = append(ids, sessPrevIDs...)
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
-			// Use parentCtx (reconcile loop / startup ctx) rather than
-			// r.historyCtx: historyCtx is cancelled as Shutdown's FIRST
-			// action, so a reconcile tick that fires during the 30s drain
-			// window would see ctx.Canceled and load zero entries, leaving
-			// the reconnected session's dashboard panel empty.
-			// Bounded budget (maxPersistedHistory) and the inner
-			// shimReconnectTimeout still protect against hung storage.
+			// parentCtx, not r.historyCtx: historyCtx is cancelled as Shutdown's
+			// FIRST action, so a reconcile tick during the drain window would
+			// load zero entries and leave the panel empty. maxPersistedHistory +
+			// shimReconnectTimeout still bound hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 			histEntries := r.historyLoader.LoadHistoryChainTail(
 				histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 			)
 			histCancel()
 			if len(histEntries) > 0 {
-				// sess.InjectHistory appends to persistedHistory; proc is
-				// not yet attached so loadProcess() inside InjectHistory
-				// observes nil and skips forwarding. The snapshot path in
-				// ReattachProcessNoCallback below seeds proc from
-				// persistedHistory exactly once.
+				// proc is not yet attached, so InjectHistory only appends to
+				// persistedHistory; ReattachProcessNoCallback below seeds proc
+				// from it exactly once.
 				sess.InjectHistory(histEntries)
 			}
 		}
@@ -721,18 +545,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
 			continue
 		}
-		// ReattachProcess calls onSessionID which tries to r.mu.Lock(),
-		// but we already hold the lock here. Do the tracking directly
-		// to avoid deadlock (sync.RWMutex is not reentrant).
-		// (onTurnDone was already bound before the JSONL-load window
-		// to avoid missing early result events.)
-		//
-		// R51-CONCUR-002 (#750): use the TryLock-guarded variant so a Send()
-		// still unwinding on the just-died process (holding sendMu) is not
-		// raced by the storeProcess swap + deathReason.Store(""). TryLock is
-		// non-blocking, so it does not violate the sendMu→r.mu ordering the
-		// caller is bound by. If a Send is in flight, abort this reconnect;
-		// the 30s reconcile tick retries once sendMu is free.
+		// ReattachProcess would call onSessionID which takes r.mu (held here;
+		// not reentrant), so track directly; onTurnDone was bound earlier. The
+		// TryLock-guarded variant keeps a Send() still unwinding on the dead
+		// process (holding sendMu) from racing the storeProcess swap; non-blocking,
+		// so the sendMu→r.mu ordering holds. If busy, the next tick retries (#750).
 		if !sess.tryReattachProcessNoCallback(proc, state.SessionID) {
 			r.mu.Unlock()
 			proc.Close()
@@ -740,11 +557,9 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				"key", state.Key)
 			continue
 		}
-		// Record the backend + wrapper-provided CLI identity so the
-		// dashboard snapshot reflects the actual backend post-reconnect,
-		// even for sessions restored from a pre-multi-backend store.
-		// Writes go through atomic.Pointer[string] so the lock-free Snapshot()
-		// in ListSessions remains race-free.
+		// Record backend + CLI identity so the dashboard snapshot reflects the
+		// actual backend post-reconnect. Writes go through atomic.Pointer[string]
+		// so the lock-free Snapshot() in ListSessions remains race-free.
 		if recBackendID != "" {
 			sess.SetBackend(recBackendID)
 		}
@@ -761,24 +576,19 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if !sess.exempt {
 			r.ss.activeCount.Add(1)
 		}
-		// Mark store dirty so the next Cleanup/saveIfDirty cycle persists
-		// the reconnected session's backend/CLI identity and active flag.
-		// Without this, a naozhi crash within the (up to) 60-second gap
-		// before the next save would lose the shim-reconnect state even
-		// though the shim itself kept the CLI process alive. Every other
-		// storeGen.Add site pairs with storeDirty = true for this reason.
+		// Mark store dirty so the next saveIfDirty persists the reconnected
+		// backend/CLI identity and active flag; every storeGen.Add site pairs
+		// with dirty = true.
 		r.ss.dirty = true
 		r.ss.gen.Add(1)
 		r.mu.Unlock()
 
-		// Event-log persist sink goes last so the InjectHistory +
-		// shim replay above land with sinkReady=false (replayPhase=true
-		// on the persister side) and are dropped rather than written
-		// back to disk. See RFC §3.2.2.
+		// Persist sink goes last so the InjectHistory + shim replay above land
+		// with sinkReady=false and are dropped rather than written back to disk
+		// (RFC §3.2.2).
 		r.installPersistSink(proc, state.Key)
 
-		// Extract lastPrompt/lastActivity from replay + JSONL entries so the
-		// sidebar shows a meaningful label instead of "(no prompt)".
+		// Sidebar label instead of "(no prompt)".
 		sess.extractLastPromptFromProcess()
 
 		reconnected++
@@ -791,18 +601,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	if reconnected > 0 {
 		r.notifyChange()
 		slog.Info("shim reconnect complete", "count", reconnected)
-		// SM2 (#394): defensive activeCount reconciliation. spawnSession
-		// runs concurrent to ReconnectShims and both Add(1) under r.mu;
-		// historically a same-key race between the two could drift the
-		// counter by ±1, surfacing later as a spurious ErrMaxProcs until
-		// the next Cleanup self-heals via countActive(). Calling
-		// countActive() here on the post-reconcile aggregate keeps the
-		// O(N) walk off the per-spawn fast path while still converging
-		// the counter to truth at every reconcile tick (>=1 reconnected).
-		// pendingSpawns isn't reset because in-flight Spawns still need
-		// their reservation — countActive only restores the visible
-		// activeCount; pendingSpawns is decremented by the slot's RAII
-		// release in Spawn's defer.
+		// Defensive activeCount reconciliation (#394): spawnSession runs
+		// concurrently and both Add(1) under r.mu; a same-key race can drift
+		// the counter ±1 (spurious ErrMaxProcs). countActive() here converges
+		// it each reconcile tick without an O(N) walk on the spawn fast path.
+		// pendingSpawns is left alone: in-flight Spawns release it in their defer.
 		r.mu.Lock()
 		r.countActive()
 		r.mu.Unlock()
@@ -820,10 +623,9 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 		return
 	}
 	go func() {
-		// Mirror StartCleanupLoop: a panic inside ReconnectShimsCtx would
-		// otherwise silently kill the loop goroutine and shim recovery would
-		// stop for the lifetime of the process. Auto-restart with a short
-		// cool-down so a panicking iteration cannot hot-loop.
+		// A panic inside ReconnectShimsCtx would otherwise silently kill the loop
+		// and shim recovery would stop for the process lifetime. Auto-restart
+		// with a short cool-down so a panicking iteration cannot hot-loop.
 		defer func() {
 			if rec := recover(); rec != nil {
 				metrics.PanicRecoveredTotal.Add(1)
@@ -846,9 +648,7 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Thread ctx so SIGTERM during a per-shim 15s handshake
-				// aborts promptly instead of waiting one full timeout per
-				// suspended session.
+				// Thread ctx so SIGTERM during a handshake aborts promptly.
 				r.ReconnectShimsCtx(ctx)
 			}
 		}

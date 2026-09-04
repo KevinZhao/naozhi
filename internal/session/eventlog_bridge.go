@@ -1,52 +1,13 @@
 // Package session — eventlog_bridge.go
 //
-// R243-ARCH-12 (#737/#1369): four eventlog tiers shadow each other today.
+// Eventlog tiers: cli.EventLog.ring (in-memory, lossy), persist.Persister
+// spool (durable, authoritative on restart, fed via this bridge's PersistSink),
+// naozhilog.Source (replay from the spool) and history/merged.Source (composed
+// read over the Claude-JSONL fallback). persist.Persister deliberately does not
+// implement eventlog/api.EventStore; it is fed via the per-key PersistSink
+// callback and read back via persist.Recover (#1570).
 //
-//   - cli.EventLog.ring — in-memory bounded ring shared with the WS
-//     subscriber tier. Pure RAM, lossy on process exit.
-//   - persist.Persister.spool — per-key durable spool that lands on
-//     disk via this bridge's PersistSink. Authoritative on restart.
-//   - naozhilog.Source.replay — read-side replay that re-hydrates the
-//     ring from the spool when sessions reattach (history panel,
-//     dashboard rewind).
-//   - history/merged.Source — the composed-read tier that fronts the
-//     naozhi-native replay over the Claude-JSONL fallback.
-//
-// Each tier owns its own append/read/subscribe primitives even though
-// their conceptual contract is identical: "append, read by range,
-// subscribe to tail."
-//
-// The unification plan is now partly landed: internal/eventlog/api
-// publishes the single `EventStore` interface (Appender + Reader +
-// Subscriber), CI-gated by api_backends_test.go (PR #1755). The
-// behaviour-free contract, expressed against clievent.EventEntry, is:
-//
-//	type EventStore interface {
-//	    Append(e clievent.EventEntry)         // Appender
-//	    AppendBatch(entries []clievent.EventEntry)
-//	    LoadBefore(...)                  // Reader = cli.HistorySource
-//	    SubscribeNew() cli.EventSubscription // Subscriber
-//	}
-//
-// Three of the four tiers already satisfy it with no shim: cli.EventLog
-// is Appender+Subscriber, and naozhilog.Source / merged.Source are
-// Reader. persist.Persister deliberately satisfies NONE of the api
-// interfaces — it is fed via a per-key PersistSink callback (sink model)
-// and read back via persist.Recover, so an adapter is intentionally
-// deferred to the #1570 registry-injection round (see
-// api_backends_test.go for the documented gap).
-//
-// A central registry that the backends register with is still future
-// work. This bridge stays in place regardless — its job is exactly the
-// EventEntry⇄persist.Entry hop. The migration is staged because each
-// tier has accumulated its own performance hot path (see R215-PERF-P1-1
-// pooling below, R228-PERF-1 single-entry fast path, R240-PERF-4
-// escape analysis); a naive interface-everywhere refactor would
-// regress those without an evals pass.
-//
-// The bridge contract here remains the only place EventEntry →
-// persist.Entry conversion lives. Adding new backends should follow
-// the registry path, not bolt on alongside.
+// This bridge is the only place EventEntry → persist.Entry conversion lives.
 package session
 
 import (
@@ -64,28 +25,19 @@ import (
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
 
-// newEventLogLocalSource builds the naozhi-native, in-process event-log
-// history source for a session key. This is tier-1 of the history stack
-// and is NOT backend-specific: the naozhilog spool is written for every
-// backend (claude / kiro / future) via the eventlog persist sink above,
-// so the constructor lives here in the bridge — the single place the
-// naozhilog import edge is allowed — rather than scattered across
-// router_core.go (background loader) and router_lifecycle.go
-// (attachHistorySource). Consolidating the two call sites here is the
-// minimal step of R214-ARCH-3 / R215-ARCH-P1-5 (#403, #567): the generic
-// session layer no longer hand-builds backend history sources inline.
+// newEventLogLocalSource builds the naozhi-native event-log history source for
+// a session key (tier-1 of the history stack). It is NOT backend-specific: the
+// naozhilog spool is written for every backend via the persist sink, so the
+// constructor lives here — the single place the naozhilog import edge is
+// allowed (#403, #567).
 func newEventLogLocalSource(eventLogDir, key string) *naozhilog.Source {
 	return naozhilog.New(eventLogDir, key)
 }
 
-// mergeWithEventLog composes the naozhi event-log local tier in front of
-// a backend-provided fallback source. When eventLogDir is empty the
-// event-log tier is opted out and the fallback is returned unchanged, so
-// callers get a single source without branching on eventLogDir at the
-// call site. fallback may be nil; the caller is responsible for replacing
-// a nil fallback with history.Noop before invoking when it wants the
-// "never nil" guarantee, but mergeWithEventLog itself tolerates nil by
-// substituting history.Noop so the merged source's read path stays safe.
+// mergeWithEventLog composes the event-log local tier in front of a
+// backend-provided fallback. Empty eventLogDir opts out and returns the
+// fallback unchanged. A nil fallback is replaced by history.Noop so the merged
+// read path stays safe.
 func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history.Source {
 	if fallback == nil {
 		fallback = history.Noop{}
@@ -99,13 +51,9 @@ func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history
 	}
 }
 
-// bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so eventlog
-// bridge hot path (≥5 events/s × N sessions) avoids the encodeState
-// allocation that json.Marshal performs each call. Mirrors the
-// jsonEncPool idiom in internal/server/dashboard.go.
-// R215-PERF-P1-1: replaces per-EventEntry json.Marshal reflection
-// path with pooled encoder to drop the heaviest steady-state alloc
-// in the persist sink closure.
+// bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so the bridge hot path
+// (≥5 events/s × N sessions) avoids the encodeState allocation json.Marshal
+// performs per call. Mirrors jsonEncPool in internal/server/dashboard.go.
 type bridgeEncBuf struct {
 	buf *bytes.Buffer
 	enc *json.Encoder
@@ -115,38 +63,28 @@ var bridgeEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
 		enc := json.NewEncoder(buf)
-		// Match clievent.EventEntry JSON shape: persist tier reads back via
-		// json.Unmarshal which already accepts unescaped HTML chars,
-		// and disabling escape avoids needless byte expansion.
+		// The persist tier reads back via json.Unmarshal, which accepts
+		// unescaped HTML; disabling escape avoids needless byte expansion.
 		enc.SetEscapeHTML(false)
 		return &bridgeEncBuf{buf: buf, enc: enc}
 	},
 }
 
-// bridgeEncMaxCap caps buffer reuse so a one-off oversized event does
-// not permanently pin large heap.
+// bridgeEncMaxCap caps buffer reuse so a one-off oversized event does not
+// permanently pin a large heap buffer.
 const bridgeEncMaxCap = 64 * 1024
 
-// span records a [start,end) byte range inside the shared pooled encode
-// buffer for one EventEntry plus that entry's TimeMS. Hoisted to package
-// scope (was a func-local type) so batchScratch can carry a reusable []span
-// across AppendBatch calls. R20260602-PERF-2 (#1629).
-//
-// R200109-PERF-3 (#1619): timeMS folded into span so the separate `times`
-// helper slice is gone — one fewer pooled slice and one fewer append per
-// entry. TimeMS is captured at span-record time and read back during the
-// persist.Entry assembly pass.
+// span records a [start,end) byte range inside the shared pooled encode buffer
+// for one EventEntry plus that entry's TimeMS. Package-scoped so batchScratch
+// can carry a reusable []span across AppendBatch calls (#1629, #1619).
 type span struct {
 	start, end int
 	timeMS     int64
 }
 
-// batchScratch pools the two per-AppendBatch helper slices the multi-entry
-// sink path used to `make` on every call (out / spans). In steady state
-// (≥5 events/s × N sessions) those heap allocations escaped per call;
-// carrying them in a sync.Pool keeps the backing arrays alive across calls
-// and reuses their capacity. Mirrors the bridgeEncPool idiom right above.
-// R20260602-PERF-2 (#1629).
+// batchScratch pools the two per-AppendBatch helper slices so their backing
+// arrays survive across calls instead of escaping to the heap per batch
+// (#1629). Mirrors the bridgeEncPool idiom.
 type batchScratch struct {
 	out   []persist.Entry
 	spans []span
@@ -157,96 +95,47 @@ var batchScratchPool = sync.Pool{
 }
 
 // batchScratchMaxCap caps slice reuse so a one-off huge batch does not pin
-// large backing arrays in the pool forever (same rationale as
-// bridgeEncMaxCap for the encode buffer). A batch wider than this is served
-// once and dropped on return instead of being recycled.
+// large backing arrays in the pool forever (same rationale as bridgeEncMaxCap).
 const batchScratchMaxCap = 4096
 
-// newEventLogSink translates a per-key persist.PersistSink (which
-// accepts persist.Entry batches) into the cli.PersistSink contract
-// (which accepts clievent.EventEntry batches).
+// newEventLogSink translates a per-key persist.PersistSink (persist.Entry
+// batches) into the cli.PersistSink contract (clievent.EventEntry batches);
+// neither cli nor persist imports the other, so the conversion lives only here.
 //
-// Two packages meet here precisely because neither cli nor persist
-// imports the other — schema.Record.Entry is json.RawMessage, so
-// the hop is always "cli marshals EventEntry → persist writes raw
-// bytes". This helper is the only place the conversion lives so a
-// future change to clievent.EventEntry's JSON shape doesn't force every
-// session call site to re-bridge.
-//
-// Ordering contract (RFC §3.2.2 / attachment-refcount §3.2): this
-// sink MUST be installed on cli.EventLog.SetPersistSink AFTER any
-// pre-hook InjectHistory calls complete. spawnSession is the sole
-// production caller responsible for the ordering; router tests anchor
-// that ordering in CI.
-//
-// attachTracker is optional: when non-nil, every non-replay
-// EventEntry that carries ImagePaths is handed to
-// tracker.OnPersistedEntry so the attachment refcount stays in
-// sync with disk. A nil tracker disables refcount bumps — the
-// event log persistence still runs. Passing keyhash up front
-// spares the tracker's resolver from re-hashing on every call.
-//
-// Failure mode: a marshal failure on a single EventEntry does NOT
-// abort the batch — the failing entry is logged and skipped. This
-// matches the "best-effort persist, never block Append" policy:
-// losing one event to a rare JSON encoding pathology is preferable
-// to dropping the entire batch (which would otherwise include many
-// valid siblings).
+// Ordering contract (RFC §3.2.2 / attachment-refcount §3.2): this sink MUST be
+// installed on cli.EventLog.SetPersistSink AFTER any pre-hook InjectHistory
+// calls complete; spawnSession is the sole production caller responsible.
+// attachTracker is optional: non-replay entries with ImagePaths bump the
+// attachment refcount. A marshal failure on one EventEntry does NOT abort the
+// batch — the entry is logged and skipped (best-effort persist, never block).
 func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSink {
 	return func(entries []clievent.EventEntry, replayPhase bool) {
 		if len(entries) == 0 {
 			return
 		}
 
-		// R228-PERF-1: single-entry fast path avoids a heap allocation
-		// for the 1-cap []persist.Entry slice. A stack-local [1]persist.Entry
-		// array keeps the backing array on the stack; slicing it to [:0]
-		// lets the compiler prove the escape is bounded to this frame.
-		// marshal/copy/refcount semantics are identical to the loop below.
-		//
-		// R240-PERF-4 (validated 2026-05-24, cron-fix-F4): `go build
-		// -gcflags=-m` confirms `make([]byte, len(raw))` (line 102) and
-		// `append(stackArr[:0], ...)` (line 108) DO escape — persisterSink
-		// is documented to retain entries (it pumps them into the per-key
-		// persist tier's batch buffer), so neither the bytes nor the slice
-		// header can stay on the stack. A byte-slice sync.Pool would only
-		// pay off if PersistSink were re-contracted to copy-on-take; that
-		// breaks every existing sink implementation. Logged here so a
-		// future re-evaluator does not repeat the -gcflags walk.
+		// Single-entry fast path shares persistOneEntry with the
+		// cli.PersistSinkOne path so marshal / refcount logic lives in one
+		// place (#410). The bytes and slice header DO escape because
+		// persisterSink retains entries; a byte-slice pool would need a
+		// copy-on-take re-contract of every sink, so none is attempted.
 		if len(entries) == 1 {
-			// Delegate to the single-entry helper so the marshal /
-			// refcount logic lives in exactly one place. Both this
-			// branch and the cli.PersistSinkOne fast path
-			// (newEventLogSinkOne) call the same helper, so a future
-			// schema tweak only has to land in one place. (#410)
 			persistOneEntry(persisterSink, attachTracker, keyhash, entries[0], replayPhase)
 			return
 		}
 
-		// R20260602-PERF-2 (#1629): borrow the helper slices from a
-		// pool instead of make-ing them per call. They are reset to [:0]
-		// (keeping their capacity) and returned at every exit path below.
-		// Both are consumed entirely before persisterSink returns —
-		// `out`'s persist.Entry values alias the pooled encode buffer, but
-		// the slice header itself is fully drained by persisterSink (it
-		// copies the bytes into its own arena, see comment below), so the
-		// backing array is free to recycle once persisterSink returns.
+		// Helper slices come from a pool (#1629), reset to [:0] and returned
+		// at every exit path. `out`'s persist.Entry values alias the pooled
+		// encode buffer, but persisterSink copies the bytes into its own arena
+		// synchronously, so both may be recycled once it returns.
 		bs := batchScratchPool.Get().(*batchScratch)
 		out := bs.out[:0]
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
-		// R240-PERF-7: explicit Put before each return path avoids the
-		// ~10ns/call defer frame setup cost on the multi-entry hot path
-		// (5-20 entries × N sessions × ≥5/s). The pool-cap guard is the
-		// same as the single-entry fast path above.
-		//
-		// R20260531A-PERF-3 (#1524): the persist sink now copies the
-		// bytes it retains (it owns a pooled per-batch arena), so the
-		// bridge no longer pays a make([]byte)+copy per entry. We encode
-		// every entry into ONE pooled buffer (without Resetting between
-		// entries) and hand persist a borrowed sub-slice per entry. The
-		// sub-slices stay valid until persisterSink returns, after which
-		// eb goes back to the pool. Offsets are resolved after the encode
-		// pass because the buffer may grow (and move) mid-loop.
+		// Explicit Put before each return (no defer) keeps the hot path cheap.
+		// All entries are encoded into ONE pooled buffer without Resetting
+		// between them; persist gets a borrowed sub-slice per entry (#1524).
+		// Offsets are resolved after the encode pass because the buffer may
+		// grow (and move) mid-loop.
 		eb.buf.Reset()
 		spans := bs.spans[:0]
 		for _, e := range entries {
@@ -264,24 +153,18 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			}
 			spans = append(spans, span{start: start, end: end, timeMS: e.Time})
 
-			// Refcount bump for every attachment path the entry
-			// carries. Replay batches are excluded — replay happens
-			// because the session is being restored from the persist
-			// tier, not because a user just re-referenced the
-			// attachment. Bumping on replay would reset
-			// LastReferencedAt and defeat the refTTL expiry logic.
+			// Refcount bump for every attachment path the entry carries.
+			// Replay batches are excluded: replay restores from the persist
+			// tier, not a fresh user reference; bumping would reset
+			// LastReferencedAt and defeat refTTL expiry.
 			if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
-		// R20260607-PERF-2: the scratch-return logic was a captured closure
-		// (out/spans/bs), which the compiler heap-allocated on every batch on
-		// this hot path (5-20 entries × N sessions × ≥5/s). Inlined verbatim
-		// at both return points instead. Returns the helper slices to the
-		// pool, writing the (possibly reallocated) headers back first so a
-		// grown capacity is preserved for the next call. Slices wider than
-		// batchScratchMaxCap are dropped (left for GC) instead of pinning an
-		// outsized array.
+		// Scratch return is inlined at both exits (a captured closure would
+		// heap-allocate per batch). The possibly-reallocated headers are
+		// written back so grown capacity is kept; slices wider than
+		// batchScratchMaxCap are left for GC instead of pinning an outsized array.
 		if len(spans) == 0 {
 			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
 				bs.out = out[:0]
@@ -297,9 +180,9 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		for _, sp := range spans {
 			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: sp.timeMS})
 		}
-		// persisterSink copies the borrowed bytes synchronously (it owns a
-		// pooled arena), so eb and the scratch slices are safe to return only
-		// AFTER it returns (out's persist.Entry JSON fields alias eb.buf).
+		// persisterSink copies the borrowed bytes synchronously, so eb and the
+		// scratch slices may be returned only AFTER it returns (out's JSON
+		// fields alias eb.buf).
 		persisterSink(out, replayPhase)
 		if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
 			bs.out = out[:0]
@@ -313,13 +196,9 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 }
 
 // persistOneEntry marshals a single EventEntry through bridgeEncPool and
-// forwards it to persisterSink. Shared between newEventLogSink's
-// len(entries)==1 fast path and newEventLogSinkOne's by-value fast path
-// so the encode/copy/refcount logic lives in exactly one place. Behaviour
-// (marshal failure handling, pool-cap guard, attachment refcount bump,
-// stack-allocated [1]persist.Entry slice) matches the inline code that
-// previously lived in newEventLogSink — extracting it here changes no
-// semantics, only call shape. (#410)
+// forwards it to persisterSink. Shared by newEventLogSink's len==1 fast path
+// and newEventLogSinkOne so the encode/copy/refcount logic lives in exactly one
+// place (#410).
 func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string, e clievent.EventEntry, replayPhase bool) {
 	eb := bridgeEncPool.Get().(*bridgeEncBuf)
 	eb.buf.Reset()
@@ -335,11 +214,9 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 	if n := len(raw); n > 0 && raw[n-1] == '\n' {
 		raw = raw[:n-1]
 	}
-	// R20260531A-PERF-3 (#1524): persisterSink copies the bytes it
-	// retains (it owns a pooled per-batch arena), so we hand it the
-	// borrowed pooled-encoder slice directly instead of make([]byte)+copy.
-	// eb is returned to the pool only AFTER persisterSink returns, because
-	// raw aliases eb.buf's backing array until then.
+	// persisterSink copies the bytes it retains (pooled per-batch arena), so
+	// it gets the borrowed encoder slice directly (#1524). eb is returned to
+	// the pool only AFTER persisterSink returns, because raw aliases eb.buf.
 	var stackArr [1]persist.Entry
 	out := append(stackArr[:0], persist.Entry{JSON: raw, TimeMS: e.Time})
 	if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
@@ -351,13 +228,10 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 	}
 }
 
-// newEventLogSinkOne is the cli.PersistSinkOne counterpart to
-// newEventLogSink. Wires Append's single-entry fast path directly to the
-// per-key persister without the `[]EventEntry{e}` slice literal that the
-// legacy slice contract required. AppendBatch continues to use the slice
-// sink built by newEventLogSink — the two share persistOneEntry's
-// marshal/refcount logic so the wire format and attachment-tracker
-// behaviour are byte-identical between the two dispatch paths. (#410)
+// newEventLogSinkOne is the cli.PersistSinkOne counterpart to newEventLogSink,
+// wiring Append's single-entry fast path to the per-key persister without a
+// `[]EventEntry{e}` slice literal. Both paths share persistOneEntry so the wire
+// format and attachment-tracker behaviour are identical (#410).
 func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSinkOne {
 	return func(e clievent.EventEntry, replayPhase bool) {
 		persistOneEntry(persisterSink, attachTracker, keyhash, e, replayPhase)
