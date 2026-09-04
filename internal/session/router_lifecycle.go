@@ -437,9 +437,13 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// opts < session tuning (operator's dashboard pick for THIS session,
 	// tuningspec-validated at write and at store load). Effort deliberately has
 	// NO access-profile tier (docs/rfc/kiro-effort-control.md §4.2).
+	// A key with no session yet may carry a pre-spawn pick
+	// (bkStore.tuningOverrides); spawnSession consumes it onto the fresh entry.
 	var tuningModel, tuningEffort string
 	if old := r.ss.sessions[key]; old != nil {
 		tuningModel, tuningEffort = old.TuningModel(), old.TuningEffort()
+	} else if pt, ok := r.bkStore.tuningOverrides[key]; ok {
+		tuningModel, tuningEffort = pt.Model, pt.Effort
 	}
 	merged := mergeArgvLayers(
 		r.backendDefaultsFor(backendID),
@@ -511,6 +515,23 @@ type sessionOverrides struct {
 	tuningEffort string
 	userLabel    string
 	labelOrigin  string
+}
+
+// consumePendingTuningLocked moves a pre-spawn tuning pick
+// (bkStore.tuningOverrides, recorded by SetSessionTuning for a key with no
+// session) onto the overrides installFreshSessionLocked will stamp on the
+// new entry, and drops the one-shot record. Returns ov unchanged when there
+// is none. Caller holds r.mu.
+func (r *Router) consumePendingTuningLocked(key string, ov sessionOverrides) sessionOverrides {
+	pt, ok := r.bkStore.tuningOverrides[key]
+	if !ok {
+		return ov
+	}
+	delete(r.bkStore.tuningOverrides, key)
+	out := ov
+	out.tuningModel = pt.Model
+	out.tuningEffort = pt.Effort
+	return out
 }
 
 // snapshotOldSessionLocked captures the per-session fields that spawnSession
@@ -798,6 +819,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		oldSID = old.getSessionID()
 	}
 	oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, oldOverrides := snapshotOldSessionLocked(old)
+	if old == nil {
+		oldOverrides = r.consumePendingTuningLocked(key, oldOverrides)
+	}
 	r.mu.Unlock()
 
 	oldHistory, prevIDs, oldUserTurns := collectPreviousHistory(old, oldPrevIDs, resumeID)
@@ -1076,6 +1100,7 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 		// One-shot dashboard pick with the same lifecycle as backendOverrides;
 		// terminal removal must clear it so an abandoned pick does not leak.
 		delete(r.bkStore.accessProfileOverrides, key)
+		delete(r.bkStore.tuningOverrides, key)
 		// shimStuckOnReset is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
 		delete(r.pp.shimStuckOnReset, key)
@@ -1403,6 +1428,10 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if ap, ok := r.bkStore.accessProfileOverrides[oldKey]; ok {
 		r.bkStore.accessProfileOverrides[newKey] = ap
 		delete(r.bkStore.accessProfileOverrides, oldKey)
+	}
+	if pt, ok := r.bkStore.tuningOverrides[oldKey]; ok {
+		r.bkStore.tuningOverrides[newKey] = pt
+		delete(r.bkStore.tuningOverrides, oldKey)
 	}
 	r.ss.dirty = true
 	r.ss.gen.Add(1)

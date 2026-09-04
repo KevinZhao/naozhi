@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -71,8 +72,10 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if _, err := r.SetSessionTuning(ctx, "k1", nil, strp("ultra")); err == nil {
 		t.Error("out-of-set effort must be rejected")
 	}
-	if _, err := r.SetSessionTuning(ctx, "missing", strp("opus"), nil); !errors.Is(err, ErrTuningUnknownSession) {
-		t.Errorf("unknown key: err = %v, want ErrTuningUnknownSession", err)
+	// A key with no session is a not-yet-spawned dashboard session: the pick
+	// is parked (deferred), never 404 — see TestSetSessionTuning_PendingSession.
+	if via, err := r.SetSessionTuning(ctx, "missing", strp("opus"), nil); err != nil || via != TuningAppliedDeferred {
+		t.Errorf("unknown key: via=%q err=%v, want deferred/nil", via, err)
 	}
 	// The observed-model manifest serves back whatever claude reported in
 	// its init frame, including the context-window suffix. A popover pick of
@@ -511,5 +514,105 @@ func TestSetSessionTuning_RespawnReleasesActiveSlot(t *testing.T) {
 	}
 	if got := r.ss.activeCount.Load(); got != 0 {
 		t.Errorf("activeCount after tuning respawn = %d, want 0 (slot leaked)", got)
+	}
+}
+
+// TestSetSessionTuning_PendingSession covers the pre-spawn path: a dashboard
+// session exists only client-side until its first message, but its header
+// chips are already clickable. The pick must be recorded server-side, shape
+// the FIRST spawn's argv (resolveSpawnParamsLocked), land on the fresh
+// ManagedSession (spawnSession's consume step) and then leave no one-shot
+// residue. Clearing both fields before spawn deletes the record outright.
+func TestSetSessionTuning_PendingSession(t *testing.T) {
+	r := mkTuningTestRouter(t)
+	ctx := context.Background()
+	const key = "dashboard:direct:2026-09-04-1-naozhi:general"
+
+	via, err := r.SetSessionTuning(ctx, key, strp("us.anthropic.claude-opus-5[1m]"), nil)
+	if err != nil || via != TuningAppliedDeferred {
+		t.Fatalf("model on pending key: via=%q err=%v, want deferred/nil", via, err)
+	}
+	if via, err := r.SetSessionTuning(ctx, key, nil, strp("high")); err != nil || via != TuningAppliedDeferred {
+		t.Fatalf("effort on pending key: via=%q err=%v, want deferred/nil", via, err)
+	}
+	if _, ok := r.ss.sessions[key]; ok {
+		t.Fatal("recording a pending pick must not create a ManagedSession")
+	}
+	if got := r.bkStore.tuningOverrides[key]; got != (pendingTuning{Model: "us.anthropic.claude-opus-5[1m]", Effort: "high"}) {
+		t.Fatalf("pending record = %+v", got)
+	}
+
+	// Validation still applies before anything is parked.
+	if _, err := r.SetSessionTuning(ctx, key, strp("-inject"), nil); err == nil {
+		t.Error("flag-shaped model on pending key must be rejected")
+	}
+	if _, err := r.SetSessionTuning(ctx, key, nil, strp("ultra")); err == nil {
+		t.Error("out-of-set effort on pending key must be rejected")
+	}
+
+	// First spawn's argv reads the parked pick (tuning is the top of both chains).
+	r.mu.Lock()
+	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "claude", Workspace: "/ws"})
+	r.mu.Unlock()
+	if sp.Model != "us.anthropic.claude-opus-5[1m]" || sp.Effort != "high" {
+		t.Errorf("first spawn params: model=%q effort=%q, want the parked pick", sp.Model, sp.Effort)
+	}
+	// resolve is a read: a failed Spawn() must leave the pick for the retry.
+	if _, ok := r.bkStore.tuningOverrides[key]; !ok {
+		t.Error("resolveSpawnParamsLocked must not consume the pending pick")
+	}
+
+	// spawnSession's consume step moves it onto the fresh entry and drops it.
+	r.mu.Lock()
+	ov := r.consumePendingTuningLocked(key, sessionOverrides{userLabel: "keep"})
+	_, stillThere := r.bkStore.tuningOverrides[key]
+	r.mu.Unlock()
+	if ov.tuningModel != "us.anthropic.claude-opus-5[1m]" || ov.tuningEffort != "high" || ov.userLabel != "keep" {
+		t.Errorf("consumed overrides = %+v", ov)
+	}
+	if stillThere {
+		t.Error("consume must delete the one-shot record")
+	}
+	r.mu.Lock()
+	if ov2 := r.consumePendingTuningLocked(key, sessionOverrides{}); ov2 != (sessionOverrides{}) {
+		t.Errorf("second consume must be a no-op, got %+v", ov2)
+	}
+	r.mu.Unlock()
+
+	// 恢复默认 on both fields before any spawn leaves no residue.
+	if _, err := r.SetSessionTuning(ctx, key, strp("sonnet"), strp("low")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SetSessionTuning(ctx, key, strp(""), strp("")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.bkStore.tuningOverrides[key]; ok {
+		t.Error("clearing both fields must delete the pending record")
+	}
+}
+
+// TestSetSessionTuning_PendingCapacity pins the DoS bound on the pre-spawn
+// store: past maxTuningOverrides a NEW key is refused with ErrTuningCapacity
+// (nothing recorded), while updating an existing key still succeeds.
+func TestSetSessionTuning_PendingCapacity(t *testing.T) {
+	r := mkTuningTestRouter(t)
+	ctx := context.Background()
+	r.bkStore.tuningOverrides = make(map[string]pendingTuning, maxTuningOverrides)
+	for i := 0; i < maxTuningOverrides; i++ {
+		r.bkStore.tuningOverrides["k:"+strings.Repeat("x", 3)+string(rune('a'+i%26))+strconv.Itoa(i)] = pendingTuning{Model: "m"}
+	}
+	if _, err := r.SetSessionTuning(ctx, "dashboard:direct:new:general", strp("opus"), nil); !errors.Is(err, ErrTuningCapacity) {
+		t.Errorf("new key at cap: err = %v, want ErrTuningCapacity", err)
+	}
+	var existing string
+	for k := range r.bkStore.tuningOverrides {
+		existing = k
+		break
+	}
+	if _, err := r.SetSessionTuning(ctx, existing, strp("opus"), nil); err != nil {
+		t.Errorf("updating an existing key at cap must succeed: %v", err)
+	}
+	if got := r.bkStore.tuningOverrides[existing].Model; got != "opus" {
+		t.Errorf("existing key model = %q, want opus", got)
 	}
 }

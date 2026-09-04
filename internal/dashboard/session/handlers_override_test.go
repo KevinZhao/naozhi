@@ -91,10 +91,21 @@ func TestHandleOverride_Contract(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown session is 404", func(t *testing.T) {
+	t.Run("unknown session is parked as deferred (pre-spawn pick)", func(t *testing.T) {
+		// A freshly created dashboard session has no ManagedSession until its
+		// first message; its header chips must still work, so the pick is
+		// recorded server-side and applied on the first spawn.
 		h := newOverrideHandler(t, "")
-		if res := doOverride(t, h, `{"key":"feishu:p2p:ghost","model":"opus"}`); res.StatusCode != http.StatusNotFound {
-			t.Errorf("status = %d, want 404", res.StatusCode)
+		res := doOverride(t, h, `{"key":"dashboard:direct:2026-09-04-1-naozhi:general","model":"opus"}`)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", res.StatusCode)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["applied_via"] != sessionpkg.TuningAppliedDeferred {
+			t.Errorf("applied_via = %q, want deferred", body["applied_via"])
 		}
 	})
 
