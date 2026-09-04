@@ -7,20 +7,11 @@ import (
 )
 
 // sanitizeWireText strips control / bidi runes from a memory field before it
-// reaches the dashboard JSON wire. Memory files are written by the Claude CLI
-// and can absorb attacker-influenced content from workspace files, so a
-// memory body (or Name/Description) could carry bidi overrides or raw C0
-// control bytes (incl. 0x1B ESC) that corrupt visual ordering or trigger ANSI
-// escape interpretation when copy-pasted out of the dashboard. [R103901-SEC-4]
-//
-// Mirrors internal/dashboard/cron/transcript.go sanitizeWireText: drop every
-// C0 control rune (< 0x20) except \t / \n / \r, plus the C1 / bidi / LS / PS
-// runes flagged by osutil.IsLogInjectionRune. Preserving \t/\n/\r keeps
-// multi-line memory bodies rendering correctly in the dashboard's text sink.
-//
-// Fast path: a string that is already pure ASCII-printable (with the three
-// preserved whitespace runes) is returned unchanged so the common case pays
-// only one scan and no allocation.
+// reaches the dashboard JSON wire: memory files are CLI-written and can absorb
+// attacker-influenced workspace content (bidi overrides, raw C0 incl. ESC).
+// Mirrors dashboard/cron/transcript.go sanitizeWireText: drop C0 (< 0x20)
+// except \t / \n / \r plus the runes flagged by osutil.IsLogInjectionRune.
+// Fast path: an already-clean ASCII string is returned without allocation.
 func sanitizeWireText(s string) string {
 	if s == "" {
 		return s

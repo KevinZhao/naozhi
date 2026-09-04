@@ -20,60 +20,34 @@ import (
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
-// Agent-team dashboard endpoints (RFC v4 agent-team-ui §3.5).
+// Agent-team dashboard endpoints (RFC v4 agent-team-ui §3.5), behind the same
+// auth middleware and remote-node proxy fallback as /api/sessions/events.
 //
-//   GET /api/sessions/agent_events
-//     ?key=<session_key>&node=<node>&task_id=<t...>&after=<ms>&limit=<n>
-//   → 200 [EventEntry...]            chronological transcript slice (Time >= after)
-//   → 202 {"status":"pending"}       SubagentLinker has not resolved yet
-//   → 404 "unknown task"             tombstone / no live linker
-//   → 400                            query param validation failure
-//
-//   GET /api/sessions/tool_result
-//     ?key=<session_key>&node=<node>&path=tool-results/<id>.ext
-//   → 200 text/plain
-//   → 404                            no linker / no file / traversal
-//   → 400                            path whitelist violation
-//   → 413                            > toolResultMaxBytes
-//
-// Both endpoints run under the same auth middleware and the same remote-node
-// proxy fallback as /api/sessions/events.
+//   GET /api/sessions/agent_events?key=&node=&task_id=&after=<ms>&limit=
+//     → 200 [EventEntry...] (Time >= after) | 202 pending (linker not yet
+//       resolved) | 404 unknown task | 400 bad param
+//   GET /api/sessions/tool_result?key=&node=&path=tool-results/<id>.ext
+//     → 200 text/plain | 404 no linker/file/traversal | 400 | 413 > cap
 
-// taskIDRe bounds the task_id query parameter to CLI's observed shapes:
-// "t" or "b" prefix + 7-12 base36 chars. The prefix is not enforced so
-// future CLI changes don't require a parser update; length + alphabet
-// whitelist suffices (RFC §4).
+// taskIDRe bounds task_id to CLI's observed shapes (prefix + base36); the
+// prefix is deliberately not enforced, length + alphabet suffice.
 var taskIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 
-// toolResultPathRe mirrors the persisted_path shape emitted by
-// TranscriptReader.extractPersistedPath: "tool-results/<basename>". The
-// basename alphabet + extension list are enforced again in
-// toolResultBasenameRe (internal/cli/subagent_transcript.go) — belt-and-
-// suspenders against filesystem traversal.
+// toolResultPathRe mirrors TranscriptReader.extractPersistedPath's
+// "tool-results/<basename>" shape; the cli side re-enforces the alphabet.
 var toolResultPathRe = regexp.MustCompile(`^tool-results/[A-Za-z0-9]{1,32}\.(txt|json|log)$`)
 
 const (
 	maxAgentEventsLimit = 500
-	// toolResultMaxBytes caps a persisted tool-result file served back to the
-	// dashboard. A tool-result is one stream-json line, so it shares the
-	// upstream line cap rather than baking a second 16MB literal (#2084).
+	// toolResultMaxBytes caps a served tool-result file; it is one stream-json
+	// line, so it shares the upstream line cap (#2084).
 	toolResultMaxBytes = limits.MaxStreamJSONLine
 )
 
-// Handler hosts the agent-team endpoints. Kept separate from
-// SessionHandlers so the auth middleware wiring in dashboard.go stays grep-able.
-//
-// linkerFor is injected so tests can stub the router/ManagedSession lookup
-// chain without a live *cli.Process. Production code uses linkerForSession
-// which resolves to ManagedSession.SubagentLinker() — i.e. the real
-// *cli.Process type assertion. Tests can return a hand-rolled
-// *cli.SubagentLinker seeded via SeedFromHistory and skip the process layer
-// entirely.
-//
-// The injection point is typed as agentlink.AgentLinker (R239-ARCH-I) so
-// future backends without a *cli.SubagentLinker can supply a noop without
-// inventing a fake concrete pointer. *cli.SubagentLinker satisfies the
-// interface implicitly; existing tests pass it directly.
+// Handler hosts the agent-team endpoints, kept separate from SessionHandlers
+// so the auth middleware wiring in dashboard.go stays grep-able. linkerFor
+// (agentlink.AgentLinker) is injectable so tests stub the lookup without a
+// live *cli.Process; production uses linkerForSession.
 type Handler struct {
 	router      *session.Router
 	nodeAccess  NodeAccessor
@@ -81,9 +55,8 @@ type Handler struct {
 	allowedRoot string // EvalSymlinks-resolved ~/.claude/projects; set by New
 }
 
-// linkerForSession is the default lookup — ManagedSession → *cli.Process
-// → SubagentLinker. Returns nil when the session is missing, dead, or
-// backed by a non-claude process type.
+// linkerForSession is the default lookup (ManagedSession → *cli.Process →
+// SubagentLinker); nil when the session is missing, dead, or non-claude.
 func (h *Handler) linkerForSession(key string) agentlink.AgentLinker {
 	if h.linkerFor != nil {
 		return h.linkerFor(key)
@@ -92,10 +65,8 @@ func (h *Handler) linkerForSession(key string) agentlink.AgentLinker {
 	if sess == nil {
 		return nil
 	}
-	// Promote the concrete *cli.SubagentLinker to the AgentLinker
-	// interface. A typed-nil concrete return becomes a non-nil interface
-	// value, so guard the underlying pointer first to keep the existing
-	// "no live linker → 404" contract intact.
+	// A typed-nil concrete pointer would become a non-nil interface; guard it
+	// first to keep the "no live linker → 404" contract.
 	concrete := sess.SubagentLinker()
 	if concrete == nil {
 		return nil
@@ -143,11 +114,9 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy parity with /api/sessions/events. Agent event fetches
-	// on a peer node go through the reverse-RPC layer; the remote side runs
-	// the same handler locally. If the peer binary predates the feature, it
-	// returns "unknown method" and we degrade to 404 so the dashboard UI
-	// shows "agent has no recorded internals" instead of a 502.
+	// Remote node proxy parity with /api/sessions/events. A peer binary that
+	// predates the feature returns "unknown method"; degrade to 404 so the UI
+	// shows "no recorded internals" instead of a 502.
 	if nodeID := q.Get("node"); nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
@@ -164,8 +133,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		// Remote peers do not yet expose agent_events fan-out — graceful 404
-		// until the cross-node feature lands.
+		// Remote peers do not yet expose agent_events fan-out: graceful 404.
 		http.Error(w, "unknown task", http.StatusNotFound)
 		return
 	}
@@ -178,10 +146,8 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 
 	info, ok := linker.QueryOrResolveFast(taskID)
 	if !ok {
-		// Linker context not yet installed (projectDir / session_id pending
-		// the first live init event) — tell client to retry. The dashboard
-		// switchAgentView helper has a bounded retry loop that converts a
-		// prolonged 202 into the same toast as 404.
+		// Linker context not yet installed (awaiting first live init event):
+		// tell the client to retry; switchAgentView bounds the retry loop.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"status":"pending"}`))
@@ -192,12 +158,9 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// [R112714-SEC-3] Defence-in-depth: verify JSONLPath is under the
-	// allowed root before opening it. SeedFromHistory already validates on
-	// the cli side; this belt-and-suspenders check guards the HTTP boundary.
-	// allowedRoot is empty on first-run (directory not yet created); in that
-	// case jsonlPathUnderAllowedRoot returns false and we serve 404 rather
-	// than opening an unchecked path.
+	// Defence in depth at the HTTP boundary: JSONLPath must be under the
+	// allowed root (SeedFromHistory already validates cli-side). Empty
+	// allowedRoot (first run) fails closed to 404.
 	if h.allowedRoot != "" && !jsonlPathUnderAllowedRoot(info.JSONLPath, h.allowedRoot) {
 		slog.Warn("agent_events: JSONLPath outside allowed root, rejecting",
 			"path", info.JSONLPath, "allowed_root", h.allowedRoot)
@@ -207,17 +170,13 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 
 	reader := cli.NewTranscriptReader(info.JSONLPath)
 	defer reader.Close()
-	// #2432 item 5: re-admit the `after` millisecond (same rule as
-	// /api/sessions/events). Transcript blocks of one assistant line and
-	// consecutive lines can share a timestamp, so a strict `>` cursor lost
-	// the sibling the previous poll's `limit` cut off. agent_view.js dedups
-	// the same-ms replay (transcript entries carry no uuid, so it keys on
-	// the full content tuple).
+	// Re-admit the `after` millisecond (as /api/sessions/events): consecutive
+	// transcript lines can share a timestamp, so a strict `>` cursor lost
+	// siblings cut off by the previous limit; agent_view.js dedups (#2432).
 	entries, err := reader.Read(cli.SinceInclusive(after), limit)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// CLI may have pruned the jsonl (e.g. /new issued on the parent
-			// session). Surface 404 so the UI flips to "no record" toast.
+			// CLI may have pruned the jsonl (e.g. /new on the parent): 404 → "no record" toast.
 			http.Error(w, "unknown task", http.StatusNotFound)
 			return
 		}
@@ -226,9 +185,8 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entries == nil {
-		// An empty transcript must serialise as `[]`, not `null`:
-		// agent_view.js treats a falsy body as "no data" and never
-		// subscribes to the live feed (permanent spinner).
+		// Must serialise as `[]`, not `null`: agent_view.js treats a falsy body
+		// as "no data" and never subscribes to the live feed.
 		entries = []clievent.EventEntry{}
 	}
 	httputil.WriteJSON(w, entries)
@@ -248,9 +206,8 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if nodeID := q.Get("node"); nodeID != "" && nodeID != "local" {
-		// Tool-result fetches do not yet cross nodes (the persisted-output
-		// file lives on the node that ran the CLI). 404 is the contract
-		// until a remote-fetch primitive is added.
+		// Tool-result fetches do not cross nodes (file lives on the node that
+		// ran the CLI); 404 is the contract.
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -277,8 +234,7 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	// EvalSymlinks resolves the full real path (e.g. /private/var on macOS);
-	// root must be resolved the same way so the prefix check is consistent.
+	// Resolve root like the leaf so the prefix check is consistent (macOS /private).
 	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolvedRoot
 	}
@@ -288,19 +244,16 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open without following a final-component symlink so the bytes streamed
-	// below come from the same inode we validate via Fstat — closing the
-	// symlink-swap TOCTOU between EvalSymlinks and open. O_NOFOLLOW yields
-	// ELOOP on a swapped-in symlink; fold every open error (missing, ELOOP,
-	// IO) to 404 so "missing" and "escape attempt" look identical.
+	// O_NOFOLLOW open so the streamed bytes come from the inode validated via
+	// Fstat below (closes the symlink-swap TOCTOU after EvalSymlinks). Every
+	// open error folds to 404 so "missing" and "escape attempt" look identical.
 	f, err := dashproject.OpenWorkspaceFile(resolved)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	defer f.Close()
-	// Fstat the fd so size/IsDir reflect the SAME inode we will read from,
-	// not a name that may have been swapped after EvalSymlinks.
+	// Fstat the fd so size/IsDir reflect the inode we read, not a swapped name.
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -318,16 +271,13 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Deps bundles all wiring for New. Phase 3d.
+// Deps bundles all wiring for New.
 type Deps struct {
 	Router     *session.Router
 	NodeAccess NodeAccessor
 }
 
-// New constructs a Handler from injected deps. It resolves
-// ~/.claude/projects via EvalSymlinks once at startup so the per-request
-// path check in HandleAgentEvents has a canonical root to compare against.
-// R112714-SEC-3.
+// New constructs a Handler, resolving ~/.claude/projects once as the canonical root.
 func New(d Deps) *Handler {
 	root := claudeProjectsAllowedRoot()
 	return &Handler{
@@ -337,11 +287,8 @@ func New(d Deps) *Handler {
 	}
 }
 
-// claudeProjectsAllowedRoot returns the EvalSymlinks-resolved path to
-// ~/.claude/projects. Used as the allowed root for JSONLPath validation in
-// HandleAgentEvents. Returns the unresolved lexical path on EvalSymlinks
-// failure (e.g. first-run before the directory exists) so the handler
-// degrades to a lexical prefix check rather than rejecting all requests.
+// claudeProjectsAllowedRoot returns the EvalSymlinks-resolved ~/.claude/projects,
+// or the lexical path when resolution fails (first run) so checks degrade, not reject.
 func claudeProjectsAllowedRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -355,12 +302,9 @@ func claudeProjectsAllowedRoot() string {
 }
 
 // jsonlPathUnderAllowedRoot checks that p is anchored under root after
-// EvalSymlinks resolution of p's nearest existing ancestor. Pure
-// HasPrefix is unsafe ("/var/foo" matches "/var/fooBar"), so we anchor on
-// root + separator. R112714-SEC-3 defence-in-depth (SeedFromHistory
-// already validates on the cli side; this is a belt-and-suspenders check
-// at the HTTP boundary). Returns false when root is empty (not yet
-// resolved) to fail safe rather than allow everything.
+// resolving p's nearest existing ancestor. Anchors on root + separator
+// (plain HasPrefix would match "/var/fooBar" for "/var/foo") and returns
+// false for an empty root to fail safe.
 func jsonlPathUnderAllowedRoot(p, root string) bool {
 	if root == "" {
 		return false
@@ -369,20 +313,17 @@ func jsonlPathUnderAllowedRoot(p, root string) bool {
 	if !filepath.IsAbs(abs) {
 		return false
 	}
-	// EvalSymlinks the nearest existing ancestor of abs so a not-yet-written
-	// jsonl (CLI emits the path before the first write) still resolves
-	// correctly when the parent directory contains symlinks.
+	// Resolve the nearest existing ancestor so a not-yet-written jsonl (CLI
+	// emits the path before the first write) still resolves through symlinks.
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	} else {
-		// Walk up to find the nearest existing ancestor.
 		cur := abs
 		tail := ""
 		for {
 			parent := filepath.Dir(cur)
 			if parent == cur {
-				// Reached filesystem root without finding an existing ancestor;
-				// fall back to the unresolved lexical path.
+				// Filesystem root reached: keep the unresolved lexical path.
 				break
 			}
 			base := filepath.Base(cur)

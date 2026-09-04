@@ -6,10 +6,9 @@ import (
 	"strings"
 )
 
-// IsSafeMethod reports whether the HTTP method is safe per RFC 7231 §4.2.1
-// — i.e. is expected to have no state-changing side effects. The CSRF
-// Origin gate only applies to mutating methods so that GET prefetches,
-// HEAD probes, and CORS preflight OPTIONS from any origin keep working.
+// IsSafeMethod reports whether the HTTP method is safe per RFC 7231 §4.2.1.
+// The CSRF Origin gate applies only to mutating methods so GET prefetches,
+// HEAD probes and CORS preflight OPTIONS keep working.
 func IsSafeMethod(m string) bool {
 	switch m {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -19,19 +18,9 @@ func IsSafeMethod(m string) bool {
 }
 
 // RequestHost returns the effective host the browser (or trusted proxy)
-// addressed this request at. When TrustedProxy is set and the
-// X-Forwarded-Host header is present, we pick the LAST value from the
-// (possibly comma-separated) list — the one appended by the trusted
-// proxy itself, which cannot be spoofed by the client. Otherwise we
-// trust r.Host directly.
-//
-// R236-SEC-03: previously we took the FIRST value, which under
-// TrustedProxy=true deployments behind ALB/CloudFront let an attacker
-// prepend `X-Forwarded-Host: attacker.com` so the proxy-appended real
-// host became the second entry — the CSRF Origin gate would then match
-// `Origin: attacker.com` against `attacker.com` and let the cross-site
-// write through. Mirrors netutil.ClientIP's last-XFF semantics so both
-// gates trust the same boundary.
+// addressed. With TrustedProxy and X-Forwarded-Host present it takes the LAST
+// comma-separated value — appended by the trusted proxy, unspoofable by the
+// client — mirroring netutil.ClientIP's last-XFF semantics.
 func RequestHost(r *http.Request, trustedProxy bool) string {
 	host := r.Host
 	if trustedProxy {
@@ -49,42 +38,24 @@ func RequestHost(r *http.Request, trustedProxy bool) string {
 	return host
 }
 
-// SameOriginOK reports whether the Origin (or Referer fallback) header
-// identifies the same host naozhi is serving on. Missing Origin AND
-// Referer is treated as "not a browser navigation" (curl, server-to-server
-// scripts) and passes — those callers don't suffer CSRF in the first place
-// because they don't carry session cookies from a victim's browser.
+// SameOriginOK reports whether the Origin (or Referer fallback) identifies the
+// same host naozhi serves on. Missing Origin AND Referer passes: non-browser
+// clients carry no victim cookies. Callers must restrict this to mutating
+// methods (IsSafeMethod). Defense-in-depth against same-registrable-domain
+// attackers that SameSite=Strict does not stop.
 //
-// The caller must restrict this check to state-changing methods (see
-// IsSafeMethod); applying it to GET would break direct-URL navigation
-// from bookmarks and external links where browsers routinely omit Origin.
-//
-// R31-SEC1 / R26-SEC1 / R58-SEC-001 / R60-SEC-001 defense-in-depth:
-// SameSite=Strict cookies do not protect against same-registrable-domain
-// cross-origin attackers (evil.naozhi-host.example → naozhi-host.example)
-// — this gate closes that gap at the HTTP layer.
-//
-// Scheme is intentionally not compared. The auth cookie is issued without
-// a Domain attribute (HandleLogin sets only Path/HttpOnly/Secure/SameSite),
-// so the browser only sends it back to the exact request host; SameSite=Strict
-// additionally prevents cross-site requests from carrying it. A sibling-origin
-// attacker who somehow forces a same-host scheme downgrade still cannot get
-// the cookie attached, so the previous scheme-match gate (R247-SEC-1) added
-// no real protection while breaking deployments where the CDN→origin hop is
-// HTTP-only and X-Forwarded-Proto reaches naozhi as http even on HTTPS
-// viewer traffic.
+// Scheme is intentionally NOT compared: the cookie has no Domain attribute and
+// is SameSite=Strict, so a scheme gate adds nothing while breaking HTTP-only
+// CDN→origin hops where X-Forwarded-Proto arrives as http.
 func SameOriginOK(r *http.Request, trustedProxy bool) bool {
 	host := RequestHost(r, trustedProxy)
 	if host == "" {
-		// Defensive: unknown Host means we can't validate Origin against
-		// anything. Refuse the write to fail closed.
+		// Unknown Host: nothing to validate against, fail closed.
 		return false
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		// Fall back to Referer. Some browsers omit Origin on same-origin
-		// POSTs in legacy modes; Referer is still sent. If both are
-		// missing the caller is probably a non-browser client.
+		// Referer fallback: some browsers omit Origin on legacy same-origin POSTs.
 		ref := r.Header.Get("Referer")
 		if ref == "" {
 			return true
@@ -93,19 +64,15 @@ func SameOriginOK(r *http.Request, trustedProxy bool) bool {
 		if err != nil || u.Host == "" {
 			return false
 		}
-		// R191-SEC-M1: Reject non-http(s) Referer schemes. javascript:,
-		// data:, ftp:, file:, blob:, etc. can parse with the correct host
-		// but must not count as browser same-origin; a crafted non-browser
-		// client (or misconfigured intermediary) could otherwise bypass
-		// the CSRF gate by supplying ftp://host/x.
+		// Non-http(s) Referer schemes (javascript:, data:, ftp:, file:, blob:)
+		// can parse with the correct host but must not count as same-origin.
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return false
 		}
 		return u.Host == host
 	}
-	// RFC 6454 allows "null" for opaque origins (sandboxed iframes, file://
-	// pages). Treat it as a definite cross-origin — never same-origin with
-	// our Host.
+	// RFC 6454 "null" (opaque origins: sandboxed iframes, file://) is a
+	// definite cross-origin.
 	if origin == "null" {
 		return false
 	}
@@ -113,7 +80,7 @@ func SameOriginOK(r *http.Request, trustedProxy bool) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	// R191-SEC-M1: Same scheme guard as the Referer fallback above.
+	// Same scheme guard as the Referer fallback above.
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}

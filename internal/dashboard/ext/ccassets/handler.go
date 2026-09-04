@@ -8,9 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
 
-// Handler serves the read-only asset-browser endpoints. It holds a map of
-// backend id -> provider (only backends that expose a provider), the resolved
-// Claude home dir, a per-request repoRoot resolver, and a rate limiter.
+// Handler serves the read-only asset-browser endpoints.
 type Handler struct {
 	providers  map[string]assets.Provider
 	home       string
@@ -18,9 +16,7 @@ type Handler struct {
 	limiter    IPLimiter
 }
 
-// New constructs a Handler. providers maps backend id -> provider; home is the
-// resolved ~/.claude dir; repoRootFn resolves the current workspace root per
-// request (may return "" — RFC §9.3); limiter rate-limits all endpoints.
+// New constructs a Handler; repoRootFn may return "" (no workspace root).
 func New(providers map[string]assets.Provider, home string, repoRootFn func(*http.Request) string, limiter IPLimiter) *Handler {
 	if repoRootFn == nil {
 		repoRootFn = func(*http.Request) string { return "" }
@@ -28,9 +24,8 @@ func New(providers map[string]assets.Provider, home string, repoRootFn func(*htt
 	return &Handler{providers: providers, home: home, repoRootFn: repoRootFn, limiter: limiter}
 }
 
-// providerFor resolves the backend query param to a provider. Empty backend
-// defaults to the sole provider when exactly one is registered (first phase:
-// only claude). Returns nil if not found.
+// providerFor resolves ?backend= to a provider; empty defaults to the sole
+// registered provider, else "claude". Returns nil if not found.
 func (h *Handler) providerFor(r *http.Request) (assets.Provider, string) {
 	id := r.URL.Query().Get("backend")
 	if id == "" {
@@ -53,8 +48,7 @@ func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	prov, _ := h.providerFor(r)
 	if prov == nil {
-		// No provider for this backend: empty inventory, not 404, so the
-		// frontend can uniformly hide the entry on an empty list.
+		// No provider: empty inventory, not 404, so the frontend hides uniformly.
 		httputil.WriteJSON(w, &assets.Inventory{Totals: map[string]int{}})
 		return
 	}
@@ -70,8 +64,7 @@ func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, inv)
 }
 
-// HandleRaw serves GET /api/cc/assets/raw. Returns the raw file bytes of the
-// asset addressed by the Ref query params, as text/plain.
+// HandleRaw serves GET /api/cc/assets/raw: raw asset bytes as text/plain.
 func (h *Handler) HandleRaw(w http.ResponseWriter, r *http.Request) {
 	if !h.limiter.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
@@ -105,20 +98,15 @@ func (h *Handler) HandleRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Force download rather than inline rendering: operator-installed plugin
-	// assets are untrusted content. Without this, navigating to the raw URL
-	// (or embedding it in an <iframe src>) would render the bytes in the
-	// browser. Content-Disposition does not affect XHR/fetch body reads, so the
-	// asset-browser's normal "fetch the text and display it" path is unchanged.
+	// Force download: operator-installed plugin assets are untrusted content and
+	// must never render inline (<iframe src>). XHR/fetch body reads are unaffected.
 	w.Header().Set("Content-Disposition", "attachment")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(raw)
 }
 
-// classifyRawErr maps a ReadRaw error to an HTTP status using the sentinels
-// exported from the assets leaf package (both sides import it, so no coupling
-// to the concrete provider package). Not-found and path-escape both surface as
-// 404 — don't leak whether the target exists; oversize is 413; else 500.
+// classifyRawErr maps ReadRaw sentinels to HTTP status. Not-found and
+// path-escape both surface as 404 (don't leak existence); oversize is 413.
 func classifyRawErr(err error) (int, string) {
 	switch {
 	case errors.Is(err, assets.ErrTooLarge):

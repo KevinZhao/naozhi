@@ -2,24 +2,13 @@ package project
 
 import "sync"
 
-// uploadQuota bounds the cumulative number of bytes the upload endpoint will
-// accept per project within a process lifetime. R202606g-SEC-3 (#2311):
-// HandleFilesUpload's only DoS guards were a shared ~10 req/min/IP rate limiter
-// and a 256 MiB per-file cap, giving any authenticated caller a ~2.5 GiB/min/IP
-// disk-fill primitive with no per-tenant ceiling. On a shared / multi-operator
-// box that is a disk-exhaustion DoS against every other tenant. This adds a
-// per-project running total so one project cannot monopolise disk through the
-// upload endpoint; the limit is deliberately generous (the legitimate use case
-// is pushing build artefacts) but finite.
-//
-// Scope and intentional limits: the counter is in-memory and per process, so it
-// resets on restart and does NOT count files already on disk from a previous
-// run or written outside the endpoint. It is a fill-RATE / per-session ceiling,
-// not a true filesystem quota — a complete solution would reconcile against
-// on-disk usage. That heavier accounting is out of scope here; the goal is to
-// remove the unbounded single-tenant fill primitive with a small, allocation-
-// free hot path. A zero or negative limit disables enforcement (back-compat for
-// the single-operator model that accepts the original trade-off).
+// uploadQuota bounds the cumulative bytes the upload endpoint accepts per
+// project within a process lifetime (#2311): without it the ~10 req/min/IP
+// limiter and 256 MiB per-file cap left any authenticated caller a
+// ~2.5 GiB/min disk-fill primitive against every other tenant on a shared
+// box. The counter is in-memory and per process — it resets on restart and
+// does not count pre-existing files — so it is a fill-rate ceiling, not a
+// filesystem quota. A zero or negative limit disables enforcement.
 type uploadQuota struct {
 	mu       sync.Mutex
 	limit    int64

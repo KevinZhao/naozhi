@@ -11,59 +11,42 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// NodeAccessor is the 1-method subset of contracts.NodeAccessor this handler
-// uses to proxy /api/cli/backends?node=<id> to a remote node. Kept narrow
-// (rather than aliasing the shared contract, #2285) because the package's
-// test doubles implement only LookupNode; contracts'
-// TestDashboardContractsDeclaredOnce asserts it stays a strict subset.
-// server's *nodeAccessor satisfies this shape. Nil is allowed — single-node
-// deployments never set it and the ?node= branch stays unreachable.
+// NodeAccessor is the 1-method subset of contracts.NodeAccessor used to proxy
+// /api/cli/backends?node=<id>; kept narrow for the test doubles and asserted a
+// strict subset by TestDashboardContractsDeclaredOnce (#2285). Nil in
+// single-node deployments.
 type NodeAccessor interface {
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 }
 
-// Handler serves the read-only CLI-backends list the dashboard
-// consumes when rendering the "new session" picker.
+// Handler serves the read-only CLI-backends list behind the dashboard
+// "new session" picker.
 //
-// `detected` is probed once at construction (each probe invokes a 5s
-// subprocess timeout per backend binary). Without caching, every call to
-// /api/cli/backends would block the HTTP goroutine up to 5s×N — an
-// authenticated user could fork-storm by polling this endpoint.
-//
-// nodeAccess is optional: when the dashboard's node picker targets a remote
-// node, Handle proxies the manifest request to that node so the picker
-// renders the REMOTE node's backends (and its default), not the primary's.
-// Without this, a multi-node dashboard creating a session on a remote node
-// pre-selected the primary's default backend — the picker node-aware fix.
+// `detected` is probed once at construction (5s subprocess timeout per
+// backend); probing per request would let an authenticated user fork-storm
+// by polling. nodeAccess is optional: with a remote node selected, Handle
+// proxies so the picker renders THAT node's backends and default.
 type Handler struct {
 	router     *session.Router
 	detected   []clipkg.BackendInfo // pre-computed at startup, immutable after
 	nodeAccess NodeAccessor         // nil in single-node / test deployments
 }
 
-// NewCLIBackendsHandler pre-computes the expensive backend probe so the HTTP
-// handler can respond in O(enabled backends) time without spawning
-// subprocesses on each request. Uses context.Background() for the probe —
-// prefer NewCLIBackendsHandlerCtx when the caller has a shutdown context.
+// NewCLIBackendsHandler pre-computes the backend probe with context.Background().
 //
 // Deprecated: prefer NewCLIBackendsHandlerCtx.
 func NewCLIBackendsHandler(router *session.Router) *Handler {
 	return NewCLIBackendsHandlerCtx(context.Background(), router)
 }
 
-// NewCLIBackendsHandlerCtx is the context-aware variant of
-// NewCLIBackendsHandler. The ctx is threaded into DetectBackendsCtx so
-// SIGTERM during startup aborts the --version probe promptly instead of
-// waiting 5s×N. R55-QUAL-004.
+// NewCLIBackendsHandlerCtx threads ctx into DetectBackendsCtx so SIGTERM
+// during startup aborts the --version probe instead of waiting 5s×N.
 func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router) *Handler {
 	detected := clipkg.DetectBackendsCtx(ctx)
 	clipkg.SortBackendsAvailableFirst(detected)
-	// Redact Path and Version: revealing installed-binary paths to any
-	// authenticated dashboard user leaks host filesystem layout, and CLI
-	// versions of backends NOT enabled in naozhi config fingerprint
-	// host software for secondary exploitation (known CVE targeting).
-	// The dashboard UI for `detected` only needs id+available to render
-	// "installed but unconfigured" — version adds no user-facing value.
+	// Redact Path and Version: binary paths leak host filesystem layout and
+	// versions of backends NOT enabled in config fingerprint host software.
+	// The UI only needs id+available for "installed but unconfigured".
 	for i := range detected {
 		detected[i].Path = ""
 		detected[i].Version = ""
@@ -71,30 +54,19 @@ func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router) *Hand
 	return &Handler{router: router, detected: detected}
 }
 
-// SetNodeAccess wires the node accessor used to proxy ?node=<id> requests
-// to a remote node. Called once at server wiring time (single-threaded, no
-// concurrent Handle in flight yet). Passing nil is a no-op that leaves the
-// handler local-only.
+// SetNodeAccess wires the node accessor for ?node=<id> proxying. Called once
+// at wiring time before any Handle is in flight; nil leaves the handler local-only.
 func (h *Handler) SetNodeAccess(na NodeAccessor) { h.nodeAccess = na }
 
-// response shape: {"backends": [...], "default": "claude", "detected": [...]}.
-//
-// `backends` lists the backends this naozhi instance is configured to spawn
-// (one Router entry per enabled backend), each annotated with whatever CLI
-// metadata the matching wrapper collected at startup.
-//
-// `detected` lists every backend naozhi knows how to drive, including ones
-// NOT enabled in config — exposed so an operator can see "kiro-cli is
-// installed but not configured" from the UI without grepping logs.
+// Handle responds {"backends": [...], "default": "claude", "detected": [...]}:
+// enabled Router entries with CLI metadata, plus every backend naozhi can
+// drive (even unconfigured) so operators see "installed but not configured".
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Remote node proxy — the node picker targets a remote node, so the
-	// picker must render THAT node's backends + default, not ours. Mirrors
-	// the ?node= proxy in dashboard/session HandleEvents. Empty / "local"
-	// falls through to the local manifest below.
+	// Remote node proxy: render THAT node's backends + default, mirroring the
+	// ?node= proxy in session HandleEvents. Empty / "local" falls through.
 	if nodeID := r.URL.Query().Get("node"); nodeID != "" && nodeID != "local" {
 		if h.nodeAccess == nil {
-			// Multi-node not wired (single-node build): the picker should
-			// never send ?node= here, but degrade cleanly rather than 500.
+			// Multi-node not wired: degrade cleanly rather than 500.
 			http.Error(w, "node routing not available", http.StatusBadGateway)
 			return
 		}
@@ -104,11 +76,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		raw, err := nc.FetchBackends(r.Context())
 		if err != nil {
-			// Older peer binaries predate fetch_backends: the reverse-RPC
-			// path returns an error and the HTTP path returns non-200. Either
-			// way the dashboard's fetch throws and the picker collapses to the
-			// single-backend UI (renderBackendPicker(null) → ''), so a 502
-			// here is the honest signal (not a silent wrong list).
+			// Older peers predate fetch_backends; 502 is the honest signal to the picker.
 			slog.Warn("remote fetch backends failed", "node", nodeID, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
@@ -117,8 +85,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local manifest — assembled by session.Router so the reverse-RPC
-	// "fetch_backends" branch renders an identical shape (single source of
-	// truth; see router_backend_manifest.go).
+	// Local manifest assembled by session.Router so the reverse-RPC
+	// "fetch_backends" branch renders an identical shape.
 	httputil.WriteJSON(w, h.router.BackendsManifest(h.detected))
 }

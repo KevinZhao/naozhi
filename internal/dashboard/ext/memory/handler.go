@@ -17,79 +17,46 @@ import (
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 )
 
-// Handler serves GET /api/memory/{slug} for the dashboard "wiki link"
-// preview. Claude's auto-memory uses [[slug]] cross-references in stored
-// memory files (and occasionally leaks them into chat output); the dashboard
-// inlineMd renderer turns them into hover cards backed by this endpoint.
-//
-// Lookup order — see docs/rfc/memory-link-rendering.md:
-//  1. current project (best-effort PWD encoding)
-//  2. all other projects under projectsDir, in lexicographic directory order
-//
-// Path safety: the slug is validated against memorySlugRE (alphanumeric / _ / -,
-// 1-64 chars) and the resolved path is re-checked with strings.HasPrefix on
-// projectsDir; both gates must pass before we read.
-// negCacheTTL is the duration for which a slug that was not found in any
-// project directory is remembered as "not found", avoiding repeated full
-// ReadDir scans within the same TTL window.
-// R20260602141221-SEC-10.
+// negCacheTTL bounds how long a slug missing from every project directory is
+// remembered as "not found", so repeated misses skip the full ReadDir scan.
 const negCacheTTL = 30 * time.Second
 
-// maxNegCacheEntries caps the total number of entries in the negative cache.
-// R220123-SEC-4: defence-in-depth against slug-spray attacks — an authenticated
-// caller that fires unique valid slugs at rate R fills at most
-// R*negCacheTTL entries before the TTL starts evicting them, but without a
-// hard cap the map could grow to O(rate × TTL) unbounded. When the cap is
-// reached we simply skip insertion (no caching, return not-found immediately)
-// rather than maintaining an LRU, keeping the implementation minimal.
+// maxNegCacheEntries hard-caps the negative cache against slug-spray: at the
+// cap we skip insertion rather than maintain an LRU.
 const maxNegCacheEntries = 4096
 
+// Handler serves GET /api/memory/{slug} for the dashboard "wiki link"
+// preview: Claude's auto-memory uses [[slug]] cross-references and the
+// inlineMd renderer turns them into hover cards backed by this endpoint.
+//
+// Lookup order (docs/rfc/memory-link-rendering.md): current project first,
+// then every other project under projectsDir in lexicographic order.
+//
+// Path safety: slug must match memorySlugRE and the resolved path is
+// re-checked against projectsDir; both gates must pass before reading.
 type Handler struct {
 	projectsDir    string
 	currentProject string
 	limiter        IPLimiter
 
-	// R242-SEC-7 (#635): cache the resolved-prefix at construction time so the
-	// runtime base used for both the lexical HasPrefix gate and the post-
-	// EvalSymlinks recheck is identical and immutable. Recomputing the prefix
-	// per-request from h.projectsDir is functionally equivalent (h.projectsDir
-	// is set once at construction and never mutated), but caching here pins
-	// the base as a property of the handler — future code that repoints
-	// projectsDir cannot drift the gates apart, and there's no chance the
-	// prefix is rebuilt under a partially-set field.
-	//
-	// resolvedPrefix already carries the trailing separator; resolvedPrefixNoSep
-	// is the same value with the trailing separator stripped, so a direct
-	// equality match with the projects root itself (resolved == prefixNoSep)
-	// stays accepted exactly as before.
+	// Resolved projectsDir prefix cached at construction so the lexical
+	// HasPrefix gate and the post-EvalSymlinks recheck share one immutable
+	// base (#635). resolvedPrefixNoSep lets the root itself match exactly.
 	resolvedPrefix      string
 	resolvedPrefixNoSep string
 
-	// R20260602141221-SEC-10: short-TTL negative cache keyed on slug. When a
-	// full ReadDir scan finds no match, we record the deadline here so
-	// subsequent requests within the TTL skip the expensive disk scan and
-	// return "not found" immediately, preventing DoS via repeated cache-miss.
+	// Short-TTL negative cache keyed on slug: a full-scan miss is remembered
+	// so repeated misses cannot DoS via ReadDir.
 	negCacheMu sync.RWMutex
 	negCache   map[string]time.Time
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
-// memoryProjectDirRE locks the shape of a Claude `~/.claude/projects/<name>`
-// directory entry. Claude encodes the project path as `-` + slash-replaced
-// CWD, so legitimate names look like `-home-user-workspace-foo` — leading
-// dash, alnum + `_-.` thereafter, capped at a generous length.
-//
-// R241-SEC-6 (#467): defence in depth. tryRead joins the entry name into
-// the lookup path; even though we only iterate `os.ReadDir(projectsDir)`
-// (so an attacker would need write access to ~/.claude/projects to plant
-// a malicious entry), an entry whose name carried `..` separators or
-// embedded NUL / control bytes could still influence the resolved path
-// or pollute audit logs. Filtering at iteration time keeps every Join
-// input within the alphabet the encoder produces. Non-matching entries
-// are silently skipped — they cannot be Claude project dirs and any
-// memory file inside them would not be discoverable through the regular
-// lookup path either.
+// memoryProjectDirRE locks the shape of a `~/.claude/projects/<name>` entry
+// (`-` + slash-replaced CWD). Defence in depth: entries with `..`, separators
+// or control bytes never reach filepath.Join; non-matching entries are
+// skipped since they cannot be Claude project dirs (#467).
 var memoryProjectDirRE = regexp.MustCompile(`^-[a-zA-Z0-9_][a-zA-Z0-9._\-]{0,255}$`)
 
 // utf8BOM is defined as bytes (not a string literal) so a literal BOM never
@@ -100,38 +67,21 @@ const (
 	MemoryLimiterRate  = 10
 	MemoryLimiterBurst = 20
 
-	// maxMemoryFileBytes caps the size of a single memory .md read. Auto-memory
-	// slugs are normally small (front-matter + a few KB of narrative); a
-	// pathological case (multi-MB hand-written notes, or a stray binary
-	// dropped under projects/<proj>/memory/) would otherwise be slurped into
-	// RAM, JSON-marshalled, and re-shipped on every hover preview, amplifying
-	// cost N times per dashboard tab. 256 KB covers any realistic memory file
-	// and keeps peak alloc bounded. Files larger than the cap are truncated
-	// at the cap and the response carries Truncated:true so the client can
-	// show "(展开为大文件,内容已截断)" instead of silently losing the tail.
-	// R240-SEC-11 / #1044.
+	// maxMemoryFileBytes caps a single memory .md read; larger files are
+	// truncated and the response carries Truncated:true so the client can
+	// show a "(已截断)" hint instead of silently losing the tail (#1044).
 	maxMemoryFileBytes = 256 * 1024
 )
 
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
-// New constructs a memory Handler.
-//
-// Phase 3c (server-split-phase4-design.md §6.5 Plan B): projectsDir +
-// limiter are now injected from the server package so this sub-package
-// doesn't reverse-import internal/server's resolveClaudeProjectsDir or
-// newIPLimiterWithProxy. server.New computes the resolved+symlink-followed
-// path once at boot and passes it here.
+// New constructs a memory Handler. projectsDir and limiter are injected by
+// the server package so this sub-package never reverse-imports it.
 func New(projectsDir string, limiter IPLimiter) *Handler {
 	dir := projectsDir
-	// R240-SEC-1: canonicalise projectsDir at construction. If the dir is itself
-	// reachable via a symlinked component (Docker bind-mount, AMI-customised
-	// layout, ~/.claude → /var/data/.claude on macOS), the prefix check inside
-	// tryRead would compare a resolved file path against an unresolved root and
-	// reject every legitimate read. EvalSymlinks here aligns the root with the
-	// resolved leaf path used by the symmetric check below. Best-effort: if the
-	// dir does not exist yet (fresh install) we keep the cleaned raw path; the
-	// check still applies once the dir materialises.
+	// Canonicalise projectsDir so the prefix check in tryRead compares the
+	// resolved leaf against a resolved root (symlinked ~/.claude etc.).
+	// Best-effort: a not-yet-existing dir keeps the cleaned raw path.
 	if dir != "" {
 		if r, err := filepath.EvalSymlinks(dir); err == nil {
 			dir = r
@@ -184,9 +134,8 @@ type memoryResponse struct {
 	Description string `json:"description,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Body        string `json:"body,omitempty"`
-	// Truncated signals that the source file exceeded maxMemoryFileBytes
-	// and Body holds only the prefix. Client may surface a "(已截断)" hint.
-	// R240-SEC-11 / #1044.
+	// Truncated signals the source exceeded maxMemoryFileBytes and Body holds
+	// only the prefix (#1044).
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -231,9 +180,7 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		}
 	}
 
-	// R20260602141221-SEC-10: check negative cache before doing a full ReadDir.
-	// A miss within the TTL means we already scanned all project dirs and found
-	// nothing; skip the expensive scan and return "not found" immediately.
+	// Negative-cache hit within TTL: every project dir was already scanned.
 	h.negCacheMu.RLock()
 	if deadline, ok := h.negCache[slug]; ok && time.Now().Before(deadline) {
 		h.negCacheMu.RUnlock()
@@ -253,12 +200,8 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		if !ent.IsDir() || ent.Name() == h.currentProject {
 			continue
 		}
-		// R241-SEC-6 (#467): skip entries whose names cannot be a
-		// Claude-encoded project dir. Disk-controlled names containing
-		// `..`, slashes, or control bytes would otherwise reach
-		// tryRead's filepath.Join and depend solely on the lexical
-		// HasPrefix check below to stay rooted. The regex is the first
-		// line of defence; the prefix + EvalSymlinks checks remain.
+		// Skip names that cannot be a Claude-encoded project dir before they
+		// reach tryRead's filepath.Join (#467).
 		if !memoryProjectDirRE.MatchString(ent.Name()) {
 			continue
 		}
@@ -277,9 +220,8 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		}
 	}
 
-	// Nothing found in full scan — record negative cache entry.
-	// Sweep expired entries first (sweep-on-write) so the map cannot grow
-	// without bound when an attacker sprays unique valid slugs.
+	// Full scan missed: record a negative entry, sweeping expired ones first
+	// so the map cannot grow without bound.
 	h.negCacheMu.Lock()
 	if h.negCache == nil {
 		h.negCache = make(map[string]time.Time)
@@ -291,9 +233,7 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 			}
 		}
 	}
-	// R220123-SEC-4: after sweeping expired entries, only insert if the map is
-	// still below the hard cap. This prevents unbounded memory growth when a
-	// caller sprays unique valid slugs faster than the TTL evicts them.
+	// Insert only while below the hard cap (slug-spray defence).
 	if len(h.negCache) < maxNegCacheEntries {
 		h.negCache[slug] = time.Now().Add(negCacheTTL)
 	}
@@ -303,24 +243,10 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 }
 
 func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
-	// R241-SEC-6 (#467): pin every Join input to the alphabet Claude's
-	// project-dir encoder produces (see encodeCurrentProjectDir). The
-	// only call sites pass either h.currentProject or an entry returned
-	// by os.ReadDir, but a future caller plumbing user input through
-	// projectDir would otherwise reach filepath.Join with no shape
-	// gate.
-	//
-	// Two failure modes, two response shapes — preserves the existing
-	// errMemoryPathEscape contract that callers already test:
-	//
-	//   • Name contains traversal/separator bytes ("..", "/", "\\") —
-	//     return errMemoryPathEscape so a deliberate attack-shaped
-	//     input is loud (matches the lexical-prefix check below).
-	//   • Name simply doesn't match the encoder alphabet (e.g. random
-	//     stray dirs disk-write planted, ent.Name() that didn't pass
-	//     the iteration filter for some other reason) — return
-	//     (nil, nil) the same way "slug not found" does, so a benign
-	//     non-Claude entry never surfaces an error to the dashboard.
+	// Pin every Join input to the encoder alphabet (see
+	// encodeCurrentProjectDir). Traversal/separator bytes are loud
+	// (errMemoryPathEscape, matching the lexical gate below); any other
+	// non-matching name is a benign miss (nil, nil) (#467).
 	if strings.Contains(projectDir, "..") ||
 		strings.ContainsAny(projectDir, `/\`) {
 		return nil, errMemoryPathEscape
@@ -331,30 +257,18 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 	full := filepath.Join(h.projectsDir, projectDir, "memory", slug+".md")
 	clean := filepath.Clean(full)
 
-	// Defence in depth: even though slug is regex-locked, re-verify the
-	// resolved path stays inside projectsDir.
-	//
-	// R242-SEC-7 (#635): use the construction-time cached prefix so the
-	// lexical gate and the post-EvalSymlinks recheck below share an
-	// identical, immutable base. Rebuilding the prefix per-request was
-	// functionally equivalent here (h.projectsDir is set once and never
-	// mutated) but kept the door open for a future caller mutating it,
-	// or for the two derivations to drift via filepath.Clean differences.
+	// Defence in depth: re-verify the path stays inside projectsDir using the
+	// construction-time prefix shared with the post-EvalSymlinks recheck (#635).
 	prefix := h.resolvedPrefix
 	prefixNoSep := h.resolvedPrefixNoSep
 	if !strings.HasPrefix(clean, prefix) {
 		return nil, errMemoryPathEscape
 	}
 
-	// R240-SEC-2: resolve symlinks before reading. The clean-prefix check above
-	// catches lexical traversal, but a symlink at <projectsDir>/<proj>/memory or
-	// at the slug file itself could redirect the read to /etc/shadow without
-	// changing the lexical path. EvalSymlinks plus a re-check of the resolved
-	// path's prefix closes that gap. Non-existent files return (nil, nil) just
-	// like the ReadFile path below, so callers see them as "slug not found"
-	// rather than an error. A resolved path that escapes the projects dir is
-	// treated as a miss too — defence in depth, and avoids leaking any signal
-	// about whether the symlink target exists.
+	// Resolve symlinks and re-check the prefix: a symlink at .../memory or at
+	// the slug file could redirect the read outside projectsDir without
+	// changing the lexical path. Missing files and escaping targets are both
+	// reported as "not found" so no signal leaks about the symlink target.
 	resolved, err := filepath.EvalSymlinks(clean)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -366,11 +280,8 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 		return nil, nil
 	}
 
-	// R240-SEC-11 / #1044: cap memory file reads at maxMemoryFileBytes so a
-	// pathological multi-MB file cannot be slurped+JSON-marshalled+re-shipped
-	// on every hover. Use os.Open + io.ReadAll on a LimitedReader (cap+1) so
-	// we can distinguish "exactly at cap" (legitimate boundary) from "exceeded
-	// cap" (truncation). Non-existent files match the prior ReadFile path.
+	// Cap the read at maxMemoryFileBytes (reads cap+1 to distinguish
+	// "exactly at cap" from truncation) (#1044).
 	raw, truncated, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -379,9 +290,8 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 		return nil, err
 	}
 	meta, body := parseMemoryFrontmatter(raw)
-	// R103901-SEC-4: memory files are Claude-CLI-authored and can absorb
-	// attacker-influenced workspace content, so scrub control / bidi runes
-	// out of every free-text field before it reaches the dashboard wire.
+	// Memory files can absorb attacker-influenced workspace content: scrub
+	// control / bidi runes from every free-text field before the wire.
 	resp := &memoryResponse{
 		Found:       true,
 		Slug:        slug,
@@ -394,26 +304,14 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 	return resp, nil
 }
 
-// readCappedMemoryFile reads up to capBytes bytes from path. If the
-// underlying file is larger than capBytes, returns the first capBytes bytes
-// plus truncated=true; otherwise returns the full content with
-// truncated=false. Errors (including os.ErrNotExist) propagate unchanged so
-// the caller's existing branches keep working.
+// readCappedMemoryFile reads up to capBytes from path; truncated=true when
+// the file was larger. Errors (including os.ErrNotExist) propagate unchanged.
 func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
-	// R20260531-SEC-5: open with O_NOFOLLOW (via OpenWorkspaceFile) instead
-	// of os.Open. The caller resolves `path` through filepath.EvalSymlinks and
-	// re-checks the projects-dir prefix, but a plain os.Open here leaves a
-	// TOCTOU window in which an attacker swaps the final component for a
-	// symlink between that check and this open. OpenWorkspaceFile refuses a
-	// final-component symlink kernel-atomically. os.ErrNotExist still
-	// propagates unchanged (callers collapse it to "slug not found"); an
-	// ELOOP symlink-swap surfaces as a generic error and fails closed.
-	//
-	// R20260606-SEC-6: Lstat before open so we can do a post-open SameFile
-	// inode recheck. O_NOFOLLOW blocks a symlink swap atomically, but a swap
-	// to a different regular file between EvalSymlinks and OpenWorkspaceFile
-	// is not caught by O_NOFOLLOW alone. SameFile(pre-Lstat, post-Fstat)
-	// verifies the descriptor is bound to the exact inode validated above.
+	// Open via OpenWorkspaceFile (O_NOFOLLOW) rather than os.Open to close the
+	// TOCTOU window between the caller's EvalSymlinks check and the open; then
+	// Lstat-before / Fstat-after SameFile pins the descriptor to the exact
+	// inode validated above (a swap to a different regular file is not caught
+	// by O_NOFOLLOW alone). os.ErrNotExist still propagates unchanged.
 	li, err := os.Lstat(path)
 	if err != nil {
 		return nil, false, err
@@ -430,9 +328,7 @@ func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
 	if !os.SameFile(li, fi) {
 		return nil, false, os.ErrNotExist
 	}
-	// Read capBytes+1 to detect overflow without a separate Stat — Stat may
-	// race with the read on a live FS (file growing/shrinking) and an extra
-	// syscall is wasteful for the common small-file path.
+	// Read capBytes+1 to detect overflow without a racy extra Stat.
 	lr := &io.LimitedReader{R: f, N: capBytes + 1}
 	raw, err := io.ReadAll(lr)
 	if err != nil {

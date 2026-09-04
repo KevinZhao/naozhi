@@ -18,14 +18,9 @@ import (
 // Exceeded requests receive 503 immediately to prevent CPU/memory DoS.
 const TranscribeSemCap = 3
 
-// transcribeWallClockCap bounds the wall-clock lifetime of a single Transcribe
-// call (R247-SEC-6, #499). The underlying ffmpeg decode stage relies on
-// ctx-cancel propagation (no `-t` argv flag), so a crafted audio stream
-// that loops indefinitely inside libavformat could otherwise occupy a
-// TranscribeSemCap slot until the outer HTTP request context cancels —
-// which for a long client connection may be effectively never. 10 minutes
-// matches the proposal in #499 and is well above the 10 MB upload cap ×
-// realistic decode throughput, so it cannot fire on legitimate audio.
+// transcribeWallClockCap bounds a single Transcribe call: ffmpeg decode relies
+// on ctx-cancel (no `-t` flag), so a crafted looping stream could otherwise pin
+// a TranscribeSemCap slot until the client disconnects (#499).
 const transcribeWallClockCap = 10 * time.Minute
 
 // Handler handles the audio transcription API endpoint.
@@ -47,7 +42,6 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acquire concurrency slot; reject immediately if all slots are busy.
 	select {
 	case h.sem <- struct{}{}:
 		defer func() { <-h.sem }()
@@ -62,9 +56,7 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	const maxAudioSize = 10 << 20 // 10 MB
 	r.Body = http.MaxBytesReader(w, r.Body, maxAudioSize+4096)
 	parseErr := r.ParseMultipartForm(maxAudioSize)
-	// Register cleanup before any return path. ParseMultipartForm may have
-	// partially populated r.MultipartForm (and written tmp files) even on
-	// error; attempting to RemoveAll on a nil form is safe to guard against.
+	// ParseMultipartForm may have written tmp files even on error.
 	defer func() {
 		if r.MultipartForm != nil {
 			_ = r.MultipartForm.RemoveAll()
@@ -92,12 +84,8 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	// MaxBytesReader on r.Body bounds the outer multipart envelope, but
-	// ParseMultipartForm may stream a single large part to a tmp file
-	// without re-checking the per-part length. Wrap the reader with an
-	// explicit LimitReader (+1 sentinel) so a runaway part that slipped
-	// past the envelope cap (e.g. via base64-padded length-of-a-length
-	// confusion) cannot exhaust memory in io.ReadAll.
+	// The envelope cap does not bound a single part; LimitReader (+1 sentinel)
+	// keeps io.ReadAll bounded.
 	data, err := io.ReadAll(io.LimitReader(f, maxAudioSize+1))
 	if err != nil {
 		http.Error(w, "failed to read audio", http.StatusInternalServerError)
@@ -108,23 +96,20 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 1: allowlist the client-supplied Content-Type so obviously wrong
-	// uploads are rejected cheaply before we run DetectContentType.
+	// Step 1: allowlist the declared Content-Type before sniffing.
 	declaredMIME := fh.Header.Get("Content-Type")
 	switch declaredMIME {
 	case "audio/ogg", "audio/mpeg", "audio/wav", "audio/flac", "audio/mp4",
 		"audio/amr", "audio/webm", "audio/aac", "audio/x-m4a",
 		"video/mp4", "video/webm": // some browsers tag voice memos as video
 	default:
-		// 415: the dashboard maps this status to its "unsupported audio
-		// format" message; 400 is reserved for malformed requests (#2433).
+		// 415 maps to the dashboard's "unsupported audio format" message; 400
+		// is reserved for malformed requests (#2433).
 		http.Error(w, "unsupported audio format", http.StatusUnsupportedMediaType)
 		return
 	}
-	// Step 2: magic-byte validation. http.DetectContentType returns
-	// "application/ogg" for legitimate OGG streams (Feishu voice); accept that
-	// too. The transcribe package runs a stricter DetectFormat before dispatch
-	// so ffmpeg never sees content that lacks the right magic.
+	// Step 2: magic bytes. DetectContentType reports "application/ogg" for
+	// legitimate OGG (Feishu voice); transcribe runs a stricter DetectFormat.
 	detected := http.DetectContentType(data)
 	if !strings.HasPrefix(detected, "audio/") &&
 		!strings.HasPrefix(detected, "video/") &&
@@ -132,17 +117,13 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file content is not audio", http.StatusUnsupportedMediaType)
 		return
 	}
-	// Use the sniffed MIME (not the client-supplied header) as the hint handed
-	// to the transcriber. This prevents a caller from mislabelling content to
-	// coerce ffmpeg dispatch into a format that doesn't match the actual bytes.
-	// Normalize application/ogg → audio/ogg so transcribe's streaming path
-	// can pick up OGG uploads without spawning ffmpeg unnecessarily.
+	// Pass the sniffed MIME, not the client header, so a caller cannot coerce
+	// ffmpeg into a mismatched format; application/ogg → audio/ogg skips ffmpeg.
 	mimeType := detected
 	if mimeType == "application/ogg" {
 		mimeType = "audio/ogg"
 	}
-	// R247-SEC-6 (#499): bound the decode stage with a wall-clock cap so
-	// a crafted audio cannot pin a TranscribeSemCap slot indefinitely.
+	// Wall-clock cap so crafted audio cannot pin a slot indefinitely (#499).
 	tctx, tcancel := context.WithTimeout(r.Context(), transcribeWallClockCap)
 	defer tcancel()
 	text, err := h.transcriber.Transcribe(tctx, data, mimeType)
@@ -152,24 +133,16 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Defence-in-depth: cap the response payload so a misbehaving upstream
-	// (e.g. AWS Transcribe returning a multi-megabyte transcript for a long
-	// audio) cannot push an unbounded JSON body to the browser.
+	// Cap the response so a misbehaving upstream cannot flood the browser.
 	const maxTranscribeRespBytes = 1 << 20 // 1 MiB
 	if len(text) > maxTranscribeRespBytes {
 		slog.Warn("transcribe text truncated", "orig_len", len(text), "cap", maxTranscribeRespBytes)
 		text = text[:textutil.TruncateAtRuneBoundary(text, maxTranscribeRespBytes)]
 	}
 
-	// R247-SEC-18 (#516): defence-in-depth sanitiser at the dashboard
-	// boundary. The upstream AWS transcriber already runs joined results
-	// through osutil.SanitizeForLog, but this server-side file is the last
-	// hop before the bytes hit IM dispatch / dashboard wire and a future
-	// transcriber implementation (or a regression in the AWS path) must
-	// not be able to land bidi / C1 / LS-PS runes — which terminal log
-	// tail-ers and some browsers still interpret — into the user-facing
-	// reply text. Mirrors the cron sanitiseRunResult policy so the same
-	// scrub policy covers both run-result text and transcript text.
+	// Last-hop sanitiser before IM dispatch / dashboard wire: a future
+	// transcriber (or a regression upstream) must not land bidi / C1 / LS-PS
+	// runes in user-facing text. Mirrors the cron sanitiseRunResult policy (#516).
 	text = osutil.SanitizeForLog(text, maxTranscribeRespBytes)
 
 	slog.Info("transcribe ok", "text_len", len(text), "mime", mimeType, "size", len(data))
@@ -177,18 +150,16 @@ func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, map[string]string{"text": text})
 }
 
-// Deps bundles all wiring for New. Phase 3d.
+// Deps bundles all wiring for New.
 type Deps struct {
 	Transcriber transcribepkg.Service
 	Limiter     IPLimiter
 	SemCap      int
 }
 
-// denyAllLimiter rejects every request. #2235: it is substituted when New
-// is wired without a Limiter so a misconfiguration fails closed (per-IP rate
-// limiting silently disabled) rather than open. Production always injects a
-// real limiter (build_handlers.go buildTranscribeHandler), so this never
-// fires there.
+// denyAllLimiter is substituted when New is wired without a Limiter so a
+// misconfiguration fails closed rather than silently disabling per-IP rate
+// limiting (#2235). Production always injects a real limiter.
 type denyAllLimiter struct{}
 
 func (denyAllLimiter) Allow(string) bool               { return false }
@@ -202,7 +173,6 @@ func New(d Deps) *Handler {
 	}
 	limiter := d.Limiter
 	if limiter == nil {
-		// Fail closed: a missing limiter must not disable per-IP throttling.
 		limiter = denyAllLimiter{}
 	}
 	return &Handler{

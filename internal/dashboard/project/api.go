@@ -18,27 +18,20 @@ import (
 )
 
 // RedactGitRemoteURL strips embedded userinfo (user:password@) from a git
-// remote URL before exposing it over the dashboard API. `.git/config` often
-// stores credentials like https://user:pat@github.com/org/repo when the user
-// originally cloned with a token; surfacing that verbatim in JSON responses
-// leaks the PAT to any browser session.
-//
-// SCP-style SSH URLs (`git@github.com:org/repo.git`) carry no credentials
-// and parse as relative paths (no Scheme) under url.Parse — they pass through
-// unchanged. Returning "" for those would make the dashboard lose the clone
-// URL for every SSH-cloned project, which is a worse failure mode than the
-// theoretical "userinfo in an unparseable form" edge case.
+// remote URL before exposing it over the dashboard API: `.git/config` often
+// holds https://user:pat@github.com/... from a token clone, and surfacing it
+// leaks the PAT to every browser session. SCP-style SSH URLs
+// (`git@github.com:org/repo.git`) carry no credentials and pass through
+// unchanged rather than being blanked.
 func RedactGitRemoteURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" {
-		// url.Parse failed (e.g. invalid port) or SCP-style (no scheme).
-		// SCP-style URLs (git@host:path) carry no credentials — return as-is.
-		// But a URL-form string with "://" that failed to parse may still
-		// embed userinfo (user:pass@) that would leak; strip it defensively.
-		// [R20260603-SEC-8]
+		// url.Parse failed or SCP-style (no scheme). SCP URLs carry no
+		// credentials, but a "://" string that failed to parse may still embed
+		// user:pass@ — strip it defensively.
 		if i := strings.Index(raw, "://"); i >= 0 {
 			rest := raw[i+3:]
 			if at := strings.IndexByte(rest, '@'); at >= 0 {
@@ -54,16 +47,9 @@ func RedactGitRemoteURL(raw string) string {
 	return u.String()
 }
 
-// validateProjectName is a thin wrapper over project.ValidateProjectName.
-//
-// Previously this file carried a full duplicate of the policy with the
-// same 128-byte cap, C0/DEL gate, and IsLogInjectionRune sweep. Keeping
-// two validators in sync across code review rounds was error-prone —
-// R181-SEC-P2-2 explicitly introduced project.ValidateProjectName as
-// the single source of truth for trust boundaries (reverse-RPC worker +
-// dashboard). R183-REFACTOR-L1 collapses the dashboard path onto the
-// same function so a future tightening (e.g. rejecting leading hyphens
-// to block flag injection through filesystem lookups) needs one edit.
+// validateProjectName delegates to project.ValidateProjectName, the single
+// source of truth for the trust boundary shared by the reverse-RPC worker
+// and the dashboard.
 func validateProjectName(name string) error {
 	return project.ValidateProjectName(name)
 }
@@ -72,70 +58,43 @@ func validateProjectName(name string) error {
 type Handlers struct {
 	projectMgr *project.Manager
 	router     *session.Router
-	// resolver centralises planner-view opts (docs/rfc/key-resolver.md
-	// §3.1 ResolveForPlannerKey). Used by planner restart to avoid
-	// re-implementing the "no defaults inheritance" contract that
-	// distinguishes administrative planner restarts from chat-view
-	// session spawns. Nil falls back to the legacy inlined merge.
+	// resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
+	// ResolveForPlannerKey) so planner restart keeps the "no defaults
+	// inheritance" contract. Nil falls back to the legacy inlined merge.
 	resolver   *session.KeyResolver
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
-	// baseCtx is the long-lived context the planner-restart timeout
-	// derives from. R247-ARCH-15 (#650): replaces a `ctxFunc func()
-	// context.Context` closure that captured `*Server` indirectly
-	// through `s.hub.ctx`. The closure-as-DI antipattern made test
-	// substitution awkward — every test had to rebuild a closure. Now
-	// tests assign `h.baseCtx = ctx` directly. Production wiring
-	// happens via `SetBaseContext` from registerDashboard once
-	// `s.hub.ctx` exists. Nil falls back to Background in restartCtx
-	// so a handler cannot panic on an un-wired Handlers
-	// (matches the prior closure's `Background()` fallback).
+	// baseCtx is the long-lived context the planner-restart timeout derives
+	// from; production wires it via SetBaseContext, tests assign directly.
+	// Nil falls back to Background in restartCtx (#650).
 	baseCtx context.Context
-	// filesExistsLimiter caps how often a single authenticated caller can
-	// invoke /api/projects/files/exists. The endpoint fans out up to
-	// maxExistsPaths (100) filesystem stats per request with a
-	// fileStatTimeout (2s) budget, so unmetered calls let a post-auth
-	// attacker tie up worker goroutines against slow/deep directory trees
-	// (NFS mounts, gigantic monorepos, symlink loops). Mirrors the
-	// uploadLimiter policy (6s period × 10 burst ≈ 10/min) since both
-	// endpoints do filesystem I/O and belong to the same DoS class.
-	// Nil in tests that build Handlers by hand; HandleFilesExists
-	// guards with a nil check so the limiter is optional. S13.
+	// filesExistsLimiter caps /api/projects/files/exists per caller: the
+	// endpoint fans out up to maxExistsPaths stats within fileStatTimeout, so
+	// unmetered calls let a post-auth attacker tie up workers on slow trees.
+	// Mirrors the uploadLimiter policy (≈10/min). Nil in hand-built test
+	// Handlers; HandleFilesExists nil-guards.
 	filesExistsLimiter IPLimiter
-	// configPutLimiter caps PUT /api/projects/config writes per IP. The
-	// handler persists ProjectConfig to disk and broadcasts a WS update
-	// fan-out to every subscribed dashboard client; an unmetered post-auth
-	// caller can therefore drive disk I/O + N×WS fan-out at line rate.
-	// 5/sec burst 5 ≈ 5×60=300/min — well above interactive UX (a human
-	// only saves config sub-second after edit) but below abuse rates.
-	// Nil-safe in tests; HandleConfigPut guards with a nil check.
-	// R247-SEC-7.
+	// configPutLimiter caps PUT /api/projects/config per IP: each write hits
+	// disk and fans out a WS update to every dashboard client. 5/sec burst 5
+	// is far above interactive saves but below abuse rates. Nil-safe in tests.
 	configPutLimiter IPLimiter
-	// uploadQuota bounds cumulative bytes accepted per project by the upload
-	// endpoint within this process (R202606g-SEC-3, #2311). Nil disables
-	// enforcement (single-operator model / tests that build Handlers by hand).
+	// uploadQuota bounds cumulative upload bytes per project within this
+	// process (#2311). Nil disables enforcement (single-operator model / tests).
 	uploadQuota *uploadQuota
-	// publicTmpEnabled gates the __public_tmp__ pseudo-project (R237-SEC-5,
-	// #646). When false (default), any request naming publicTmpProject as
-	// the project field is rejected as "project not found" — same surface
-	// as a non-existent regular project. The single-operator dashboard
-	// model can flip this to true via server.public_tmp_enabled in
-	// config.yaml; multi-user deployments leave it off so an authenticated
-	// dashboard user cannot enumerate / preview arbitrary /tmp paths
-	// (other operators' editor swaps, systemd-private payloads, …) just
-	// because the naozhi process happens to have read access on Linux DAC.
+	// publicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
+	// false (default) it is rejected as "project not found" like any missing
+	// project, so multi-user deployments cannot enumerate / preview arbitrary
+	// /tmp paths merely because the naozhi process has DAC read access.
+	// Single-operator setups flip it via server.public_tmp_enabled.
 	publicTmpEnabled bool
-	// projectStableKeyEnabled gates emitting the per-project StableKey in the
-	// list response (RFC docs/rfc/project-stable-session-key.md §4.2). When
-	// false (operator set session.project_stable_key.enabled: false), the
-	// field is omitted so the frontend falls back to the legacy timestamp-key
-	// path for "continue". Default true via cmd wiring.
+	// projectStableKeyEnabled gates emitting StableKey in the list response
+	// (docs/rfc/project-stable-session-key.md §4.2); when false the frontend
+	// falls back to the legacy timestamp-key path for "continue". Default true.
 	projectStableKeyEnabled bool
 }
 
-// Deps bundles all wiring for New. Phase 2 (server-split-phase4-design.md
-// §6.5 Plan B): exported ctor so internal/server's buildProjectHandlers
-// can construct without needing access to unexported fields.
+// Deps bundles all wiring for New so internal/server can construct Handlers
+// without access to unexported fields.
 type Deps struct {
 	ProjectMgr         *project.Manager
 	Router             *session.Router
@@ -146,8 +105,7 @@ type Deps struct {
 	ConfigPutLimiter   IPLimiter
 	PublicTmpEnabled   bool
 	// UploadQuotaBytes caps cumulative per-project upload bytes within a
-	// process (R202606g-SEC-3, #2311). <=0 disables enforcement, preserving
-	// the original single-operator trade-off.
+	// process (#2311). <=0 disables enforcement.
 	UploadQuotaBytes int64
 	// ProjectStableKeyEnabled toggles the StableKey field in the list
 	// response. Production wires cfg.Session.ProjectStableKey.ResolvedEnabled(true).
@@ -171,22 +129,14 @@ func New(d Deps) *Handlers {
 	}
 }
 
-// SetBaseContext wires the long-lived process context (typically
-// `Hub.ctx`) used by the planner-restart timeout. Called from
-// registerDashboard after the Hub is constructed. Pre-wiring tests
-// can assign `h.baseCtx` directly; this setter exists so production
-// callers don't need to reach into an unexported field. R247-ARCH-15
-// (#650).
+// SetBaseContext wires the long-lived process context (typically Hub.ctx)
+// used by the planner-restart timeout; tests may assign h.baseCtx directly (#650).
 func (h *Handlers) SetBaseContext(ctx context.Context) {
 	h.baseCtx = ctx
 }
 
-// restartCtx returns the parent context for `handleRestartPlanner`'s
-// 30s timeout. Falls back to context.Background() when baseCtx has
-// not been wired (test paths that build Handlers by hand
-// without calling SetBaseContext). Mirrors the prior `ctxFunc`
-// closure's nil branch so behaviour is unchanged for existing call
-// sites. R247-ARCH-15 (#650).
+// restartCtx returns the parent context for handleRestartPlanner's 30s
+// timeout, falling back to context.Background() when baseCtx is unwired.
 func (h *Handlers) restartCtx() context.Context {
 	if h.baseCtx != nil {
 		return h.baseCtx
@@ -194,16 +144,11 @@ func (h *Handlers) restartCtx() context.Context {
 	return context.Background()
 }
 
-// projectsListEntry is the per-project element in GET /api/projects.
-// R247-PERF-6: replaces the prior `map[string]any{8 keys}` literal that
-// allocated one inner map + 8 interface{} boxing slots per project per
-// dashboard poll. The JSON shape pinned by TestDashboardJSON_Projects_
-// ShapeContract requires `git_remote_url` and `github` to always be
-// present (the dashboard JS reads them unconditionally), so neither
-// carries `omitempty` even though the empty/false zero values were
-// previously emitted via the map literal too. `Node` keeps `omitempty`
-// because the local-only path never sets it; the multi-node merge path
-// stamps "local" before serialise.
+// projectsListEntry is the per-project element in GET /api/projects. The
+// JSON shape is pinned by TestDashboardJSON_Projects_ShapeContract:
+// `git_remote_url` and `github` must always be present (the dashboard JS
+// reads them unconditionally), so neither carries omitempty. `Node` keeps
+// omitempty because the local-only path never sets it.
 type projectsListEntry struct {
 	Name         string                `json:"name"`
 	Path         string                `json:"path"`
@@ -218,21 +163,16 @@ type projectsListEntry struct {
 	// files view defaults its browse root to this project so the operator
 	// lands at the workspace root rather than the first subdirectory project.
 	IsRoot bool `json:"is_root,omitempty"`
-	// DirModTime is the project directory's filesystem mtime (unix ms),
-	// captured at Manager.Scan. The dashboard "new session" picker orders its
-	// fallback tier by this descending so the most-recently-touched workspace
-	// surfaces first. omitempty: zero (un-stat'able) drops the key and the
-	// picker falls back to backend order for that entry — the JS reads it as
-	// `p.dir_mtime || 0`, so absence is handled without an undef branch.
+	// DirModTime is the project directory's mtime (unix ms) from Manager.Scan;
+	// the "new session" picker orders its fallback tier by it descending.
+	// omitempty: the JS reads `p.dir_mtime || 0`, so absence is handled.
 	DirModTime int64 `json:"dir_mtime,omitempty"`
 	// StableKey is the project-level stable dashboard session key for the
-	// default (general) agent: dashboard:pj:<workspace-hash>:general
-	// (RFC docs/rfc/project-stable-session-key.md §4.2). The backend is the
-	// SOLE owner of the workspace-hash so the frontend never re-implements
-	// sha256 (no algorithm drift). For a non-general agent the frontend
-	// swaps the trailing :general segment for the selected agent — a plain
-	// string op that does not touch the hash. Empty for remote/path-less
-	// entries.
+	// general agent: dashboard:pj:<workspace-hash>:general
+	// (docs/rfc/project-stable-session-key.md §4.2). The backend is the SOLE
+	// owner of the workspace hash so the frontend never re-implements sha256;
+	// for another agent it swaps the trailing :general segment. Empty for
+	// remote/path-less entries.
 	StableKey string `json:"stableKey,omitempty"`
 }
 
@@ -241,7 +181,7 @@ type projectsListEntry struct {
 // subset of its fields and must not drift).
 func ProjectsListEntryType() reflect.Type { return reflect.TypeOf(projectsListEntry{}) }
 
-// GET /api/projects — list all projects (local + remote).
+// HandleList serves GET /api/projects — list all projects (local + remote).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
 		httputil.WriteJSON(w, []any{})
@@ -298,7 +238,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, result)
 }
 
-// GET /api/projects/config?name=...
+// HandleConfigGet serves GET /api/projects/config?name=...
 func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
@@ -319,12 +259,10 @@ func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, p.Config)
 }
 
-// PUT /api/projects/config?name=...
+// HandleConfigPut serves PUT /api/projects/config?name=...
 func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
-	// R247-SEC-7: cap per-IP rate before any work — disk write +
-	// dashboard-wide WS fan-out is otherwise rate-unlimited for any
-	// authenticated caller. Same nil-guard convention as filesExistsLimiter
-	// so tests that build Handlers by hand still pass.
+	// Rate-limit before any work: disk write + dashboard-wide WS fan-out is
+	// otherwise unmetered for any authenticated caller. Nil-guarded for tests.
 	if h.configPutLimiter != nil && !h.configPutLimiter.AllowRequest(r) {
 		w.Header().Set("Retry-After", "1")
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
@@ -336,11 +274,9 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cap incoming body size before either the remote-proxy read or the
-	// local JSON decode. Project configs are small (schedule + planner
-	// prompt); 64 KB is well above legitimate payloads and keeps both
-	// paths consistent so a remote proxy cannot be used to smuggle a
-	// larger body than the local handler would accept.
+	// Cap body size before either the remote-proxy read or the local decode
+	// so a remote proxy cannot smuggle a larger body than the local handler
+	// accepts; 64 KB is well above legitimate configs.
 	r = httputil.WithMaxBytes(w, r, 64*1024)
 
 	// Remote node proxy
@@ -379,15 +315,8 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := project.ValidateConfig(cfg); err != nil {
-		// R181-SEC-P2-5: ValidateConfig returns field-specific strings
-		// like "planner_prompt exceeds 8192-byte limit" that echo the
-		// internal size caps — a low-risk information leak to
-		// authenticated users probing config field names. The wrapped
-		// err.Error() is logged for operator diagnosis but the HTTP
-		// response stays generic. The reverse-RPC worker's same guard
-		// (internal/upstream/connector.go update_config) does surface
-		// the detail because the primary is already trusted enough to
-		// hold config, but dashboard users may be more broadly authz'd.
+		// ValidateConfig's field-specific messages echo internal size caps;
+		// log the detail for the operator but keep the HTTP response generic.
 		slog.Debug("project update_config: ValidateConfig failed", "project", name, "err", err)
 		http.Error(w, "invalid project config", http.StatusBadRequest)
 		return
@@ -406,7 +335,7 @@ func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteOK(w)
 }
 
-// POST /api/projects/favorite?name=...&favorite=true|false
+// HandleFavoriteToggle serves POST /api/projects/favorite?name=...&favorite=true|false
 func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
@@ -455,17 +384,15 @@ func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	// Bump the router's version counter so the dashboard's version-based
-	// change detection in fetchSessions() notices the favorite flip. Without
-	// this, the frontend short-circuits and the star icon only refreshes on
-	// the next real session event.
+	// Bump the router version so the dashboard's version-gated fetchSessions()
+	// notices the favorite flip instead of waiting for the next session event.
 	if h.router != nil {
 		h.router.BumpVersion()
 	}
 	httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 }
 
-// POST /api/projects/planner/restart?name=...
+// HandlePlannerRestart serves POST /api/projects/planner/restart?name=...
 func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
@@ -494,12 +421,9 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Delegate planner-view opts derivation to Resolver
-	// (ResolveForPlannerKey). This preserves the "do not read defaults"
-	// contract that keeps administrative planner restarts decoupled from
-	// agent defaults (docs/rfc/key-resolver.md §2.2 #6). Legacy fallback
-	// reproduces the original literal-AgentOpts construction for headless
-	// test paths that don't wire a resolver.
+	// Derive planner-view opts via the resolver (ResolveForPlannerKey), which
+	// keeps the "do not read defaults" contract (docs/rfc/key-resolver.md
+	// §2.2 #6). Legacy fallback serves headless test paths without a resolver.
 	var plannerKey string
 	var opts session.AgentOpts
 	if h.resolver != nil {
@@ -522,15 +446,10 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 			Workspace: p.Path,
 			Exempt:    true,
 		}
-		// R215-SEC-P1-2 (#535): mirror the resolver path's spawn-boundary
-		// re-validation. EffectivePlannerPrompt re-reads from cached
-		// project.yaml / CLAUDE.md, neither of which guarantees the bytes
-		// still satisfy ValidateConfig — Claude's Write tool can mutate
-		// CLAUDE.md and the next planner restart would inherit the
-		// tampered prompt without this sanitiser. Drop the prompt entirely
-		// when sanitisation fails so the spawn falls through to "no
-		// planner system prompt" rather than feeding control bytes /
-		// oversize argv into the CLI subprocess.
+		// Spawn-boundary re-validation (#535): EffectivePlannerPrompt re-reads
+		// cached project.yaml / CLAUDE.md, which Claude's Write tool can mutate
+		// past ValidateConfig. Drop the prompt entirely when sanitisation fails
+		// rather than feeding control bytes / oversize argv to the CLI.
 		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
 			opts.SystemPrompt = pp // #2493: dedicated field, not ExtraArgs
 		}
@@ -548,11 +467,8 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 	httputil.WriteJSON(w, map[string]string{"status": "restarted"})
 }
 
-// HasFilesExistsLimiter reports whether the FilesExistsLimiter has been
-// wired. Phase 2 (server-split-phase4-design.md §6.5 Plan B) — exposed for
-// the server-package integration test that pins server.New must wire a
-// non-nil limiter (S13). Direct field access is prevented because the
-// field is unexported.
+// HasFilesExistsLimiter reports whether FilesExistsLimiter has been wired;
+// exposed for the server-package test pinning that server.New wires it.
 func (h *Handlers) HasFilesExistsLimiter() bool {
 	return h.filesExistsLimiter != nil
 }

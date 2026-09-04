@@ -1,8 +1,5 @@
 // Package project hosts the dashboard endpoints for project list / config /
-// favorites / planner-restart and the project-files I/O endpoints. Phase 2
-// (server-split-phase4-design.md §6.5 Plan B) moved these from
-// internal/server.
-//
+// favorites / planner-restart and the project-files I/O endpoints.
 // Cross-cutting dependencies are accepted as the shared interfaces in
 // internal/dashboard/contracts (#2285) rather than reverse-imported from
 // internal/server, keeping the dependency direction one-way.

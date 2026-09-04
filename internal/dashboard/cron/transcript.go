@@ -23,36 +23,22 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint.
+// Transcript endpoint: surfaces the assistant/tool/user turn timeline the
+// claude CLI persists as JSONL under ~/.claude/projects/<slug>/<SessionID>.jsonl,
+// streaming only the segment inside the run's [StartedAt, EndedAt] window and
+// flattening each line into a Turn the dashboard renders without parsing JSONL.
 //
-// Goal: surface the assistant/tool/user turn timeline persisted by the
-// claude CLI for a given cron run. The CLI writes JSONL into
-// ~/.claude/projects/<encode(WorkDir)>/<SessionID>.jsonl already; this
-// endpoint streams a *segment* of that file (just the lines whose
-// timestamp falls inside the run's [StartedAt, EndedAt] window) and
-// flattens each line into a Turn shape the dashboard can render
-// without re-implementing JSONL parsing in JS.
-//
-// Failure model: this endpoint never 5xx's on absent / corrupt data.
-// Three downgrade states convey the failure to the client so it can
-// fall back to the "原始日志" tab:
+// Failure model: never 5xx on absent / corrupt data. Downgrade states let the
+// client fall back to the "原始日志" tab:
 //
 //	fallback:"missing"  SessionID empty or JSONL not found
 //	fallback:"raw"      JSONL exists but no recognised turns parsed
-//	truncated:true      hit one of the size caps (8MB/500 turns/etc)
-//
-// All caps are conservative; the typical cron run produces 5-50 turns
-// totalling <100 KB so the limits exist purely as safety bounds against
-// pathological JSONL files (long-lived fresh=false sessions accumulate
-// turns from many runs into one file — see internal/cron/run.go:48).
+//	truncated:true      hit one of the size caps
 
 const (
-	// maxTranscriptBytes is the hard cap on bytes read from the JSONL
-	// file. Beyond this we set truncated:true and stop. 8 MB roughly
-	// equals 8000 turns at 1 KB each, which is far beyond any realistic
-	// single cron run. The cap is conservative because JSONL files in
-	// fresh=false mode share state across runs and could otherwise grow
-	// without bound.
+	// maxTranscriptBytes is the hard cap on bytes read from the JSONL file;
+	// beyond it truncated:true is set. fresh=false JSONL files share state
+	// across runs and could otherwise grow without bound.
 	maxTranscriptBytes int64 = 8 * 1024 * 1024
 
 	// maxTranscriptTurns caps the number of decoded turns returned. A
@@ -75,50 +61,30 @@ const (
 	// maxAssistantTextBytes caps a single assistant text block.
 	maxAssistantTextBytes = 64 * 1024
 
-	// maxToolInputBytes caps the raw tool_use.Input JSON we surface to the
-	// dashboard (R234-SEC-8). Without this, a transcript containing 500
-	// turns × 256KB lines of tool_use.Input would push ~128MB of bytes into
-	// the response per request — the request handler is auth'd but that
-	// is still a trivial dashboard-side memory amplifier. Bash command
-	// payloads / Read tool args / Edit diffs all fit comfortably in 64KB;
-	// pathological cases (a tool that streams binary as a single-call
-	// argument) get a "[truncated]" placeholder so the timeline still
-	// renders the call but no longer ships the full payload.
+	// maxToolInputBytes caps the raw tool_use.Input JSON we surface. Without it
+	// 500 turns × 256KB lines could push ~128MB per (auth'd) request — a trivial
+	// memory amplifier. Oversize inputs get a "[truncated]" placeholder so the
+	// timeline still renders the call.
 	maxToolInputBytes = 64 * 1024
 
-	// summariseInputCap is the upper byte limit for a tool_use.Input we
-	// will feed to json.Unmarshal in summariseToolInput. The probe only
-	// surfaces six short string fields (command, file_path, …) and the
-	// fallback is truncated to 200 bytes, so a useful one-line label never
-	// needs more than a few KB of input. Capping well below the wire
-	// payload limit (maxToolInputBytes = 64 KB) shrinks the amount of
-	// attacker-influenced JSON handed to json.Unmarshal: at
-	// maxTranscriptTurns=500 × transcriptSem(8) the worst-case unmarshal
-	// fan-out drops from 500×128 KB ≈ 64 MB to 500×16 KB ≈ 8 MB per
-	// request. Inputs above this cap are rejected before json.Unmarshal so
-	// a hostile transcript line cannot drive the parser through a large
-	// deeply-nested blob just to populate a 200-byte label.
-	// R242-SEC-13 (#645); R20260602141221-SEC-9 (#1584) lowered 128 KB→16 KB.
+	// summariseInputCap bounds the tool_use.Input bytes fed to json.Unmarshal
+	// in summariseToolInput. The probe only needs a few KB to find a one-line
+	// label, so capping well below maxToolInputBytes shrinks the worst-case
+	// unmarshal fan-out (500 turns × transcriptSem 8) of attacker-influenced
+	// JSON; oversize inputs are rejected before parsing (#645, #1584).
 	summariseInputCap = 16 * 1024
 
-	// transcriptRunningSlackMS is the slack added to "now" when computing
-	// the upper bound of the time window for a still-running cron run.
-	// fresh=false runs share a JSONL across many invocations, so we filter
-	// turns by [run.StartedAt, endedMS]. While the run is still going we
-	// have no run.EndedAt, so we use time.Now()+slack to absorb clock skew
-	// between the cron wall-clock and the JSONL writer (CLI subprocess) —
-	// neither is NTP-synced in test fixtures, and a turn timestamp slightly
-	// ahead of "now" should still appear in the live transcript view.
+	// transcriptRunningSlackMS is added to "now" as the window upper bound for
+	// a still-running run (no EndedAt yet), absorbing clock skew between the
+	// cron wall-clock and the JSONL writer (CLI subprocess) so a turn slightly
+	// ahead of "now" still appears in the live view.
 	transcriptRunningSlackMS int64 = 5_000
 )
 
-// The concurrency gate for HandleRunTranscript lives on the Handlers
-// struct as transcriptSem (wired by server/build_handlers.go with
-// cronTranscriptSemCap=8). See the acquire site in HandleRunTranscript
-// and the field godoc in handlers.go for the R243-SEC-12 (#798)
-// rationale — each in-flight transcript holds a 256 KB scanner buffer
-// plus an 8 MB LimitReader budget, so a process-wide ceiling bounds the
-// memory amplifier under multi-operator load.
+// The concurrency gate for HandleRunTranscript is Handlers.transcriptSem
+// (cronTranscriptSemCap=8, wired by server/build_handlers.go): each in-flight
+// transcript holds a 256 KB scanner buffer plus an 8 MB LimitReader budget, so
+// a process-wide ceiling bounds the memory amplifier under multi-operator load.
 
 // truncatedToolInputPlaceholder is the JSON value substituted for
 // tool_use.Input fields that exceed maxToolInputBytes. Pre-encoded so the
@@ -126,21 +92,11 @@ const (
 // literal here) so the wire shape stays consistent for dashboard JS.
 var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 
-// ansiEscRe matches the most common ANSI CSI sequences (color, cursor
-// motion) AND OSC sequences (operating-system commands such as the
-// hyperlink escape `\x1b]8;;url\x1b\\` / BEL-terminated `\x1b]8;;url\x07`).
-// We strip these from tool output before serialising so the rendered
-// <pre> doesn't show garbled bytes. Defensive: the dashboard uses
-// esc()-then-<pre> so the bytes wouldn't be interpreted as HTML either
-// way, but they'd render as literal escape codes which hurt readability
-// for a debugging-focused view.
-//
-// R243-SEC-6 (#788): the regex previously covered only CSI (`\x1b[`),
-// leaving OSC hyperlinks (used by `gh`, modern `ls --hyperlink`, and
-// language-server output) intact. Extend the alternation so both
-// terminators (BEL `\x07` and ST `\x1b\\`) are scrubbed together with
-// CSI. The two halves run as one Go RE2 alternation so a single regex
-// pass covers both classes — no extra hot-path allocation.
+// ansiEscRe matches common ANSI CSI sequences (color, cursor motion) AND OSC
+// sequences (e.g. hyperlink `\x1b]8;;url\x1b\\` / BEL-terminated `\x1b]8;;url\x07`,
+// emitted by gh / ls --hyperlink). Stripped from tool output before
+// serialising so the rendered <pre> doesn't show garbled escape codes; the
+// dashboard's esc()-then-<pre> already prevents HTML interpretation (#788).
 var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
 // transcriptResponse is the wire shape the dashboard consumes.
@@ -153,17 +109,12 @@ type transcriptResponse struct {
 	Turns     []transcriptTurn  `json:"turns"`
 	NextIndex int               `json:"next_index"`
 	Truncated bool              `json:"truncated"`
-	// TruncateReason discriminates why Truncated is true so forensics can
-	// distinguish a legitimate size-cap hit from a disk read error or an
-	// over-long JSONL line. Only populated when Truncated is true.
-	// R240-SEC-8 / #1049.
-	//
-	//   ""               — Truncated=false (normal path) or legacy producers
+	// TruncateReason discriminates why Truncated is true so forensics can tell
+	// a size-cap hit from a disk read error or an over-long line (#1049).
+	// Only populated when Truncated is true:
 	//   "size_cap"       — hit maxTranscriptBytes / maxTranscriptTurns
-	//   "line_too_long"  — bufio.ErrTooLong (one line exceeded
-	//                      maxTranscriptLineBytes)
+	//   "line_too_long"  — bufio.ErrTooLong (line > maxTranscriptLineBytes)
 	//   "scan_io_error"  — Scanner.Err returned a non-ErrTooLong error
-	//                      (disk read failure, truncated file mid-syscall)
 	TruncateReason string `json:"truncate_reason,omitempty"`
 	// Fallback signals a degraded path:
 	//   "missing" — SessionID empty or JSONL not found
@@ -178,26 +129,16 @@ type transcriptTokens struct {
 	Total  int `json:"total"`
 }
 
-// transcriptTurn is a single rendered timeline entry. Only fields
-// relevant to its kind are populated; absent fields stay at zero values
-// (omitted via json:"omitempty"). Index reflects this turn's position in
-// the *response*, not the original JSONL line — the dashboard uses it
-// for stable React-style keys when diffing live updates.
+// transcriptTurn is a single rendered timeline entry. Only fields relevant to
+// its kind are populated (omitempty). Index is the position in the *response*,
+// not the JSONL line — the dashboard uses it as a stable key for live diffs.
 //
-// CLIENT-SIDE CONTRACT (R249-SEC-8 / #921): the Input field is forwarded
-// as raw JSON bytes from the CLI's tool_use payload. httputil.WriteJSON disables
-// SetEscapeHTML (see dashboard.go httputil.WriteJSON R71-SEC-L1 godoc), so any
-// `<`, `>`, `&` literals embedded in the original tool input survive
-// onto the wire verbatim. Today's dashboard.js renders Input via
-// JSON.stringify + esc() before assembling DOM, which is safe; a future
-// debug viewer that injects Input directly via innerHTML — without
-// DOMPurify — would immediately become a stored-XSS sink because tool
-// input is attacker-influenced (a malicious project file can steer the
-// CLI's tool calls). When introducing a new consumer of this field,
-// mirror the existing Text / Output sanitizeWireText pattern or route
-// the bytes through DOMPurify before any innerHTML assignment. The
-// upstream maxToolInputBytes cap + truncatedToolInputPlaceholder
-// substitution keep Input bounded but do not normalise its byte set.
+// CLIENT-SIDE CONTRACT (#921): Input is forwarded as raw JSON bytes from the
+// CLI's tool_use payload and httputil.WriteJSON disables SetEscapeHTML, so
+// `<`, `>`, `&` survive verbatim. Tool input is attacker-influenced (a
+// malicious project file can steer the CLI's tool calls), so any consumer
+// must render it via JSON.stringify + esc() or DOMPurify — never raw
+// innerHTML. maxToolInputBytes bounds its size but does not normalise bytes.
 type transcriptTurn struct {
 	Index      int             `json:"index"`
 	Kind       string          `json:"kind"` // "user" | "assistant" | "tool_use" | "tool_result" | "error"
@@ -257,14 +198,11 @@ type claudeContentBlock struct {
 
 // GET /api/cron/runs/{run_id}/transcript?job_id=<jid>
 func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
-	// R250-SEC-7 (#1096): use the dedicated transcriptLimiter rather
-	// than the shared runsLimiter. The transcript path fans out far
-	// more I/O than the runs-list endpoint (EvalSymlinks ×2 + 8 MB
-	// LimitReader + 256 KB scanner buffer + per-line json.Unmarshal +
-	// flattenJSONLEvent) so sharing one bucket lets either endpoint
-	// starve the other under load. Fall back to runsLimiter for older
-	// hand-rolled Handlers fixtures (newCronHandlersForTest) that
-	// haven't been wired with a transcriptLimiter.
+	// Use the dedicated transcriptLimiter rather than the shared runsLimiter:
+	// the transcript path fans out far more I/O (EvalSymlinks ×2 + 8 MB
+	// LimitReader + 256 KB scanner + per-line Unmarshal), so one shared bucket
+	// would let either endpoint starve the other (#1096). runsLimiter is the
+	// fallback for hand-rolled fixtures without a transcriptLimiter.
 	limiter := h.transcriptLimiter
 	if limiter == nil {
 		limiter = h.runsLimiter
@@ -273,21 +211,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
 		return
 	}
-	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads.
-	// Each running scan holds 256 KB of bufio.Scanner buffer plus an
-	// 8 MB LimitReader budget; without this gate, N distinct
-	// authenticated operators can each saturate their per-IP
-	// runsLimiter and collectively park N×8 MB of file-mapped pages
-	// + N×256 KB of scanner buffers. The non-blocking acquire keeps
-	// the failure mode "503 immediately" instead of "slow-loris
-	// holds a goroutine open until the request context expires" —
-	// matches the transcribeSemCap pattern. Acquired BEFORE the
-	// scheduler-nil check so the gate is testable in isolation
-	// (handlers built without a scheduler can still exercise the
-	// busy fast-fail path); a 503 here also short-circuits the
-	// scheduler lookup, which is mildly cheaper than the reverse
-	// ordering. Nil-guarded so older hand-rolled Handlers
-	// fixtures (newCronHandlersForTest) skip the gate.
+	// Cap concurrent in-flight transcript reads: each holds 256 KB of scanner
+	// buffer plus an 8 MB LimitReader budget, so N operators could park N×8 MB
+	// without this gate (#798). Non-blocking acquire fails "503 immediately"
+	// rather than slow-loris holding a goroutine. Acquired BEFORE the scheduler
+	// nil check so the gate is testable in isolation; nil-guarded for fixtures.
 	if h.transcriptSem != nil {
 		select {
 		case h.transcriptSem <- struct{}{}:
@@ -362,32 +290,21 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	// R236-SEC-13: defence in depth before ClaudeProjectSlug encodes
-	// WorkDir into a filesystem path component. ClaudeProjectSlug only
-	// replaces '/' with '-' and strips the leading separator — it does
-	// NOT scrub C0/C1/bidi/zero-width or invalid UTF-8. A persisted run
-	// from a hand-edited disk file (or an older naozhi version that
-	// allowed weaker WorkDir validation) could carry a control rune
-	// that tunnels through the slug into the projects/ directory name
-	// and lets the EvalSymlinks below land on an unintended path.
-	// Reject before constructing jsonlPath so the strict check below is
-	// not asked to defend against a malformed input.
+	// Defence in depth before ClaudeProjectSlug encodes WorkDir into a path
+	// component: the slug only maps '/'→'-' and does NOT scrub control runes
+	// or invalid UTF-8, so a hand-edited or legacy persisted run could tunnel
+	// a control rune into the projects/ directory name and steer EvalSymlinks
+	// onto an unintended path. Reject before constructing jsonlPath.
 	if !utf8.ValidString(run.WorkDir) {
 		slog.Warn("cron transcript: rejecting non-UTF8 WorkDir", "job_id", jobID, "run_id", runID)
 		resp.Fallback = "missing"
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	// R242-SEC-14: IsLogInjectionRune covers C1 / bidi / LS-PS but
-	// intentionally NOT C0 controls (see osutil/loginject.go godoc —
-	// "Callers that also need to reject C0 controls (< 0x20) should
-	// gate on `r < 0x20 || r == 0x7f` separately"). A persisted run
-	// with an embedded tab / NUL / DEL in WorkDir (older naozhi
-	// versions or hand-edited disk files) would otherwise slip
-	// through this guard and reach the EvalSymlinks below with a
-	// malformed slug. Add the C0+DEL band explicitly so the strict
-	// check downstream is not asked to defend against shell control
-	// characters.
+	// IsLogInjectionRune covers C1 / bidi / LS-PS but intentionally NOT C0
+	// controls (see osutil/loginject.go), so add the C0+DEL band explicitly:
+	// an embedded tab / NUL / DEL in WorkDir would otherwise reach the
+	// EvalSymlinks below with a malformed slug.
 	for _, r := range run.WorkDir {
 		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
 			slog.Warn("cron transcript: rejecting WorkDir with control rune", "job_id", jobID, "run_id", runID)
@@ -415,24 +332,18 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	// Both the resolved JSONL path AND the claudeDir+projects root must be
-	// canonicalised before the prefix check. macOS canonicalises /var to
-	// /private/var, and any host where claudeDir contains a symlinked
-	// component (Docker bind-mounts, AMI-customised layouts) similarly
-	// drifts under EvalSymlinks. Without the symmetric resolve the prefix
-	// check rejects every legitimate JSONL on those hosts.
+	// Both the resolved JSONL path AND the projects root must be canonicalised
+	// before the prefix check: macOS maps /var→/private/var and symlinked
+	// claudeDir components (Docker bind-mounts) drift under EvalSymlinks, so an
+	// asymmetric resolve would reject every legitimate JSONL on those hosts.
 	allowedRoot := filepath.Join(h.claudeDir, "projects")
 	resolvedRoot, rrErr := filepath.EvalSymlinks(allowedRoot)
 	if rrErr != nil {
-		// R240-SEC-3: only fall back on the "fresh install / dir not yet
-		// materialised" case. Any *other* EvalSymlinks failure (permission
-		// denied, broken symlink chain, IO error) means we cannot trust the
-		// raw root for the prefix comparison below — if allowedRoot is itself
-		// a symlink we don't know where it points, so an attacker-controlled
-		// symlink target could pass the lexical HasPrefix check against the
-		// raw path. Return the same "missing" downgrade the dashboard already
-		// renders for absent transcripts; the operator-visible signal is the
-		// slog.Warn line below.
+		// Only fall back to the raw root on "dir not yet materialised". Any
+		// other EvalSymlinks failure (permission denied, broken chain, IO
+		// error) means we cannot trust the raw root for the prefix check — an
+		// attacker-controlled symlink target could pass a lexical HasPrefix.
+		// Same "missing" downgrade; the slog.Warn is the operator signal.
 		if !errors.Is(rrErr, fs.ErrNotExist) {
 			slog.Warn("cron transcript: allowedRoot evalsymlinks failed",
 				"root", allowedRoot, "err", rrErr)
@@ -442,16 +353,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 		resolvedRoot = allowedRoot
 	}
-	// R236-SEC-05 / R238-SEC-6: containment honours filesystem semantics, not
-	// path-string identity. osutil.PathContainedInRoot does the byte-wise
-	// prefix check first, then falls back to an os.SameFile walk on resolved's
-	// ancestors. The fallback matters on case-insensitive filesystems (macOS
-	// APFS/HFS+, Windows NTFS) where EvalSymlinks preserves user-typed case —
-	// e.g. resolved="/Users/alice/.claude/projects/..." vs
-	// resolvedRoot="/Users/Alice/.claude/projects" — which would otherwise
-	// falsely fail the prefix check and downgrade every legitimate run to
-	// "missing". Both args are EvalSymlinks-resolved above (the helper's input
-	// contract), keeping the symlink-escape rejection intact.
+	// Containment honours filesystem semantics, not path-string identity:
+	// osutil.PathContainedInRoot does the byte-wise prefix check, then falls
+	// back to an os.SameFile ancestor walk for case-insensitive filesystems
+	// (macOS APFS, NTFS) where EvalSymlinks preserves user-typed case. Both
+	// args are EvalSymlinks-resolved above (the helper's input contract).
 	if !osutil.PathContainedInRoot(resolved, resolvedRoot) {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
@@ -459,17 +365,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lstat to reject non-regular files (FIFO, device, dir-with-name
-	// matching). Then open with O_NOFOLLOW + Fstat for TOCTOU defence:
-	// the symlink-swap could happen between Lstat and Open, and a plain
-	// os.Open would silently follow the swapped symlink and stream bytes
-	// from outside the projects subtree under the original path's
-	// authorisation. R249-SEC-4 (#918) closes that window the same way
-	// handleFileGet / handleAttachment already do — see the R219-SEC-2 /
-	// R249-SEC-3 prior art in project_files.go and dashboard_send.go.
-	// The post-open Fstat re-check still catches a same-inode swap to a
-	// non-regular file (the residual TOCTOU after O_NOFOLLOW eliminates
-	// the symlink leg).
+	// Lstat rejects non-regular files (FIFO, device, dir); then open with
+	// O_NOFOLLOW + Fstat for TOCTOU defence — a symlink swap between Lstat and
+	// Open would otherwise let a plain os.Open stream bytes from outside the
+	// projects subtree under the original path's authorisation (#918). The
+	// post-open SameFile check catches the residual same-name inode swap.
 	li, err := os.Lstat(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
@@ -501,16 +401,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, resp)
 		return
 	}
-	// R249-SEC-4 (#918): TOCTOU inode recheck. The Lstat above resolved
-	// the dirent to a regular-file inode, then a hostile symlink swap
-	// (filename → /etc/shadow) could in theory race the os.Open call
-	// before the file descriptor binds. Mode().IsRegular() on the open
-	// fd catches a swap-to-dir/FIFO but NOT a swap to another regular
-	// file outside the projects subtree. os.SameFile checks the device
-	// + inode pair so a successful match guarantees the open descriptor
-	// references the exact inode Lstat validated under the path-escape
-	// guard above. Mismatch ⇒ swap raced; fall back to "missing" rather
-	// than read potentially exfiltrated bytes.
+	// TOCTOU inode recheck (#918): Mode().IsRegular() on the open fd catches a
+	// swap-to-dir/FIFO but NOT a swap to another regular file outside the
+	// projects subtree. os.SameFile compares device + inode, so a match
+	// guarantees the descriptor is the exact inode Lstat validated under the
+	// path-escape guard. Mismatch ⇒ swap raced; downgrade to "missing".
 	if !os.SameFile(li, fi) {
 		slog.Warn("cron transcript: inode swap detected post-open", "path", resolved)
 		resp.Fallback = "missing"
@@ -527,27 +422,18 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	if !run.EndedAt.IsZero() {
 		endedMS = run.EndedAt.UnixMilli()
 	} else {
-		// Running run: include everything up to "now". A small slack
-		// (transcriptRunningSlackMS) handles clock skew between the
-		// cron wall-clock and the JSONL writer (CLI subprocess),
-		// neither of which is NTP-synced in test fixtures.
+		// Running run: include everything up to "now" plus slack for clock skew
+		// between the cron wall-clock and the CLI JSONL writer.
 		endedMS = time.Now().UnixMilli() + transcriptRunningSlackMS
 	}
 
 	tokens := transcriptTokens{}
 	toolCalls := 0
 
-	// LimitReader caps total bytes read; bufio.Scanner with a 256 KB
-	// buffer caps single-line bytes. Together they enforce the
-	// design's three-tier size budget without ever calling
-	// os.ReadFile on the underlying file.
-	//
-	// io.LimitReader always returns *io.LimitedReader; we keep the
-	// concrete type so the post-scan check below can read N directly
-	// without type assertion. Using f.Seek to detect cap-hit would be
-	// wrong: bufio.Scanner pre-fills a 256 KB buffer, so the underlying
-	// file offset can advance well past the LimitReader's logical
-	// budget even when the scanner only consumed the first line.
+	// LimitReader caps total bytes; bufio.Scanner's 256 KB buffer caps a single
+	// line. Keep the concrete *io.LimitedReader so the post-scan check reads N
+	// directly — f.Seek would be wrong because the scanner's read-ahead advances
+	// the file offset past the logical budget even if only one line was consumed.
 	// 显式 int64 cast 防止 maxTranscriptBytes 类型变更后静默截断（当前已是 int64）。
 	lr := &io.LimitedReader{R: f, N: int64(maxTranscriptBytes)}
 	scanner := bufio.NewScanner(lr)
@@ -555,10 +441,8 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
-	// truncateReason discriminates Truncated cause for forensics
-	// (R240-SEC-8 / #1049). Set alongside `truncated = true`. First
-	// reason sticks — we report the earliest cause to keep the
-	// reason field deterministic when multiple caps trigger.
+	// truncateReason discriminates the Truncated cause for forensics (#1049).
+	// First reason sticks so the field is deterministic when several caps fire.
 	truncateReason := ""
 	setTruncated := func(reason string) {
 		truncated = true
@@ -582,53 +466,24 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 			// Skip unparseable line; do not fail the whole response.
 			continue
 		}
-		// Time-window filter applies only to dated events. The CLI
-		// writes "queue-operation" / "attachment" events without
-		// timestamps for some shapes; we let those pass through and
-		// drop later if they're not turn-worthy.
-		//
-		// R240-SEC-15 / #1046: BUT for fresh=false (shared JSONL across
-		// many cron runs), letting timestamp-less events pass through
-		// causes adjacent runs to bleed into each other's transcript —
-		// a "queue-operation" or untimestamped attachment from run N+1
-		// would appear in the response for run N because the
-		// time-window gate is skipped. We have no per-event run-id to
-		// disambiguate, so the safe-by-default rule for shared files
-		// is: drop timestamp-less events entirely. The cost is a few
-		// missed metadata events on the boundary; the alternative
-		// (cross-run leak of attachments / queue ops with potentially
-		// sensitive content) is strictly worse. Fresh=true runs own
-		// the JSONL exclusively, so the existing pass-through behaviour
-		// remains correct there.
+		// Time-window filter applies only to dated events. For fresh=false the
+		// JSONL is shared across cron runs and we have no per-event run-id, so
+		// timestamp-less events ("queue-operation", untimestamped attachments)
+		// are dropped rather than leaked into an adjacent run's transcript
+		// (#1046). fresh=true runs own the JSONL, so they pass through there.
 		ts := parseISO8601MS(ev.Timestamp)
 		if ts > 0 {
-			// R242-SEC-12 (#642): for fresh=false the JSONL is shared
-			// across adjacent cron runs, so an event whose timestamp
-			// lands exactly on the millisecond boundary between two
-			// runs (run N ended at T, run N+1 started at T) was
-			// previously included in BOTH runs' transcript responses
-			// because the time-window check uses `ts > endedMS` on the
-			// upper side AND `ts < startedMS` on the lower side — both
-			// half-open in the wrong direction, so ts==endedMS_N and
-			// ts==startedMS_{N+1} both pass the gate. Without a per-run
-			// UUID we cannot reliably attribute the boundary event;
-			// the safe-by-default fix is the standard half-open
-			// interval [startedMS, endedMS) so a boundary event is
-			// claimed by the LATER run only (deterministic single
-			// owner). For fresh=true the JSONL is exclusively owned by
-			// this run, so the inclusive boundary is preserved (both
-			// ends inclusive matches the previous behaviour and is
-			// safe since no adjacent run shares the file).
+			// fresh=false shares the JSONL with adjacent runs, so a boundary
+			// event (run N ended at T, run N+1 started at T) must have a single
+			// owner: use the half-open [startedMS, endedMS) so it belongs to the
+			// LATER run only (#642). fresh=true owns the file exclusively, so
+			// the inclusive interval is safe there.
 			if run.Fresh {
 				if ts < startedMS || ts > endedMS {
 					continue
 				}
 			} else {
-				// fresh=false: half-open [startedMS, endedMS). The
-				// boundary event ts == endedMS_N is rejected here for
-				// run N; it falls to run N+1 (whose startedMS_{N+1}
-				// == endedMS_N is the inclusive lower bound). Single
-				// owner per ts boundary, no leak.
+				// half-open: ts == endedMS_N falls to run N+1.
 				if ts < startedMS || ts >= endedMS {
 					continue
 				}
@@ -638,18 +493,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 			// run; skip rather than leak adjacent-run state.
 			continue
 		} else if ev.Timestamp != "" {
-			// R250-SEC-8 (#1097): ts==0 but the source timestamp string
-			// is non-empty means parseISO8601MS rejected the input. Even
-			// for fresh=true (this run owns the JSONL exclusively) an
-			// unparseable timestamp signals either disk corruption or a
-			// hand-written / hostile JSONL entry that an operator with
-			// workspace write access could craft to surface across every
-			// run's transcript drawer. Align parse-failure with the
-			// empty-timestamp skip policy already used for fresh=false:
-			// drop rather than include. Empty ev.Timestamp (legitimate
-			// CLI shapes like "queue-operation" without a timestamp) is
-			// preserved on the fresh=true branch so existing metadata
-			// continues to flow through.
+			// ts==0 with a non-empty source string means parseISO8601MS rejected
+			// it: disk corruption or a hand-written / hostile JSONL entry that
+			// could surface across every run's drawer. Drop it, matching the
+			// fresh=false skip policy (#1097). Empty ev.Timestamp (legitimate
+			// CLI shapes like "queue-operation") still flows through on fresh=true.
 			continue
 		}
 		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
@@ -668,16 +516,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		// Don't 5xx — the prefix we did parse is still useful.
-		// R240-SEC-8 / #1049: discriminate ErrTooLong (oversize line)
-		// from genuine IO errors (disk read failure, file truncated
-		// mid-syscall). Forensics need this distinction — collapsing
-		// both into truncated=true loses the signal that the JSONL
-		// file itself was malformed vs. the disk was sick.
+		// Don't 5xx — the parsed prefix is still useful. Discriminate ErrTooLong
+		// (malformed JSONL) from genuine IO errors (sick disk) for forensics (#1049).
 		if errors.Is(err, bufio.ErrTooLong) {
-			// R20260602141221-SEC-13: use basename only — full path leaks
-			// operator home/workspace/session UUID to log aggregators.
-			// The escape-attempt log at line 461 retains full path (security event).
+			// Basename only — the full path leaks operator home / session UUID
+			// to log aggregators (the path-escape warn above keeps it: security event).
 			slog.Warn("cron transcript: line too long (returning partial)", "file", filepath.Base(resolved), "err", err)
 			setTruncated("line_too_long")
 		} else {
@@ -686,22 +529,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// LimitReader hit means we read maxTranscriptBytes worth without
-	// seeing EOF. Mark truncated too. Read lr.N directly: bufio's
-	// 256 KB read-ahead can advance the underlying *os.File offset
-	// past maxTranscriptBytes even on a small file, so f.Seek would
-	// false-positive truncation.
-	//
-	// R244-GO-P1-1: lr.N is the number of bytes the LimitedReader will
-	// still hand out to its consumer (bufio.Scanner) on subsequent Read
-	// calls. It is decremented by each successful Read on lr by the
-	// number of bytes returned, so `lr.N <= 0` means the LimitedReader
-	// has no bytes left to give bufio.Scanner — equivalently, the scan
-	// loop above either consumed exactly maxTranscriptBytes or stopped
-	// before that point with no remaining budget. It does NOT track
-	// "logical bytes still queued in the parser" — bufio.Scanner's
-	// internal 256 KB buffer may still hold partly-parsed data, but
-	// the LimitedReader will refuse to top it up further.
+	// lr.N <= 0 means the LimitedReader has no budget left — the scan consumed
+	// maxTranscriptBytes without seeing EOF — so mark truncated. Read lr.N
+	// rather than f.Seek: bufio's 256 KB read-ahead can advance the file offset
+	// past the cap even on a small file. lr.N does NOT track bytes still
+	// queued in the scanner buffer; the reader simply refuses to top it up.
 	if lr.N <= 0 {
 		setTruncated("size_cap")
 	}
@@ -760,21 +592,13 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 
 // sanitizeWireText drops bidi / C1 / LS-PS runes (the IsLogInjectionRune
 // class) AND C0 control bytes (except \t / \n / \r) before transcript turn
-// fields reach the JSON wire. Preserves \t / \n / \r so multi-line
-// tool_result rendering survives — calling SanitizeForLog directly would
-// map those to '_' and destroy formatting in the dashboard's <pre> sink.
+// fields reach the JSON wire, then redacts secrets. Preserves \t / \n / \r so
+// multi-line tool_result rendering survives — SanitizeForLog would map those
+// to '_' and destroy formatting in the dashboard's <pre> sink.
 //
-// R243-SEC-5: HandleRunDetail runs Prompt/WorkDir through the strict
-// SanitizeForLog before wire-encode; the JSONL transcript path skipped
-// sanitisation entirely, so a JSONL file with bidi overrides could reach
-// the dashboard verbatim and corrupt visual ordering despite esc()-then-
-// <pre>. Defence-in-depth.
-//
-// R20260527122801-SEC-7 (#1331): IsLogInjectionRune only covers C1
-// (0x80..9F) + bidi + LS/PS — 0x1B ESC (and other C0 control bytes) used
-// to flow through verbatim. Operators copy-pasting transcript JSON into a
-// terminal viewer would then trigger ANSI escape interpretation. Drop all
-// r < 0x20 except the three whitespace chars we explicitly preserve.
+// Defence-in-depth: bidi overrides in a JSONL file could otherwise corrupt
+// visual ordering despite esc()-then-<pre>, and 0x1B ESC would trigger ANSI
+// interpretation when operators paste transcript JSON into a terminal (#1331).
 func sanitizeWireText(s string) string {
 	if s == "" {
 		return s
@@ -812,15 +636,10 @@ func sanitizeWireText(s string) string {
 }
 
 // flattenJSONLEvent decodes one JSONL line into 0..N transcript turns.
-// Returns (turns, token deltas, tool-call delta, parsedAny).
-//
-// parsedAny is true when the event maps to at least one recognised turn
-// shape — used by the caller to decide whether to set fallback:"raw".
-//
-// R242-CR-13: previously this function held three event-type cases inline
-// at 4-5 levels of nesting (~120 lines). Per-type extraction below
-// flattens the dispatch to a single switch and lets each helper own
-// just its own (decode → walk → emit) sub-flow.
+// Returns (turns, token deltas, tool-call delta, parsedAny); parsedAny is
+// true when the event maps to at least one recognised turn shape — the
+// caller uses it to decide whether to set fallback:"raw". Per-type helpers
+// own their own (decode → walk → emit) sub-flow.
 func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	switch ev.Type {
 	case "user":
@@ -833,20 +652,11 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 	return nil, transcriptTokens{}, 0, false
 }
 
-// flattenUserEvent emits a "user" text turn (when content carries one)
-// plus zero or more "tool_result" turns (when the user message wraps
-// a content-block array). content can be a plain string OR a
-// content-block array (the latter is how Claude carries tool_result
-// payloads back into the conversation).
-//
-// R241-PERF-7: previously this allocated `make([]transcriptTurn, 0, 2)`
-// per JSONL line — on a 500-line cron transcript that's 500 grow-prone
-// 2-cap headers even when the line decoded into zero or one turns. We
-// now mirror flattenAssistantEvent's two-pass shape: count tool_result
-// blocks first, pre-size out exactly (text? + N×tool_result), and skip
-// the allocation entirely on lines that contribute no turns. Negligible
-// CPU cost (one extra pass over `blocks`, which is already in-cache from
-// decodeStringOrBlocks) for an O(N) → O(parsed-rows) allocation drop.
+// flattenUserEvent emits a "user" text turn (when content carries one) plus
+// zero or more "tool_result" turns (when the user message wraps a
+// content-block array — how Claude carries tool_result payloads back into the
+// conversation). Two-pass: count tool_result blocks first, pre-size out
+// exactly, and skip the allocation on lines that contribute no turns.
 func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	tok := transcriptTokens{}
 
@@ -910,21 +720,11 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 }
 
 // flattenAssistantEvent emits a single aggregated "assistant" text turn
-// (multiple text blocks in one message are merged with blank-line
-// separators because they split awkwardly when shown as separate
-// timeline entries) followed by per-tool_use turns. Returns the token
-// usage delta from msg.Usage so callers can advance the running total.
-//
-// R247-PERF-2 / R247-PERF-18: the previous implementation emitted tool_use
-// turns first (with provisional indices nextIdx + len(out)), then prepended
-// the assistant turn via `append([]turn{a}, out...)` and re-indexed every
-// element. Each call therefore allocated a fresh backing slice and reindexed
-// O(N) — on a 500-row transcript the prepend dominated the parse cost. We
-// now build textBuf in a first pass over `blocks`, emit the assistant turn
-// first (when present) at the deterministic nextIdx, then emit tool_use
-// turns at sequential indices in a second pass over the same blocks. No
-// prepend, no reindex; allocations stay at O(1) for the slice header
-// regardless of textBuf vs tool_use mix.
+// (multiple text blocks in one message are merged with blank-line separators
+// because they split awkwardly as separate timeline entries) followed by
+// per-tool_use turns. Returns the token usage delta from msg.Usage. Two-pass:
+// aggregate text + count tool_use blocks, then emit at final indices — no
+// prepend, no reindex, O(1) slice allocation.
 func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	tok := transcriptTokens{}
 	toolCalls := 0
@@ -938,9 +738,8 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		tok.Input = msg.Usage.InputTokens
 		tok.Output = msg.Usage.OutputTokens
 	}
-	// First pass: aggregate text blocks + count tool_use blocks so we can
-	// pre-size the output slice exactly. Avoids the per-row `make([]T,0,2)`
-	// + grow churn flagged by R247-PERF-18 across 500-row transcripts.
+	// First pass: aggregate text blocks + count tool_use blocks so the output
+	// slice can be pre-sized exactly.
 	var textBuf strings.Builder
 	toolUseCount := 0
 	for _, b := range blocks {
@@ -983,31 +782,22 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		}
 		toolCalls++
 		summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
-		// R234-SEC-8: cap the raw Input JSON we surface. summary is built
-		// from a probe-Unmarshal of the original bytes (still bounded by
-		// the per-line maxTranscriptLineBytes), so the dashboard timeline
-		// keeps its one-line label even when Input itself is replaced
-		// with the [truncated] placeholder.
+		// Cap the raw Input JSON we surface; summary was built from the original
+		// bytes so the one-line label survives even when Input is replaced with
+		// the [truncated] placeholder.
 		input := b.Input
 		if len(input) > maxToolInputBytes {
 			input = truncatedToolInputPlaceholder
 		}
-		// R243-CR-P2-4 / #822: json.RawMessage's `omitempty` only checks
-		// `len(value) == 0`, so a literal `null` (4 bytes) survives as a
-		// `"input": null` field on the wire — confusing the dashboard's
-		// "card has tool input?" check (truthy on the field's *presence*
-		// rather than its value) and wasting bytes on a value the field
-		// is supposed to omit by zero-value semantics. Normalise the JSON
-		// `null` literal to a zero-length RawMessage so omitempty trips
-		// correctly. Whitespace-only variants (`null`, `null\n`, etc.)
-		// don't appear in CLI output — RFC 8259 forbids interior
-		// whitespace in JSON literals — but bytes.TrimSpace + compare
-		// would handle a future formatter blip with negligible cost.
+		// json.RawMessage's `omitempty` only checks len==0, so a literal `null`
+		// would survive as `"input": null` and confuse the dashboard's
+		// "has tool input?" presence check. Normalise to a zero-length
+		// RawMessage so omitempty trips (#822).
 		if isJSONNull(input) {
 			input = nil
 		}
-		// R20260607-SEC-8 (#1914): redact secrets in the raw Input JSON so
-		// credentials a cron job read into a tool call don't leak verbatim.
+		// Redact secrets so credentials a cron job read into a tool call don't
+		// leak verbatim (#1914).
 		input = redactToolInput(input)
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
@@ -1052,15 +842,10 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 	return out, tok, 0, true
 }
 
-// toolInputProbe is the partial schema used by summariseToolInput to pick
-// the most useful one-liner label for a tool_use card header. Only the
-// six fields below are surfaced today (Bash → command, Read/Write/Edit →
-// file_path, etc.); decoding into this typed struct avoids the reflection
-// + map allocation cost of `map[string]any` on every transcript line.
-// Unrecognised keys are silently skipped by encoding/json, so a future CLI
-// adding new tool-input fields will not break parsing.
-//
-// R233-PERF-5 (#1010): replaces a per-line `var obj map[string]any` decode.
+// toolInputProbe is the partial schema summariseToolInput decodes into to
+// pick a one-liner label (Bash → command, Read/Write/Edit → file_path, …).
+// A typed struct avoids the reflection + map cost of `map[string]any` per
+// transcript line; unrecognised keys are skipped by encoding/json (#1010).
 type toolInputProbe struct {
 	Command  string `json:"command,omitempty"`
 	FilePath string `json:"file_path,omitempty"`
@@ -1070,38 +855,26 @@ type toolInputProbe struct {
 	Query    string `json:"query,omitempty"`
 }
 
-// summariseToolInput builds a one-line label for the tool_use card
-// header. Best-effort: Bash → command, Read/Write/Edit → file_path,
-// otherwise fall back to a JSON-trimmed dump of the input.
-//
-// R242-SEC-13 (#645): cap the JSON input handed to encoding/json. The
-// per-line bufio.Scanner buffer (maxTranscriptLineBytes = 256 KB) already
-// bounds a single transcript line, but a maximally-sized tool_use.Input
-// can still drive json.Unmarshal through a deeply-nested 256 KB blob just
-// to populate six string fields and a fallback that ends up truncated
-// to 200 bytes anyway. Refuse anything beyond summariseInputCap up front
-// so the parser never sees the amplifier shape — the probe only needs a
-// few KB to find a label, so the cap sits well below the wire payload
-// limit (maxToolInputBytes = 64 KB) to minimise unmarshal fan-out.
+// summariseToolInput builds a one-line label for the tool_use card header.
+// Best-effort: Bash → command, Read/Write/Edit → file_path, otherwise a
+// JSON-trimmed dump of the input. Inputs above summariseInputCap are refused
+// before json.Unmarshal so a deeply-nested blob cannot drive the parser just
+// to populate a 200-byte label (#645).
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
 	}
 	if len(input) > summariseInputCap {
-		// Treat oversize input as opaque: the caller will already have
-		// rendered the [truncated] placeholder for the wire payload,
-		// and a one-line label built from a 64 KB+ blob is not useful
-		// anyway. Returning empty drops the header summary line; the
-		// dashboard already handles missing summaries.
+		// Oversize input is opaque: the wire payload already carries the
+		// [truncated] placeholder and the dashboard handles a missing summary.
 		return ""
 	}
 	var probe toolInputProbe
 	if err := json.Unmarshal(input, &probe); err != nil {
 		return ""
 	}
-	// Iterate in priority order (matches the previous map-based code's
-	// `prefer` slice) so callers see deterministic output when a tool
-	// happens to populate multiple fields.
+	// Priority order so callers see deterministic output when a tool
+	// populates multiple fields.
 	candidates := [...]string{
 		probe.Command, probe.FilePath, probe.Path,
 		probe.URL, probe.Pattern, probe.Query,
@@ -1111,17 +884,15 @@ func summariseToolInput(name string, input json.RawMessage) string {
 			return textutil.RedactSecrets(osutil.SanitizeForLog(s, 200))
 		}
 	}
-	// Fallback: reuse the original input bytes (json.Unmarshal does not
-	// mutate its source). The probe struct only validated structure, no
-	// need to Marshal again. R244-GO-P2-2.
+	// Fallback: reuse the original bytes (json.Unmarshal does not mutate its
+	// source), no need to Marshal again.
 	return textutil.RedactSecrets(osutil.SanitizeForLog(string(input), 200))
 }
 
 // isJSONNull reports whether b is the JSON `null` literal (with optional
 // surrounding ASCII whitespace per RFC 8259). Used to suppress an upstream
-// `"input": null` from the tool_use turn so the wire response matches the
-// `omitempty` contract callers reasonably expect from a RawMessage field.
-// R243-CR-P2-4 / #822.
+// `"input": null` so the wire response honours the RawMessage `omitempty`
+// contract (#822).
 func isJSONNull(b json.RawMessage) bool {
 	// RFC 8259 permits insignificant whitespace (sp/tab/lf/cr) outside
 	// structural tokens; trim conservatively before the byte compare.
@@ -1147,20 +918,15 @@ compare:
 }
 
 // redactToolInput strips well-known secret tokens (API keys, passwords, …)
-// out of the raw tool_use.Input JSON before it reaches the wire.
+// out of the raw tool_use.Input JSON before it reaches the wire; the Summary
+// is already redacted via sanitizeWireText but the full Input surfaced
+// verbatim (#1914).
 //
-// R20260607-SEC-8 (#1914): summariseToolInput's one-line Summary already runs
-// through sanitizeWireText (→ RedactSecrets), but the full Input RawMessage
-// surfaced verbatim — a cron job that read a file containing credentials would
-// echo them back in the transcript response's `input` field.
-//
-// The redaction MUST leave valid JSON behind: an `input` that json.Encoder
-// refuses to emit fails the whole transcript response (WriteJSON → 500, and
-// before that fix a silent empty 200). RedactSecrets' `KEY=value` masking
-// can swallow a closing `"}` when the assignment sits at the end of a JSON
-// string, so the substitution goes through redactRawJSON which falls back to
-// per-string-value redaction whenever the text-level result is no longer
-// well-formed. Clean input is returned unchanged (aliased).
+// The redaction MUST leave valid JSON behind: an `input` json.Encoder refuses
+// to emit fails the whole response (WriteJSON → 500). RedactSecrets' `KEY=value`
+// masking can swallow a closing `"}` inside a JSON string, so redactRawJSON
+// falls back to per-string-value redaction whenever the text-level result is
+// malformed. Clean input is returned unchanged (aliased).
 func redactToolInput(in json.RawMessage) json.RawMessage {
 	if len(in) == 0 {
 		return in
@@ -1173,25 +939,15 @@ func redactToolInput(in json.RawMessage) json.RawMessage {
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
-// Returns 0 when the input is empty or unparseable so callers can use
-// it as a fall-through "skip filter" sentinel.
+// Returns 0 when the input is empty or unparseable so callers can use it as a
+// "skip filter" sentinel. time.RFC3339Nano is a strict superset of RFC3339
+// (the fractional part is optional), so no second layout is needed.
 //
-// time.RFC3339Nano is a strict superset of time.RFC3339 — any timestamp
-// the latter accepts is also accepted by the former — so the previous
-// RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
-// (Go time.Parse treats .999... fragment as optional, so RFC3339Nano layout accepts both fractional and non-fractional inputs.)
-//
-// R234-PERF-10 / #1012: time.Parse(time.RFC3339Nano, …) costs ~300ns/line
-// because the layout-driven parser walks a generic state machine over the
-// reference layout string. The Claude CLI exclusively emits UTC timestamps
-// in the form "YYYY-MM-DDTHH:MM:SS[.fff…]Z" — a single rigid shape we can
-// peel apart with byte-level integer parsing in ~30ns, an order-of-magnitude
-// speedup that compounds across 500-line transcripts (250 line/s × 270ns
-// saved ≈ 70µs/s reclaimed under bulk dashboard polling). Fast-path is
-// guarded on the canonical shape; anything else (offsets like +08:00,
-// truncated fragments, exotic layouts) falls back to time.Parse, so
-// correctness is bit-for-bit identical to the previous behaviour for any
-// input that isn't a perfectly-canonical UTC timestamp.
+// The Claude CLI exclusively emits "YYYY-MM-DDTHH:MM:SS[.fff…]Z", which the
+// byte-level fast path parses in ~30ns vs ~300ns for time.Parse — compounding
+// across 500-line transcripts under bulk polling (#1012). Anything
+// non-canonical (offsets, exotic layouts) falls back to time.Parse, so
+// results are bit-identical to the slow path.
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0
@@ -1206,23 +962,16 @@ func parseISO8601MS(s string) int64 {
 	return t.UnixMilli()
 }
 
-// parseISO8601MSFast hand-parses the canonical UTC RFC 3339 shape that
-// the Claude CLI emits and returns (unixMillis, true) on success. The
-// canonical shape is:
+// parseISO8601MSFast hand-parses the canonical UTC RFC 3339 shape the Claude
+// CLI emits and returns (unixMillis, true) on success:
 //
 //	YYYY-MM-DDTHH:MM:SS(.fffffffff)?Z
 //
-// Any deviation (timezone offset other than 'Z', missing field, non-digit
-// where digit expected, lowercase 't'/'z', etc.) returns (0, false) and
-// the caller falls back to time.Parse(time.RFC3339Nano). We range-check
-// each field (month/day/hour/minute/second) before handing them to
-// time.Date, because time.Date *normalises* out-of-range values
-// (e.g. month 13 → Jan of next year) whereas time.Parse *rejects* them
-// ("month out of range"). Accepting them in the fast path would diverge
-// from the slow path; instead we return (0, false) so the caller falls
-// back to time.Parse, which yields its 0 sentinel for the same input.
-// Note: time.Parse rejects second 60 (it does not honour leap seconds for
-// RFC3339), so we likewise cap seconds at 59 to stay consistent.
+// Any deviation (offset other than 'Z', missing field, non-digit, lowercase
+// 't'/'z') returns (0, false) and the caller falls back to time.Parse. Each
+// field is range-checked before time.Date because time.Date *normalises*
+// out-of-range values (month 13 → next January) whereas time.Parse rejects
+// them; seconds cap at 59 since time.Parse does not honour leap seconds.
 func parseISO8601MSFast(s string) (int64, bool) {
 	// Minimum canonical length is "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes.
 	if len(s) < 20 {
@@ -1257,10 +1006,8 @@ func parseISO8601MSFast(s string) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	// Range-check each field so we reject the same out-of-range inputs
-	// time.Parse rejects (rather than silently normalising via time.Date).
-	// day is validated per-month (leap-year aware) so e.g. Feb 30 / Apr 31
-	// are declined to match time.Parse rather than rolling into next month.
+	// Range-check so we reject what time.Parse rejects instead of letting
+	// time.Date normalise; day is validated per-month (leap-year aware).
 	if month < 1 || month > 12 ||
 		day < 1 || day > daysInMonth(year, month) ||
 		hour > 23 ||
@@ -1332,11 +1079,9 @@ func daysInMonth(year, month int) int {
 	}
 }
 
-// parseDigits parses a fixed-length all-ASCII-digits string as a non-
-// negative int. Returns (n, true) on success, (0, false) on any non-digit.
-// Unrolled for the common short widths (≤4 digits) we care about; longer
-// inputs fall through to a tight loop. The loop variant still beats
-// strconv.Atoi by avoiding the leading-sign / leading-zero dance.
+// parseDigits parses a fixed-length all-ASCII-digits string as a non-negative
+// int. Returns (n, true) on success, (0, false) on any non-digit. Beats
+// strconv.Atoi by skipping the leading-sign / leading-zero handling.
 func parseDigits(s string) (int, bool) {
 	n := 0
 	for i := 0; i < len(s); i++ {
@@ -1349,16 +1094,11 @@ func parseDigits(s string) (int, bool) {
 	return n, true
 }
 
-// truncateRunes caps a string to maxBytes by rune boundary, appending
-// an ellipsis indicator (3 bytes "…") when truncation actually happened.
-// We trim by rune count rather than byte count so multi-byte UTF-8 sequences
-// don't get split mid-codepoint (which would render as U+FFFD in the browser).
-//
-// R235-SEC-4: the previous implementation tested `i >= maxBytes-3` against the
-// rune's *start* offset and then cut at `cum` (the previous rune's start),
-// which could leave the result one rune over the cap when that earlier rune
-// was multi-byte. Fixed by walking until adding the next rune would push the
-// final byte length (after the "…" suffix) past maxBytes.
+// truncateRunes caps a string to maxBytes by rune boundary, appending "…"
+// (3 bytes) when truncation happened. Cutting by rune rather than byte keeps
+// multi-byte UTF-8 sequences intact (a split would render as U+FFFD). The
+// walk stops when adding the next rune would push the final length (after
+// the "…" suffix) past maxBytes, so the result is never over the cap.
 func truncateRunes(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s

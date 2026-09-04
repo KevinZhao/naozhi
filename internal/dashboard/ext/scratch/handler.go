@@ -19,15 +19,10 @@ import (
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
-// Handler serves the /api/scratch/* endpoints used by the dashboard
-// "aside" drawer: a preview-pane chat seeded with quoted context from the
-// main transcript, kept out of the sidebar, and torn down on close or TTL.
-//
-// router is the consumer-side ScratchRouter view of *session.Router (see
-// consumer.go). The handler used to reach the router via h.hub.router.*
-// transits — R215-ARCH-P1-4 / #566 closes that Phase-2.5 cleanup item by
-// declaring the dependency on this struct directly. Wiring (dashboard.go)
-// passes hub.router; tests can inject a stub satisfying ScratchRouter.
+// Handler serves the /api/scratch/* endpoints behind the dashboard "aside"
+// drawer: a preview-pane chat seeded with quoted context, kept out of the
+// sidebar and torn down on close or TTL. router is the consumer-side
+// ScratchRouter view of *session.Router; tests inject a stub (#566).
 type Handler struct {
 	broadcaster Broadcaster
 	router      ScratchRouter
@@ -57,12 +52,9 @@ type openResponse struct {
 	SourceMessageID  string `json:"source_message_id,omitempty"`
 }
 
-// HandleOpen creates a scratch session seeded with the quote.
-//
-// Auth is inherited from the router mux (all /api/scratch/* live behind
-// requireAuth). A per-IP limiter throttles creation so a script on an
-// authenticated session cannot exhaust the scratch pool or the CLI process
-// budget via a tight loop.
+// HandleOpen creates a scratch session seeded with the quote. Auth is
+// inherited from the router mux; a per-IP limiter stops an authenticated
+// script from exhausting the scratch pool or CLI process budget.
 func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if h.openLimit != nil && !h.openLimit.AllowRequest(r) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "open rate limit exceeded"})
@@ -79,41 +71,32 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is required"})
 		return
 	}
-	// R177-SEC-11: the pool sanitizer collapses empty quotes but doesn't
-	// reject bidi/C1 runes in a non-empty body. Quote becomes a synthetic
-	// assistant turn in the CLI history and propagates into every log attr
-	// that echoes it; scrub at the trust boundary to match the last_prompt
-	// / cron_prompt policy.
+	// The pool sanitizer collapses empty quotes but does not reject bidi/C1
+	// runes. Quote becomes a synthetic assistant turn and is echoed into log
+	// attrs; scrub at the trust boundary like last_prompt / cron_prompt.
 	if !utf8.ValidString(req.Quote) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
 		return
 	}
-	// R181-GO-P2-3: rune name `ch` instead of `r` to avoid shadowing
-	// the outer *http.Request. A future edit that reads r.Header inside
-	// this loop would silently typecheck against the rune.
 	for _, ch := range req.Quote {
 		if osutil.IsLogInjectionRune(ch) {
 			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
 			return
 		}
 	}
-	// Validate the source key at the trust boundary before it is indexed into
-	// logs or fed to SessionFor — mirrors the IM ValidateSessionKey gate.
+	// Validate source key at the trust boundary (mirrors the IM ValidateSessionKey gate).
 	if err := session.ValidateSessionKey(req.SourceKey); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid source_key"})
 		return
 	}
-	// Source session must exist. Without this the pool happily spawns a
-	// scratch whose agent/workspace inheritance is based on lookups that
-	// silently miss; the user sees a confused "what was I quoting?" aside.
+	// Source must exist, else inheritance lookups silently miss.
 	src := h.router.SessionFor(req.SourceKey)
 	if src == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "source session not found"})
 		return
 	}
 
-	// Scratches must not be opened against another scratch (stacking asides
-	// would quickly saturate the pool and serves no product need).
+	// No scratch-on-scratch: stacking asides would saturate the pool.
 	if sessionkey.IsScratchKey(req.SourceKey) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "cannot open scratch from another scratch"})
 		return
@@ -129,16 +112,12 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		base = h.agents[agentID]
 	}
 	base = inheritSourceTuning(base, snap)
-	// Inherit per-session backend override the source was using (dashboard
-	// "pick backend" flow). snap.Backend is empty when the source is using
-	// the router default; leaving BaseOpts.Backend empty lets the router
-	// fall back to the same default.
+	// Inherit the source's per-session backend override; empty means router
+	// default, and leaving BaseOpts.Backend empty preserves that.
 	backend := snap.Backend
 	workspace := snap.Workspace
 
-	// Resolve the turn window around the quoted message. ContextTurns is
-	// the requested count of entries on EACH side; the renderer later
-	// enforces the byte budget and will drop whatever does not fit.
+	// ContextTurns is per side; the renderer enforces the byte budget later.
 	turns := req.ContextTurns
 	if turns <= 0 {
 		turns = session.DefaultScratchContextTurns
@@ -146,10 +125,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if turns > session.MaxScratchContextTurns {
 		turns = session.MaxScratchContextTurns
 	}
-	// When the client cannot supply a message timestamp we still do a "best
-	// effort" fill: take the last N entries as the before-window and leave
-	// after empty. This matches the old behaviour of earlier dashboards
-	// that never sent a time hint.
+	// No timestamp: best effort, last N entries as before-window, after empty.
 	before, after := collectScratchContext(r.Context(), src, req.SourceMessageTime, turns)
 
 	sc, err := h.pool.Open(session.OpenOptions{
@@ -197,26 +173,16 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// inheritSourceTuning layers the source session's spawn-time identity onto
-// the agent-registry defaults so the aside runs on the same access profile,
-// model and effort tier as the conversation it quotes (#2433; the aside
-// contract is "inherit the source's agent settings", but only Agent /
-// Backend / Workspace were carried before).
+// inheritSourceTuning layers the source session's spawn-time identity
+// (access profile, model, effort) onto the agent-registry defaults so the
+// aside runs with the same settings as the conversation it quotes (#2433).
 //
-// Snapshot values are CLI-*reported*, not operator input: claude's init
-// frame can echo a context-window suffix ("…-fable-5-1[1m]") that the
-// router's per-request model gate rejects, which would turn every later
-// send on the scratch into ErrInvalidModel. Model is therefore pre-flighted
-// with session.ValidateModelID — the SAME gate GetOrCreate applies (so
-// Bedrock ARNs / inference-profile IDs with ':' '/' pass, "[1m]" does not) —
-// and Effort with the closed tuningspec tier set that BuildArgs relies on.
-// A value that fails is skipped (logged at Info so operators can see why an
-// aside did not follow its source) and the scratch keeps the registry
-// default — exactly today's behaviour. AccessProfile needs no gate here: it
-// is the ID the router itself resolved at spawn, and an unknown ID degrades
-// to the global default inside resolveSpawnParamsLocked.
-//
-// Returns a new AgentOpts; base is not mutated.
+// Snapshot values are CLI-reported, not operator input: the init frame can
+// echo a context-window suffix ("…[1m]") the router's model gate rejects, so
+// Model is pre-flighted with session.ValidateModelID (the same gate
+// GetOrCreate applies) and Effort with tuningspec. A failing value is
+// skipped at Info and the registry default kept. AccessProfile needs no
+// gate: an unknown ID degrades to the global default at spawn.
 func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) session.AgentOpts {
 	out := base
 	if snap.AccessProfile != "" {
@@ -243,39 +209,23 @@ func inheritSourceTuning(base session.AgentOpts, snap session.SessionSnapshot) s
 	return out
 }
 
-// collectScratchContext pulls up to `turns` eligible event entries from each
-// side of the quoted message. When sourceMessageTime is 0 we fall back to
-// the tail of the log on the before-side (no after context is available).
-//
-// The event-log accessors return a chronological-order slice; ordering is
-// preserved for the pool's renderer which relies on newest-first truncation
-// on the before-side and oldest-first on the after-side.
-//
-// The before-window uses EventEntriesBeforeCtx so a quoted message older than
-// the in-memory ring buffer (dead session, ring rotated past) still gets
-// historical context via the disk-tier history.Source instead of returning
-// empty (R229-GO-8).
+// collectScratchContext pulls up to `turns` eligible entries from each side
+// of the quoted message (tail of the log when sourceMessageTime == 0). Slices
+// stay chronological for the pool's renderer; EventEntriesBeforeCtx reaches
+// the disk-tier history when the message is older than the in-memory ring.
 func collectScratchContext(ctx context.Context, sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []clievent.EventEntry) {
 	if sess == nil || turns <= 0 {
 		return nil, nil
 	}
-	// Ask for 3x the requested count so the pool's filter (which drops
-	// tool_use / thinking / todo / init / system events) still has a decent
-	// chance of finding `turns` eligible entries. The pool trims again if
-	// too many survive filtering — slight over-fetch is cheaper than under.
+	// Over-fetch 3x so the pool's filter (drops tool_use / thinking / todo /
+	// init / system) still finds `turns` eligible entries; the pool trims.
 	fetch := turns * 3
 	if sourceMessageTime > 0 {
 		before = sess.EventEntriesBeforeCtx(ctx, sourceMessageTime, fetch)
-		// cli.SinceInclusive yields entries with Time >= sourceMessageTime;
-		// the loop then skips the exact-match entry so the quoted message
-		// itself is not echoed into the context block (the quote already
-		// carries that content).
+		// SinceInclusive yields Time >= sourceMessageTime; the loop skips the
+		// exact match so the quoted message is not echoed into the context.
 		raw := sess.EventEntriesSince(cli.SinceInclusive(sourceMessageTime))
-		// Cap the pre-allocation at `fetch` so a long-running session
-		// that has emitted many events after the quote cannot force an
-		// arbitrarily large slice for what is ultimately a fetch-bounded
-		// result. Worst case len(raw) >> fetch — paying len(raw) caps was
-		// wasting up to several KB per open.
+		// Cap pre-allocation at `fetch`; the result is fetch-bounded anyway.
 		afterCap := len(raw)
 		if afterCap > fetch {
 			afterCap = fetch
@@ -291,8 +241,7 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 			}
 		}
 	} else {
-		// No time hint: the best we can do is give the pool a tail window.
-		// EventLastN returns chronological order already.
+		// No time hint: tail window only (EventLastN is chronological).
 		before = sess.EventLastN(fetch)
 	}
 	return before, after
@@ -319,17 +268,12 @@ type promoteResponse struct {
 }
 
 // HandlePromote converts a live scratch into a regular session: the running
-// CLI process gets adopted under a new session key (4-segment, visible in
-// the sidebar) and the scratch metadata is detached from the pool without
-// killing the process. The UI replaces the drawer with the new session.
+// CLI process is adopted under a new 4-segment key (visible in the sidebar)
+// and the scratch metadata is detached from the pool without killing it.
 //
-// Ordering rationale (H1): Detach first, THEN RenameSession. Between a bare
-// Get and the later Detach, the pool sweeper could independently fire and
-// call router.Remove(sc.Key) on the process we're about to promote —
-// killing the CLI underneath a user who just clicked "save". Detaching
-// first removes the scratch from the sweep set atomically. If the rename
-// then fails (collision, validation) we still own the process on sc.Key
-// and must clean it up manually via router.Remove to avoid an orphan.
+// Ordering invariant: Detach first, THEN RenameSession. Otherwise the pool
+// sweeper could router.Remove(sc.Key) the process mid-promote. Once detached
+// the process is ours: on rename failure we must router.Remove it ourselves.
 func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !isValidScratchID(id) {
@@ -337,23 +281,17 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Detach first so the sweeper's (pool mu → router mu) path cannot race
-	// our (router mu via Rename) path. After this point the scratch is
-	// entirely our responsibility until RenameSession or Remove lands.
+	// our Rename path; from here the scratch is our responsibility.
 	sc, err := h.pool.Detach(id)
 	if err != nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "scratch not found"})
 		return
 	}
-	// Build the promoted key from the source session key so the UX ties back
-	// to the originating chat. Shape:
-	//   "{platform}:{chatType}:{chatID}:aside-{agentID}-{shortID}"
-	// — still 4 segments, still passes ValidateSessionKey. The agent suffix
-	// lets the sidebar show which agent flavour the aside inherited.
+	// Promoted key: "{platform}:{chatType}:{chatID}:aside-{agentID}-{shortID}"
+	// — still 4 segments, still passes ValidateSessionKey.
 	srcParts := strings.SplitN(sc.SourceKey, ":", 4)
 	if len(srcParts) != 4 {
-		// Shouldn't happen: open-time ValidateSessionKey + the 4-split guard
-		// in HandleOpen already reject malformed sources. Treat as a
-		// defensive programming error, kill the orphan, and report.
+		// Unreachable after open-time ValidateSessionKey; kill the orphan and report.
 		h.router.Remove(sc.Key)
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
 		return
@@ -372,10 +310,7 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 	newKey := session.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
 
 	if !h.router.RenameSession(sc.Key, newKey) {
-		// Rename failed (collision, invalid new key, or the scratch's
-		// session entry vanished between Detach and Rename — the last
-		// case shouldn't happen post-Detach but handling it keeps us
-		// orphan-free under any future refactor that changes visibility).
+		// Collision, invalid key, or entry vanished post-Detach: stay orphan-free.
 		h.router.Remove(sc.Key)
 		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": "scratch unavailable"})
 		return
@@ -385,9 +320,8 @@ func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, promoteResponse{Key: newKey})
 }
 
-// isValidScratchID checks that id is a 32-char lowercase hex string —
-// the shape produced by newScratchID. A tight validator here keeps
-// operator-controllable path segments out of log attrs / router lookups.
+// isValidScratchID checks for the 32-char lowercase hex shape newScratchID
+// produces, keeping operator-controllable segments out of logs / lookups.
 func isValidScratchID(id string) bool {
 	if len(id) != 32 {
 		return false
@@ -401,19 +335,9 @@ func isValidScratchID(id string) bool {
 	return true
 }
 
-// shortPromoteSuffix returns a 16-char lowercase hex string for use as the
-// "aside-<x>" tail on promoted session keys. R247-SEC-9 [BREAKING-LOCAL]:
-// raised from 4 → 8 random bytes (32 → 64 bits of entropy) so the suffix
-// matches the entropy budget of anonCookieName / upload-id (16 bytes / 128
-// bits). The original 32-bit width's birthday-bound (~2^16) was already
-// "fine within a single chat's namespace" but inconsistent with the rest of
-// the codebase's short-id generation; aligning here removes a per-call-site
-// audit burden and makes future security review uniform.
-//
-// BREAKING-LOCAL footprint: the returned string changes length 8 → 16. The
-// only caller is internal (RenameSession ➝ promoteScratch) so no external
-// API or persisted format is affected; the suffix is generated and stored
-// in-process per session and never exposed in stable URLs or storage keys.
+// shortPromoteSuffix returns a 16-char lowercase hex string (64 bits of
+// entropy, matching other short-id generators) for the "aside-<x>" tail of
+// promoted session keys; in-process only, never a stable URL or storage key.
 func shortPromoteSuffix() (string, error) {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -422,9 +346,8 @@ func shortPromoteSuffix() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// Deps bundles all wiring for New. Phase 3c (server-split-phase4-design.md
-// §6.5 Plan B): exported ctor so internal/server can construct without
-// needing access to unexported fields.
+// Deps bundles all wiring for New so internal/server can construct a Handler
+// without access to unexported fields.
 type Deps struct {
 	Broadcaster Broadcaster
 	Router      ScratchRouter
@@ -444,12 +367,10 @@ func New(d Deps) *Handler {
 	}
 }
 
-// SetOpenLimitForTest is a test-only setter that lets server-package
-// integration tests bypass the open-rate gate. NOT for production use —
-// the field is otherwise immutable after New().
+// SetOpenLimitForTest lets server-package integration tests bypass the
+// open-rate gate. NOT for production use.
 func (h *Handler) SetOpenLimitForTest(l IPLimiter) { h.openLimit = l }
 
-// RouterIsWired reports whether the scratch handler's router field has
-// been wired. Phase 3c — exposed for the server-package wiring-regression
-// test that pins registerDashboard to install a non-nil ScratchRouter.
+// RouterIsWired reports whether the router field has been wired; used by the
+// server-package wiring-regression test.
 func (h *Handler) RouterIsWired() bool { return h.router != nil }
