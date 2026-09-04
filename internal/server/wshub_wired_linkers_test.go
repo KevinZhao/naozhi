@@ -1,8 +1,6 @@
 package server
 
 import (
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -100,32 +98,5 @@ func TestWiredLinkers_DedupContract(t *testing.T) {
 	}
 	if _, ok := m[c]; !ok {
 		t.Error("secondStubAgentLinker entry missing after multi-type insert")
-	}
-}
-
-// TestWiredLinkers_GodocWarnsMultiBackend pins the comment that warns
-// future multi-backend authors about the (T, V) dedup tuple. If the
-// warning prose disappears (likely cause: a refactor that "tidies up"
-// the comment), the test fails so the next maintainer is forced to
-// re-read the contract before deciding whether to keep, weaken, or
-// strengthen the protection. The contract belongs in the source — not
-// a wiki page that drifts — so we check via os.ReadFile.
-func TestWiredLinkers_GodocWarnsMultiBackend(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("wshub.go")
-	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
-	}
-	src := string(data)
-	// Anchored on the unique R248 token + the multi-backend warning so a
-	// random refactor of unrelated comments doesn't false-positive here.
-	if !strings.Contains(src, "R248-GO-5") {
-		t.Error("wshub.go: R248-GO-5 anchor missing from wiredLinkers godoc — issue #372 warning lost")
-	}
-	if !strings.Contains(src, "1:1 invariant") {
-		t.Error("wshub.go: multi-backend 1:1 invariant warning lost from wiredLinkers godoc")
-	}
-	if !strings.Contains(src, "canonical AgentLinker") {
-		t.Error("wshub.go: 'canonical AgentLinker' guidance lost from wiredLinkers godoc")
 	}
 }

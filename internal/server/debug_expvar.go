@@ -10,65 +10,35 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// goroutinesPublishOnce guards the expvar.Publish("goroutines", ...) call so
-// multiple Server instances in the same process (e.g. test servers) do not
-// trip the stdlib's "Reuse of exported var name" panic. The gauge itself is
-// process-scoped — NumGoroutine() is not per-Server state — so a single
-// registration is semantically correct regardless of how many servers exist.
+// goroutinesPublishOnce guards expvar.Publish("goroutines") so multiple
+// Server instances in one process (tests) do not trip the stdlib "Reuse of
+// exported var name" panic; the gauge is process-scoped anyway.
 var goroutinesPublishOnce sync.Once
 
 // registerExpvar wires stdlib expvar's /debug/vars JSON endpoint onto the
-// server mux, gated identically to pprof:
-//
-//  1. requireAuth (bearer token / signed cookie) — same middleware that
-//     protects /api/*. Prevents anonymous operators / crawlers from reading
-//     process-internal counters.
-//  2. loopback-only remote address check. expvar output includes cmdline +
-//     memstats — combined with naozhi's own counters (session counts, CLI
-//     spawns, auth failures), this is plenty of fingerprinting material
-//     for an attacker mapping an environment. A compromised ALB must not
-//     be able to smuggle this out via forged X-Forwarded-For; trusted-proxy
-//     mode does NOT exempt expvar from the loopback gate.
-//
-// Path is /api/debug/vars (prefix-matches the rest of /api/debug/*). The
-// expvar handler is shaped for the stdlib's own `/debug/vars` registration
-// pattern; both URLs point to the same http.Handler instance.
-//
-// See docs/ops/pprof.md for the equivalent runbook — expvar has no pprof
-// CPU / heap cost but exposes the same sensitivity class.
+// server mux at /api/debug/vars, gated identically to pprof: requireAuth AND
+// loopback-only client check (cmdline + memstats + naozhi counters are
+// fingerprinting material; trusted-proxy mode does NOT exempt expvar).
+// Runbook: docs/ops/pprof.md.
 func (s *Server) registerExpvar() {
-	// R208-OBS1 residual: publish runtime.NumGoroutine() as an expvar.Func
-	// gauge so operators monitoring /api/debug/vars can alert on goroutine-
-	// count spikes as an early signal for leaks (wsclient readPump / wshub
-	// send goroutines / dispatch ownerLoop are the usual suspects — see the
-	// `naozhi_panic_recovered_total` row in docs/ops/pprof.md). NumGoroutine
-	// is cheap (runtime fastpath over allg) so on-demand evaluation at scrape
-	// time is safe; no background sampler needed.
+	// NumGoroutine gauge: early leak signal; cheap enough to evaluate at scrape time.
 	goroutinesPublishOnce.Do(func() {
 		expvar.Publish("goroutines", expvar.Func(func() any { return runtime.NumGoroutine() }))
 	})
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Defense-in-depth (R20260602-SEC-10): with no dashboard token the
-		// loopback gate is the only protection, and a UDS reverse-proxy
-		// misconfig that strips RemoteAddr would expose /debug/vars to any
-		// same-host process. Refuse entirely when there is no token to enforce.
+		// With no dashboard token the loopback gate (which trusts empty UDS
+		// RemoteAddr) would be the only protection; refuse entirely.
 		if s.dashboardToken == "" {
 			slog.Warn("rejecting expvar request: no dashboard token configured",
 				"path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "expvar disabled: set a dashboard token to enable", http.StatusForbidden)
 			return
 		}
-		// R20260604-SEC-5: gate on the real client IP, not r.RemoteAddr —
-		// in trustedProxy mode RemoteAddr is the proxy's loopback IP for every
-		// forwarded request, which would defeat the loopback-only gate. See
-		// isLoopbackClient.
+		// Gate on the real client IP: in trustedProxy mode RemoteAddr is the
+		// proxy's loopback IP for every forwarded request.
 		if !isLoopbackClient(r, s.auth.TrustedProxy) {
-			// R186-SEC-L1: r.URL.Path is URL-decoded from the client-supplied
-			// request line; it can carry bidi / C1 / LS/PS code points that
-			// corrupt downstream terminal log viewers. Sanitize before it
-			// reaches slog attrs. r.RemoteAddr is formatted by net/http from
-			// a net.Listener-provided net.Addr and cannot be attacker-shaped.
+			// r.URL.Path is client-supplied; sanitize before it reaches slog attrs.
 			slog.Warn("rejecting non-loopback expvar request",
 				"remote", r.RemoteAddr, "path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "expvar is loopback-only; SSH to the host and curl 127.0.0.1", http.StatusForbidden)

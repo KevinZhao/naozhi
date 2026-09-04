@@ -17,68 +17,43 @@ import (
 
 const (
 	// wsMaxMessageSize caps the whole JSON frame the reader will accept.
-	// Gorilla WebSocket allocates a buffer up to this size per ReadMessage,
-	// so the worst-case resident memory is connCount × wsMaxMessageSize.
-	// Budget: maxWSSendTextBytes (1 MB text, JSON-escaped worst case ≈
-	// 1 MB × 6 bytes for all-`"`) + 10 × 80-byte file_id hex + small
-	// framing (key, workspace, backend, node, id, type) ≤ ~1.15 MB for
-	// non-pathological payloads. 1.5 MB leaves headroom for JSON escape
-	// expansion without paying 2 MB per connection. R68-GO-H1.
+	// Gorilla allocates a buffer up to this size per ReadMessage, so resident
+	// memory is connCount × wsMaxMessageSize. 1.5 MB covers maxWSSendTextBytes
+	// plus file_ids and framing with headroom for JSON escape expansion.
 	wsMaxMessageSize = 1536 * 1024
-	// wsPreAuthMessageSize tightens the read budget while the connection is
-	// unauthenticated. The only legal message in this state is `auth` whose
-	// Token field is bounded by the dashboard token max (~256 bytes); 512
-	// gives plenty of slack for the JSON framing and an "interrupt" form
-	// that some old clients still send pre-auth (silently dropped, but
-	// enforcement happens after Unmarshal). Cap is lifted to wsMaxMessageSize
-	// once auth succeeds. Reduces pre-auth memory amplification: a flood of
-	// upgraded-but-unauth connections each parking a 1.5 MB read buffer can
-	// pin ~750 MB at the 500-conn cap; with this gate the pre-auth budget
-	// drops to ~256 KB. R229-SEC-11.
+	// wsPreAuthMessageSize tightens the read budget while unauthenticated: the
+	// only legal message then is `auth` (token ≤ ~256 bytes). Lifted to
+	// wsMaxMessageSize once auth succeeds; otherwise a flood of unauth
+	// connections could pin ~750 MB of 1.5 MB read buffers at the 500-conn cap.
 	wsPreAuthMessageSize = 512
 	wsWriteWait          = 10 * time.Second
 	wsPongWait           = 60 * time.Second
 	wsPingPeriod         = (wsPongWait * 9) / 10
 	wsAuthTimeout        = 5 * time.Second
 
-	// maxWSSendTextBytes bounds a single "send" msg.Text payload. See
-	// handleSend for the rationale; summary: wsMaxMessageSize bounds the
-	// JSON frame but not the individual text field, and dispatch-queue
-	// coalescing can multiply N queued entries into a single CLI stdin
-	// write. 1 MB matches the ~1M-token context window of modern models
-	// (~4 bytes/token UTF-8 lower bound, so 1 MB ≈ 250k tokens of English
-	// or ~330k CJK characters — comfortably under the model budget while
-	// still leaving CLI-stdin headroom with the coalesce/MaxDepth caps.
-	// R59-SEC-H1.
+	// maxWSSendTextBytes bounds a single "send" msg.Text payload (see
+	// handleSend: the frame cap does not bound the field, and coalescing
+	// multiplies queued entries into one CLI stdin write). 1 MB ≈ 250k English
+	// tokens / ~330k CJK chars — under the model budget with stdin headroom.
 	maxWSSendTextBytes = 1024 * 1024
 
 	// subGenRetentionNanos is how long a wsClient.subGen[key] entry must be
-	// kept alive past its last unsubscribe before it can be reclaimed. The
-	// stale-goroutine hazard R163 warned about lives inside resubscribeEvents
-	// (see its godoc): that loop runs 12 iterations of 5s timer waits = 60s
-	// max, checking subGen[key] == gen each iteration to detect takeover.
-	// Deleting subGen[key] while a stale loop is still parked would let a
-	// fresh subscribe's gen=1 match the stale loop's remembered gen=1 and
-	// silently resume on the wrong ManagedSession. 75s retention puts a
-	// comfortable 15s buffer past the worst-case park window. R175-P2.
+	// kept past its last unsubscribe. resubscribeEvents parks up to 12 × 5s =
+	// 60s checking subGen[key] == gen; deleting earlier would let a fresh
+	// subscribe's gen=1 match a stale loop's remembered gen and silently resume
+	// on the wrong ManagedSession. 75s leaves a 15s buffer past that window.
 	subGenRetentionNanos = int64(75 * time.Second)
-	// subGenSweepMinIntervalNanos rate-limits opportunistic scans of
-	// subGenReleaseAt so a flurry of subscribe/unsubscribe messages from a
-	// flappy client does not turn each handler into an O(map) scan under
-	// h.mu. 30s is well under the 75s retention window so expired entries
-	// are still reclaimed promptly.
+	// subGenSweepMinIntervalNanos rate-limits opportunistic sweeps of
+	// subGenReleaseAt so a flappy client does not turn each subscribe /
+	// unsubscribe into an O(map) scan under h.mu; well under the 75s retention.
 	subGenSweepMinIntervalNanos = int64(30 * time.Second)
-	// subGenHighWaterMark is the entry count above which we force an
-	// immediate sweep regardless of the last-sweep throttle. This bounds
-	// worst-case map growth on long-lived clients that open/close many
-	// session panels between the natural 30s sweep ticks.
+	// subGenHighWaterMark forces an immediate sweep regardless of the throttle,
+	// bounding map growth on long-lived clients that flip many panels.
 	subGenHighWaterMark = 200
 
-	// wsDropThreshold: If a client drops this many messages cumulatively,
-	// close the connection so the browser side reconnects and resyncs state
-	// via the fresh `subscribe` handshake. 64 = ~ 1 min of 1Hz updates at
-	// worst — well below what a transiently slow client might hit, generous
-	// enough that a permanently-slow client is the only one hitting it.
+	// wsDropThreshold: past this many cumulative drops the connection is closed
+	// so the browser reconnects and resyncs via a fresh `subscribe`. 64 ≈ 1 min
+	// of 1Hz updates — only a permanently-slow client hits it.
 	wsDropThreshold = 64
 )
 
@@ -93,34 +68,22 @@ type wsClient struct {
 	interruptLimiter *rate.Limiter     // per-connection rate limit on "interrupt" messages (separate from send)
 	subscriptions    map[string]func() // key -> unsubscribe function
 	subGen           map[string]uint64 // key -> subscription generation (detects resubscribe race)
-	// subGenReleaseAt tracks the earliest wall-clock unix-nano deadline after
-	// which a subGen[key] entry may be deleted. R175-P2: long-lived dashboard
-	// clients that rapidly open/close many session panels accumulate subGen
-	// entries forever because R163's contract forbids deleting them at
-	// unsubscribe time (stale eventPushLoop goroutines may still be parked in
-	// resubscribeEvents' 60s ticker and would silently resume if a fresh
-	// subscribe reset the generation back to a value they remember). The
-	// retention window (subGenRetentionNanos) is longer than the longest
-	// possible resubscribeEvents wait (12 × 5s = 60s) so stale goroutines
-	// are guaranteed to have exited before their subGen entry is reclaimed.
-	// A nil map is equivalent to "empty"; the map is lazily populated only
-	// when a key is actually unsubscribed.
+	// subGenReleaseAt: earliest unix-nano deadline after which subGen[key] may
+	// be deleted. Entries cannot be deleted at unsubscribe time: a stale
+	// eventPushLoop may still be parked in resubscribeEvents' 60s wait and
+	// would resume if a fresh subscribe reset the generation to a value it
+	// remembers. nil map == empty; populated lazily on first unsubscribe.
 	subGenReleaseAt map[string]int64
-	// subGenLastSweepNs is the unix-nano of the last opportunistic sweep of
-	// subGenReleaseAt. Sweeps run at most once per subGenSweepMinIntervalNs
-	// from handleSubscribe / handleUnsubscribe so N concurrent clients flapping
-	// subscribes do not each trigger an O(map) scan under h.mu.
+	// subGenLastSweepNs: unix-nano of the last sweep; sweeps run at most once
+	// per subGenSweepMinIntervalNanos from handleSubscribe / handleUnsubscribe.
 	subGenLastSweepNs int64
 	done              chan struct{}
 	doneOnce          sync.Once
 	dropped           atomic.Int64 // messages dropped due to full send buffer
-	// uploadOwner is the upload-store owner key derived from auth cookie (or
-	// IP in no-token mode). Accessed concurrently: the readPump's auth handler
-	// writes it (handleAuth token-mode derivation) while writePump's
-	// unregister path reads it (releaseOwnerSlot) and the readPump's send path
-	// reads it (allowSendForOwner). #1776: guard the read/write with an atomic
-	// pointer so a write-in-readPump / read-in-writePump overlap is race-free.
-	// nil pointer reads as "" via uploadOwnerKey. R1776-GO-1.
+	// uploadOwner is the upload-store owner key (auth cookie, or IP in no-token
+	// mode). Written by readPump's handleAuth and read by writePump's unregister
+	// path (releaseOwnerSlot) and readPump's send path, hence the atomic
+	// pointer (#1776). nil reads as "" via uploadOwnerKey.
 	uploadOwner atomic.Pointer[string]
 }
 
@@ -132,7 +95,7 @@ func (c *wsClient) uploadOwnerKey() string {
 	return ""
 }
 
-// setUploadOwner stores the upload-store owner key. #1776.
+// setUploadOwner stores the upload-store owner key.
 func (c *wsClient) setUploadOwner(owner string) {
 	c.uploadOwner.Store(&owner)
 }
@@ -142,12 +105,9 @@ func (c *wsClient) closeDone() {
 }
 
 // markSubGenReleasable flags a key for delayed reclamation. Callers MUST hold
-// Hub.mu (the enclosing mutex that serialises access to c.subscriptions /
-// c.subGen). The entry itself is NOT deleted here; sweepSubGenExpiredLocked
-// performs the deletion later once the 75s retention window elapses. This
-// preserves the R163 stale-goroutine contract: resubscribeEvents keeps
-// checking subGen[key] == gen for up to 60s after an unsubscribe, and we
-// only reclaim after any such stale goroutine is guaranteed to have exited.
+// Hub.mu (which serialises c.subscriptions / c.subGen). The entry is NOT
+// deleted here; sweepSubGenExpiredLocked reclaims it after the retention
+// window, once any stale resubscribeEvents loop has certainly exited.
 func (c *wsClient) markSubGenReleasable(key string, nowNanos int64) {
 	if c.subGenReleaseAt == nil {
 		c.subGenReleaseAt = make(map[string]int64)
@@ -201,21 +161,10 @@ func (c *wsClient) sweepSubGenExpiredLocked(nowNanos int64) int {
 }
 
 func (c *wsClient) SendJSON(v any) {
-	// json.Marshal returns a fresh []byte we can hand directly to SendRaw
-	// (no copy needed; stdlib already pools encodeState internally). The
-	// previous encoder-pool path required a make+copy to isolate the send
-	// channel from the returned pool buffer, making it strictly more
-	// expensive than plain Marshal for this single-producer hot path.
-	//
-	// R234-PERF-7 (archive 2026-05-23): re-proposed introducing a
-	// sync.Pool[*bytes.Buffer + *json.Encoder] mirroring shimSendBufPool;
-	// rejected because (a) the send-channel hand-off requires the buffer
-	// to outlive the SendJSON return — pooling forces a make+copy that
-	// erases the saved alloc, and (b) stdlib already pools encodeState
-	// inside json.Marshal so the per-call alloc is already amortised.
-	// The fan-out hot path (multi-subscriber broadcast in agent_tailer)
-	// uses marshalPooled exactly once per event before fan-out; that's
-	// where the pooling pays off, not here.
+	// json.Marshal returns a fresh []byte handed straight to SendRaw. Pooling a
+	// buffer here does not pay: the send-channel hand-off needs the bytes to
+	// outlive the call (forcing a make+copy), and stdlib already pools
+	// encodeState. Fan-out paths use marshalPooled once per event instead.
 	data, err := json.Marshal(v)
 	if err != nil {
 		slog.Debug("ws SendJSON encode", "err", err)
@@ -230,26 +179,18 @@ func (c *wsClient) SendRaw(data []byte) {
 	case c.send <- data:
 	case <-c.done:
 	default:
-		// Drop message if client buffer is full to prevent deadlocking
-		// the hub mutex when broadcasting to slow clients. Both per-client
-		// and hub-wide counters bump so /health can report totals without
-		// scanning the clients map under RLock.
-		//
-		// R040034-GO-10 (#1396): production wires hub via NewHub, but unit
-		// tests sometimes build a wsClient directly without a Hub. Guard
-		// the hub-wide counter so the test fixture doesn't NPE; the
-		// per-client counter still advances so the slow-client close
-		// gate below works regardless of hub presence.
+		// Drop when the buffer is full so a slow client cannot block the hub
+		// mutex during broadcast. Per-client and hub-wide counters both bump so
+		// /health reports totals without scanning clients. c.hub is nil in
+		// unit tests that build a wsClient without a Hub (#1396).
 		n := c.dropped.Add(1)
 		if c.hub != nil {
 			c.hub.droppedTotal.Add(1)
 		}
-		// Safety net: a permanently-slow client silently falling arbitrarily
-		// behind is worse than a forced reconnect. Once cumulative drops
-		// cross wsDropThreshold, close the connection so the browser side
-		// reconnects and resyncs state via a fresh subscribe handshake.
-		// closeDone uses sync.Once so concurrent SendRaw calls tripping the
-		// threshold simultaneously all collapse to a single close.
+		// A permanently-slow client silently falling behind is worse than a
+		// forced reconnect: past wsDropThreshold close the connection so the
+		// browser resyncs via a fresh subscribe. doneOnce collapses concurrent
+		// trips to a single close.
 		if n >= wsDropThreshold {
 			c.doneOnce.Do(func() {
 				slog.Warn("slow client closed; will reconnect",
@@ -263,14 +204,11 @@ func (c *wsClient) SendRaw(data []byte) {
 func (c *wsClient) readPump() {
 	defer func() {
 		if r := recover(); r != nil {
-			// OBS1: increment panic counter before logging so observers see
-			// the rate even when stack-dump output is truncated.
+			// Bump the panic counter before logging so observers see the rate
+			// even when stack output is truncated.
 			serverMetrics.PanicRecovered()
-			// Log the panic cause at Error so operators are alerted, but
-			// keep the verbose stack trace at Debug — shipping it to
-			// journald / aggregated log stores would broadcast internal
-			// file paths and function names, which is not useful after
-			// the fact once the panic type is known.
+			// Cause at Error, verbose stack at Debug — stack frames would ship
+			// internal paths and function names to journald / log aggregators.
 			slog.Error("panic in ws readPump (recovered)",
 				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws readPump: stack",
@@ -281,25 +219,18 @@ func (c *wsClient) readPump() {
 		c.conn.Close()
 	}()
 
-	// R229-SEC-11: tighten the read budget for unauthenticated connections.
-	// Pre-auth the only legal frame is `auth` (a few-hundred-byte JSON);
-	// granting the full 1.5 MB buffer to every upgraded socket meant a flood
-	// of unauth connections could pin ~750 MB before the 5s wsAuthTimeout
-	// reaped them. The cap is lifted to wsMaxMessageSize on the auth-success
-	// path below.
+	// Pre-auth the only legal frame is `auth`; granting the full 1.5 MB buffer
+	// to every upgraded socket would let a flood of unauth connections pin
+	// ~750 MB before wsAuthTimeout reaps them. Lifted on auth success below.
 	if c.authenticated.Load() {
 		c.conn.SetReadLimit(wsMaxMessageSize)
 	} else {
 		c.conn.SetReadLimit(wsPreAuthMessageSize)
 	}
 	// Unauthenticated connections get the shorter auth window; authenticated
-	// ones get the full pong window so the PongHandler keeps them alive.
-	// Single write avoids the earlier "set wsPongWait then immediately
-	// overwrite with wsAuthTimeout" dead-code pattern.
-	// Failing to set the deadline means the next ReadMessage could block
-	// forever on a half-closed connection — match writePump's pattern of
-	// returning on SetWriteDeadline failure rather than silently dropping
-	// the error.
+	// ones the full pong window so the PongHandler keeps them alive. A failed
+	// SetReadDeadline means ReadMessage could block forever on a half-closed
+	// connection, so return (matching writePump) rather than ignore it.
 	var deadlineErr error
 	if c.authenticated.Load() {
 		deadlineErr = c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
@@ -337,9 +268,8 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleAuth(c, msg)
 			if c.authenticated.Load() {
-				// R229-SEC-11: lift the 512-byte pre-auth read limit now that
-				// the peer is trusted to send legitimate `send` payloads up
-				// to wsMaxMessageSize.
+				// Lift the pre-auth read limit now that the peer may send
+				// legitimate `send` payloads up to wsMaxMessageSize.
 				c.conn.SetReadLimit(wsMaxMessageSize)
 				if err := c.conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
 					return
@@ -347,9 +277,8 @@ func (c *wsClient) readPump() {
 			}
 		case "subscribe":
 			if !c.authenticated.Load() {
-				// R229-PERF-4: pre-marshalled frame avoids reflect.Marshal on
-				// the not-authenticated rejection path. Byte-equal to the old
-				// SendJSON output is locked by TestWSPreMarshalledFrames.
+				// Pre-marshalled frame avoids reflect.Marshal on the rejection
+				// path; byte-equality is locked by TestWSPreMarshalledFrames.
 				c.SendRaw([]byte(wsErrNotAuthMsg))
 				continue
 			}
@@ -368,11 +297,9 @@ func (c *wsClient) readPump() {
 				c.SendRaw([]byte(wsErrRateLimitedMsg))
 				continue
 			}
-			// R244-SEC-P2-3 / #888: per-user (uploadOwner) ceiling so a
-			// single user holding N tabs cannot multiply the burst budget
-			// by N. Per-conn limiter above is still the per-tab floor; we
-			// only consult the per-user bucket once that admits the call,
-			// which preserves legitimate single-tab burst semantics.
+			// Per-user (uploadOwner) ceiling so N tabs cannot multiply the burst
+			// budget by N; consulted only after the per-conn limiter admits the
+			// call, preserving single-tab burst semantics (#888).
 			if !c.hub.allowSendForOwner(c.uploadOwnerKey()) {
 				c.SendRaw([]byte(wsErrRateLimitedMsg))
 				continue
@@ -389,11 +316,9 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleInterrupt(c, msg)
 		case "ping":
-			// Reuse sendLimiter so *any* client can't spin a flood of pings
-			// that each trigger json.Marshal + channel send — the work is
-			// small per message but easy to amplify without a cap. Applied
-			// unconditionally so unauthenticated connections also pay the
-			// budget before the wsAuthTimeout evicts them.
+			// Reuse sendLimiter so a ping flood cannot amplify channel sends;
+			// applied unconditionally so unauthenticated connections also pay
+			// before wsAuthTimeout evicts them.
 			if !c.sendLimiter.Allow() {
 				continue
 			}
@@ -422,10 +347,7 @@ func (c *wsClient) writePump() {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer func() {
 		if r := recover(); r != nil {
-			// Mirror readPump: bump counter first so observers see the rate
-			// even when stack output is truncated, then log the cause at
-			// Error and keep the stack at Debug to avoid leaking internal
-			// paths to aggregated log stores.
+			// Mirror readPump: counter first, cause at Error, stack at Debug.
 			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws writePump (recovered)",
 				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
@@ -433,26 +355,19 @@ func (c *wsClient) writePump() {
 				"remote", c.remoteIP, "stack", string(debug.Stack()))
 		}
 		ticker.Stop()
-		// When writePump exits first (e.g. TCP RST on a ping write while
-		// readPump is still blocked in ReadMessage), we must mark the client
-		// as done so broadcasts stop queueing, and unregister from the hub so
-		// new subscribes can't target this dying conn. Close the underlying
-		// connection last so readPump unblocks and its defer can also run
-		// (closeDone/unregister are idempotent). Without this, the hub kept
-		// a live entry for the zombie until the kernel eventually closed the
-		// socket, inflating broadcast fan-out with dead clients.
+		// When writePump exits first (e.g. RST on a ping write while readPump is
+		// blocked in ReadMessage): mark done so broadcasts stop queueing,
+		// unregister so new subscribes can't target the dying conn, then close
+		// the conn last so readPump unblocks (closeDone/unregister are idempotent).
 		c.closeDone()
 		c.hub.unregister(c)
 		c.conn.Close()
 	}()
 
-	// R229-PERF-11: rolling deadline. SetWriteDeadline + time.Now ran on
-	// every event, costing two vDSO calls per Append on a high-throughput
-	// client (50 ev/s × N tabs). Refresh the deadline only when the
-	// remaining slack drops below half of wsWriteWait — the same write
-	// timeout invariant ("a stalled writer is killed within ~wsWriteWait")
-	// holds because the deadline is always at most wsWriteWait in the
-	// future and at least wsWriteWait/2.
+	// Rolling deadline: refresh only when the remaining slack drops below half
+	// of wsWriteWait, saving two vDSO calls per event on high-throughput
+	// clients. The deadline is always between wsWriteWait/2 and wsWriteWait
+	// ahead, so a stalled writer is still killed within ~wsWriteWait.
 	const refreshInterval = wsWriteWait / 2
 	var nextRefreshAt time.Time
 	refreshDeadline := func() error {
@@ -469,10 +384,9 @@ func (c *wsClient) writePump() {
 	for {
 		select {
 		case message := <-c.send:
-			// If SetWriteDeadline fails (conn closed), fall through to return
-			// so the defer closes/unregisters. Without a deadline, WriteMessage
-			// could block on a half-closed socket until TCP keepalive expires,
-			// leaving the hub broadcasting to a zombie client.
+			// A failed SetWriteDeadline (conn closed) must return so the defer
+			// unregisters; without a deadline WriteMessage could block on a
+			// half-closed socket until TCP keepalive expires.
 			if err := refreshDeadline(); err != nil {
 				return
 			}

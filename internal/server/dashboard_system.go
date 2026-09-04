@@ -1,17 +1,10 @@
-// dashboard_system.go — System (sysession) dashboard endpoints.
-//
-// Two endpoints, both gated by the same auth middleware as the rest of
-// /api/*:
+// dashboard_system.go — System (sysession) dashboard endpoints, gated by the
+// same auth middleware as the rest of /api/*:
 //
 //	GET  /api/system/daemons             read-only daemon status list
 //	POST /api/system/labels/clear-origin reset a session's LabelOrigin
 //
 // See docs/rfc/system-session.md §9.2 / §9.3.
-//
-// Phase 1 keeps these handlers thin — no pause/trigger/edit endpoints.
-// Operators who need finer-grained control flip cfg.Sysession.* values
-// in YAML and restart.  Phase 2 may add controls once we have run-history
-// persistence to back them.
 package server
 
 import (
@@ -24,18 +17,10 @@ import (
 
 // handleSystemDaemons serves the read-only daemon status list.  Returns
 // an empty array (not 404) when sysession is disabled so dashboard JS
-// can rely on the response shape.
-//
-// R246-SEC-3 [BREAKING-LOCAL]: routes the response through writeJSON so
-// every reply (empty + populated) carries the same X-Content-Type-Options
-// nosniff + Cache-Control no-store headers the rest of /api/* uses. The
-// previous direct w.Write([]byte("[]")) bypassed both, leaving the empty
-// path subject to MIME-sniffing on legacy browsers and to shared-proxy
-// caching of authenticated state.
+// can rely on the response shape. Always via writeJSON so every reply
+// carries the nosniff + no-store headers.
 func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
 	if s.sysessionMgr == nil {
-		// Empty array preserves the "GET always returns JSON array"
-		// contract for the dashboard polling loop.
 		writeJSON(w, []sysession.DaemonStatus{})
 		return
 	}
@@ -56,14 +41,10 @@ type clearLabelOriginRequest struct {
 //
 // Body: {"key": "<session-key>"}.
 //
-// Returns 200 with {"ok": true} on success, 400 for missing/invalid
+// Returns 200 with {"status":"ok"} on success, 400 for missing/invalid
 // keys, 404 when the key is unknown.
 func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) {
-	// Cap the body so a multi-MB hostile payload cannot be buffered
-	// before the decoder surfaces an error; mirrors every other
-	// dashboard mutation endpoint. decodeJSONBody does NOT set its own
-	// MaxBytesReader (it relies on callers wrapping r.Body), and adds the
-	// package-wide DisallowUnknownFields mass-assignment guard.
+	// decodeJSONBody does NOT cap the body itself; callers must wrap r.Body.
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req clearLabelOriginRequest
 	if err := decodeJSONBody(r, &req); err != nil {
@@ -79,11 +60,8 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid key", http.StatusBadRequest)
 		return
 	}
-	// Session-level rule: this endpoint is for IM sessions, not the
-	// reserved namespaces (cron / project / scratch / sys).  Those are
-	// managed via their own UIs (or have no operator-facing labels at
-	// all).  Reject early to give a clear error rather than letting the
-	// router silently no-op on a stub that can't carry a user label.
+	// Reserved namespaces (cron / project / scratch / sys) cannot carry a
+	// user label; reject early with a clear error.
 	if session.IsReservedNamespace(req.Key) {
 		http.Error(w, "label-origin only applies to user sessions", http.StatusBadRequest)
 		return
@@ -92,11 +70,5 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	// R246-SEC-3 [BREAKING-LOCAL]: writeOK matches the {"status":"ok"} body
-	// every other dashboard mutation endpoint emits AND adds the
-	// X-Content-Type-Options + Cache-Control headers the bare w.Write
-	// previously omitted. The wire-shape change ({"ok":true} → {"status":"ok"})
-	// matches the rest of /api/* and the dashboard JS doesn't read the body
-	// on success today, so this is a clean alignment.
 	writeOK(w)
 }

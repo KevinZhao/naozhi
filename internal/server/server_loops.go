@@ -1,12 +1,5 @@
-// Background lifecycle loops extracted out of server.go as a Phase-3 physical
-// split (ARCH1 / #387). server.go has carried the retired-store flusher and the
-// project-scan loop alongside the constructor, the Start/Shutdown sequencer,
-// and 200+ lines of warning consts; both loops are self-contained
-// ctx-driven goroutine drivers with no routing or constructor coupling, so
-// moving them here shrinks server.go toward the <800-line target the issue
-// names with zero behaviour change (pure move). The retired-store interval
-// consts stay in server.go next to RetiredStore wiring; this file references
-// them as package-level identifiers.
+// Background lifecycle loops: retired-store flusher and project-scan loop.
+// The retired-store interval consts live in server.go next to RetiredStore wiring.
 package server
 
 import (
@@ -41,12 +34,8 @@ func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
 }
 
 // removedProjectNames returns the project names present in old but absent in
-// current — i.e. the projects deleted between two consecutive scans. It is the
-// pure decision rule extracted from startProjectScanLoop (ARCH-SVR-2 / #460):
-// no Router, Hub, or logging is touched, so it can be exercised directly in a
-// unit test rather than only through the 60s ticker goroutine. The caller is
-// responsible for the side effects (orphaned-planner removal, WS broadcast),
-// which remain the server adapter's concern.
+// current — i.e. the projects deleted between two consecutive scans. Pure;
+// the caller applies side effects (orphaned-planner removal, WS broadcast).
 func removedProjectNames(old, current map[string]struct{}) []string {
 	if len(old) == 0 {
 		return nil
@@ -82,8 +71,7 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 }
 
 // projectScanTick runs one rescan of the projects root and applies the
-// router/hub side effects for any added or removed project. Extracted from
-// the ticker loop so the change-detection contract is unit-testable.
+// router/hub side effects for any added or removed project.
 func (s *Server) projectScanTick() {
 	oldNames := s.projectMgr.ProjectNames()
 	if err := s.projectMgr.Scan(); err != nil {
@@ -92,13 +80,6 @@ func (s *Server) projectScanTick() {
 	}
 	newNames := s.projectMgr.ProjectNames()
 
-	// Detect removed projects and clean up orphaned planner
-	// sessions. The set-diff is the pure business rule (which
-	// projects disappeared) and lives in removedProjectNames so
-	// it is unit-testable without a Router/Hub — the first
-	// concrete slice of ARCH-SVR-2 (#460) "sink business logic
-	// out of server". The router/hub side effects below stay in
-	// the server layer because they are the HTTP/WS adapter's job.
 	removed := removedProjectNames(oldNames, newNames)
 	changed := len(oldNames) != len(newNames)
 	for _, name := range removed {
@@ -110,10 +91,8 @@ func (s *Server) projectScanTick() {
 	}
 	if changed {
 		s.log().Info("project list changed", "count", len(newNames))
-		// The dashboard gates its /api/sessions re-render on stats.version;
-		// a broadcast alone leaves the version unchanged and the sidebar
-		// never picks up the added / removed project. Mirror
-		// HandleFavoriteToggle: bump first, then push.
+		// The dashboard gates its re-render on stats.version, so bump before
+		// broadcasting or the sidebar never picks up the change.
 		if s.router != nil {
 			s.router.BumpVersion()
 		}

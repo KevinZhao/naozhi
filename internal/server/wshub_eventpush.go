@@ -3,9 +3,6 @@
 //	WRITES:     rate-limit/cache block (historyMarshalCache for replay cache)
 //	READS:      shared deps block (read-only after ctor) + subscriber block
 //	            (clients for fanout) + lifecycle block (ctx for cancel)
-//
-// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
-// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (
@@ -21,46 +18,20 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// File: wshub_eventpush.go
-//
-// Per-subscription event-push loop and resubscribe helpers extracted from
-// wshub.go (R243-ARCH-2 split). Owns:
-//   - maxHistoryPushEntries / capHistoryBatch (history batching cap)
-//   - eventPushLoop: long-lived goroutine that fans EventLog updates to a
-//     subscribed wsClient, with generation gating + flap-aware resubscribe
-//   - resubscribeEvents: re-attach to the post-flap EventLog without
-//     dropping the WS subscription
-//   - resubscribeMaxAttempts / resubscribeInterval: wait budget constants
-//
-// All Hub state used by these helpers stays on *Hub. Pure code-relocation.
-
-// resubscribeMaxAttempts and resubscribeInterval together set the wait
-// budget for resubscribeEvents — used when a session process flapped and
-// the WS client wants to pick up the freshly attached EventLog without
-// dropping the dashboard subscription.
-//
-// Total window = resubscribeMaxAttempts × resubscribeInterval = 12 × 5s = 60s.
-// 60s comfortably covers the cold-start budget for a `claude` CLI subprocess
-// (typical first-init: 5-15s; worst case with model warmup + remote git fetch:
-// 30-45s). Beyond 60s we declare flap permanent and drop the WS subscription;
-// the client's exponential-backoff reconnect loop takes over.
-//
-// The two constants are split (not a single 60s timer) so the per-iteration
-// loop body — generation check, ctx fan-out, client-disconnect detection —
-// runs at a 5s heartbeat instead of blocking the whole window. R240-CR-6.
+// resubscribeMaxAttempts × resubscribeInterval (60s) is the wait budget for
+// resubscribeEvents; it covers a `claude` CLI cold start (worst case 30-45s),
+// after which the flap is permanent and the client's reconnect loop takes over.
+// Split into attempts so the loop body (generation check, ctx / client-done
+// fan-out) runs at a 5s heartbeat instead of blocking the whole window.
 const (
 	resubscribeMaxAttempts = 12
 	resubscribeInterval    = 5 * time.Second
 )
 
-// maxHistoryPushEntries caps a single WS "history" push. EventEntriesSince
-// on an initial catch-up (lastTime=0) or after a notify backlog can return
-// the full ring buffer (maxPersistedHistory=500 entries). At ~200 B per
-// entry JSON-encoded, a 500-entry batch balloons to ~100 KB per push; with
-// 500 active WS connections that is 50 MB of simultaneous marshal work
-// blocking the hub. 50 entries matches the dashboard's paginated
-// /api/sessions/events tail fetch, so older entries are still reachable
-// via the `before=` path. R68-PERF-H1.
+// maxHistoryPushEntries caps a single WS "history" push so a full-ring
+// catch-up (500 entries, ~100 KB) cannot fan out to every connection at once.
+// 50 matches the dashboard's paginated /api/sessions/events tail fetch;
+// older entries stay reachable via `before=`.
 const maxHistoryPushEntries = 50
 
 func capHistoryBatch(entries []clievent.EventEntry) []clievent.EventEntry {
@@ -70,63 +41,25 @@ func capHistoryBatch(entries []clievent.EventEntry) []clievent.EventEntry {
 	return entries[len(entries)-maxHistoryPushEntries:]
 }
 
-// marshalHistoryFrame produces the WS "history" frame bytes for the given
-// session key + entries tail, coalescing the marshalPooled call across all
-// eventPushLoop goroutines that are in lock-step on the same session. R214-
-// PERF-4: the prior code path called marshalPooled directly inside each
-// pushLoop, so N multi-tab dashboards on one session paid N reflect-marshals
-// per notify wave on payloads that were byte-identical between tabs.
-//
-// The cache is keyed by session key; the per-key fingerprint
-// (lastTime, latest entry Time, count, first/last UUID) detects out-of-lockstep subscribers
-// (e.g. a slow tab that fell behind the head and is now catching up) and
-// forces a fresh marshal rather than handing back stale bytes.
-//
-// On cache miss the marshal runs under the per-key mutex inside
-// historyMarshalCache.getOrMarshal so the first arriving subscriber pays the
-// marshal cost once and the rest of the fan-out wave reuses the bytes. The
-// returned []byte is safe to hand to wsClient.SendRaw concurrently from
-// multiple goroutines — SendRaw enqueues a slice header into a per-client
-// channel and the writePump never mutates the underlying buffer.
+// marshalHistoryFrame produces the WS "history" frame bytes for key + entries
+// tail, coalescing the marshal across all eventPushLoop goroutines in
+// lock-step on the same session. The per-key fingerprint (lastTime, latest
+// Time, count, first/last UUID) forces a fresh marshal for out-of-lockstep
+// subscribers. The returned []byte may be handed to wsClient.SendRaw from
+// multiple goroutines: SendRaw enqueues the slice and writePump never mutates it.
 func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent.EventEntry) ([]byte, error) {
-	// R20260604-SEC-10: scrub credential token shapes (sk-ant-, ghp_, AKIA, …)
-	// from the free-text Summary/Detail fields before the bytes are marshalled
-	// and fanned out to dashboard WS clients (where they would also persist to
-	// IndexedDB history). This mirrors the textutil.RedactSecrets pass that
-	// dispatch.decorateReplyText and cron finishRun already apply on the IM
-	// path; the live dashboard WS stream was the one egress that handed raw
-	// clievent.EventEntry text to the browser. marshalHistoryFrame is the single
-	// serialization choke point for both the backfill and live-push paths, so
-	// redacting here covers every WS history frame exactly once.
-	//
-	// R20260607-PERF-1 (#1888): redactEntrySecrets is an O(n) scan over every
-	// entry's Summary/Detail. Running it unconditionally above the cache meant a
-	// multi-tab fan-out wave re-scanned the SAME already-redacted entries on
-	// every getOrMarshal cache HIT (the cache returns pre-redacted bytes, so the
-	// scan was pure waste on hits). Push the redaction INSIDE both marshal
-	// closures — the single-subscriber fast path and the getOrMarshal closure —
-	// so the scan fires only when bytes are actually produced (cache miss), not
-	// on every fan-out hit. The cache fingerprint (lastTime, latest Time, count, UUIDs)
-	// is computed from the un-redacted entries, and redactEntrySecrets is
-	// copy-on-write and never touches Time, so moving it below the fingerprint
-	// is fingerprint-neutral.
+	// Redact credential token shapes from Summary/Detail before the bytes reach
+	// the browser: this is the single serialization choke point for backfill and
+	// live push, and the dashboard persists frames to IndexedDB. Redaction runs
+	// inside the marshal closures so a cache HIT does not re-scan already-redacted
+	// entries (#1888); it never touches Time, so the fingerprint is unaffected.
 	if h.historyMarshalCache == nil {
-		// Defensive: should not happen for a Hub built via NewHub, but a
-		// hand-constructed test Hub may skip the field. Fall back to the
-		// uncached path so behaviour is identical to pre-R214-PERF-4.
+		// Hand-constructed test Hubs may skip the field; use the uncached path.
 		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
 	}
-	// R249-PERF-30 (#944): single-subscriber fast path. The marshal
-	// cache only pays off when ≥2 pushLoops share the same (key,
-	// fingerprint) wave — for one tab on the session every notify
-	// advances lastTime, so the fingerprint always misses and the
-	// per-key sync.Map.Load + marshalCacheEntry.mu round-trip is pure
-	// overhead. A short h.mu.RLock + map lookup is cheaper than that
-	// round-trip on a hit AND avoids the slot-allocation cost on the
-	// first miss for a short-lived single-tab session. When
-	// singleSubscriber returns false (count != 1, or counter unwired
-	// in test harnesses) we fall through to the cached path so
-	// behaviour for the multi-tab fan-out case is unchanged.
+	// Single-subscriber fast path (#944): with one tab every notify advances
+	// lastTime so the cache always misses; skip the sync.Map + mutex round-trip.
+	// count != 1 (or counter unwired in tests) falls through to the cached path.
 	if h.singleSubscriber(key) {
 		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: redactEntrySecrets(entries)})
 	}
@@ -137,23 +70,12 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent
 }
 
 // singleSubscriber reports whether `key` has exactly one subscriber.
-// Returns false when the count is 0 (key being torn down or never
-// registered) so the caller's fast-path is gated on the strict
-// "single tab" definition only — multi-tab broadcasts AND the
-// transient "no subscribers" window both flow through the cached
-// path. R249-PERF-30 (#944).
-//
-// R20260531A-PERF-1 (#1522): read the lock-free subscriberCountFast
-// mirror instead of taking h.mu.RLock. This call fires once per
-// EventLog notify wave per subscribed client (5-50 events/s × N
-// sessions), so the old RLock contended with subscribe/unsubscribe
-// writers on h.mu for what is purely a fast-path heuristic. The mirror
-// is maintained under h.mu by every subscriberCount mutation, so the
-// lock-free load is at most one writer-critical-section stale — a wrong
-// verdict only changes whether this push uses the marshal cache, never
-// the emitted bytes. nil gate retained for hand-built test hubs that
-// skip NewHub (subscriberCount left nil): they get the same
-// "false / use cached path" behaviour as before.
+// Returns false for count 0 (teardown / never registered) so only the strict
+// "single tab" case takes the fast path (#944). Reads the lock-free
+// subscriberCountFast mirror rather than h.mu.RLock: the mirror is updated
+// under h.mu by every subscriberCount mutation, so a stale verdict only
+// changes whether this push uses the marshal cache, never the bytes (#1522).
+// nil subscriberCount (hand-built test hubs) yields false.
 func (h *Hub) singleSubscriber(key string) bool {
 	if h.subscriberCount == nil {
 		return false
@@ -167,59 +89,32 @@ func (h *Hub) singleSubscriber(key string) bool {
 
 // eventPushLoop is the per-subscription pump that reads EventLog notifications
 // and streams entries to the WS client. It owns exactly one clientWG slot for
-// its entire lifetime (Add happens in completeSubscribe before go; Done runs
-// in the goroutine's defer).
+// its lifetime (Add in completeSubscribe before go; Done in the deferred func).
 //
-// CLIENTWG CONTRACT (R49-CONCUR-RESUBSCRIBE-CLIENTWG): when resubscribeEvents
-// transparently swaps `sess` for a new process's session (the `!ok` arm
-// below), the loop keeps running in the same goroutine — we do NOT Add(1)
-// for the new subscription. This is correct because:
-//
-//  1. The lifetime being tracked is "this pushLoop goroutine", not "this
-//     particular EventLog subscription". A single Add/Done pair covers
-//     every successful resubscribe within the goroutine.
-//  2. resubscribeEvents installs the new `unsub` into c.subscriptions[key]
-//     under h.mu, replacing the stale one — so Hub.Shutdown walking
-//     c.subscriptions sees the current generation's unsub without any
-//     additional bookkeeping.
-//  3. The unsub → notify closure ensures resubscribeEvents returns ok=false
-//     on Shutdown (h.ctx.Done is checked), so the goroutine exits and
-//     the single deferred Done balances the single Add.
-//
-// If you ever split the resubscribe path into a new goroutine (e.g. to
-// parallelise multi-session fan-in), you MUST Add(1) for the new goroutine
-// and Done from its own defer — otherwise Shutdown's clientWG.Wait either
-// hangs (Add without Done) or panics with negative counter (Done without
-// Add). The guarantee is enforced by code shape, not by assertion; a
-// review that simply notes "+1 goroutine here" is insufficient without
-// also updating the WG pairing.
+// CLIENTWG CONTRACT: when resubscribeEvents swaps `sess` for a new process's
+// session the loop keeps running in this goroutine, so there is NO extra
+// Add(1): the tracked lifetime is the goroutine, and resubscribeEvents installs
+// the new unsub into c.subscriptions[key] under h.mu so Shutdown sees it.
+// Anyone splitting the resubscribe path into a new goroutine MUST Add(1) for it
+// and Done from its own defer, or Shutdown's clientWG.Wait hangs / panics.
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, csr *cli.SinceCursor) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Mirror readPump: bump counter first so the panic rate is
-			// visible even when stack output is truncated, then log the
-			// cause at Error and the stack at Debug to avoid leaking
-			// internal paths to aggregated log stores. Tag with the
-			// subscription key so operators can correlate the panic
-			// against a specific session fan-out.
+			// Mirror readPump: counter first, cause at Error, stack at Debug (avoid
+			// leaking internal paths to aggregated logs); tag with the key.
 			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws eventPushLoop (recovered)",
 				"key", key, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws eventPushLoop: stack",
 				"key", key, "stack", string(debug.Stack()))
-			// Without closing the connection, the panicked subscription
-			// would linger: subscriptions[key]/subGen[key] stay set,
-			// subscriberCount[key] is not decremented, and the per-key cap
-			// (maxSubscribersPerKey) eventually traps further subscribes
-			// from the same client. Closing done unblocks readPump/
-			// writePump, which run unregister and tear down all subs.
+			// Close the connection so readPump/writePump unregister and tear down
+			// all subs; otherwise subscriptions[key]/subGen/subscriberCount linger
+			// and maxSubscribersPerKey eventually traps this client.
 			c.closeDone()
 		}
 	}()
-	// R20260604-PERF-25 (#1740): one buffer per pushLoop goroutine, reused
-	// across every notify wave by backfillSubscriberEvents. The drain consumes
-	// it synchronously (marshal + SendRaw) and never retains it, so reuse is
-	// race-free — each goroutine owns its own buf.
+	// One buffer per goroutine, reused across notify waves by
+	// backfillSubscriberEvents (#1740); the drain never retains it.
 	var evBuf []clievent.EventEntry
 	for {
 		select {
@@ -229,25 +124,16 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				if !ok {
 					return
 				}
-				// #2402: rewind on session REPLACEMENT (e.g. /new, router
-				// eviction + respawn) — the fresh event log's timestamps can
-				// predate the old watermark, so the first notify after a swap
-				// must deliver the full new history. Mirrors
-				// upstream/connector_subscribe.go. The same-session
-				// process-flap path keeps its watermark.
+				// Rewind on session REPLACEMENT (/new, eviction + respawn): the new
+				// log's timestamps can predate the old watermark (#2402). A
+				// same-session process flap keeps its watermark.
 				if newSess != sess {
 					csr.Reset()
 				}
 				sess = newSess
-				// Catch up on events missed during the resubscribe
-				// transition. resubscribeEvents may consume one pending
-				// notification while probing newNotify (ok=true path) — if
-				// we didn't catch up unconditionally here, those events
-				// would only surface on the next Append, which in an idle
-				// session may be seconds or more. R246-CR-006 / #744:
-				// extracted into backfillSubscriberEvents so the same
-				// coalesced-marshal path serves both the post-resubscribe
-				// catch-up and the regular notify drain.
+				// Catch up unconditionally: resubscribeEvents may have consumed one
+				// pending notification while probing newNotify, and in an idle
+				// session the next Append could be seconds away (#744).
 				alive, b := h.backfillSubscriberEvents(c, key, sess, csr, evBuf)
 				evBuf = b
 				if !alive {
@@ -263,12 +149,8 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 		case <-c.done:
 			return
 		case <-h.ctx.Done():
-			// Hub shutdown: exit even if the client hasn't closed and the
-			// subscribed notify channel is stalled. Without this arm, a
-			// notify source that stops firing could park this goroutine
-			// past Shutdown, with no escape until conn.Close propagates
-			// through readPump — which may not happen if the socket is
-			// half-open.
+			// Hub shutdown: exit even if the client is open and notify is stalled
+			// (a half-open socket may never propagate conn.Close via readPump).
 			return
 		}
 	}
@@ -279,45 +161,16 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // and writes it to c. Returns (alive, buf) — the caller must exit when alive
 // is false (the client closed mid-drain) and retain buf for the next wave.
 //
-// #2402 (kiro dashboard 不实时刷新): the previous implementation tracked a
-// naked lastTime int64 and queried EventEntriesSince(lastTime) — strictly
-// greater-than — so an entry appended in the SAME millisecond as the tail of
-// an already-delivered wave but landing in a LATER notify wave was silently
-// dropped. cli.SinceCursor (inclusive watermark query + UUID dedup at the
-// trailing millisecond) is the shared fix; see its file header for the full
-// rationale and the upstream twin R20260530-GO-1 (#1481). Same-millisecond
-// redeliveries that reach the client are absorbed by the dashboard's UUID dedup.
-//
-// R246-CR-006 / #744: previously inlined twice in eventPushLoop — once
-// in the regular notify arm and once in the post-resubscribe catch-up
-// branch. The two copies differed only in the c.done early-return: the
-// regular arm exited the loop on close, the resubscribe arm did not. The
-// helper now propagates that signal via the alive return so both call
-// sites get the same eviction semantics.
-//
-// Capping via capHistoryBatch is mandatory: a slow client that built up
-// a long backlog must not see a single multi-MB push frame that starves
-// the WS send channel — the dashboard backfills older events via
-// /api/sessions/events?before=. R68-PERF-H1. marshalHistoryFrame
-// coalesces the JSON marshal across N pushLoops subscribed to the same
-// session — multi-tab dashboards previously paid N marshals per notify
-// wave for the identical (key, entries-tail) payload. R214-PERF-4.
-//
-// Behavior note: on marshal error the helper returns without advancing
-// the cursor (matches the regular-notify arm's `continue` path), so the
-// same entries are retried from the same watermark on the next notify.
+// cli.SinceCursor (inclusive watermark query + UUID dedup at the trailing
+// millisecond) is what keeps same-millisecond entries landing in a LATER
+// notify wave from being dropped (#2402); redeliveries that reach the client
+// are absorbed by the dashboard's UUID dedup. On marshal error the cursor is
+// not advanced, so the same entries are retried on the next notify.
 func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *cli.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
-	// R20260604-PERF-25 (#1740): pass the caller's per-goroutine buffer (sliced to [:0])
-	// into EventEntriesSinceAppend so BOTH the dead-session (persistedHistory) and the
-	// live-process path reuse capacity instead of allocating a fresh []clievent.EventEntry
-	// per notify wave. The entries are consumed synchronously below (marshal + SendRaw,
-	// which copies only the frame bytes), never retained past this call, so reusing the
-	// buffer on the next notify is safe. The (possibly grown) buffer is returned so the
-	// caller can keep it for the next iteration.
-	//
-	// QueryAfter re-admits the watermark millisecond; Filter drops the
-	// already-delivered UUIDs in place, so the backing array (and its
-	// capacity) survives for the next wave.
+	// buf[:0] lets both the dead-session and live-process paths reuse capacity
+	// across notify waves (#1740); entries are consumed synchronously below and
+	// never retained. QueryAfter re-admits the watermark millisecond; Filter
+	// drops already-delivered UUIDs in place, so the backing array survives.
 	entries := sess.EventEntriesSinceAppend(buf[:0], csr.QueryAfter())
 	fetched := entries
 	entries = csr.Filter(entries)
@@ -329,13 +182,11 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 		return false, fetched
 	default:
 	}
-	// capHistoryBatch may return a tail sub-slice of entries; marshal/advance
-	// from that view but return the full `fetched` slice as the reusable buffer
-	// so its capacity is preserved across notify waves (a tail slice would
-	// shrink cap every call and defeat the reuse).
+	// Marshal/advance from the capped tail view but return the full `fetched`
+	// slice so its capacity is preserved (a tail slice shrinks cap every call).
 	capped := capHistoryBatch(entries)
 	// The marshal-cache fingerprint keys on the pre-advance watermark, so
-	// lock-step tabs still coalesce onto one marshal as with the old lastTime.
+	// lock-step tabs still coalesce onto one marshal.
 	data, err := h.marshalHistoryFrame(key, csr.Watermark(), capped)
 	if err != nil {
 		return true, fetched
@@ -351,11 +202,8 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 // resubscribeInterval = 60s), or a newer subscription has taken over this
 // key (generation mismatch).
 func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
-	// Timer.Reset reuses a single timer allocation across the iterations
-	// instead of allocating a Ticker and its runtime goroutine; resubscribe
-	// is a cold-ish path but client flap can trigger N simultaneous calls.
-	// resubscribeMaxAttempts × resubscribeInterval = 60s total window —
-	// see const godoc for the budget rationale.
+	// Timer.Reset reuses one timer across iterations instead of a Ticker + its
+	// goroutine; client flap can trigger N simultaneous calls.
 	timer := time.NewTimer(resubscribeInterval)
 	defer timer.Stop()
 
@@ -371,20 +219,9 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		case <-timer.C:
 		}
 
-		// Check if a newer subscription (from handleSubscribe) has taken over.
-		//
-		// R230C-PERF-8 (archive 2026-05-23): the ticket proposed dropping this
-		// h.mu.RLock and "comparing against the local gen parameter directly".
-		// That misreads the invariant — `gen` is the generation captured when
-		// resubscribeEvents started, and `c.subGen[key]` is the *current* per-
-		// client generation written by handleSubscribe under h.mu.Lock when a
-		// fresh subscribe takes over the same key. The lock is the visibility
-		// barrier that lets this stale-resubscribe goroutine observe the new
-		// generation and bail out; without it Go memory model gives no read
-		// guarantee on the map slot. Only ~12 RLock probes per resubscribe and
-		// the contention is bounded by the per-client subscription map, so the
-		// "免锁" optimisation would buy nothing and forfeit the supersede
-		// signal that lets stale loops self-terminate. Keep as-is.
+		// Bail out if a newer subscription (handleSubscribe) has taken over.
+		// The RLock is the visibility barrier for c.subGen[key], written by
+		// handleSubscribe under h.mu.Lock; do not replace it with a lock-free read.
 		h.mu.RLock()
 		currentGen := c.subGen[key]
 		h.mu.RUnlock()
@@ -413,18 +250,10 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			// Channel is alive (not closed) — process is back.
 		}
 
-		// Update the subscription registration for this client.
-		//
-		// H8 (Round 163): capture the old unsub while holding h.mu but call
-		// it *after* releasing the lock. The current lock order is
-		// h.mu → EventLog.subMu (enforced by Hub.Shutdown's contract and the
-		// shutdown_lock_order_test.go tripwire), so calling oldUnsub() under
-		// h.mu is technically safe today. Releasing h.mu first removes a
-		// latent hazard: if oldUnsub() were ever extended to take additional
-		// locks (e.g. a future per-client audit mutex or a sub-layer WG
-		// protected by h.mu), calling it under h.mu would reintroduce a
-		// reverse acquisition order. Swap is a rare path (resubscribe
-		// collision), so the extra unlock/relock has no measurable cost.
+		// Update the subscription registration. Capture the old unsub under h.mu
+		// but call it AFTER releasing the lock: lock order is h.mu → EventLog.subMu
+		// (shutdown_lock_order_test.go), and calling oldUnsub under h.mu would
+		// reintroduce a reverse-order hazard if it ever took more locks.
 		h.mu.Lock()
 		if c.subscriptions == nil {
 			// Client was removed during Shutdown.
@@ -445,25 +274,19 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			oldUnsub()
 		}
 
-		// Re-wire the subagent linker tailer for this session: a client
-		// that subscribed BEFORE the first process spawn (HasProcess==false
-		// branch in completeSubscribe) never reached maybeWireLinkerTailer,
-		// and the linker is created lazily on spawn. Without this call,
-		// the only client subscribed via the suspended path would never
-		// receive subagent transcripts from the freshly-spawned process.
+		// Re-wire the subagent linker tailer: a client that subscribed before the
+		// first spawn (HasProcess==false in completeSubscribe) never reached
+		// maybeWireLinkerTailer, and the linker is created lazily on spawn.
 		// Idempotent — guarded by wiredLinkers.
 		h.maybeWireLinkerTailer(key, currentSess)
 
 		*notify = newNotify
 		return true, currentSess
 	}
-	// Timed out waiting for new process — notify client so the dashboard
-	// can surface a "subscription expired" indicator instead of silently
-	// showing stale state. Clean up the dead subscription slot so it doesn't
-	// count toward the per-connection cap.
-	//
-	// H8 (Round 163): same lock-order precaution — snapshot oldUnsub
-	// under h.mu, release the lock, then invoke it.
+	// Timed out: tell the client so the dashboard can surface "subscription
+	// expired" instead of stale state, and free the dead subscription slot so
+	// it stops counting toward the per-connection cap. Same lock-order
+	// precaution: snapshot oldUnsub under h.mu, release, then invoke.
 	h.mu.Lock()
 	var staleUnsub func()
 	dropCache := false
@@ -472,19 +295,13 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			staleUnsub = u
 			delete(c.subscriptions, key)
 			h.decSubscriberCountLocked(key)
-			// #2224: mark subGen[key] for delayed reclamation, matching
-			// handleUnsubscribe. Without this the resubscribe-timeout path
-			// deleted the subscription but left subGen[key] pinned for the
-			// whole connection lifetime (sweepSubGenExpiredLocked only scans
-			// keys present in subGenReleaseAt), so a dashboard client that
-			// flaps through many session panels and times out on resubscribe
-			// grows c.subGen without bound.
+			// Mark subGen[key] for delayed reclamation, matching handleUnsubscribe;
+			// otherwise the slot stays pinned for the connection lifetime (#2224).
 			nowNanos := time.Now().UnixNano()
 			c.markSubGenReleasable(key, nowNanos)
 			c.sweepSubGenExpiredLocked(nowNanos)
-			// R20260610-085718-LB-5 (#2010): drop the marshal cache slot when
-			// this stale cleanup removed the last subscriber, matching
-			// handleUnsubscribe/unregister.
+			// Drop the marshal cache slot when this removed the last subscriber,
+			// matching handleUnsubscribe/unregister (#2010).
 			dropCache = !h.enforceCaps || h.subscriberCount[key] == 0
 		}
 	}

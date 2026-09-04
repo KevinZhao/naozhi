@@ -2,9 +2,6 @@
 //
 //	WRITES:     rate-limit/cache block (historyMarshalCache only)
 //	READS:      none beyond historyMarshalCache itself; pure helper file
-//
-// 此文件实装 historyMarshalCache 的 sync.Map 抽象——单字段块持有，无
-// cross-block dependency。Phase 4b rule 3b 对账时是最简单的一类。
 package server
 
 import (
@@ -12,41 +9,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
-
-// File: wshub_eventpush_cache.go
-//
-// historyMarshalCache coalesces the per-subscriber JSON marshal in
-// eventPushLoop. R214-PERF-4: when N dashboard tabs are subscribed to the
-// same session, an EventLog notify wakes all N pushLoops and each one
-// independently called marshalPooled on what is, in steady state, the
-// identical (key, entries-tail) payload. With 5+ tabs the marshal CPU
-// dominated the WS broadcast cost on a single hot session.
-//
-// Design: single-slot cache per session key. Entry holds a fingerprint of
-// (lastTime, latestEntryTime, count, firstUUID, lastUUID) plus the marshaled
-// bytes. The UUID pair is what distinguishes two DIFFERENT same-millisecond
-// tails: #2432 — the ACP turn-end appends thinking/text/result in one
-// millisecond across three notify waves, so wave 2 `[e2(T)]` and wave 3
-// `[e3(T)]` share (watermark=T, latest=T, count=1) and the time-only
-// fingerprint served e2's bytes for e3, which then never reached any tab
-// (the dashboard dedups the replayed uuid). Entries are a chronological tail
-// of one append-only log, so equal (first, last) UUIDs + equal count imply an
-// identical slice. eventPushLoop
-// asks the cache via getOrMarshal; on hit the bytes are returned without a
-// second marshalPooled. On miss (or fingerprint mismatch from a slow
-// subscriber lagging behind the head) the caller marshals once and stores.
-//
-// Bounded by # concurrently subscribed session keys; entries dropped when
-// the last subscriber for the key unsubscribes (Hub.dropHistoryMarshalCache).
-// Hub.Shutdown clears the whole map. Memory per entry ≤ 1 capHistoryBatch
-// payload (~50 entries × ~2 KB ≈ 100 KB worst case; typical ~5 KB).
-//
-// Concurrency: getOrMarshal takes the per-key mutex for the cache slot only
-// during fingerprint check and update. The marshal itself runs under that
-// mutex so a single goroutine produces the bytes that the rest of the
-// fan-out reuses; without this, two simultaneous misses could race and
-// each pay the marshal cost. The mutex is per-key, not global, so unrelated
-// sessions never contend.
 
 // marshalCacheEntry holds the most recent marshaled "history" payload for
 // a session key plus the fingerprint that produced it.
@@ -60,29 +22,24 @@ type marshalCacheEntry struct {
 	data            []byte
 }
 
-// marshalCacheEntryPool recycles loser allocations on the cold-miss path.
-// R040034-GO-11 (#1397): when a fan-out wave hits a missing key with N
-// goroutines, only one of them can win the LoadOrStore; the rest were
-// previously throwing their freshly allocated *marshalCacheEntry onto the
-// GC. The pool lets losers return their entry for the next cold miss.
-// Note: only entries that were never stored (lost the LoadOrStore race)
-// are returned to the pool — entries that became visible to readers are
-// never reused, since a concurrent slot() may still hold a pointer to them.
+// marshalCacheEntryPool recycles candidates that lost the LoadOrStore race on
+// a cold-miss fan-out (#1397). Only never-stored entries are returned to the
+// pool — entries visible to readers are never reused, since a concurrent
+// slot() may still hold a pointer to them.
 var marshalCacheEntryPool = sync.Pool{
 	New: func() any { return &marshalCacheEntry{} },
 }
 
-// historyMarshalCache is the per-session marshal coalescer.
-//
-// R250-PERF-28 (#1131): the entries map lives in a sync.Map so the
-// hot fan-out path (one notify wave wakes N pushLoops on the same
-// session) does not serialise every cache-hit subscriber behind a
-// single top-level mutex. The per-key *marshalCacheEntry is the
-// real synchronisation unit — its embedded e.mu still serialises
-// the marshal-once / fingerprint-update step inside getOrMarshal,
-// while sync.Map handles the map-insertion race for new keys
-// without forcing readers to wait. Pre-existing reset() / drop()
-// continue to share the same sync.Map.
+// historyMarshalCache is the per-session marshal coalescer: when N dashboard
+// tabs subscribe to one session, a notify wave wakes N pushLoops that would
+// each marshal the identical (key, entries-tail) payload. One slot per key
+// holds the fingerprint (lastTime, latestEntryTime, count, firstUUID,
+// lastUUID) plus the bytes. The UUID pair distinguishes two DIFFERENT
+// same-millisecond tails (#2432); entries are a chronological tail of one
+// append-only log, so equal (first, last) UUIDs + count imply an identical
+// slice. Entries live in a sync.Map so cache hits do not serialise behind a
+// global mutex; the per-key e.mu serialises marshal-once + fingerprint update
+// (#1131). Slots are dropped when the last subscriber leaves; Shutdown resets.
 type historyMarshalCache struct {
 	entries sync.Map // map[string]*marshalCacheEntry
 }
@@ -93,17 +50,8 @@ func newHistoryMarshalCache() *historyMarshalCache {
 
 // slot returns (creating if needed) the per-key cache entry. Caller MUST
 // take entry.mu before reading or mutating its fingerprint / data fields.
-//
-// R250-PERF-28 (#1131): sync.Map's LoadOrStore lets repeated cache hits
-// for the same key skip the lock-on-read penalty the prior plain-map +
-// top-level mutex paid.
-//
-// R040034-GO-11 (#1397): on a cold-miss fan-out (N goroutines racing on
-// the same missing key) we now grab the candidate from marshalCacheEntryPool
-// instead of `new`-ing every time. Losers (LoadOrStore returned an existing
-// entry) reset and return their candidate to the pool for the next cold
-// miss. This keeps the steady-state alloc rate at ~1 entry per distinct
-// session key rather than ~N per cold-miss wave.
+// Cold misses take the candidate from marshalCacheEntryPool; losers of the
+// LoadOrStore race reset and return it.
 func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 	if v, ok := c.entries.Load(key); ok {
 		return v.(*marshalCacheEntry)
@@ -111,9 +59,7 @@ func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 	candidate := marshalCacheEntryPool.Get().(*marshalCacheEntry)
 	e, loaded := c.entries.LoadOrStore(key, candidate)
 	if loaded {
-		// Lost the race; recycle the unused candidate. Reset is cheap and
-		// guards against accidental reuse of stale fingerprint/data fields
-		// if a future code path leaks state into a freshly-Got entry.
+		// Lost the race; reset and recycle the unused candidate.
 		candidate.lastTime = 0
 		candidate.latestEntryTime = 0
 		candidate.count = 0
@@ -128,14 +74,11 @@ func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 // getOrMarshal returns the marshaled bytes for the given (key, entries) tail.
 // On a fingerprint hit the cached bytes are returned and `marshal` is NOT
 // called. On miss `marshal` is invoked exactly once under the per-key mutex
-// and its result is cached for subsequent fan-out members of the same notify
-// wave. Returns (data, fromCache, err) — fromCache is true when the bytes
-// originated from a previous getOrMarshal call.
+// and its result is cached for the rest of the fan-out wave. Returns
+// (data, fromCache, err).
 //
-// The cached []byte is safe to hand directly to wsClient.SendRaw: SendRaw
-// only enqueues the slice into the per-client send channel and the writePump
-// reads it; nothing on the WS path mutates the buffer. Concurrent SendRaw
-// callers across different clients all read the same slice header.
+// The cached []byte is safe to hand directly to wsClient.SendRaw: SendRaw only
+// enqueues the slice and writePump reads it; nothing on the WS path mutates it.
 func (c *historyMarshalCache) getOrMarshal(
 	key string,
 	lastTime int64,
@@ -143,10 +86,8 @@ func (c *historyMarshalCache) getOrMarshal(
 	marshal func() ([]byte, error),
 ) (data []byte, fromCache bool, err error) {
 	if len(entries) == 0 {
-		// No fingerprint can be computed from an empty tail; skip the cache
-		// entirely. eventPushLoop already short-circuits this case before
-		// calling getOrMarshal, but the guard keeps the helper honest if a
-		// future caller forgets.
+		// No fingerprint for an empty tail; skip the cache (callers already
+		// short-circuit this, the guard keeps the helper honest).
 		data, err = marshal()
 		return data, false, err
 	}

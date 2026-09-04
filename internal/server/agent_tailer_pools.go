@@ -1,13 +1,5 @@
-// Phase 4c-prep / R-tailer-pools-extract (2026-05-28):
-// agent_tailer.go 中两套 sync.Pool（subs 切片池 + buffered 切片池）抽到
-// 独立文件。纯物理切分、零行为变化。
-//
-// 这两套池子构成完整闭环：
-//   - tailerSubsPool / tailerSubsHandle / acquire / release（fanout 路径）
-//   - tailerBufferedPool / tailerBufferedHandle / acquire / release（attach 路径）
-//
-// 性能注释（R245-PERF-15 #865 / R249-PERF-4 #926）逐字保留，是日后理解
-// "为什么用 pointer-to-slice + 单独 handle 包装" 的唯一来源。
+// agent tailer 的两套 sync.Pool：tailerSubsPool（pollOnce fanout 路径）+
+// tailerBufferedPool（attach replay 路径）。
 package server
 
 import (
@@ -17,26 +9,10 @@ import (
 )
 
 // tailerSubsPool reuses []*wsClient slices across pollOnce ticks so the
-// 200ms event-fanout path stays alloc-free in steady state. R245-PERF-15
-// (#865): each pollOnce previously did make([]*wsClient, 0, len(t.subs))
-// per tick when there were events to fan out — at 50 active tailers ×
-// 5 ticks/s that's 250 GC-visible allocs/s for slices that never escape.
-// The pool's New supplies a 4-cap default (matches the typical "1-2
-// dashboard tabs subscribed" steady state); larger fan-outs grow the
-// underlying slice as usual and the grown slice is then returned to the
-// pool, so subsequent ticks with similar subscriber counts skip the
-// growth too.
-//
-// We pool *[]*wsClient (pointer-to-slice) per the sync.Pool best-practice
-// note in the standard library — putting the slice header by value means
-// every Get/Put cycle allocates a new interface{} header for the slice
-// metadata, which would defeat half the pool's purpose. The pointer
-// indirection lets the same allocation round-trip end-to-end.
-//
-// releaseTailerSubsSlice zero-clears the slice so wsClient pointers
-// cannot keep clients alive past their unsubscribe — without this, a
-// busy tailer's pool would pin one wsClient per parked slot for the
-// lifetime of the pool entry.
+// event-fanout path stays alloc-free in steady state (#865). Pools
+// *[]*wsClient (pointer-to-slice) so the slice header does not allocate a
+// fresh interface box on every Get/Put. Default cap 4 matches the typical
+// 1-2 dashboard tabs; grown slices return to the pool.
 var tailerSubsPool = sync.Pool{
 	New: func() any {
 		s := make([]*wsClient, 0, 4)
@@ -44,12 +20,9 @@ var tailerSubsPool = sync.Pool{
 	},
 }
 
-// tailerSubsHandle wraps the pool entry pointer so callers can return
-// the *exact same* pointer they pulled from Get(). Without this, the
-// caller would have to remember the original *[]*wsClient through the
-// pollOnce control flow — and writing tailerSubsPool.Put(&local) would
-// force `local` to escape to the heap (one alloc per tick), defeating
-// the pool's purpose.
+// tailerSubsHandle wraps the pool entry pointer so callers return the exact
+// pointer they pulled from Get(); Put(&local) would force `local` to escape
+// (one alloc per tick), defeating the pool.
 type tailerSubsHandle struct {
 	sp *[]*wsClient
 }
@@ -68,12 +41,9 @@ func acquireTailerSubsSlice(hint int) ([]*wsClient, tailerSubsHandle) {
 	return s, tailerSubsHandle{sp: sp}
 }
 
-// releaseTailerSubsSlice clears the slice's backing pointers (so dropped
-// wsClients become GC-eligible immediately) and returns it to the pool
-// via the handle the caller received from acquireTailerSubsSlice. The
-// final s value supersedes whatever sat in the pool (caller may have
-// grown the slice via append). Nil-handle-safe so the caller can defer
-// the release unconditionally even on the no-subs branch.
+// releaseTailerSubsSlice zero-clears the slice (so dropped wsClients are
+// GC-eligible immediately) and returns it to the pool; the possibly-grown s
+// supersedes the pooled value. Nil-handle-safe so callers can defer it.
 func releaseTailerSubsSlice(s []*wsClient, h tailerSubsHandle) {
 	if h.sp == nil {
 		return
@@ -85,21 +55,10 @@ func releaseTailerSubsSlice(s []*wsClient, h tailerSubsHandle) {
 	tailerSubsPool.Put(h.sp)
 }
 
-// tailerBufferedPool reuses []clievent.EventEntry buffers used by attach()
-// to copy the in-memory ring under lock and replay events to a new
-// subscriber outside the lock. Without the pool, every agent_subscribe
-// path allocated a fresh buffer of up to 500 EventEntry values
-// (~140 KB) inside t.mu — the lock window is short, but the allocation
-// itself is GC-visible and was the #1 attach-path alloc per
-// R249-PERF-4 (#926) profiling. Reuse pattern matches tailerSubsPool:
-// pointer-to-slice in the pool so the slice metadata round-trips on
-// the same heap object, and a handle wrapper so the same pointer comes
-// back through Put.
-//
-// Default cap is 16 (the typical attach replays a handful of events
-// for a fresh tab joining mid-run); larger replays grow the slice via
-// append() inside attach() and the grown slice returns to the pool so
-// subsequent attaches at similar sizes skip the growth.
+// tailerBufferedPool reuses []clievent.EventEntry buffers that attach()
+// fills under lock and replays outside it (#926). Same pointer-to-slice +
+// handle pattern as tailerSubsPool. Default cap 16; grown slices return
+// to the pool.
 var tailerBufferedPool = sync.Pool{
 	New: func() any {
 		s := make([]clievent.EventEntry, 0, 16)
@@ -107,17 +66,14 @@ var tailerBufferedPool = sync.Pool{
 	},
 }
 
-// tailerBufferedHandle wraps the pool entry pointer so attach() can
-// hand back the *exact* pointer it pulled. Same rationale as
-// tailerSubsHandle (taking &local would force the local to escape to
-// the heap on every attach call).
+// tailerBufferedHandle wraps the pool entry pointer so attach() hands back
+// the exact pointer it pulled; same rationale as tailerSubsHandle.
 type tailerBufferedHandle struct {
 	sp *[]clievent.EventEntry
 }
 
 // acquireTailerBufferedSlice returns a reusable []clievent.EventEntry with
 // len==0 and cap >= hint plus the handle the caller must hand back.
-// R249-PERF-4 (#926).
 func acquireTailerBufferedSlice(hint int) ([]clievent.EventEntry, tailerBufferedHandle) {
 	sp := tailerBufferedPool.Get().(*[]clievent.EventEntry)
 	s := (*sp)[:0]
@@ -128,10 +84,8 @@ func acquireTailerBufferedSlice(hint int) ([]clievent.EventEntry, tailerBuffered
 	return s, tailerBufferedHandle{sp: sp}
 }
 
-// releaseTailerBufferedSlice zero-clears each EventEntry (so its
-// embedded pointers — Images, ToolCall, Message bytes — become
-// GC-eligible immediately rather than pinning whatever the previous
-// attach handed us) and returns the slice to the pool. Nil-handle-safe.
+// releaseTailerBufferedSlice zero-clears each EventEntry (so embedded
+// pointers become GC-eligible) and returns the slice to the pool. Nil-handle-safe.
 func releaseTailerBufferedSlice(s []clievent.EventEntry, h tailerBufferedHandle) {
 	if h.sp == nil {
 		return

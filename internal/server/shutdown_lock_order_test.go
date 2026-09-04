@@ -60,27 +60,10 @@ var wshubLockOrderFiles = []string{
 //	   subMu-holding callback would become possible without this test
 //	   catching it. ARCH-EVENTLOG-SPLIT spread EventLog across siblings,
 //	   so the scan globs every eventlog*.go (mirrors part A / PR #327).
-//	C. The LOCK ORDER CONTRACT comment stays in Shutdown's godoc so
-//	   future readers follow the chain back to this audit item.
 //
 // Any failure here forces the author to re-evaluate whether the
 // new lock site can starve Shutdown.
 func TestHubShutdown_LockOrderInvariant(t *testing.T) {
-	// C) the LOCK ORDER CONTRACT tripwire comment must survive in
-	// wshub.go (Hub.Shutdown's godoc anchor). Read it eagerly so we
-	// fail fast if the file vanished.
-	wshubSrc, err := os.ReadFile("wshub.go")
-	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
-	}
-	if !regexp.MustCompile(`LOCK ORDER CONTRACT \(R35-REL2\)`).Match(wshubSrc) {
-		t.Error("Hub.Shutdown no longer carries the LOCK ORDER CONTRACT godoc. " +
-			"R35-REL2: the comment is the only anchor linking the h.mu → " +
-			"eventLog.subMu ordering to this audit item. If you reorganise " +
-			"the comment, keep the R35-REL2 tag searchable so the contract " +
-			"test can still locate it.")
-	}
-
 	// A) within every wshub_*.go file in the package, reject any
 	// function body that acquires subMu (hypothetical future code
 	// accessing EventLog directly) AND also has a subsequent

@@ -1,28 +1,9 @@
 // select_node_for_backend.go: backend-aware reverse-node routing.
 //
-// This file plugs the "kiro session + node that doesn't speak ACP" hole
-// in the multi-backend RFC (docs/rfc/multi-backend.md §6 — backend-aware
-// dispatch): before this file, dashboards / IM channels could pick any
-// reverse node from the picker and naozhi would happily forward the send
-// RPC; the remote shim would then fail to spawn the kiro CLI (no `kiro`
-// binary, no `acp` capability) and the user saw a generic transport
-// error.
-//
-// Now every dispatch entry point (HTTP /api/sessions/send, WS
-// handleRemoteSend, future cron remote dispatch) calls
-// Server.selectNodeForBackend BEFORE forwarding. The helper:
-//  1. Resolves the backend.Profile to learn its RequiredNodeCaps.
-//  2. If the caller specified a node, asserts every required cap is
-//     advertised by that node. Missing caps surface as a structured
-//     error with backend ID + node ID + offending cap, so dashboards
-//     can render an actionable message instead of a generic 500.
-//  3. Returns nil + nil error when targetNode is "" — the caller
-//     treats nil as "dispatch locally" (existing behaviour).
-//
-// Empty backendID is treated as the default backend implicitly: if
-// the registry has no profile for the empty string, RequiredNodeCaps
-// is nil and the node passes (legacy single-backend deployments
-// don't even register a "claude" id on stored sessions).
+// Every dispatch entry point (HTTP send, WS handleRemoteSend) calls
+// selectNodeForBackend BEFORE forwarding so a node that lacks a backend's
+// RequiredNodeCaps is rejected with a structured error instead of a remote
+// spawn failure (docs/rfc/multi-backend.md §6).
 package server
 
 import (
@@ -35,42 +16,29 @@ import (
 )
 
 // maxBackendIDLen / isValidBackendID alias the shared backendid leaf package
-// so the HTTP send path, WS handlers, and the dashboard cron CRUD endpoints
-// all enforce one length+charset contract (R20260607-ARCH-2 #1893 unified the
-// previously copy-pasted definitions). See internal/backendid for the contract
-// rationale (R20260527122801-ARCH-8 #1314 widened the cap to 64).
+// so every entry point enforces one length+charset contract (#1893).
 const maxBackendIDLen = backendid.MaxLen
 
 func isValidBackendID(s string) bool { return backendid.IsValid(s) }
 
-// nodeLookup is the minimal surface selectNodeForBackend needs to find
-// an active reverse-node connection by id. Server's *nodeRegistry and
-// Hub's hubNodeLookup adapter both satisfy this; defining the
-// interface locally keeps the helper free of an upward dependency on
-// either.
+// nodeLookup is the minimal surface selectNodeForBackend needs to find an
+// active reverse-node connection by id (*nodeRegistry and hubNodeLookup).
 type nodeLookup interface {
 	NodeByID(id string) (node.Conn, bool)
 }
 
 // ErrUnknownBackend is returned when a caller asks selectNodeForBackend
-// to route a backend ID that has no Profile in the registry. Sentinel
-// (rather than fmt.Errorf) so handlers can map it onto a 400 status
-// and a stable user-facing string. Mirrors the discriminated errors
-// used elsewhere in this package for the workspace gate.
+// to route a backend ID that has no Profile in the registry. Sentinel so
+// handlers can map it onto a 400.
 var ErrUnknownBackend = errors.New("unknown backend")
 
 // ErrNodeNotConnected is returned when the caller specified a target
-// node that is not currently registered. Distinct from "node lacks
-// cap" so handlers can render different messages — "node offline,
-// try later" vs "node X cannot host backend Y, pick a different
-// node".
+// node that is not currently registered.
 var ErrNodeNotConnected = errors.New("node not connected")
 
 // ErrNodeMissingCap is returned when the target node is connected but
-// did not advertise one of the backend's RequiredNodeCaps at register
-// time. Wrapped (via %w) into a richer fmt.Errorf so callers can both
-// errors.Is(err, ErrNodeMissingCap) AND surface the full
-// "node X lacks cap Y for backend Z" string in error UI.
+// did not advertise one of the backend's RequiredNodeCaps. Wrapped via %w
+// so callers can errors.Is it and still surface the full message.
 var ErrNodeMissingCap = errors.New("node missing required capability")
 
 // selectNodeForBackend resolves (targetNode, backendID) into a routing
@@ -80,36 +48,20 @@ var ErrNodeMissingCap = errors.New("node missing required capability")
 //   - (nil, nil):     dispatch locally; targetNode was empty / "local".
 //   - (nil, err):     refuse to dispatch; surface err to the user.
 //
-// Empty targetNode short-circuits without consulting the registry —
-// local dispatch never needs a capability check (the local naozhi
-// process is the source of truth for what backends it can host, via
-// its wrapper map). Likewise empty backendID is allowed and treated
-// as "router default"; selectNodeForBackend trusts the caller's
-// upstream resolution and only enforces caps when the registry
-// actually knows about the id.
-//
-// Capability gating is done O(profile.RequiredNodeCaps × 1) — the cap
-// map on NodeMeta is hash-lookup, so this is essentially constant time
-// for the tag counts we expect (≤ 3).
+// Local dispatch never needs a capability check. Empty backendID is
+// treated as "router default" and passes with no cap requirement.
 func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node.Conn, error) {
-	// Local / unspecified target — nothing to gate.
 	if targetNode == "" || targetNode == "local" {
 		return nil, nil
 	}
 
 	nc, ok := lookup.NodeByID(targetNode)
 	if !ok {
-		// targetNode quoted via %q because handler logs treat the value
-		// as attacker-controlled (dashboard form field). %q is safe
-		// against newline / control-byte injection into slog attrs.
+		// %q: targetNode is attacker-controlled; guards log injection.
 		return nil, fmt.Errorf("%w: %q", ErrNodeNotConnected, targetNode)
 	}
 
-	// Backend ID empty (legacy session where Backend wasn't recorded) or
-	// unknown — fall through with no cap requirement. Returning the
-	// connected node here preserves the historical behaviour for both
-	// (a) deployments that pre-date multi-backend and (b) connected
-	// peers that still satisfy the default backend.
+	// Legacy session without a recorded Backend — no cap requirement.
 	if backendID == "" {
 		return nc, nil
 	}
@@ -118,11 +70,7 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 		return nil, fmt.Errorf("%w: %q", ErrUnknownBackend, backendID)
 	}
 
-	// Walk RequiredNodeCaps deterministically (the backend.Profile
-	// stores a slice, not a set, so iteration order is the registration
-	// order — fine for error reporting). The first missing cap wins;
-	// reporting all missing caps would help a doctor view but isn't
-	// needed for the dispatch reject path.
+	// First missing cap wins (slice order = registration order).
 	meta := nc.Meta()
 	for _, requiredCap := range profile.RequiredNodeCaps {
 		if !meta.HasCap(requiredCap) {
@@ -136,13 +84,9 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 
 // ErrAccessProfileRemote is returned when a session bound to a non-default
 // access profile is dispatched to a remote node. The access-profile env
-// overlay (and any *_FILE secret it references) is host-local: it is resolved
-// on THIS node and never crosses the reverse-RPC wire (ClientMsg carries only
-// key/text/workspace/backend — no env). A remote node would spawn on ITS OWN
-// baseline, silently running the session on the wrong account. Rather than
-// leak an overlay over the wire or spawn on the wrong auth chain, we fail loud.
-// RFC project-access-profile §4.5 / P1-a — access profiles are LOCAL-DISPATCH
-// ONLY in this release; overlay-over-wire is future work.
+// overlay (and any *_FILE secret) is host-local and never crosses the
+// reverse-RPC wire, so a remote node would silently run the session on the
+// wrong account; fail loud instead (RFC project-access-profile §4.5).
 var ErrAccessProfileRemote = errors.New("access-profile session cannot be dispatched to a remote node (local-dispatch only)")
 
 // accessProfileResolver is the minimal surface the remote-dispatch gate needs:
@@ -167,13 +111,10 @@ func gateRemoteAccessProfile(resolver accessProfileResolver, targetNode, key str
 }
 
 // hubNodeLookup adapts the Hub's shared *nodeRegistry to the nodeLookup
-// interface so handleRemoteSend can call selectNodeForBackend without
-// needing access to Server.nodes. Locking is done per-call inside the
-// registry (read lock); the cost is negligible vs the downstream RPC.
+// interface so handleRemoteSend can call selectNodeForBackend.
 type hubNodeLookup struct{ h *Hub }
 
 func (l hubNodeLookup) NodeByID(id string) (node.Conn, bool) {
-	// ARCH4 (#384): defer to Hub.lookupNode so every by-ID read of the
-	// Server-shared node table goes through the single Hub-side seam.
+	// Every by-ID read of the shared node table goes through Hub.lookupNode.
 	return l.h.lookupNode(id)
 }

@@ -5,9 +5,6 @@
 //	            subscriber block (clients) for SendRaw fanout
 //	READS:      shared deps block (read-only after ctor) + send block
 //	            (queue / droppedTotal for broadcast-aware enqueue)
-//
-// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
-// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (
@@ -23,35 +20,9 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// File: wshub_broadcast.go
-//
-// Broadcast and fan-out helpers extracted from wshub.go (R243-ARCH-2 split).
-// Owns:
-//   - broadcastClientSnapPool: pooled []*wsClient backing array
-//   - sessionsUpdateMsg: pre-marshaled byte literal
-//   - broadcastToAuthenticated / broadcastState / BroadcastSessionReady
-//   - BroadcastSessionsUpdate (debounced) + doBroadcastSessionsUpdate
-//   - BroadcastCronRunStarted / BroadcastCronRunEnded and their named
-//     WS payload structs (cron_result wire frame deleted in Phase D —
-//     see cronRunStartedMsg / cronRunEndedMsg comment block below)
-//   - BroadcastDaemonRunStarted / BroadcastDaemonRunEnded
-//   - sanitizeHexIDForBroadcast (Job/Run hex-ID short-circuit)
-//   - DroppedMessages (atomic-counter accessor, broadcast-adjacent)
-//
-// All Hub state used by these helpers stays on *Hub: debounceMu /
-// debounceTimer / debounceFirst / debounceClosed / clients / mu /
-// droppedTotal. This file is pure code-relocation — no behaviour change.
-
-// Pre-marshaled static message body, derived ONCE from node.ServerMsg at
-// package init so it can never drift from the wire schema. R243-ARCH-24
-// (#869) incremental slice: the previous hand-written byte literal was a
-// second, unverified source of truth for the sessions_update frame and
-// carried a "must stay exactly in sync" comment — exactly the scattered-
-// wire-struct hazard the issue flags. Deriving from the struct keeps the
-// zero-alloc broadcast hot path (still a single shared []byte) while making
-// node.ServerMsg the only authority. All fields are omitempty so the result
-// is `{"type":"sessions_update"}`; marshalSessionsUpdate panics on the
-// impossible Marshal error rather than shipping a malformed/empty frame.
+// sessionsUpdateMsg is the pre-marshaled sessions_update frame, derived from
+// node.ServerMsg at package init so it cannot drift from the wire schema while
+// keeping the broadcast hot path zero-alloc (#869).
 var sessionsUpdateMsg = marshalSessionsUpdate()
 
 func marshalSessionsUpdate() []byte {
@@ -62,26 +33,16 @@ func marshalSessionsUpdate() []byte {
 	return data
 }
 
-// broadcastClientSnapPool reuses the []*wsClient backing array across
-// broadcasts so high-frequency session_state / sessions_update traffic does
-// not allocate one slice per broadcast. The drop threshold is keyed off
-// maxWSConns so a steady-state fleet at any size up to the ceiling keeps
-// pooling; only genuinely oversized slices (e.g. after a brief spike over
-// the cap) fall through to a fresh allocation.
+// broadcastSnapPoolMaxCap: snapshots grown past the connection ceiling are not
+// returned to broadcastClientSnapPool, so a spike cannot pin an oversized array.
 const broadcastSnapPoolMaxCap = maxWSConns
 
-// subFilterChunk bounds how many candidate clients broadcastSessionSystemEvent
-// filters per h.mu.RLock acquisition. R20260607-PERF-014 (#1925): the phase-2
-// subscription scan reads c.subscriptions[key] under the Hub-wide h.mu, and a
-// single RLock spanning all N authenticated clients blocks every writer
-// (register / unregister / markAuthenticated take the WRITE lock) for the whole
-// walk. Releasing the lock every subFilterChunk candidates lets those writers
-// interleave between batches, capping the starvation window at O(subFilterChunk)
-// regardless of fleet size. 64 keeps the per-chunk lock/unlock overhead
-// negligible against a tiny map lookup per client while still draining a
-// maxWSConns-sized fleet in a bounded handful of acquisitions.
+// subFilterChunk bounds how many candidates fanOutToSubscribers filters per
+// h.mu.RLock acquisition, so register / unregister / markAuthenticated (write
+// lock) can interleave instead of waiting behind a whole-fleet scan (#1925).
 const subFilterChunk = 64
 
+// broadcastClientSnapPool reuses []*wsClient backing arrays across broadcasts.
 var broadcastClientSnapPool = sync.Pool{
 	New: func() any {
 		s := make([]*wsClient, 0, 32)
@@ -89,18 +50,9 @@ var broadcastClientSnapPool = sync.Pool{
 	},
 }
 
-// releaseBroadcastSnap returns a client snapshot to broadcastClientSnapPool
-// after a fan-out completes. It (1) nils every *wsClient slot so a
-// disconnected client can be GC'd before the backing array is reused
-// (R59-PERF-L1), and (2) drops oversized backing arrays rather than pinning
-// them in the pool — replacing them with a fresh small slice so a single
-// "big broadcast" cannot permanently deplete a pool slot (R58-PERF-005).
-//
-// R243-ARCH-2 (#459 server-domain slice): broadcastToAuthenticated and
-// broadcastSessionSystemEvent repeated this identical clear→cap-check→Put
-// tail; consolidating it keeps the two fan-out paths' pool discipline in
-// one place so a future tweak (e.g. the cap threshold) can't drift between
-// them. Pure code-relocation — no behaviour change.
+// releaseBroadcastSnap returns a fan-out snapshot to broadcastClientSnapPool.
+// Slots are nil'd so disconnected clients can be GC'd before reuse; oversized
+// arrays are replaced with a fresh small slice instead of being pooled.
 func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 	for i := range snap {
 		snap[i] = nil
@@ -114,23 +66,8 @@ func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 }
 
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
-// Takes a pointer snapshot under RLock and releases the lock before the per-
-// client channel sends. SendRaw itself is non-blocking, but with hundreds of
-// clients a loop under RLock still serialises `register`/`unregister` behind
-// every broadcast; snapshotting removes that contention amplifier and the
-// backing slice is reused via sync.Pool so steady-state broadcasts are zero-alloc.
-//
-// R040034-PERF-23 (#1409): iterate the h.authClients mirror instead of
-// scanning h.clients with a per-element c.authenticated.Load() filter.
-// cron's run-started/ended fan-out paid one O(N_clients) walk per broadcast
-// wave even when most connections were still pre-auth (no-token mode is the
-// only path that bypasses handleAuth — tokens routes flip authenticated only
-// after the inner auth message exchanges). The mirror is updated under
-// authMu (nested inside h.mu) by register / markAuthenticated / unregister /
-// Shutdown so it stays consistent with h.clients while letting this fan-out
-// read under authMu alone — R200109-PERF-4 (#1621). Hand-rolled test hubs that bypass NewHub leave
-// h.authClients nil; the nil-guard falls back to the legacy filter loop so
-// pre-existing fixtures observe no behaviour change.
+// The recipient snapshot is taken under authMu and released before the per-client
+// SendRaw loop so register / unregister never serialise behind a broadcast.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	snapPtr, snap := h.snapshotAuthenticated()
 	for _, c := range snap {
@@ -142,23 +79,17 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // snapshotAuthenticated returns a pooled snapshot of the clients that should
 // receive an "all authenticated clients" broadcast. The caller MUST return the
 // snapshot to the pool via releaseBroadcastSnap once the fan-out completes.
-//
-// R200109-PERF-4 (#1621): the authClients mirror has its own authMu so this
-// fan-out (N sessions × multiple events/s) no longer serialises behind the
-// Hub-wide h.mu that register / unregister / markAuthenticated hold. Snapshot
-// under the cheap authMu.RLock, release before the per-client SendRaw loop. The
-// legacy fallback still walks h.clients (h.mu-owned). authClients-nil is fixed
-// at NewHub, so the nil check is lock-free.
+// The authClients mirror is read under its own authMu, not the Hub-wide h.mu
+// (#1621); it is nil only for hand-rolled test hubs that bypass NewHub, which
+// fall back to walking h.clients. authClients is fixed at NewHub, so the nil
+// check is lock-free.
 func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
 
 	if h.authClients != nil {
-		// R202606g-PERF-020 (#2310): copy the contiguous slice mirror instead
-		// of range-ing the map. At 500 clients the map walk chases scattered
-		// buckets under authMu.RLock on every broadcast wave; copy() is a single
-		// sequential memmove into the pooled backing array. The slice is kept in
-		// lockstep with authClients by add/removeAuthClientLocked + Shutdown.
+		// Copy the slice mirror instead of ranging the map: one sequential
+		// memmove under authMu.RLock (#2310).
 		h.authMu.RLock()
 		if n := len(h.authClientsSlice); n > 0 {
 			if cap(snap) < n {
@@ -183,28 +114,12 @@ func (h *Hub) snapshotAuthenticated() (*[]*wsClient, []*wsClient) {
 	return snapPtr, snap
 }
 
-// marshalBroadcastAuth consolidates the marshal→err-guard→fan-out tail shared
-// by every "broadcast to all authenticated clients" producer (session_state,
-// cron/daemon run-started/ended). R243-ARCH-15 (#845) incremental slice: these
-// six call sites previously repeated the identical `data, err := marshalPooled
-// (v); if err != nil { return }; h.broadcastToAuthenticated(data)` triple. A
-// marshal failure is swallowed (matching the prior behaviour) because the WS
-// payload structs are fixed-shape and cannot fail json.Marshal in practice;
-// dropping the frame is preferable to panicking the producer goroutine.
-//
-// R20260608133928-PERF-1: fast-path zero-client check mirrors the subscriber
-// guard in broadcastSessionSystemEvent (see line ~381). When authClients is
-// non-nil (all production hubs via NewHub) and empty, there is nobody to
-// deliver to — skip marshalPooled entirely. Hand-rolled hubs that leave
-// authClients nil fall through to the legacy path (h.clients scan) as before.
-//
-// R20260616-PERF-004 (#2141): the recipient snapshot and the empty check share
-// a single authMu acquisition. Previously the empty check took authMu.RLock,
-// released it, and then broadcastToAuthenticated re-acquired it — two serial
-// authMu round-trips per broadcast (every cron tick fires two of these). Now we
-// snapshot once: an empty snapshot means there is nobody to deliver to, so we
-// skip marshalPooled entirely; otherwise we marshal and reuse the same snapshot
-// for the fan-out.
+// marshalBroadcastAuth marshals v and fans it out to every authenticated client.
+// The snapshot is taken first and doubles as the empty check (one authMu
+// acquisition), so a hub with no recipients skips marshalPooled entirely
+// (#2141). A marshal failure drops the frame: the WS payload structs are
+// fixed-shape and cannot fail in practice, and dropping beats panicking the
+// producer goroutine.
 func (h *Hub) marshalBroadcastAuth(v any) {
 	snapPtr, snap := h.snapshotAuthenticated()
 	if len(snap) == 0 {
@@ -246,14 +161,9 @@ func (h *Hub) BroadcastSessionsUpdate() {
 		debounceInterval = 50 * time.Millisecond
 		maxDebounceDelay = 500 * time.Millisecond
 	)
-	// R246-PERF-9 / #723: check the atomic mirror BEFORE acquiring the
-	// debounce mutex. Once Shutdown has set the flag every subsequent call
-	// is a no-op; without this fast path, the dozens of producer paths
-	// racing a teardown (router/cron/dashboard send/scratch/etc.) all
-	// serialise on debounceMu just to read the bool and return. The
-	// authoritative `debounceClosed` check below still runs under the
-	// mutex so the Shutdown ordering contract is unchanged for callers
-	// that arrive before the flag publishes.
+	// Lock-free fast path: once Shutdown has published the flag every call is a
+	// no-op. The authoritative debounceClosed check below still runs under the
+	// mutex for callers that arrive before the flag publishes (#723).
 	if h.debounceClosedFast.Load() {
 		return
 	}
@@ -272,14 +182,11 @@ func (h *Hub) BroadcastSessionsUpdate() {
 			// Hard cap reached — let the pending timer fire without resetting.
 			return
 		}
-		// time.Timer.Reset on a timer whose AfterFunc already fired but whose
-		// callback is still blocked on debounceMu would schedule a SECOND run
-		// without a matching clientWG.Add — breaking the Shutdown Wait and
-		// producing a negative clientWG count. Stop() returns false if the
-		// callback already ran or is scheduled to run; in that case we treat
-		// the in-flight callback as the one that will do the broadcast and
-		// skip rescheduling. The callback clears debounceArmed under
-		// debounceMu, so the next call re-arms via the idle branch below.
+		// Reset on a timer whose AfterFunc already fired (callback blocked on
+		// debounceMu) would schedule a SECOND run without a matching
+		// clientWG.Add, breaking Shutdown's Wait. Stop() == false means the
+		// in-flight callback will do the broadcast; it clears debounceArmed so
+		// the next call re-arms via the idle branch below.
 		if h.debounceTimer.Stop() {
 			h.debounceTimer.Reset(debounceInterval)
 		}
@@ -291,14 +198,10 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	// callback still runs even after Stop() if it had already fired and
 	// was scheduled, so the tracking guards against a post-Shutdown race.
 	h.clientWG.Add(1)
-	// R200109-PERF-14 (#1624): production hubs pre-allocate debounceTimer
-	// once in NewHub (bound to h.debounceFire), so the idle→armed transition
-	// re-uses it via Reset(debounceInterval) — no per-call *time.Timer
-	// allocation. R239-PERF-6 already amortised the closure; this removes the
-	// remaining runtime-timer-struct alloc on the high-frequency refresh path.
-	// Hand-rolled hubs from old tests skip NewHub and leave debounceTimer nil;
-	// they fall back to the original per-call time.AfterFunc with an inline
-	// closure that keeps the R249-GO-7 closed-check so Shutdown-races stay safe.
+	// Production hubs pre-allocate debounceTimer in NewHub (bound to
+	// h.debounceFire) so the idle→armed transition is a Reset with no timer
+	// allocation (#1624). Hand-rolled test hubs leave it nil and fall back to a
+	// per-call AfterFunc whose closure keeps the closed-check for Shutdown races.
 	if h.debounceTimer != nil {
 		h.debounceArmed = true
 		h.debounceTimer.Reset(debounceInterval)
@@ -325,15 +228,8 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 }
 
 // cronRunStartedMsg / cronRunEndedMsg are the cron-run-history WS payloads.
-// Phase D (RFC §3.5) deleted the legacy cronResultMsg / BroadcastCronResult
-// pair: dashboard.js's cron_result subscription was a strict subset of its
-// cron_run_ended subscription (announce + fetchCronJobs + renderCronPanel),
-// and result text is fetched via /api/cron/jobs/<id>/runs/<runID> when
-// needed rather than carried inline on the success-path WS frame. The
-// announce("定时任务已完成") moved to dashboard.js's cron_run_ended
-// succeeded branch.
-//
-// New clients subscribe to the run-started / run-ended pair, which
+// Result text is not carried inline; clients fetch it via
+// /api/cron/jobs/<id>/runs/<runID> when needed.
 type cronRunStartedMsg struct {
 	Type      string `json:"type"`
 	JobID     string `json:"job_id"`
@@ -361,11 +257,8 @@ type cronRunEndedMsg struct {
 // BroadcastCronRunStarted emits cron_run_started to authenticated clients.
 // Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
 func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
-	// R222-PERF-15: jobID / runID are produced by cron.generateHexID — pure
-	// lowercase hex of fixed length. cron.IsValidID rejects anything else,
-	// so once it returns true we can skip SanitizeForLog (slow path allocates
-	// a strings.Map output even on the no-op branch when len > 0). Untrusted
-	// or shape-mismatched input still falls through to the sanitiser.
+	// jobID / runID come from cron.generateHexID; sanitizeHexIDForBroadcast
+	// skips SanitizeForLog's allocating slow path when the hex shape holds.
 	h.marshalBroadcastAuth(cronRunStartedMsg{
 		Type:      "cron_run_started",
 		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
@@ -383,11 +276,8 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 // updated). errorMsg is already path-redacted + sanitised by the cron
 // package's recordResultP0 → SanitizeForLog pipeline.
 func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string) {
-	// errClass/trigger are typed enums today (cron.ErrorClass / cron.TriggerKind)
-	// so currently safe; defensive sanitisation matches the treatment of jobID
-	// and shields a future code path that derives them from external config
-	// (e.g. webhook trigger names) from log/payload injection. R221-FIX-P2-7.
-	// R222-PERF-15: see sanitizeHexIDForBroadcast — hex IDs short-circuit.
+	// errClass/trigger are typed enums today; sanitising anyway shields a future
+	// path that derives them from external config from payload injection.
 	h.marshalBroadcastAuth(cronRunEndedMsg{
 		Type:       "cron_run_ended",
 		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
@@ -404,19 +294,13 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 }
 
 // broadcastSessionSystemEvent pushes a synthetic `system`-type event frame to
-// every authenticated client currently subscribed to `key`. R176-ARCH-NX
-// (#433): the primary→remote send path previously surfaced a remote-send
-// failure ONLY to the originating client via send_ack, while the symmetric
-// remote→primary path (upstream/connector_rpc.go) injects a LogSystemEvent that
-// reaches every dashboard subscribed to the session. This restores parity for
-// remote sessions, whose EventLog lives on the remote node and so cannot be
-// appended to locally — instead we fan the failure out over the same WS
-// `event` frame that streamed remote events already use, scoped to subscribers
-// of that key so it is not cross-tenant noise.
+// every authenticated client currently subscribed to `key`. A remote session's
+// EventLog lives on the remote node and cannot be appended locally, so remote
+// send/interrupt failures are fanned out over the same WS `event` frame that
+// streamed remote events use, scoped to that key's subscribers (#433).
 //
-// summary is caller-sanitised (osutil.SanitizeForLog) before reaching here —
-// it is broadcast verbatim to subscribed dashboards and would otherwise be a
-// log/terminal-injection primitive, mirroring the connector_rpc.go contract.
+// summary MUST be caller-sanitised (osutil.SanitizeForLog): it is broadcast
+// verbatim to dashboards and would otherwise be an injection primitive.
 func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	if key == "" || summary == "" {
 		return
@@ -432,19 +316,15 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 }
 
 // DroppedMessages returns the total number of messages dropped across all
-// clients since the process started. Lock-free atomic load; see the struct
-// field comment for why this replaced a per-client RLock scan.
+// clients since the process started (lock-free atomic load).
 func (h *Hub) DroppedMessages() int64 {
 	return h.droppedTotal.Load()
 }
 
 // LegacySendInvokes returns the total number of times sessionSend fell
 // through to the deprecated sessionSendLegacy path. Production Hubs wire a
-// real MessageQueue and never increment this counter; tests/headless tools
-// that omit Queue do. R-LEGACY-SEND (#710) uses this counter to drive the
-// migration to one delivery contract — once every test fixture wires a
-// MessageQueue stub the counter stays at zero and sessionSendLegacy can
-// be deleted alongside its sole caller branch in send.go.
+// real MessageQueue and never increment this; once every test fixture does
+// too, sessionSendLegacy can be deleted (#710).
 func (h *Hub) LegacySendInvokes() int64 {
 	if h == nil {
 		return 0
@@ -452,14 +332,11 @@ func (h *Hub) LegacySendInvokes() int64 {
 	return h.legacySendInvokes.Load()
 }
 
-// daemonRunStartedMsg / daemonRunEndedMsg are the WS payloads for
-// docs/rfc/system-session.md §9.4.  Crucially we do NOT carry an
-// ErrorMsg field — error messages from the daemon's Runner subprocess
-// can echo back portions of the user-supplied prompt (CLI "context too
-// long" failures are a known case), and broadcasting that to every
-// authenticated dashboard client constitutes cross-tenant leakage.
-// Server-side slog still carries the full error for operator-side
-// debugging.
+// daemonRunStartedMsg / daemonRunEndedMsg are the sysession WS payloads
+// (docs/rfc/system-session.md §9.4). They deliberately carry NO ErrorMsg:
+// daemon Runner errors can echo user-prompt fragments, and broadcasting that
+// to every authenticated dashboard would be cross-tenant leakage. Server-side
+// slog still carries the full error.
 type daemonRunStartedMsg struct {
 	Type      string `json:"type"`
 	Name      string `json:"name"`
@@ -478,13 +355,9 @@ type daemonRunEndedMsg struct {
 	Trigger    string `json:"trigger,omitempty"`
 }
 
-// BroadcastDaemonRunStarted emits daemon_run_started.
-//
-// name / runID / trigger / state come from compiled-in enums (not
-// operator-supplied), but we run them through SanitizeForLog anyway as
-// defence-in-depth — a future caller might wire a daemon name from
-// config or pass through external content; sanitising at the broadcast
-// boundary keeps us safe regardless.
+// BroadcastDaemonRunStarted emits daemon_run_started. name / runID / trigger
+// are compiled-in enums today; sanitising at the broadcast boundary is
+// defence-in-depth against a future config-derived caller.
 func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
 	h.marshalBroadcastAuth(daemonRunStartedMsg{
 		Type:      "daemon_run_started",
@@ -511,9 +384,7 @@ func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger stri
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the
 // cron.IsValidID hex shape (and fits within maxLen), otherwise routes
-// through the regular sanitiser. Avoids the strings.Map slow-path on
-// the common case where Job/Run IDs are produced by generateHexID.
-// R222-PERF-15.
+// through the regular sanitiser, avoiding its strings.Map slow path.
 func sanitizeHexIDForBroadcast(id string, maxLen int) string {
 	if len(id) <= maxLen && cron.IsValidID(id) {
 		return id
@@ -521,13 +392,11 @@ func sanitizeHexIDForBroadcast(id string, maxLen int) string {
 	return osutil.SanitizeForLog(id, maxLen)
 }
 
-// sanitizeTriggerForBroadcast short-circuits the known-safe cron TriggerKind
-// enum values (typed lowercase-ASCII constants the scheduler controls) so the
-// hot cron-run-started/ended fan-out skips SanitizeForLog's byte-scan entirely.
-// Anything outside the closed enum — a future externally-derived webhook
-// trigger name, say — still routes through the sanitiser, preserving the
-// log/payload-injection defence the original SanitizeForLog call provided.
-// R202606c-PERF-007 (#2232); mirrors sanitizeHexIDForBroadcast's IsValidID gate.
+// sanitizeTriggerForBroadcast short-circuits the closed cron TriggerKind enum
+// (lowercase-ASCII constants the scheduler controls) so the hot cron-run
+// fan-out skips SanitizeForLog's byte-scan. Anything outside the enum — e.g. a
+// future externally-derived webhook trigger name — still goes through the
+// sanitiser (#2232).
 func sanitizeTriggerForBroadcast(trigger string) string {
 	switch cron.TriggerKind(trigger) {
 	case cron.TriggerScheduled, cron.TriggerManual, runtelemetry.TriggerCatchup:
@@ -537,9 +406,8 @@ func sanitizeTriggerForBroadcast(trigger string) string {
 }
 
 // sanitizeSessionIDForBroadcast short-circuits canonical UUID session IDs
-// (the form every cron run records) so the fan-out skips SanitizeForLog on the
-// common case. Non-UUID shapes still fall through to the sanitiser.
-// R202606c-PERF-007 (#2232).
+// (the form every cron run records); non-UUID shapes still go through the
+// sanitiser (#2232).
 func sanitizeSessionIDForBroadcast(sessionID string) string {
 	if discovery.IsValidSessionID(sessionID) {
 		return sessionID

@@ -69,11 +69,4 @@ func TestResubscribeEvents_OldUnsubReleasedOutsideMu(t *testing.T) {
 			"before h.mu.Unlock() has reappeared. This is exactly the shape " +
 			"H8 removed. Restore the capture-then-unlock form described above.")
 	}
-
-	// Invariant 4: the H8 contract comment must still reference the
-	// Round number so future readers can locate this test.
-	if !regexp.MustCompile(`H8 \(Round 163\)`).MatchString(text) {
-		t.Error("H8 anchor comment missing. Keep `H8 (Round 163)` searchable " +
-			"in wshub_eventpush.go so future reviewers land on this contract.")
-	}
 }

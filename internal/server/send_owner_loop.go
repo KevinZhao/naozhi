@@ -1,15 +1,6 @@
-// Phase 3f-prep / R-send-owner-loop-extract (2026-05-28):
-// ownerLoop + handleOwnerLoopPanic (~90 行队列消费驱动) 抽到独立文件。
-// 纯物理切分、零行为变化。
-//
-// 这两个 method 构成"会话拥有者跑完头炮后排空 queue"的完整闭包：
-//   - ownerLoop          首炮 + collectTimer 驱动的 drain 循环
-//   - handleOwnerLoopPanic 拥有者协程的 panic 恢复 + queue Discard + UI 通知
-//
-// 与 ws/broadcast 路径无 receiver 关系；调用 runTurn (留在 send.go) 通过
-// 同包可见性。Phase 4b（wshub.go *Hub method 锁定）禁动的是 wshub.go 内
-// 的 ws fan-out / subscribe / cache 等方法，本文件的 ownerLoop 是 send
-// 业务路径的拥有者循环，落在 send.go 而非 wshub.go，可独立抽离。
+// ownerLoop + handleOwnerLoopPanic：会话拥有者跑完头炮后排空 queue 的完整闭包
+// （首炮 + collectTimer 驱动的 drain 循环；panic 恢复 + queue Discard + UI 通知）。
+// runTurn 留在 send.go。
 package server
 
 import (
@@ -21,14 +12,12 @@ import (
 )
 
 // ownerLoop processes the first send turn and then drains any messages that
-// arrived while the turn was running, coalescing them into a single follow-up
-// turn. Mirrors dispatch.Dispatcher.ownerLoop but integrates with the hub's
-// broadcast + session routing.
+// arrived meanwhile, coalescing them into a single follow-up turn. Mirrors
+// dispatch.Dispatcher.ownerLoop with the hub's broadcast + session routing.
 //
-// gen is the queue generation at enqueue time. If Discard (e.g., /new) bumps
-// it mid-flight, DoneOrDrain returns nil and this loop exits cleanly.
-// Caller must arrange sendWG accounting via TrackSend — ownerLoop does not
-// touch sendWG directly so it can be launched with a defer-release closure.
+// gen is the queue generation at enqueue time; if Discard (e.g. /new) bumps
+// it mid-flight, DoneOrDrain returns nil and the loop exits. Caller must
+// arrange sendWG accounting via TrackSend — ownerLoop never touches sendWG.
 func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError asyncErrorFn) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -45,10 +34,8 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 	for {
 		select {
 		case <-h.ctx.Done():
-			// Discard clears msgs and resets busy=false + bumps gen so a
-			// fresh owner can be spawned by the next Enqueue after restart;
-			// without this, the key would remain "busy" forever and queued
-			// messages would never be processed.
+			// Discard resets busy + bumps gen so the next Enqueue can spawn a
+			// fresh owner; otherwise the key stays "busy" forever.
 			h.queue.Discard(key)
 			return
 		case <-collectTimer.C:
@@ -64,10 +51,8 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
 		h.runTurn(key, text, images, nil)
-		// 与 dispatch.ownerLoop 对齐：Reset 前 Stop + drain，防止未来循环
-		// 形状变化（例如 early-continue）让 timer 的残留 tick 立即 fire，
-		// 导致 DoneOrDrain 被多调一次、刚入队的消息被丢弃且无任何提示。
-		// R192-SRV-P0-CollectTimerDrain。
+		// Reset 前 Stop + drain（与 dispatch.ownerLoop 对齐）：残留 tick 会让
+		// DoneOrDrain 多调一次、刚入队的消息被静默丢弃。
 		if !collectTimer.Stop() {
 			select {
 			case <-collectTimer.C:
@@ -78,20 +63,10 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 	}
 }
 
-// handleOwnerLoopPanic is the deferred panic recovery helper for ownerLoop.
-// Split out of the defer so the recover path can be unit-tested directly —
-// constructing a panicking runTurn in tests would require a real router +
-// session, which is out of scope for a targeted recover regression. The
-// helper:
-//
-//  1. Logs the panic with a full stack trace for operator triage.
-//  2. Clears the message queue so a stale owner is not left holding the key.
-//  3. Signals the dashboard client via onAsyncError so the UI can tell the
-//     user the turn was lost. HTTP path fans out via httpSendErrorCallback (ack already
-//     shipped), so this is a no-op there. RETRY3.
-//
-// A nested recover around onAsyncError absorbs a cascading panic (e.g., a
-// broken WS writer) so the outer defer always completes.
+// handleOwnerLoopPanic is the deferred panic recovery helper for ownerLoop
+// (split out to be unit-testable): logs the stack, Discards the queue so a
+// stale owner does not hold the key, and notifies the client via onAsyncError.
+// A nested recover absorbs a cascading panic (e.g. a broken WS writer).
 func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError asyncErrorFn, r any) {
 	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if h.queue != nil {

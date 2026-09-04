@@ -1,12 +1,6 @@
-// Phase 5-prep / R-send-helper-extract (2026-05-28):
-// Anonymous-bucket cookie helpers moved out of dashboard_send.go into
-// their own file. Pure physical split, zero behaviour change. The
-// nz_anon cookie is NOT an auth credential — it's a per-browser random
-// label hashed into the upload-owner key so co-NAT users don't collide
-// in no-token mode. All three constants and three functions move
-// together because they form one cohesive contract (mint + validate +
-// hash); splitting them would scatter the security comments that justify
-// the lengths and lifetime values.
+// nz_anon cookie helpers (mint + validate + hash). The cookie is NOT an auth
+// credential — it is a per-browser random label hashed into the upload-owner
+// key so co-NAT users don't collide in no-token mode.
 package server
 
 import (
@@ -20,47 +14,27 @@ import (
 )
 
 // anonCookieName labels a per-browser random bucket used ONLY in no-token
-// (opt-in) mode to disambiguate uploadOwner between co-NAT users. NOT an
-// auth credential — just a 16-byte random label hashed into the owner key
-// so User A's upload cannot be claimed by User B via TakeAll.
+// mode to disambiguate uploadOwner between co-NAT users, so User A's upload
+// cannot be claimed by User B via TakeAll. Not an auth credential.
 const anonCookieName = "nz_anon"
 
-// anonCookieHexLen is the wire length of a freshly-minted nz_anon value:
-// 16 random bytes hex-encoded (see mintAnonCookie). Validators on the
-// upgrade / send paths re-mint when the inbound cookie does not match
-// this length so a malformed-or-attacker-bytes value cannot land in
-// uploadOwner buckets unaltered. The HMAC proposal in R236-SEC-06 / #485
-// would add a signature but the cookie carries no trust to begin with —
-// it's a label. Length + lowercase-hex is sufficient to reject obvious
-// injection attempts while keeping the existing ownerKeyFromCookie hash
-// chain intact for legitimately-minted values.
+// anonCookieHexLen is the wire length of a minted nz_anon value (16 random
+// bytes, hex). Validators re-mint when the inbound cookie does not match, so
+// attacker-supplied bytes never land in uploadOwner buckets unaltered (#485).
 const anonCookieHexLen = 32
 
-// anonCookieMaxAgeSeconds bounds the lifetime of the nz_anon owner label.
-// R247-SEC-15 / #514: lowered from 30 days to 7 to shrink the window in
-// which a stale label can be reused after a service restart, token-mode
-// toggle, or non-TLS sniff. Pulled out as a const so regression tests can
-// pin the value without parsing the cookie header.
-//
-// R202606f-SEC-005 / #2297: aligned down to the nz_auth session lifetime
-// (authCookieMaxAgeSeconds = 3600 / 1h in internal/dashboard/auth). The 7-day
-// label outlived the 1h auth session by 7×, so on a shared device a second
-// user arriving after the first user's auth cookie had expired (but before
-// logout, which #2157 wires to clear nz_anon) could still inherit the first
-// user's owner bucket and TakeAll their pending uploads. Bounding the label to
-// the auth session closes that cross-user reuse window: once the auth cookie
-// expires the browser must re-authenticate, and the owner label expires
-// alongside it. Kept as a literal (not a cross-package reference) so this file
-// owns its own security knob; anonCookieMaxAgeMatchesAuth in the test pins the
-// two values together so a future change to either is caught.
+// anonCookieMaxAgeSeconds bounds the nz_anon label lifetime. It MUST equal
+// the nz_auth session lifetime (authCookieMaxAgeSeconds in
+// internal/dashboard/auth): a label outliving the auth session lets a second
+// user on a shared device inherit the first user's owner bucket and TakeAll
+// their pending uploads (#2297). Kept a literal; the
+// anonCookieMaxAgeMatchesAuth test pins the two values together.
 const anonCookieMaxAgeSeconds = 3600 // 1 hour, aligned to nz_auth session
 
 // isValidAnonCookieValue reports whether v looks like a freshly-minted
 // nz_anon value: exactly anonCookieHexLen bytes, all lowercase hex.
-// The hex check is intentionally strict (lowercase only) because
-// mintAnonCookie always emits encoding/hex's lowercase form; any other
-// shape originated outside the server and should be re-minted, not
-// hashed-and-bucketed. R236-SEC-06 (#485) hardening.
+// Strictly lowercase because mintAnonCookie emits encoding/hex's form; any
+// other shape originated outside the server and must be re-minted (#485).
 func isValidAnonCookieValue(v string) bool {
 	if len(v) != anonCookieHexLen {
 		return false
@@ -76,36 +50,9 @@ func isValidAnonCookieValue(v string) bool {
 }
 
 // mintAnonCookie writes a freshly-random nz_anon cookie and returns its value.
-// HttpOnly, SameSite=Strict (matches the auth cookie; nz_anon is only read by
-// same-origin XHR so Lax offered no value and left a cross-site-GET window
-// open for any future GET handler that reads it), Secure gated by
-// auth.IsSecure(r), MaxAge=anonCookieMaxAgeSeconds.
-//
-// R247-SEC-15 / #514: MaxAge was 30 days, which kept the per-browser owner
-// label alive across token-mode toggles and service restarts that the
-// operator may have used to invalidate sessions. The cookie is NOT an auth
-// credential — it only disambiguates uploadOwner between co-NAT users —
-// but a stale owner label can still be claimed by an attacker who sniffed
-// the value over a non-TLS deployment (where the Secure flag is absent
-// because auth.IsSecure(r)=false). 7 days is the upper bound a reasonable
-// dev-laptop user would expect for a "remember this tab" hint, and it
-// shrinks the post-token-rotation window 4×. The cookieGen-coupled
-// rotation that #514's proposal flags as the deeper fix is left for a
-// follow-up because it requires a dashboard_auth coupling change; this
-// commit just lowers the MaxAge floor where there is no design decision.
-//
-// R222-SEC-4 / #687: in multi-user mode (dashboardToken set) with no TLS
-// terminator on the request path, the previous Secure=false branch let a
-// same-network attacker sniff the cookie and bucket-collide future uploads.
-// We now force Secure=true whenever a dashboard token is configured, which
-// makes the browser refuse to ship the cookie over plaintext — fail-closed
-// rather than silently degrade. The single-user / no-token deployment is
-// unchanged: those operators legitimately run on http://127.0.0.1 and the
-// Secure-on-non-TLS combination would simply make the browser drop the
-// cookie, breaking upload disambiguation for nobody (single user, single
-// owner). The startup-time warning on server.go:931 already calls out the
-// "token + plaintext" misconfiguration so an operator running this combo
-// will see the cookies disappear and find the warning in the same log.
+// Attributes: HttpOnly, SameSite=Strict (only same-origin XHR reads it; Lax
+// would open a cross-site-GET window), Secure per setAnonCookie,
+// MaxAge=anonCookieMaxAgeSeconds.
 func mintAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -117,16 +64,14 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers) (
 }
 
 // setAnonCookie writes the nz_anon Set-Cookie header with the shared
-// attribute set (HttpOnly, SameSite=Strict, Secure policy per mintAnonCookie
-// godoc, MaxAge=anonCookieMaxAgeSeconds). Extracted so mintAnonCookie (fresh
-// random value) and renewAnonCookie (same value, fresh expiry) cannot drift
-// on attributes.
+// attribute set, so mintAnonCookie (fresh value) and renewAnonCookie (same
+// value, fresh expiry) cannot drift on attributes.
 func setAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) {
 	secure := ah != nil && ah.IsSecure(r)
-	// R222-SEC-4 / #687: force Secure when a dashboard token is configured —
-	// the operator has signalled multi-user intent, so plaintext sniff of the
-	// owner label is no longer an acceptable degradation. The browser will
-	// drop the cookie under HTTP, which is the desired fail-closed.
+	// Force Secure when a dashboard token is configured (multi-user intent):
+	// the browser drops the cookie under plaintext HTTP, which is the desired
+	// fail-closed against same-network sniffing (#687). No-token deployments
+	// on http://127.0.0.1 keep working.
 	if !secure && ah != nil && ah.DashboardToken != "" {
 		secure = true
 	}
@@ -137,27 +82,17 @@ func setAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, va
 	})
 }
 
-// renewAnonCookie re-issues the SAME nz_anon value with a fresh MaxAge —
-// sliding renewal, mirroring the nz_auth session cookie's renewal behaviour
-// (internal/dashboard/auth). Without it the label hard-expires
-// anonCookieMaxAgeSeconds after mint even while the dashboard is actively
-// used: a long-lived WS connection keeps serving the owner derived from the
-// expired label while the next /api/sessions/upload mints a NEW label — the
-// uploadStore owner for the upload then never matches the WS send's frozen
-// owner and every file-bearing send fails TakeAll with "file not found or
-// expired" (the "本机不能添加图片附件" bug; #2297 aligned the MaxAge down to
-// 1h but skipped the sliding renewal that makes the 1h ceiling livable).
-// Renewing on every owner-deriving request keeps the label alive exactly as
-// long as the browser keeps talking to us, without extending the idle bound.
+// renewAnonCookie re-issues the SAME nz_anon value with a fresh MaxAge
+// (sliding renewal, mirroring nz_auth). Without it a long-lived WS keeps the
+// owner derived from an expired label while the next upload mints a new one,
+// and every file-bearing send fails TakeAll with "file not found or expired".
 func renewAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) {
 	setAnonCookie(w, r, ah, val)
 }
 
-// renewedOwnerFromCookie is the shared "valid nz_anon presented" arm of the
-// HTTP owner-derivation path: sliding-renew the label (nil-w tolerant for
-// callers without a response to write into) and hand back the owner key it
-// hashes to. Lives here rather than inline in uploadOwner so the renewal
-// contract sits next to the mint/renew helpers it depends on.
+// renewedOwnerFromCookie is the "valid nz_anon presented" arm of HTTP owner
+// derivation: sliding-renew the label (w may be nil) and return the owner
+// key it hashes to.
 func renewedOwnerFromCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, val string) string {
 	if w != nil {
 		renewAnonCookie(w, r, ah, val)
@@ -166,20 +101,10 @@ func renewedOwnerFromCookie(w http.ResponseWriter, r *http.Request, ah *auth.Han
 }
 
 // ownerKeyFromCookie returns a stable owner key derived from an HMAC
-// auth-cookie value. The cookie is itself an HMAC hex string so hashing it
-// ensures the owner key does not leak raw MAC material (the old code used a
-// raw 16-char cookie prefix which exposed half of the MAC).
-//
-// R247-SEC-16: sha256[:8] gave 64-bit owner-key entropy — collision-find /
-// preimage feasible at scale (~2^32 keys for 50% collision). Bump to
-// sha256[:16] (128-bit) so the per-owner upload bucket cannot be steered
-// onto another tenant's quota by a chosen-cookie collision attack. The
-// owner key is opaque: only equality-tested against ownerCounts/ownerBytes
-// map keys. Existing in-memory entries from prior process incarnations are
-// invalidated on restart anyway (uploadStore is RAM-only), so widening
-// the key has no migration cost. Mirrors R246-SEC-5 / R247-SEC-24
-// (resume key) and R67-SEC-1 (WS bearer hash) which all carry ≥128-bit
-// material elsewhere in the codebase.
+// auth-cookie value. Hashing keeps raw MAC material out of the owner key;
+// sha256[:16] (128-bit) so a chosen-cookie collision cannot steer the
+// per-owner upload bucket onto another tenant's quota. The key is opaque —
+// only equality-tested against ownerCounts/ownerBytes.
 func ownerKeyFromCookie(cookieValue string) string {
 	if cookieValue == "" {
 		return ""

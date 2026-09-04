@@ -30,9 +30,8 @@ func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTim
 	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
 		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
 	}
-	// Defense-in-depth: never SIGTERM a process owned by another user. Guards
-	// against a hypothetical same-cwd PID/start_time collision crafted by a
-	// local attacker. R20260526-SEC-009.
+	// Defense-in-depth: never SIGTERM a process owned by another user
+	// (same-cwd PID/start_time collision crafted by a local attacker).
 	if err := verifyProcOwnedByEuid(pid); err != nil {
 		return err
 	}
@@ -44,11 +43,8 @@ func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTim
 }
 
 // pickTakeoverCandidate selects the most recently active discovered session
-// whose CWD matches workspace. It is the pure decision rule extracted from
-// tryAutoTakeover (ARCH-SVR-2 / #460): no Router, kill, or logging side
-// effects, so the matching policy ("exact CWD match, newest LastActive wins")
-// can be exercised directly in a unit test rather than only through the full
-// scan→kill→resume goroutine path. Returns nil when no candidate matches.
+// whose CWD matches workspace. Pure decision rule (no Router / kill / logging)
+// so the policy is unit-testable. Returns nil when no candidate matches.
 func pickTakeoverCandidate(discovered []discovery.DiscoveredSession, workspace string) *discovery.DiscoveredSession {
 	if workspace == "" {
 		return nil
@@ -90,9 +86,6 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if err != nil || len(discovered) == 0 {
 		return false
 	}
-	// Find the most recently active session whose CWD matches the workspace.
-	// The set-diff lives in pickTakeoverCandidate so the matching policy is
-	// unit-testable without a Router/kill path (ARCH-SVR-2 / #460).
 	best := pickTakeoverCandidate(discovered, workspace)
 	if best == nil {
 		return false

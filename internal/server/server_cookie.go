@@ -1,9 +1,5 @@
-// Phase 5-prep / R-server-cookie-extract (2026-05-28):
-// loadOrCreateCookieSecret 抽到独立文件。纯物理切分、零行为变化。
-//
-// 这个 bootstrap-time helper 只在 buildServer 启动期被调用一次，逻辑
-// 高度自包含（symlink defence + 0600 perm gate + atomic write + 失败
-// 时 ephemeral fallback）；与 Server lifecycle 主流程无运行期耦合。
+// loadOrCreateCookieSecret：启动期一次性 helper（symlink defence + 0600 perm
+// gate + atomic write + 失败时 ephemeral fallback）。
 package server
 
 import (
@@ -20,14 +16,9 @@ import (
 // if the file cannot be read or written (e.g. no stateDir configured).
 func loadOrCreateCookieSecret(stateDir string) []byte {
 	if stateDir != "" {
-		// Defence in depth: the symlink check below pins cookie_secret
-		// itself, but a local attacker who can repoint stateDir (e.g.
-		// stateDir → /tmp/pwn/ because the parent is world-writable)
-		// bypasses that by placing a well-formed cookie_secret inside
-		// their own directory. Lstat'ing stateDir first makes that
-		// class of attack visible — a symlink'd stateDir gets flagged
-		// and the secret is regenerated (ephemeral fallback) instead
-		// of silently trusting whatever the target directory serves.
+		// A symlinked stateDir would let a local attacker serve their own
+		// well-formed cookie_secret, bypassing the per-file symlink check
+		// below; flag it and fall back to an ephemeral secret.
 		if fi, err := os.Lstat(stateDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			slog.Error("cookie_secret regenerated because stateDir is a symlink",
 				"state_dir", stateDir, "reason", "statedir_symlink")
@@ -38,22 +29,16 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 			return b
 		}
 		path := filepath.Join(stateDir, "cookie_secret")
-		// R188-SEC-L4: use os.Lstat so a symlink attack (e.g. cookie_secret →
-		// /etc/some-readable-file) is detected instead of silently validated
-		// against the target's mode. A local attacker who can write stateDir
-		// would otherwise trick the check into passing against an arbitrary
-		// file and leak its contents via the cookie secret ABI, or trigger
-		// rotation loops that invalidate all sessions.
+		// Lstat (not Stat) so a symlinked cookie_secret is rejected instead of
+		// validated against the target's mode and leaking its contents via the
+		// cookie secret.
 		if fi, err := os.Lstat(path); err == nil {
 			switch {
 			case fi.Mode()&os.ModeSymlink != 0:
 				slog.Error("cookie_secret regenerated because file is a symlink",
 					"path", path, "reason", "symlink")
 			case fi.Mode().Perm() != 0600:
-				// Log at Error with an explicit reason so monitoring can
-				// distinguish "unsafe perms forced rotation" from first-run
-				// regeneration. All existing browser sessions will be
-				// invalidated — operator should know why.
+				// Error-level with reason: rotation invalidates every browser session.
 				slog.Error("cookie_secret regenerated due to unsafe permissions",
 					"path", path, "mode", fi.Mode().Perm(), "reason", "unsafe_permissions")
 			default:
@@ -66,22 +51,15 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 		if _, err := rand.Read(b); err != nil {
 			panic("crypto/rand unavailable: " + err.Error())
 		}
-		// R236-SEC-10: persistence is best-effort, but failure must surface
-		// at Error level (not Warn). When the secret cannot be persisted the
-		// process keeps running with an in-memory secret — the side effect
-		// is that every restart silently invalidates every browser session,
-		// which operators will mistake for a token expiry bug rather than a
-		// disk / permissions misconfiguration. Error-level lines + an
-		// explicit reason make the failure mode greppable in logs.
+		// Persistence is best-effort but failure must be Error-level: an
+		// in-memory secret silently invalidates every browser session on each
+		// restart, which looks like a token-expiry bug.
 		if err := os.MkdirAll(stateDir, 0700); err != nil {
 			slog.Error("cookie_secret stateDir mkdir failed; session secret is ephemeral, all sessions will be invalidated on restart",
 				"state_dir", stateDir, "err", err, "reason", "mkdir_failed")
 		} else {
-			// Write atomically (tmp + rename) so a concurrent reader never
-			// sees a partial secret during rotation. os.WriteFile opens with
-			// O_TRUNC and the crypto/rand bytes land in small chunks — a
-			// parallel open+read could pick up N bytes of zeros if we were
-			// mid-Write. WriteFileAtomic also fsyncs the file + parent dir.
+			// Atomic tmp+rename so a concurrent reader never sees a partial
+			// secret during rotation.
 			if err := osutil.WriteFileAtomic(path, b, 0600); err != nil {
 				slog.Error("cookie_secret atomic write failed; session secret is ephemeral, all sessions will be invalidated on restart",
 					"path", path, "err", err, "reason", "write_failed")

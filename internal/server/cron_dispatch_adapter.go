@@ -1,10 +1,7 @@
 // cron_dispatch_adapter.go adapts the concrete cron scheduler surface onto
-// dispatch.CronCommands — the projection-typed seam that #1164 (R250-ARCH-1)
-// introduced to cut the internal/dispatch → internal/cron import edge (RFC
-// cron-sysession-merge §3.6). The server package is the natural host: it is
-// the wiring point that already imports both cron and dispatch, and it holds
-// the send_dispatch_adapter.go precedent (serverCaps) for thin shells that
-// bind *Server-side concretions onto dispatch consumer interfaces.
+// dispatch.CronCommands, the projection-typed seam that keeps
+// internal/dispatch free of an internal/cron import (#1164). server hosts it
+// because it already imports both packages.
 package server
 
 import (
@@ -15,11 +12,8 @@ import (
 )
 
 // cronCommandScheduler is the slash-command subset of *cron.Scheduler that
-// the dispatch adapter consumes. It carries the concrete cron types the
-// dispatch-side CronCommands seam deliberately no longer names (#1164).
-// *cron.Scheduler satisfies it implicitly (pinned via cronScheduler in
-// cronview_contract_test.go); the server's cronScheduler consumer aggregate
-// embeds this so Server.scheduler keeps advertising exactly what is used.
+// the dispatch adapter consumes. *cron.Scheduler satisfies it implicitly
+// (pinned in cronview_contract_test.go).
 type cronCommandScheduler interface {
 	AddJob(j *cron.Job) error
 	NextRun(j *cron.Job) time.Time
@@ -30,22 +24,14 @@ type cronCommandScheduler interface {
 }
 
 // cronDispatchAdapter implements dispatch.CronCommands over the concrete
-// scheduler surface. Translation rules:
+// scheduler surface. Jobs cross as dispatch.CronJob projections
+// (projectCronJob is the single copy site); errors are returned UNWRAPPED so
+// the sentinel chain survives for ClassifyError; the dispatch-side CronCode*
+// constants must match cron.ClassifyError wire values byte-for-byte.
 //
-//   - Jobs cross the boundary as dispatch.CronJob projections (4 fields);
-//     projectCronJob is the single copy site. The per-ListJobs projection
-//     alloc is O(jobs-per-chat) ≤ MaxJobsPerChat on a non-hot IM command
-//     path — acceptable.
-//   - Errors are returned UNWRAPPED so the scheduler's sentinel chain
-//     survives for ClassifyError (dispatch.CronCommands contract).
-//   - ClassifyError returns string(cron.ClassifyError(err)); the dispatch-
-//     side CronCode* constants must match those wire values byte-for-byte,
-//     pinned by cron_dispatch_adapter_test.go.
-//
-// Wiring note: a nil scheduler must NOT be wrapped — Server.Start passes a
-// genuinely nil dispatch.CronCommands when s.scheduler is nil, because a
-// non-nil adapter value would defeat NewDispatcher's nil collapse and the
-// `d.scheduler != nil` "/cron disabled" gates. #1164.
+// A nil scheduler must NOT be wrapped — Server.Start passes a genuinely nil
+// dispatch.CronCommands, or the `d.scheduler != nil` "/cron disabled" gates
+// would be defeated.
 type cronDispatchAdapter struct{ s cronCommandScheduler }
 
 // projectCronJob copies the dispatch-read fields (ID / Schedule / Prompt /
@@ -63,11 +49,8 @@ func projectCronJob(j *cron.Job) dispatch.CronJob {
 	}
 }
 
-// AddJob constructs the concrete job (cron.NewJob keeps the single
-// construction choke point of R250-CR-9), registers it, and folds the
-// follow-up NextRun read into the return value — handleCronAdd was the only
-// NextRun caller on the create path and invoked it immediately after AddJob,
-// so the merge is semantics-preserving. #1164.
+// AddJob constructs the concrete job via cron.NewJob (the single construction
+// choke point), registers it, and folds the follow-up NextRun into the result.
 func (a cronDispatchAdapter) AddJob(req dispatch.CronJobRequest) (dispatch.CronJob, time.Time, error) {
 	job := cron.NewJob(req.Schedule, req.Prompt, cron.JobIMContext{
 		Platform:  req.Platform,
@@ -110,8 +93,7 @@ func (a cronDispatchAdapter) PauseJob(idPrefix, plat, chatID string) (dispatch.C
 	return projectCronJob(j), nil
 }
 
-// ResumeJob folds the follow-up NextRun read into the return value, same
-// rationale as AddJob (handleCronResume was the only other NextRun caller).
+// ResumeJob folds the follow-up NextRun read into the return value, like AddJob.
 func (a cronDispatchAdapter) ResumeJob(idPrefix, plat, chatID string) (dispatch.CronJob, time.Time, error) {
 	j, err := a.s.ResumeJob(idPrefix, plat, chatID)
 	if err != nil {

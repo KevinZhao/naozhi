@@ -5,9 +5,6 @@
 //	            rate-limit/cache block (userSendLimitersMu / userSendLimiters)
 //	READS:      shared deps block (read-only after ctor)
 //	READS-ALSO: subscriber block (clients) for per-subscription routing
-//
-// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
-// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (
@@ -23,46 +20,22 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// wsFileNotFoundMsg is the WS-path TakeAll miss label. Same sentinel text as
-// the HTTP path plus a recovery hint (#2418 follow-up F5) because the WS owner
-// may simply be stale — see the comment above the TakeAll call in handleSend.
+// wsFileNotFoundMsg is the WS-path TakeAll miss label: the HTTP sentinel text
+// plus a recovery hint, because the WS upload owner may simply be stale (#2418).
 const wsFileNotFoundMsg = "file not found or expired，请重新添加附件后再发送"
 
 // remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
-// owning peer node before the dashboard goroutine gives up. R244-ARCH-16
-// (#1054): named so the value is greppable and tunable in one place instead
-// of being a bare `10*time.Second` literal duplicated across the proxy sites.
+// owning peer node before the dashboard goroutine gives up.
 const remoteNodeProxyTimeout = 10 * time.Second
 
-// lookupNode resolves a node ID to its Conn via the shared node registry.
-// R176-ARCH-M3 / ARCH4 (#384): the Hub's only by-ID access to the
-// Server-shared node table is this helper, used by the remote interrupt /
-// subscribe / unsubscribe sites and the hubNodeLookup adapter. G2 (#2192)
-// swapped the raw `nodesMu.RLock(); nodes[id]; RUnlock()` triple for the
-// registry method, so the helper survives purely as the single seam those
-// call sites share. Callers MUST still validate the ID with isValidNodeID
-// first.
+// lookupNode resolves a node ID to its Conn via the shared node registry; it
+// is the Hub's only by-ID access to the node table. Callers MUST validate the
+// ID with isValidNodeID first.
 func (h *Hub) lookupNode(id string) (node.Conn, bool) {
 	return h.nodes.NodeByID(id)
 }
 
-// File: wshub_send.go
-//
-// Dashboard-side send / interrupt handling extracted from wshub.go (R243-ARCH-2
-// split). Owns:
-//   - handleSend: WS "send" → MessageQueue (preferred) or legacy guard path
-//   - handleInterrupt: WS "interrupt" → router.InterruptViaControl on local
-//     sessions
-//   - handleRemoteInterrupt: forwards "interrupt" to the owning node when the
-//     subscribed key is hosted on a peer node (multi-node deployments)
-//   - handleRemoteSend: forwards "send" similarly with HTTP fallback for
-//     pre-WS-relay nodes
-//
-// All Hub state used by these helpers stays on *Hub (queue, guard, router,
-// nodes, ctx, sendWG, projectMgr…). Pure code-relocation.
-
 func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
-	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
 		h.handleRemoteSend(c, msg)
 		return
@@ -73,15 +46,10 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
-	// R183-SEC-M1: the remote-node delegation branch above forwards to
-	// handleRemoteSend which re-enters the connector's ValidateSessionKey
-	// gate; the local fast path here previously skipped that gate,
-	// violating the trust-boundary policy every other ws path (subscribe
-	// / unsubscribe / interrupt) already follows. An authenticated WS
-	// client could land a multi-KB key containing C1/bidi/newline bytes
-	// into the dispatch queue, the sessionSend log attrs, and eventually
-	// sessions.json at shutdown. ValidateSessionKey also caps length at
-	// MaxSessionKeyBytes (~520 B).
+	// Same trust-boundary gate every other ws path (subscribe / unsubscribe /
+	// interrupt) applies: reject C1/bidi/newline bytes and cap length at
+	// MaxSessionKeyBytes before the key reaches the dispatch queue, slog attrs,
+	// or sessions.json.
 	if err := session.ValidateSessionKey(key); err != nil {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
 		return
@@ -90,13 +58,9 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text or files required"})
 		return
 	}
-	// Per-field byte cap on the WS path. wsMaxMessageSize already bounds the
-	// whole JSON frame, but without this inner gate an authenticated client
-	// can land repeated max-size payloads into the dispatch queue; when the
-	// queue drains, CoalesceMessages concatenates up to MaxDepth entries into
-	// a single stdin write. maxCoalescedTextBytes backstops the merged total,
-	// and maxStdinLineBytes (12 MB at the shim) is the hard ceiling.
-	// R59-SEC-H1.
+	// Per-field byte cap. wsMaxMessageSize bounds the whole frame, but queued
+	// max-size payloads get concatenated by CoalesceMessages into a single
+	// stdin write; maxCoalescedTextBytes and maxStdinLineBytes backstop that.
 	if len(msg.Text) > maxWSSendTextBytes {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text too long"})
 		return
@@ -106,19 +70,11 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
-	// Atomic TakeAll: partial failure leaves the store untouched so the user
-	// can retry with a fresh upload batch rather than silently losing the
-	// earlier images. R37-CONCUR4.
-	//
-	// #2418: the owner used here is the one frozen at WebSocket upgrade
-	// (wsDeriveUploadOwner → setUploadOwner) and is never refreshed in
-	// no-token mode, so it can diverge from the request-time owner
-	// /api/sessions/upload used. The bundled dashboard therefore routes every
-	// file-bearing send over HTTP and never sends file_ids on this path; it is
-	// kept for third-party / legacy clients. A miss is most likely that
-	// divergence (or plain expiry), and re-attaching mints a fresh upload
-	// under the current owner — say so instead of a bare "not found".
+	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user
+	// theft. TakeAll is atomic: partial failure leaves the store untouched so
+	// the user can retry with a fresh batch. The owner is the one frozen at WS
+	// upgrade (never refreshed in no-token mode) and can diverge from the one
+	// /api/sessions/upload used; the bundled dashboard sends files over HTTP (#2418).
 	var images []cli.Attachment
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
@@ -135,19 +91,13 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		images = append(images, taken...)
 	}
 
-	// Persist file_ref attachments (PDFs) into the workspace. Mirrors the
-	// HTTP handleSend flow; without this the file_ref entry reaches
-	// NewUserMessageWithMeta with an empty WorkspacePath and its Read-tool
-	// bullet is silently dropped (see prependFileRefHint's skip branch).
-	// That presented to the user as a "[System: The user attached 1 file]"
-	// prompt with no path — exactly the bug report that triggered this fix.
+	// Persist file_ref attachments (PDFs) into the workspace, mirroring HTTP
+	// handleSend; otherwise the entry reaches NewUserMessageWithMeta with an
+	// empty WorkspacePath and its Read-tool bullet is silently dropped.
 	var wsRollback func()
 	if hasPersistableAttachment(images) {
-		// resolveAttachmentWorkspace falls back to the session/router's
-		// saved workspace when msg.Workspace is empty. The dashboard does
-		// not re-send workspace on every WS message for an already-running
-		// session, so this is the common path; without the fallback every
-		// post-first send of a PDF returned "invalid workspace".
+		// resolveAttachmentWorkspace falls back to the session's saved workspace:
+		// the dashboard does not re-send workspace for a running session.
 		validatedWS, err := resolveAttachmentWorkspace(h, key, msg.Workspace)
 		if err != nil {
 			slog.Warn("ws attachment workspace validation failed",
@@ -185,28 +135,15 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: asyncErrorMessage(err)})
 		return
 	}
-	// sessionSend accepted (or reset-processed) the request — files must stay on disk.
-	// Below this point wsRollback must NOT be invoked: documentation only,
-	// no further branches reference it.
-	//
-	// R040034-GO-8 (#1394): on the reset branch (`/clear` or `/new`) the
-	// turn that uploaded these PDFs was discarded by sessionSend, so no
-	// session entry references the persisted bytes. We deliberately keep
-	// the files instead of rolling back because:
-	//   1. Audit — the workspace's attachments/ tree still records the
-	//      user upload; ops can correlate it with logs even though the
-	//      message itself was reset away.
-	//   2. Next-message reuse — a user who hits /clear by mistake and
-	//      immediately re-attaches the same PDF benefits from the upload
-	//      already living in the workspace; the next /send dedups via
-	//      content hash without a re-upload round trip.
-	// The attachments GC sweeper handles eventual cleanup for refs that
-	// no session ever picks up; that's the audit-bounded case.
+	// sessionSend accepted (or reset-processed) the request — files stay on
+	// disk and wsRollback must NOT be invoked below this point. On the reset
+	// branch (/clear, /new) the files are kept deliberately: the attachments/
+	// tree remains an audit record and a re-attached PDF dedups by content hash;
+	// the attachments GC sweeper reclaims refs no session picks up (#1394).
 	_ = wsRollback
 	if reset {
-		// /clear or /new — HTTP path reports "reset"; keep the WS path in sync so
-		// clients can uniformly distinguish reset from accepted/queued turns
-		// instead of seeing an empty Status string.
+		// HTTP path reports "reset"; keep the WS path in sync so clients can
+		// distinguish reset from accepted/queued turns.
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "reset", Key: key})
 		return
 	}
@@ -219,25 +156,21 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
-	// R175-SEC-P1: same policy as handleSubscribe / HTTP handlers. Reject
-	// C1 / bidi / multi-KB keys before they land in router lookup + slog
-	// attrs (both local and remote paths).
+	// Same policy as handleSubscribe / HTTP handlers: reject C1 / bidi /
+	// multi-KB keys before they reach router lookup + slog attrs.
 	if err := session.ValidateSessionKey(key); err != nil {
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
 		return
 	}
 
-	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
 		h.handleRemoteInterrupt(c, msg)
 		return
 	}
 
 	// Prefer the non-destructive control_request path so the CLI subprocess
-	// survives. Raw SIGINT via InterruptSession kills Claude `-p` outright,
-	// which tears down the shim and forces a brand-new spawn on the next
-	// message (losing resume context and leaking socket files). See
-	// Router.InterruptSessionSafe for the full design rationale.
+	// survives; raw SIGINT kills Claude `-p`, tearing down the shim and forcing
+	// a fresh spawn on the next message. See Router.InterruptSessionSafe.
 	switch h.router.InterruptSessionSafe(key) {
 	case session.InterruptSent:
 		slog.Info("session interrupted via dashboard", "key", key)
@@ -264,10 +197,8 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
-	// H6 (#435): this path only forwards a single proxy RPC, so depend on
-	// the narrow node.NodeProxy role rather than the full 26-method Conn.
-	// Documents the exact capability this goroutine exercises and keeps a
-	// future mock for this site minimal.
+	// Only a single proxy RPC is forwarded here, so depend on the narrow
+	// node.NodeProxy role rather than the full Conn (#435).
 	var nc node.NodeProxy = conn
 
 	release, shuttingDown := h.TrackSend()
@@ -278,11 +209,9 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 	go func() {
 		defer release()
 		capturedID, capturedKey := msg.ID, msg.Key
-		// R175-SEC-P1: malformed RPC payloads from a compromised node could
-		// panic inside ProxyInterruptSession's json decode path; without a
-		// recover the whole naozhi service goes down, affecting every other
-		// session. Mirror the ownerLoop/readLoop defensive pattern: log and
-		// reply "error" so the dashboard surfaces the failure.
+		// Malformed RPC payloads from a compromised node could panic inside
+		// ProxyInterruptSession's decode path; recover so one node cannot take
+		// the whole service down, and reply "error" so the dashboard sees it.
 		defer func() {
 			if r := recover(); r != nil {
 				serverMetrics.PanicRecovered()
@@ -303,15 +232,9 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		defer cancel()
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
-			// R217-CR-5 (#641): mirror the upstream connector_rpc.go
-			// LogSystemEvent path which routes err.Error() through
-			// osutil.SanitizeForLog before surfacing it. The error
-			// originates from the remote / transport stack so it can
-			// carry C1 controls / bidi / LS+PS that byte-level `<0x20`
-			// gates miss; without the sanitiser an authenticated client
-			// who controls a compromised peer node could inject log
-			// lines into the primary's slog sink. 512 B matches the cap
-			// used by upstream/connector_rpc.go.
+			// err comes from the remote / transport stack and may carry C1 /
+			// bidi / LS+PS bytes; sanitise before logging so a compromised peer
+			// cannot inject log lines. 512 B matches upstream/connector_rpc.go (#641).
 			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
 			errMsg := "remote interrupt failed"
 			if isUnknownRPCMethodErr(err) {
@@ -320,15 +243,9 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 				errMsg = "remote node needs upgrade to support this action"
 			}
 			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg})
-			// R176-ARCH-NX (#433): same parity gap as handleRemoteSend — the
-			// interrupt_ack reaches only the originating tab, so a second
-			// operator who pressed stop on the same remote session sees no
-			// signal that the interrupt never reached the node. Fan the
-			// failure out to every dashboard subscribed to this session over
-			// the shared `event` frame. The remote session's EventLog lives
-			// on the node so we cannot append locally; the summary is
-			// re-sanitised here (same redaction as the slog above) because it
-			// is broadcast verbatim to dashboards.
+			// interrupt_ack reaches only the originating tab; fan the failure out
+			// to every dashboard subscribed to this remote session. The summary
+			// is re-sanitised because it is broadcast verbatim (#433).
 			h.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
 			return
 		}
@@ -347,47 +264,30 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
 		return
 	}
-	// Syntactic workspace validation on the primary. Even though the remote
-	// node runs its own EvalSymlinks check, that check uses the remote's
-	// defaults; a node whose defaultWorkspace is unconfigured would pass
-	// any absolute path through. Reject traversal / control-byte / oversize
-	// inputs here so no primary-authenticated dashboard user can have a
-	// remote node bind e.g. `/etc` as a Claude workspace. R61-SEC-2.
+	// Syntactic workspace validation on the primary: the remote's own
+	// EvalSymlinks check uses the remote's defaults, and an unconfigured
+	// defaultWorkspace there would pass any absolute path (e.g. `/etc`).
 	if err := validateRemoteWorkspace(msg.Workspace); err != nil {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid workspace"})
 		return
 	}
-	// Enforce the same per-field text cap as handleSend. Without this gate an
-	// authenticated dashboard user who targets a remote node can bypass the
-	// local cap and push up to wsMaxMessageSize bytes straight to nc.Send,
-	// amplifying input into the remote shim's 12 MB stdin line ceiling via
-	// coalesce at the remote end. R62-SEC-1.
+	// Same per-field text cap as handleSend; otherwise a remote-targeted send
+	// bypasses the local cap and amplifies via coalesce at the remote shim.
 	if len(msg.Text) > maxWSSendTextBytes {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "text too long"})
 		return
 	}
 	nodeID := msg.Node
-	// PR #119 review fix: gate msg.Backend with the same charset/length
-	// rule HTTP path enforces (send.go:262-272) so a hostile WS client
-	// can't push a 4 KB / control-char bag into the rejection error
-	// string echoed back via send_ack. Empty backend is allowed and
-	// flows through the router default below.
+	// Same charset/length rule as the HTTP path so a hostile client can't push
+	// a 4 KB / control-char bag into the send_ack error echo. Empty backend
+	// flows through to the router default.
 	if !isValidBackendID(msg.Backend) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"})
 		return
 	}
-	// Sprint 6b: backend-aware lookup. selectNodeForBackend handles
-	// "node not connected" and "node lacks RequiredNodeCaps for the
-	// picked backend" with structured errors so the WS client gets a
-	// specific reason (logged + surfaced via send_ack.Error). Empty
-	// msg.Backend bypasses the cap check entirely (legacy single-
-	// backend deployments and existing claude sessions both land
-	// here). Errors flow into a "send rejected" send_ack and bypass
-	// the goroutine launch / RPC entirely.
-	// RFC project-access-profile P1-a: a session bound to a non-default access
-	// profile must not be dispatched remotely — the env overlay is host-local
-	// and never crosses the wire, so the remote would spawn on the wrong
-	// account. Fail loud before the RPC.
+	// A session bound to a non-default access profile must not be dispatched
+	// remotely: the env overlay is host-local and never crosses the wire, so
+	// the remote would spawn on the wrong account. Fail loud before the RPC.
 	if err := gateRemoteAccessProfile(h.resolver, nodeID, msg.Key); err != nil {
 		slog.Debug("ws send: access-profile remote-dispatch rejected", "node", nodeID, "key", msg.Key, "err", err)
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
@@ -396,10 +296,8 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	nc, err := selectNodeForBackend(hubNodeLookup{h}, nodeID, msg.Backend)
 	if err != nil {
 		slog.Debug("ws send: backend route rejected", "node", nodeID, "backend", msg.Backend, "err", err)
-		// Surface ErrNodeMissingCap / ErrUnknownBackend / ErrNodeNotConnected
-		// verbatim — the dashboard renders the actionable message; raw
-		// internals here are limited to the constants in
-		// select_node_for_backend.go (no host paths, no token bytes).
+		// ErrNodeMissingCap / ErrUnknownBackend / ErrNodeNotConnected are
+		// surfaced verbatim: fixed constants (no host paths, no token bytes).
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
 		return
 	}
@@ -412,16 +310,10 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// send_ack is deferred until nc.Send returns, so the remote session
-	// is guaranteed to exist when the browser receives the ack and triggers
-	// a subscribe. Sending the ack eagerly (before the RPC) caused a race
-	// where the subscribe arrived at the remote before session creation.
-	//
-	// Track via sendWG so Shutdown waits for in-flight RPC+broadcast to
-	// finish before tearing down node connections and client maps. Go via
-	// TrackSend so a send initiated just as Shutdown fires is refused here
-	// rather than squeezing past the clientWG barrier and then hitting a
-	// closed sendWG window.
+	// send_ack is deferred until nc.Send returns so the remote session exists
+	// before the browser's follow-up subscribe arrives. TrackSend registers the
+	// goroutine with sendWG so Shutdown waits for the in-flight RPC+broadcast,
+	// and refuses a send that races Shutdown instead of slipping past clientWG.
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"})
@@ -430,9 +322,8 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	go func() {
 		defer release()
 		capturedID, capturedKey := msg.ID, msg.Key
-		// R175-SEC-P1: same rationale as handleRemoteInterrupt — a panic
-		// inside nc.Send (e.g. malformed RPC response from a compromised
-		// node) would otherwise take the whole naozhi service down.
+		// Same rationale as handleRemoteInterrupt: a panic inside nc.Send from
+		// a malformed RPC response must not take the whole service down.
 		defer func() {
 			if r := recover(); r != nil {
 				serverMetrics.PanicRecovered()
@@ -452,27 +343,16 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
-			// R217-CR-5 (#641): symmetric sanitisation with the interrupt
-			// path above and the upstream connector_rpc.go LogSystemEvent
-			// site. err originates from the remote transport so it may
-			// carry control bytes / bidi overrides; route through
-			// osutil.SanitizeForLog to keep journald + dashboard tail
-			// rendering safe.
+			// err originates from the remote transport and may carry control
+			// bytes / bidi overrides; sanitise before logging (#641).
 			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
 			// Do not surface the raw err: transport-level messages can leak
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
-			// R176-ARCH-NX (#433): parity with the remote→primary direction
-			// (upstream/connector_rpc.go injects LogSystemEvent on send
-			// failure). The send_ack above reaches only the originating tab;
-			// fan the failure out to every dashboard subscribed to this
-			// remote session so a second operator watching the conversation
-			// sees the message did not land instead of a silent stall. The
-			// remote session's EventLog lives on the node, so we cannot append
-			// locally — broadcast over the same `event` frame remote events
-			// already use. The summary is re-sanitised here (same redaction as
-			// the slog above) because it is broadcast verbatim to dashboards.
+			// send_ack reaches only the originating tab; fan the failure out to
+			// every dashboard subscribed to this remote session (whose EventLog
+			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
 			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})

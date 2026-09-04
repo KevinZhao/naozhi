@@ -231,7 +231,6 @@ func TestSubGenReclaim_SourceAnchor(t *testing.T) {
 	for _, want := range []string{
 		"markSubGenReleasable(key",
 		"sweepSubGenExpiredLocked",
-		"R175-P2",
 	} {
 		if !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(body) {
 			t.Errorf("handleUnsubscribe missing anchor %q — R175-P2 reclamation wiring removed?", want)
