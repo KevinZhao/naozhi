@@ -492,6 +492,8 @@ cron → {session, platform, routing}，node → {cli, config}。routing 保持�
 
 **终态**：server 只留 HTTP 管道（routes / middleware / hub / 静态资源 / 平台 webhook 注册），内部依赖数预期从 42 降到 ~25。
 
+**归属规则已钉住（#2498）**：终态的 handler 归属部分不再等 Phase 5——它写在 `internal/server/doc.go`，由 `tools/lint-server-handlers` rule 1（`handle_decl`：`(s *Server) handle*` 仅剩 `handleDashboard` 静态壳）与 rule 6（`api_route_owner`：routes.go 中任何 `/api/*` 注册不得指向 Server 方法）在 CI fail 模式下强制。`/api/system/*` 与 `/api/planner/stats` 已随之迁入 `dashboard/ext/{system,planner}`。Phase 5 剩余内容（`buildServer` 构造互连上移、`SendHandler` 下沉）仍按 4b/4c 的暂缓决策处理，但不再是归属规则的前提。
+
 **每片验收**：`go build ./...` + `go vet ./...` + `go test ./internal/server/ ./internal/wireup/ ./internal/dashboard/...` 通过；`legacy_new_crosspkg_guard_test` 与 `TestGenerateSystemdUnit_MatchesDeployTemplate` 等守卫测试保持绿。
 
 ### 对"不做的事情"的修订（2026-07-14）

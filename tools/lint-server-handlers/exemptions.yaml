@@ -92,13 +92,10 @@ file_size:
     # moved to internal/dashboard/auth/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
 
-# Phase 0 baseline 锁定的 Server.handle* 方法（rule 1: handle_decl）
-# 新增的 (s *Server) handle* 方法 → linter fail
-# v0.6.1 校准：origin/master HEAD 5788207b 比 v0.4 baseline 多 1 个
-# (handlePlannerStats，#1349 加入)
-# 2026-05-28 静态资源清理：4 个零状态 handler（handleAgentViewJS / handleDashboardJS
-# / handleManifest / handleSW）转为包级 func，从 baseline 移除。剩 4 个 *Server
-# handler 待 Phase 5 处理（handleDashboard / handleClearLabelOrigin /
-# handlePlannerStats / handleSystemDaemons —— 这些都依赖 s.X 字段）。
+# rule 1 (handle_decl) 的唯一豁免。归属规则见 internal/server/doc.go：
+# internal/server 只拥有 HTTP 管道（mux/routes、middleware、WS hub、health、
+# 静态壳与资源、平台 webhook 注册、send/upload 管线）；其余 /api/* handler
+# 一律放 internal/dashboard/<sub> 子包并经 Deps 结构体注入。任何新的
+# (s *Server) handle* 方法都是 lint fail，不再往本清单加条目。
 handle_baseline:
-    - Server.handleDashboard
+    - Server.handleDashboard    # 静态壳 GET /dashboard = server 自有
