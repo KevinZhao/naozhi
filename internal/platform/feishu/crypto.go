@@ -8,24 +8,10 @@ import (
 	"errors"
 )
 
-// decryptFeishuEvent decrypts a Feishu webhook payload that was encrypted with
-// the app's Encrypt Key. When an Encrypt Key is configured in the Feishu event
-// subscription settings, Feishu wraps the ENTIRE push body as
-// `{"encrypt":"<base64>"}` and the operator's handler must AES-decrypt the
-// inner ciphertext before it can read the challenge handshake or any event.
-//
-// Scheme (matches the official Lark/Feishu SDK EventDispatcher and the
-// "Encrypt Key" docs):
-//
-//   - key  = SHA-256(encryptKey)                 (32 bytes → AES-256)
-//   - data = base64-decode(encrypt)
-//   - IV   = data[:aes.BlockSize]                (first 16 bytes)
-//   - ct   = data[aes.BlockSize:]                (AES-256-CBC ciphertext)
-//   - plaintext = PKCS#7-unpadded CBC-decrypt(ct)
-//
-// Signature verification (verifySignature) runs over the RAW request body
-// BEFORE this step, exactly as Feishu computes it (SHA256(ts+nonce+key+body)),
-// so callers must verify the signature on the undecrypted body first.
+// decryptFeishuEvent decrypts an Encrypt-Key-mode push body per the official
+// SDK scheme: key = SHA-256(encryptKey), IV = first 16 bytes, AES-256-CBC,
+// PKCS#7 unpad. Callers MUST verify the signature on the raw (still encrypted)
+// body first — that is what Feishu signs.
 func decryptFeishuEvent(encryptKey, encrypt string) ([]byte, error) {
 	if encryptKey == "" {
 		return nil, errors.New("feishu decrypt: empty encrypt key")

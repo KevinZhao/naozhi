@@ -1,26 +1,6 @@
-// Package wireup — registry.go provides a single generic registration
-// idiom (Registry[T]) so cron daemons, platforms, and backends can all
-// register through the same type-safe surface instead of each subsystem
-// reinventing its own register-call + duplicate-guard.
-//
-// R244-ARCH-4 (#1058): the blank-import wireup pattern (history_backends.go)
-// only covers history backends; CLI backends use an explicit RegisterDefaults
-// call (backends.go), and cron/sysession/platforms each have bespoke
-// construction-time wiring (schedulers.go). The proposal is a unified
-// Registry[T] that every sub-system registers through with one idiom.
-//
-// This file introduces that idiom as a leaf utility with no external
-// dependencies so it can be adopted incrementally: a subsystem migrates by
-// declaring a package-level Registry[T] and calling Register at init() or
-// boot. The duplicate-key panic matches the existing semantics of
-// cli.RegisterHistoryFactory and backend.Register, so accidental
-// double-wireup keeps surfacing at startup rather than at first runtime use.
-//
-// R20260602-ARCH-2 (#1579): Registry[T] is no longer a tested-but-unused
-// generic — boot.go's bootRegistry is its first production consumer,
-// recording each boot-time wireup step (cli-backends, history-backends)
-// so Validate() and the startup audit list (BootSteps) ride on this idiom
-// rather than a bespoke table.
+// registry.go provides the generic type-safe registration idiom (Registry[T])
+// with a duplicate-key panic, so double-wireup surfaces at startup rather than
+// at first runtime use (#1058).
 package wireup
 
 import (
@@ -30,32 +10,21 @@ import (
 )
 
 // Registry is a concurrency-safe, type-safe name→value table for boot-time
-// subsystem registration. T is the registered value type (e.g. a factory
-// func, a platform constructor, a daemon descriptor).
-//
-// Zero value is NOT ready for use — construct via NewRegistry so the kind
-// label (used in panic messages) and the backing map are initialised.
+// subsystem registration. Zero value is NOT usable — construct via NewRegistry.
 type Registry[T any] struct {
-	// kind labels the registry in panic/audit messages ("backend",
-	// "platform", "cron-daemon"); makes a duplicate-registration panic
-	// self-describing without the caller threading context.
+	// kind labels the registry in panic/audit messages ("backend", "platform").
 	kind string
 	mu   sync.RWMutex
 	m    map[string]T
 }
 
-// NewRegistry constructs an empty Registry. kind is a short human label
-// used only in panic/error text (e.g. "platform").
+// NewRegistry constructs an empty Registry; kind is used only in panic text.
 func NewRegistry[T any](kind string) *Registry[T] {
 	return &Registry[T]{kind: kind, m: make(map[string]T)}
 }
 
-// Register adds value under name. It panics on a duplicate name or an
-// empty name — both are wiring bugs that must fail loudly at boot rather
-// than silently shadowing an earlier registration or registering an
-// unaddressable entry. The panic mirrors the existing duplicate-ID guards
-// in cli.RegisterHistoryFactory / backend.Register so the unified idiom
-// preserves the "fail at startup" contract operators already rely on.
+// Register adds value under name. It panics on a duplicate or empty name —
+// both are wiring bugs that must fail loudly at boot, not shadow silently.
 func (r *Registry[T]) Register(name string, value T) {
 	if name == "" {
 		panic(fmt.Sprintf("wireup: empty %s registration name", r.kind))
@@ -76,10 +45,7 @@ func (r *Registry[T]) Get(name string) (T, bool) {
 	return v, ok
 }
 
-// Names returns the registered names in sorted order. Sorted (not map
-// order) so audit output / startup logs are deterministic across runs —
-// the whole point of a unified registry is an inspectable "what is wired"
-// list, which a nondeterministic order would undermine.
+// Names returns the registered names sorted, so audit output is deterministic.
 func (r *Registry[T]) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

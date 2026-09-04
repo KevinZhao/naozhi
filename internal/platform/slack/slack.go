@@ -36,43 +36,22 @@ type Slack struct {
 	done    chan struct{}
 	startMu sync.Mutex
 	started bool
-	// botID is the bot's own Slack user ID, used to detect @-mentions in
-	// group channels. Guarded by botIDMu because Start() (and the background
-	// self-heal goroutine, #1947) write it while handleMessage goroutines
-	// read it concurrently. Empty means AuthTest has not yet succeeded —
-	// see botIDOrEmpty / handleMessage's degraded fail-open branch.
+	// botID is the bot's own user ID for @-mention detection; written by
+	// Start() and the self-heal, read by handleMessage goroutines (botIDMu).
+	// Empty means AuthTest has not yet succeeded.
 	botIDMu sync.RWMutex
 	botID   string
-	// botHealAt is the next wall-clock time the lazy AuthTest self-heal is
-	// allowed to run, rate-limiting the re-auth burst while botID is unknown.
-	// Guarded by botIDMu. #1947.
+	// botHealAt is the next time the AuthTest self-heal may run; guarded by botIDMu.
 	botHealAt time.Time
-	// dispatch bounds concurrent inbound message-handler goroutines (shared
-	// platform.DefaultHandlerConcurrency cap) and tracks them so Stop() can
-	// drain in-flight work. Without the cap a single noisy workspace (legit
-	// or attacker-controlled) could spawn unbounded goroutines via Socket
-	// Mode message events, each holding downstream Send/Reply state until
-	// the CLI finishes — eventually OOMing naozhi. R226-SEC-4, #2254.
+	// dispatch bounds concurrent handler goroutines (a noisy workspace could
+	// otherwise OOM naozhi) and lets Stop() drain them.
 	dispatch platform.BoundedDispatch
 }
 
-// slackHTTPClient is shared by all Slack adapter instances for Web API calls
-// (auth.test / chat.postMessage / files.upload etc). Two defences in one:
-//
-//   - R191-ARCH-M3 enforces a 10s Timeout. Context cancellation is advisory
-//     in slack-go, so a slow Slack response would otherwise hold a connection
-//     for Slack's server timeout (60+s), pinning todoLoop goroutines (held by
-//     loopWG) and blocking Stop()'s drain. Feishu's httpClient caps at the
-//     same 10s.
-//
-//   - CheckRedirect blocks all 3xx. Slack Web API endpoints do not rely on
-//     cross-host redirects for any documented flow. Following a redirect
-//     would let a DNS/MITM-compromised path or a malicious proxy redirect
-//     the Bearer-token-carrying request at an internal address (IMDS
-//     169.254.169.254, loopback admin port, etc.) — classic SSRF-via-
-//     redirect. Feishu / Discord / Weixin all short-circuit the same way;
-//     this aligns Slack with them. ErrUseLastResponse surfaces the 3xx
-//     response unchanged so the caller fails cleanly instead of following.
+// slackHTTPClient is shared by all Slack adapters. The 10s Timeout matters
+// because slack-go treats ctx cancellation as advisory and a slow response
+// would pin goroutines past Stop()'s drain. CheckRedirect blocks all 3xx so a
+// MITM'd path cannot redirect the bearer-token request to an internal address.
 var slackHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -108,28 +87,16 @@ func (s *Slack) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
 // Start implements RunnablePlatform. Launches Socket Mode connection.
 func (s *Slack) Start(handler platform.MessageHandler) error {
-	// R244-SEC-P1-4 (#879): hard-reject empty credentials before any
-	// network call. The slack-go SDK eventually surfaces a misleading
-	// "missing_scope"/"invalid_auth" error from AuthTest, but by then
-	// the operator has already burned a connection attempt against
-	// slack.com and the failure mode is opaque in journalctl. An empty
-	// BotToken or AppToken is the Socket-Mode equivalent of feishu's
-	// empty signing-secret fallback (see transport_hook.go:30-34): a
-	// misconfiguration that lets the platform silently accept all
-	// inbound traffic / fail open. Surfacing it here keeps the gate
-	// next to the lifecycle entry-point so config.validateConfig and
-	// this guard form a defence-in-depth pair (config rejects at
-	// startup; this rejects at programmatic-construction Start()).
+	// Defence-in-depth with config.validateConfig: empty credentials would
+	// otherwise surface only as an opaque AuthTest error after a network call.
 	if s.cfg.BotToken == "" {
 		return fmt.Errorf("slack: BotToken required (got empty)")
 	}
 	if s.cfg.AppToken == "" {
 		return fmt.Errorf("slack: AppToken required for Socket Mode (got empty)")
 	}
-	// Initialize lifecycle state (ctx/cancel/done) under startMu so a
-	// concurrent Stop() that observes `started=true` cannot race a
-	// half-initialized ctx. Stop() also acquires startMu now, making
-	// Start+Stop mutually exclusive at initialization time.
+	// Lifecycle state is initialised under startMu so a concurrent Stop()
+	// never sees a half-initialised ctx.
 	s.startMu.Lock()
 	if s.started {
 		s.startMu.Unlock()
@@ -140,14 +107,9 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 	s.cancel = cancel
 	s.ctx = ctx
 	s.done = make(chan struct{})
-	// Assign handler BEFORE releasing startMu so a racing goroutine that
-	// observes started==true through a future peek path can only see the
-	// fully-initialised Slack value. Leaving it outside the lock used to
-	// give other observers a window where s.handler was still nil.
 	s.handler = handler
 	s.startMu.Unlock()
 
-	// Fetch bot user ID for mention detection
 	authResp, err := s.api.AuthTest()
 	if err != nil {
 		slog.Warn("slack auth test failed — all channel messages will be processed (no mention filtering)", "err", err)
@@ -189,9 +151,7 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform.
 func (s *Slack) Stop() error {
-	// Snapshot lifecycle handles under startMu so a pre-Start Stop() or a
-	// racing Start() cannot hand us a nil ctx/cancel. If the platform was
-	// never started, there is nothing to tear down.
+	// Snapshot under startMu so a pre-Start or racing Stop() never sees a nil cancel.
 	s.startMu.Lock()
 	cancel := s.cancel
 	done := s.done
@@ -208,7 +168,6 @@ func (s *Slack) Stop() error {
 
 // Reply sends a message to a Slack channel. Handles text and/or images.
 func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
-	// Upload images as file attachments
 	for _, img := range msg.Images {
 		ext := platform.ImageExt(img.MimeType)
 		_, err := s.api.UploadFileContext(ctx, slack.UploadFileParameters{
@@ -222,7 +181,6 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 		}
 	}
 
-	// Send text if present
 	if msg.Text == "" {
 		return "", nil
 	}
@@ -362,9 +320,7 @@ func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, 
 	}
 }
 
-// slackBotHealCooldown rate-limits the lazy AuthTest self-heal so a sustained
-// stream of group messages while botID is unknown can't hammer auth.test.
-// Mirrors feishu.botInfoRefreshCooldown (#1947).
+// slackBotHealCooldown rate-limits the AuthTest self-heal while botID is unknown (#1947).
 const slackBotHealCooldown = time.Minute
 
 // botIDOrEmpty returns the cached bot user ID under the read lock. Empty means
@@ -375,11 +331,8 @@ func (s *Slack) botIDOrEmpty() string {
 	return s.botID
 }
 
-// maybeHealBotID kicks a single rate-limited background AuthTest when botID is
-// unknown so the adapter recovers exact-mention filtering after a transient
-// Start-time auth failure (#1947). At most one re-auth runs per cooldown
-// window; a success populates botID and subsequent group messages match the
-// "<@BOT>" token strictly instead of riding the loose any-mention fallback.
+// maybeHealBotID kicks one rate-limited background AuthTest while botID is
+// unknown so exact-mention filtering recovers after a transient Start failure (#1947).
 func (s *Slack) maybeHealBotID() {
 	s.botIDMu.Lock()
 	if s.botID != "" || time.Now().Before(s.botHealAt) {
@@ -420,15 +373,9 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 			mentionMe = true
 		}
 	} else {
-		// #1947: AuthTest failed at Start (transient network/5xx/rate-limit)
-		// so we don't know our own user ID and cannot match the exact
-		// "<@BOT>" mention token. The Start-time warn promises fail-open
-		// ("all channel messages will be processed, no mention filtering"),
-		// but leaving mentionMe=false here is fail-CLOSED: the dispatcher's
-		// group gate (ChatType=="group" && !MentionMe) then silently drops
-		// every group message until a restart. Degrade to any-mention=true —
-		// matching that log claim and Feishu's isBotMentioned fallback — and
-		// kick a rate-limited background AuthTest so botID self-heals.
+		// botID unknown: mentionMe=false would fail CLOSED (dispatch's group
+		// gate drops every group message until restart). Fail open, as the
+		// Start-time warn promises, and self-heal (#1947).
 		mentionMe = true
 		s.maybeHealBotID()
 	}
@@ -436,12 +383,7 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	if text == "" {
 		return
 	}
-	// Match platform.DefaultMaxIncomingBytes so no platform path can force an
-	// oversized prompt past the HTTP-surface maxWSSendTextBytes guard. The
-	// shim's 12 MB line ceiling and the dispatch queue's 4 MB coalesce cap
-	// are final backstops, not the intended security boundary. Slack's own
-	// UX limit is ~40 KB but API-posted messages can exceed that. R71-SEC-M3.
-	// R230C-ARCH-6: aliased to platform.DefaultMaxIncomingBytes.
+	// API-posted messages can exceed Slack's UX limit; cap before dispatch.
 	const maxSlackInboundBytes = platform.DefaultMaxIncomingBytes
 	if len(text) > maxSlackInboundBytes {
 		slog.Warn("slack message exceeds inbound text cap, dropping",
@@ -449,21 +391,15 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		return
 	}
 
-	// Slack ChannelType values: "im" (1:1 DM), "mpim" (multi-party DM),
-	// "channel" (public), "group" (private channel). Multi-party DMs must
-	// map to "group" so each mpim gets its own session key; otherwise every
-	// participant of every mpim collapses into a single "direct" bucket.
+	// mpim (multi-party DM) must map to "group" so each gets its own session
+	// key instead of collapsing into one "direct" bucket.
 	chatType := "direct"
 	if ev.ChannelType == "channel" || ev.ChannelType == "group" || ev.ChannelType == "mpim" {
 		chatType = "group"
 	}
 
-	// EventID is the global dedup key (dispatch.go shares one Dedup instance
-	// across all platforms). A bare ts is NOT unique across channels — Slack
-	// documents that two messages in different channels can share a TS, since
-	// the fractional part is a per-channel sequence. Using the (channel,ts)
-	// composite (same key MessageID already uses) keeps cross-channel messages
-	// from deduping each other into silence. #2015.
+	// A bare ts is NOT unique across channels (the fraction is a per-channel
+	// sequence); the composite keeps cross-channel messages from deduping (#2015).
 	eventID := ev.Channel + ":" + ev.TimeStamp
 
 	msg := platform.IncomingMessage{
@@ -477,10 +413,6 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		MentionMe: mentionMe,
 	}
 
-	// R226-SEC-4: cap concurrent handler goroutines so a flood of inbound
-	// Socket Mode messages cannot spawn unbounded goroutines. When the
-	// semaphore is saturated, drop the message + slog.Warn — preferable to
-	// OOM since the dispatcher already has its own queue + retry semantics.
 	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
 		"chat", msg.ChatID, "user", msg.UserID)
 }

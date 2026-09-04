@@ -27,74 +27,48 @@ import (
 )
 
 const (
-	// maxAPIRespBodyBytes caps the response body read for all Feishu Open API
-	// JSON responses (token, send, upload, bot_info, etc.). 1 MiB is well
-	// above any documented response size; the limit prevents a
-	// compromised/misbehaving upstream from forcing unbounded memory growth.
+	// maxAPIRespBodyBytes caps every Feishu Open API JSON response read so a
+	// misbehaving upstream cannot force unbounded memory growth.
 	maxAPIRespBodyBytes = 1 << 20
 
-	// maxImageDownloadBytes / maxAudioDownloadBytes cap the raw-byte download
-	// paths for message attachments. Feishu's own documented limits are
-	// 10 MiB (image) and 20 MiB (audio); we match those exactly so the error
-	// surface is predictable.
+	// Attachment download caps match Feishu's documented limits exactly.
 	maxImageDownloadBytes = 10 * 1024 * 1024
 	maxAudioDownloadBytes = 20 * 1024 * 1024
 
-	// tokenTTLBuffer is the number of seconds subtracted from Feishu's
-	// reported token expiry before caching, so the cached token is never
-	// used right up to its expiry boundary (clock skew, network latency).
+	// tokenTTLBuffer (seconds) is subtracted from Feishu's reported token
+	// expiry so a cached token is never used at its boundary (skew, latency).
 	tokenTTLBuffer = 60
 
-	// minTokenCacheDuration is the floor TTL applied when Feishu reports an
-	// unusually short (or zero/negative post-buffer) expiry. Keeps
-	// singleflight effective and avoids a refresh storm.
+	// minTokenCacheDuration floors the TTL when Feishu reports an unusually
+	// short expiry, keeping singleflight effective against refresh storms.
 	minTokenCacheDuration = 30 * time.Second
 
-	// maxWebhookBodyBytes caps the raw request body read by the webhook handler.
-	// 64 KiB is well above the largest legitimate Feishu webhook payload; a body
-	// larger than this is either a misconfigured sender or an attack attempt.
+	// maxWebhookBodyBytes caps the webhook request body; 64 KiB is well above
+	// any legitimate Feishu payload.
 	maxWebhookBodyBytes = 64 * 1024
 
-	// maxWebhookNonceLen bounds the X-Lark-Request-Nonce header length
-	// before insertion into seenNonces. Feishu nonces are 16-char random
-	// strings in practice; this limit protects the dedup map from a
-	// header-flood with giant nonces inflating heap.
+	// maxWebhookNonceLen bounds X-Lark-Request-Nonce (16 chars in practice)
+	// so a header flood cannot bloat the seenNonces map.
 	maxWebhookNonceLen = 128
 
-	// maxEventIDLen caps the inbound event_id length before it lands in
-	// recentEventIDs. Feishu event IDs are short hex/UUID strings in
-	// practice; same dedup-map heap-flood concern as maxWebhookNonceLen.
-	// Shared by transport_ws.go and transport_hook.go.
+	// maxEventIDLen caps inbound event_id before it lands in the dedup map;
+	// shared by transport_ws.go and transport_hook.go.
 	maxEventIDLen = 256
 
-	// maxIncomingTextBytes caps the inbound message text byte length
-	// after decoding. Aliases platform.DefaultMaxIncomingBytes so all four
-	// adapters share one source of truth (R230C-ARCH-6). Shared by
-	// transport_ws.go and transport_hook.go.
+	// maxIncomingTextBytes caps decoded inbound text; aliases
+	// platform.DefaultMaxIncomingBytes so all adapters share one source of truth.
 	maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 
-	// maxWebhookTokenLen bounds the verification token field accepted from
-	// the request body before constantTimeEqualString hashes both sides.
-	// Real Feishu tokens are ~32 bytes; 512 leaves wide headroom while
-	// preventing a 64 KiB body from forcing an attacker-controlled SHA-256
-	// over the entire token field on every request (small CPU DoS lever
-	// otherwise multiplied by dispatch semaphore concurrency).
+	// maxWebhookTokenLen bounds the body token before constantTimeEqualString
+	// hashes it (~32 bytes real) so a 64 KiB body is not a per-request SHA-256 DoS lever.
 	maxWebhookTokenLen = 512
 
-	// maxWebhookSigLen bounds the X-Lark-Signature header length before it
-	// reaches verifySignature. Real Feishu signatures are SHA-256 hex strings
-	// (64 bytes); 256 leaves headroom while preventing oversized headers from
-	// amplifying allocations inside verifySignature (string concat + sha256).
+	// maxWebhookSigLen bounds X-Lark-Signature (64-byte hex real) before
+	// verifySignature concatenates + hashes.
 	maxWebhookSigLen = 256
 
-	// Webhook timestamp freshness window constants (webhookTimestampFutureSkew /
-	// webhookTimestampMaxAge) and the verifySignature / verifyTimestamp helpers
-	// they back live in signature.go (R214-ARCH-13 split).
-
-	// wsStopTimeout caps how long Stop() waits for the lark-ws SDK to exit.
-	// The SDK's Start() may block in select{} if its internal disconnect path
-	// stalls, so we don't wait forever on shutdown — log + return to keep
-	// systemd's stop deadline meaningful.
+	// wsStopTimeout caps how long Stop() waits for the lark-ws SDK, whose
+	// Start() may block in select{} — keep systemd's stop deadline meaningful.
 	wsStopTimeout = 5 * time.Second
 )
 
@@ -104,27 +78,19 @@ var feishuHTTPClient = &http.Client{
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
-		// open.feishu.cn supports TLS 1.2+; pin the floor so a future Go
-		// toolchain regression can't silently accept legacy protocols.
+		// Pin the TLS floor so a toolchain regression cannot accept legacy protocols.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	},
-	// Block all redirects. The Feishu Open API does not rely on redirects
-	// for any documented flow (token fetch, send, upload, resource
-	// download). Following a redirect would let a compromised upstream
-	// (or DNS attacker mid-handshake before the cached cert is served)
-	// direct the bearer-token-carrying request at an internal address
-	// (IMDS, loopback admin port, etc.) — a classic SSRF-via-redirect.
-	// Returning ErrUseLastResponse makes the client surface the 3xx
-	// response as-is so the caller fails cleanly instead of following.
+	// The Open API uses no redirects; following one would let a compromised
+	// upstream aim the bearer-token request at an internal address (IMDS,
+	// loopback admin) — SSRF-via-redirect. Surface the 3xx as-is instead.
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
 }
 
-// APIError is the typed error returned by Feishu Open API calls (token
-// fetch, send message, upload image). Callers can use errors.As to inspect
-// Code and decide retry policy via IsPermanent — rate-limit / 5xx codes
-// should be retried, invalid-credential codes should not.
+// APIError is the typed error returned by Feishu Open API calls; callers use
+// errors.As on Code and IsPermanent to decide retry policy.
 type APIError struct {
 	Code int
 	Msg  string
@@ -132,33 +98,17 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	// R181-SEC-P2-4: e.Msg is the `msg` field of the Feishu API HTTP
-	// response. In the normal path Feishu returns short ASCII strings,
-	// but a DNS/MITM-compromised path (pre-TLS-handshake rollover,
-	// a mis-issued CA cert) could return bidi/C1/newline bytes. Using
-	// %q keeps the rendered error safe to feed into slog attrs without
-	// double-escaping (slog JSON handler re-escapes as needed; text
-	// handler also reads the quoted form cleanly).
+	// %q: a MITM'd upstream msg could carry bidi/C1/newline bytes into slog attrs.
 	if e.Msg != "" {
 		return fmt.Sprintf("feishu %s: code=%d msg=%q", e.Op, e.Code, e.Msg)
 	}
 	return fmt.Sprintf("feishu %s: code=%d", e.Op, e.Code)
 }
 
-// IsPermanent reports whether the error indicates a non-transient condition
-// (app credentials invalid, app disabled by vendor) where retrying with the
-// same request will never succeed. Used by reconnect loops to break out
-// instead of hammering the API forever.
-//
-// Code references: open.feishu.cn/document/server-docs/getting-started/server-error-codes
-//   - 99991663: invalid app_secret
-//   - 99991664: app disabled
-//   - 99991668: app not authorized
-//   - 1061045: bot not in chat (permanent for that chat)
-//   - 230001: invalid receive_id
-//
-// Note: token-expired codes (99991671/99991672) are NOT permanent — they
-// are handled by invalidateAccessToken + retry, see IsTokenExpired.
+// IsPermanent reports whether retrying the same request can never succeed
+// (open.feishu.cn server-error-codes): 99991663 invalid app_secret, 99991664
+// app disabled, 99991668 not authorized, 1061045 bot not in chat, 230001
+// invalid receive_id. Token-expired codes are NOT permanent (IsTokenExpired).
 func (e *APIError) IsPermanent() bool {
 	switch e.Code {
 	case 99991663, 99991664, 99991668, 1061045, 230001:
@@ -167,20 +117,9 @@ func (e *APIError) IsPermanent() bool {
 	return false
 }
 
-// IsTokenExpired reports whether the error indicates that the tenant access
-// token presented with the request was rejected by Feishu (invalid or
-// expired). When this fires, the cached token in Feishu.accessToken is
-// stale and MUST be invalidated so the next getAccessToken call refreshes
-// it — otherwise ReplyWithRetry's 3 attempts all send the same stale token
-// and all fail identically. R83 / RETRY1.
-//
-// Feishu's catalogue groups a few codes under the "tenant access token
-// invalid" umbrella depending on endpoint version. Listing them here keeps
-// the retry policy authoritative.
-//   - 99991671: tenant access token invalid
-//   - 99991672: app access token invalid (shouldn't occur via Reply but
-//     listed for symmetry with outbound admin calls)
-//   - 99991673: user access token invalid (same)
+// IsTokenExpired reports whether Feishu rejected the presented access token
+// (99991671 tenant / 99991672 app / 99991673 user). The cached token MUST then
+// be invalidated, or ReplyWithRetry's attempts all resend the same stale token.
 func (e *APIError) IsTokenExpired() bool {
 	switch e.Code {
 	case 99991671, 99991672, 99991673:
@@ -189,13 +128,8 @@ func (e *APIError) IsTokenExpired() bool {
 	return false
 }
 
-// IsTokenInvalidated implements platform.TokenInvalidatedError. Returns
-// true for the same codes as IsTokenExpired — when one of these errors
-// flows out of Feishu.Reply the cached access token has just been
-// cleared by maybeInvalidateOnTokenError, so ReplyWithRetry can grant
-// one extra retry with a propagation pause to give the next attempt a
-// fresh token that the upstream has had a chance to register. Issue
-// #1339.
+// IsTokenInvalidated implements platform.TokenInvalidatedError: the cache was
+// just cleared, so ReplyWithRetry may grant one extra retry with a fresh token (#1339).
 func (e *APIError) IsTokenInvalidated() bool {
 	return e.IsTokenExpired()
 }
@@ -209,15 +143,10 @@ type Config struct {
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLen       int    `yaml:"max_reply_length"`
 
-	// AllowInsecureWebhook opts in to the verification_token-only webhook
-	// mode (no encrypt_key HMAC). R250531-SEC-1 (#1507): token-only mode
-	// authenticates solely on a plaintext shared secret carried in the
-	// request body, so a passive observer (CDN/TLS-inspection proxy/log
-	// leak) who sees the token can forge/replay events within the 5min
-	// timestamp window. We therefore refuse to start a webhook with
-	// encrypt_key unset UNLESS the operator explicitly sets this flag,
-	// making the weaker posture a conscious, audited choice rather than a
-	// silent default. encrypt_key (HMAC) remains the recommended config.
+	// AllowInsecureWebhook opts in to verification_token-only webhook mode (no
+	// encrypt_key HMAC): a passive observer who sees the plaintext token can
+	// forge/replay events within the 5min window, so the webhook refuses to
+	// start without this explicit, audited choice (#1507).
 	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
@@ -231,16 +160,12 @@ type Feishu struct {
 	tokenMu     sync.RWMutex
 	tokenGroup  singleflight.Group
 
-	// botInfoSF merges concurrent lazy bot-info re-fetches (maybeRefreshBotInfo)
-	// so a burst of group mentions while open_id is still unknown collapses to
-	// a single bot/v3/info call. R229-ARCH-19 (#1009).
+	// botInfoSF collapses concurrent lazy bot-info re-fetches into one call.
 	botInfoSF singleflight.Group
 
-	// Token refresh circuit breaker: if the upstream token endpoint returns
-	// an error (e.g. app_secret revoked), subsequent refresh attempts within
-	// tokenFailCooldown are short-circuited to the cached error. Prevents
-	// hammering open.feishu.cn at the per-request rate when every reply path
-	// needs a token. singleflight alone does not cache errors.
+	// Token refresh circuit breaker: a failed refresh is cached for
+	// tokenFailCooldown so every reply path does not re-hit open.feishu.cn
+	// (singleflight alone does not cache errors).
 	tokenLastFailAt time.Time
 	tokenLastFailed error
 
@@ -254,10 +179,8 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
-	// dispatch bounds concurrent inbound handler goroutines (webhook and
-	// websocket transports, shared platform.DefaultHandlerConcurrency cap)
-	// and tracks them plus the bot-info self-heal so Stop() can drain
-	// in-flight work. #2254.
+	// dispatch bounds concurrent inbound handler goroutines (both transports)
+	// and tracks them plus the bot-info self-heal so Stop() can drain (#2254).
 	dispatch platform.BoundedDispatch
 	startMu  sync.Mutex
 	started  bool
@@ -267,67 +190,37 @@ type Feishu struct {
 
 	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
 	seenNonces sync.Map
-	// seenNoncesCount tracks the approximate size of seenNonces so we can
-	// refuse new inserts past maxSeenNonces without the O(n) scan Range
-	// would require. Incremented on successful LoadOrStore-miss,
-	// decremented by cleanupNonces on expiry. Concurrent Add → eventual
-	// consistency: at worst we accept a few extra entries between the
-	// check and increment, which is bounded and harmless.
+	// seenNoncesCount approximates len(seenNonces) so the cap check avoids an
+	// O(n) Range. Eventually consistent: a few extra entries between check and
+	// increment are bounded and harmless.
 	seenNoncesCount atomic.Int64
-	// nonceEvictMu serializes evictOldestNonces so concurrent cap-hit
-	// goroutines cannot each run an independent Range+decrement pass. Without
-	// it, overlapping evictions split the seenNoncesCount adjustment across
-	// goroutines and the counter can transiently dip below the map's real size
-	// (or negative), letting a subsequent Add(1) read a value under the cap and
-	// bypass the eviction gate. Holding this mutex makes eviction-and-recount a
-	// single critical section that resets the counter to the map's actual size.
-	// R20260531070014-SEC-4 (#1534).
+	// nonceEvictMu serializes evictOldestNonces: overlapping evictions would
+	// split the counter adjustment and let it dip below the map's real size,
+	// bypassing the cap gate. Eviction-and-recount is one critical section (#1534).
 	nonceEvictMu sync.Mutex
 
-	// evictNoncesFn lets tests inject the eviction step so the cap-hit
-	// recovery path (including the evicted==0 fallback) can be exercised
-	// deterministically without seeding a 50k-entry map. nil means use the
-	// real evictOldestNonces. See evictNonces.
+	// evictNoncesFn lets tests inject the eviction step (incl. the evicted==0
+	// fallback) without seeding a 50k-entry map; nil = evictOldestNonces.
 	evictNoncesFn func() int
 
-	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry returned
-	// by the create-reaction API, so RemoveReaction can later target the correct
-	// reaction. Feishu's delete endpoint requires the reaction_id (there's no
-	// "delete by emoji type" form). Entries are deleted on successful removal
-	// OR by the cleanupNonces ticker once the stored expiry passes — any
-	// unpaired Add (bot restart between Add and Remove, Feishu-side message
-	// deletion, early-exit send-reply paths) would otherwise accumulate
-	// indefinitely. TTL is reactionCacheTTL. R175-P1.
+	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry because
+	// Feishu's delete endpoint needs the reaction_id. Entries go on successful
+	// removal or when cleanupNoncesTick sees the expiry, so unpaired Adds
+	// (restart, message deleted) cannot accumulate forever.
 	reactionIDs sync.Map
 
-	// botOpenID is the bot's own open_id, populated by fetchBotInfo() during
-	// Start(). Used by isBotMentioned() to distinguish @bot from @other-user
-	// in group chats. Empty if the bot/v3/info call failed — in which case
-	// the mention check degrades to the legacy "any @ means mentioned" rule
-	// (mirror of slack/discord's warn-and-continue on AuthTest failure).
-	//
-	// Guarded by botInfoMu: written in Start() and by the lazy self-heal
-	// re-fetch (maybeRefreshBotInfo), read on every inbound group message.
-	//
-	// R229-ARCH-19 (#1009): the Start()-time fetch is best-effort and
-	// time-boxed at 5s. If it failed, isBotMentioned would stay in the loose
-	// "any @ = hit" fallback for the entire process lifetime, which lets an
-	// ambient @other-bot mention in a group falsely wake this bot. To tighten
-	// that window without breaking the degraded-startup contract, the degraded
-	// branch triggers a rate-limited background re-fetch so the bot's open_id
-	// self-heals and subsequent group mentions match strictly.
+	// botOpenID is the bot's own open_id for isBotMentioned. Empty when
+	// bot/v3/info failed, in which case the check degrades to "any @ counts"
+	// and the degraded branch kicks a rate-limited self-heal re-fetch so an
+	// ambient @other-bot mention cannot wake this bot for the whole process
+	// lifetime. Guarded by botInfoMu.
 	botInfoMu          sync.RWMutex
 	botOpenID          string
-	lastBotInfoFetchNs int64 // unix nanos of the last (Start or lazy) fetch attempt; rate-limits self-heal
+	lastBotInfoFetchNs int64 // unix nanos of the last fetch attempt; rate-limits self-heal
 
-	// insecureWebhookWarnOnce emits one runtime SECURITY error the first time a
-	// webhook request is actually processed while running in the
-	// verification_token-only (no encrypt_key / no HMAC) mode enabled by
-	// allow_insecure_webhook. config.validateConfig already logs at startup, but
-	// that single Warn is easy to lose in boot noise; surfacing an Error at the
-	// first live delivery gives operators a concrete, traffic-correlated signal
-	// that production is running the replay/forgery-prone posture. Gated by Once
-	// so a request flood cannot turn this into a log-amplification DoS. #1724.
+	// insecureWebhookWarnOnce emits one runtime SECURITY error on the first
+	// live delivery in verification_token-only mode — traffic-correlated and
+	// harder to miss than the boot Warn; Once prevents log amplification (#1724).
 	insecureWebhookWarnOnce sync.Once
 }
 
@@ -345,58 +238,34 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	f.cleanupWg.Add(1)
 	go func() {
 		defer f.cleanupWg.Done()
-		// Pass f.stopCtx by field lookup rather than the local `ctx`
-		// variable so any future refactor that replaces stopCtx (e.g.
-		// swaps in a shutdown-hierarchy ctx) does not leave this
-		// goroutine subscribed to the original, never-cancelled one.
+		// Field lookup (not the local ctx) so a future stopCtx swap cannot
+		// leave this goroutine on a never-cancelled context.
 		f.cleanupNonces(f.stopCtx)
 	}()
 	return f
 }
 
-// cleanupNonces periodically removes expired entries from seenNonces.
-// Runs until ctx is cancelled (i.e. until Stop() is called).
-//
-// Aligned with verifyTimestamp's 5-minute freshness window: a request older
-// than 5 min is rejected by timestamp verification, so holding nonces beyond
-// that window just bloats the map without any replay-defense value.
+// nonceTTL matches verifyTimestamp's 5-minute freshness window; older
+// requests are rejected by timestamp anyway, so longer retention only bloats the map.
 const nonceTTL = 5 * time.Minute
 
-// maxSeenNonces caps the replay-protection map so a flood of authenticated
-// requests with unique nonces cannot bloat memory past a predictable ceiling.
-// 50k entries × (~48B key + 24B value) ≈ 3.6 MB, well below a typical
-// heap budget. Legitimate traffic with 5-minute TTL is far below this cap.
+// maxSeenNonces caps the replay map (~3.6 MB at 50k entries) so a flood of
+// authenticated unique-nonce requests cannot bloat memory.
 const maxSeenNonces = 50000
 
-// nonceEvictionBatch is the number of oldest entries removed by
-// evictOldestNonces when the map hits maxSeenNonces. R20260527122801-SEC-8
-// (#1332): without batch eviction, an attacker holding a leaked
-// verification_token can fill the map with unique nonces faster than the
-// cleanupNoncesTick (which only removes EXPIRED entries) sweeps it,
-// putting every legitimate event webhook on a 5-minute 429 cliff. By
-// evicting the oldest 1024 entries on cap-hit we trade a tiny replay
-// window for the older nonces (those entries were going to expire within
-// minutes anyway) for guaranteed forward progress under flood. Picked
-// 1024 ≈ 2% of cap so a sustained flood pays a steady eviction cost
-// rather than thrashing every insert.
+// nonceEvictionBatch is how many oldest entries evictOldestNonces removes on
+// cap-hit. Without it a leaked verification_token could pin the map at cap
+// and 429 every legitimate webhook for nonceTTL; ~2% of cap keeps a sustained
+// flood paying a steady cost instead of thrashing every insert (#1332).
 const nonceEvictionBatch = 1024
 
-// tokenFailCooldown bounds how long a failed tenant-access-token refresh is
-// cached so concurrent callers do not re-hit open.feishu.cn on every reply
-// when credentials are revoked. 5s balances operator-visible recovery time
-// with upstream rate protection.
+// tokenFailCooldown bounds how long a failed token refresh is cached: 5s
+// balances operator-visible recovery with upstream rate protection.
 const tokenFailCooldown = 5 * time.Second
 
-// reactionCacheTTL / reactionCacheEntry / reactionEmojiType / reactionCacheKey
-// moved to reaction_cache.go (R214-ARCH-13 continuation).
-
-// nonceCleanupInterval is set to nonceTTL/2 so an expired entry never sits
-// in seenNonces longer than ~1.5 × TTL after expiry. Previously the ticker
-// fired every full nonceTTL, which under the worst phase (insert just after
-// a tick) left expired entries in the map for up to 2 × TTL — harmless for
-// replay defense (verifyTimestamp gates that) but caused seenNoncesCount
-// to converge on maxSeenNonces faster than necessary under sustained
-// authenticated traffic, risking spurious 429s. R235-SEC-9.
+// nonceCleanupInterval is nonceTTL/2 so an expired entry never lingers past
+// ~1.5 × TTL and seenNoncesCount does not creep toward the cap under
+// sustained traffic.
 const nonceCleanupInterval = nonceTTL / 2
 
 func (f *Feishu) cleanupNonces(ctx context.Context) {
@@ -405,16 +274,9 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			// R175-P1: wrap each tick's work in its own recover frame so a
-			// panic in a single Range/Delete pass (e.g. from a future
-			// refactor that stores a different value type, or a corrupt
-			// sync.Map internal) does NOT tear the goroutine down. The
-			// previous shape had `defer recover()` at the function scope,
-			// which would recover the panic but then unwind out of the
-			// `for` loop and terminate the goroutine — replay protection
-			// was permanently disabled until restart, exactly the outcome
-			// the earlier comment promised to prevent. Now the loop
-			// survives and the next tick retries cleanup.
+			// The recover frame MUST live in the per-tick helper, not here: a
+			// function-scope recover would unwind out of the loop and disable
+			// replay protection until restart.
 			f.cleanupNoncesTick()
 		case <-ctx.Done():
 			return
@@ -422,9 +284,8 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 	}
 }
 
-// cleanupNoncesTick performs one sweep of the expired-nonce map. Extracted so
-// each call has its own recover frame — a panic here is logged and the caller
-// (cleanupNonces) moves to the next tick rather than exiting.
+// cleanupNoncesTick performs one sweep of the expired-nonce map in its own
+// recover frame so a panic is logged and the next tick retries.
 func (f *Feishu) cleanupNoncesTick() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -433,18 +294,12 @@ func (f *Feishu) cleanupNoncesTick() {
 				"panic", r, "stack", string(debug.Stack()))
 		}
 	}()
-	// R186-CONC-L1: capture once so the nonce sweep and the reactionIDs sweep
-	// below share a single wall-time basis. Two independent time.Now() calls
-	// otherwise straddle a scheduler hiccup and produce inconsistent cutoff
-	// decisions for entries sitting near either TTL boundary — harmless today
-	// but confusing when correlating sweep logs.
+	// One wall-time basis for both sweeps so cutoff decisions are consistent.
 	nowT := time.Now()
 	now := nowT.Unix()
 	deleted := int64(0)
 	f.seenNonces.Range(func(k, v any) bool {
-		// Defensive type assertion: sync.Map has no compile-time type
-		// safety, so guard against accidental cross-type Store from a
-		// future refactor. Drop malformed entries so the map recovers.
+		// sync.Map has no type safety; drop malformed entries so the map recovers.
 		ts, ok := v.(int64)
 		if !ok || ts < now {
 			f.seenNonces.Delete(k)
@@ -453,20 +308,15 @@ func (f *Feishu) cleanupNoncesTick() {
 		return true
 	})
 	if deleted > 0 {
-		// Clamp at zero: every webhook insert MUST pair with Add(1),
-		// but defensive type assertion above can delete entries that
-		// bypassed the counted insert path (future refactor risk). A
-		// negative counter would eventually bump legitimate traffic
-		// against the maxSeenNonces ceiling until restart.
+		// Clamp at zero: malformed entries deleted above may have bypassed the
+		// counted insert path, and a negative counter would eventually 429
+		// legitimate traffic.
 		if n := f.seenNoncesCount.Add(-deleted); n < 0 {
 			f.seenNoncesCount.Store(0)
 		}
 	}
 
-	// R175-P1: piggy-back the reactionIDs sweep onto the same 5-minute
-	// tick. Using UnixNano throughout keeps the ticker schedule decoupled
-	// from real-time drift (whereas seenNonces above uses Unix seconds
-	// because its TTL is 5 min — precision is not load-bearing there).
+	// reactionIDs sweep rides the same tick (UnixNano: its TTL is finer).
 	nowNano := nowT.UnixNano()
 	f.reactionIDs.Range(func(k, v any) bool {
 		entry, ok := v.(reactionCacheEntry)
@@ -477,10 +327,7 @@ func (f *Feishu) cleanupNoncesTick() {
 	})
 }
 
-// evictNonces dispatches to the injected eviction hook in tests, falling back
-// to evictOldestNonces in production. Centralizing the indirection keeps the
-// serveWebhook cap-hit path testable without threading the hook through call
-// sites.
+// evictNonces dispatches to the test hook when set, else evictOldestNonces.
 func (f *Feishu) evictNonces() int {
 	if f.evictNoncesFn != nil {
 		return f.evictNoncesFn()
@@ -488,30 +335,14 @@ func (f *Feishu) evictNonces() int {
 	return f.evictOldestNonces()
 }
 
-// evictOldestNonces removes up to nonceEvictionBatch entries from
-// seenNonces, preferring the ones whose stored expiry timestamp is
-// smallest (i.e. oldest / closest to natural expiry). R20260527122801-SEC-8
-// (#1332): when an attacker holding a leaked verification_token floods
-// the map with unique nonces, the cleanupNoncesTick ticker (which only
-// removes EXPIRED entries) cannot keep up, so legitimate webhooks 429
-// for up to nonceTTL. By making cap-hit a self-healing trigger that
-// reclaims headroom from the oldest-but-still-valid nonces, fresh
-// traffic keeps flowing. The replay-defense regression is bounded:
-// only nonces within the same nonceTTL window are evicted, so an
-// attacker who already saw the original event has at most a few
-// minutes to replay it before timestamp verification rejects the
-// payload outright.
-//
-// Returns the number of entries actually removed so callers can decide
-// whether to log a warning and whether the cap-check should re-pass.
+// evictOldestNonces removes up to nonceEvictionBatch entries closest to
+// natural expiry so fresh traffic keeps flowing when a leaked-token flood
+// hits the cap (#1332). The replay regression is bounded: only nonces inside
+// the current nonceTTL window are evicted, and timestamp verification still
+// rejects older payloads. Returns the number actually removed.
 func (f *Feishu) evictOldestNonces() int {
-	// R20260531070014-SEC-4 (#1534): serialize eviction so concurrent cap-hit
-	// goroutines cannot each gather an overlapping Range snapshot and split the
-	// seenNoncesCount decrement, which previously let the counter dip below the
-	// map's true size (or negative) and lapse the cap guard. Inside the lock we
-	// evict, then resync seenNoncesCount to the map's actual live size so the
-	// counter is exact on exit regardless of how many keys other (now-blocked)
-	// callers had reserved.
+	// Serialized so overlapping evictions cannot split the counter decrement
+	// and lapse the cap guard; the counter is resynced to the live size on exit (#1534).
 	f.nonceEvictMu.Lock()
 	defer f.nonceEvictMu.Unlock()
 
@@ -519,18 +350,13 @@ func (f *Feishu) evictOldestNonces() int {
 		key    any
 		expiry int64
 	}
-	// Single Range pass: gather (key, expiry) pairs, sort by expiry, delete
-	// the smallest nonceEvictionBatch keys. sync.Map.Range is consistent
-	// w.r.t. live entries; concurrent inserts during the scan may be missed
-	// but those are necessarily fresh (high expiry) so excluding them only
-	// makes the eviction more aggressive on the genuinely-old set, which
-	// is the correct policy.
+	// Inserts missed by the Range are necessarily fresh, so excluding them only
+	// makes eviction more aggressive on the genuinely-old set.
 	entries := make([]nonceEntry, 0, nonceEvictionBatch*2)
 	f.seenNonces.Range(func(k, v any) bool {
 		ts, ok := v.(int64)
 		if !ok {
-			// Cross-type entry (defensive): treat as evictable by giving it
-			// a sentinel expiry so it sorts to the front and gets cleared.
+			// Cross-type entry: sentinel expiry sorts it to the front.
 			entries = append(entries, nonceEntry{key: k, expiry: 0})
 			return true
 		}
@@ -554,15 +380,9 @@ func (f *Feishu) evictOldestNonces() int {
 		}
 	}
 	if deleted > 0 {
-		// Resync the counter to the map's actual live size rather than doing a
-		// relative Add(-deleted). Under the nonceEvictMu lock this is the only
-		// goroutine mutating via eviction, but inserts/replay-undo (Add ±1) and
-		// the cleanup ticker (Add(-deleted)) still run concurrently, so a
-		// relative decrement here could compound with those into a count that
-		// drifts below the real map size. Counting live entries makes the
-		// counter exact at exit and keeps the cap guard honest. The extra Range
-		// is bounded (only on cap-hit, batched ≥nonceEvictionBatch apart) so the
-		// O(n) cost is amortized. R20260531070014-SEC-4 (#1534).
+		// Resync to the live size rather than Add(-deleted): concurrent inserts
+		// and the cleanup ticker still adjust the counter, and a relative
+		// decrement could drift below the real map size. Only runs on cap-hit.
 		live := int64(0)
 		f.seenNonces.Range(func(_, _ any) bool {
 			live++
@@ -598,21 +418,14 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 
 	f.handler = handler
 
-	// Best-effort fetch of the bot's own open_id used by isBotMentioned() to
-	// filter group chat @ events. Failure is logged as a Warn and the mention
-	// check degrades to the legacy "any @ is a hit" rule — same contract as
-	// slack's AuthTest failure path. Time-boxed at 5s so a flaky network
-	// doesn't block startup; Start() proceeds regardless.
-	// IIFE + defer ensures cancelFetch() runs even if fetchBotInfo panics,
-	// releasing the 5s context timer. Bare `cancelFetch()` after the call
-	// would be skipped on panic, leaking the timer goroutine until stopCtx
-	// fires.
+	// Best-effort, 5s-boxed fetch of the bot's open_id; failure degrades
+	// isBotMentioned to "any @ is a hit" (same contract as slack's AuthTest).
+	// IIFE + defer so the timer is released even if fetchBotInfo panics.
 	func() {
 		fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
 		defer cancelFetch()
-		// Stamp the attempt time so the lazy self-heal path (maybeRefreshBotInfo)
-		// honours botInfoRefreshCooldown relative to this Start() fetch rather
-		// than firing on the very first group mention. R229-ARCH-19 (#1009).
+		// Stamp so the self-heal cooldown counts from this fetch, not the
+		// first group mention.
 		atomic.StoreInt64(&f.lastBotInfoFetchNs, time.Now().UnixNano())
 		if err := f.fetchBotInfo(fetchCtx); err != nil {
 			slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
@@ -624,19 +437,13 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 		slog.Info("feishu using websocket mode (no public IP needed)")
 		return f.startWebSocket()
 	}
-	// Webhook mode exposes a public HTTP endpoint. Refuse to start if neither
-	// VerificationToken nor EncryptKey is configured — without either, any
-	// caller on the open internet can inject forged events.
+	// Webhook mode is a public endpoint: without either credential anyone on
+	// the internet could inject forged events.
 	if f.cfg.VerificationToken == "" && f.cfg.EncryptKey == "" {
 		return fmt.Errorf("feishu webhook mode requires verification_token or encrypt_key to be configured")
 	}
-	// VerificationToken-only mode relies on a plaintext shared secret in the
-	// request body; if that token ever leaks (CDN/TLS-inspection proxy/log
-	// leak), events can be forged or replayed within the 5min timestamp
-	// window without access to the EncryptKey HMAC. R250531-SEC-1 (#1507):
-	// refuse to start a public webhook in this weaker posture unless the
-	// operator explicitly opts in via allow_insecure_webhook. The default
-	// (secure) path requires encrypt_key for HMAC defence-in-depth.
+	// Token-only mode is forgeable if the plaintext token leaks; require the
+	// explicit allow_insecure_webhook opt-in (#1507).
 	if f.cfg.EncryptKey == "" {
 		if !f.cfg.AllowInsecureWebhook {
 			return fmt.Errorf("feishu webhook: verification_token-only mode has no HMAC and is replay/forgery-prone if the token leaks; " +
@@ -648,16 +455,9 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	return nil
 }
 
-// fetchBotInfo populates botOpenID by calling GET /open-apis/bot/v3/info.
-// Called once from Start(); returns nil on success, error otherwise so the
-// caller can decide whether to log+continue or abort.
-//
-// Response shape (from https://open.feishu.cn/document/server-docs/im-v1/bot/get):
-//
-//	{"code":0,"msg":"ok","bot":{"open_id":"ou_xxx","app_name":"...","activate_status":2}}
-//
-// Note the `bot` field is at top level, NOT under `data` — this is one of the
-// older bot APIs that predates Feishu's standardised envelope.
+// fetchBotInfo populates botOpenID via GET /open-apis/bot/v3/info. Note the
+// `bot` field is at top level, NOT under `data` (older API predating the
+// standard envelope).
 func (f *Feishu) fetchBotInfo(ctx context.Context) error {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
@@ -696,35 +496,23 @@ func (f *Feishu) fetchBotInfo(ctx context.Context) error {
 	f.botInfoMu.Lock()
 	f.botOpenID = result.Bot.OpenID
 	f.botInfoMu.Unlock()
-	// R182-SEC-L2: AppName / OpenID come from the upstream Feishu API body.
-	// Under a TLS MITM or misissued CA scenario they could carry C1/bidi/
-	// newline bytes. Symmetric with the existing %q-guarded APIError path.
+	// Upstream body could carry C1/bidi/newline bytes under a TLS MITM.
 	slog.Info("feishu bot identity",
 		"open_id", osutil.SanitizeForLog(result.Bot.OpenID, 64),
 		"app_name", osutil.SanitizeForLog(result.Bot.AppName, 128))
 	return nil
 }
 
-// isBotMentioned reports whether any mention in the list targets this bot.
-// Returns the legacy "any mention = true" behaviour when botOpenID is unknown
-// (e.g. fetchBotInfo failed during Start) so we don't silently lose responses
-// in degraded-startup scenarios.
-//
-// The mentions parameter is abstracted via an extractor closure so webhook
-// (local struct) and WebSocket (*larkim.MentionEvent) schemas share the same
-// matching logic without duplicating the fallback rule.
+// isBotMentioned reports whether any mention targets this bot; when botOpenID
+// is unknown any mention counts, so a degraded Start does not drop responses.
+// The extractor closure lets the webhook and WebSocket schemas share the logic.
 func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
 	f.botInfoMu.RLock()
 	botID := f.botOpenID
 	f.botInfoMu.RUnlock()
 	if botID == "" {
-		// Degraded mode: any mention counts. Matches legacy behaviour so a
-		// failed Start() doesn't silently drop responses for DM-heavy users
-		// who don't care about group precision.
-		//
-		// R229-ARCH-19 (#1009): kick a rate-limited background re-fetch so the
-		// open_id self-heals — once it lands, the next group mention matches
-		// strictly instead of falling through this loose "any @" path forever.
+		// Degraded: kick a rate-limited re-fetch so the open_id self-heals and
+		// the next group mention matches strictly (#1009).
 		if count > 0 {
 			f.maybeRefreshBotInfo()
 		}
@@ -738,54 +526,35 @@ func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
 	return false
 }
 
-// botInfoRefreshCooldown rate-limits the lazy self-heal re-fetch so a sustained
-// stream of group mentions while open_id is unknown can't hammer bot/v3/info.
-// 1 minute is short enough that a transient Start()-time failure recovers within
-// the first follow-up burst, long enough that a hard failure (revoked app) does
-// not generate a per-message API call. R229-ARCH-19 (#1009).
+// botInfoRefreshCooldown rate-limits the self-heal re-fetch: short enough to
+// recover from a transient Start failure, long enough that a revoked app does
+// not cost a per-message API call.
 const botInfoRefreshCooldown = time.Minute
 
 // maybeRefreshBotInfo kicks a rate-limited, singleflight-merged background
-// re-fetch of the bot's open_id when isBotMentioned is operating in the
-// degraded "any @" fallback (open_id unknown). Non-blocking: the inbound
-// message handler returns immediately on the loose match for this delivery,
-// and a *subsequent* group mention benefits from the now-populated open_id
-// (strict matching). Tracked on f.dispatch so Stop() waits for the in-flight fetch.
-// R229-ARCH-19 (#1009).
+// re-fetch of the bot's open_id while isBotMentioned is degraded. Non-blocking;
+// tracked on f.dispatch so Stop() waits for it.
 func (f *Feishu) maybeRefreshBotInfo() {
-	// stopCtx is nil only for directly-constructed test fixtures (the
-	// production New() always seeds it). Without it there's no lifecycle
-	// to anchor the fetch context to, so skip the self-heal entirely —
-	// the degraded "any @" match already returned for the caller.
+	// nil only for directly-constructed test fixtures; no lifecycle to anchor to.
 	if f.stopCtx == nil {
 		return
 	}
 	now := time.Now().UnixNano()
 	last := atomic.LoadInt64(&f.lastBotInfoFetchNs)
-	// delta < 0 guards an NTP step backwards (same pattern as the dispatch
-	// eviction-warn cooldown): re-anchor and allow the fetch rather than
-	// wedging the cooldown forever.
+	// delta < 0 = NTP step backwards: re-anchor rather than wedge the cooldown.
 	if delta := now - last; delta >= 0 && delta < int64(botInfoRefreshCooldown) {
 		return
 	}
 	if !atomic.CompareAndSwapInt64(&f.lastBotInfoFetchNs, last, now) {
-		// Another goroutine won the CAS and is already (re)fetching.
 		return
 	}
-	// R20260531-CR-003: Stop() cancels stopCtx then blocks on
-	// f.dispatch.Wait(). If we win the CAS concurrently with that Wait,
-	// calling wg.Add(1) after the counter already drained to 0 — followed
-	// by the goroutine's defer wg.Done() — would drive the counter negative
-	// and panic. Re-check the cancellation here, after the CAS and before
-	// Add: once stopCtx is cancelled we skip the self-heal entirely. The
-	// stamp is already advanced (harmless: at most one fewer refetch), and
-	// the degraded "any @" match already returned for the caller.
+	// Stop() cancels stopCtx then waits on dispatch; an Add after the counter
+	// drained would panic, so re-check cancellation after the CAS and before Go.
 	if f.stopCtx.Err() != nil {
 		return
 	}
 	f.dispatch.Go("feishu bot info refresh", func() {
-		// singleflight collapses overlapping re-fetches; the key is constant
-		// because there's a single bot identity per adapter.
+		// Constant key: one bot identity per adapter.
 		_, _, _ = f.botInfoSF.Do("bot_info", func() (any, error) {
 			ctx, cancel := context.WithTimeout(f.stopCtx, 5*time.Second)
 			defer cancel()
@@ -807,15 +576,11 @@ func (f *Feishu) Stop() error {
 	done := f.done
 	f.startMu.Unlock()
 
-	// Cancel lifecycle context so webhook goroutines respond to shutdown.
 	f.stopCancel()
 
 	if cancel != nil {
 		cancel()
 		// SDK's Start() may block indefinitely (select{}); don't wait forever.
-		// Use NewTimer + defer Stop so the fast path (SDK exits cleanly)
-		// doesn't leave a wsStopTimeout timer goroutine parked until the
-		// timeout elapses.
 		timer := time.NewTimer(wsStopTimeout)
 		select {
 		case <-done:
@@ -824,8 +589,8 @@ func (f *Feishu) Stop() error {
 			slog.Warn("feishu websocket stop timed out")
 		}
 	}
-	f.dispatch.Wait()  // always wait for in-flight message handlers to finish
-	f.cleanupWg.Wait() // wait for cleanupNonces goroutine to exit
+	f.dispatch.Wait()  // in-flight message handlers
+	f.cleanupWg.Wait() // cleanupNonces goroutine
 	return nil
 }
 
@@ -833,30 +598,19 @@ func (f *Feishu) Stop() error {
 func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	var lastMsgID string
 
-	// Send text message
 	if msg.Text != "" {
 		id, err := f.sendText(ctx, msg.ChatID, msg.Text)
 		if err != nil {
-			// Any outbound-API failure whose APIError is IsTokenExpired
-			// invalidates the cache so ReplyWithRetry's next attempt
-			// carries a fresh token. R83 / RETRY1.
+			// A token-expired error invalidates the cache so the retry has a fresh token.
 			return "", f.maybeInvalidateOnTokenError(err)
 		}
 		lastMsgID = id
 	}
 
-	// Send image messages. Non-token image failures are log-and-continue (the
-	// text part already landed), but a token-invalidation error must PROPAGATE
-	// so platform.ReplyWithRetry can grant its one-shot rotation retry with a
-	// fresh token. R20260623-LB-3 (#2305): swallowing the token error to nil
-	// here meant a single-image reply that hit token-expiry (99991671) cleared
-	// the cache but never retried — the only image was lost silently, an
-	// asymmetry with the text path (which always goes through ReplyWithRetry).
-	// The maybeInvalidateOnTokenError side effect still clears the cache so the
-	// retry attempt carries a fresh token. Multi-image replies keep their
-	// log-and-continue behaviour for non-token failures (the earlier text /
-	// images already landed and the next image can self-heal on the rotated
-	// token), but a token error still short-circuits to the retry path.
+	// Non-token image failures are log-and-continue (earlier parts landed),
+	// but a token-invalidation error must PROPAGATE so ReplyWithRetry can
+	// grant its rotation retry — otherwise a single-image reply hitting
+	// token-expiry is lost silently (#2305).
 	for _, img := range msg.Images {
 		id, err := f.sendImage(ctx, msg.ChatID, img)
 		if err != nil {
@@ -873,23 +627,14 @@ func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 }
 
 func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, error) {
-	// Always send as card so EditMessage (PATCH) can later update with markdown.
-	// Previously, plain text messages couldn't be edited to card format, causing
-	// the thinking status message + final reply to appear as two separate messages.
+	// Always a card so EditMessage (PATCH) can later replace it with markdown;
+	// plain text cannot be edited into card format.
 	return f.sendCard(ctx, chatID, text)
 }
 
-// buildMarkdownCardJSON marshals a Feishu interactive card (schema 2.0) with
-// a single markdown element.
-//
-// Schema 2.0 is required for full GitHub-flavored markdown rendering —
-// headings (#/##/###), fenced code blocks, tables, and blockquotes. The
-// legacy 1.0 shape (bare "elements" array) only supports a restricted subset
-// (bold/italic/links/lists) so Claude-style output rendered as plain text.
-// See: open.feishu.cn/document/feishu-cards/quick-start
-// Static card shape — typed so json.Marshal walks named fields instead of
-// three levels of map[string]any + []any interface boxing on every reply.
-// The shape is fixed per Feishu schema 2.0 spec (one markdown element).
+// Feishu interactive card, schema 2.0 (required for full GFM: headings,
+// fenced code, tables, blockquotes). Typed so json.Marshal avoids
+// map[string]any boxing on every reply.
 type feishuMarkdownElement struct {
 	Tag     string `json:"tag"`
 	Content string `json:"content"`
@@ -902,6 +647,7 @@ type feishuCard struct {
 	Body   feishuCardBody `json:"body"`
 }
 
+// buildMarkdownCardJSON marshals a single-markdown-element card.
 func buildMarkdownCardJSON(text string) ([]byte, error) {
 	card := feishuCard{
 		Schema: "2.0",
@@ -909,20 +655,14 @@ func buildMarkdownCardJSON(text string) ([]byte, error) {
 			Elements: [1]feishuMarkdownElement{{Tag: "markdown", Content: text}},
 		},
 	}
-	// Disable HTML escaping so Claude output containing `<`, `>`, `&`
-	// (common in code blocks, shell redirection, arrow operators) is
-	// preserved verbatim in the Feishu card. Default json.Marshal would
-	// emit `\u003c` / `\u003e` / `\u0026` which renders as literal
-	// escape sequences inside the markdown element.
+	// No HTML escaping: `<` etc. would render literally in the markdown element.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(card); err != nil {
 		return nil, err
 	}
-	// json.Encoder appends a trailing '\n'; strip it so the result is a
-	// clean JSON object (the downstream outer Marshal expects a pure
-	// JSON value, not NDJSON).
+	// Strip the Encoder's trailing '\n'; the outer Marshal expects a pure value.
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
@@ -937,10 +677,7 @@ func (f *Feishu) sendCard(ctx context.Context, chatID, text string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("marshal card: %w", err)
 	}
-	// Feishu's send-message endpoint requires `content` to be a stringified
-	// JSON (not a nested object), so json.RawMessage would emit the wrong
-	// shape. But replacing the outer map[string]any with a named struct
-	// still eliminates the 3-entry map + 3 interface{} boxes per reply.
+	// `content` must be stringified JSON, not a nested object.
 	reqBody, err := json.Marshal(struct {
 		ReceiveID string `json:"receive_id"`
 		MsgType   string `json:"msg_type"`
@@ -998,9 +735,7 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	// Feishu's send-message endpoint requires `content` to be a stringified
-	// JSON (not a nested object). Use typed structs instead of map[string]any
-	// to eliminate interface{} boxing per reply, matching sendCard's pattern.
+	// `content` must be stringified JSON, not a nested object.
 	content, err := json.Marshal(struct {
 		ImageKey string `json:"image_key"`
 	}{ImageKey: imageKey})
@@ -1031,9 +766,7 @@ func (f *Feishu) DownloadAudio(ctx context.Context, messageID, fileKey string) (
 
 // downloadResource downloads a message resource (image/audio) from the Feishu API.
 func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resType string, maxBytes int64, defaultMIME string) ([]byte, string, error) {
-	// Guard against a caller passing math.MaxInt64 (which would overflow
-	// maxBytes+1 below and degrade LimitReader to 0-byte reads). No current
-	// caller does this, but the contract should be self-protecting.
+	// math.MaxInt64 would overflow maxBytes+1 and degrade LimitReader to 0 bytes.
 	if maxBytes <= 0 || maxBytes >= (1<<62) {
 		return nil, "", fmt.Errorf("download %s: invalid maxBytes %d", resType, maxBytes)
 	}
@@ -1057,16 +790,12 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		// R181-SEC-P3-2: upstream response body flows into err.Error() and
-		// then into slog attrs; %q escapes bidi/C1/newline so a DNS/MITM-
-		// compromised path cannot forge log lines via the failure branch.
+		// %q: upstream body reaches slog attrs; escape bidi/C1/newline.
 		return nil, "", fmt.Errorf("download %s: status %d, body: %q", resType, resp.StatusCode, body)
 	}
 
-	// Read up to maxBytes+1 so we can distinguish "exactly maxBytes" (legal)
-	// from "exceeds maxBytes" (silently truncated by LimitReader). If we read
-	// exactly maxBytes+1 bytes, the payload was larger than the limit and we
-	// reject it rather than delivering a truncated file to the CLI.
+	// maxBytes+1 distinguishes "exactly at limit" from "silently truncated";
+	// reject rather than deliver a truncated file.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read %s body: %w", resType, err)
@@ -1083,27 +812,11 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 		contentType = defaultMIME
 	}
 
-	// Content-based verification: the Content-Type header is upstream-
-	// provided and not authoritative (SSRF or compromised proxy could
-	// deliver arbitrary bytes labeled as image/png). http.DetectContentType
-	// sniffs the first 512 bytes; reject anything whose detected family does
-	// not match the expected resource type.
-	//
-	// Feishu voice messages are OGG/Opus. Go's sniffer implements the WHATWG
-	// MIME-Sniffing standard which emits `application/ogg` (not `audio/ogg`)
-	// for OGG containers, and returns `application/octet-stream` for formats
-	// it does not know (e.g. Opus-in-WebM). The accept-list below covers the
-	// OGG case explicitly while still rejecting clearly-wrong families
-	// (image/*, text/*, etc.).
-	//
-	// R175-P2: audio path also runs an explicit magic-byte allowlist
-	// (audioMagicOK) on top of the sniffer. DetectContentType can admit
-	// "audio/*" for borderline inputs and returns application/octet-stream
-	// for unknown formats — a compromised upstream could deliver arbitrary
-	// bytes that trip the generic prefix check. The magic check narrows
-	// acceptance to formats the transcribe pipeline is expected to handle
-	// (OGG / MP3 / WAV / M4A / FLAC) so a crafted payload cannot broaden
-	// the ffmpeg/Whisper attack surface just by setting an audio/* header.
+	// The Content-Type header is not authoritative; sniff the bytes. Go's
+	// WHATWG sniffer reports OGG as `application/ogg`, hence the explicit
+	// accept. Audio additionally passes the audioMagicOK allowlist so a
+	// crafted payload cannot widen the ffmpeg/Whisper attack surface just by
+	// looking audio/* to the sniffer.
 	if len(data) > 0 {
 		sniffed := http.DetectContentType(data)
 		ok := true
@@ -1120,30 +833,11 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	return data, contentType, nil
 }
 
-// audioMagicOK reports whether data's first bytes match one of the audio
-// container magic numbers the Feishu voice pipeline is expected to carry.
-// Defence-in-depth against DetectContentType admitting a borderline header;
-// even if the sniffer says audio/*, we still require the payload to *look*
-// like a format we actually want to feed into transcribe/ffmpeg/Whisper.
-//
-// Accepted families:
-//   - OGG container        ("OggS")
-//   - MP3 with ID3v2 tag   ("ID3")
-//   - Raw MP3 frame sync   (0xFF, {0xF2/F3/FA/FB})
-//   - WAV                  ("RIFF" … "WAVE")
-//   - MP4/M4A ftyp box     (bytes 4..7 == "ftyp", brand is an audio/video
-//     codec we accept — mp42 is a common container brand and M4A files
-//     normally tag themselves "M4A ")
-//   - FLAC                 ("fLaC")
-//
-// Any payload that does not match one of the patterns above is rejected.
-// Keep this function pure (no I/O, no locks) so tests can hammer it with a
-// table of adversarial inputs.
-// AMR (#!AMR) and raw AAC-ADTS (0xFFF1/0xFFF9) are intentionally NOT in the
-// accept list: Feishu voice messages are OGG/Opus (or M4A on some clients),
-// both the upstream DefaultMIME (audio/ogg) and observed traffic agree. If a
-// future Feishu client rolls out AMR/ADTS audio, add them here explicitly
-// rather than widening the sniffer fallback.
+// audioMagicOK reports whether data starts with a magic number of a format the
+// transcribe pipeline handles: OGG, MP3 (ID3v2 or frame sync), WAV, MP4/M4A
+// (allowlisted ftyp brands) or FLAC. AMR and raw AAC-ADTS are intentionally
+// absent — Feishu voice is OGG/Opus or M4A; add new formats here explicitly
+// rather than widening the sniffer fallback. Pure so tests can table-drive it.
 func audioMagicOK(data []byte) bool {
 	if len(data) < 4 {
 		return false
@@ -1152,15 +846,11 @@ func audioMagicOK(data []byte) bool {
 	if bytes.HasPrefix(data, []byte("OggS")) {
 		return true
 	}
-	// MP3 ID3v2 tag: "ID3" + version major (2/3/4) + revision + flags.
-	// Require the version byte to be a known ID3v2 major so an attacker-
-	// controlled ASCII "ID3…" string cannot slip past the check.
+	// ID3v2: require a known major version so an ASCII "ID3…" string cannot pass.
 	if len(data) >= 5 && bytes.HasPrefix(data, []byte("ID3")) && data[3] >= 2 && data[3] <= 4 {
 		return true
 	}
-	// Raw MP3 frame header: 0xFF followed by 0xF2/0xF3/0xFA/0xFB. A bare
-	// 0xFFE* could also be a valid MPEG sync but those variants are not
-	// used by Feishu voice and widening the mask reduces specificity.
+	// Raw MP3 frame sync; the bare 0xFFE* variants are not used by Feishu voice.
 	if data[0] == 0xFF {
 		switch data[1] {
 		case 0xF2, 0xF3, 0xFA, 0xFB:
@@ -1171,13 +861,8 @@ func audioMagicOK(data []byte) bool {
 	if len(data) >= 12 && bytes.HasPrefix(data, []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WAVE")) {
 		return true
 	}
-	// MP4/M4A ftyp box. Layout: 4-byte size | "ftyp" | 4-byte brand.
-	// Whitelist the brands Feishu clients are known to emit / the transcribe
-	// pipeline is known to consume (M4A/mp4a audio, isom/mp42/dash common
-	// containers). Brands like `ftypqt  ` (QuickTime) and `ftypf4v ` (Flash
-	// Video) are intentionally rejected — the sniffer sometimes labels them
-	// audio/video generically, but Whisper/ffmpeg compatibility is spottier
-	// and they are not part of the normal Feishu surface.
+	// ftyp box: 4-byte size | "ftyp" | brand. QuickTime / Flash brands are
+	// rejected — spottier Whisper/ffmpeg compatibility, not on the Feishu surface.
 	if len(data) >= 12 && bytes.Equal(data[4:8], []byte("ftyp")) {
 		switch string(data[8:12]) {
 		case "M4A ", "mp4a", "isom", "mp42", "dash":
@@ -1191,12 +876,8 @@ func audioMagicOK(data []byte) bool {
 	return false
 }
 
-// replyError sends an error message directly to the user, bypassing Claude.
-// Uses a short-lived context derived from stopCtx rather than the caller's
-// ctx: callers often pass a ctx that may already be cancelled (e.g. the
-// webhook handler's ctx tied to the HTTP request, or a ctx timed out while
-// downloading an image), and we still want the user-facing error notice to
-// land. stopCtx is cancelled only at Feishu.Stop().
+// replyError sends an error notice directly to the user on a short-lived ctx
+// derived from stopCtx, because the caller's ctx is often already cancelled.
 func (f *Feishu) replyError(_ context.Context, chatID, text string) {
 	rctx, cancel := context.WithTimeout(f.stopCtx, 5*time.Second)
 	defer cancel()
@@ -1212,7 +893,6 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	// Derive filename extension from MIME type
 	filename := "image" + platform.ImageExt(mimeType)
 
 	var buf bytes.Buffer
@@ -1261,8 +941,7 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 	return result.Data.ImageKey, nil
 }
 
-// EditMessage updates an existing Feishu card message via PATCH.
-// All messages are sent as cards (interactive), so we always use the card PATCH API.
+// EditMessage updates an existing card message via PATCH (all messages are cards).
 func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) error {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
@@ -1280,9 +959,7 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("marshal request body: %w", err)
 	}
 
-	// PathEscape the msgID: like AddReaction/RemoveReaction/downloadResource,
-	// protect against a crafted ID containing "/" or "?" that could redirect
-	// the PATCH to a different Open-API endpoint.
+	// PathEscape: a crafted ID with "/" or "?" must not redirect the PATCH.
 	req, err := http.NewRequestWithContext(ctx, "PATCH",
 		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(msgID),
 		bytes.NewReader(reqBody))
@@ -1306,28 +983,14 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("decode edit response: %w", err)
 	}
 	if result.Code != 0 {
-		// Return the structured APIError so ReplyWithRetry / maybeInvalidateOnTokenError
-		// can inspect Code (errors.As) and react to 99991663/invalid-token the same way
-		// they do for sendText/sendCard. The previous fmt.Errorf string was opaque to
-		// errors.As and caused edit-path token-refresh to silently skip.
+		// Structured so errors.As-based token refresh works on the edit path too.
 		return &APIError{Code: result.Code, Msg: result.Msg, Op: "edit"}
 	}
 	return nil
 }
 
-// invalidateAccessToken / maybeInvalidateOnTokenError / getAccessToken moved
-// to token.go (R20260607-ARCH-3 / #1906) — the tenant-access-token lifecycle
-// (singleflight refresh + circuit breaker + early-revocation invalidation).
-// Token state fields and the related constants stay on *Feishu / in this file.
-
-// verifySignature / verifyTimestamp moved to signature.go (R214-ARCH-13).
-// reactionEmojiType / reactionCacheKey moved to reaction_cache.go.
-
-// reactionRequestBody is the JSON body sent to POST /reactions.
-// R182-PERF-P1-1: a fixed struct avoids the 2 map[string]any / map[string]string
-// heap allocations (and the map-key sort inside json.Marshal) that the previous
-// inline map literal incurred on every outgoing reaction. Hot path: one call
-// per dispatched IM message.
+// reactionRequestBody is the JSON body sent to POST /reactions (hot path:
+// one call per dispatched IM message, typed to avoid map allocations).
 type reactionRequestBody struct {
 	ReactionType reactionTypeField `json:"reaction_type"`
 }
@@ -1336,13 +999,8 @@ type reactionTypeField struct {
 	EmojiType string `json:"emoji_type"`
 }
 
-// AddReaction implements platform.Reactor. Creates a reaction on messageID
-// via POST /open-apis/im/v1/messages/:msg_id/reactions and caches the
-// returned reaction_id so RemoveReaction can later delete by id.
-//
-// Returns nil on HTTP success. Server-side "already reacted" errors are
-// treated as success (the reaction_id is still returned by Feishu). All
-// other API errors are wrapped.
+// AddReaction implements platform.Reactor: creates the reaction and caches the
+// returned reaction_id so RemoveReaction can delete by id.
 func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
 	if messageID == "" {
 		return fmt.Errorf("feishu AddReaction: empty messageID")
@@ -1387,13 +1045,11 @@ func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.R
 		return fmt.Errorf("decode reaction response: %w", err)
 	}
 	if result.Code != 0 {
-		// R181-SEC-P2-4: %q escapes bidi/C1/newline in upstream msg so slog attrs stay safe.
+		// %q escapes bidi/C1/newline in the upstream msg.
 		return fmt.Errorf("feishu reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
 	if result.Data.ReactionID != "" {
-		// R175-P1: store as struct with expiry so cleanupNoncesTick can
-		// GC orphaned entries (bot-restart / message-deleted / early-exit
-		// paths that never invoke RemoveReaction).
+		// Expiry lets cleanupNoncesTick GC entries that never see RemoveReaction.
 		f.reactionIDs.Store(reactionCacheKey(messageID, emojiType), reactionCacheEntry{
 			id:     result.Data.ReactionID,
 			expiry: time.Now().Add(reactionCacheTTL).UnixNano(),
@@ -1402,10 +1058,9 @@ func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.R
 	return nil
 }
 
-// RemoveReaction implements platform.Reactor. Deletes a previously added
-// reaction by consulting the cached reaction_id. If no id is cached (e.g.,
-// process restart between Add and Remove), returns nil silently — the
-// reaction will linger but that is acceptable for best-effort UX feedback.
+// RemoveReaction implements platform.Reactor via the cached reaction_id; with
+// no cached id (restart between Add and Remove) it returns nil and the
+// reaction lingers — acceptable for best-effort UX feedback.
 func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
 	if messageID == "" {
 		return nil
@@ -1415,20 +1070,15 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 		return nil
 	}
 	cacheKey := reactionCacheKey(messageID, emojiType)
-	// #1984: Load (not LoadAndDelete) so a failed DELETE keeps the
-	// reaction_id cached for a later retry. Evicting the entry only AFTER the
-	// API confirms removal makes "drop cache" strictly later than "confirm
-	// success" — otherwise a transient token/HTTP/business-code failure loses
-	// the reaction_id permanently and the ⏳ reaction can never be cleared.
+	// Load, not LoadAndDelete: evict only AFTER the DELETE is confirmed so a
+	// transient failure keeps the id for retry and ⏳ can still be cleared (#1984).
 	v, ok := f.reactionIDs.Load(cacheKey)
 	if !ok {
 		return nil
 	}
 	entry, ok := v.(reactionCacheEntry)
 	if !ok || entry.id == "" {
-		// Defensive: a future refactor that stores a different value type
-		// should not wedge RemoveReaction. Drop the malformed entry — it can
-		// never produce a valid DELETE, so retaining it is pointless.
+		// A malformed entry can never produce a valid DELETE; drop it.
 		f.reactionIDs.Delete(cacheKey)
 		return nil
 	}
@@ -1459,10 +1109,8 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 		return fmt.Errorf("decode delete reaction response: %w", err)
 	}
 	if result.Code != 0 {
-		// R181-SEC-P2-4: %q escapes bidi/C1/newline in upstream msg so slog attrs stay safe.
 		return fmt.Errorf("feishu delete reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
-	// #1984: only now that the DELETE is confirmed do we evict the cache entry.
 	f.reactionIDs.Delete(cacheKey)
 	return nil
 }

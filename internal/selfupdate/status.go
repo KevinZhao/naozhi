@@ -1,17 +1,8 @@
-// status.go — the shared version-state object between the background Checker
-// and the dashboard.
-//
-// Why this exists: the Checker already polls GitHub Releases on
-// cfg.UpdateInterval() (6h default). The dashboard must NOT poll GitHub
-// itself — every connected browser would multiply the request rate against a
-// third party for information that is identical for all of them. So the
-// Checker writes what it learned here and the dashboard reads it.
-//
-// The single most important thing this file encodes is the distinction
-// between "a newer release exists" and "a newer binary is already on disk,
-// waiting for a restart". Those look similar but need OPPOSITE actions, and
-// conflating them corrupts the rollback artifact — see ActionRestart and
-// docs/rfc/dashboard-update-notice.md §1.2/§1.3.
+// status.go — version state shared between the Checker (writer) and the
+// dashboard (reader), so browsers never poll GitHub themselves. The key
+// distinction it encodes: "a newer release exists" vs "a newer binary is
+// staged on disk" need OPPOSITE actions, and conflating them corrupts the
+// rollback artifact (docs/rfc/dashboard-update-notice.md §1.2/§1.3).
 package selfupdate
 
 import (
@@ -24,66 +15,46 @@ import (
 type Phase string
 
 const (
-	// PhaseIdle means there is nothing to do: either no check has succeeded
-	// yet, or the latest release is not newer than what we run.
+	// PhaseIdle: no check succeeded yet, or latest is not newer than current.
 	PhaseIdle Phase = "idle"
 
-	// PhaseAvailable means a newer release exists and the on-disk binary has
-	// NOT been replaced yet.
-	//
-	// Under the default mode ("download") this state is nearly unobservable:
-	// the Checker replaces the binary within seconds of finding it (measured:
-	// 3s on this project's own deployment). It is the steady state only for
-	// mode "notify", or in the window before a download completes.
+	// PhaseAvailable: a newer release exists and the binary is NOT replaced
+	// yet. Nearly unobservable under mode "download"; steady only for "notify".
 	PhaseAvailable Phase = "available"
 
 	// PhaseInstalling means a download/verify/replace cycle is in flight.
 	PhaseInstalling Phase = "installing"
 
-	// PhaseStaged means the new binary IS on disk but this process still runs
-	// the old one — it applies on the next restart.
-	//
-	// This is the steady state operators actually see under the default
-	// "download" mode, and the reason this whole feature exists: nothing in
-	// the product surfaced it, so deployments sat on a staged binary for
-	// hours (22h observed) with no signal that a restart was all it needed.
+	// PhaseStaged: the new binary IS on disk but this process still runs the
+	// old one — the steady state under mode "download", applied on restart.
 	PhaseStaged Phase = "staged"
 
-	// PhaseRestarting means a restart has been triggered and this process is
-	// about to be killed. It is the last state this generation reports.
+	// PhaseRestarting: a restart was triggered; the last state this generation reports.
 	PhaseRestarting Phase = "restarting"
 
-	// PhaseFailed means the most recent install/restart attempt failed;
-	// LastErr carries the (sanitized) reason. The service keeps running the
-	// old binary — Replace restores its backup on any swap failure.
+	// PhaseFailed: the last install/restart failed (LastErr has the reason);
+	// the service keeps running the old binary.
 	PhaseFailed Phase = "failed"
 )
 
-// Action is the single field the dashboard is allowed to branch on. The
-// server computes it so the browser never re-implements semver comparison or
-// the phase state machine — two copies of that logic would drift.
+// Action is the single field the dashboard branches on, computed server-side
+// so the browser never re-implements semver or the phase machine.
 type Action string
 
 const (
 	// ActionNone: nothing for the operator to do.
 	ActionNone Action = "none"
 
-	// ActionInstall: a newer release exists and is not yet on disk. Applying
-	// means download → verify → replace → restart.
+	// ActionInstall: newer release, not yet on disk — download → verify → replace → restart.
 	ActionInstall Action = "install"
 
-	// ActionRestart: the new binary is already staged on disk. Applying means
-	// RESTART ONLY.
-	//
-	// It must never mean "install again". Replace() backs up whatever is
-	// currently at installPath, so a second Replace in the staged state would
-	// copy the NEW binary over the backup (O_TRUNC), destroying the only copy
-	// of the version we could roll back to. See RFC §1.3.
+	// ActionRestart: the new binary is staged — RESTART ONLY. It must never
+	// mean "install again": a second Replace would copy the NEW binary over
+	// the backup and destroy the only rollback copy (RFC §1.3).
 	ActionRestart Action = "restart"
 )
 
-// StatusSnapshot is an immutable value copy handed to the HTTP layer. Callers
-// may hold it as long as they like; it never aliases Status' guarded fields.
+// StatusSnapshot is an immutable value copy handed to the HTTP layer.
 type StatusSnapshot struct {
 	Current   string
 	Latest    string
@@ -94,36 +65,23 @@ type StatusSnapshot struct {
 	LastErr   string
 }
 
-// Action derives what the operator can do from the snapshot alone, so the
-// HTTP handler and the tests agree on one implementation.
-//
-// Order matters: the staged check comes FIRST. In the staged state Latest is
-// also greater than Current (that is why it was staged), so a naive
-// "Latest > Current ⇒ install" test would report install and walk straight
-// into the backup-destroying path described on ActionRestart.
+// Action derives what the operator can do from the snapshot alone. The staged
+// check comes FIRST: in the staged state Latest > Current too, and a naive
+// "install" verdict walks into the backup-destroying path.
 func (s StatusSnapshot) Action() Action {
-	// Staged binary that differs from what we run ⇒ a restart is all it takes.
 	if s.Staged != "" && s.Staged != s.Current {
 		return ActionRestart
 	}
-	// Otherwise only a strictly-newer remote tag is actionable. semverGreater
-	// returns false on unparseable input, which conservatively yields
-	// ActionNone — and it is also what blocks a downgrade from being offered
-	// as an "update" (R20260602141221-SEC-1).
+	// Strictly newer only; semverGreater's false on bad input also blocks a
+	// downgrade from being offered as an "update".
 	if s.Latest != "" && semverGreater(s.Latest, s.Current) {
 		return ActionInstall
 	}
 	return ActionNone
 }
 
-// Status is the mutable shared state. Writers are the Checker (background
-// tick) and — from P2 on — the dashboard apply handler; the reader is the
-// HTTP GET. Every field is guarded by mu.
-//
-// A nil *Status is a valid no-op receiver on every method. That is load
-// bearing: it lets the Checker run exactly as it did before this file
-// existed, which is what keeps the pre-existing checker tests meaningful as
-// a regression gate rather than something we had to edit to stay green.
+// Status is the mutable shared state; every field is guarded by mu. A nil
+// *Status is a valid no-op receiver on every method.
 type Status struct {
 	mu        sync.Mutex
 	current   string
@@ -140,14 +98,9 @@ func NewStatus(current string) *Status {
 	return &Status{current: current, phase: PhaseIdle}
 }
 
-// StatusFixture describes a Status to construct directly, for tests in OTHER
-// packages (the HTTP handler's, primarily) that need to exercise a specific
-// version state.
-//
-// The real mutators stay unexported on purpose: only the Checker writes this
-// object in production, and keeping noteCheck/notePhase package-private is what
-// prevents a future handler from "helpfully" mutating shared state on a GET.
-// This is the one seam that opens for tests.
+// StatusFixture builds a Status in an arbitrary state for tests in OTHER
+// packages. The real mutators stay unexported so no handler can mutate shared
+// state on a GET; this is the one seam that opens for tests.
 type StatusFixture struct {
 	Current  string
 	Latest   string
@@ -202,9 +155,8 @@ func (s *Status) Current() string {
 	return s.current
 }
 
-// LastCheck reports when the last check completed and whether a tag was
-// learned. The GET handler uses this to decide whether an on-demand check is
-// warranted (cold-start window — see Checker.CheckNow).
+// LastCheck reports when the last check completed and the tag learned; the GET
+// handler uses it to decide whether an on-demand check is warranted.
 func (s *Status) LastCheck() (at time.Time, latest string) {
 	if s == nil {
 		return time.Time{}, ""
@@ -214,15 +166,9 @@ func (s *Status) LastCheck() (at time.Time, latest string) {
 	return s.checkedAt, s.latest
 }
 
-// noteCheck records the outcome of a release check.
-//
-// checkedAt advances even on failure: it marks "we tried", which is what the
-// on-demand throttle needs in order to avoid hammering GitHub while it is
-// unreachable.
-//
-// A failed check deliberately leaves `latest` untouched rather than clearing
-// it. A transient network blip should not make a genuine pending update
-// vanish from the dashboard.
+// noteCheck records a release check. checkedAt advances even on failure (the
+// throttle needs "we tried"); a failed check leaves `latest` untouched so a
+// network blip does not hide a genuine pending update.
 func (s *Status) noteCheck(latest string, err error) {
 	if s == nil {
 		return
@@ -236,9 +182,7 @@ func (s *Status) noteCheck(latest string, err error) {
 	}
 	s.checkErr = ""
 	s.latest = latest
-	// Only advance the phase when it carries no more specific information.
-	// Overwriting PhaseStaged/PhaseInstalling/PhaseFailed here would erase
-	// state the operator still needs to see.
+	// Never overwrite a more specific phase (Staged/Installing/Failed).
 	if s.phase == PhaseIdle || s.phase == PhaseAvailable {
 		if semverGreater(latest, s.current) {
 			s.phase = PhaseAvailable
@@ -248,9 +192,8 @@ func (s *Status) noteCheck(latest string, err error) {
 	}
 }
 
-// notePhase records a phase transition. `staged` is applied only when
-// non-empty, so callers reporting an unrelated transition cannot
-// accidentally clear a real staged tag.
+// notePhase records a phase transition; `staged` is applied only when
+// non-empty so unrelated transitions cannot clear a real staged tag.
 func (s *Status) notePhase(p Phase, staged string, err error) {
 	if s == nil {
 		return
@@ -265,18 +208,13 @@ func (s *Status) notePhase(p Phase, staged string, err error) {
 		s.lastErr = sanitizeErr(err)
 		return
 	}
-	// A successful transition clears the previous failure so the dashboard
-	// does not keep showing a stale error next to a healthy state.
 	s.lastErr = ""
 }
 
 // MarkFailed records an apply that died outside the Checker's own error
-// handling — the HTTP layer's recover() boundary around the detached apply
-// goroutine. Without it a panic mid-install would leave the phase parked on
-// `installing` (which the dashboard renders as busy) with no error to show.
-//
-// It does not touch `staged`: if a binary was written before the panic, the
-// dashboard must keep offering a restart rather than a second install.
+// handling (the HTTP layer's recover() around the detached apply goroutine) so
+// the phase is not parked on `installing`. It does not touch `staged`: a binary
+// written before the panic must still be offered a restart, not a re-install.
 func (s *Status) MarkFailed(err error) {
 	if err == nil {
 		err = errors.New("update apply aborted")

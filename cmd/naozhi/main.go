@@ -28,11 +28,8 @@ import (
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
 
-	// R239-ARCH-B: side-effect import for history-source factory
-	// registration. Replaces the blank-imports that previously lived
-	// inside internal/session/router_core.go; importing wireup here
-	// keeps internal/session backend-agnostic and centralizes the
-	// per-backend init() trigger list in one explicit place.
+	// Side-effect import: history-source factory registration lives in wireup
+	// so internal/session stays backend-agnostic.
 	"github.com/naozhi/naozhi/internal/wireup"
 )
 
@@ -66,9 +63,8 @@ func main() {
 		}
 	}
 
-	// t0 anchors every startup phase gauge (RNEW-OPS-414). Captured after
-	// the subcommand dispatch so setup/install/doctor invocations do not
-	// pollute the naozhi boot histogram.
+	// t0 anchors every startup phase gauge; captured after subcommand dispatch
+	// so setup/install/doctor do not pollute the boot histogram.
 	t0 := time.Now()
 
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -81,16 +77,13 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	// Setup logging (resolveLogLevel + newLogHandler in main_init.go).
 	setupLogging(cfg)
 
-	// Context with cancellation for graceful shutdown. Created here (before
-	// applyClaudeEnvSettings) so retry sleeps in readJSONWithRetry respond to
-	// ctx.Done() from the very first use of the settings file.
+	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
+	// honour ctx.Done() from the first use of the settings file.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// CLI Protocol + Wrapper
 	if err := applyClaudeEnvSettings(ctx); err != nil {
 		switch claudeSettingsErrSeverity(err) {
 		case settingsErrSeverityCancel:
@@ -101,41 +94,27 @@ func main() {
 			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
 		}
 	}
-	// docs/rfc/direct-user-settings.md PR1: naozhi-spawned cc now loads
-	// ~/.claude/settings.json directly via `--setting-sources user` (set in
-	// cli.ClaudeProtocol.BuildArgs). No settings-override copy is generated;
-	// the parent-process env injection above (applyClaudeEnvSettings) is the
-	// only remaining settings.json consumer in main (it feeds transcribe +
-	// sysession Runner Bedrock auth, see RFC §7.1).
+	// cc loads ~/.claude/settings.json itself via `--setting-sources user`; the
+	// parent-process env injection above only feeds transcribe + sysession
+	// Runner Bedrock auth (docs/rfc/direct-user-settings.md §7.1).
 	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
-	// Register the cli/backend.Profile registry with the built-in profiles
-	// (claude + kiro) before any consumer (discovery, main, server) looks
-	// up DisplayName / DefaultTag / DetectInProc by id. Routed through
-	// wireup so the boot-time registration set has one inspectable owner
-	// (#1165): wireup.EnsureCLIBackends drives backend.RegisterDefaults and
-	// records the step in the wireup boot registry. Explicit, not init()-
-	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
+	// Register built-in backend profiles before any consumer looks them up.
+	// Explicit rather than init()-driven so a missing import fails loudly (#1165).
 	wireup.EnsureCLIBackends()
 
-	// Confirm the required wireup boot steps actually ran (#1165 extension
-	// point): a dropped blank-import or a no-op'd helper now aborts startup
-	// here with a clear message instead of degrading to empty history /
-	// missing profiles silently at first runtime use (R249-ARCH-9).
+	// A dropped blank-import or no-op'd helper aborts startup here instead of
+	// degrading silently to empty history / missing profiles.
 	if err := wireup.Validate(); err != nil {
 		slog.Error("wireup validation failed", "err", err)
 		os.Exit(1)
 	}
 
-	// CQ1 (#396): config validation diag fan-out extracted to
-	// logConfigValidationDiagnostics so a future format change is
-	// unit-testable. docs/rfc/multi-backend.md §11.1 fail-soft posture
-	// preserved — error-level diags do NOT abort startup.
+	// Fail-soft: error-level diags do NOT abort startup (docs/rfc/multi-backend.md §11.1).
 	logConfigValidationDiagnostics(cfg)
 
-	// Shared shim manager across all backends — every shim records its own
-	// Backend in state, so reconnect routing is backend-aware without
-	// needing per-backend state directories.
+	// One shim manager for all backends — each shim records its Backend in
+	// state, so reconnect routing needs no per-backend state directories.
 	shimMgr, err := shim.NewManager(shim.ManagerConfig{
 		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
 		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
@@ -149,20 +128,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CQ1 (#396): backend wrapper construction + default selection extracted
-	// to initBackendWrappers. Post direct-user-settings PR1 there is no
-	// settings-override path to plumb: the claude profile spawns cc with
-	// `--setting-sources user` so live edits to ~/.claude/settings.json are
-	// re-read by cc on every spawn with no naozhi involvement.
 	bws, ok := initBackendWrappers(ctx, cfg, shimMgr)
 	if !ok {
 		if bws.Default == nil {
 			slog.Error("no usable cli backend configured")
 		} else {
-			// Default backend's --version probe failed. R55-QUAL-001:
-			// surface the operator-actionable hint so the journalctl line
-			// points at the config field they need to fix instead of just
-			// saying "spawn failed" on the first user message.
+			// Default backend's --version probe failed: point the operator at
+			// the config field instead of "spawn failed" on the first message.
 			slog.Error("default cli backend is unavailable",
 				"id", bws.Default.BackendID, "path", bws.Default.CLIPath,
 				"hint", "fix the binary path in cli.backends or set cli.default to an available backend")
@@ -177,7 +149,6 @@ func main() {
 	defaultBackend := bws.DefaultID
 	wrapper := bws.Default
 
-	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
 	storePath := osutil.ExpandHome(cfg.Session.StorePath)
 	workspace := osutil.ExpandHome(cfg.Session.CWD)
@@ -187,45 +158,29 @@ func main() {
 	}
 	warnIfStateDirLarge(filepath.Dir(storePath))
 
-	// Session Router
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
-	// Event-log persistence directory sits next to sessions.json so
-	// operators can co-locate state. Empty StorePath (test harnesses)
-	// disables the event log persister via the same empty-string
-	// guard inside NewRouter.
+	// Event log sits next to sessions.json; empty StorePath (test harnesses)
+	// disables the persister via the same empty-string guard in NewRouter.
 	eventLogDir := ""
 	if storePath != "" {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
-	// Access-profile registry (RFC project-access-profile): translate the
-	// config.AccessProfile map (which the session package must not import) into
-	// the session-layer view. Nil when no profiles configured — every session
-	// then runs on the global settings.json baseline (legacy behaviour).
+	// Session-layer view of config.AccessProfiles (session must not import
+	// config). Nil when none configured — sessions run on the global baseline.
 	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
 
-	// naozhi-owned isolated Claude settings (RFC naozhi-owned-settings-v3).
-	// Opt-in: when enabled, seed a settings file naozhi owns (once, from the
-	// local ~/.claude/settings.json with hooks+env stripped) and point every
-	// ClaudeProtocol spawn at it. Disabled (default) leaves naozhiSettingsFile
-	// "" so the router keeps the legacy `--setting-sources user` path.
+	// Opt-in naozhi-owned isolated Claude settings file; "" keeps the
+	// `--setting-sources user` path (RFC naozhi-owned-settings-v3).
 	naozhiSettingsFile := resolveNaozhiSettingsFile(cfg, storePath, claudeDir)
 
-	// Operator-owned MCP server set (RFC cli-mcp-config). Opt-in via
-	// cli.mcp_config; "" (the default) omits --mcp-config so every spawn stays
-	// argv-identical. Needed whenever naozhiSettingsFile is non-empty, since
-	// that path's `--setting-sources ""` suppresses ~/.claude.json's mcpServers.
-	// resolveMCPConfigFile validates the envelope and returns "" on any problem
-	// — cc refuses to start on a bad --mcp-config, so passing an unvalidated
-	// path would turn a typo in that file into a total spawn outage.
+	// Opt-in operator MCP server set (RFC cli-mcp-config); "" omits --mcp-config.
+	// Validated first: cc refuses to start on a bad --mcp-config, so an
+	// unvalidated path would turn a typo into a total spawn outage.
 	mcpConfigFile := resolveMCPConfigFile(cfg)
 
-	// (auto-workspace-chain policy removed — RFC
-	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
-	// now carried by the project-stable session key; the old
-	// session.auto_chain config block is deprecated, see config loader.)
 	router := session.NewRouter(session.RouterConfig{
 		Wrapper:          wrapper,
 		Wrappers:         wrappers,
@@ -237,11 +192,9 @@ func main() {
 		ExtraArgs:        cfg.CLI.Args,
 		BackendModels:    backendModels,
 		BackendExtraArgs: backendExtraArgs,
-		// No router-wide Effort: initBackendWrappers already resolved
-		// cli.effort into per-backend entries and dropped it for backends that
-		// cannot accept a tier, so BackendEfforts is the filtered truth. A
-		// router-level default would re-introduce the tier for those backends
-		// and make the arg-drift comparison disagree with the real spawn.
+		// No router-wide Effort: initBackendWrappers already dropped the tier for
+		// backends that cannot accept one; a router default would re-add it and
+		// make the arg-drift comparison disagree with the real spawn.
 		BackendEfforts:       backendEfforts,
 		BackendModelLists:    backendModelLists,
 		AccessProfiles:       accessProfiles,
@@ -253,30 +206,20 @@ func main() {
 		NoOutputTimeout:      noOutputTimeout,
 		TotalTimeout:         totalTimeout,
 		ClaudeDir:            claudeDir,
-		// KiroSessionsDir feeds the kirojsonl history factory so
-		// Sprint 1c "load earlier" pages can fall back to the kiro
-		// CLI's per-session jsonl after naozhi restart. Default path
-		// is the kiro CLI's documented location; a config override is
-		// a follow-up sprint.
+		// KiroSessionsDir / CodexSessionsDir feed the jsonl history factories so
+		// "load earlier" survives a naozhi restart (the CLIs' documented paths).
 		KiroSessionsDir: osutil.ExpandHome("~/.kiro/sessions/cli"),
-		// CodexSessionsDir feeds the codexjsonl history factory so "load
-		// earlier" pages can fall back to the codex CLI's date-bucketed
-		// rollout transcripts after a naozhi restart. Default path is the
-		// codex CLI's documented location.
+		// Codex rollout transcripts are date-bucketed under this root.
 		CodexSessionsDir:  osutil.ExpandHome("~/.codex/sessions"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
 	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
-	// Reconnect to surviving shim processes from previous naozhi run
 	router.ReconnectShimsCtx(ctx)
 	metrics.StartupPhaseShimReconnectMs.Set(time.Since(t0).Milliseconds())
 
-	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
-
-	// Periodically reconcile shim liveness (reconnect dropped connections)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
 	// Parallel init: transcriber and project scan can overlap
@@ -335,7 +278,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register platforms
 	platforms, err := initPlatforms(cfg, stt)
 	if err != nil {
 		slog.Error("init platforms failed", "err", err)
@@ -346,13 +288,8 @@ func main() {
 		slog.Warn("no platforms configured, running in dashboard-only mode")
 	}
 
-	// Build agent opts from config (buildAgentOpts in main_init.go) — the
-	// session.AgentOpts map is the operator-trusted shape used by the
-	// router-side spawn path; cronAgents is the internal/cron-import-free
-	// translation via toCronAgentOpts (see cron_router_adapter.go).
 	agents, cronAgents := buildAgentOpts(cfg)
 
-	// Validate agent_commands reference existing agents.
 	if cmd, ok := firstUndefinedAgentCommand(cfg.AgentCommands, agents); !ok {
 		slog.Error("agent_commands references undefined agent",
 			"command", cmd, "agent", cfg.AgentCommands[cmd])
@@ -360,19 +297,13 @@ func main() {
 	}
 	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
-	// Cron + sysession orchestration moved into internal/wireup.WireSchedulers
-	// (#1031 R240-ARCH-12). main.go retains:
-	//   - notifyDefault configured-log (operator-facing visibility)
-	//   - StartupPhaseSchedulerMs metric (wireup pkg has no
-	//     internal/metrics dependency)
-	//   - sysession build error logging (wireup returns nil-Sysession on
-	//     build failure; main slog.Warn matches existing degraded-mode
-	//     contract)
+	// Cron + sysession orchestration lives in wireup.WireSchedulers; main keeps
+	// the operator-facing logs and the metrics (wireup has no metrics dep).
 	cronLoc := cfg.ParseCronTimezone()
 	slog.Info("cron timezone", "location", cronLoc.String())
 	if cfg.Cron.NotifyDefault.Platform != "" && cfg.Cron.NotifyDefault.ChatID != "" {
-		// Log only platform and truncated chat_id suffix so log aggregators
-		// don't carry the full group/user identifier.
+		// Truncated chat_id suffix only, so log aggregators never carry the
+		// full group/user identifier.
 		slog.Info("cron notify default configured",
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
@@ -394,26 +325,20 @@ func main() {
 		slog.Error("start cron scheduler", "err", err)
 		os.Exit(1)
 	}
-	// sysession build failure is surfaced via the Schedulers struct field
-	// (#1588), not a closure side-channel. Degradable: warn + continue.
+	// Degradable: warn + continue without daemons.
 	if schedulers.SysessionBuildErr != nil {
 		slog.Warn("sysession manager unavailable; daemons disabled", "err", schedulers.SysessionBuildErr)
 	}
 	scheduler := schedulers.Cron
 	sysMgr := schedulers.Sysession
 	sysWorkDir := schedulers.SysessionWorkDir
-	// When the sysession daemon framework is disabled, SysessionWorkDir is
-	// empty — but the image-orient vision runner below still spawns CLIs and
-	// must land their JSONLs in a directory the history panel filters out.
-	// Resolve the same sys-sessions path so SkipWorkspace has a real target.
+	// With sysession disabled SysessionWorkDir is empty, but the vision runner
+	// below still needs its JSONLs to land where the history panel filters them.
 	if sysWorkDir == "" {
 		sysWorkDir = sysSessionsWorkDir(cfg, storePath)
 	}
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
-	// Configure remote nodes for multi-node aggregation (buildRemoteNodes in
-	// main_init.go). nil when none are configured — server treats nil and
-	// empty identically.
 	nodes := buildRemoteNodes(cfg)
 	if len(nodes) > 0 {
 		slog.Info("multi-node configured", "nodes", len(nodes))
@@ -426,19 +351,11 @@ func main() {
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 
-	// Image auto-orientation: build a dedicated image-capable side runner
-	// (separate from the sysession daemon Runner, which is text-only and may
-	// be disabled). Feature defaults on; a runner build failure degrades to
-	// the feature being off rather than failing startup — auto-orient is
-	// best-effort.
-	//
-	// WorkDir MUST be the sys-sessions dir, NOT the user workspace root: the
-	// claude CLI writes a transcript JSONL under ~/.claude/projects/<cwd>/ on
-	// every invocation, and a vision call pointed at the workspace root leaks
-	// those (plus the orientation-prompt fragment) into the history panel.
-	// sysWorkDir is the SkipWorkspace filter target, so landing JSONLs there
-	// hides them. EnsureWorkDir is required because the sysession framework
-	// (which normally creates it) may be disabled.
+	// Image auto-orientation uses a dedicated image-capable runner (the sysession
+	// Runner is text-only and may be disabled); a build failure turns the
+	// feature off rather than failing startup. WorkDir MUST be the sys-sessions
+	// dir: the claude CLI writes a transcript JSONL per invocation, and only
+	// that dir is filtered out of the history panel.
 	orientEnabled := cfg.ImageOrientEnabled()
 	var orientRunner server.VisionOrienter
 	if orientEnabled {
@@ -469,20 +386,16 @@ func main() {
 		}
 	}
 
-	// Self-update state, built BEFORE the server so the same pointer reaches
-	// both the HTTP layer (which reads it) and the background checker started
-	// further down (which writes it). updateChecker stays nil when auto-update
+	// Built before the server so the HTTP layer (reader) and the background
+	// checker (writer) share one Status. updateChecker is nil when auto-update
 	// is disabled; the endpoint then reports the running version only.
 	updateStatus := selfupdate.NewStatus(version)
 	var updateChecker *selfupdate.Checker
 	if cfg.UpdateEnabled() {
 		updateChecker = newUpdateChecker(ctx, cfg, platforms, updateStatus)
 	}
-	// Whether the dashboard may apply an update itself, as opposed to only
-	// reporting one (update.dashboard_install, default true).
 	updateDashboardInstall := cfg.UpdateDashboardInstall()
 
-	// Server
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:          cfg.Server.Addr,
 		Router:        router,
@@ -495,10 +408,8 @@ func main() {
 		WorkspaceName: cfg.Workspace.Name,
 		AllowedRoot:   workspace,
 		StateDir:      filepath.Dir(storePath),
-		// Access-profile create endpoint (RFC project-access-profile P1-d):
-		// ConfigPath enables it (appends via yaml.Node surgery); secrets dir is
-		// where token *_FILE contents land (0600). Resolve config path to
-		// absolute so the write target is stable regardless of cwd changes.
+		// ConfigPath enables the access-profile create endpoint; absolute so the
+		// write target survives cwd changes. Secrets dir holds *_FILE tokens (0600).
 		ConfigPath:              absConfigPath(*configPath),
 		AccessProfileSecretsDir: filepath.Join(filepath.Dir(storePath), "access-profile-secrets"),
 		NoOutputTimeout:         noOutputTimeout,
@@ -519,8 +430,7 @@ func main() {
 		UpdateDashboardInstall:  &updateDashboardInstall,
 		SysessionManager:        sysMgr,
 		SysWorkDir:              sysWorkDir,
-		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).
-		// Default-on (opt-out via session.project_stable_key.enabled: false).
+		// Default-on; opt-out via session.project_stable_key.enabled: false.
 		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
 		ImageOrientEnabled:      orientEnabled,
 		ImageOrientModel:        cfg.ImageOrient.Model,
@@ -533,20 +443,14 @@ func main() {
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
 
-	// Start upstream connector (this node connects to a primary)
+	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
-		// Build a KeyResolver for the connector so reverse-RPC planner
-		// restart (#7) goes through the same ResolveForPlannerKey path
-		// as the dashboard HTTP handler (#6). Independent instance from
-		// the server's resolver — the agents map and project data are
-		// the same source of truth, but wiring through main.go avoids
-		// coupling upstream to the server package.
+		// Own KeyResolver so reverse-RPC planner restart takes the same
+		// ResolveForPlannerKey path as the dashboard handler without coupling
+		// upstream to the server package.
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
 		conn := upstream.New(buildUpstreamConfig(cfg), router, projectMgr, upstreamResolver)
 		if claudeDir != "" {
-			// Discover/preview closures extracted to main_upstream.go so the
-			// scan-exclude + project-resolve + JSON-fallback logic is testable
-			// in isolation (R237-ARCH-8 / #590).
 			conn.SetDiscoverFunc(newUpstreamDiscoverFunc(claudeDir, router, projectMgr))
 			conn.SetPreviewFunc(newUpstreamPreviewFunc(claudeDir))
 		}
@@ -554,12 +458,10 @@ func main() {
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
 
-	// Graceful shutdown. runShutdown is idempotent via shutdownOnce so both the
-	// signal path and the spontaneous server-exit path (see select below) run it
-	// exactly once. Without this guard, a srv.Start error exit would skip
-	// scheduler.Stop()/router.Shutdown() and drop the last cron snapshot + leak
-	// shim state; conversely a clean server exit without a signal would
-	// deadlock on <-shutdownDone.
+	// runShutdown is idempotent via shutdownOnce so the signal path and the
+	// server-exit path (select below) each run it exactly once; otherwise a
+	// srv.Start error would skip scheduler/router teardown and a clean server
+	// exit without a signal would deadlock on <-shutdownDone.
 	shutdownDone := make(chan struct{})
 	var shutdownOnce sync.Once
 	runShutdown := func(reason string) {
@@ -570,64 +472,31 @@ func main() {
 					slog.Error("panic during shutdown", "panic", r)
 				}
 			}()
-			// R245-ARCH-38 (#893): emit per-phase timing at shutdown so a
-			// hung subsystem is attributable from logs alone (operator can
-			// grep `phase=` in journalctl output without an external metric
-			// store). The sysMgr → scheduler → router order is a contract
-			// (see comments below) — each phase is intentionally serial,
-			// not topo-sort-derived, because the ordering is encoded in
-			// upstream callgraphs that a runtime sort cannot infer.
+			// Per-phase timing makes a hung subsystem attributable from
+			// journalctl alone (grep `phase=`).
 			shutdownT0 := time.Now()
 			slog.Info("shutdown starting", "reason", reason)
 			if err := osutil.SdNotify("STOPPING=1"); err != nil {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
 			}
 			cancel()
-			// Ordered teardown contract (sysmgr → scheduler → http-drain →
-			// router), extracted to runShutdownSteps so the sequence is a
-			// value a behavioral test can assert (#1487 / #1376). Each step's
-			// rationale is documented on shutdownStep / runshutdown.go; the
-			// per-step prose below mirrors what used to be inline. A future
-			// subsystem (planner / Cron Dashboard) MUST be inserted at the
-			// correct slot here — runshutdown_order_test.go pins the order.
+			// Ordered teardown contract: sysmgr → scheduler → http-drain → router
+			// (runshutdown_order_test.go pins it; a new subsystem MUST take the
+			// correct slot). Stop-overflow policies deliberately differ and MUST
+			// NOT be harmonised (#1169): sysession force-exits (its daemons run
+			// user-prompt-derived strings through a CLI, and a leaked goroutine
+			// on a torn-down router could echo excerpts into another session);
+			// cron budget-then-leaks (deliveries re-resolve via dispatch retry, so
+			// leaking is safe and force-exit would kill long jobs).
 			//
-			// Host-level Stop-overflow policy (#1169 / Sec-LOW-2): the two
-			// long-lived subsystems deliberately DIVERGE on what happens when a
-			// daemon/job ignores its drain budget, and this ordered seam is the
-			// single place that owns the host invariant. sysession force-exits
-			// (sysession.StopPolicyForceExit — Manager.Stop fires OnHardFail,
-			// default os.Exit(2)) because its daemons run user-prompt-derived
-			// strings through a CLI subprocess and a leaked goroutine touching a
-			// torn-down router could echo conversation excerpts into another
-			// session's reply. cron budget-leaks (cron.StopPolicyBudgetThenLeak —
-			// Stop logs + bumps CronStopBudgetExceeded*, orphans the goroutine for
-			// OS reap) because cron deliveries re-resolve the session through
-			// dispatch's outbound retry, so leaking is safe and force-exiting
-			// would kill legitimately-long jobs. This asymmetry is the security
-			// property: do NOT harmonise the two without reopening Sec-LOW-2. A
-			// future subsystem added below MUST pick one StopPolicy* explicitly.
-			//
-			// #1897: per-step deadline for the scheduler teardown phase,
-			// mirroring the sysmgr step's 5s. This does NOT itself fit the
-			// whole systemd TimeoutStopSec (sysmgr alone can consume its own
-			// 5s, and SendSIGKILL=no means systemd never kills us); its job
-			// is to cap a wedged cron drain at ~5s instead of scheduler's
-			// full ~35s internal budget so the http-drain/router phases
-			// still get to run. StopContext is advisory — an early-finishing
-			// drain returns immediately; a job ignoring ctx returns at the
-			// deadline and its goroutine is left for OS reap per Stop()'s
-			// StopPolicyBudgetThenLeak contract above.
+			// schedStopBudget caps a wedged cron drain at ~5s instead of the
+			// scheduler's ~35s internal budget so later phases still run (#1897).
 			const schedStopBudget = 5 * time.Second
 			runShutdownSteps([]shutdownStep{
-				// Sysession Manager must stop FIRST: daemon Tick paths call
-				// into router (VisitSessions / SetUserLabelWithOrigin);
-				// leaving them running while Scheduler.Stop or Router.Shutdown
-				// tear down downstream state would race. Manager.Stop is hard
-				// wg.Wait (RFC v2.1 §5.2) — a daemon that ignores ctx will
-				// panic the process at shutdown rather than leak goroutines.
-				// 5s budget is comfortable headroom for Runner subprocess
-				// teardown via exec.CommandContext. run is nil when no Manager
-				// was built (degraded mode), preserving the contract slot.
+				// Sysession first: daemon Tick paths call into router, so racing
+				// Scheduler.Stop / Router.Shutdown would be unsafe. Manager.Stop is
+				// a hard wg.Wait — a daemon ignoring ctx panics the process rather
+				// than leaking. nil Manager (degraded mode) keeps the slot.
 				{name: "sysmgr", run: func() {
 					if sysMgr == nil {
 						return
@@ -636,39 +505,18 @@ func main() {
 					sysMgr.Stop(sysStopCtx)
 					sysStopCancel()
 				}},
-				// Scheduler must stop fully before router.Shutdown: in-flight
-				// cron jobs still call into router (GetOrCreate/Send), so
-				// tearing the router down in parallel would race.
-				//
-				// #1897: honour an external shutdown deadline like the sysmgr
-				// step above, instead of the bare scheduler.Stop. Stop() ==
-				// stopWithCtx(nil) ignores the host shutdown window and waits
-				// out its full internal budget (gcWaitBudget 5s + stopBudget
-				// 30s = 35s worst case). With a wedged cron job that bounds the
-				// scheduler phase to ~5s instead of ~35s, so the later
-				// http-drain/router phases are not starved of the systemd stop
-				// window. StopContext is advisory + additive (R250-ARCH-5 /
-				// #1168): each drain phase short-circuits on ctx cancel and the
-				// final persistOnShutdown ALWAYS runs, so no cron snapshot is
-				// lost — the happy path is identical to Stop().
+				// Scheduler before router: in-flight cron jobs still call
+				// GetOrCreate/Send. StopContext (not bare Stop) honours the host
+				// deadline; persistOnShutdown ALWAYS runs so no snapshot is lost.
 				{name: "scheduler", run: func() {
 					schedStopCtx, schedStopCancel := context.WithTimeout(context.Background(), schedStopBudget)
 					scheduler.StopContext(schedStopCtx)
 					schedStopCancel()
 				}},
-				// S11 (R194-COR): block on the real HTTP-drain barrier before
-				// tearing down the router. cancel() above triggers
-				// Server.Start's shutdown goroutine (srv.Shutdown 30s drain);
-				// ShutdownComplete closes only after that drain returns, i.e.
-				// after every in-flight GetOrCreate/Send handler has finished.
-				// Sequencing router.Shutdown after this point guarantees no
-				// handler observes a half-cleaned session map. On the
-				// server-error/server-exit paths Start has already returned,
-				// so the channel is already closed and this is a no-op. The
-				// drain has its own 30s ctx; this wait inherits that bound
-				// rather than blocking forever.
+				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
+				// every in-flight handler finished, so router.Shutdown never races a
+				// half-cleaned session map. Already closed on server-exit paths.
 				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
-				// Router teardown runs LAST.
 				{name: "router", run: router.Shutdown},
 			})
 			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
@@ -692,9 +540,7 @@ func main() {
 		"max_procs", cfg.Session.MaxProcs,
 		"platforms", len(platforms),
 	)
-	// Surface the configured webhook endpoints so operators can copy the URL
-	// into the IM provider console without having to grep routes. Routes for
-	// WS-only platforms (feishu websocket mode) are intentionally omitted.
+	// Operators copy these URLs into the IM console; WS-only platforms omitted.
 	logWebhookEndpoints(cfg, platforms)
 
 	if cfg.Server.DashboardToken == "" {
@@ -711,15 +557,10 @@ func main() {
 		serverErr <- srv.Start(ctx)
 	}()
 
-	// Systemd watchdog heartbeat (startWatchdogLoop in main_init.go).
 	startWatchdogLoop(ctx, router.HealthCheck)
 
-	// Auto-update checker (opt-out; see config.UpdateConfig). Polls GitHub
-	// Releases on cfg.UpdateInterval() and, per mode, notifies / downloads /
-	// downloads+restarts. All work is best-effort and error-swallowing so a
-	// failed check never disturbs the gateway. dev builds self-skip.
-	// Constructed earlier (alongside the server, which shares its Status);
-	// this only starts the polling loop.
+	// Best-effort and error-swallowing so a failed check never disturbs the
+	// gateway; dev builds self-skip.
 	startUpdateChecker(ctx, updateChecker)
 
 	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
@@ -732,12 +573,10 @@ func main() {
 			<-shutdownDone
 			os.Exit(1)
 		}
-		// Server exited cleanly without a signal (e.g. listener closed by
-		// internal path) — still need to drain scheduler/router before return.
+		// Clean server exit without a signal still needs scheduler/router drain.
 		runShutdown("server-exit")
 		<-shutdownDone
 	case <-shutdownDone:
-		// Wait for HTTP server to finish draining in-flight requests
 		<-serverErr
 	}
 }

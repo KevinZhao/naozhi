@@ -1,13 +1,4 @@
-// Webhook crypto verification for Feishu encrypt-key mode. Extracted from
-// feishu.go (R214-ARCH-13 minimal split) so the signature/timestamp gate
-// reads as a self-contained 60-line block instead of being buried at line
-// ~1268 of a 1459-line file.
-//
-// No behavior change: the two functions and the two timestamp-window
-// constants moved verbatim. Callers in transport_hook.go and the existing
-// table tests in feishu_test.go continue to work because the package
-// surface (function names, signatures, package-level constants) is
-// preserved.
+// Webhook signature / timestamp verification for Feishu encrypt-key mode.
 package feishu
 
 import (
@@ -18,33 +9,18 @@ import (
 	"time"
 )
 
-// Webhook timestamp freshness window. Asymmetric on purpose:
-//
-//   - webhookTimestampMaxAge (5 min in the past) covers normal network
-//     latency and legitimate Feishu-side retries. R218-SEC-13.
-//   - webhookTimestampFutureSkew (30 s in the future) tolerates clock
-//     skew without giving attackers a wide pre-issuance window for
-//     nonce-replay amplification. R218-SEC-13.
+// Webhook timestamp freshness window, asymmetric on purpose: 5 min in the
+// past covers latency and Feishu retries; only 30 s in the future tolerates
+// clock skew without a wide pre-issuance window for nonce-replay amplification.
 const (
 	webhookTimestampFutureSkew = 30
 	webhookTimestampMaxAge     = 5 * 60
 )
 
-// verifySignature verifies the request signature (for encrypt_key mode).
-// Uses the incremental hash.Hash interface to avoid copying the body into a
-// concatenated string — webhook bodies can be up to 64 KB, and the old
-// `timestamp + nonce + encryptKey + string(body)` path allocated ~64 KB per
-// request and did it twice (once for the string, once for the []byte cast).
-// Also hex-encodes via encoding/hex to avoid the fmt.Sprintf "%x" parse
-// overhead, and compares as bytes under ConstantTimeCompare without stringy
-// intermediate allocation.
-//
-// R224-SEC-2: callers MUST gate this call on `encryptKey != ""` themselves.
-// The earlier "empty key → return true" internal fallback was a footgun:
-// any future caller forgetting the outer guard would silently bypass
-// signature verification entirely. Empty key now returns false (a missing
-// signature cannot be valid), forcing the configuration check to live at
-// the call site where it's auditable.
+// verifySignature verifies the encrypt_key-mode signature
+// SHA256(ts+nonce+key+body) via incremental hashing (no 64 KB concat) and a
+// constant-time compare. An empty key returns false — never "skip": callers
+// MUST gate on encryptKey != "" themselves so the config check stays auditable.
 func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature string) bool {
 	if encryptKey == "" {
 		return false
@@ -61,8 +37,7 @@ func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature
 	return subtle.ConstantTimeCompare(hexBuf[:], []byte(signature)) == 1
 }
 
-// verifyTimestamp checks that the request timestamp is plausibly recent.
-// See the webhookTimestamp* constants above for the window rationale.
+// verifyTimestamp checks that the request timestamp is within the window above.
 func verifyTimestamp(timestamp string) bool {
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {

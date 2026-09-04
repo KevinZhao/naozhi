@@ -14,15 +14,8 @@ type EventSink interface {
 	SendRaw(data []byte)
 }
 
-// H6 (#435): the 26-method Conn interface mixed four distinct
-// responsibilities (identity, fetch, proxy, pub-sub). It is now composed
-// from four small role interfaces so consumers can depend on the narrow
-// slice they actually use — e.g. wshub's remote send/interrupt paths take a
-// NodeProxySubscriber, not the full Conn. Splitting the surface keeps mocks
-// in tests focused (a fake only needs the methods the consumer calls) and
-// documents which capability set each call site exercises. Conn still embeds
-// all four so every existing implementation and call site compiles unchanged
-// — this is a pure interface decomposition, no behaviour change.
+// Conn is composed of four role interfaces so consumers (and test fakes)
+// depend only on the slice they use (#435).
 
 // NodeInfo exposes the register-time identity / status of a remote node.
 type NodeInfo interface {
@@ -30,13 +23,8 @@ type NodeInfo interface {
 	DisplayName() string
 	RemoteAddr() string
 	Status() string // "ok" | "error" | "connecting"
-	// Meta returns the register-time NodeMeta snapshot used by
-	// server-side dispatch (selectNodeForBackend) to gate
-	// backend-specific routing on advertised capabilities. Reverse
-	// nodes populate Capabilities from their register frame; HTTPClient
-	// peers carry an empty cap set today (legacy "host whatever the
-	// primary asks" semantics). Never returns nil; HasCap on the
-	// returned pointer is the canonical lookup.
+	// Meta returns the register-time NodeMeta used to gate backend routing on
+	// advertised capabilities; never nil, HasCap is the canonical lookup.
 	Meta() *NodeMeta
 }
 
@@ -48,14 +36,9 @@ type NodeFetcher interface {
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
 	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]clievent.EventEntry, error)
-	// FetchBackends returns the remote node's /api/cli/backends payload
-	// ({backends, default, detected}) verbatim as raw JSON, so the dashboard
-	// node-aware picker renders the remote node's backend list + default.
-	// Relayed opaquely (json.RawMessage) rather than decoded into a typed
-	// struct so the primary need not stay in lockstep with a newer peer's
-	// manifest shape. Peers predating this RPC return an error (reverse) or
-	// a non-200 (HTTP); the dashboard handler surfaces that as a 502 and the
-	// frontend picker collapses to the single-backend UI.
+	// FetchBackends returns the remote /api/cli/backends payload verbatim as
+	// raw JSON so the primary need not track a newer peer's manifest shape;
+	// peers predating the RPC error and the picker collapses to single-backend.
 	FetchBackends(ctx context.Context) (json.RawMessage, error)
 	Send(ctx context.Context, key, text, workspace string) error
 }
@@ -68,18 +51,14 @@ type NodeProxy interface {
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 	ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error
-	// ProxyRemoveSession forwards DELETE /api/sessions to the remote node.
-	// Returns (true, nil) when the session was removed; (false, nil) when the
-	// remote responded 404 (session not found); (false, err) on transport errors.
+	// ProxyRemoveSession: (true, nil) removed; (false, nil) remote 404;
+	// (false, err) transport error.
 	ProxyRemoveSession(ctx context.Context, key string) (bool, error)
-	// ProxyInterruptSession forwards POST /api/sessions/interrupt to the remote node.
-	// Returns (true, nil) when interrupted; (false, nil) when the remote reports
-	// the session is not running; (false, err) on transport errors.
+	// ProxyInterruptSession: (true, nil) interrupted; (false, nil) not running;
+	// (false, err) transport error.
 	ProxyInterruptSession(ctx context.Context, key string) (bool, error)
-	// ProxySetSessionLabel forwards PATCH /api/sessions/label to the remote node.
-	// Returns (true, nil) when the label was updated; (false, nil) when the remote
-	// responded 404 (session not found); (false, err) on transport errors or when
-	// the peer does not implement the RPC yet (older binaries).
+	// ProxySetSessionLabel: (true, nil) updated; (false, nil) remote 404;
+	// (false, err) transport error or peer predating the RPC.
 	ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error)
 }
 
@@ -91,10 +70,8 @@ type NodeSubscriber interface {
 	RemoveClient(c EventSink)
 }
 
-// Conn is the unified interface for both direct (HTTPClient, HTTP) and
-// reverse-connected (ReverseConn, WS) remote nodes. It is now the composition
-// of the four role interfaces above (H6 / #435) plus Close; every existing
-// implementation satisfies it unchanged.
+// Conn is the unified interface for direct (HTTPClient) and reverse-connected
+// (ReverseConn) remote nodes: the four role interfaces plus Close.
 type Conn interface {
 	NodeInfo
 	NodeFetcher
@@ -104,11 +81,9 @@ type Conn interface {
 	Close()
 }
 
-// containsSink reports whether c already sits in clients. Subscribe paths use
-// it to keep re-subscribes by the same EventSink idempotent: a browser that
-// re-clicks the selected session (or re-subscribes after the remote dropped
-// its subscription) must not be appended twice, or every fan-out reaches it
-// twice. Caller must hold the lock protecting the slice. (#2421 review F1)
+// containsSink reports whether c is already in clients, keeping same-sink
+// re-subscribes idempotent (otherwise every fan-out reaches it twice). Caller
+// holds the lock protecting the slice.
 func containsSink(clients []EventSink, c EventSink) bool {
 	for _, cl := range clients {
 		if cl == c {

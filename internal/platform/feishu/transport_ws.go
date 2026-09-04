@@ -17,11 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// Voice-pipeline user-facing notices. Centralised as named constants
-// (R247-ARCH-19, #631) so the platform layer no longer scatters inline
-// user-facing literals across the audio handler — a single source of
-// truth here is the seam the future i18n catalog (internal/i18n) hooks
-// into without re-grepping the adapter body.
+// Voice-pipeline user-facing notices, centralised as the future i18n seam.
 const (
 	msgVoiceDownloadFailed   = "[语音消息下载失败，请重试]"
 	msgVoiceTranscribeFailed = "[语音消息转写失败，请发送文字消息]"
@@ -45,10 +41,8 @@ func (f *Feishu) startWebSocket() error {
 
 	handler := f.handler
 
-	// f.dispatch limits concurrent message handlers to avoid unbounded
-	// goroutine growth when Feishu delivers bursts of messages (e.g., group
-	// chat floods). Only one transport (ws or webhook) is active per adapter,
-	// so sharing the pool with the webhook path changes nothing.
+	// f.dispatch bounds handler goroutines under message bursts; only one
+	// transport is active per adapter, so sharing the pool is harmless.
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -57,19 +51,15 @@ func (f *Feishu) startWebSocket() error {
 			return nil
 		}
 
-		// R184-CONCUR-H1: BoundedDispatch.TryGo runs wg.Add(1) on this
-		// goroutine before `go`, so a concurrent Stop()/Wait() cannot
-		// observe counter=0 between the SDK dispatching us and the handler
-		// goroutine being tracked; the drop branch never touches the wg.
+		// TryGo does wg.Add(1) on this goroutine before `go`, so a concurrent
+		// Stop()/Wait() cannot observe counter=0 mid-dispatch.
 		switch pe.MediaType {
 		case "image":
 			f.dispatch.TryGo("feishu ws image", func() {
 				msg := pe.Msg
 				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
-					// R190-SEC-M3: pe.MediaKey is derived from user-crafted
-					// Feishu message content (image_key). Sanitize before slog
-					// so C1/bidi/LS/PS can't fragment structured-log fields.
+					// image_key is sender-controlled; sanitize before slog.
 					slog.Error("feishu ws download image failed", "err", err,
 						"key", osutil.SanitizeForLog(pe.MediaKey, 128))
 					return
@@ -89,15 +79,11 @@ func (f *Feishu) startWebSocket() error {
 		}
 		return nil
 	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-		// Card button click — decode the `value` payload we emitted in
-		// SendQuestionCard and dispatch as a synthesised user message.
-		// We must return non-nil because the SDK expects a response; an
-		// empty Toast keeps the Feishu client silent (no popup spam).
+		// The SDK requires a non-nil response; an empty Toast keeps the client silent.
 		if event == nil || event.Event == nil || event.Event.Action == nil {
 			return &callback.CardActionTriggerResponse{}, nil
 		}
-		// Decode Action.Value (map[string]any) into our typed payload so the
-		// downstream dispatchCardAction path is uniform across WS + webhook.
+		// Round-trip Action.Value (map[string]any) into the typed payload.
 		raw, err := json.Marshal(event.Event.Action.Value)
 		if err != nil {
 			slog.Warn("feishu ws card_action: marshal value failed", "err", err)
@@ -117,30 +103,13 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// The WS card-action callback envelope carries no chat_type, so we
-		// prefer the originating chat type embedded in the button value (see
-		// buildQuestionCardJSON) to route the answer back to the same session
-		// key the question was asked in.
-		//
-		// Fallback only when the value is absent (older cards / non-card
-		// clicks): default to "direct". The previous chat_id-prefix heuristic
-		// ("oc_" => group) was wrong — Feishu p2p (1:1) chats ALSO use an
-		// "oc_" open_chat_id, so it mis-routed 1:1 answers into a phantom
-		// group session. Genuine group chats still gate on dispatch's
-		// mention/owner rules, and MentionMe is set on the synthesised message
-		// regardless.
+		// The WS callback carries no chat_type; use the value embedded in the
+		// button, defaulting to "direct" (p2p chats also use "oc_" ids, so a
+		// prefix heuristic would mis-route 1:1 answers).
 		chatType := normalizeCardChatType(val.ChatType)
 		if chatType == "" {
 			chatType = "direct"
 		}
-		// R20260608-133914-LB-4 (#1964): track + rate-limit the dispatch like
-		// the WS text/image/audio branches and the webhook card branch
-		// (transport_hook.go:367-383). The larkws SDK requires this callback to
-		// return its response synchronously (the SDK acks the frame on return),
-		// so we cannot simply spawn — dispatchCardActionTracked brackets the
-		// synchronous dispatch with f.dispatch.TryRun so Stop()'s Wait()
-		// drains in-flight card dispatches and a burst of clicks can't exceed
-		// the shared cap.
 		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
@@ -162,21 +131,10 @@ func (f *Feishu) startWebSocket() error {
 	return nil
 }
 
-// dispatchCardActionTracked runs f.dispatchCardAction under the same wg +
-// semaphore discipline the WS message branches use (f.dispatch.TryRun), while
-// preserving the synchronous return the larkws SDK callback contract requires
-// (the SDK acks the frame only after OnP2CardActionTrigger returns, so the
-// dispatch cannot be detached into a fire-and-forget goroutine).
-// R20260608-133914-LB-4 (#1964):
-//
-//   - TryRun tracks the in-flight dispatch on f.dispatch so a concurrent
-//     Stop()/Wait() drains it; the drop branch never touches the counter.
-//   - The shared semaphore bounds concurrency so a burst of card clicks
-//     cannot spawn unbounded work; on a full pool the click is dropped
-//     best-effort (the user can re-click) rather than blocking the SDK read
-//     loop.
-//   - Panic recovery keeps a panic in the dispatch from escaping into the SDK
-//     read loop and gives the same structured log the other branches emit.
+// dispatchCardActionTracked runs dispatchCardAction under f.dispatch.TryRun —
+// tracked and capped like the message branches, but synchronous because the
+// larkws SDK acks the frame only after the callback returns. On a full pool
+// the click is dropped best-effort rather than blocking the SDK read loop (#1964).
 func (f *Feishu) dispatchCardActionTracked(
 	ctx context.Context,
 	val cardActionPayload,
@@ -198,8 +156,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 
 	data, mime, err := f.DownloadAudio(ctx, messageID, fileKey)
 	if err != nil {
-		// R190-SEC-M3: fileKey originates from user-crafted Feishu message
-		// content (file_key in audio messages). Sanitize before slog.
+		// file_key is sender-controlled; sanitize before slog.
 		slog.Error("feishu download audio failed", "err", err,
 			"key", osutil.SanitizeForLog(fileKey, 128))
 		f.replyError(ctx, msg.ChatID, msgVoiceDownloadFailed)
@@ -226,10 +183,6 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 }
 
 // parseSDKEvent converts a Feishu SDK event to a parsedEvent.
-//
-// Method receiver (rather than package function) so we can call
-// f.isBotMentioned against the bot's cached open_id for precise group-chat
-// mention detection.
 func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return parsedEvent{}, false
@@ -268,9 +221,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	if event.EventV2Base != nil && event.EventV2Base.Header != nil {
 		eventID = event.EventV2Base.Header.EventID
 	}
-	// R186-SEC-L: symmetric with transport_hook's cap. WS path is signed by
-	// Feishu's SDK, but the dedup map still grows one key per delivered event;
-	// bounding the key size guards against an unexpected wire-format bump.
+	// Symmetric with transport_hook's cap: bound the dedup map key size.
 	if len(eventID) > maxEventIDLen {
 		slog.Warn("feishu ws: event_id too long, skipping dedup for this delivery",
 			"len", len(eventID))
@@ -282,10 +233,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		messageID = *msg.MessageId
 	}
 
-	// Precise bot-mention detection: match each mention's id.open_id against
-	// the bot's own open_id cached by fetchBotInfo(). Degrades to "any mention"
-	// when the bot open_id is unknown (see isBotMentioned). nil-safe on every
-	// pointer dereference because the SDK returns pointers throughout.
+	// nil-safe on every dereference: the SDK returns pointers throughout.
 	hasMention := f.isBotMentioned(len(msg.Mentions), func(i int) string {
 		m := msg.Mentions[i]
 		if m == nil || m.Id == nil || m.Id.OpenId == nil {
@@ -313,23 +261,14 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 			return parsedEvent{}, false
 		}
 		text := content.Text
-		// Mirror the webhook-path guard in transport_hook.go: reject oversized
-		// text bodies at the ingress boundary so multi-KB payloads never reach
-		// slog attrs, dispatch queue, or CLI stdin. Feishu's upstream limit is
-		// ~4 KiB (~1333 CJK chars); 8 KiB is 2× that official ceiling.
-		// Keeping WS and webhook paths symmetric prevents a regression where
-		// one transport silently accepts what the other rejects. R184-SEC-H1a.
-		// maxIncomingTextBytes is shared with transport_hook.go.
+		// Same ingress cap as transport_hook.go so neither transport silently
+		// accepts what the other rejects.
 		if len(text) > maxIncomingTextBytes {
 			slog.Warn("feishu ws: text exceeds limit, dropping",
 				"size", len(text))
 			return parsedEvent{}, false
 		}
-		// Strip all @-mention tokens in a single pass, mirroring the
-		// webhook path in transport_hook.go. Previously each ReplaceAll
-		// allocated a fresh string and copied the whole text; a group
-		// message with multiple @ users did that N times. WS is the
-		// default transport, so it carries the bulk of inbound traffic.
+		// Strip all @-mention tokens in a single pass.
 		if len(msg.Mentions) > 0 {
 			pairs := make([]string, 0, len(msg.Mentions)*2)
 			for _, m := range msg.Mentions {

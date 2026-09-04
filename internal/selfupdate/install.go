@@ -1,17 +1,7 @@
-// install.go — the operator-triggered apply path (dashboard "一键生效").
-//
-// The background Checker decides WHEN to act from a timer; this file lets an
-// operator decide instead, from the dashboard, without SSH. It deliberately
-// adds no download or verification logic of its own: the same doInstall
-// pipeline runs, so the SHA-256 check, the atomic replace, the backup and the
-// rollback-on-failure behaviour are shared rather than reimplemented.
-//
-// What IS specific to this path is which of two things "apply" means. Under the
-// default update mode the binary is usually already on disk and only a restart
-// is missing, and installing again in that state overwrites the backup with the
-// version we would need to roll back TO. So the whole file is organised around
-// finding out whether bytes still need fetching, and refusing to fetch them
-// when they do not. See docs/rfc/dashboard-update-notice.md §1.3.
+// install.go — the operator-triggered apply path (dashboard "一键生效"). It
+// reuses doInstall; what is specific here is deciding whether bytes still need
+// fetching: installing again in the staged state overwrites the backup with
+// the very version we would roll back TO (docs/rfc/dashboard-update-notice.md §1.3).
 package selfupdate
 
 import (
@@ -27,51 +17,32 @@ import (
 )
 
 var (
-	// ErrInstallInProgress means another install (background tick or a
-	// previous click) holds installMu. Callers should surface "already
-	// running" rather than queue: the operator is watching a status chip, and
-	// a queued second install would either be a no-op or the very
-	// backup-destroying repeat this package guards against.
+	// ErrInstallInProgress means another install holds installMu; surface
+	// "already running" rather than queue a possibly backup-destroying repeat.
 	ErrInstallInProgress = errors.New("update install already in progress")
 
-	// ErrNothingToDo means the deployment is already on the newest release, or
-	// the tag we would install is the one already installed.
+	// ErrNothingToDo means the deployment is already on the newest release.
 	ErrNothingToDo = errors.New("no update to apply")
 
-	// ErrRestartUnsupported means a restart is the only remaining step but no
-	// managed service (systemd unit / launchd job) was found to drive it. The
-	// binary is on disk and correct; a human has to restart the process.
+	// ErrRestartUnsupported means only a restart remains but no managed service
+	// can drive it; the binary is correct and a human must restart.
 	ErrRestartUnsupported = errors.New("no managed service to restart; restart the process manually")
 )
 
-// onDiskVersionFn is indirected so tests can simulate what the binary at the
-// install path reports without executing anything.
+// onDiskVersionFn is indirected so tests can simulate the on-disk binary's version.
 var onDiskVersionFn = onDiskVersion
 
-// InstallLatest applies the newest release on operator demand and returns the
-// outcome. `restart` asks for the service to be restarted so the new binary
-// actually takes effect.
-//
-// Single-flight via TryLock, never a queue: a caller that arrives during an
-// install gets ErrInstallInProgress immediately (the handler maps that to 409).
-//
-// The three ways this returns without downloading anything are the point of the
-// function, not edge cases — each one is a state in which fetching would
-// overwrite the rollback backup with the new binary:
-//
-//  1. this process already installed a newer tag (`installed`),
-//  2. the newest release equals the tag already installed,
-//  3. the binary sitting at the install path already reports the target
-//     version — which happens when someone ran `naozhi upgrade` from a shell,
-//     so `installed` is empty even though the bytes are staged.
-//
-// In all three the only remaining step is a restart.
+// InstallLatest applies the newest release on operator demand; `restart` asks
+// for the service restart that makes it take effect. Single-flight via
+// TryLock (ErrInstallInProgress, never a queue). It returns WITHOUT
+// downloading — restart only — when this process already installed a newer
+// tag, when latest equals the installed tag, or when the on-disk binary
+// already reports the target version (someone ran `naozhi upgrade` from a
+// shell): in each state fetching would overwrite the rollback backup.
 func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 	if c == nil {
 		return errors.New("no update checker configured")
 	}
-	// Same rule checkOnce and CheckNow apply: a dev build has no released tag
-	// to compare against and replacing it would silently discard a local build.
 	if c.cfg.CurrentVersion == "dev" || c.cfg.CurrentVersion == "" {
 		return ErrCheckSkippedDev
 	}
@@ -81,10 +52,8 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 	}
 	defer c.installMu.Unlock()
 
-	// (1) This process already staged something newer than what it runs.
-	// Checked before the network call: it needs no remote information, and
-	// asking GitHub first would only widen the window in which a fresher tag
-	// appears and talks us into a second Replace.
+	// (1) Already staged something newer; checked before the network call so a
+	// fresher remote tag cannot talk us into a second Replace.
 	if c.installed != "" && c.installed != c.cfg.CurrentVersion {
 		return c.restartOnly(ctx, c.installed)
 	}
@@ -92,14 +61,11 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 	rel, err := latestRelease(ctx)
 	c.cfg.Status.noteCheck(relTag(rel), err)
 	if err != nil {
-		// A lookup failure is not an install failure: nothing was touched, so
-		// the phase stays as it was and only CheckErr (set by noteCheck) moves.
+		// A lookup failure touches nothing; only CheckErr moves.
 		slog.Warn("dashboard update: release lookup failed", "err", err)
 		return err
 	}
-	// R20260602141221-SEC-1 applies here exactly as on the tick path: only a
-	// strictly greater tag is installable, so a rolled-back "latest" cannot be
-	// used to push this deployment onto an older, vulnerable release.
+	// Strictly greater only, so a rolled-back "latest" cannot downgrade us.
 	if !semverGreater(rel.Tag, c.cfg.CurrentVersion) {
 		return ErrNothingToDo
 	}
@@ -107,11 +73,7 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 	if rel.Tag == c.installed {
 		return c.restartOnly(ctx, rel.Tag)
 	}
-	// (3) Staged by someone else — most plausibly `naozhi upgrade` run in a
-	// shell, or a previous process of this service. `installed` only remembers
-	// what THIS process did, so without this probe the dashboard would offer
-	// "install" for a version that is already on disk and the apply would
-	// Replace() a second time, copying v_new over the .bak that holds v_old.
+	// (3) Staged by someone else; `installed` only remembers THIS process.
 	if onDisk, ok := onDiskVersionFn(); ok && onDisk == rel.Tag {
 		slog.Info("dashboard update: target already on disk, restart only",
 			"tag", rel.Tag, "running", c.cfg.CurrentVersion)
@@ -120,14 +82,9 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 		return c.restartOnly(ctx, rel.Tag)
 	}
 
-	// A real install. Downgrade the restart request rather than pretend:
-	// doInstall's restart branch would enter PhaseRestarting and then call a
-	// primitive that is a no-op with no managed service, leaving the chip
-	// spinning on "restarting" for a process nobody is going to restart.
-	//
-	// ServiceManagesThisProcess, not ServiceRunning: the restart has to land on
-	// US. A unit that is active but runs some other naozhi process would take
-	// the restart while this one keeps running the old binary.
+	// Downgrade the restart request rather than pretend: with no service
+	// managing US, PhaseRestarting would spin forever. ServiceManagesThisProcess,
+	// not ServiceRunning — a unit running another naozhi would take the restart.
 	wantRestart := restart
 	if restart && !ServiceManagesThisProcess() {
 		restart = false
@@ -136,26 +93,18 @@ func (c *Checker) InstallLatest(ctx context.Context, restart bool) error {
 		return err
 	}
 	if wantRestart && !restart {
-		// Installed successfully; only the restart could not happen. Report it
-		// as Staged + LastErr, which is literally true and is the state the UI
-		// renders with a manual command instead of a button.
+		// Installed; only the restart could not happen. Staged + LastErr is the
+		// state the UI renders with a manual command instead of a button.
 		c.cfg.Status.notePhase(PhaseStaged, rel.Tag, ErrRestartUnsupported)
 		return ErrRestartUnsupported
 	}
 	return nil
 }
 
-// restartOnly restarts the service without touching the binary. Callers must
-// hold installMu.
-//
-// The ServiceManagesThisProcess() gate here is NOT the outer gate
-// R20260602141221-CR-3 forbids in doInstall. That one was harmful because a
-// stale "not running" read skipped the restart while `installed` had already
-// been set, so the next tick short-circuited and the staged binary was stranded
-// with no log and no notice. Here nothing is installed as a side effect and the
-// verdict is returned to an HTTP handler that shows it to the operator, plus
-// recorded in LastErr — the failure mode CR-3 protects against (silence) cannot
-// occur.
+// restartOnly restarts the service without touching the binary; callers hold
+// installMu. Unlike doInstall, gating on ServiceManagesThisProcess here is
+// safe: nothing is installed as a side effect and the verdict reaches the
+// operator via the HTTP handler and LastErr, so it cannot strand silently.
 func (c *Checker) restartOnly(ctx context.Context, tag string) error {
 	if !ServiceManagesThisProcess() {
 		c.cfg.Status.notePhase(PhaseStaged, tag, ErrRestartUnsupported)
@@ -165,49 +114,37 @@ func (c *Checker) restartOnly(ctx context.Context, tag string) error {
 	c.cfg.Status.notePhase(PhaseRestarting, tag, nil)
 	c.notify("🔄 naozhi 正在重启以应用 " + tag + "…")
 	if err := RestartServiceNoWait(ctx); err != nil {
-		// The binary stays staged and valid; only the trigger failed. Do not
-		// report Failed — that would invite a retry of an install that already
-		// succeeded, which in this state is the backup-destroying path.
+		// Staged (with LastErr), not Failed: Failed would invite a repeat
+		// install, the backup-destroying path.
 		slog.Warn("dashboard update: restart trigger failed (binary IS staged)", "tag", tag, "err", err)
 		c.cfg.Status.notePhase(PhaseStaged, tag, err)
 		return err
 	}
-	// Restart is queued; this process is about to receive SIGTERM.
+	// Restart queued; this process is about to receive SIGTERM.
 	return nil
 }
 
-// RollbackHint returns a paste-ready shell command that restores the previous
-// binary from the backup Replace() leaves behind, or "" when the install path
-// cannot be resolved.
-//
-// It exists to be shown BEFORE the operator confirms, not after: the failure it
-// answers for is "the new binary does not start", and in that failure the
-// dashboard that would have told them how to recover is precisely what is gone.
-// So the escape route has to be on screen while the service is still up.
-//
-// `serviceRunning` is supplied by the caller for the same reason as in
-// CheckPreflight: it is a `launchctl list` fork on darwin, the caller already
-// holds the answer, and this function is on a polled path.
+// RollbackHint returns a paste-ready command restoring the previous binary
+// from Replace's backup, or "" when the install path is unknown. Shown BEFORE
+// the operator confirms: if the new binary does not start, the dashboard that
+// would explain recovery is gone. serviceRunning is caller-supplied (a
+// launchctl fork on darwin the caller already paid for).
 func RollbackHint(serviceRunning bool) string {
 	path, err := SelfPath()
 	if err != nil {
 		return ""
 	}
 	restore := fmt.Sprintf("cp %s%s %s && chmod 0755 %s", path, backupSuffix, path, path)
-	// No managed service ⇒ no restart command to append. Guessing one would be
-	// worse than omitting it: launchdServiceLabel() falls back to a constant
-	// when this process was not launched by launchd, so the "helpful" tail would
-	// be a command that fails, inside a && chain that swallows the restore's
-	// success message. Restoring the bytes is the part only this hint knows.
+	// No managed service ⇒ no restart tail: a guessed launchd command would
+	// fail inside the && chain and hide the restore's success.
 	if !serviceRunning {
 		return restore
 	}
 	return restore + " && " + restartCommand()
 }
 
-// restartCommand is the shell command an operator runs to restart the managed
-// service on this host, built from the real platform and the real launchd
-// label. Only meaningful when a managed service exists — callers gate on that.
+// restartCommand is the shell command that restarts the managed service on
+// this host; only meaningful when one exists (callers gate on that).
 func restartCommand() string {
 	if runtime.GOOS == "darwin" {
 		return fmt.Sprintf("launchctl kickstart -k gui/%d/%s", os.Getuid(), launchdServiceLabel())
@@ -215,20 +152,11 @@ func restartCommand() string {
 	return "sudo systemctl restart naozhi"
 }
 
-// ManualCommand is the command the dashboard shows when it cannot carry out
-// `action` itself (preflight blocked, dashboard_install off). It is computed
-// here so the browser never guesses: the browser only knows its OWN platform,
-// which is not the server's, and the launchd label is a property of this
-// deployment (see launchdServiceLabel) that a client cannot know at all.
-//
-//   - ActionInstall: `naozhi upgrade` — the CLI does the download + Replace
-//     with the same safeguards as the background checker.
-//   - ActionRestart with a service that manages this process: the platform's
-//     restart command.
-//   - ActionRestart without one: "" — there is no command to give; the
-//     preflight reason already tells the operator to restart the process by
-//     hand, and `systemctl restart naozhi` would restart the wrong thing.
-//   - ActionNone: "".
+// ManualCommand is what the dashboard shows when it cannot carry out `action`
+// itself, computed server-side because the browser knows neither the server's
+// platform nor its launchd label. ActionInstall → `naozhi upgrade`;
+// ActionRestart → the platform restart command only when a service manages
+// this process (otherwise "" — `systemctl restart` would hit the wrong thing).
 func ManualCommand(action Action, serviceManaged bool) string {
 	switch action {
 	case ActionInstall:
@@ -241,26 +169,14 @@ func ManualCommand(action Action, serviceManaged bool) string {
 	return ""
 }
 
-// onDiskVersionProbeTimeout bounds the version probe below. Generous enough for
-// a cold-cache exec of a ~19MB binary, short enough that a hung probe cannot
+// onDiskVersionProbeTimeout bounds the version probe so a hung exec cannot
 // hold installMu for long.
 const onDiskVersionProbeTimeout = 10 * time.Second
 
-// onDiskVersion reports what the binary at the install path claims to be, by
-// running `<path> --version` (which prints the ldflag version and exits without
-// reading config, opening ports, or touching state).
-//
-// Executing the install path is not a new capability or a new attack surface:
-// it is this service's own binary, and whoever can write it already gets code
-// execution at the next restart — which is exactly the event we are here to
-// trigger. Doing it is what closes the gap between "what this process
-// installed" and "what is actually on disk", the gap through which a `naozhi
-// upgrade` from a shell would otherwise lead the dashboard into a second
-// Replace().
-//
-// Failure is not an error: (…, false) simply means "cannot tell", and callers
-// then proceed down the normal install path. The probe is a safety net, never a
-// gate.
+// onDiskVersion runs `<installPath> --version` to learn what is actually on
+// disk. Not a new attack surface: whoever can write our own binary already
+// gets code execution at the next restart. (…, false) means "cannot tell" and
+// callers proceed down the normal install path — a safety net, never a gate.
 func onDiskVersion() (string, bool) {
 	path, err := SelfPath()
 	if err != nil {
@@ -277,9 +193,7 @@ func onDiskVersion() (string, bool) {
 	if i := strings.IndexByte(v, '\n'); i >= 0 {
 		v = strings.TrimSpace(v[:i])
 	}
-	// A tag is short. Anything long is not a version string — some other
-	// binary, or a build that prints a banner — and comparing it to a tag
-	// would be meaningless.
+	// Anything long is a banner or another binary, not a tag.
 	if v == "" || len(v) > 64 {
 		return "", false
 	}

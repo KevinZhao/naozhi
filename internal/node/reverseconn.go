@@ -16,43 +16,24 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// maxReverseRPCResponseBytes caps the size of a single reverse-RPC response
-// payload before the primary node json.Unmarshals it. The websocket read
-// limit in reverseserver.go is 16 MiB to accommodate legitimate batch
-// results (full project dumps, large event ranges), but unmarshal targets
-// like []map[string]any allocate one map per nested object and are an easy
-// heap-exhaustion primitive from a compromised node. 2 MiB is ~10x larger
-// than the worst observed legitimate response. R58-SEC-M2.
+// maxReverseRPCResponseBytes caps one reverse-RPC response before Unmarshal:
+// []map[string]any targets allocate per nested object, an easy heap-exhaustion
+// primitive from a compromised node. ~10x the worst legitimate response.
 const maxReverseRPCResponseBytes = 2 << 20 // 2 MiB
 
-// maxPendingReverseRPCs caps the in-flight reverse-RPC request map size
-// per ReverseConn. Every `rpc()` call inserts one entry into `c.pending`;
-// callers use 10s context timeouts so entries naturally drain, but a
-// hung-but-TCP-alive peer (half-open TCP, compromised node that ACKs the
-// handshake and goes silent) lets polling dashboards (CacheManager.Refresh,
-// /api/sessions fanout) accumulate entries before readLoop eventually
-// detects the dead connection. Capping at 256 keeps the memory bounded
-// while comfortably exceeding realistic concurrent-RPC fan-out (typical
-// dashboard poll drives ≤10 concurrent FetchXxx). R59-SEC-M1.
+// maxPendingReverseRPCs caps in-flight RPCs per ReverseConn so a hung but
+// TCP-alive peer cannot let polling dashboards accumulate entries before
+// readLoop detects the dead connection; a poll drives ≤10 concurrent fetches.
 const maxPendingReverseRPCs = 256
 
-// maxPushedNodeStringBytes caps the length of free-form string fields that
-// arrive in pushed reverse-node messages (session_state.Reason,
-// subscribe_error.Error). These fields skip the rpc() size gate because
-// they're broadcast directly to every subscribed browser client — an
-// unbounded push from a compromised node can fill each client's 256-slot
-// send channel and trigger drops, degrading dashboard UX. 512 bytes fits
-// any realistic operator-facing message without enabling abuse. R61-SEC-9.
+// maxPushedNodeStringBytes caps free-form strings in pushed messages
+// (session_state.Reason, subscribe_error.Error), which skip the rpc() size
+// gate and are broadcast to every subscribed browser.
 const maxPushedNodeStringBytes = 512
 
-// maxPushedHistoryEvents caps the length of the `events` array in pushed
-// `events` messages from a reverse node. The reverse WS read limit is 16 MB
-// (reverseserver.go after auth), and `broadcastToSubs` fan-outs to every
-// subscribed browser client with a 256-slot send channel — a compromised
-// node can push a 16 MB events array and amplify it N× across connected
-// tabs, filling every send channel and triggering drops. 500 matches the
-// dashboard's `maxEventsPageLimit` and any local EventLog ring size, so
-// legitimate history replays are never truncated. R67-SEC-3.
+// maxPushedHistoryEvents caps the `events` array in pushed history so a
+// compromised node cannot amplify a 16 MB push N× across browser tabs; 500
+// matches the dashboard page limit so legitimate replays are never truncated.
 const maxPushedHistoryEvents = 500
 
 type reverseResult struct {
@@ -66,13 +47,8 @@ type ReverseConn struct {
 	id          string
 	displayName string
 	remoteAddr  string
-	// meta is the immutable snapshot of register-time metadata
-	// (capabilities, hostname, registered-at). Built once in
-	// newReverseConnWithMeta from the values flowing in via
-	// reverseserver.go's register frame; never mutated thereafter so
-	// concurrent Meta() readers (server-side selectNodeForBackend on
-	// every dispatch) need no locking. Stored by value so the public
-	// Meta() returns a pointer into a stable allocation.
+	// meta is the immutable register-time snapshot; never mutated, so
+	// concurrent Meta() readers need no lock.
 	meta NodeMeta
 
 	writeMu sync.Mutex
@@ -85,12 +61,8 @@ type ReverseConn struct {
 	subMu sync.Mutex
 	subs  map[string][]EventSink // session key → local browser clients
 
-	// subWG tracks the detached Subscribe history-fetch goroutines (the
-	// first-subscriber and additional-subscriber paths). They are bounded by
-	// baseCtx (5s) and unwind on baseCancel(), but Close() previously returned
-	// while one was still mid-FetchEvents and could call cl.SendJSON after the
-	// connection was torn down. Close() now waits on subWG so no history write
-	// races a teardown. Mirrors wsRelay.wg. R202606f-GO-010 (#2294).
+	// subWG tracks the detached Subscribe history-fetch goroutines so Close()
+	// never returns while one could still SendJSON after teardown (#2294).
 	subWG sync.WaitGroup
 
 	statusMu sync.RWMutex
@@ -100,23 +72,16 @@ type ReverseConn struct {
 	closed  bool
 	closeMu sync.Mutex
 
-	// baseCtx is the parent context for in-flight Subscribe history fetches
-	// (and any future per-connection RPCs that should abort on disconnect).
-	// baseCancel fires on Close()/markDisconnected() so timeout contexts
-	// derived from baseCtx unwind without needing a separate "cancel on
-	// c.done" watcher goroutine per RPC. H7 (Round 163).
+	// baseCtx parents in-flight Subscribe history fetches; baseCancel fires on
+	// Close()/markDisconnected() so derived timeouts unwind without a
+	// per-RPC watcher goroutine.
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
 }
 
-// newReverseConnWithMeta is the capability-aware constructor used by
-// reverseserver.go after a successful register. caps is the wire-form
-// slice from ReverseMsg.Capabilities; nil/empty means "node advertised
-// no caps" (legacy peer). hostname is the truncated remote-supplied
-// label, separate from remoteAddr (which is r.RemoteAddr fallback).
-//
-// Tests that don't care about caps call this directly with nil caps and
-// an empty hostname so the meta surface stays uniformly populated.
+// newReverseConnWithMeta constructs a ReverseConn after a successful
+// register. caps is the wire slice (nil = legacy peer advertising nothing);
+// hostname is the truncated remote label, distinct from remoteAddr.
 func newReverseConnWithMeta(id, displayName, remoteAddr string, conn *websocket.Conn, caps []string, hostname string) *ReverseConn {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &ReverseConn{
@@ -144,12 +109,8 @@ func (c *ReverseConn) NodeID() string      { return c.id }
 func (c *ReverseConn) DisplayName() string { return c.displayName }
 func (c *ReverseConn) RemoteAddr() string  { return c.remoteAddr }
 
-// Meta returns the immutable register-time metadata snapshot. Pointer
-// receiver returns a pointer into a stable allocation so callers can
-// chain `c.Meta().HasCap("acp")` without a copy. Never nil — every
-// ReverseConn is constructed with a populated meta, even legacy paths
-// that omit caps (NodeMeta.Capabilities is nil; HasCap returns false
-// for non-empty cap queries, which is the correct denial semantics).
+// Meta returns the immutable register-time metadata snapshot; never nil (a
+// legacy peer has nil Capabilities and HasCap denies non-empty queries).
 func (c *ReverseConn) Meta() *NodeMeta { return &c.meta }
 
 func (c *ReverseConn) Status() string {
@@ -169,26 +130,19 @@ func (c *ReverseConn) Close() {
 	conn := c.conn
 	c.closeMu.Unlock()
 
-	// Cancel baseCtx so any in-flight Subscribe history fetches unwind
-	// without relying on an auxiliary watcher goroutine per RPC. Safe to
-	// call multiple times; markDisconnected may also fire it.
+	// Idempotent; markDisconnected may also fire it.
 	c.baseCancel()
 	conn.Close()
 
-	// Wait for in-flight Subscribe history-fetch goroutines to finish so none
-	// calls cl.SendJSON after Close() returns. baseCancel() above unwinds the
-	// 5s FetchEvents timeout and conn.Close() stops readLoop, so this Wait
-	// returns promptly rather than blocking the full timeout. Mirrors the
-	// wsRelay.wg.Wait() teardown. R202606f-GO-010 (#2294).
+	// Returns promptly: baseCancel unwound the fetches and conn.Close stopped readLoop.
 	c.subWG.Wait()
 }
 
 func (c *ReverseConn) writeJSON(v any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	// If SetWriteDeadline fails (conn half-closed / closed), return the
-	// error instead of issuing a deadline-less WriteJSON that can block
-	// until TCP keepalive expires; the caller's error path will re-dial.
+	// A failed SetWriteDeadline means a half-closed conn; do not issue a
+	// deadline-less WriteJSON that could block until TCP keepalive expires.
 	if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
@@ -206,9 +160,7 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 	}
 
 	c.pendingMu.Lock()
-	// Guard against pending-map growth when the peer is slow / hung. See
-	// maxPendingReverseRPCs doc for rationale. Fail fast so the caller's
-	// 10s timeout isn't wasted waiting for a response that will never come.
+	// Fail fast rather than waste the caller's timeout on a hung peer.
 	if len(c.pending) >= maxPendingReverseRPCs {
 		c.pendingMu.Unlock()
 		return nil, fmt.Errorf("reverse rpc: too many pending requests (%d)", maxPendingReverseRPCs)
@@ -233,20 +185,13 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 		if res.err != nil {
 			return nil, res.err
 		}
-		// Gate response size before returning to callers that will
-		// json.Unmarshal into nested map[string]any trees. A compromised
-		// reverse node could otherwise send 16 MB of maximally-nested JSON
-		// (the ws read limit set in reverseserver.go) and force hundreds
-		// of thousands of heap allocations on the primary. 2 MiB comfortably
-		// exceeds realistic FetchSessions/FetchEvents payloads and localizes
-		// the exhaustion-defense at the single RPC choke point rather than
-		// repeating the guard at every FetchXxx caller. R58-SEC-M2.
+		// Size gate at the single RPC choke point (see maxReverseRPCResponseBytes).
 		if len(res.result) > maxReverseRPCResponseBytes {
 			return nil, fmt.Errorf("reverse rpc response too large (%d > %d bytes)", len(res.result), maxReverseRPCResponseBytes)
 		}
 		return res.result, nil
 	case <-ctx.Done():
-		// Critical: remove pending to avoid goroutine leak when response arrives late
+		// Remove pending so a late response does not leak.
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
@@ -315,12 +260,8 @@ func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) 
 	return result, json.Unmarshal(raw, &result)
 }
 
-// FetchBackends relays the remote node's CLI backend manifest. The
-// "fetch_backends" reverse-RPC branch returns the {backends, default,
-// detected} object as raw JSON; we pass it through untouched (see the
-// NodeFetcher.FetchBackends contract). A peer binary predating this method
-// replies with an "unknown method" error, which the caller degrades to the
-// local manifest.
+// FetchBackends relays the remote node's CLI backend manifest as raw JSON (see
+// NodeFetcher.FetchBackends); an older peer replies "unknown method".
 func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error) {
 	return c.rpc(ctx, "fetch_backends", nil)
 }
@@ -425,24 +366,18 @@ func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bo
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
-	// Same client re-subscribing (dashboard re-click / dead→running
-	// recovery): keep exactly one entry, or broadcastToSubs would deliver
-	// every frame twice to that browser. It still takes the additional-
-	// subscriber path below for its `subscribed` ack + history page.
-	// (#2421 review F1)
+	// Same client re-subscribing keeps one entry, or every frame would be
+	// delivered twice; it still gets its `subscribed` ack + history page.
 	if !containsSink(c.subs[key], cl) {
 		c.subs[key] = append(c.subs[key], cl)
 	}
-	// Add under subMu (mirroring the spawn) so Close()'s subWG.Wait() never
-	// races an Add. R202606f-GO-010 (#2294).
+	// Add under subMu so Close()'s subWG.Wait() never races it.
 	c.subWG.Add(1)
 	c.subMu.Unlock()
 
 	if alreadySub {
-		// Additional subscriber: send history via RPC (non-blocking).
-		// Derive the timeout from baseCtx so a connection drop mid-fetch
-		// cancels the RPC through ctx cancellation — no auxiliary
-		// watcher goroutine needed. H7 (Round 163).
+		// Additional subscriber: history via RPC, derived from baseCtx so a
+		// connection drop cancels it.
 		go func() {
 			defer c.subWG.Done()
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
@@ -458,35 +393,21 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			}
 		}()
 	} else {
-		// First subscriber: tell remote to start pushing events.
-		// Subscriber was already added above so readLoop can deliver events
-		// arriving immediately after the write. On failure, roll back.
+		// First subscriber: the sink was added above so readLoop can deliver
+		// events arriving right after the write; roll back on failure.
 		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}); err != nil {
 			slog.Warn("reverse subscribe write failed", "node", c.id, "key", key, "err", err)
 			c.subMu.Lock()
 			removeSub(c.subs, key, cl)
 			c.subMu.Unlock()
-			// No history goroutine spawned on this path; release the token. (#2294)
+			// No history goroutine on this path; release the token.
 			c.subWG.Done()
 			return
 		}
-		// Also fetch persisted history synchronously so that ready sessions
-		// (no live process) still deliver the event log. The remote
-		// connector's streamEvents only pushes on EventLog Append, which
-		// never fires for a process-less session — without this fetch the
-		// dashboard would subscribe and never receive any history.
-		//
-		// Run in a goroutine so the hub's readPump is not blocked waiting
-		// for the RPC; the "subscribed" message from the remote arrives via
-		// readLoop and the history message from here can arrive in either
-		// order. Order doesn't matter for the client: onHistory merges by
-		// key/time, and the initial page render is keyed on the frame's
-		// Initial flag (ServerMsg.Initial) rather than on arrival order —
-		// which is exactly why this frame must set it.
-		//
-		// Derive the timeout from baseCtx so a connection drop cancels the
-		// RPC through ctx cancellation — no auxiliary watcher goroutine
-		// needed. H7 (Round 163).
+		// Also fetch persisted history: the remote's streamEvents only pushes
+		// on Append, which never fires for a process-less session. This frame
+		// and the remote's `subscribed` ack may arrive in either order, which
+		// is why the initial page is keyed on ServerMsg.Initial, not arrival.
 		go func() {
 			defer c.subWG.Done()
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
@@ -504,13 +425,9 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	}
 }
 
-// RefreshSubscription forces the remote to re-create the streamEvents
-// goroutine for key, even if a subscription already exists. This is
-// needed after a remote send because the previous process (and its
-// streamEvents) may have died since the last subscribe.
-//
-// Best-effort: a concurrent Unsubscribe between the check and the write
-// may send a redundant subscribe, but the remote handles it gracefully.
+// RefreshSubscription forces the remote to re-create streamEvents for key
+// after a remote send, since the previous process may have died. Best-effort:
+// a racing Unsubscribe may cause a redundant subscribe the remote tolerates.
 func (c *ReverseConn) RefreshSubscription(key string) {
 	c.subMu.Lock()
 	hasSubs := len(c.subs[key]) > 0
@@ -547,12 +464,8 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 	}
 }
 
-// subSnapPool reuses the subscriber-snapshot slice that broadcastToSubs
-// builds on every remote event. The readLoop fires broadcastToSubs for
-// every incoming `event`/`events`/`session_state` message from a remote
-// node — on a running Claude turn that is dozens of events per second.
-// A sync.Pool avoids the per-call make([]EventSink, N) alloc. R61-PERF-3.
-// Mirrors the broadcastClientSnapPool pattern in server/wshub.go.
+// subSnapPool reuses the subscriber snapshot built on every remote event
+// (dozens per second during a turn).
 var subSnapPool = sync.Pool{
 	New: func() any {
 		s := make([]EventSink, 0, 16)
@@ -585,13 +498,11 @@ func (c *ReverseConn) broadcastToSubs(key string, out ServerMsg, deleteKey bool)
 		}
 	}
 
-	// Clear pointers so disconnected EventSinks can be GC'd instead of being
-	// pinned in the pooled backing array until the next Get replaces them.
+	// Clear pointers so disconnected sinks are not pinned by the pool.
 	for i := range clients {
 		clients[i] = nil
 	}
-	// Drop oversized snapshots so the pool never pins an arbitrarily large
-	// backing array (e.g. after a brief spike to hundreds of subscribers).
+	// Never pool an arbitrarily large backing array after a subscriber spike.
 	if cap(clients) <= 256 {
 		*snapPtr = clients[:0]
 		subSnapPool.Put(snapPtr)
@@ -606,16 +517,14 @@ func (c *ReverseConn) readLoop() {
 	}()
 	defer c.markDisconnected()
 
-	// The connector sends WebSocket pings every 30s (upstream/connector.go).
-	// Set a 90s read deadline so we detect silent disconnections (NAT timeout,
-	// crash without clean close) rather than blocking forever on ReadJSON.
+	// The connector pings every 30s; a 90s read deadline detects silent
+	// disconnects (NAT timeout, crash without close).
 	const reverseReadTimeout = 90 * time.Second
 	if err := c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout)); err != nil {
 		return
 	}
 	c.conn.SetPongHandler(func(string) error {
-		// Errors propagate to the next ReadJSON iteration, which exits the
-		// loop cleanly; nothing useful for the handler itself to return.
+		// Errors surface on the next read iteration.
 		_ = c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
 		return nil
 	})
@@ -628,9 +537,7 @@ func (c *ReverseConn) readLoop() {
 
 	for {
 		var msg ReverseMsg
-		// Mirror wsRelay.readLoop: ReadMessage + Unmarshal avoids the
-		// per-frame json.Decoder + intermediate buffer alloc that
-		// ReadJSON incurs on every message. [R202606f-PERF-001]
+		// ReadMessage + Unmarshal avoids ReadJSON's per-frame Decoder alloc.
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
@@ -664,10 +571,7 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}, false)
 
 		case "events":
-			// Cap fan-out size to prevent a compromised node amplifying a
-			// 16 MB history push N× across subscribed browser tabs. Keep
-			// the tail (most recent) to preserve "last N events" semantics
-			// for legitimate history replays. R67-SEC-3.
+			// Keep the tail (most recent) when capping.
 			events := msg.Events
 			if len(events) > maxPushedHistoryEvents {
 				events = events[len(events)-maxPushedHistoryEvents:]
@@ -675,17 +579,12 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: events, Node: c.id}, false)
 
 		case "session_state":
-			// Bound Reason to prevent a compromised node from flooding
-			// subscribed browser clients and forcing send-channel drops.
-			// R61-SEC-9.
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}, false)
 
 		case "subscribed":
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}, false)
 
 		case "subscribe_error":
-			// Same cap as session_state.Reason; msg.Error reaches every
-			// subscribed client on the 'error' type. R61-SEC-9.
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}, true)
 		}
 	}
@@ -703,12 +602,11 @@ func (c *ReverseConn) markDisconnected() {
 	}
 	c.closeMu.Unlock()
 
-	// Mirror Close(): cancel baseCtx so Subscribe history goroutines unwind
-	// the 5s FetchEvents timeout rather than waiting it out. Idempotent.
+	// Idempotent; unwinds in-flight history fetches like Close().
 	c.baseCancel()
 
-	// Drop EventSink references so disconnected browser clients don't keep
-	// sinks live for the hub's 90s subscription TTL.
+	// Drop sink references so disconnected browsers are not kept live for the
+	// hub's 90s subscription TTL.
 	c.subMu.Lock()
 	clear(c.subs)
 	c.subMu.Unlock()

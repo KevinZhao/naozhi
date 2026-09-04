@@ -47,7 +47,6 @@ func runShimRun(args []string) {
 	cwd := fs.String("cwd", "", "working directory for CLI")
 	spawnOverlayJSON := fs.String("spawn-overlay", "", "JSON per-request spawn overlay; recorded verbatim in the state file (#2494)")
 
-	// Collect --cli-arg flags (repeated)
 	var cliArgs cliArgSlice
 	fs.Var(&cliArgs, "cli-arg", "CLI argument (repeatable)")
 
@@ -60,13 +59,11 @@ func runShimRun(args []string) {
 		os.Exit(1)
 	}
 
-	// Setup minimal logging (JSON to stderr before we close it)
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
-	// The overlay is written by the parent naozhi (shim.EncodeSpawnOverlay), so
-	// a decode failure is a version skew, not operator input. Refuse to start:
-	// a shim that silently dropped it would read as "legacy, overlay unknown"
-	// on the next restart and re-open the very misclassification this fixes.
+	// Written by the parent naozhi, so a decode failure is version skew.
+	// Refuse to start: silently dropping it would read as "legacy, overlay
+	// unknown" on the next restart (#2494).
 	spawnOverlay, err := shim.DecodeSpawnOverlay(*spawnOverlayJSON)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid --spawn-overlay: %v\n", err)
@@ -90,8 +87,7 @@ func runShimRun(args []string) {
 
 	if err := shim.Run(cfg); err != nil {
 		slog.Error("shim exited with error", "err", err)
-		// Write error to stdout so the parent manager can read the actual
-		// failure reason instead of the generic "shim exited before ready".
+		// stdout is what the parent manager reads for the failure reason.
 		errJSON, _ := json.Marshal(err.Error())
 		fmt.Fprintf(os.Stdout, `{"status":"error","error":%s}`+"\n", errJSON)
 		os.Exit(1)
@@ -134,7 +130,6 @@ func runShimStop(args []string) {
 		handle, err := mgr.Reconnect(context.Background(), state.Key, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "connect to %s: %v\n", state.Key, err)
-			// Fallback: send SIGUSR2 for immediate shutdown
 			if state.ShimPID > 0 {
 				_ = osutil.SendShimReload(state.ShimPID)
 				fmt.Fprintf(os.Stderr, "  sent SIGUSR2 to PID %d\n", state.ShimPID)

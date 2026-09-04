@@ -21,22 +21,10 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 )
 
-// runDoctor prints a one-shot diagnostic report. Stays CLI-local (no
-// unix socket, no new surface on the HTTP server) so a disabled
-// naozhi is still a place to start triage. Checks include systemd
-// status, HTTP /health, auth validity, pprof reachability, state dir
-// writability, and — on Linux — the zero-downtime scope count that
-// hints whether the sudoers hardening took.
-//
-// Exit codes:
-//
-//	0 — everything passed or only WARN-level findings
-//	1 — at least one FAIL finding (service down, auth broken, etc.)
-//	2 — invalid flags / cannot render report
-//
-// Designed to be grep/pipe friendly: every line is `<icon> <category>
-// — <detail>`. The icon is ✓/⚠/✗ so scripts can filter by the
-// leading byte without parsing the full column.
+// runDoctor prints a one-shot diagnostic report. CLI-local (no new HTTP
+// surface) so a down naozhi is still triageable. Exit codes: 0 pass/WARN only,
+// 1 at least one FAIL, 2 invalid flags. Each line is `<icon> <category> <detail>`
+// with icon ✓/⚠/✗ so scripts can filter on the leading byte.
 func runDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	addr := fs.String("addr", envDefault("NAOZHI_BASE_URL", "http://127.0.0.1:8180"),
@@ -53,15 +41,13 @@ func runDoctor(args []string) {
 		os.Exit(2)
 	}
 
-	// R20260602-SEC-2: validate --addr / NAOZHI_BASE_URL before use.
 	cleanAddr := strings.TrimRight(*addr, "/")
 	if err := validateDoctorAddr(cleanAddr); err != nil {
 		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
 		os.Exit(2)
 	}
-	// Warn when a token is present and the target host is not loopback —
-	// the token would travel to a remote host, which may be intentional
-	// (CI, staging) but warrants operator awareness.
+	// A token sent to a non-loopback host may be intentional (CI, staging)
+	// but warrants operator awareness.
 	if parsedURL, _ := url.Parse(cleanAddr); parsedURL != nil {
 		host := parsedURL.Hostname()
 		if ip := net.ParseIP(host); !(host == "localhost" ||
@@ -92,11 +78,8 @@ func runDoctor(args []string) {
 	}
 }
 
-// validateDoctorAddr parses rawAddr and returns an error if it is not a
-// well-formed http or https URL. url.Parse is lenient (it accepts
-// relative paths, schemeless strings, etc.), so we additionally gate on
-// the scheme after parsing. Returns nil for valid http/https addresses.
-// [R20260602-SEC-2]
+// validateDoctorAddr rejects anything but a well-formed http/https URL;
+// url.Parse alone is lenient (relative paths, schemeless strings).
 func validateDoctorAddr(rawAddr string) error {
 	parsed, err := url.Parse(rawAddr)
 	if err != nil {
@@ -118,10 +101,8 @@ func envDefault(key, fallback string) string {
 	return fallback
 }
 
-// loadTokenBestEffort tries NAOZHI_DASHBOARD_TOKEN, then DASHBOARD_TOKEN
-// (legacy alias some scripts still export), then scans ~/.naozhi/env for
-// either name. Intentionally tolerant: a failure here just means we run
-// auth-scoped checks without a token and report them as "cannot verify".
+// loadTokenBestEffort tries NAOZHI_DASHBOARD_TOKEN, then DASHBOARD_TOKEN, then
+// ~/.naozhi/env. Tolerant: no token just means auth checks report "cannot verify".
 func loadTokenBestEffort() string {
 	for _, k := range []string{"NAOZHI_DASHBOARD_TOKEN", "DASHBOARD_TOKEN"} {
 		if v := os.Getenv(k); v != "" {
@@ -147,9 +128,8 @@ func loadTokenBestEffort() string {
 	return ""
 }
 
-// finding is one diagnostic result. level is "pass"/"warn"/"fail";
-// the human icon is chosen at render time so the JSON and text paths
-// stay in sync.
+// finding is one diagnostic result; Level is "pass"/"warn"/"fail" and the
+// icon is chosen at render time.
 type finding struct {
 	Category string `json:"category"`
 	Level    string `json:"level"`
@@ -164,12 +144,10 @@ type doctor struct {
 	json       bool
 	configPath string
 
-	// client issues every HTTP probe; nil means http.DefaultClient (the
-	// production path). Tests inject httptest.Server.Client() so parallel
-	// subtests never share http.DefaultTransport: httptest.Server.Close()
-	// calls DefaultTransport.CloseIdleConnections(), which can close a
-	// sibling subtest's freshly pooled body-less response connection before
-	// its RoundTrip has consumed the response (#2473).
+	// client issues every HTTP probe; nil means http.DefaultClient. Tests
+	// inject httptest.Server.Client() so parallel subtests never share
+	// DefaultTransport, whose CloseIdleConnections on Server.Close can kill a
+	// sibling's pooled connection mid-RoundTrip (#2473).
 	client *http.Client
 
 	hasFail  bool
@@ -195,11 +173,8 @@ func (d *doctor) run() {
 	d.checkZeroDowntimeScopes()
 	d.checkServerSecurity()
 	d.render()
-	// Backends section runs after the standard findings render so its
-	// section-header layout doesn't interleave with the per-finding ✓/✗
-	// stream. JSON mode skips the section entirely — JSON consumers
-	// already get backend metadata via /api/cli/backends and shouldn't
-	// have to parse free-form section headers from doctor's stdout.
+	// After the findings so section headers don't interleave with the ✓/✗
+	// stream; JSON consumers get backend metadata from /api/cli/backends.
 	if !d.json {
 		d.renderBackendsSection()
 	}
@@ -232,55 +207,17 @@ func (d *doctor) render() {
 	}
 }
 
-// renderBackendsSection prints the multi-backend RFC §11.2 status block
-// to d.out. It is intentionally derived from static data only (config
-// file + Profile registry + DetectBackendsCtx --version probe) so doctor
-// can run while naozhi.service is down — that's the most common time the
-// operator reaches for it. No HTTP, no shim, no server-side state is
-// touched.
-//
-// Layout (also see RFC §11.2):
-//
-//	=== CLI Backends ===
-//	Default: claude
-//
-//	[claude] claude-code 2.1.92    proto=stream-json  caps=Replay,Priority,StreamJSON
-//	  path: /home/user/.local/bin/claude
-//	  history: ~/.claude/projects/...
-//
-//	[kiro] kiro 2.3.0              proto=acp           caps=SoftInterrupt
-//	  path: /home/user/.local/bin/kiro-cli
-//	  history: ~/.kiro/sessions/cli/
-//
-//	=== Reverse Nodes ===
-//	(no reverse_nodes configured)
-//
-// or, when reverse_nodes are present:
-//
-//	node "macbook"   (live caps unknown — register a node to inspect)
-//	  can host: claude  (kiro requires "acp" cap)
-//
-// Reverse-node cap info is intentionally NOT live: doctor cannot start
-// the WebSocket hub without booting half the server, and the cap data
-// only appears once a node connects. We dump configured nodes plus a
-// per-backend "what would be required" line so an operator inspecting
-// the config sees the dependency before they ever bring the system up.
+// renderBackendsSection prints the CLI Backends + Reverse Nodes status block
+// (docs/rfc/multi-backend.md §11.2) from static data only (config + Profile
+// registry + --version probe) so it works while naozhi.service is down.
+// Reverse-node caps are NOT live — they only exist once a node connects — so
+// each backend's required caps are listed as a pre-condition instead.
 func (d *doctor) renderBackendsSection() {
-	// Ensure Profile registry is initialised — concurrent-safe and
-	// idempotent. EnsureDefaults wraps RegisterDefaults in a sync.Once;
-	// it does the right thing whether main has already registered, the
-	// helper is being called for the first time, or two parallel doctor
-	// invocations race the bootstrap. Replaces the earlier recover()
-	// pattern, which could leak a partial registry if a panic fired
-	// mid-RegisterDefaults (PR #122 review HIGH).
+	// Idempotent sync.Once bootstrap; safe whether or not main registered.
 	backend.EnsureDefaults()
 
-	// Best-effort config load. If config is missing or malformed, fall
-	// back to "no config" rendering — we still want to show what the
-	// binary CAN drive. The user typically runs doctor in two modes:
-	// "service is broken, give me triage data" (config exists) and
-	// "I just installed naozhi, what backends does it support" (no
-	// config yet).
+	// Missing/malformed config falls back to "what the binary CAN drive" so
+	// a fresh install still gets a useful section.
 	cfg, cfgErr := config.Load(d.configPath)
 	defaultBackend := "claude"
 	var cfgBackends []config.CLIBackendConfig
@@ -290,17 +227,13 @@ func (d *doctor) renderBackendsSection() {
 		cfgBackends = cfg.EnabledBackends()
 		cfgReverseNodes = cfg.ReverseNodes
 	} else {
-		// Synthesise an entry per registered Profile so the section is
-		// still informative without a config. ID order matches Profile
-		// registration order (claude, kiro, ...).
+		// One synthesised entry per registered Profile, in registration order.
 		for _, p := range backend.All() {
 			cfgBackends = append(cfgBackends, config.CLIBackendConfig{ID: p.ID})
 		}
 	}
 
-	// Probe each registered backend's binary. Use a short context so a
-	// hung --version invocation can't freeze doctor; the caller should
-	// see the per-backend probe result quickly.
+	// Short context so a hung --version cannot freeze doctor.
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	probes := cli.DetectBackendsCtx(ctx)
@@ -309,7 +242,6 @@ func (d *doctor) renderBackendsSection() {
 		probeByID[p.ID] = p
 	}
 
-	// Index Profiles by ID for caps + history-dir lookup.
 	profileByID := make(map[string]backend.Profile, len(backend.All()))
 	for _, p := range backend.All() {
 		profileByID[p.ID] = p
@@ -338,8 +270,7 @@ func (d *doctor) renderBackendsSection() {
 		if version == "" {
 			version = "unknown"
 		}
-		// Render protocol + caps. NewProtocol lookup happens through the
-		// Profile so an unknown ID degrades gracefully to "proto=?".
+		// Unknown ID degrades to "proto=?".
 		protoName := "?"
 		capsStr := "(unknown)"
 		if profileOK {
@@ -349,9 +280,7 @@ func (d *doctor) renderBackendsSection() {
 		}
 		fmt.Fprintf(d.out, "[%s] %s %s  proto=%s  caps=%s\n",
 			id, displayName, version, protoName, capsStr)
-		// path: prefer the probe (it walks $PATH). Fall back to the
-		// configured cli.backends[].path so an operator who set an
-		// override sees what they typed.
+		// Prefer the probe (walks $PATH), else show the configured override.
 		path := probe.Path
 		if path == "" {
 			path = b.Path
@@ -371,13 +300,11 @@ func (d *doctor) renderBackendsSection() {
 		fmt.Fprintln(d.out)
 	}
 
-	// Reverse Nodes section.
 	fmt.Fprintln(d.out, "=== Reverse Nodes ===")
 	if len(cfgReverseNodes) == 0 {
 		fmt.Fprintln(d.out, "(no reverse_nodes configured)")
 		return
 	}
-	// Sort node IDs so output is deterministic across runs.
 	ids := make([]string, 0, len(cfgReverseNodes))
 	for id := range cfgReverseNodes {
 		ids = append(ids, id)
@@ -391,11 +318,7 @@ func (d *doctor) renderBackendsSection() {
 		}
 		fmt.Fprintf(d.out, "node %q  display=%q  (live caps unknown — visible only after node connects)\n",
 			id, display)
-		// For each registered backend, list whether the node can
-		// host it based on RequiredNodeCaps. Doctor cannot inspect
-		// the live cap set, so we phrase the line as a
-		// pre-condition: "claude needs no special cap; kiro needs
-		// the 'acp' cap from the connected node".
+		// Live caps are unknown here, so phrase each backend as a pre-condition.
 		for _, p := range backend.All() {
 			if len(p.RequiredNodeCaps) == 0 {
 				fmt.Fprintf(d.out, "  %s: no special cap required\n", p.ID)
@@ -407,10 +330,8 @@ func (d *doctor) renderBackendsSection() {
 	}
 }
 
-// formatCapsForDoctor renders Caps as a comma-separated list of the
-// flags that are TRUE. Empty result becomes "(none)" so the line
-// stays parseable. Order matches the struct field order so the
-// output is deterministic.
+// formatCapsForDoctor renders the TRUE Caps flags as a comma-separated list
+// in struct field order; empty becomes "(none)" so the line stays parseable.
 func formatCapsForDoctor(c cli.Caps) string {
 	parts := make([]string, 0, 4)
 	if c.Replay {
@@ -431,22 +352,9 @@ func formatCapsForDoctor(c cli.Caps) string {
 	return strings.Join(parts, ",")
 }
 
-// historyDirForBackend returns the documented history directory for the
-// given backend ID, sourced from the Profile registry (added in PR #117
-// follow-up). Falls back to "(none)" when the backend is unknown OR
-// when its Profile has no HistoryDir set — both are valid states for an
-// in-memory-only backend.
-//
-// Reading from the Profile (rather than a private switch in doctor.go)
-// closes the compile-safety hole flagged in PR #117 review: adding a
-// new backend with a transcript directory now requires only a Profile
-// entry; doctor inherits the value automatically.
-//
-// Self-bootstraps the registry via EnsureDefaults (sync.Once) so the
-// helper is callable from unit tests that import it directly, and is
-// safe under parallel goroutines — replaces the earlier recover()
-// pattern which could leak a partial registry on concurrent racing
-// callers (PR #122 review HIGH).
+// historyDirForBackend returns the Profile's documented history directory, or
+// "(none)" for an unknown backend or one without a HistoryDir. Self-bootstraps
+// the registry so it is callable directly from tests.
 func historyDirForBackend(id string) string {
 	backend.EnsureDefaults()
 	if p, ok := backend.Get(id); ok && p.HistoryDir != "" {

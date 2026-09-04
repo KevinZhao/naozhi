@@ -1,23 +1,7 @@
-// File: main_claude_settings.go
-//
-// Claude settings handling for the naozhi parent process.
-//
-// docs/rfc/direct-user-settings.md PR1 (2026-05-30): naozhi-spawned cc now
-// loads ~/.claude/settings.json directly via `--setting-sources user`, so the
-// settings-override copy (writeClaudeSettingsOverride) and the naozhi-callback
-// hook filter (filterHooks / isNaozhiCallbackHook / sanitizeLogCmd / addrPort /
-// loopbackV4Re) were removed — hook feedback-loop protection lives at naozhi's
-// HTTP entry auth instead.
-//
-// What remains here is the **parent-process env injection** path (RFC §7.1),
-// which is independent of cc's --setting-sources and still required so naozhi
-// itself (transcribe → Bedrock) and the sysession Runner inherit the
-// settings.json env block:
-//   - claudeEnvAllowedPrefixes / awsEnvDenyList 白/黑名单
-//   - settingsErrSeverity enum + claudeSettingsErrSeverity 分类器
-//   - readClaudeSettingsRaw / readJSONWithRetry 文件读取（带重试）
-//   - filterClaudeEnv / matchesAnyPrefix 环境变量过滤
-//   - applyClaudeEnvSettings 父进程 env 注入（保留 shell 优先权）
+// Parent-process env injection from ~/.claude/settings.json
+// (docs/rfc/direct-user-settings.md §7.1). cc reads settings.json itself via
+// `--setting-sources user`; this path only feeds naozhi (transcribe → Bedrock)
+// and the sysession Runner.
 package main
 
 import (
@@ -38,12 +22,9 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// claudeEnvAllowedPrefixes restricts which env vars from
-// ~/.claude/settings.json are allowed to leak into the naozhi parent process.
-// Historically every key was injected, which meant arbitrary keys set by a
-// third-party Claude extension would become part of naozhi's attack surface
-// (and downstream shim/CLI env) with no audit. Limit to the prefixes that
-// Claude CLI and its AWS/Anthropic model plumbing actually consume.
+// claudeEnvAllowedPrefixes restricts which settings.json env vars may enter
+// the naozhi process: only what Claude CLI and its AWS/Anthropic plumbing
+// consume, so a third-party extension cannot widen the attack surface.
 var claudeEnvAllowedPrefixes = []string{
 	"ANTHROPIC_",
 	"CLAUDE_",
@@ -52,15 +33,10 @@ var claudeEnvAllowedPrefixes = []string{
 	"http_proxy", "https_proxy", "no_proxy",
 }
 
-// proxyEnvKeys is the set of allowed proxy env keys whose VALUE is a URL that
-// steers ALL of naozhi's outbound traffic (Feishu bearer token, message
-// bodies, upstream connectors). R20260603-SEC-5 (#1660): a tampered
-// ~/.claude/settings.json could set HTTPS_PROXY=http://attacker to intercept
-// everything; unlike the API base-URL vars, the proxy value had no scheme
-// guard. We reuse validateClaudeBaseURLEnv (reject non-loopback http://) so a
-// plaintext-http proxy to a remote host is dropped with a warning, while
-// https proxies and loopback http (local dev proxy) stay allowed. NO_PROXY is
-// not a URL and is intentionally excluded from the value check.
+// proxyEnvKeys are the proxy vars whose VALUE steers ALL outbound traffic
+// (Feishu bearer token, message bodies, upstream). A tampered settings.json
+// could set HTTPS_PROXY=http://attacker, so the value gets the same
+// non-loopback-https guard as base URLs (#1660). NO_PROXY is not a URL.
 var proxyEnvKeys = map[string]bool{
 	"HTTP_PROXY":  true,
 	"HTTPS_PROXY": true,
@@ -68,23 +44,16 @@ var proxyEnvKeys = map[string]bool{
 	"https_proxy": true,
 }
 
-// claudeEnvDenyList draws the same "refuse to propagate" line for the CLAUDE_
-// prefix that awsEnvDenyList draws for AWS_. R20260603-SEC-8 (#1660): the
-// CLAUDE_ prefix is allowlisted wholesale, so a settings.json (writable by a
-// Claude tool) could inject CLI kill-switches / test-mode flags that change
-// security-relevant behaviour of naozhi's downstream shim and CLI children.
-// Block the known dangerous switches; ordinary CLAUDE_ config (model, region,
-// feature toggles) still flows through.
+// claudeEnvDenyList blocks CLI kill-switch / mock-mode keys inside the
+// wholesale-allowed CLAUDE_ prefix: settings.json is writable by a Claude
+// tool and these change security-relevant behaviour of shim/CLI children (#1660).
 var claudeEnvDenyList = map[string]bool{
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
 	"CLAUDE_CODE_USE_MOCK_RESPONSES":           true,
 }
 
-// awsEnvDenyList 在 AWS_ 前缀允许之上再画一条"禁止跨入"的线：这些键会
-// 改变 AWS 认证来源（角色切换、凭据文件重定向），~/.claude/settings.json
-// 可以被 Claude tool 写入，放行等于给一个不受控的 env 注入通道对
-// transcribe/S3 执行凭据劫持。默认只允许标准的 region/credentials/session
-// 组合走进子进程。
+// awsEnvDenyList 在 AWS_ 前缀允许之上再禁止会改变 AWS 认证来源的键（角色切换、
+// 凭据文件重定向）：settings.json 可被 Claude tool 写入，放行等于凭据劫持通道。
 var awsEnvDenyList = map[string]bool{
 	"AWS_ROLE_ARN":                true,
 	"AWS_WEB_IDENTITY_TOKEN_FILE": true,
@@ -96,13 +65,9 @@ var awsEnvDenyList = map[string]bool{
 	"AWS_ENDPOINT_URL":            true,
 }
 
-// settingsErrSeverity classifies the outcome of applyClaudeEnvSettings so
-// main() can route to slog.Warn vs slog.Error consistently and the
-// classification itself is unit-testable. R236-QA-13 (#542): file-missing
-// is a legitimate first-run state and stays at Warn; corrupt JSON is
-// operator-actionable and surfaces at Error so the SLO log filter picks
-// it up. R241-GO-4 (#490): ctx-cancel mid-retry stays at Warn so
-// shutdown noise does not pollute the corruption alerting filter.
+// settingsErrSeverity classifies applyClaudeEnvSettings failures for main():
+// file-missing (first run) and ctx-cancel (shutdown) stay at Warn; corrupt
+// JSON is operator-actionable and surfaces at Error.
 type settingsErrSeverity int
 
 const (
@@ -124,15 +89,9 @@ func claudeSettingsErrSeverity(err error) settingsErrSeverity {
 	}
 }
 
-// readClaudeSettingsRaw reads ~/.claude/settings.json and returns its raw bytes,
-// retrying a few times if JSON parsing fails. The retry handles the race where
-// another process (Claude CLI, a VS Code extension, etc.) is rewriting the file
-// non-atomically: we may observe a truncated view, but 100ms later the writer
-// has finished and we see a complete document.
-//
-// Returns (data, nil) on success. Returns a non-nil error if the file cannot be
-// read, or if every retry yielded invalid JSON — callers must treat the error
-// as "could not determine a trustworthy settings snapshot", NOT as "file is empty".
+// readClaudeSettingsRaw reads ~/.claude/settings.json, retrying on invalid
+// JSON because another process may be rewriting the file non-atomically.
+// An error means "no trustworthy snapshot", NOT "file is empty".
 func readClaudeSettingsRaw(ctx context.Context) ([]byte, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -142,19 +101,15 @@ func readClaudeSettingsRaw(ctx context.Context) ([]byte, error) {
 	return readJSONWithRetry(ctx, path, 3, 100*time.Millisecond)
 }
 
-// readJSONWithRetry reads path and verifies the content is valid JSON. If the
-// read succeeds but parsing fails, retries up to attempts-1 more times with the
-// given sleep in between. If the file doesn't exist, returns the os.Open error
-// immediately (no retry — missing is a different failure mode than truncated).
-// The ctx parameter allows callers to abort a retry sleep early on shutdown or
-// timeout; ctx.Err() is returned when the context is cancelled mid-sleep.
+// readJSONWithRetry reads path and retries up to attempts-1 times if the
+// content is not valid JSON. A read error returns immediately (missing is a
+// different failure mode than truncated); ctx cancellation aborts a sleep.
 func readJSONWithRetry(ctx context.Context, path string, attempts int, sleep time.Duration) ([]byte, error) {
 	return readJSONWithRetryFn(ctx, path, attempts, sleep, os.ReadFile)
 }
 
-// readJSONWithRetryFn is readJSONWithRetry with the file reader injected, so
-// tests can pin the "torn first read, valid retry" interleaving without a
-// racing writer goroutine (#2473). Production always passes os.ReadFile.
+// readJSONWithRetryFn is readJSONWithRetry with the file reader injected so
+// tests can pin the torn-read interleaving deterministically (#2473).
 func readJSONWithRetryFn(ctx context.Context, path string, attempts int, sleep time.Duration, readFile func(string) ([]byte, error)) ([]byte, error) {
 	var lastParseErr error
 	for i := 0; i < attempts; i++ {
@@ -179,19 +134,11 @@ func readJSONWithRetryFn(ctx context.Context, path string, attempts int, sleep t
 	return nil, lastParseErr
 }
 
-// filterClaudeEnv returns a copy of in containing only entries that pass the
-// allowlist (claudeEnvAllowedPrefixes), the deny list (awsEnvDenyList), and the
-// per-value safety check (no NUL/newline, ≤4096 bytes). Rejected keys are
-// logged at WARN once per call so operators can spot a malicious or misconfigured
-// ~/.claude/settings.json.
-//
-// Used by applyClaudeEnvSettings (parent-process env injection). The
-// awsEnvDenyList guards naozhi's own AWS auth source (transcribe → Bedrock,
-// sysession Runner) against an auth-source override smuggled in via the
-// settings.json env block. cc child processes no longer go through this path:
-// post direct-user-settings PR1 they read settings.json directly via
-// `--setting-sources user`, so the parent-env view and the cc-env view of the
-// same settings.json may differ (RFC §7.1, documented intentional asymmetry).
+// filterClaudeEnv returns the entries of in that pass the prefix allowlist,
+// the AWS/CLAUDE deny lists and the per-value checks (no NUL/newline, ≤4096
+// bytes, https for non-loopback URLs). Rejected keys are logged at WARN.
+// cc children do not go through this path (they read settings.json directly),
+// so the parent-env view may intentionally differ from cc's (RFC §7.1).
 func filterClaudeEnv(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
@@ -202,38 +149,25 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 			slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
 			continue
 		}
-		// R20260603-SEC-8 (#1660): CLAUDE_ is allowlisted by prefix, so block
-		// the known kill-switch / mock-mode keys that would alter downstream
-		// CLI security behaviour if injected via settings.json.
 		if claudeEnvDenyList[k] {
 			slog.Warn("claude settings env: refusing to propagate CLAUDE_ kill-switch var", "key", k)
 			continue
 		}
-		// R188-SEC-M1: the prefix allowlist restricts key namespace but puts
-		// no constraint on the value. A malicious ~/.claude/settings.json
-		// could set ANTHROPIC_BASE_URL to an attacker-controlled host or
-		// inject NUL/newline into the process env that child processes
-		// inherit via execve. Gate the value size + reject NUL/newline.
+		// Children inherit the env via execve; NUL/newline or huge values must
+		// not reach it.
 		if strings.ContainsAny(v, "\x00\n\r") || len(v) > 4096 {
 			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
 			continue
 		}
-		// R20260602-SEC-1 (#1576): base-URL vars steer where naozhi (and the
-		// sysession Runner that inherits this env) sends API traffic. A
-		// tampered settings.json could point them at an attacker host or the
-		// IMDS endpoint (http://169.254.169.254) for credential harvesting.
-		// Require https:// for non-loopback hosts, mirroring weixin's SSRF
-		// guard; loopback http stays allowed for local mock gateways.
+		// Base URLs steer API traffic; a tampered file could aim them at an
+		// attacker host or IMDS (169.254.169.254). https unless loopback (#1576).
 		if claudeBaseURLEnvKeys[k] {
 			if err := validateClaudeBaseURLEnv(v); err != nil {
 				slog.Warn("claude settings env: rejecting unsafe base_url", "key", k, "err", err)
 				continue
 			}
 		}
-		// R20260603-SEC-5 (#1660): proxy vars redirect ALL outbound traffic;
-		// apply the same SSRF/redirect guard as base-URL vars so a tampered
-		// settings.json cannot point HTTP(S)_PROXY at a remote plaintext-http
-		// interceptor. Loopback http and https proxies stay allowed.
+		// Same guard for proxies: no remote plaintext-http interceptor (#1660).
 		if proxyEnvKeys[k] {
 			if err := validateClaudeBaseURLEnv(v); err != nil {
 				slog.Warn("claude settings env: rejecting unsafe proxy", "key", k, "err", err)
@@ -245,33 +179,24 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 	return out
 }
 
-// claudeBaseURLEnvKeys is the set of settings.json env keys whose value is an
-// API endpoint URL that steers naozhi's outbound traffic. validateClaudeBaseURLEnv
-// applies an SSRF/redirect guard to each. R20260602-SEC-1 (#1576).
+// claudeBaseURLEnvKeys are the env keys whose value is an API endpoint URL;
+// each is SSRF-guarded by validateClaudeBaseURLEnv (#1576).
 var claudeBaseURLEnvKeys = map[string]bool{
 	"ANTHROPIC_BASE_URL":         true,
 	"ANTHROPIC_BEDROCK_BASE_URL": true,
 	"ANTHROPIC_VERTEX_BASE_URL":  true,
 }
 
-// validateClaudeBaseURLEnv enforces that an API base-URL pulled from
-// ~/.claude/settings.json uses https:// unless it targets a loopback host
-// (localhost / 127.0.0.0/8 / ::1) for which plain http is allowed so operators
-// can wire local mock gateways. An empty value is accepted (clears the var).
-// The implementation moved to internal/envpolicy (#891) so it is shared with
-// the sysession Runner env guard verbatim. R20260602-SEC-1 (#1576).
+// validateClaudeBaseURLEnv requires https:// unless the host is loopback
+// (local mock gateways); empty is accepted. Shared with the sysession Runner
+// guard via internal/envpolicy.
 func validateClaudeBaseURLEnv(v string) error {
 	return envpolicy.ValidateBaseURLValue(v)
 }
 
-// applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
-// to the current process so spawned CC child processes inherit them via os.Environ().
-// Only sets vars not already present (shell-set vars take precedence) and only
-// for keys passing filterClaudeEnv.
-//
-// Returns an error when the settings file cannot be read or parsed so callers
-// can surface the failure. A nil return with zero env applied (e.g. no `env`
-// section or all keys filtered) is NOT treated as an error.
+// applyClaudeEnvSettings applies the settings.json env section to the current
+// process for keys passing filterClaudeEnv; shell-set vars take precedence.
+// Zero env applied is not an error; an unreadable/unparsable file is.
 func applyClaudeEnvSettings(ctx context.Context) error {
 	data, err := readClaudeSettingsRaw(ctx)
 	if err != nil {
@@ -293,39 +218,27 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 	return nil
 }
 
-// resolveNaozhiSettingsFile implements the opt-in gate for the naozhi-owned
-// isolated Claude settings file (RFC naozhi-owned-settings-v3). It returns the
-// absolute path the router should hand to every ClaudeProtocol spawn via
-// SpawnOptions.SettingsFile, or "" to keep the legacy `--setting-sources user`
-// path.
-//
-//   - Disabled (default) → "" (legacy: cc reads ~/.claude/settings.json).
-//   - Enabled → resolve the path (config override or a default under the data
-//     root), ensure it is bootstrapped ONCE from the local settings (hooks+env
-//     stripped), and return it. A bootstrap failure is logged but non-fatal:
-//     EnsureBootstrapped still writes a usable (possibly empty) file, so naozhi
-//     runs on an isolated baseline rather than falling back to the shared local
-//     file the operator explicitly opted out of.
+// resolveNaozhiSettingsFile returns the absolute path of the opt-in
+// naozhi-owned isolated Claude settings file for SpawnOptions.SettingsFile,
+// or "" to keep `--setting-sources user` (RFC naozhi-owned-settings-v3). When
+// enabled the file is bootstrapped ONCE from the local settings with
+// hooks+env stripped; a bootstrap warning is non-fatal as long as a file exists.
 func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) string {
 	if !cfg.NaozhiSettings.Enabled {
 		return ""
 	}
 	path := osutil.ExpandHome(cfg.NaozhiSettings.Path)
 	if path == "" {
-		// Default next to the session store (data root), mirroring how the
-		// event log dir is derived. Fall back to the CWD only if storePath is
-		// unset (test harnesses).
+		// Default next to the session store; CWD only when storePath is unset.
 		base := "."
 		if storePath != "" {
 			base = filepath.Dir(storePath)
 		}
 		path = filepath.Join(base, "naozhi-settings.json")
 	}
-	// The path MUST be absolute: BuildArgs silently falls back to
-	// `--setting-sources user` for a non-absolute --settings value, which would
-	// re-read the local file the operator explicitly opted OUT of. If we cannot
-	// make it absolute, refuse to enable rather than misleadingly appear enabled
-	// while actually using local settings (F2).
+	// MUST be absolute: BuildArgs silently falls back to `--setting-sources
+	// user` for a relative --settings, re-reading the file the operator opted
+	// OUT of. Refuse to enable rather than appear enabled while using local.
 	if !filepath.IsAbs(path) {
 		abs, err := filepath.Abs(path)
 		if err != nil {
@@ -341,10 +254,8 @@ func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) 
 	}
 	existed, seeded, err := naozhisettings.EnsureBootstrapped(path, localPath)
 	if err != nil {
-		// err may be advisory (file written, e.g. local unreadable) or fatal
-		// (mkdir/write failed, no file). Probe the file: if it is absent we must
-		// NOT hand the router a --settings path to a missing file (cc would read
-		// no settings). Fall back to the safe local path instead.
+		// err may be advisory (file written) or fatal (no file). Never hand the
+		// router a --settings path to a missing file — cc would read no settings.
 		if _, statErr := os.Stat(path); statErr != nil {
 			slog.Error("naozhi settings: could not create isolated file; staying on local settings",
 				"path", path, "err", err)
@@ -363,9 +274,8 @@ func resolveNaozhiSettingsFile(cfg *config.Config, storePath, claudeDir string) 
 	return path
 }
 
-// matchesAnyPrefix reports whether s starts with any of the given prefixes.
-// Prefixes ending in "_" match a namespace; prefixes without "_" match the
-// full name (e.g. "HTTP_PROXY" matches only the exact env name).
+// matchesAnyPrefix reports whether s matches any prefix: entries ending in
+// "_" match a namespace, others match the exact name.
 func matchesAnyPrefix(s string, prefixes []string) bool {
 	for _, p := range prefixes {
 		if strings.HasSuffix(p, "_") {

@@ -1,19 +1,4 @@
-// File: doctor_checks.go
-//
-// Phase 5-prep / R-cmd-doctor-checks-extract (2026-05-28):
-// 把 doctor.go 中 9 个诊断 check 方法 + 2 个 helper 抽到独立文件。
-// **纯物理切分，逐字保留原代码、零行为变化**。
-//
-// 抽出的内容（按 origin/master doctor.go line 184-509 原貌）：
-//   - checkBinary / checkSystemd / checkHealth / checkAuth / checkPprof /
-//     checkExpvar / checkStateDir / checkZeroDowntimeScopes /
-//     checkServerSecurity  — 9 个 (d *doctor) 诊断方法
-//   - isLoopbackAddr        — addr 是否仅绑 localhost（纯函数）
-//   - runOutput             — 带 3s 硬超时的 exec.Cmd 输出捕获
-//
-// doctor.go 保留编排层（run / render / renderBackendsSection）+ finding /
-// doctor struct + d.add() 等。check 方法通过同 package 的 *doctor receiver
-// 继续调用，零改动。
+// doctor 的各项诊断 check 方法；编排层（run / render）在 doctor.go。
 package main
 
 import (
@@ -54,8 +39,6 @@ func (d *doctor) checkSystemd() {
 		d.add("systemd", "pass", "skipped (not linux)")
 		return
 	}
-	// `systemctl is-active` is the canonical liveness check. Doesn't
-	// require sudo for read-only queries.
 	out, err := runOutput(exec.Command("systemctl", "is-active", "naozhi"))
 	state := strings.TrimSpace(out)
 	if err != nil && state == "" {
@@ -66,13 +49,11 @@ func (d *doctor) checkSystemd() {
 		d.add("systemd", "fail", fmt.Sprintf("naozhi.service is %q (expected active)", state))
 		return
 	}
-	// Augment with MainPID/uptime for quick grep.
 	show, _ := runOutput(exec.Command("systemctl", "show", "naozhi",
 		"--property=MainPID,ActiveEnterTimestamp,NRestarts", "--no-pager"))
 	show = strings.ReplaceAll(strings.TrimSpace(show), "\n", " · ")
-	// R187-SEC-M1: systemctl show output is local but goes to the operator
-	// terminal. Sanitize any bidi/C1/ANSI escapes defensively so a crafted
-	// unit file (or a future --property value) can't flip display order.
+	// Sanitize bidi/C1/ANSI escapes so a crafted unit file cannot flip the
+	// operator's terminal display.
 	d.add("systemd", "pass", "active · "+osutil.SanitizeForLog(show, 512))
 }
 
@@ -92,9 +73,7 @@ func (d *doctor) checkHealth() {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	// R187-SEC-M1: /health response echoes to terminal. If the configured
-	// addr is hijacked or a future /health implementation emits untrusted
-	// strings, bidi / ANSI escapes would flip operator display. Sanitize.
+	// Response echoes to the terminal; a hijacked addr could emit escapes.
 	bodyStr := osutil.SanitizeForLog(strings.TrimSpace(string(body)), 512)
 	if resp.StatusCode != http.StatusOK {
 		d.add("http /health", "fail", fmt.Sprintf("status=%d body=%s", resp.StatusCode, bodyStr))
@@ -164,9 +143,8 @@ func (d *doctor) checkPprof() {
 	}
 }
 
-// checkExpvar probes /api/debug/vars to confirm the OBS2 counters endpoint
-// is reachable. Like pprof, this sits behind auth + loopback-only; a 403
-// when doctor runs from outside the host is the hardening working.
+// checkExpvar probes /api/debug/vars (auth + loopback-only; a 403 from
+// outside the host is the hardening working).
 func (d *doctor) checkExpvar() {
 	if d.token == "" {
 		d.add("expvar", "warn", "no token; expvar reachability not verified")
@@ -189,12 +167,8 @@ func (d *doctor) checkExpvar() {
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// Spot-check one naozhi_* counter — if the endpoint responds but the
-		// payload is empty (e.g. operator hit the stdlib /debug/vars mount
-		// instead of /api/debug/vars in a misconfigured proxy), we want to
-		// surface that as fail, not pass.
-		// R185-QUAL-M1: surface read errors distinctly so a truncated body
-		// from a transient network glitch is not misreported as a routing bug.
+		// Spot-check one naozhi_* counter so a misrouted stdlib /debug/vars
+		// mount fails instead of passing; read errors are reported distinctly.
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if readErr != nil {
 			d.add("expvar", "fail", "read body failed: "+readErr.Error())
@@ -233,20 +207,15 @@ func (d *doctor) checkStateDir() {
 		d.add("state dir", "fail", dir+" exists but is not a directory")
 		return
 	}
-	// R229-SEC-13: warn on group/world readable state_dir. EventLog and
-	// sessions.json files inside use 0600 explicitly via WriteFileAtomic,
-	// but the parent dir's mode determines whether other local users can
-	// list filenames + traverse to read sidecar artefacts. cookie_secret
-	// uses the same 0600 floor — surface the mismatch via doctor so
-	// operators see it once, not via a quiet log line at every startup.
+	// Files inside are 0600, but the dir mode decides whether other local
+	// users can list filenames and traverse to sidecar artefacts.
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
 		d.add("state dir", "warn",
 			fmt.Sprintf("%s is group/world-accessible (mode %04o); restrict with: chmod 0700 %s",
 				dir, mode, dir))
 		return
 	}
-	// Writability probe — avoids chmod/owner noise that a raw Stat
-	// wouldn't catch (e.g. naozhi running as a different uid).
+	// A real write catches owner/uid mismatches a Stat would miss.
 	tmp, err := os.CreateTemp(dir, ".doctor-probe-*")
 	if err != nil {
 		d.add("state dir", "fail", dir+" not writable: "+err.Error())
@@ -262,10 +231,8 @@ func (d *doctor) checkZeroDowntimeScopes() {
 		d.add("zero-downtime", "pass", "skipped (not linux)")
 		return
 	}
-	// systemctl list-units --type=scope lists transient scopes
-	// (including naozhi-shim-*.scope if sudoers hardening is
-	// active). 0 scopes with any running shim = sudoers denied the
-	// busctl call and moveToShimsCgroup fell through to the fallback.
+	// naozhi-shim-*.scope units exist only when sudoers hardening let the
+	// busctl call through; 0 with live shims means the cgroup fallback ran.
 	out, err := runOutput(exec.Command("systemctl", "--no-legend",
 		"--no-pager", "list-units", "--type=scope"))
 	if err != nil {
@@ -286,26 +253,14 @@ func (d *doctor) checkZeroDowntimeScopes() {
 	d.add("zero-downtime", "pass", fmt.Sprintf("%d shim scope(s) active (sudoers hardening is working)", count))
 }
 
-// checkServerSecurity warns when the deployment is likely behind a TLS-
-// terminating reverse proxy (ALB / CloudFront / Nginx) but trusted_proxy
-// is not enabled. In that mode the dashboard cookie is minted without
-// the Secure flag because r.TLS == nil reaches the cookie writer, and
-// X-Forwarded-Proto is not consulted unless trusted_proxy is set. The
-// resulting cookie can leak over a downgrade attack on the proxy hop.
-//
-// Heuristic: dashboard_token configured (so the binary intends to serve
-// authenticated traffic) + listen addr is non-loopback (so external
-// peers can reach it). False positives are possible (single-host
-// loopback-only with token, or no proxy at all) — but a "warn"-level
-// finding pointed at config.yaml is cheap to dismiss after a one-time
-// review and catches the genuinely dangerous case loudly.
-//
-// Doctor's contract is to use FAIL only for "broken now"; this is
-// "broken on next request" so warn is the right level. R232-SEC-13.
+// checkServerSecurity warns when dashboard_token is set on a non-loopback
+// addr without trusted_proxy: behind a TLS-terminating proxy r.TLS is nil and
+// X-Forwarded-Proto is ignored, so the dashboard cookie is minted without
+// Secure and can leak on a downgrade of the proxy hop. Warn, not FAIL —
+// doctor reserves FAIL for "broken now".
 func (d *doctor) checkServerSecurity() {
 	cfg, err := config.Load(d.configPath)
 	if err != nil || cfg == nil {
-		// Already surfaced by other checks; don't duplicate noise.
 		d.add("server security", "pass", "skipped (config not loaded)")
 		return
 	}
@@ -327,18 +282,14 @@ func (d *doctor) checkServerSecurity() {
 }
 
 // isLoopbackAddr returns true when addr clearly binds to localhost only.
-// Conservative — when in doubt return false (so checkServerSecurity warns
-// rather than silently passing). Recognises empty addr, ":port" (which
-// binds 0.0.0.0), and explicit loopback hosts. Anything else is treated
-// as potentially externally reachable.
+// Conservative: empty, ":port" (0.0.0.0) and unparseable addrs return false
+// so checkServerSecurity warns rather than silently passing.
 func isLoopbackAddr(addr string) bool {
 	if addr == "" {
-		return false // empty effectively binds to default which may be 0.0.0.0
+		return false
 	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		// No port — could be just a host or a path. Treat unparseable as
-		// non-loopback to err on the side of warning.
 		host = addr
 	}
 	switch host {
@@ -348,12 +299,9 @@ func isLoopbackAddr(addr string) bool {
 	return false
 }
 
-// runOutput runs cmd with a 3s hard deadline and returns combined
-// stdout+stderr. Intentionally swallows context cancel as the err
-// value when the inner process itself exited cleanly — callers only
-// care about the exec.ExitError path (non-zero exit = meaningful
-// signal, e.g. systemctl is-active returns 3 for "inactive"). The
-// 3s cap prevents a hung systemd from freezing the whole report.
+// runOutput runs cmd with a 3s hard deadline (a hung systemd must not freeze
+// the report) and returns combined stdout+stderr; callers care about the
+// exec.ExitError path (e.g. systemctl is-active exits 3 for "inactive").
 func runOutput(cmd *exec.Cmd) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
