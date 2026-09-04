@@ -74,6 +74,23 @@ func TestSetSessionTuning_Validation(t *testing.T) {
 	if _, err := r.SetSessionTuning(ctx, "missing", strp("opus"), nil); !errors.Is(err, ErrTuningUnknownSession) {
 		t.Errorf("unknown key: err = %v, want ErrTuningUnknownSession", err)
 	}
+	// The observed-model manifest serves back whatever claude reported in
+	// its init frame, including the context-window suffix. A popover pick of
+	// that id must round-trip (suspended → deferred), not 400 — this was the
+	// "every model chip click fails" regression once the deployment moved to
+	// `…[1m]` model ids.
+	if via, err := r.SetSessionTuning(ctx, "k1", strp("us.anthropic.claude-fable-5-1[1m]"), nil); err != nil || via != TuningAppliedDeferred {
+		t.Errorf("[1m] model: via=%q err=%v, want deferred/nil", via, err)
+	}
+	if got := r.ss.sessions["k1"].TuningModel(); got != "us.anthropic.claude-fable-5-1[1m]" {
+		t.Errorf("[1m] model: recorded = %q", got)
+	}
+	if _, err := r.SetSessionTuning(ctx, "k1", strp("[1m]"), nil); err == nil {
+		t.Error("leading bracket must still be rejected (leading-char gate)")
+	}
+	if _, err := r.SetSessionTuning(ctx, "k1", strp(""), nil); err != nil {
+		t.Errorf("clearing model must not error: %v", err)
+	}
 	// claude accepts `--effort` since CLI 2.1.226 (#2412: EffortTier=true),
 	// so a tier on a claude session is recorded (suspended → deferred), not
 	// rejected. Pinning this here is what catches a future Capabilities()

@@ -22,7 +22,13 @@ import (
 // ambiguous on some shells) is rejected outright — a value like "-foo"
 // could otherwise be re-parsed by the CLI's flag parser when naozhi
 // assembles argv (`--model <value>`). Flag-injection guard, R215-SEC-P2-1.
-var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+//
+// `[` `]` are allowed in the tail because the claude CLI's context-window
+// suffix syntax ("us.anthropic.claude-fable-5-1[1m]") is a real model id:
+// the CLI echoes it in its init frame, the observed-model manifest serves
+// it back to the popover, and the operator picks it. Rejecting it turned
+// every popover pick into a 400. Not shell-expanded — naozhi execs directly.
+var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\[\]-]*$`)
 
 // EffortTiers is the closed set of thinking-effort tiers naozhi will
 // forward, matching `kiro-cli acp --effort` (verified 2.16.0–2.20.2).
@@ -65,7 +71,7 @@ func ValidateModel(field, value string) error {
 		return fmt.Errorf("%s %q is too long (max 128 chars)", field, value)
 	}
 	if !modelNameRe.MatchString(value) {
-		return fmt.Errorf("%s %q must match [A-Za-z0-9._-]+ — refusing (flag-injection guard)", field, value)
+		return fmt.Errorf("%s %q must match [A-Za-z0-9._[]-]+ — refusing (flag-injection guard)", field, value)
 	}
 	return nil
 }

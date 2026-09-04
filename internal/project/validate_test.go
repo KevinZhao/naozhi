@@ -17,6 +17,7 @@ func TestValidateConfig(t *testing.T) {
 		{"plain model passes", ProjectConfig{PlannerModel: "claude-sonnet-4-6"}, true},
 		{"model with slash allowed", ProjectConfig{PlannerModel: "anthropic/claude-opus"}, true},
 		{"model with dot/colon allowed", ProjectConfig{PlannerModel: "eu-west-1.bedrock:claude"}, true},
+		{"model with [1m] context-window suffix allowed", ProjectConfig{PlannerModel: "us.anthropic.claude-fable-5-1[1m]"}, true},
 		{"prompt with tab allowed", ProjectConfig{PlannerPrompt: "line1\n"[:0] + "\tindent"}, true},
 
 		{"prompt over cap rejected", ProjectConfig{PlannerPrompt: strings.Repeat("a", 8*1024+1)}, false},
@@ -29,6 +30,7 @@ func TestValidateConfig(t *testing.T) {
 		{"model over cap rejected", ProjectConfig{PlannerModel: strings.Repeat("a", 257)}, false},
 		{"model with space rejected", ProjectConfig{PlannerModel: "claude --dangerously"}, false},
 		{"model with leading dash rejected", ProjectConfig{PlannerModel: "-rm-rf"}, false},
+		{"model with leading bracket rejected", ProjectConfig{PlannerModel: "[1m]"}, false},
 		{"model with newline rejected", ProjectConfig{PlannerModel: "claude\nfoo"}, false},
 
 		// R184-SEC-M1: ChatBindings must reject colon / NUL / oversize so

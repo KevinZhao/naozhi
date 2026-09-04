@@ -471,6 +471,11 @@ func TestValidateModelString(t *testing.T) {
 		{"haiku_ms", "haiku-4-5-20251001", false},
 		{"bedrock_dotted", "us.anthropic.claude-3-5-sonnet", false},
 		{"underscore", "kiro_alpha", false},
+		// claude CLI context-window suffix: reported in the init frame and
+		// served back by the observed-model manifest, so the popover pick
+		// must round-trip through the same validator.
+		{"context_window_suffix_ok", "us.anthropic.claude-fable-5-1[1m]", false},
+		{"leading_bracket_rejected", "[1m]", true},
 		{"leading_dash_rejected", "-injected", true},
 		{"flag_pair_rejected", "--mcp-config", true},
 		{"space_rejected", "claude opus", true},

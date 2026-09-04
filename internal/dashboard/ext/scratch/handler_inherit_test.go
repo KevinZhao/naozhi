@@ -64,8 +64,7 @@ func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 
 // inheritSourceTuning is the pure merge behind HandleOpen. Snapshot values
 // are CLI-reported, so anything that would fail the router's argv-injection
-// gate (e.g. claude echoing a "[1m]" context-window suffix in its init frame,
-// or an out-of-set effort tier) must be skipped — falling back to the
+// gate (e.g. a flag-shaped value or an out-of-set effort tier) must be skipped — falling back to the
 // registry default — rather than turning every later send into an
 // ErrInvalidModel failure. The gate must be the router's own
 // (session.ValidateModelID), not a stricter one: Bedrock ARN / inference-
@@ -95,9 +94,12 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 			want: session.AgentOpts{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}},
 		},
 		{
-			name: "CLI-reported [1m] suffix fails the router model gate and is skipped",
+			// claude's init frame echoes the context-window suffix; the
+			// router gate admits it (it is a real model id the CLI parses),
+			// so the aside follows its source's 1M-context model.
+			name: "CLI-reported [1m] suffix passes the router model gate and is inherited",
 			snap: session.SessionSnapshot{AccessProfile: "bedrock", Model: "us.anthropic.claude-fable-5-1[1m]"},
-			want: session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "bedrock", ExtraArgs: []string{"--x"}},
+			want: session.AgentOpts{Model: "us.anthropic.claude-fable-5-1[1m]", Effort: "low", AccessProfile: "bedrock", ExtraArgs: []string{"--x"}},
 		},
 		{
 			name: "flag-shaped model is skipped",
