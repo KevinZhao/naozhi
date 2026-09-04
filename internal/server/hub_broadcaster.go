@@ -3,16 +3,10 @@ package server
 import "github.com/naozhi/naozhi/internal/runtelemetry"
 
 // hubBroadcaster implements runtelemetry.Broadcaster against *Hub.
-// Cron and sysession both register one of these at construction so
-// their run lifecycle events fan out through a single seam, replacing
-// the legacy SetOnExecute / SetOnRunStarted / SetOnRunEnded trio for
-// cron and the per-Manager SetTelemetry seam for sysession (#1723).
-//
-// The dispatch is keyed on RunStartedEvent.Subsystem /
-// RunEndedEvent.Subsystem so a future producer (planner, system) can
-// be added by extending the switch without touching cron / sysession.
-//
-// Refs: docs/rfc/cron-sysession-merge.md §3.5.4.
+// Cron and sysession both register one at construction so their run lifecycle
+// events fan out through a single seam (#1723). Dispatch is keyed on
+// RunStartedEvent.Subsystem / RunEndedEvent.Subsystem, so a new producer is
+// added by extending the switch. Refs: docs/rfc/cron-sysession-merge.md §3.5.4.
 type hubBroadcaster struct{ h *Hub }
 
 // newHubBroadcaster wraps a Hub for use as a runtelemetry.Broadcaster.
@@ -44,11 +38,10 @@ func (b hubBroadcaster) BroadcastRunEnded(ev runtelemetry.RunEndedEvent) {
 			ev.StartedAt, ev.EndedAt, ev.DurationMS, ev.SessionID,
 			string(ev.ErrorClass), ev.ErrorMsg, string(ev.Trigger))
 	case runtelemetry.SubsystemSysession:
-		// SECURITY: ErrorMsg deliberately dropped on the wire for sysession
-		// per docs/rfc/system-session.md §9.4 — daemon errors can echo
-		// prompt fragments back from the LLM subprocess and broadcasting
-		// that to every authenticated dashboard client constitutes
-		// cross-tenant leakage. cron emits ErrorMsg post-redact.
+		// SECURITY: ErrorMsg deliberately dropped for sysession
+		// (docs/rfc/system-session.md §9.4) — daemon errors can echo prompt
+		// fragments, and broadcasting them to every authenticated dashboard
+		// client is cross-tenant leakage. cron emits ErrorMsg post-redact.
 		b.h.BroadcastDaemonRunEnded(ev.OwnerID, ev.RunID, string(ev.State),
 			string(ev.ErrorClass), string(ev.Trigger), ev.DurationMS)
 	}

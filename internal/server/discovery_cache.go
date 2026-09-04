@@ -19,22 +19,14 @@ type discoveryCache struct {
 	mu       sync.RWMutex
 	sessions []discovery.DiscoveredSession
 
-	// refreshMu serialises refresh() so the two startLoop goroutines (initial
-	// one-shot + the 10s ticker) cannot run a Scan / tryShortCircuit
-	// concurrently. startLoop launches both independently and nothing
-	// otherwise orders them — a first full Scan that runs longer than the 10s
-	// tick interval (slow disk / huge ~/.claude) would otherwise let the tick
-	// fire a second concurrent refresh. Beyond preventing duplicate Scan work,
-	// this single-flight guarantee is what makes refreshScratch safe to keep
-	// as shared state. R20260603-PERF-2 (#1700).
+	// refreshMu single-flights refresh() across the two startLoop goroutines
+	// (initial one-shot + ticker); it is also what makes refreshScratch safe
+	// as shared state (#1700).
 	refreshMu sync.Mutex
 
-	// refreshScratch is a reusable buffer owned by the refresh path (guarded
-	// by refreshMu, never published to readers). tryShortCircuit copies the
-	// cached sessions into it and runs RefreshDynamic in place, allocating a
-	// fresh published snapshot only when a dynamic field actually changed.
-	// This drops the steady-state idle tick from one N-element allocation to
-	// zero. R20260603-PERF-2 (#1700).
+	// refreshScratch is owned by the refresh path (guarded by refreshMu, never
+	// published to readers); tryShortCircuit runs RefreshDynamic in it and
+	// publishes a fresh copy only when something changed.
 	refreshScratch []discovery.DiscoveredSession
 
 	wg sync.WaitGroup // tracks the initial refresh goroutine started by startLoop
@@ -69,25 +61,13 @@ func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[st
 
 // startLoop begins periodic scanning every 10 seconds. Both the initial
 // refresh and the ticker loop are tracked by dc.wg so Server.Shutdown can
-// Wait() on them after cancelling ctx — otherwise a tick fired between
-// ctx-cancel and projectMgr cleanup would race on disposed state. R218B-GO-1.
-//
-// R242-GO-19: the initial refresh goroutine previously ignored ctx
-// entirely — Server.Shutdown could cancel before refresh()'s blocking
-// discovery.Scan finished, leaving Wait() blocked on a goroutine no one
-// could interrupt. Tick-loop already short-circuits on ctx.Done; gate
-// the initial call the same way so a SIGTERM during boot doesn't burn
-// the full Scan budget on a server about to die anyway.
+// Wait() on them after cancelling ctx and not race projectMgr cleanup.
 func (dc *discoveryCache) startLoop(ctx context.Context) {
 	dc.wg.Add(1)
 	go func() {
 		defer dc.wg.Done()
-		// Quick pre-scan ctx check so a SIGTERM caught before this
-		// goroutine is scheduled (or while still parked) skips the
-		// expensive Scan entirely. Scan itself doesn't take ctx, so
-		// this is the only point we can pre-empt without invasive
-		// surgery to discovery.Scan; an in-flight Scan still runs to
-		// completion (≤O(few hundred ms) for a typical claude dir).
+		// Scan doesn't take ctx, so this pre-check is the only pre-emption
+		// point; an in-flight Scan still runs to completion.
 		select {
 		case <-ctx.Done():
 			return
@@ -125,8 +105,6 @@ func (dc *discoveryCache) refresh() {
 		return
 	}
 
-	// R20260603-PERF-2 (#1700): single-flight the refresh path so the two
-	// startLoop goroutines never Scan / mutate refreshScratch concurrently.
 	dc.refreshMu.Lock()
 	defer dc.refreshMu.Unlock()
 
@@ -134,10 +112,8 @@ func (dc *discoveryCache) refresh() {
 		return
 	}
 
-	// Capture dir mtime BEFORE scan so that any files created during the scan
-	// will have a newer mtime, causing the next tryShortCircuit to miss and
-	// trigger a full scan. This avoids a TOCTOU where a newly created session
-	// file is missed permanently.
+	// Capture dir mtime BEFORE scan so files created mid-scan make the next
+	// tryShortCircuit miss instead of being missed permanently.
 	sessDir := filepath.Join(dc.claudeDir, "sessions")
 	var newDirMtime time.Time
 	if info, err := os.Stat(sessDir); err == nil {
@@ -151,12 +127,9 @@ func (dc *discoveryCache) refresh() {
 	}
 	sessions, err := scan(dc.claudeDir, pids, sids, cwds)
 	if err != nil {
-		// Keep the previous snapshot and leave lastDirMtime untouched: a
-		// transient error used to publish an empty list AND advance the
-		// mtime, so every following tick short-circuited on "dir unchanged"
-		// and the discovered panel stayed empty until the directory was
-		// touched again. Not advancing the mtime makes the next tick retry
-		// the full scan.
+		// Keep the previous snapshot and leave lastDirMtime untouched so the
+		// next tick retries the full scan instead of short-circuiting on an
+		// empty list.
 		slog.Warn("discovery cache refresh", "err", err)
 		return
 	}
@@ -176,22 +149,13 @@ func (dc *discoveryCache) refresh() {
 		}
 	}
 
-	// Filter out recently-evicted PIDs and store the final result.
-	//
-	// R20260614-PERF-009 (#2123): the O(N) sessions filter and the
-	// evictedPIDs expiry sweep used to run entirely under dc.mu.Lock(),
-	// blocking every snapshot() reader (dashboard GET /api/discovered) for
-	// the full scan-size duration. Both are now computed against a small
-	// snapshot of evictedPIDs taken under a brief RLock, with the write lock
-	// held only for the final publish. Because evictPID can add a PID in the
-	// window between our RUnlock and the publish Lock (the race the
-	// RefreshDynamic path documents at R20260605B-CORR-5), the publish does a
-	// cheap re-check against any PIDs evicted *after* our snapshot instant so
-	// a just-evicted session cannot be resurrected.
+	// Filter recently-evicted PIDs against a snapshot of evictedPIDs taken
+	// under a brief RLock so snapshot() readers are not blocked for the O(N)
+	// pass; the publish re-checks PIDs evicted after the snapshot so a
+	// just-evicted session cannot be resurrected (#2123).
 	now := time.Now()
 	const evictGrace = 60 * time.Second
 
-	// Snapshot the (typically tiny) evictedPIDs set under a brief RLock.
 	dc.mu.RLock()
 	var evictedSnap map[int]time.Time
 	if len(dc.evictedPIDs) > 0 {
@@ -202,7 +166,6 @@ func (dc *discoveryCache) refresh() {
 	}
 	dc.mu.RUnlock()
 
-	// Expiry sweep + O(N) filter run lock-free against the snapshot.
 	if len(evictedSnap) > 0 {
 		for pid, evictedAt := range evictedSnap {
 			if now.Sub(evictedAt) > evictGrace {
@@ -221,10 +184,8 @@ func (dc *discoveryCache) refresh() {
 	}
 
 	dc.mu.Lock()
-	// Apply the expiry deletions decided above to the live map, and re-filter
-	// against any PID evicted after our snapshot instant (concurrent
-	// evictPID). The re-check loop only iterates when a race actually
-	// happened; the steady-state path skips it entirely.
+	// Apply expiry to the live map and re-filter against PIDs evicted after
+	// our snapshot instant (concurrent evictPID).
 	if len(dc.evictedPIDs) > 0 {
 		for pid, evictedAt := range dc.evictedPIDs {
 			if now.Sub(evictedAt) > evictGrace {
@@ -232,8 +193,6 @@ func (dc *discoveryCache) refresh() {
 				continue
 			}
 			if _, seen := evictedSnap[pid]; !seen {
-				// Evicted during our lock-free window — drop any matching
-				// session so the just-evicted card cannot reappear.
 				out := sessions[:0:0]
 				for _, s := range sessions {
 					if s.PID != pid {
@@ -277,42 +236,20 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 		}
 	}
 
-	// Session list is stable (no new/removed processes), but dynamic fields
-	// (lastActive, state, summary, lastPrompt) may have changed because the
-	// CLI keeps writing to JSONL files.  Do a lightweight refresh that only
-	// stats files and hits the mtime-based caches.
-	//
-	// R20260603-PERF-2 (#1700): we must NOT call RefreshDynamic on dc.sessions
-	// in place — snapshot() hands the same backing array to dashboard readers
-	// (and evictPID's [:0:0] establishes the published-slice-is-immutable
-	// contract), so a concurrent reader copying it while RefreshDynamic
-	// rewrites string headers in place is a data race. The previous code
-	// therefore allocated a full N-element copy EVERY tick (~10s) even when no
-	// dynamic field changed — pure churn on the steady-state idle path.
-	//
-	// RefreshDynamic returns changed, so we can refresh into a refresh-
-	// goroutine-private scratch buffer (refreshScratch, never published) and
-	// only publish a fresh immutable copy when something actually changed. On
-	// the common idle path (no JSONL writes since the last tick) changed=false
-	// and we allocate nothing and never take the write lock. refreshMu
-	// (held by the caller) guarantees refreshScratch has a single user.
+	// Session list is stable but dynamic fields (lastActive, state, summary,
+	// lastPrompt) may have changed. The published slice is immutable (readers
+	// copy it without the lock), so RefreshDynamic must NOT run on dc.sessions
+	// in place — refresh into refreshScratch (single user via refreshMu) and
+	// publish a fresh copy only when something changed (#1700).
 	if len(cached) > 0 {
 		scratch := dc.refreshScratch[:0]
 		scratch = append(scratch, cached...)
 		dc.refreshScratch = scratch // retain grown capacity for reuse
 		if discovery.RefreshDynamic(dc.claudeDir, scratch) {
-			// Publish a fresh immutable snapshot — never hand readers the
-			// reusable scratch backing array.
-			//
-			// R20260605B-CORR-5: `scratch` was built from the `cached`
-			// snapshot read under RLock at the top of this function. evictPID
-			// takes only dc.mu (NOT refreshMu), so a session takeover can call
-			// evictPID in the window between that RUnlock and the Lock below —
-			// removing a killed PID from dc.sessions and recording it in
-			// evictedPIDs. Publishing the pre-eviction copy verbatim would
-			// resurrect the just-evicted session (the stale sidebar card
-			// EvictPID exists to prevent). Filter evictedPIDs here under the
-			// write lock, mirroring the full-scan path in refresh().
+			// Publish a fresh copy, never the scratch array. evictPID takes only
+			// dc.mu (not refreshMu) and may have run since `cached` was read, so
+			// filter evictedPIDs under the write lock or the killed session
+			// would be resurrected.
 			dc.mu.Lock()
 			updated := make([]discovery.DiscoveredSession, 0, len(scratch))
 			for _, s := range scratch {
@@ -358,9 +295,9 @@ func (dc *discoveryCache) snapshot() []discovery.DiscoveredSession {
 }
 
 // Snapshot is the exported alias used by internal/dashboard/discovery via the
-// CacheView interface. Phase 3b (server-split-phase4-design.md §6.5 Plan B).
+// CacheView interface.
 func (dc *discoveryCache) Snapshot() []discovery.DiscoveredSession { return dc.snapshot() }
 
 // EvictPID is the exported alias used by internal/dashboard/discovery via the
-// CacheView interface. Phase 3b.
+// CacheView interface.
 func (dc *discoveryCache) EvictPID(pid int) { dc.evictPID(pid) }

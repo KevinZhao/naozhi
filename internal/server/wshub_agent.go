@@ -2,9 +2,6 @@
 //
 //	WRITES:     agent tailer block (tailers / wiredLinkersMu / wiredLinkers)
 //	READS:      shared deps block (router for session resolution)
-//
-// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
-// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (
@@ -15,37 +12,24 @@ import (
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
-// agentTaskDoneSetter is the server-package consumer view of the
-// parent-stream EventLog surface that maybeWireLinkerTailer needs:
-// install a single callback fired when a parent-stream `task_done`
-// arrives so the matching agent tailer closes promptly. Declared here
-// (not imported from cli) so wshub_agent.go does not type-assert on
-// `*cli.EventLog` at the call site — *cli.EventLog satisfies the
-// interface implicitly via Go structural typing.
-//
-// R217-ARCH-2 / R222-ARCH-5 / #625: closes the type-assertion debt at
-// the wshub_agent.go boundary. A future ACP / Gemini backend that
-// wires its own task-done plumbing can pass an alternative
-// implementation through ManagedSession.AgentEventLog without forcing
-// the server to learn the new concrete type. The wider lifecycle
-// AgentIntrospector reform (also tracked under #625) lives in the
-// session package; this is the minimal server-side cut.
+// agentTaskDoneSetter is the server-side view of the parent-stream EventLog
+// surface maybeWireLinkerTailer needs: one callback fired when a parent-stream
+// `task_done` arrives so the matching agent tailer closes promptly. Declared
+// here so the call site never names *cli.EventLog (which satisfies it
+// implicitly); another backend can pass its own implementation through
+// ManagedSession.AgentEventLog (#625).
 type agentTaskDoneSetter interface {
 	SetOnAgentTaskDone(fn func(taskID, status string))
 }
 
 // enrichSnapshot overlays tailer-local aggregator metrics onto each
-// SubagentInfo in snap. Callers already have a *Hub — the tailer registry
-// lives there. Safe to call when h.tailers is nil (unit test harness);
-// the function is a no-op in that case.
+// SubagentInfo in snap. No-op when h.tailers is nil (unit test harness).
 //
-// Metric precedence: the session Snapshot carries whatever the EventLog
-// recorded from parent-stream task_progress (authoritative when present).
-// We overwrite only when the tailer has a later value — the silent tailer
-// tracks each agent's internal tool_use count and per-step duration which
-// the parent stream reports only at coarser granularity. If the parent
-// stream task_done has already closed the tailer, it's gone from the
-// registry and we leave the EventLog values in place (by design).
+// Precedence: the Snapshot carries what the EventLog recorded from
+// parent-stream task_progress; the tailer overwrites only with a later value,
+// since it tracks per-agent tool_use count and step duration at finer
+// granularity. Once task_done has closed the tailer it is gone from the
+// registry and the EventLog values stand.
 func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
 	if h == nil || h.tailers == nil || snap == nil || len(snap.Subagents) == 0 {
 		return
@@ -84,24 +68,17 @@ func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
 // successful resolution so parallel-stream events start buffering
 // immediately, even before any client subscribes.
 //
-// The linker is consumed via the agentlink.AgentLinker interface (R239-
-// ARCH-I) so server stays decoupled from the *cli.SubagentLinker concrete
-// type. *cli.SubagentLinker satisfies the interface implicitly; future
-// ACP / Gemini backends that lack a subagent-linking concept can plug a
-// noop AgentLinker without server-side branching.
+// The linker is consumed via agentlink.AgentLinker so server stays decoupled
+// from the *cli.SubagentLinker concrete type.
 func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
-	// Capture the concrete return for the nil check first — a typed nil
-	// *cli.SubagentLinker promoted to an interface value is non-nil at
-	// the interface layer, so we must guard against `nil` while still in
-	// the concrete return type to match the pre-R239-ARCH-I behaviour.
+	// Nil-check the concrete return first: a typed-nil *cli.SubagentLinker
+	// promoted to an interface value is non-nil at the interface layer.
 	concrete := sess.SubagentLinker()
 	if concrete == nil || h.tailers == nil {
 		return
 	}
-	// Promote to interface for storage and downstream calls. Map dedup
-	// runs against (dynamic type, pointer value); behaviour is equivalent
-	// to the prior pointer-keyed map for the cli backend but admits other
-	// AgentLinker implementations without churn.
+	// Map dedup runs against (dynamic type, pointer value), so other
+	// AgentLinker implementations work without churn.
 	var linker agentlink.AgentLinker = concrete
 	h.wiredLinkersMu.Lock()
 	if h.wiredLinkers == nil {
@@ -130,15 +107,10 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 		h.tailers.ensureTailer(key, taskID, toolUseID, info.JSONLPath)
 	})
 
-	// Parent stream task_done → close tailer (fires agent_done to any
-	// remaining subscribers + flushes final meta).
-	//
-	// We retain the concrete return for the typed-nil guard (a
-	// *cli.EventLog promoted to an interface keeps the dynamic-type
-	// half non-nil even when the value half is nil — the same trap
-	// SubagentLinker dodges above). After the guard we route through
-	// the local agentTaskDoneSetter interface so the call site does
-	// not name *cli.EventLog. R217-ARCH-2 / #625.
+	// Parent stream task_done → close tailer (fires agent_done to remaining
+	// subscribers + flushes final meta). Same typed-nil guard on the concrete
+	// return as above; after it, route through agentTaskDoneSetter so the call
+	// site does not name *cli.EventLog (#625).
 	if rawLog := sess.AgentEventLog(); rawLog != nil {
 		var hook agentTaskDoneSetter = rawLog
 		hook.SetOnAgentTaskDone(func(taskID, status string) {
@@ -147,10 +119,8 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 	}
 }
 
-// wshub_agent.go — WS handlers for agent_subscribe / agent_unsubscribe.
-// Paired with agent_tailer.go (the server-side event fanout) and
-// dashboard_agent_events.go (the HTTP fallback) to deliver the agent-team
-// internal-view feature described by RFC v4 agent-team-ui §3.5.2.
+// WS handlers for agent_subscribe / agent_unsubscribe; agent_tailer.go is the
+// event fanout and dashboard_agent_events.go the HTTP fallback.
 
 // agentTaskIDRe mirrors the HTTP endpoint's whitelist (taskIDRe) so a WS
 // payload with a rogue task_id gets rejected before reaching the Linker.

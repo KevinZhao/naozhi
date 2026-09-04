@@ -1,11 +1,5 @@
-// Phase 4c-prep / R-tailer-registry-extract (2026-05-28):
-// tailerRegistry struct + tailerKey + 11 methods 抽到独立文件。
-// 纯物理切分、零行为变化。
-//
-// agent_tailer.go 现在仅保留 agentTailer struct + 4 个 method
-// (MetaSnapshot / pollOnce / updateMetaFromEventLocked / finalize)；
-// 容器侧（生命周期管理、ensureTailer、attach/detach、Shutdown 等）
-// 全部进入此文件。
+// tailerRegistry 容器侧（生命周期管理、ensureTailer、attach/detach、Shutdown）；
+// agentTailer 本体见 agent_tailer.go。
 package server
 
 import (
@@ -28,13 +22,8 @@ type tailerRegistry struct {
 	hub        *Hub
 	clientSubs map[*wsClient]map[tailerKey]struct{} // reverse index for client teardown
 
-	// R246-PERF-7: a single registry-level ticker drives every tailer's
-	// pollOnce step rather than each tailer owning its own goroutine +
-	// time.NewTicker. With agentTailerMax=50 the prior design cost 50
-	// long-lived goroutines and 50 ticker channels; this collapses to one
-	// of each. pollWG tracks the central ticker goroutine so Shutdown can
-	// block until the final fan-out iteration has fully released every
-	// t.reader before the Hub-level teardown drops the transcript file.
+	// One registry-level ticker drives every tailer's pollOnce. pollWG lets
+	// Shutdown block until the final iteration has released every t.reader.
 	pollStop     chan struct{}
 	pollStopOnce sync.Once
 	pollOnce     sync.Once
@@ -56,11 +45,8 @@ func newTailerRegistry(hub *Hub) *tailerRegistry {
 	}
 }
 
-// startCentralPoller lazily launches the single registry-level pollLoop
-// goroutine on first ensureTailer. Doing the launch on demand (rather than at
-// newTailerRegistry time) keeps test fixtures that build registries without
-// ever calling ensureTailer goroutine-leak-free, and matches the prior
-// "goroutine spawned only after first tailer" footprint.
+// startCentralPoller lazily launches the single pollLoop goroutine on first
+// ensureTailer, so registries that never tail stay goroutine-free.
 func (r *tailerRegistry) startCentralPoller() {
 	r.pollOnce.Do(func() {
 		r.pollWG.Add(1)
@@ -69,19 +55,13 @@ func (r *tailerRegistry) startCentralPoller() {
 }
 
 // pollLoop is the single timer goroutine that drives every active tailer's
-// pollOnce step. R246-PERF-7: replaces the per-tailer t.run() goroutine that
-// allocated one *time.Ticker + one goroutine per tailer (×agentTailerMax=50).
-// Iteration is serial — pollOnce is a bounded operation (a few file Stat /
-// Read calls + bounded send-fan-out under the tailer's own mu) and 50 of
-// them per 200 ms tick comfortably fits in budget. A central goroutine also
-// gives idle reaping a single deterministic point of execution.
+// pollOnce step. Iteration is serial — pollOnce is bounded and 50 per
+// 200 ms tick fits in budget; it also gives idle reaping one execution point.
 func (r *tailerRegistry) pollLoop() {
 	defer r.pollWG.Done()
 	ticker := time.NewTicker(agentTailerPollInterval)
 	defer ticker.Stop()
-	// Reuse a single scratch slice across ticks so steady-state polling pays
-	// zero allocation for the snapshot itself; the cap grows monotonically up
-	// to agentTailerMax.
+	// Scratch slice reused across ticks so the snapshot is alloc-free.
 	scratch := make([]*agentTailer, 0, agentTailerMax)
 	for {
 		select {
@@ -91,26 +71,18 @@ func (r *tailerRegistry) pollLoop() {
 			scratch = r.snapshotTailers(scratch[:0])
 			for _, t := range scratch {
 				if !t.pollOnce() {
-					// pollOnce returned false (idle reap or already closed).
-					// closeTask has already removed t from byTask so the next
-					// snapshot will not see it. No further work here.
+					// Idle reap or already closed; closeTask already removed t from byTask.
 				}
 			}
-			// Drop references in the scratch slice between ticks so a tailer
-			// removed by closeTask becomes GC-eligible immediately rather than
-			// being pinned through r.pollWG's scratch capture.
-			// R249-PERF-5: clear() compiles to a memclr that no-ops on an empty
-			// slice, so the steady-state idle tick (no tailers registered) pays
-			// zero work here instead of entering a manual range loop.
+			// Drop references between ticks so a closed tailer is GC-eligible
+			// immediately instead of pinned by scratch.
 			clear(scratch)
 		}
 	}
 }
 
 // snapshotTailers copies the current set of live tailers into dst (truncated
-// by the caller) under r.mu.RLock, returning the populated slice. Holds the
-// read lock for O(N) over byTask only — pollOnce iteration runs lock-free
-// outside.
+// by the caller) under r.mu.RLock; pollOnce iteration then runs lock-free.
 func (r *tailerRegistry) snapshotTailers(dst []*agentTailer) []*agentTailer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -129,12 +101,9 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 	if jsonlPath == "" {
 		return nil, false
 	}
-	// R232-SEC-14: when allowedRoot is configured, refuse jsonlPath outside
-	// it. The Linker normally sources JSONLPath from CLI-emitted absolute
-	// paths under the workspace root, but a malformed init/parallel-stream
-	// event could in principle drive ensureTailer at an arbitrary FS
-	// location and have the silent tailer Stat/Tail it. Empty allowedRoot
-	// (legacy unrestricted deployments) keeps prior behaviour.
+	// When allowedRoot is configured, refuse jsonlPath outside it so a
+	// malformed CLI event cannot make the tailer Stat/Tail an arbitrary file.
+	// Empty allowedRoot means unrestricted.
 	if r != nil && r.hub != nil && r.hub.allowedRoot != "" {
 		if !jsonlPathUnderAllowedRoot(jsonlPath, r.hub.allowedRoot) {
 			slog.Warn("agent_tailer: jsonl path outside allowed_root rejected",
@@ -173,8 +142,6 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 	}
 	r.byTask[tk] = t
 	r.count.Add(1)
-	// R246-PERF-7: spin up the single central poller on first tailer rather
-	// than spawning a goroutine per tailer. Idempotent via sync.Once.
 	r.startCentralPoller()
 	return t, true
 }
@@ -203,18 +170,10 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.mu.Unlock()
 		return false
 	}
-	// R20260622-LB-1 (#2259): guard against the attach/detachClient race.
-	// writePump can exit first (TCP RST on ping write, or slow-client drop),
-	// run the one-and-only detachClient via its unregister defer, and then
-	// close the conn — all while readPump is mid-flight in handleAgentSubscribe
-	// here. Without this check attach would re-insert the already-dead client
-	// into t.subs and bump refCount back to 1; the second unregister sees
-	// removed=false and skips detachClient, pinning the dead client in the
-	// tailer forever (refCount stuck at 1, idle-reap never fires, every tick
-	// broadcasts to a dead client). Observing c.done under t.mu — mirroring
-	// rekeyOwnerSlot (wshub.go:1050) — closes the window: detachClient closes
-	// c.done before it could have removed us, so we bail and roll back the
-	// clientSubs entry we optimistically added above.
+	// attach/detachClient race guard: writePump may have already run the
+	// one-and-only detachClient; re-inserting the dead client would pin it in
+	// t.subs forever (refCount stuck at 1). c.done is observed under t.mu, so
+	// if it is closed we bail and roll back the clientSubs entry (#2259).
 	select {
 	case <-c.done:
 		t.mu.Unlock()
@@ -233,24 +192,9 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.subs[c] = struct{}{}
 		t.refCount.Add(1)
 	}
-	// R249-PERF-4 (#926): pool the replay buffer instead of allocating
-	// a fresh up-to-500-element []clievent.EventEntry per attach. The pool
-	// is keyed by len(t.buffered) so a tab joining a hot run with 500
-	// buffered events grows the underlying slice once and subsequent
-	// attaches at similar buffer depths reuse the grown slice. The
-	// copy-out under lock is unchanged — we still snapshot the ring
-	// here so the replay loop below runs lock-free; only the
-	// destination slice is now reused across calls.
-	//
-	// R249-PERF-4 (#926) follow-up: skip the pool Get/Put + empty append
-	// entirely when there is nothing buffered yet. This is the common
-	// case for a fresh subscriber attaching to a tailer that just
-	// started (Linker.OnResolve fires the ensureTailer before any
-	// transcript line lands) or one whose buffer was reaped — there is
-	// no copy to make and no replay to do, so the only effect of the
-	// pool dance would be churning a pool slot under a high subscribe
-	// rate. meta is still snapshotted under the lock so the late-meta
-	// nudge below stays correct.
+	// Snapshot the ring into a pooled buffer so the replay below runs
+	// lock-free (#926). Empty buffer skips the pool entirely; meta is still
+	// snapshotted so the late-meta nudge stays correct.
 	var buffered []clievent.EventEntry
 	var bufferedHandle tailerBufferedHandle
 	if len(t.buffered) > 0 {
@@ -260,14 +204,8 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 	meta := t.meta
 	t.mu.Unlock()
 
-	// Replay buffered events to the new subscriber outside the lock so a
-	// slow client cannot stall other subscribers. Defer the pool
-	// release until after the replay so the SendJSON loop can borrow
-	// the slice without a copy; releaseTailerBufferedSlice zero-clears
-	// each EventEntry before returning the slice so the pool does not
-	// pin Images / ToolCall / Message pointers across calls.
-	// releaseTailerBufferedSlice is nil-handle-safe so the empty-buffer
-	// short-circuit above (which leaves bufferedHandle zero) is a no-op.
+	// Replay outside the lock so a slow client cannot stall other
+	// subscribers; release (nil-handle-safe) deferred until after replay.
 	defer releaseTailerBufferedSlice(buffered, bufferedHandle)
 	for i := range buffered {
 		e := buffered[i]
@@ -324,10 +262,6 @@ func (r *tailerRegistry) detachClient(c *wsClient) {
 		return
 	}
 	delete(r.clientSubs, c)
-	// R249-PERF-3 (#925): cold-path detach but no reason to spend two
-	// allocations. The previous shape built keys[], then walked it to
-	// build targets[] — keys was dead the moment targets finished. Walk
-	// subs directly into targets[] and skip the intermediate slice.
 	targets := make([]*agentTailer, 0, len(subs))
 	for k := range subs {
 		if t, ok := r.byTask[k]; ok {
@@ -364,21 +298,14 @@ func (r *tailerRegistry) closeTask(key, taskID, status string) {
 }
 
 // Shutdown stops every tailer the registry owns. Called by Hub.Shutdown.
-// Blocks until the central pollLoop goroutine has returned so the surrounding
-// Hub teardown can drop the underlying TranscriptReader without racing the
-// final pollOnce iteration. R246-PERF-7: previously waited on runWG (one
-// goroutine per tailer); now waits on pollWG (one goroutine total).
+// Blocks until the central pollLoop goroutine has returned so Hub teardown
+// cannot race the final pollOnce iteration.
 func (r *tailerRegistry) Shutdown() {
 	r.mu.Lock()
 	tailers := make([]*agentTailer, 0, len(r.byTask))
 	for _, t := range r.byTask {
 		tailers = append(tailers, t)
 	}
-	// R247-PERF-25: clear() reuses the existing map's bucket array instead
-	// of paying the runtime.makemap allocation each Shutdown. The registry
-	// is rebuilt from empty after Shutdown() returns (the next ensureTailer
-	// re-populates), so reusing the underlying bucket slab is safe — no
-	// stale pointer is observable through the cleared map.
 	clear(r.byTask)
 	clear(r.clientSubs)
 	r.count.Store(0)
@@ -386,19 +313,12 @@ func (r *tailerRegistry) Shutdown() {
 	for _, t := range tailers {
 		t.finalize("shutdown")
 	}
-	// Stop the central poller exactly once. close on a never-started channel
-	// is fine, but startCentralPoller may have launched the loop at any point;
-	// we use a sync.Once guard to make Shutdown idempotent for tests that
-	// call it more than once.
 	r.stopCentralPoller()
 	r.pollWG.Wait()
 }
 
 // stopCentralPoller signals the central pollLoop goroutine to exit. Safe to
-// call multiple times — the underlying close is sync.Once-guarded via
-// pollStopOnce. Tailer registries that never had ensureTailer called still
-// observe this no-op cleanly because pollLoop was never started (pollWG.Wait
-// returns immediately).
+// call multiple times and when pollLoop was never started.
 func (r *tailerRegistry) stopCentralPoller() {
 	r.pollStopOnce.Do(func() {
 		close(r.pollStop)

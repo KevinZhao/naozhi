@@ -8,11 +8,8 @@ import (
 	"sync"
 )
 
-// gzipPool reuses gzip.Writer instances across requests so the dashboard's hot
-// paths (events, sessions list) don't pay an allocation per response. Level 1
-// (BestSpeed) gives ~3x compression on JSON payloads with negligible CPU cost
-// versus default level 6 — the right tradeoff for a latency-sensitive UI on
-// flaky networks.
+// gzipPool reuses gzip.Writer instances across requests. BestSpeed gives ~3x
+// on JSON with negligible CPU — the right tradeoff for a latency-sensitive UI.
 var gzipPool = sync.Pool{
 	New: func() any {
 		w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
@@ -20,10 +17,8 @@ var gzipPool = sync.Pool{
 	},
 }
 
-// isCompressibleType reports whether a Content-Type value should be gzipped.
-// Pre-compressed binary formats (image/*, audio/*, video/*, application/zip,
-// application/gzip) gain nothing from a second pass and just burn CPU, so we
-// keep an explicit allowlist of text-shaped types.
+// isCompressibleType reports whether a Content-Type value should be gzipped
+// (explicit allowlist of text-shaped types; pre-compressed binaries gain nothing).
 func isCompressibleType(ct string) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = ct[:i]
@@ -42,20 +37,13 @@ func isCompressibleType(ct string) bool {
 	return false
 }
 
-// acceptsGzip does a minimal scan of an Accept-Encoding header for the "gzip"
-// token. Full q-value parsing is overkill here — every modern browser and
-// reverse proxy sends gzip unconditionally, and a missing Accept-Encoding
-// means "identity only" under RFC 7231 §5.3.4.
-//
-// The fast path skips the strings.Split + per-token TrimSpace allocs that
-// fired on every HTTP request (including high-frequency dashboard polls).
-// Falls back to per-token parsing only when a q-value parameter is present
-// and we need to verify the gzip token isn't the disabled one.
+// acceptsGzip does a minimal alloc-free scan of an Accept-Encoding header for
+// a "gzip" token that is not disabled by q=0. A missing header means
+// "identity only" (RFC 7231 §5.3.4).
 func acceptsGzip(ae string) bool {
 	if ae == "" {
 		return false
 	}
-	// Walk tokens manually to avoid strings.Split + per-token TrimSpace allocs.
 	for ae != "" {
 		var tok string
 		if i := strings.IndexByte(ae, ','); i >= 0 {
@@ -119,8 +107,7 @@ func (g *gzipResponseWriter) decide() {
 	}
 	g.wroteHeader = true
 	h := g.Header()
-	// Never double-encode: if the handler already set Content-Encoding
-	// (e.g. a pre-compressed blob), leave it alone.
+	// Never double-encode a response that already has Content-Encoding.
 	if h.Get("Content-Encoding") != "" {
 		return
 	}
@@ -130,8 +117,6 @@ func (g *gzipResponseWriter) decide() {
 	g.useGzip = true
 	h.Set("Content-Encoding", "gzip")
 	h.Add("Vary", "Accept-Encoding")
-	// Body length changes post-compression; any Content-Length the handler
-	// computed against the uncompressed payload is now wrong.
 	h.Del("Content-Length")
 	gz := gzipPool.Get().(*gzip.Writer)
 	gz.Reset(g.ResponseWriter)
@@ -139,14 +124,8 @@ func (g *gzipResponseWriter) decide() {
 }
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
-	// Bodyless responses (304 Not Modified, 204 No Content) must never be
-	// gzipped: there is nothing to compress, and turning gzip on would (a) pull
-	// a gzip.Writer from the pool + Reset it for nothing, (b) attach a
-	// misleading Content-Encoding/Vary to a zero-body response, and (c) make
-	// close() emit ~20 bytes of gzip header/trailer as a phantom body, which
-	// RFC 7232 says a 304 must not carry. The static-asset 304 fast-path
-	// (serveStaticWithETag) is one of the hottest mobile-reload paths, so skip
-	// decide() entirely here and leave useGzip=false. (#1771)
+	// Bodyless 304/204 must never be gzipped: close() would otherwise emit
+	// ~20 bytes of gzip framing as a phantom body, which RFC 7232 forbids (#1771).
 	if code == http.StatusNotModified || code == http.StatusNoContent {
 		g.wroteHeader = true
 		g.ResponseWriter.WriteHeader(code)
@@ -169,10 +148,8 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	return g.ResponseWriter.Write(p)
 }
 
-// Flush forwards to both the gzip writer (so compressed bytes leave our buffer)
-// and the underlying ResponseWriter. Streaming handlers (event push, chunked
-// responses) need this to land bytes promptly; without it, gzip would buffer
-// frames behind its own block boundary.
+// Flush forwards to both the gzip writer and the underlying ResponseWriter so
+// streaming handlers land bytes promptly instead of behind a gzip block boundary.
 func (g *gzipResponseWriter) Flush() {
 	if g.useGzip && g.gz != nil {
 		_ = g.gz.Flush()
@@ -193,20 +170,12 @@ func (g *gzipResponseWriter) close() {
 }
 
 // gzipMiddleware wraps h with transparent gzip encoding when the client
-// advertises Accept-Encoding: gzip. WebSocket upgrades are passed through
-// verbatim so the underlying ResponseWriter keeps its Hijacker, and handlers
-// that write pre-compressed binary (images, archives) are skipped via the
-// Content-Type check in gzipResponseWriter.decide().
-//
-// This middleware is response-side only: it never touches r.Body, so request
-// body caps (MaxBytesReader) and gzip-bomb defenses on inbound payloads
-// remain orthogonal concerns owned by the request-parsing path.
+// advertises Accept-Encoding: gzip. Response-side only: it never touches
+// r.Body, so inbound body caps stay with the request-parsing path.
 func gzipMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// WebSocket upgrades hijack the TCP connection — wrapping the
-		// ResponseWriter would break the Hijacker assertion in gorilla/ws.
-		// Matching on the Upgrade header is path-agnostic so future WS
-		// routes (e.g. /ws-node) are covered automatically.
+		// WebSocket upgrades must keep the raw ResponseWriter (Hijacker);
+		// match on the Upgrade header so every WS route is covered.
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			h.ServeHTTP(w, r)
 			return

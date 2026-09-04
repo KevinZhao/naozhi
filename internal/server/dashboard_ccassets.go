@@ -10,19 +10,11 @@ import (
 )
 
 // registerAssetBrowserRoutes wires the read-only installed-asset browser
-// (docs/rfc/cc-asset-browser.md). Split out of registerDashboard to keep that
-// file from growing (mirrors registerScratchRoutes / static_assets.go).
-//
-// The claude provider is attached to the backend registry HERE — server is the
-// neutral top layer that legitimately imports both internal/cli/backend and
-// internal/ccassets, so injecting via backend.AttachAssetProvider avoids the
-// backend→ccassets import cycle the RFC's B2 review flagged (§3.0). The handler
-// then collects every backend that exposes a provider, so kiro/codex appear
-// automatically once they register one.
-//
-// P0 scope: project-level + memory sources are gated behind a repoRoot that is
-// always "" for now (RFC §9.3 deferred), so only user-level + plugin assets
-// surface until the workspace-resolution contract is finalised.
+// (docs/rfc/cc-asset-browser.md). The claude provider is attached HERE
+// because server is the neutral layer importing both internal/cli/backend
+// and internal/ccassets — attaching inside backend would be an import cycle.
+// Project-level + memory sources are gated behind a repoRoot that is always
+// "" for now (RFC §9.3), so only user-level + plugin assets surface.
 func (s *Server) registerAssetBrowserRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
 	if s.ccAssetsH == nil {
 		backend.AttachAssetProvider("claude", ccassets.NewClaudeProvider())
@@ -35,7 +27,7 @@ func (s *Server) registerAssetBrowserRoutes(auth func(http.HandlerFunc) http.Han
 		s.ccAssetsH = extccassets.New(
 			providers,
 			resolveClaudeDir(),
-			func(*http.Request) string { return "" }, // P0: project scope deferred (RFC §9.3)
+			func(*http.Request) string { return "" }, // project scope deferred (RFC §9.3)
 			newIPLimiterWithProxy(extccassets.AssetsLimiterRate, extccassets.AssetsLimiterBurst, s.auth.TrustedProxy),
 		)
 	}

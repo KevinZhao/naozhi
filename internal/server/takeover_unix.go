@@ -10,15 +10,12 @@ import (
 )
 
 // verifyProcOwnedByEuid is a defense-in-depth check that the process at pid
-// runs under the same UID as naozhi itself. Combined with verifyProcIdentity
-// (PID/start_time TOCTOU guard) it eliminates the residual risk of a same-UID
-// attacker constructing a process with a colliding (PID, start_time) under a
-// matching cwd. R20260526-SEC-009.
+// runs under the same UID as naozhi itself, complementing the
+// verifyProcIdentity PID/start_time guard.
 //
 // Linux-only: reads stat(2).Uid from /proc/<pid>. Returns nil on non-Linux
-// Unix platforms (darwin has no /proc) or when stat fails (caller should rely
-// on the start_time check alone in that case — we don't want to block
-// legitimate kills on darwin where /proc isn't available).
+// Unix (no /proc) or when stat fails, so the caller falls back to the
+// start_time check alone rather than blocking legitimate kills.
 func verifyProcOwnedByEuid(pid int) error {
 	if runtime.GOOS != "linux" {
 		return nil

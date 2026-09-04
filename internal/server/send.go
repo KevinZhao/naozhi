@@ -1,11 +1,8 @@
 // send.go contains sendWithBroadcast, the canonical wrapper for sending
-// messages to a session with dashboard state notifications.
-//
-// All entry points that send user messages (IM, HTTP API, WebSocket) should
-// use this rather than calling sess.Send directly, so the dashboard receives
-// running/ready state transitions. The only exception is cron (internal/cron),
-// which runs in a separate package and uses sess.Send directly since cron
-// jobs are background tasks with their own notification path (BroadcastCronResult).
+// messages to a session with dashboard state notifications. Every entry point
+// that sends user messages (IM, HTTP API, WebSocket) must use it rather than
+// sess.Send so the dashboard sees running/ready transitions; cron is the only
+// exception (own notification path via BroadcastCronResult).
 package server
 
 import (
@@ -25,10 +22,8 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// sendWithBroadcast wraps sess.Send with dashboard state broadcasts.
-// Broadcasts "running" before send, and the final session snapshot after send.
-// This is the canonical implementation; Server.sendWithBroadcast delegates here.
-//
+// sendWithBroadcast wraps sess.Send with dashboard state broadcasts ("running"
+// before, session snapshot after); Server.sendWithBroadcast delegates here.
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (h *Hub) sendWithBroadcast(
 	ctx context.Context,
@@ -42,16 +37,10 @@ func (h *Hub) sendWithBroadcast(
 }
 
 // sendWithBroadcastPriority is the passthrough-aware variant of
-// sendWithBroadcast. When priority is non-empty (or when the dispatch layer
-// asks for passthrough via context key), the session routes through
-// SendPassthrough so multiple calls for the same session can run concurrently;
-// otherwise the legacy serialized Send path is used. The broadcast calls are
-// identical — they only signal "session active / state changed" to dashboard
-// subscribers, which is agnostic to the concurrency model underneath.
-//
-// When the ctx carries dispatch.WithUrgent, the explicit `priority` argument
-// is upgraded to "now" if not already set — this lets handlers opt into the
-// urgent path without threading the priority field through every wrapper.
+// sendWithBroadcast: when the ctx asks for passthrough and the session
+// supports it, the turn goes through SendPassthrough so concurrent sends on
+// one session can overlap; otherwise the serialized Send path is used. A ctx
+// carrying dispatch.WithUrgent upgrades an unset priority to "now".
 func (h *Hub) sendWithBroadcastPriority(
 	ctx context.Context,
 	key string,
@@ -61,9 +50,8 @@ func (h *Hub) sendWithBroadcastPriority(
 	onEvent cli.EventCallback,
 	priority string,
 ) (*cli.SendResult, error) {
-	// R236-PERF-01: only broadcast the running-state transition here; the
-	// post-send BroadcastSessionsUpdate below covers the sessions snapshot
-	// (and is already debounced), making a pre-send full-fanout redundant.
+	// Only the running-state transition here; the post-send (debounced)
+	// BroadcastSessionsUpdate covers the sessions snapshot.
 	h.BroadcastSessionReady(key)
 
 	if priority == "" && dispatch.IsUrgent(ctx) {
@@ -79,8 +67,7 @@ func (h *Hub) sendWithBroadcastPriority(
 		result, err = sess.SendPassthrough(ctx, text, images, onEvent, priority)
 	case priority == "now":
 		// ACP / legacy protocols: emulate urgent by interrupting the in-flight
-		// turn before sending the new message. Best-effort; failures are not
-		// fatal — the message still lands on the next turn.
+		// turn first. Best-effort — the message still lands on the next turn.
 		sess.InterruptViaControl()
 		result, err = sess.Send(ctx, text, images, onEvent)
 	default:
@@ -97,7 +84,6 @@ func (h *Hub) sendWithBroadcastPriority(
 }
 
 // usePassthrough reports whether this turn should take the passthrough path.
-// Gate: ctx carries dispatch.WithPassthrough AND session reports support.
 func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 	if sess == nil || !sess.SupportsPassthrough() {
 		return false
@@ -106,14 +92,9 @@ func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 }
 
 // sendWithBroadcast delegates to Hub.sendWithBroadcast when a dashboard Hub is
-// wired. When no hub is present it falls back to a direct sess.Send without
-// broadcasts — but only when the Server was constructed with Headless=true
-// (test harnesses, headless tools). A production Server is never headless, so a
-// nil hub there means a wiring regression: rather than silently routing through
-// the no-broadcast fallback (which would drop every dashboard/IM broadcast with
-// no signal), we fail loud. This mirrors dispatch.NoopCapabilities.Send's
-// panic-on-misconfig gate so both wiring layers surface miswiring instead of
-// degrading quietly. R248-ARCH-9 (#379).
+// wired. Without a hub it falls back to a direct, broadcast-free sess.Send
+// only for Headless Servers; a non-headless Server with a nil hub is a wiring
+// regression and panics rather than silently dropping every broadcast (#379).
 //
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (s *Server) sendWithBroadcast(
@@ -131,20 +112,17 @@ func (s *Server) sendWithBroadcast(
 		return s.hub.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 	}
 	if !s.headless {
-		// Non-headless Server with no hub == wiring regression. Fail loud
-		// instead of silently dropping broadcasts.
+		// Wiring regression — fail loud instead of silently dropping broadcasts.
 		panic("server: sendWithBroadcast called with nil hub on a non-headless Server (set ServerOptions.Headless for hub-less wiring)")
 	}
-	// Headless mode (no hub): still route through passthrough when caller
-	// set the ctx marker and session supports it.
+	// Headless (no hub): still honour passthrough when requested and supported.
 	if usePassthrough(ctx, sess) {
 		return sess.SendPassthrough(ctx, text, images, onEvent, "")
 	}
 	return sess.Send(ctx, text, images, onEvent)
 }
 
-// sendParams holds parsed input for a session send request.
-// Both HTTP and WebSocket callers construct this after their own input parsing.
+// sendParams holds parsed input for a session send request (HTTP and WebSocket).
 type sendParams struct {
 	Key       string
 	Text      string
@@ -166,128 +144,77 @@ type sendAckStatus string
 const (
 	sendAckAccepted sendAckStatus = "accepted"
 	sendAckQueued   sendAckStatus = "queued"
-	// sendAckBusy is returned when the session is busy but the queue is
-	// disabled (MaxDepth<=0) so the message cannot even be buffered. The
-	// client should retry rather than assume the message will arrive.
+	// sendAckBusy: session busy and queue disabled (MaxDepth<=0), so the
+	// message was not buffered — the client should retry.
 	sendAckBusy sendAckStatus = "busy"
 )
 
-// interruptAcquireTimeout is the upper bound the post-interrupt
-// AcquireTimeout waits for the previous turn's owner goroutine to
-// release the per-key guard. 2s tolerates a slow CLI shutdown while
-// keeping the user-visible "interrupted, please retry" feedback within
-// a single response cycle.
+// interruptAcquireTimeout bounds how long the post-interrupt AcquireTimeout
+// waits for the previous owner to release the per-key guard.
 const interruptAcquireTimeout = 2 * time.Second
 
-// sessionSend validates and dispatches a send request.
-// Returns (true, "", nil) if the request was a /clear or /new reset.
-// Returns (false, "", err) if validation failed (workspace forbidden, etc.).
-// Returns (false, "accepted", nil) when we owned the send turn.
-// Returns (false, "queued",   nil) when the session was busy and the message
-// was enqueued behind the active turn — a background drain loop will process it
-// after the current turn completes, coalescing with any other queued messages.
-//
+// sessionSend validates and dispatches a send request. Returns (true, "", nil)
+// for a /clear or /new reset; (false, "", err) on validation failure;
+// (false, "accepted", nil) when we own the turn; (false, "queued", nil) when
+// the message was enqueued for the owner's drain loop to coalesce.
 // onAsyncError (may be nil) fires from the owner goroutine when the turn fails
-// after the ack; it gets the underlying error (nil at literal-message sites) +
+// after the ack, with the underlying error (nil at literal-message sites) +
 // localised label so fan-out callers can filter (Hub.httpSendErrorCallback).
 func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
-	// R175-SEC-P1: use the canonical session.ValidateSessionKey gate
-	// (also used by handleEvents / handleDelete / handleSetLabel / HTTP
-	// handleInterrupt / WS handleSubscribe / WS handleInterrupt). The
-	// previous inline loop only rejected ASCII C0 / DEL; C1 controls
-	// (U+0080-U+009F), bidi overrides (U+202A-U+202E / U+2066-U+2069),
-	// and non-UTF-8 sequences fell through and reached slog attrs +
-	// sessions.json, giving an authenticated caller a log-injection
-	// primitive. ValidateSessionKey also caps at MaxSessionKeyBytes
-	// (~520 B) which supersedes the old local 512 ceiling.
+	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
+	// over-long keys: no log-injection primitive via slog / sessions.json.
 	if err := session.ValidateSessionKey(key); err != nil {
 		return false, "", fmt.Errorf("invalid key")
 	}
 
-	// Handle /clear and /new — CLI built-in doesn't work in stream-json.
-	// Also clear any pending queue so stale follow-ups don't hit the fresh session.
-	// Case-insensitive so CJK mobile IMEs that auto-capitalize the first letter
-	// ("/Clear" / "/New") still reset. Mirrors dispatch.normalizeSlashCommand's
-	// leading-token lowercasing used on the IM path.
+	// /clear and /new — the CLI built-in doesn't work in stream-json; also
+	// drop the pending queue. Case-insensitive so CJK mobile IMEs that
+	// auto-capitalize ("/Clear") still reset (as dispatch.normalizeSlashCommand).
 	trimmed := strings.ToLower(strings.TrimSpace(p.Text))
 	if trimmed == "/clear" || trimmed == "/new" {
 		if h.queue != nil {
 			h.queue.Discard(key)
 		}
-		// passthrough 模式下 dashboard /new 必须与 IM 路径（dispatch.discardQueue）
-		// 对齐：queue.Discard 只清 MessageQueue 里的排队消息，还要把 session
-		// 层 in-flight 的 SendPassthrough goroutine 也通知到，否则它们会继续
-		// 占着 sendSlot 直到自然超时，期间新消息被 ErrTooManyPending 拒绝，
-		// 用户看到"排队已满"而非干净重置。R192-SRV-P0-NewDiscardPassthrough。
+		// queue.Discard 只清排队消息；in-flight 的 SendPassthrough goroutine
+		// 也要通知到，否则它们继续占着 sendSlot 直到超时，新消息被
+		// ErrTooManyPending 拒绝（与 IM 路径 dispatch.discardQueue 对齐）。
 		if sess := h.router.SessionFor(key); sess != nil {
 			sess.DiscardPassthroughPending(cli.ErrSessionReset)
 		}
-		// Round-207 SM1: atomic Reset + workspaceOverride delete closes
-		// the race where a concurrent SetWorkspace would survive a naive
-		// Reset+delete pair and leak into the fresh session.
+		// Atomic Reset + workspaceOverride delete: a concurrent SetWorkspace
+		// must not survive and leak into the fresh session.
 		h.router.ResetAndDiscardOverride(key)
 		h.BroadcastSessionsUpdate()
 		return true, "", nil
 	}
 
-	// Workspace validation
 	var validatedWorkspace string
 	if p.Workspace != "" {
 		wsPath, err := validateWorkspace(p.Workspace, h.allowedRoot)
 		if err != nil {
-			// Decouple the client-facing message from the internal error
-			// chain so any future edit wrapping an os.PathError with %w in
-			// validateWorkspace cannot leak the resolved filesystem path to
-			// the dashboard user. Full detail stays in the operator log.
-			// R58-SEC-L2.
-			//
-			// Log at Warn, not Debug — validateWorkspace rejects path
-			// traversal, symlink escapes, and out-of-root roots, which are
-			// security-relevant events operators should see without flipping
-			// on verbose logging. The workspace path is already scrubbed
-			// from the HTTP response, so surfacing it in logs doesn't leak
-			// it to the client. R59-GO-M2.
-			//
-			// R175-SEC-P1: p.Workspace is attacker-influenced (authenticated
-			// dashboard/node, but not operator-supplied). The ValidateSessionKey
-			// gate above rejects C1/bidi in the KEY; workspace is validated
-			// separately as a filesystem path and passes through here raw.
-			// Route it through osutil.SanitizeForLog so C1 controls / bidi
-			// overrides / LS/PS cannot flip terminal rendering under `tail
-			// -f` or inject fake lines into JSON log sinks.
-			// 200 bytes matches the cap used for other attacker-influenced
-			// fields in this package (chatID, session key); the previous 1024
-			// allowed ~300 CJK/emoji glyphs of attacker-controlled content per
-			// log line, which still afforded a journal-noise primitive.
+			// Generic client message: the error chain may embed the resolved
+			// path. Warn — rejects are traversal / symlink-escape events.
+			// p.Workspace is attacker-influenced, so SanitizeForLog (200-byte
+			// cap, same as other attacker-influenced fields).
 			slog.Warn("workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(p.Workspace, 200))
 			return false, "", fmt.Errorf("invalid workspace")
 		}
 		validatedWorkspace = wsPath
-		// Require a non-empty chat-key prefix before the final ':'. A key of the
-		// form ":agentID" (idx==0) would otherwise persist the empty string as
-		// a workspace override, overriding the default for every subsequent
-		// GetWorkspace("") lookup.
+		// Refuse an empty chat-key prefix (":agentID"): it would persist "" as
+		// the override for every GetWorkspace("") lookup.
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			h.router.SetWorkspace(key[:idx], wsPath)
 		}
 	}
 
-	// Dashboard-picked backend override. Recorded per key so spawnSession
-	// (which runs later inside runTurn, not here) can pick up the choice
-	// when it actually fires up a wrapper. Unknown IDs are clamped to the
-	// router default inside wrapperFor, but we reject obviously hostile
-	// input early so a 4 KB `backend=<payload>` cannot land in logs.
+	// Dashboard-picked backend override, recorded per key and consumed by
+	// spawnSession inside runTurn. Unknown IDs clamp to the router default in
+	// wrapperFor; only hostile input is rejected here (keeps it out of logs).
 	if p.Backend != "" {
-		// R230-CQ-12 / R233-SEC-9: route both length cap and charset through
-		// the shared isValidBackendID + maxBackendIDLen primitives. Previously
-		// the HTTP send path inlined a tighter [a-z0-9_-] subset while WS
-		// dispatch and node selection used isValidBackendID's superset
-		// ([a-zA-Z0-9._-]); the asymmetry meant a backend ID accepted on one
-		// surface was rejected on another. Error messages stay aligned with
-		// dashboard_cron.validateCronBackend so substring matching in
-		// dashboard JS / external API consumers continues to work regardless
-		// of which surface rejected.
+		// Shared isValidBackendID / maxBackendIDLen so HTTP, WS dispatch and
+		// node selection accept the same IDs; error text aligned with
+		// dashboard_cron.validateCronBackend for dashboard JS substring matching.
 		if len(p.Backend) > maxBackendIDLen {
 			return false, "", fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 		}
@@ -298,11 +225,8 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 	}
 
 	// Dashboard-picked access-profile override (RFC project-access-profile
-	// §8.2). Same one-shot semantics as Backend: recorded per key, consumed by
-	// spawnSession. Charset/length gated with the shared identifier rule so a
-	// hostile 4 KB / control-char value cannot land in logs or argv. Unknown
-	// IDs resolve to the global default inside resolveSpawnParamsLocked (safe
-	// fallback), so we only reject syntactically hostile input here.
+	// §8.2); same one-shot semantics as Backend. Unknown IDs resolve to the
+	// global default in resolveSpawnParamsLocked; only hostile input is rejected.
 	if p.AccessProfile != "" {
 		if len(p.AccessProfile) > maxBackendIDLen || !isValidBackendID(p.AccessProfile) {
 			return false, "", fmt.Errorf("invalid access_profile identifier")
@@ -310,9 +234,8 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		h.router.SetSessionAccessProfile(key, p.AccessProfile)
 	}
 
-	// Resume registration — bound length before regex scan to limit cost
-	// of a hostile multi-MB resume_id (declared but unvalidated elsewhere).
-	// Valid session IDs are UUIDs (36 chars); 64 gives headroom for future formats.
+	// Bound resume_id length before the regex scan (UUIDs are 36 chars; 64
+	// leaves headroom) so a hostile multi-MB value costs nothing.
 	if len(p.ResumeID) > 64 {
 		return false, "", fmt.Errorf("invalid resume_id length")
 	}
@@ -324,29 +247,23 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 		h.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
-	// Fallback to legacy guard path when no queue is configured (tests, headless).
-	// Bumping h.legacySendInvokes lets R-LEGACY-SEND migrators (#710) observe
-	// remaining test fixtures via Hub.LegacySendInvokes(); a production Hub
-	// constructed with a real MessageQueue never reaches this branch.
+	// Legacy guard path when no queue is configured (tests, headless);
+	// legacySendInvokes lets migrators observe remaining fixtures (#710).
 	if h.queue == nil {
 		h.legacySendInvokes.Add(1)
 		return h.sessionSendLegacy(p, onAsyncError)
 	}
 
-	// Passthrough mode: direct dispatch — every send gets its own goroutine
-	// and runs concurrently with any other in-flight send for the same
-	// session. The CLI's commandQueue + Process-level sendSlot FIFO handle
-	// ordering. If the session's protocol doesn't support replay,
-	// usePassthrough() inside sendWithBroadcast transparently falls back
-	// to the legacy serialized Send path.
+	// Passthrough mode: every send gets its own goroutine; the CLI's
+	// commandQueue + sendSlot FIFO handle ordering. Protocols without replay
+	// fall back to serialized Send inside sendWithBroadcast (usePassthrough).
 	if h.queue.Mode() == dispatch.ModePassthrough {
 		release, shuttingDown := h.TrackSend()
 		if shuttingDown {
 			return false, sendAckBusy, nil
 		}
-		// /urgent prefix → strip + set priority:"now" so the CLI aborts
-		// the in-flight turn. Keeps dashboard behavior parallel with the IM
-		// dispatcher's /urgent command (dispatch/commands.go handleUrgent).
+		// /urgent prefix → strip + priority "now" so the CLI aborts the
+		// in-flight turn (parallels dispatch/commands.go handleUrgent).
 		text := p.Text
 		priority := ""
 		if strings.HasPrefix(strings.TrimSpace(text), "/urgent ") {
@@ -368,10 +285,8 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 	isOwner, enqueued, shouldInterrupt, gen, _ := h.queue.Enqueue(key, qm)
 	if !isOwner {
 		if shouldInterrupt {
-			// Interrupt mode: abort the in-flight turn so the queued
-			// follow-up can be processed promptly. See dispatch.go for the
-			// full rationale; this mirrors the IM path. Non-Sent outcomes
-			// degrade silently to Collect (the message is still queued).
+			// Interrupt mode: abort the in-flight turn so the queued follow-up
+			// runs promptly (mirrors dispatch.go). Non-Sent outcomes degrade to Collect.
 			switch outcome := h.router.InterruptSessionViaControl(key); outcome {
 			case session.InterruptSent:
 				slog.Debug("send: aborted active turn to process follow-up", "key", key)
@@ -386,26 +301,22 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 			}
 		}
 		if !enqueued {
-			// Queue disabled (MaxDepth<=0) and session is busy — the
-			// message is dropped. Surface this so the client knows to retry
-			// instead of waiting for a drain that never owns this message.
+			// Queue disabled (MaxDepth<=0) and session busy — the message is
+			// dropped; tell the client to retry.
 			slog.Debug("send: message dropped (session busy, queue disabled)", "key", key)
 			return false, sendAckBusy, nil
 		}
-		// Busy — message was accepted into the queue; owner's ownerLoop will
-		// pick it up on its next drain tick.
+		// Queued; the owner's ownerLoop picks it up on its next drain tick.
 		slog.Debug("send: message queued (session busy)", "key", key)
 		return false, sendAckQueued, nil
 	}
 
-	// I'm the owner — spawn the drain loop. Gate with TrackSend so a send
-	// arriving concurrent with Shutdown is declined cleanly rather than
-	// escaping past sendWG.Wait.
+	// Owner — spawn the drain loop. TrackSend declines a send arriving
+	// concurrently with Shutdown instead of escaping past sendWG.Wait.
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
-		// Drop ownership so a later Enqueue (post-restart) can re-own.
-		// Discard bumps gen and clears the owner flag without re-invoking
-		// ownerLoop. The caller will see sendAckBusy-equivalent behaviour.
+		// Discard drops ownership (bumps gen, clears the owner flag) so a
+		// later Enqueue can re-own.
 		h.queue.Discard(key)
 		return false, sendAckBusy, nil
 	}
@@ -416,21 +327,12 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError asyncErrorFn) (bool, sendAc
 	return false, sendAckAccepted, nil
 }
 
-// ownerLoop + handleOwnerLoopPanic moved to send_owner_loop.go
-// (Phase 3f-prep, 2026-05-28).
-
 // sessionOptsFor returns the AgentOpts to use when spawning (or resuming)
-// the session for key.
-//
-// Scratch (ephemeral aside) keys are resolved via the pool so the inherited
-// agent/backend/model/workspace config plus the --append-system-prompt quote
-// shim land on the spawned CLI. Every other key falls back to
-// buildSessionOpts, which consults the agent registry and planner overrides.
-//
-// The pool lookup touches the scratch's lastUsed timestamp so an actively
-// used aside is not swept out from under the user. This "Touch on lookup"
-// pattern is the only mechanism preventing the sweeper from evicting a
-// scratch that is about to receive its first send — do not remove it.
+// the session for key: scratch keys via the pool (inherited config + the
+// --append-system-prompt quote shim), everything else via buildSessionOpts.
+// The pool lookup touches the scratch's lastUsed — that "Touch on lookup" is
+// the only thing preventing the sweeper from evicting a scratch about to
+// receive its first send. Do not remove it.
 func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
 	if h.scratchPool != nil && sessionkey.IsScratchKey(key) {
 		if opts, ok := h.scratchPool.OptsForKey(key); ok {
@@ -453,12 +355,8 @@ func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError as
 		return
 	}
 	if status != session.SessionExisting {
-		// Debug (not Info): router.spawnSession emits "session spawned" at
-		// Info with key + active count for every spawn regardless of caller;
-		// surfacing the send-layer spawn row additionally just doubles the
-		// journal entries per spawn. Keep the elapsed_ms detail at Debug
-		// so it is still available when operators opt into verbose logging
-		// (e.g. investigating slow spawn paths).
+		// Debug, not Info: router.spawnSession already logs "session spawned"
+		// at Info for every spawn.
 		slog.Debug("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(sendStart).Milliseconds())
 	}
 
@@ -470,14 +368,9 @@ func (h *Hub) runTurn(key, text string, images []cli.Attachment, onAsyncError as
 	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
 
-// runTurnPassthrough runs one passthrough-mode turn. Called from a detached
-// goroutine so multiple sends on the same session execute concurrently. The
-// session layer routes through SendPassthrough when the protocol supports
-// replay; otherwise it transparently falls back to the legacy serialized
-// Send path (matching dispatch's fallback semantics).
-//
-// `priority` is forwarded as-is to SendPassthrough: "" for normal messages,
-// "now" for /urgent preemption.
+// runTurnPassthrough runs one passthrough-mode turn from a detached goroutine
+// so sends on the same session overlap; protocols without replay fall back to
+// serialized Send. priority is "" or "now" (/urgent preemption).
 func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, priority string, onAsyncError asyncErrorFn) {
 	sendStart := time.Now()
 	opts := h.sessionOptsFor(key)
@@ -491,9 +384,8 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 	}
 	ctx := dispatch.WithPassthrough(h.ctx)
 	if _, err := h.sendWithBroadcastPriority(ctx, key, sess, text, images, nil, priority); err != nil {
-		// ErrAbortedByUrgent, ErrReconnectedUnknown, ErrSessionReset are
-		// informational — the user knows what happened (or will see a
-		// dashboard state update). Only log at Warn for surprising failures.
+		// ErrAbortedByUrgent / ErrReconnectedUnknown / ErrSessionReset are
+		// informational; only surprising failures log at Warn.
 		if informationalSendErr(err) {
 			slog.Debug("passthrough: send completed with informational error", "key", key, "err", err)
 		} else {
@@ -509,13 +401,8 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.Attachment, prio
 }
 
 // autoSaveCronPrompt persists the just-sent text as the cron job's prompt on
-// a successful turn (IM auto-save). It is a no-op for non-cron keys or when no
-// scheduler is wired.
-//
-// ErrPromptAlreadySet is benign here: after the first turn the job already has
-// a prompt, so every later turn would return that sentinel and — without this
-// filter — spam Warn once per turn. R20260531-CR-001: suppress only that
-// sentinel; every other SetJobPrompt failure still logs at Warn.
+// a successful turn; no-op for non-cron keys or without a scheduler.
+// ErrPromptAlreadySet (every turn after the first) is benign and not logged.
 func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
 	if h.scheduler == nil || !sessionkey.IsCronKey(key) {
 		return
@@ -528,32 +415,16 @@ func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
 
 // Deprecated: sessionSend with a configured MessageQueue handles all production
 // paths. sessionSendLegacy keeps the pre-queue guard/interrupt behaviour only
-// for test code paths that do not wire a MessageQueue. New call sites should
-// use sessionSend. NewHub emits a slog.Warn on construction when Queue is nil
-// so production wiring with a missing queue surfaces in journalctl rather than
-// silently falling through here. R219-CR-11.
-//
-// Removal tracked in docs/TODO.md R-LEGACY-SEND. Unblock when:
-//  1. every test that drives Hub through this path migrates to wiring a
-//     real MessageQueue (or a stub that matches its delivery contract), and
-//  2. NewHub stops constructing a Hub with Queue == nil (turn the guard
-//     into a Fatal precondition rather than a slog.Warn).
-//
-// Once both conditions hold, delete sessionSendLegacy and its sole caller
-// branch in sessionSend together so the guard/interrupt semantics live in
-// exactly one place. R222-CR-8.
+// for tests that do not wire a MessageQueue. Removal tracked in docs/TODO.md
+// R-LEGACY-SEND: delete it with its sole caller branch once every test wires one.
 func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, sendAckStatus, error) {
 	key := p.Key
 
 	acquired := h.guard.TryAcquire(key)
 	needInterrupt := !acquired
 	if needInterrupt {
-		// R229-CR-5: prefer InterruptSessionSafe (control_request → SIGINT
-		// fallback) over raw InterruptSession. Raw SIGINT terminates Claude
-		// `-p` outright, burning a shim slot and losing resume context — the
-		// fast path here calls control_request first so the live shim/session
-		// survives for the queued follow-up. Falls back to SIGINT only when
-		// the protocol genuinely has no stdin-level interrupt (ACP).
+		// InterruptSessionSafe (control_request → SIGINT fallback): raw SIGINT
+		// kills Claude `-p` outright, burning a shim slot and resume context.
 		h.router.InterruptSessionSafe(key)
 		slog.Debug("send: interrupted running session", "key", key)
 	}
@@ -562,10 +433,8 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, 
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
 		if !needInterrupt {
-			// We successfully acquired the guard above but will not spawn
-			// the drain goroutine — release so a later enqueue (post-restart)
-			// can re-acquire. needInterrupt=true means we never acquired,
-			// only sent an interrupt which the CLI will observe regardless.
+			// Acquired but not spawning — release so a later enqueue can
+			// re-acquire (needInterrupt=true means we never acquired).
 			h.guard.Release(key)
 		}
 		return false, sendAckBusy, nil
@@ -573,11 +442,8 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, 
 	go func() {
 		defer release()
 		if needInterrupt {
-			// AcquireTimeout writes a per-key entry into Guard.lastWait that
-			// is only cleared on Release; paths that bypass Release leave a
-			// permanent entry. See TODO R217-GO-1 for the planned LRU/TTL
-			// eviction. The defer h.guard.Release(key) below covers this
-			// site's happy and error paths.
+			// AcquireTimeout writes a Guard.lastWait entry cleared only by
+			// Release; the defer Release below covers this site.
 			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
@@ -593,6 +459,3 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError asyncErrorFn) (bool, 
 
 	return false, sendAckAccepted, nil
 }
-
-// serverCaps adapter (implements dispatch.Capabilities) moved to
-// send_dispatch_adapter.go (Phase 3f-prep, 2026-05-28).

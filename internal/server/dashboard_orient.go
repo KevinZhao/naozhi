@@ -12,23 +12,19 @@ import (
 )
 
 // VisionOrienter is the minimal capability the orient handler needs from a
-// vision-capable side runner. Defined here (consumer side) so the handler
-// can be unit-tested with a stub and so the server package doesn't take a
-// hard dependency on sysession's concrete type. Implemented by
-// sysession.VisionRunner, passed in via ServerOptions.ImageOrientRunner.
+// vision-capable side runner. Implemented by sysession.VisionRunner, passed
+// in via ServerOptions.ImageOrientRunner.
 type VisionOrienter interface {
 	RunVision(ctx context.Context, stdinLine []byte, model string) ([]byte, error)
 }
 
 // orientConfig carries the resolved runtime knobs for the feature. A nil
-// *orientConfig (or runner) means the feature is off — the handler then
-// returns a benign "not enabled" so the client simply skips rotation.
+// *orientConfig (or runner) means the feature is off.
 type orientConfig struct {
 	enabled bool
 	model   string
 	runner  VisionOrienter
-	// timeout caps the whole vision call. Haiku measured ~12s; 45s leaves
-	// headroom for a cold CLI start without hanging the handler forever.
+	// timeout caps the whole vision call (~12s typical; headroom for cold CLI start).
 	timeout time.Duration
 }
 
@@ -36,10 +32,8 @@ type orientConfig struct {
 const orientTimeoutDefault = 45 * time.Second
 
 // buildOrientConfig resolves the auto-orient feature from ServerOptions.
-// Returns nil when the feature is disabled or no runner was wired — the
-// handler treats a nil *orientConfig as a benign no-op. Keeping the nil
-// shape (rather than a struct with enabled=false) means the handler's
-// single nil-check covers "off", "no runner", and "not configured".
+// Returns nil when disabled or no runner was wired, so the handler's single
+// nil-check covers every "off" case.
 func buildOrientConfig(opts ServerOptions) *orientConfig {
 	if !opts.ImageOrientEnabled || opts.ImageOrientRunner == nil {
 		return nil
@@ -54,21 +48,13 @@ func buildOrientConfig(opts ServerOptions) *orientConfig {
 
 // handleOrient implements POST /api/sessions/orient.
 //
-// Request JSON: {"id":"<upload-id>"}. The id must reference a live upload
-// owned by the caller (Peek enforces ownership). The handler:
-//  1. Peeks the image bytes (does NOT consume — the user still sends it).
-//  2. Asks the vision model which edge holds the top of the text.
-//  3. On an actionable verdict, rotates the bytes and Replaces the stored
-//     entry in place (preserving id/owner/TTL).
-//  4. Returns {"rotated":bool,"degrees":int}. rotated=false covers every
-//     fail-safe path (feature off, unclear verdict, decode/rotate failure,
-//     store race) — the client keeps the original image.
-//
-// This endpoint is best-effort: it never errors the upload. A 200 with
-// rotated=false is the normal "nothing to do" response.
+// Request {"id":"<upload-id>"} must reference a live upload owned by the
+// caller. Peeks (does not consume) the image, asks the vision model for the
+// text orientation, and on an actionable verdict Replaces the stored entry
+// in place. Best-effort: returns {"rotated":bool,"degrees":int}, with
+// rotated=false on every fail-safe path so the client keeps the original.
 func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
-	// Reuse the upload limiter: orient is triggered once per uploaded image,
-	// so the same 10/min budget bounds abuse without a new limiter.
+	// Orient fires once per uploaded image, so the upload limiter's budget fits.
 	if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 		return
@@ -81,10 +67,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "missing id"})
 		return
 	}
-	// [R20260614-SEC-7] Validate upload ID format before passing to store.
-	// uploadStore.Put generates IDs as hex.EncodeToString(16 random bytes) →
-	// exactly 32 lowercase hex chars. Reject anything that doesn't match so
-	// a crafted ID cannot probe the store or cause unexpected behaviour.
+	// Validate ID shape (32 lowercase hex) before it reaches the store.
 	if !isUploadID(req.ID) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
@@ -95,9 +78,8 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Feature disabled (or not wired) → benign no-op. Done AFTER owner
-	// resolution so a probing client can't use this endpoint to discover
-	// whether the feature exists without a valid session.
+	// Checked AFTER owner resolution so an unauthenticated probe cannot
+	// discover whether the feature exists.
 	if h.orient == nil || !h.orient.enabled || h.orient.runner == nil {
 		writeJSON(w, map[string]any{"rotated": false, "degrees": 0})
 		return
@@ -105,7 +87,7 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 
 	img := h.uploadStore.Peek(req.ID, owner)
 	if img == nil {
-		// Not found / expired / wrong owner — opaque, same as Take.
+		// Not found / expired / wrong owner — deliberately opaque.
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "not found or expired"})
 		return
 	}
@@ -120,12 +102,8 @@ func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"rotated": false, "degrees": 0})
 		return
 	}
-	// Echo the corrected image inline (data URL) so the client can refresh
-	// its preview thumbnail without a second round-trip — there is no
-	// endpoint that serves a still-pending upload-store entry by id (the
-	// attachment endpoint only serves persisted workspace files), so the
-	// bytes must ride back on this response. The payload is the same
-	// downscaled JPEG the client already holds, re-rotated, so it's bounded.
+	// Echo the corrected image inline: no endpoint serves a still-pending
+	// upload-store entry by id, so the preview refresh must ride this response.
 	dataURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(rotatedBytes)
 	writeJSON(w, map[string]any{"rotated": true, "degrees": verdict, "image": dataURL})
 }
@@ -170,9 +148,8 @@ func (h *SendHandler) orientImage(parent context.Context, id, owner string, img 
 	// PNG-in/JPEG-out doesn't desync the content type sent to Claude.
 	rotImg := cli.Attachment{Kind: cli.KindImageInline, Data: out, MimeType: "image/jpeg"}
 	if !h.uploadStore.Replace(id, owner, rotImg) {
-		// The entry expired or was consumed between Peek and Replace, or the
-		// rotated payload would exceed quota. Keep the original (already
-		// stored) — the user can still send it unrotated.
+		// Expired/consumed between Peek and Replace, or over quota; the
+		// original stays stored and sendable.
 		slog.Info("orient: store replace rejected, keeping original", "id_present", id != "")
 		return 0, nil
 	}

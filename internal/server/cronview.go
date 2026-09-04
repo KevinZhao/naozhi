@@ -1,14 +1,5 @@
-// Phase 3e (server-split-phase4-design.md §6.5 Plan B): CronView previously
-// lived in dashboard_session.go. After SessionHandlers moved to
-// internal/dashboard/session, a server-package copy kept wshub.go +
-// cronview_contract_test.go call sites compiling without reverse-importing
-// the sub-package.
-//
-// R20260531070014-ARCH-2 (#1536): that copy and the byte-identical one in
-// internal/dashboard/session/handlers.go are now both type aliases for the
-// single canonical definition in the leaf package internal/dashboard/cronview.
-// (The former independent wshub/types.go CronView was removed together with
-// the wshub package in G1 — docs/rfc/godstruct-extraction.md / #2195.)
+// CronView is a type alias for the canonical definition in the leaf package
+// internal/dashboard/cronview, shared with internal/dashboard/session (#1536).
 
 package server
 
@@ -23,22 +14,10 @@ import (
 // *cron.Scheduler satisfies it implicitly.
 type CronView = cronview.CronView
 
-// cronScheduler is the server-package consumer view of *cron.Scheduler
-// (R20260603000023-ARCH-2 / #1648). Previously Server.scheduler and
-// ServerOptions.Scheduler held the concrete *cron.Scheduler — its full ~60
-// method surface — even though the server package only ever forwards the
-// value into already-narrowed interface fields (cronCommandScheduler via
-// cronDispatchAdapter, cronview.CronView) and calls exactly one method on it
-// directly: SetTelemetry (routes.go). This aggregate embeds the two consumer
-// interfaces the value is forwarded into plus that one direct method, so the
-// field type now advertises only what the server actually depends on while
-// *cron.Scheduler continues to satisfy it implicitly (pinned by
-// cronview_contract_test.go).
-//
-// #1164: the dispatch.CronScheduler embed became the server-local
-// cronCommandScheduler (cron_dispatch_adapter.go) when dispatch's seam was
-// re-typed to the projection-based CronCommands — dispatch no longer names
-// cron types, so the concrete-typed subset now lives on this side.
+// cronScheduler is the server-package consumer view of *cron.Scheduler: the
+// two interfaces the value is forwarded into plus the one method called
+// directly (SetTelemetry, routes.go). *cron.Scheduler satisfies it implicitly
+// (pinned by cronview_contract_test.go) (#1648).
 type cronScheduler interface {
 	cronview.CronView
 	cronCommandScheduler

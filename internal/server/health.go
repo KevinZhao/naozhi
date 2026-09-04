@@ -17,18 +17,13 @@ type HealthHandler struct {
 	startedAt     time.Time
 	workspaceID   string
 	workspaceName string
-	// version is the build tag surfaced on /health so external probes can
-	// confirm which binary is running without needing dashboard auth. Empty
-	// means "unknown" — the field is omitted from the response to preserve
-	// the legacy wire shape.
+	// version is the build tag surfaced on the authenticated part of /health;
+	// empty means unknown and the field is omitted.
 	version         string
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
-	// noOutputTimeoutStr / totalTimeoutStr cache the pre-formatted
-	// duration strings used in the watchdog sub-object. time.Duration.String()
-	// is not trivial (it allocates a short string on every call), and these
-	// timeouts never change after router construction, so we format them
-	// once here. R59-PERF-H2.
+	// noOutputTimeoutStr / totalTimeoutStr are the pre-formatted watchdog
+	// duration strings (timeouts never change after construction).
 	noOutputTimeoutStr string
 	totalTimeoutStr    string
 	watchdogNoOut      *atomic.Int64
@@ -36,11 +31,7 @@ type HealthHandler struct {
 	nodeAccess         NodeAccessor
 	platforms          map[string]struct{} // platform names (read-only after init)
 	// platformsStatus is the pre-built {name: "registered"} map served as the
-	// /health `platforms` sub-object. Platform names are fixed at construction
-	// (read-only after init, mirroring `platforms`), so building this once
-	// avoids a per-request make(map)+range on the 1 Hz dashboard poll path.
-	// R20260616-PERF-002. Only ever assigned to auth.Platforms for JSON
-	// serialization (read-only), never mutated by callers.
+	// /health `platforms` sub-object. Read-only after init; never mutated.
 	platformsStatus map[string]string
 	hubDropped      func() int64 // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
@@ -49,10 +40,7 @@ type HealthHandler struct {
 	dispatcherMetrics func() (int64, int64, int64, time.Time)
 }
 
-// healthWatchdogStats is the /health "watchdog" sub-object. Stack-allocated
-// per response so the dashboard-status-bar polling at 1 Hz doesn't pay a
-// per-request map[string]any alloc for what is a fixed-shape value. Mirrors
-// the R58-PERF-F2 treatment of /api/sessions's watchdog sub-object.
+// healthWatchdogStats is the /health "watchdog" sub-object.
 type healthWatchdogStats struct {
 	NoOutputKills   int64  `json:"no_output_kills"`
 	TotalKills      int64  `json:"total_kills"`
@@ -60,9 +48,7 @@ type healthWatchdogStats struct {
 	TotalTimeout    string `json:"total_timeout"`
 }
 
-// healthSessionStats and healthDispatchStats mirror the watchdog treatment —
-// named structs with omitempty so /health does not allocate three
-// map[string]any objects on every authenticated dashboard poll. R62-PERF-2.
+// healthSessionStats and healthDispatchStats are fixed-shape /health sub-objects.
 type healthSessionStats struct {
 	Active int `json:"active"`
 	Total  int `json:"total"`
@@ -78,13 +64,10 @@ type healthDispatchStats struct {
 
 // healthAuthSection is the authenticated-only subset of /health. Held as a
 // pointer inside healthResp so unauthenticated probes marshal to just
-// {"status":"ok","uptime":"..."}. When non-nil, Go's json package promotes
-// the embedded fields into the top-level object so the wire shape stays
-// identical to the prior `map[string]any` version. R60-PERF-001.
+// {"status":"ok","uptime":"..."}; when non-nil its fields are promoted to
+// the top-level object.
 type healthAuthSection struct {
-	// Version is the build tag (git describe injected via -X main.version=...).
-	// R229-SEC-7: previously exposed at the top level for unauthenticated
-	// probes; moved into the auth-only section so a public /health cannot
+	// Version is the build tag. Auth-only so a public /health cannot
 	// fingerprint the running binary.
 	Version           string                  `json:"version,omitempty"`
 	Sessions          healthSessionStats      `json:"sessions"`
@@ -102,18 +85,12 @@ type healthAuthSection struct {
 	AttachmentTracker *healthAttachTrackStats `json:"attachment_tracker,omitempty"`
 }
 
-// healthEventLogStats mirrors session.EventLogHealth over the wire.
-// Kept as a server-internal struct so the JSON shape isn't coupled
-// to session package refactors — a field rename there won't silently
-// break dashboards reading /health.
+// healthEventLogStats mirrors session.EventLogHealth over the wire; kept
+// server-internal so the JSON shape is decoupled from session refactors.
 //
-// The `writer_alive` definition per RFC §6.3:
+// writer_alive (RFC §6.3):
 //
 //	last_drain_ms_ago < 5000  AND  channel_depth < 0.8 * channel_cap
-//
-// Both component fields are exposed independently so operators can
-// distinguish "writer goroutine deadlocked" from "writer goroutine
-// keeping up but channel about to overflow" without parsing the bool.
 type healthEventLogStats struct {
 	Dir            string `json:"dir"`
 	WriterAlive    bool   `json:"writer_alive"`
@@ -129,18 +106,12 @@ type healthEventLogStats struct {
 	FSSupported    bool   `json:"fs_supported"`
 }
 
-// healthAttachTrackStats mirrors session.AttachmentTrackerHealth
-// over the wire. Kept server-internal for the same reasons as
-// healthEventLogStats — the wire shape should not drift when the
-// session-level struct evolves.
+// healthAttachTrackStats mirrors session.AttachmentTrackerHealth over the
+// wire (server-internal, same reasons as healthEventLogStats).
 //
-// writer_alive uses the same formula as the event-log tracker:
+// writer_alive:
 //
 //	last_drain_ms < 5000 AND channel_depth < 0.8 * channel_cap
-//
-// Per-component fields are exposed so operators can distinguish
-// "tracker deadlocked" from "just backed up" without reverse-
-// engineering the bool.
 type healthAttachTrackStats struct {
 	WriterAlive  bool  `json:"writer_alive"`
 	ChannelDepth int   `json:"channel_depth"`
@@ -153,68 +124,34 @@ type healthAttachTrackStats struct {
 	Errors       int64 `json:"meta_error_total"`
 }
 
-// healthResp is the JSON response for /health. Prior code built a
-// map[string]any per probe (14 interface{} box ops on the hot 1 Hz polling
-// path); this named struct is stack-allocated with a lazy pointer for the
-// authenticated sub-section. Marshals byte-identically to the old shape.
-// R60-PERF-001 / R60-PERF-008.
+// healthResp is the JSON response for /health.
 type healthResp struct {
 	Status string `json:"status"`
 	Uptime string `json:"uptime"`
-	// Anonymous pointer embed: json package promotes non-nil pointer's
-	// fields into the enclosing object, so authenticated probes get the
-	// exact same top-level keys as before while unauthenticated probes
-	// serialize down to just status/uptime.
-	//
-	// R229-SEC-7: Version moved into healthAuthSection so unauthenticated
-	// probes cannot fingerprint the build.
+	// Anonymous pointer embed: nil for unauthenticated probes (status/uptime
+	// only); non-nil promotes the auth fields to the top level.
 	*healthAuthSection
 }
 
-// handleLivez serves /livez — Kubernetes-style liveness probe. Returns
-// 200 if the process is alive (i.e. this goroutine got scheduled and the
-// HTTP serve loop is running). NEVER touches dependencies (router, hub,
-// CLI, eventlog) so a backed-up dependency cannot cause a liveness failure
-// and trigger a restart loop. Always unauthenticated; the response body is
-// the static literal "ok\n" so an attacker scanning the endpoint cannot
-// fingerprint the deployment beyond "naozhi is up". R247-ARCH-1 (#609).
-//
-// Restart loop hazard: every K8s probe cycle that observes a non-200 here
-// kills the process. Anything that can wedge under load (cron, transcript
-// store, eventlog drain) must therefore stay OUT of this handler — those
-// concerns belong on /readyz where a temporary not-ready merely removes
-// the pod from the load-balancer rotation without restarting it.
+// handleLivez serves /livez — Kubernetes-style liveness probe. MUST NOT
+// touch dependencies (router, hub, CLI, eventlog): a non-200 here restarts
+// the process, so anything that can wedge belongs on /readyz instead.
+// Unauthenticated; the static body reveals nothing beyond "up" (#609).
 func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// handleReadyz serves /readyz — Kubernetes-style readiness probe. Returns
-// 200 only when the process is ready to accept traffic: HTTP listener
-// bound (implicit — this handler is registered after Start) and the
-// router has finished its startup wiring (hub != nil). When not ready,
-// returns 503 with a short reason so operators tailing the probe history
-// see why traffic was blackholed. Like /livez, never returns the rich
-// stats / version / sub-objects so an unauthenticated probe cannot
-// fingerprint the binary beyond "ready"/"not ready". R247-ARCH-1 (#609).
-//
-// Why this is separate from /livez: a wedged dependency (eventlog drain
-// stuck, scheduler restart panic loop) should drop the pod from the LB
-// rotation but NOT trigger a kill — readiness expresses "send me traffic"
-// while liveness expresses "I'm alive at all". Conflating them turns a
-// transient dep wobble into a restart storm. The split mirrors the
-// k8s probe contract every orchestrator (k8s, ECS, Nomad, ALB target
-// groups via separate health-check paths) understands natively.
+// handleReadyz serves /readyz — Kubernetes-style readiness probe. 503 with a
+// short reason when not ready; never returns stats/version so an
+// unauthenticated probe cannot fingerprint the binary (#609).
 func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff") // R20260616-SEC-3
-	// Router presence is the minimal "wired" check — Start() bolts every
-	// handler onto a non-nil router before the listener accepts traffic,
-	// so router==nil here means the constructor partially-initialised
-	// HealthHandler (test harness) and the probe should fail closed.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// router==nil means a partially-initialised HealthHandler; fail closed.
 	if h.router == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("not ready: router unavailable\n"))
@@ -225,24 +162,12 @@ func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 // handleHealth serves /health with a two-tier response:
 //
-//   - Unauthenticated probes: status + uptime only. Intentionally cheap so
-//     orchestrators (k8s liveness, ALB target-group checks) don't need a
-//     token. R246-SEC-11 (#819): the unauth branch is now gated by the
-//     same per-IP unauthDashLimiter that throttles the login-page render
-//     so a scanner cannot fingerprint deployment uptime at unbounded rate.
-//     Authenticated callers skip the gate (the auth check happens first
-//     so legitimate dashboard polls never count against the bucket).
-//     The limiter is nil-safe; tests that build HealthHandler without
-//     an AuthHandlers fall through to the previous unthrottled path.
-//
-//   - Authenticated probes (operator dashboard, /api/sessions polling):
-//     full sub-objects. Already throttled at the HTTP layer by the
-//     dashboard's 1 Hz poll cadence; lateral moves from a stolen token
-//     would face the same poll budget as a legitimate dashboard tab.
+//   - Unauthenticated probes: status + uptime only, gated by the per-IP
+//     unauthDashLimiter so a scanner cannot enumerate uptime at unbounded
+//     rate (#819). The limiter is nil-safe for harnesses without auth.
+//   - Authenticated probes: full sub-objects.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	// R20260616-SEC-3: set defensively at the top so every exit path (incl.
-	// the errRespRetry rate-limit branch) carries the headers, not only the
-	// writeJSON success paths which set them via httputil.WriteJSON.
+	// Set at the top so every exit path (incl. the rate-limit branch) carries them.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
 	resp := healthResp{
@@ -250,23 +175,13 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.IsAuthenticated(r) {
-		// R246-SEC-11 (#819): per-IP cap so an attacker scanning across
-		// time cannot enumerate uptime to fingerprint deploy/restart
-		// cadence. unauthDashAllow returns true when the limiter is not
-		// wired (test harness without server.New) so this stays a no-op
-		// for fixtures that bypass the bucket.
-		// R20260614-SEC-10 (#2120): fail closed when the client IP can't be
-		// resolved in trusted-proxy mode (XFF stripped) rather than sharing
-		// the unknownIPKey bucket, so one direct-to-origin attacker can't
-		// starve the /health unauth budget for every other XFF-less caller.
-		// Mirrors HandleLogin (R247-SEC-25). No-op in !trustedProxy mode.
+		// Fail closed when the client IP is unresolvable in trusted-proxy mode
+		// (XFF stripped) instead of sharing the unknownIPKey bucket, so one
+		// direct-to-origin attacker cannot starve the budget for every other
+		// XFF-less caller (#2120). Mirrors HandleLogin.
 		if h.auth != nil &&
 			(!requestHasResolvableClientIP(r, h.auth.TrustedProxy) ||
 				!h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy))) {
-			// JSON envelope (errRespRetry, R247-ARCH-3 / #612 / #451) keeps the
-			// /health error path consistent with its writeJSON success path and
-			// carries retry_after in the body for fetch wrappers that drop the
-			// Retry-After header. errRespRetry also sets the header itself.
 			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}
@@ -295,15 +210,8 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.Platforms = h.platformsStatus
 
-	// R247-ARCH-12 (#1052): the per-subsystem auth-section fields
-	// (ws_dropped, dispatch, eventlog, attachment_tracker) route through
-	// the HealthProbe factories defined in health_probe.go instead of
-	// inlining each field copy here. The factories are the single source
-	// of truth for each subsystem's wire mapping and keep the
-	// disabled-as-noop (nil pointer / nil closure → omitempty) contract,
-	// so the JSON output stays byte-identical to the prior inline form.
-	// Top-level fields that read many HealthHandler-private values at once
-	// (sessions / system / nodes / platforms / watchdog) remain inline.
+	// Per-subsystem fields (ws_dropped, dispatch, eventlog, attachment_tracker)
+	// come from the HealthProbe factories in health_probe.go.
 	for _, probe := range h.subsystemProbes() {
 		probe(auth)
 	}
@@ -311,7 +219,3 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp.healthAuthSection = auth
 	writeJSON(w, resp)
 }
-
-// cliAvailable / cliAvailableAt / cliAvailEntry / cliAvailCacheTTL /
-// cliAvailCache / systemInfo / sysInfoOnce / sysInfoVal / localIPCount
-// 抽到 health_systeminfo.go (Phase 5-prep, 2026-05-28).

@@ -18,69 +18,27 @@ import (
 )
 
 // defaultUploadQuotaBytes caps cumulative per-project upload bytes per process
-// (R202606g-SEC-3, #2311). 4 GiB ≈ 16 max-size (256 MiB) files — generous for
-// the build-artefact push use case while bounding a single tenant's ability to
-// fill a shared disk through the upload endpoint.
+// so one tenant cannot fill a shared disk through the upload endpoint (#2311).
+// 4 GiB ≈ 16 max-size (256 MiB) files.
 const defaultUploadQuotaBytes int64 = 4 << 30
 
-// build_handlers.go is part of the buildServer split (R246-CR-004 / #738).
-// Each helper constructs one handler-struct group from ServerOptions plus
-// already-resolved derived state (cookieSecret, claudeDir, agents, etc.).
-// The helpers are kept package-private and have no side effects on the
-// Server value — buildServer remains the single owner of struct assembly,
-// it just delegates the per-domain literal blocks here so the constructor
-// reads as a contents-of-Server outline rather than a 358-line wall.
-//
-// Naming: build<Domain>Handlers returns the handler pointer. When the
-// helper needs already-constructed Server fields (e.g. nodes) the
-// caller passes them as explicit parameters — no helper accepts a
-// partially-constructed *Server, which keeps initialization order
-// inspectable at the buildServer call site.
+// Each build<Domain>Handlers helper constructs one handler group from
+// ServerOptions plus already-resolved derived state. No helper accepts a
+// partially-constructed *Server — needed fields are passed explicitly so
+// initialization order stays inspectable at the buildServer call site (#738).
 
 // buildAuthHandlers constructs the AuthHandlers shared by login + WS
-// upgrade paths. Limiter buckets are sized to fit human refresh cadence
-// (60/min sustained, 20 burst); see AuthHandlers commentary at field-decl
-// site for the exhaustive justification. unauthDashLimiter intentionally
-// reuses the same shape as wsUpgradeLimiter — same scanner-blocking
-// envelope works for both unauthenticated dashboard probes and WS
-// upgrades. R230C-SEC-12.
+// upgrade paths.
 func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string) *auth.Handlers {
 	return auth.New(opts.DashboardToken, cookieSecret, cookieGen, opts.TrustedProxy)
 }
 
-// buildCronHandlers constructs CronHandlers with the three per-IP limiters
-// gating cron endpoints:
-//
-//   - runsLimiter (R222-SEC-3): /api/cron/runs and /api/cron/runs/{run_id}.
-//     60 req/min/IP with burst 60 mirrors the per-minute pace the
-//     dashboard uses when paginating run history (one initial fetch +
-//     occasional refresh) and leaves enough headroom for the run-detail
-//     drawer to fan out a few sequential reads. A stolen token can
-//     otherwise enumerate the entire on-disk run history at unbounded
-//     rate, both burning IO and exposing per-job activity timing.
-//
-//   - listLimiter (R242-CR-3): the 1 Hz GET /api/cron poll. Dashboard
-//     tabs hit this endpoint roughly once per second each, and the
-//     per-call cost is O(N jobs × RecentRuns(5)) of sync.Map loads +
-//     entry locks — cheap individually but unbounded under hostile
-//     parallelism. 2 req/s sustained with burst 30 leaves plenty of
-//     headroom for legit dashboard refresh bursts (tab switch + filter
-//     change) while capping a stolen token's steady-state poll rate.
-//
-//   - writeLimiter (R247-SEC-2 / R247-SEC-3): cron write/control endpoints
-//     (trigger, preview). 30 req/min sustained with burst 6 — legitimate
-//     UI form-edit loops hit preview a handful of times per minute, while
-//     a stolen token is capped at one trigger every 2 s steady-state.
-//
-// R242-SEC-8 / #636: all three buckets are constructed via
-// newIPLimiterWithCap so the per-limiter LRU cap and idle TTL are pinned
-// explicitly rather than inherited from the ratelimit package defaults
-// (1000 / 10m). The implicit cap is a DDoS soft floor — once 1000 fresh
-// attacker-IPs land, the LRU evicts the oldest legit rate-limited entries
-// and they come back unthrottled. cronLimiterMaxKeys raises that floor
-// to 8192 and cronLimiterTTL pins idle expiry at 5 minutes, which is
-// well above the 1 Hz poll cadence yet short enough that a transient
-// scanner does not occupy a slot for the full 10-minute default.
+// buildCronHandlers constructs CronHandlers with per-IP limiters gating the
+// cron endpoints: runs (1/s, burst 60 — a stolen token must not enumerate
+// the whole run history), list (2/s, burst 30 — the 1 Hz dashboard poll),
+// write/trigger/preview (1 per 2s, burst 6), transcript. All use
+// newIPLimiterWithCap so the LRU cap / idle TTL are pinned explicitly
+// (see cronLimiterMaxKeys).
 func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers {
 	return dashcron.New(dashcron.Deps{
 		Scheduler:   opts.Scheduler,
@@ -108,37 +66,23 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 	})
 }
 
-// cronTranscriptSemCap caps in-flight cron transcript reads. Renamed from
-// server-package transcribeSemCap to disambiguate; the audio transcribe
-// path keeps its own semaphore. Phase 1.
+// cronTranscriptSemCap caps in-flight cron transcript reads; the audio
+// transcribe path keeps its own semaphore.
 const cronTranscriptSemCap = 8
 
 // cronLimiterMaxKeys / cronLimiterTTL pin the LRU cap + idle TTL for the
-// three cron-handler limiters. R242-SEC-8 / #636: previously the buckets
-// inherited ratelimit.New defaults (MaxKeys=1000 / TTL=10m). Under DDoS
-// — bursts of fresh attacker IPs spread across XFF-spoofed sources —
-// the 1000-key LRU saturates and the *oldest* entry is evicted to make
-// room. The evicted entry is by definition a legitimate rate-limited IP
-// (it's been in the bucket long enough to be the LRU tail), so it loses
-// its accumulated debt and comes back un-throttled on the next request.
-//
-// Raising MaxKeys to 8192 lifts the saturation floor 8× (≈1 MiB worst-
-// case for the three cron buckets combined; cheap given a heartbeat-path
-// memory budget). The 5-minute TTL is shorter than the 10-minute default
-// — at 1 Hz dashboard cadence a legit poller refreshes its lastSeen on
-// every tick, so anything idle for 5 minutes is either a tab that closed
-// or a one-shot scanner; either way evicting it frees the slot for new
-// active callers without disturbing rate-limited regulars.
+// cron-handler limiters. A small LRU is a DDoS soft floor: a burst of fresh
+// (XFF-spoofed) IPs evicts the oldest — i.e. legitimately rate-limited —
+// entries, which come back unthrottled. 8192 keys ≈ 1 MiB worst case; 5m
+// idle is well above the 1 Hz poll cadence (#636).
 const (
 	cronLimiterMaxKeys = 8192
 	cronLimiterTTL     = 5 * time.Minute
 )
 
 // buildTranscribeHandler constructs the speech-to-text handler with a
-// per-IP rate limiter (5/min) and a fixed-cap concurrency semaphore.
-// Both backstops are defence-in-depth: a stolen token plus a large audio
-// payload would otherwise drive unbounded CPU + outbound API spend on
-// whichever transcribe service is wired.
+// per-IP rate limiter (5/min) and a fixed-cap concurrency semaphore, so a
+// stolen token cannot drive unbounded CPU + outbound API spend.
 func buildTranscribeHandler(opts ServerOptions) *transcribe.Handler {
 	return transcribe.New(transcribe.Deps{
 		Transcriber: opts.Transcriber,
@@ -148,12 +92,9 @@ func buildTranscribeHandler(opts ServerOptions) *transcribe.Handler {
 }
 
 // buildRetiredStoreWithErr constructs the discovery.RetiredStore eagerly so
-// the SessionHandlers can hold a non-nil pointer at construction time. When
-// stateDir is set the store is persisted to <stateDir>/history-retired.json;
-// otherwise an in-memory-only store is returned (tests, ephemeral
-// deployments). The (store, err) shape lets buildServer log a slog.Warn
-// with the underlying disk error — a corrupt file just means the popover
-// starts with last_active sort, but operators want the cause in journals.
+// the SessionHandlers can hold a non-nil pointer at construction time.
+// Persisted to <stateDir>/history-retired.json when stateDir is set, else
+// in-memory. The err lets buildServer log a corrupt file (the store still works).
 func buildRetiredStoreWithErr(stateDir string) (*discovery.RetiredStore, error) {
 	if stateDir == "" {
 		store, _ := discovery.NewRetiredStore("")
@@ -166,11 +107,6 @@ func buildRetiredStoreWithErr(stateDir string) (*discovery.RetiredStore, error) 
 // behind the dashboard discovery endpoints. broadcast is invoked when the
 // cache observes a change so subscribed dashboard clients receive fresh
 // state without a manual refresh.
-//
-// Phase 3b (server-split-phase4-design.md §6.5 Plan B): the handler group
-// lives in internal/dashboard/discovery; this helper bridges server-package
-// private types (validateWorkspace, verifyProcIdentity, *session.Router)
-// into the small interface surface the sub-package consumes.
 func buildDiscoveryHandlers(
 	opts ServerOptions,
 	claudeDir string,
@@ -196,9 +132,7 @@ func buildDiscoveryHandlers(
 
 // routerTakeoverAdapter narrows *session.Router's Takeover return shape
 // (`*ManagedSession, error`) to the `error`-only signature the discovery
-// sub-package consumes. Discovery handlers ignore the *ManagedSession; the
-// adapter discards it here so the interface in dashdiscovery.SessionRouter
-// can stay tiny and not transitively re-export internal/session types.
+// sub-package consumes, so that interface need not re-export session types.
 type routerTakeoverAdapter struct{ r *session.Router }
 
 func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
@@ -207,29 +141,11 @@ func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd
 }
 
 // buildProjectHandlers wires the dashboard project-config + project-files
-// endpoints. Two per-IP limiters are kept tighter than the cron set
-// because both paths touch disk on every call:
-//
-//   - filesExistsLimiter (S13): /api/projects/files/exists. 10/min matches
-//     the uploadLimiter cadence — both endpoints do filesystem I/O and
-//     belong to the same DoS class. Burst 10 accommodates the dashboard's
-//     initial batch-render pass that can spawn several exists calls
-//     back-to-back when a session is opened with many file references.
-//
-//   - configPutLimiter (R247-SEC-7): PUT /api/projects/config. The handler
-//     persists ProjectConfig to disk and broadcasts a WS update to every
-//     subscribed dashboard client; without a gate any authenticated caller
-//     can drive unbounded disk + fan-out. 5/sec burst 5 ≈ 5×60=300/min —
-//     well above interactive editing (a single user saves config sub-
-//     second after each edit) but well below abuse rates a script could
-//     reach.
-//
-// R247-ARCH-15 (#650): ctxFunc closure parameter retired. The handler
-// now stores `baseCtx` as a plain field that registerDashboard wires
-// via SetBaseContext once `s.hub` exists. The two-phase wiring is
-// unchanged (Hub still doesn't exist when buildProjectHandlers is
-// called); only the DI shape moved from a captured closure to a
-// direct field assign.
+// endpoints. Both per-IP limiters are tighter than the cron set because both
+// paths touch disk on every call: files/exists 10/min burst 10 (same DoS
+// class as upload); PUT config 5/s burst 5 (persists to disk + WS fan-out).
+// The Hub does not exist yet at this point; registerDashboard wires the
+// base context later via SetBaseContext (#650).
 func buildProjectHandlers(
 	opts ServerOptions,
 	resolver *session.KeyResolver,
@@ -244,11 +160,7 @@ func buildProjectHandlers(
 		NodeCache:          nodeCache,
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
-		// R202606g-SEC-3 (#2311): bound cumulative per-project upload bytes per
-		// process so one tenant cannot fill a shared disk through the upload
-		// endpoint. 4 GiB is ~16 max-size files — generous for the build-artefact
-		// use case while finite. Process-local (resets on restart); a true
-		// filesystem quota is out of scope for this guard.
+		// Process-local (resets on restart); not a filesystem quota.
 		UploadQuotaBytes: defaultUploadQuotaBytes,
 		PublicTmpEnabled: opts.PublicTmpEnabled,
 
@@ -264,8 +176,6 @@ func agentIDList(agents map[string]session.AgentOpts) []string {
 	ids = append(ids, "general")
 	for id := range agents {
 		if id == "general" {
-			// "general" is already prepended unconditionally; skip the
-			// configured copy so it isn't listed twice.
 			continue
 		}
 		ids = append(ids, id)
@@ -285,9 +195,8 @@ func platformNameSet(platforms map[string]platform.Platform) map[string]struct{}
 }
 
 // platformStatusMap pre-builds the {name: "registered"} map HealthHandler
-// serves as the /health `platforms` sub-object. Platform registration is
-// fixed at construction, so building this once (R20260616-PERF-002) avoids a
-// per-request make(map)+range on the 1 Hz dashboard poll path.
+// serves as the /health `platforms` sub-object (registration is fixed at
+// construction).
 func platformStatusMap(names map[string]struct{}) map[string]string {
 	out := make(map[string]string, len(names))
 	for name := range names {
