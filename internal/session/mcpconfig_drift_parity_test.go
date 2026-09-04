@@ -78,11 +78,11 @@ func TestMCPConfigDriftParity_NoFalsePositive(t *testing.T) {
 	// What classifyShimState's drift check builds (driftCompareArgs → read-only
 	// debug path).
 	driftArgs := proto.BuildArgs(
-		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugPathFor(key), bd.Args))
+		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugPathFor(key), "", bd.Args))
 	// What spawnSession builds for a session on backend defaults
 	// (router_lifecycle.go → side-effecting debug path).
 	spawnArgs := proto.BuildArgs(
-		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), bd.Args))
+		r.argvSpawnOptions(bd.Model, bd.Effort, r.cliDebugFileFor(key), "", bd.Args))
 
 	if !slices.Equal(stripResumeArgs(spawnArgs), stripResumeArgs(driftArgs)) {
 		t.Errorf("drift check disagrees with the real spawn:\n spawn = %v\n drift = %v",

@@ -44,26 +44,20 @@ func TestUrgent_AppendsPlannerPromptWhenProjectBound(t *testing.T) {
 		t.Errorf("key = %q, want %q", key, "project:myproj:planner")
 	}
 	want := session.AgentOpts{
-		Model:     "opus",
-		Workspace: "/w/myproj",
-		Exempt:    true,
-		ExtraArgs: []string{"--append-system-prompt", "你是 myproj 规划者"},
+		Model:        "opus",
+		Workspace:    "/w/myproj",
+		Exempt:       true,
+		SystemPrompt: "你是 myproj 规划者",
 	}
 	if !reflect.DeepEqual(opts, want) {
 		t.Errorf("opts mismatch:\n got:  %#v\nwant: %#v", opts, want)
 	}
 
-	// Explicitly assert the ExtraArgs contains the prompt — the pre-
-	// Phase-3 bug manifested as an empty ExtraArgs slice.
-	found := false
-	for i := 0; i+1 < len(opts.ExtraArgs); i++ {
-		if opts.ExtraArgs[i] == "--append-system-prompt" && opts.ExtraArgs[i+1] == "你是 myproj 规划者" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("planner prompt not in ExtraArgs — /urgent would fail to deliver planner instructions. got: %v", opts.ExtraArgs)
+	// Explicitly assert the prompt landed in SystemPrompt — the pre-Phase-3
+	// bug manifested as no prompt at all, and #2493 as the prompt sitting in
+	// ExtraArgs where the cli denylist stripped it.
+	if opts.SystemPrompt != "你是 myproj 规划者" {
+		t.Errorf("planner prompt not in SystemPrompt — /urgent would fail to deliver planner instructions. got: %+v", opts)
 	}
 }
 

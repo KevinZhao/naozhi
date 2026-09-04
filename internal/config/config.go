@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -216,6 +217,21 @@ type AgentConfig struct {
 	// cli.backends[].effort, then cli.effort.
 	// docs/rfc/kiro-effort-control.md
 	Effort string `yaml:"effort,omitempty"`
+	// SystemPrompt is appended to the CLI's system prompt for every session
+	// of this agent (`--append-system-prompt`, via
+	// session.AgentOpts.SystemPrompt → cli.SpawnOptions.AppendSystemPrompt).
+	// Project planner prompts and scratch quoted context stack on top of it
+	// ("\n\n"-separated). Multi-line YAML block scalars are fine; CR, NUL,
+	// other C0 controls, DEL, C1/bidi controls and a leading '-' are
+	// rejected at load (validateSystemPrompt), size is capped at
+	// MaxAgentSystemPromptBytes. Claude backend only — kiro / codex have no
+	// equivalent flag and ignore it.
+	//
+	// #2493: do NOT write `--append-system-prompt` under `args` instead —
+	// that flag is denylisted for args (cli.deniedExtraFlags) and was
+	// silently stripped at every spawn. Load() lifts a legacy occurrence
+	// into this field with a warning so existing configs keep working.
+	SystemPrompt string `yaml:"system_prompt,omitempty"`
 }
 
 // AccessProfile is a NAMED bundle of "how to reach the model" for a session:
@@ -864,6 +880,11 @@ func Load(path string) (*Config, error) {
 	if err := parseDurations(&cfg); err != nil {
 		return nil, err
 	}
+	// Before validation so the lifted value is validated as system_prompt
+	// and the (now removed) flag is not reported by validateArgvStrings.
+	if err := liftLegacySystemPromptArgs(&cfg); err != nil {
+		return nil, err
+	}
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
@@ -1313,6 +1334,9 @@ func validateConfig(cfg *Config) error {
 		if err := validateEffortString(fmt.Sprintf("agents[%s].effort", id), a.Effort); err != nil {
 			return err
 		}
+		if err := validateSystemPrompt(fmt.Sprintf("agents[%s].system_prompt", id), a.SystemPrompt); err != nil {
+			return err
+		}
 	}
 	// projects.planner_defaults.model 同走 BuildArgs（spawnSession 在 planner
 	// 路径覆盖 opts.Model），配置层 allowlist 与 cli.model 对齐。
@@ -1335,7 +1359,7 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
-	// projects.planner_defaults.prompt 走 --append-system-prompt argv，
+	// projects.planner_defaults.prompt 经 AgentOpts.SystemPrompt 走 --append-system-prompt argv（#2493），
 	// 与 project.PlannerPrompt 完全同源。validateConfig 之前漏检此字段：
 	// 配置文件里写入 NUL / C0 / C1 / bidi / LS-PS 会绕过所有验证直接进 argv。
 	// 镜像 project.ValidateConfig 的同名规则；LF/CR 同样禁止——多行 prompt
@@ -1440,6 +1464,15 @@ func validatePlannerPrompt(field, prompt string) error {
 // not silently pass an empty argument to the CLI. Kept narrow and local to
 // the config package; broader runtime validators (session.ValidateSessionKey,
 // shim.validateKeyForShim) cover user-controlled strings.
+//
+// It also WARNS (does not reject) on any element that cli.BuildArgs would
+// strip as a denied flag (#2493): `--effort`, `--model`, `--mcp-config`, …
+// each have a dedicated config field, and a flag written under args instead
+// used to vanish at spawn behind a generic per-spawn log line with no field
+// path. Warning rather than erroring keeps a config that loaded yesterday
+// loading today; the operator gets the exact field to fix. Note the one flag
+// with a lift instead of a warning: `--append-system-prompt` under
+// agents[].args is migrated by liftLegacySystemPromptArgs before this runs.
 func validateArgvStrings(field string, args []string) error {
 	for i, a := range args {
 		if a == "" {
@@ -1449,6 +1482,10 @@ func validateArgvStrings(field string, args []string) error {
 			if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
 				return fmt.Errorf("%s[%d] contains control byte (0x%02x) — refusing (argv injection guard)", field, i, r)
 			}
+		}
+		if cli.IsDeniedExtraFlag(a) {
+			slog.Warn("config: args contains a flag the spawn pipeline strips; it will NOT reach the CLI — use the dedicated config field instead",
+				"field", fmt.Sprintf("%s[%d]", field, i), "flag", a)
 		}
 	}
 	return nil

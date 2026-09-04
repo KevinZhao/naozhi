@@ -306,7 +306,20 @@ type AgentOpts struct {
 	// (agents[<id>].effort). Empty = inherit the backend / router default.
 	// Only ACP-protocol backends act on it. docs/rfc/kiro-effort-control.md
 	Effort string
-	Exempt bool // exempt from TTL, eviction, and activeCount (planner sessions)
+	// SystemPrompt is the text naozhi appends to the CLI's system prompt for
+	// this session (`--append-system-prompt`, via
+	// cli.SpawnOptions.AppendSystemPrompt). Sources, lowest layer first:
+	// agents[<id>].system_prompt, then the project planner prompt
+	// (ResolveForChat / ResolveForPlannerKey), then the scratch quoted
+	// context (ScratchPool.Open). Layers stack by JoinSystemPrompts — base
+	// first, "\n\n"-separated — into this single string; the CLI sees one
+	// flag. Empty = no flag.
+	//
+	// #2493: never put `--append-system-prompt` into ExtraArgs instead — it
+	// is denylisted there (cli.deniedExtraFlags) and silently stripped.
+	// Only the Claude backend renders it; ACP / codex ignore it.
+	SystemPrompt string
+	Exempt       bool // exempt from TTL, eviction, and activeCount (planner sessions)
 }
 
 // SessionStatus indicates how a session was obtained.
@@ -445,8 +458,12 @@ type spawnParams struct {
 	Model     string
 	Args      []string
 	// Effort is the resolved thinking-effort tier ("" = pass no flag).
-	Effort    string
-	Workspace string
+	Effort string
+	// SystemPrompt is AgentOpts.SystemPrompt passed through unchanged: the
+	// layering (agent → planner → scratch) happens in the resolvers that
+	// build AgentOpts, and there is no backend- or router-level tier for it.
+	SystemPrompt string
+	Workspace    string
 	// ResumeID after workspace/jsonl guard. Empty means "spawn fresh".
 	ResumeID string
 	// AccessProfileID is the resolved access-profile name ("" = global
@@ -592,6 +609,9 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		Effort:        opts.Effort,
 		ExtraArgs:     slices.Clone(opts.ExtraArgs),
 		AccessProfile: accessProfileID,
+		// #2493: the layered system prompt is argv-bearing and per-session,
+		// so it must ride in the overlay for the drift rebuild to reproduce it.
+		AppendSystemPrompt: opts.SystemPrompt,
 	}
 
 	// Model / effort / args merge lives in mergeArgvLayers, shared verbatim
@@ -682,6 +702,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		Model:            model,
 		Args:             args,
 		Effort:           effort,
+		SystemPrompt:     merged.SystemPrompt,
 		Workspace:        workspace,
 		ResumeID:         resumeID,
 		AccessProfileID:  accessProfileID,
@@ -1025,7 +1046,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// the arg-drift comparison cannot diverge (see argvSpawnOptions). DebugFile
 	// uses the side-effecting cliDebugFileFor here — the spawned CLI needs the
 	// log pre-created 0600 — where drift uses the read-only cliDebugPathFor.
-	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args)
+	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
 	// ResumeID is argv-bearing (BuildArgs emits --resume) but stays out of the
 	// shared constructor: it is session state, not config, and the drift side
 	// strips it from the stored argv (stripResumeArgs) precisely so a resumed
@@ -1941,6 +1962,9 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 
 // stripResumeArgs removes --resume <id> pairs from a CLI arg slice.
 // Used by drift check: --resume is session-specific, not a config change.
+// (`--append-system-prompt` is NOT stripped: since #2493 the prompt travels
+// in shim.SpawnOverlay.AppendSystemPrompt, so the drift rebuild reproduces
+// it through mergeArgvLayers and a changed prompt correctly reads as drift.)
 //
 // Fast path: return the original slice unchanged if --resume is absent.
 // reconnectShims calls this once per discovered shim during startup; for

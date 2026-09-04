@@ -223,8 +223,14 @@ func (r *Router) driftCompareArgs(recWrapper *cli.Wrapper, backendID, key string
 	// argvSpawnOptions for why this is a shared function and not another
 	// hand-copied struct literal. cliDebugPathFor (not cliDebugFileFor) keeps
 	// the comparison read-only: this runs for every surviving shim at startup.
+	//
+	// systemPrompt is "" by design: AgentOpts.SystemPrompt is per-session
+	// (agent / planner / scratch) and not reconstructible from backend
+	// defaults, so stripResumeArgs removes the `--append-system-prompt`
+	// pair from the STORED side instead (#2493; per-agent visibility is
+	// #2494's scope, see KNOWN LIMITATION above).
 	return recWrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.Args))
+		r.argvSpawnOptions(merged.Model, merged.Effort, r.cliDebugPathFor(key), merged.SystemPrompt, merged.Args))
 }
 
 // shimArgsDrift is the arg-drift predicate reconnectShims feeds

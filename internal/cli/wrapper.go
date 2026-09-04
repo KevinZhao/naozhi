@@ -129,7 +129,45 @@ type SpawnOptions struct {
 	// override applied) so "known and empty" is distinguishable from
 	// "written by a pre-#2494 shim".
 	SpawnOverlay *shim.SpawnOverlay
+
+	// AppendSystemPrompt, when non-empty, is rendered by ClaudeProtocol as
+	// `--append-system-prompt <value>` — the ONLY sanctioned way for naozhi's
+	// own prompt channels (agents[].system_prompt, planner prompt, scratch
+	// quoted context) to reach the CLI's system prompt. #2493: the flag is in
+	// deniedExtraFlags (R219-SEC-1 / #653) so an attacker-controlled prompt
+	// or a misconfigured agent cannot smuggle it in through ExtraArgs, and
+	// for a long time that denial also silently stripped every one of
+	// naozhi's own injections because they all travelled through ExtraArgs
+	// too. This is the dedicated field the denylist godoc always promised,
+	// exactly as SpawnOptions.Effort was for `--effort`.
+	//
+	// Stacking: this is a single string, not a slice. Callers that layer one
+	// prompt on another (agent prompt + planner prompt, agent prompt +
+	// scratch context) join them with "\n\n", base first — see
+	// session.JoinSystemPrompts. BuildArgs emits the flag once.
+	//
+	// Guards (mirroring SettingsFile / MCPConfigFile / DebugFile): the value
+	// must not start with '-' (the CLI's flag parser would read it as another
+	// flag), must not contain NUL (execve truncates the argv element there)
+	// and must stay within MaxAppendSystemPromptBytes (ARG_MAX headroom);
+	// a value failing any check is dropped with a Warn, never truncated —
+	// half a system prompt is worse than none. Callers truncate at their own
+	// layer with their own markers (scratch: MaxScratchQuoteBytes /
+	// MaxScratchContextBytes; planner: maxPlannerPromptBytesAtSpawn).
+	//
+	// Only ClaudeProtocol consumes this; ACP (kiro) and codex backends
+	// ignore it, as they do DebugFile / SettingsFile — neither CLI exposes an
+	// append-system-prompt flag, so for those backends the prompt channels
+	// were never delivered before this field existed and still are not.
+	AppendSystemPrompt string
 }
+
+// MaxAppendSystemPromptBytes caps SpawnOptions.AppendSystemPrompt. The
+// realistic worst case is an agents[].system_prompt (config caps it at
+// 32 KiB) stacked with a full scratch context block (24 KiB) or a planner
+// prompt (8 KiB), so 64 KiB leaves ~2x headroom while staying below the
+// 128 KiB maxExtraArgsBytes budget and far below Linux ARG_MAX (~2 MiB).
+const MaxAppendSystemPromptBytes = 64 * 1024
 
 // PermissionMode selects how a Claude-CLI spawn handles tool permissions.
 // See SpawnOptions.PermissionMode godoc.

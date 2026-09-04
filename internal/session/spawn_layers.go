@@ -2,12 +2,18 @@ package session
 
 import "github.com/naozhi/naozhi/internal/shim"
 
-// argvLayers is the merged output of mergeArgvLayers: the three values that
-// argvSpawnOptions turns into argv (model, effort, extra args).
+// argvLayers is the merged output of mergeArgvLayers: the values that
+// argvSpawnOptions turns into argv (model, effort, extra args, and the
+// appended system prompt).
 type argvLayers struct {
 	Model  string
 	Effort string
 	Args   []string
+	// SystemPrompt is the overlay's AppendSystemPrompt passed through
+	// unchanged (#2493): there is no backend- or tuning-level tier for it —
+	// the agent → planner → scratch layering already happened in the
+	// resolvers that built AgentOpts.SystemPrompt.
+	SystemPrompt string
 }
 
 // mergeArgvLayers is the single, side-effect-free precedence rule for the
@@ -65,7 +71,7 @@ func mergeArgvLayers(bd backendDefaults, profileDefaultModel string, ov shim.Spa
 	if tuningEffort != "" {
 		effort = tuningEffort
 	}
-	return argvLayers{Model: model, Effort: effort, Args: args}
+	return argvLayers{Model: model, Effort: effort, Args: args, SystemPrompt: ov.AppendSystemPrompt}
 }
 
 // profileDefaultModelFor returns the default_model of profile id in profiles,

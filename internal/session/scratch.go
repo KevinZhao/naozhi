@@ -228,9 +228,10 @@ type OpenOptions struct {
 }
 
 // Open creates a new scratch session and returns it. The quote is sanitized
-// and truncated; the resulting --append-system-prompt is appended to
-// opts.BaseOpts.ExtraArgs. The caller is responsible for first validating
-// that opts.SourceKey refers to a real session.
+// and truncated; the resulting prompt is layered onto BaseOpts.SystemPrompt
+// (JoinSystemPrompts) and reaches the CLI as --append-system-prompt via
+// cli.SpawnOptions.AppendSystemPrompt. The caller is responsible for first
+// validating that opts.SourceKey refers to a real session.
 func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	clean, truncated := SanitizeQuote(opts.Quote)
 	if clean == "" {
@@ -269,12 +270,18 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 		opts.ContextBefore, opts.ContextAfter, contextBudget,
 	)
 
-	// Build BaseOpts: deep-copy the source opts so the scratch-specific
-	// --append-system-prompt doesn't mutate the agent registry map value.
+	// Build BaseOpts: copy the source opts (ExtraArgs deep-copied so a later
+	// append cannot reach the agent registry's backing array) and layer the
+	// quoted context on top of whatever system prompt the agent already has
+	// (agents[].system_prompt). #2493: this used to be appended to ExtraArgs
+	// as `--append-system-prompt <quote>`, where cli.deniedExtraFlags
+	// silently stripped it — the aside never actually saw the quote.
+	// Assigning into the local copy leaves the registry map value untouched.
 	cloned := opts.BaseOpts
 	cloned.ExtraArgs = append([]string(nil), opts.BaseOpts.ExtraArgs...)
-	cloned.ExtraArgs = append(cloned.ExtraArgs,
-		"--append-system-prompt", buildScratchSystemPrompt(clean, truncated, contextBlock),
+	cloned.SystemPrompt = JoinSystemPrompts(
+		opts.BaseOpts.SystemPrompt,
+		buildScratchSystemPrompt(clean, truncated, contextBlock),
 	)
 	if opts.Workspace != "" {
 		cloned.Workspace = opts.Workspace

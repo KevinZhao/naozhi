@@ -55,7 +55,7 @@ func TestTuningDriftParity_NoFalseDrift(t *testing.T) {
 	// it, and the comparison passed while production diverged.
 	sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args))
+		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
 	// Drift-side reconstruction for the surviving shim of the same session,
 	// fed the overlay the spawn persisted into shim state (#2494).
@@ -136,7 +136,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	// field the drift side sets (or vice versa).
 	sp := r.resolveSpawnParamsLocked(key, "sess-drift-3", AgentOpts{Backend: "kiro", Workspace: "/ws"})
 	realArgs := sp.Wrapper.Protocol.BuildArgs(
-		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args))
+		r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
 	// The spawn then replaces the entry, carrying the snapshotted overrides.
 	_, _, _, _, ov := snapshotOldSessionLocked(s)

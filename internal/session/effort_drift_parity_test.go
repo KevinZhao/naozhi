@@ -52,10 +52,16 @@ func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	// or per-agent one, so the drift side can reconstruct it exactly.
 	// RFC cli-mcp-config G4.
 	//
+	// AppendSystemPrompt (#2493) is per-session (agent / planner / scratch);
+	// both paths obtain it from mergeArgvLayers — the spawn from the overlay it
+	// builds, the drift side from shim.SpawnOverlay.AppendSystemPrompt the
+	// shim persisted. Listing it here pins that it stays in the ONE literal
+	// rather than being spelled out at a call site.
+	//
 	// Still deliberately absent: ResumeID (session state, stripped from the
 	// stored argv by stripResumeArgs) and PermissionMode (both paths rely on the
 	// same zero value — see argvSpawnOptions).
-	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "DebugFile"}
+	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "DebugFile", "AppendSystemPrompt"}
 
 	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
 	if literals == 0 {

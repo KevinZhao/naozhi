@@ -22,9 +22,20 @@ func TestBuildAgentOpts(t *testing.T) {
 			// DeepEqual projection check: dropping it from either adapter
 			// direction breaks that comparison.
 			"planner": {Model: "opus", Effort: "max"},
+			// #2493: agents[].system_prompt must survive both hops too.
+			"reviewer": {Model: "sonnet", SystemPrompt: "You are a code review expert."},
 		},
 	}
 	agents, cronAgents := buildAgentOpts(cfg)
+
+	if got := agents["reviewer"].SystemPrompt; got != "You are a code review expert." {
+		t.Errorf("agents[reviewer].SystemPrompt = %q, want the configured prompt", got)
+	}
+	if got := cronAgents["reviewer"].SystemPrompt; got != "You are a code review expert." {
+		t.Errorf("cronAgents[reviewer].SystemPrompt = %q, want the configured prompt", got)
+	}
+	delete(agents, "reviewer")
+	delete(cronAgents, "reviewer")
 
 	if len(agents) != 2 || len(cronAgents) != 2 {
 		t.Fatalf("len(agents)=%d len(cronAgents)=%d, want 2/2", len(agents), len(cronAgents))

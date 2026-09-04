@@ -24,11 +24,12 @@ import (
 // ExtraArgs ownership note).
 func toCronAgentOpts(o session.AgentOpts) cron.AgentOpts {
 	out := cron.AgentOpts{
-		Model:     o.Model,
-		Workspace: o.Workspace,
-		Backend:   o.Backend,
-		Effort:    o.Effort,
-		Exempt:    o.Exempt,
+		Model:        o.Model,
+		Workspace:    o.Workspace,
+		Backend:      o.Backend,
+		Effort:       o.Effort,
+		SystemPrompt: o.SystemPrompt,
+		Exempt:       o.Exempt,
 	}
 	if len(o.ExtraArgs) > 0 {
 		out.ExtraArgs = append([]string(nil), o.ExtraArgs...)

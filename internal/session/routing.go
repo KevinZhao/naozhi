@@ -157,16 +157,17 @@ func NewKeyResolver(defaults map[string]AgentOpts, data PlannerDataSource) *KeyR
 //   - bound chat + agentID == "general" → base, overlay Workspace /
 //     Model / Prompt, Exempt = true, planner key.
 //
-// ExtraArgs merge uses three-arg slice (`[:len:len]`) to force a fresh
-// backing array — without this, two concurrent goroutines reading the
-// same `defaults[agentID].ExtraArgs` would corrupt each other's opts
-// when cap > len (R37-CONCUR1).
+// The planner prompt is layered into AgentOpts.SystemPrompt (agent
+// system_prompt first, JoinSystemPrompts) — NOT appended to ExtraArgs,
+// where cli.deniedExtraFlags would strip it (#2493). Since the merge no
+// longer appends to ExtraArgs, the historical R37-CONCUR1 hazard (two
+// goroutines reading the same `defaults[agentID].ExtraArgs` corrupting
+// each other's opts when cap > len) cannot arise here any more.
 //
-// Aliasing safety extends to ALL return paths, not just the planner
-// branch that appends — even the "early return" paths clone ExtraArgs
-// so a downstream caller that does `opts.ExtraArgs = append(...)` on
-// the returned slice cannot poison the shared defaults map. Without
-// this clone, R215-ARCH-P2-8: a non-planner caller appending to opts
+// Aliasing safety still extends to ALL return paths: every path clones
+// ExtraArgs so a downstream caller that does `opts.ExtraArgs =
+// append(...)` on the returned slice cannot poison the shared defaults
+// map. Without this clone, R215-ARCH-P2-8: a caller appending to opts
 // would silently mutate r.defaults[agentID].ExtraArgs whenever
 // cap > len.
 func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string) (key string, opts AgentOpts) {
@@ -224,14 +225,13 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	// control-char prompts that could have slipped past the write-path
 	// ValidateConfig (tampered disk file, future bypass path).
 	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
-		// Three-arg slice forces fresh backing array. Without
-		// `:len:len`, append would write past len in the shared
-		// defaults slice when cap > len — see
-		// dispatch/planner_args_isolation_test.go for canary test.
-		base.ExtraArgs = append(
-			base.ExtraArgs[:len(base.ExtraArgs):len(base.ExtraArgs)],
-			"--append-system-prompt", pp,
-		)
+		// #2493: the planner prompt travels in the dedicated SystemPrompt
+		// field, layered on top of the agent's own system_prompt. It used
+		// to be appended to ExtraArgs as `--append-system-prompt <pp>`,
+		// where cli.deniedExtraFlags silently stripped it on every spawn.
+		// `base` is a value copy of the registry entry, so assigning the
+		// joined string never mutates r.defaults[agentID].
+		base.SystemPrompt = JoinSystemPrompts(base.SystemPrompt, pp)
 	}
 	return plannerKeyFor(b.Name), base
 }
@@ -270,9 +270,9 @@ func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts
 	// also land here with a stale b.PlannerPrompt cached from a prior
 	// disk reload, so the boundary check must guard both entry points.
 	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
-		// Fresh literal slice; no aliasing risk because we do not
-		// read from defaults.
-		opts.ExtraArgs = []string{"--append-system-prompt", pp}
+		// Planner-view starts from blank opts, so the prompt is the only
+		// layer here (no agent system_prompt to stack on). #2493.
+		opts.SystemPrompt = pp
 	}
 	return plannerKeyFor(b.Name), opts, true
 }

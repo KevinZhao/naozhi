@@ -288,7 +288,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 	if sc == nil {
 		t.Fatal("scratch missing from pool")
 	}
-	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	prompt := sc.BaseOpts.SystemPrompt
 	for _, mustHave := range []string{"q1 before", "a1 before", "a2 after", "q2 after", "<conversation_context>", "<selected_quote>"} {
 		if !strings.Contains(prompt, mustHave) {
 			t.Errorf("prompt missing %q\n---\n%s", mustHave, prompt)
@@ -383,7 +383,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 	if sc == nil {
 		t.Fatal("scratch missing from pool")
 	}
-	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	prompt := sc.BaseOpts.SystemPrompt
 	// All 4 tail-window turns must be present in the rendered block.
 	for _, mustHave := range []string{"old-q1", "old-a1", "new-q2", "new-a2"} {
 		if !strings.Contains(prompt, mustHave) {

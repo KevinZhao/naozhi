@@ -25,15 +25,22 @@ import "github.com/naozhi/naozhi/internal/cli"
 // the spawn path pre-creates and hardens the log (cliDebugFileFor), while the
 // drift path must stay read-only (cliDebugPathFor). See cli_debug.go.
 //
+// systemPrompt is the layered AgentOpts.SystemPrompt (#2493). Both paths take
+// it from mergeArgvLayers: the spawn from the overlay it just built, the drift
+// side from the overlay the shim persisted (shim.SpawnOverlay.AppendSystemPrompt),
+// so a prompted session compares equal on restart and a changed prompt reads
+// as drift. Keeping it positional here means a new consumer cannot forget it.
+//
 // PermissionMode is deliberately absent: BuildArgs emits
 // --dangerously-skip-permissions for the zero value, so both paths agree today.
 // A caller that starts varying it must add it here, not at one call site.
-func (r *Router) argvSpawnOptions(model, effort, debugFile string, extraArgs []string) cli.SpawnOptions {
+func (r *Router) argvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string) cli.SpawnOptions {
 	return cli.SpawnOptions{
-		Model:     model,
-		Effort:    effort,
-		ExtraArgs: extraArgs,
-		DebugFile: debugFile,
+		Model:              model,
+		Effort:             effort,
+		ExtraArgs:          extraArgs,
+		DebugFile:          debugFile,
+		AppendSystemPrompt: systemPrompt,
 		// "" unless the operator opted into naozhi-owned isolated settings
 		// (RFC naozhi-owned-settings-v3); only ClaudeProtocol acts on it.
 		SettingsFile: r.naozhiSettingsFile,

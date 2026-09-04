@@ -156,11 +156,11 @@ func TestResolveForChat(t *testing.T) {
 			},
 			wantKey: "project:myproj:planner",
 			wantOpts: AgentOpts{
-				Model:     "opus",
-				Workspace: "/w/myproj",
-				Exempt:    true,
-				Backend:   "claude",
-				ExtraArgs: []string{"--append-system-prompt", "P"},
+				Model:        "opus",
+				Workspace:    "/w/myproj",
+				Exempt:       true,
+				Backend:      "claude",
+				SystemPrompt: "P",
 			},
 		},
 		{
@@ -192,10 +192,11 @@ func TestResolveForChat(t *testing.T) {
 			canaryCap: true,
 			wantKey:   "project:p:planner",
 			wantOpts: AgentOpts{
-				Model:     "sonnet",
-				Workspace: "/w",
-				Exempt:    true,
-				ExtraArgs: []string{"--existing", "--append-system-prompt", "P"},
+				Model:        "sonnet",
+				Workspace:    "/w",
+				Exempt:       true,
+				ExtraArgs:    []string{"--existing"},
+				SystemPrompt: "P",
 			},
 		},
 	}
@@ -369,10 +370,10 @@ func TestResolveForPlannerKey(t *testing.T) {
 			t.Errorf("key = %q, want %q", key, "project:p:planner")
 		}
 		want := AgentOpts{
-			Model:     "opus",
-			Workspace: "/w",
-			Exempt:    true,
-			ExtraArgs: []string{"--append-system-prompt", "P"},
+			Model:        "opus",
+			Workspace:    "/w",
+			Exempt:       true,
+			SystemPrompt: "P",
 			// Backend MUST be empty — not copied from defaults.
 		}
 		if !reflect.DeepEqual(opts, want) {
@@ -617,8 +618,14 @@ func TestResolveForChat_ConcurrentNoAliasing(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
 				_, opts := r.ResolveForChat("feishu", "direct", "alice", "general")
-				if len(opts.ExtraArgs) != 3 {
-					t.Errorf("ExtraArgs len = %d, want 3", len(opts.ExtraArgs))
+				// #2493: the planner prompt no longer rides in ExtraArgs
+				// (it is SystemPrompt now), so the base slice stays len 1
+				// and the prompt must land in the dedicated field.
+				if len(opts.ExtraArgs) != 1 {
+					t.Errorf("ExtraArgs len = %d, want 1", len(opts.ExtraArgs))
+				}
+				if opts.SystemPrompt != "P" {
+					t.Errorf("SystemPrompt = %q, want P", opts.SystemPrompt)
 				}
 			}
 		}()
