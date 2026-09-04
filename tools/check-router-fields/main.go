@@ -33,6 +33,12 @@
 // 纯增量（pure-additive）：本工具只读源码，不改 Router 结构、方法签名、锁
 // 拓扑，也不改既有 52 条 `// 读写:` 注释。
 //
+// 范围边界（#2495 step 1 起）：facet 一旦迁到独立包（如 wsStore 的类型变为
+// workspacestore.Store），其 inner 字段对 package session 不可见，字段访问约束
+// 由编译器接管，本工具不再（也无法）递归其 inner 字段——只对账 Router 上那个
+// 外层字段（r.wsStore）的域注释。仍留在同包的 sub-struct facet（ss / bkStore /
+// kid / pp）继续按下面的 one-level 递归规则对账。
+//
 // 用法：
 //
 //	check-router-fields [-mode warn|fail] [-dir internal/session]
@@ -319,9 +325,12 @@ func parseRouterFields(corePath string, structDecls map[string]*ast.StructType) 
 }
 
 // namedTypeIdent reports whether expr is a bare named type identifier (e.g.
-// `workspaceStore`) and returns its name. Pointer/slice/map/qualified types are
-// intentionally not followed — only a directly-embedded value sub-struct facet
-// is recursed.
+// `sessionStore`) and returns its name. Pointer/slice/map/qualified types are
+// intentionally not followed — only a same-package value sub-struct facet is
+// recursed. A qualified type (e.g. `workspacestore.Store`, #2495) means the
+// facet lives in its own package: its fields are unexported there, so the
+// compiler already forbids r.<outer>.<inner> access and there is nothing for
+// this lint to account for below the outer field.
 func namedTypeIdent(expr ast.Expr) (string, bool) {
 	if id, ok := expr.(*ast.Ident); ok {
 		return id.Name, true

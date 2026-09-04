@@ -12,10 +12,7 @@ func newWorkspaceTestRouter(def string, overrides map[string]string) *Router {
 		ss:         sessionStore{sessions: make(map[string]*ManagedSession)},
 		defaultCWD: def,
 	}
-	r.wsStore.overrides = make(map[string]string)
-	for k, v := range overrides {
-		r.wsStore.overrides[k] = v
-	}
+	r.wsStore.Seed(overrides)
 	return r
 }
 

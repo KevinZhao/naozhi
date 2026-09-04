@@ -515,18 +515,15 @@ func (r *Router) Cleanup() {
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
-	snapshotWsGen := r.wsStore.gen.Load()
+	snapshotWsGen := r.wsStore.Gen()
 	if r.ss.dirty {
 		sessionsCopy = make([]*ManagedSession, 0, len(r.ss.sessions))
 		for _, v := range r.ss.sessions {
 			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
-	if r.wsStore.dirty {
-		wsOverridesCopy = make(map[string]string, len(r.wsStore.overrides))
-		for k, v := range r.wsStore.overrides {
-			wsOverridesCopy[k] = v
-		}
+	if r.wsStore.Dirty() {
+		wsOverridesCopy = r.wsStore.Snapshot()
 	}
 	// knownIDs is append-only and relatively stable. Throttle its fsync to
 	// bound disk I/O (see knownIDsSaveInterval constant). Commit
@@ -569,9 +566,7 @@ func (r *Router) Cleanup() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.mu.Lock()
-			if r.wsStore.gen.Load() == snapshotWsGen {
-				r.wsStore.dirty = false
-			}
+			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
 			r.mu.Unlock()
 		}
 	}
@@ -734,7 +729,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 // Cleanup ticks do not discard newly discovered session IDs.
 func (r *Router) saveIfDirty() {
 	// R20260531070014-PERF-9 (#1535): the snapshot phase only READS r.ss.sessions /
-	// r.wsStore.overrides / r.kid.ids and the dirty flags, so take the cheaper
+	// the wsStore overrides / r.kid.ids and the dirty flags, so take the cheaper
 	// RLock here instead of the exclusive Lock. The hot GetOrCreate / Send paths
 	// that contend on r.mu can now proceed concurrently with the O(N) map copy
 	// (they only need the write lock briefly to register a session); previously
@@ -743,7 +738,7 @@ func (r *Router) saveIfDirty() {
 	// below, only when a knownIDs save is actually due.
 	r.mu.RLock()
 	knownIDsDue := r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval
-	if !r.ss.dirty && !r.wsStore.dirty && !knownIDsDue {
+	if !r.ss.dirty && !r.wsStore.Dirty() && !knownIDsDue {
 		r.mu.RUnlock()
 		return
 	}
@@ -757,18 +752,15 @@ func (r *Router) saveIfDirty() {
 		}
 	}
 	var wsOverridesCopy map[string]string
-	if r.wsStore.dirty {
-		wsOverridesCopy = make(map[string]string, len(r.wsStore.overrides))
-		for k, v := range r.wsStore.overrides {
-			wsOverridesCopy[k] = v
-		}
+	if r.wsStore.Dirty() {
+		wsOverridesCopy = r.wsStore.Snapshot()
 	}
 	var knownIDsCopy []byte
 	var snapshotKnownIDsGen uint64
 	var knownIDsMarshalErr error
 	storePath := r.storePath
 	snapshotGen := r.ss.gen.Load()
-	snapshotWsGen := r.wsStore.gen.Load()
+	snapshotWsGen := r.wsStore.Gen()
 	r.mu.RUnlock()
 
 	if knownIDsDue {
@@ -818,9 +810,7 @@ func (r *Router) saveIfDirty() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.mu.Lock()
-			if r.wsStore.gen.Load() == snapshotWsGen {
-				r.wsStore.dirty = false
-			}
+			r.wsStore.MarkSavedIfUnchanged(snapshotWsGen)
 			r.mu.Unlock()
 		}
 	}
@@ -995,10 +985,7 @@ func (r *Router) shutdown() {
 	// R20260616-PERF-009 (#2143): reuse the gen-memoised marshal so an
 	// unchanged set since the last periodic save re-uses the cached bytes.
 	knownIDsCopy, knownIDsMarshalErr := r.snapshotKnownIDsMarshaledLocked()
-	wsOverrides := make(map[string]string, len(r.wsStore.overrides))
-	for k, v := range r.wsStore.overrides {
-		wsOverrides[k] = v
-	}
+	wsOverrides := r.wsStore.Snapshot()
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface

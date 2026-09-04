@@ -115,7 +115,6 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 		r.bkStore.defaultBackend = "kiro"
 		r.bkStore.backendOverrides = make(map[string]string)
 		r.bkStore.backendEfforts = backendEfforts
-		r.wsStore.overrides = make(map[string]string)
 		r.claudeDir = t.TempDir()
 		r.kiroSessionsDir = t.TempDir()
 		return r

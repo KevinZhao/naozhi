@@ -827,9 +827,9 @@ type sessionStore struct {
 // stay in the same struct/lock/order and the invalidation cannot tear.
 //
 // CRITICAL: gen and sortedGen are PLAIN uint64, NOT atomic — every access is
-// under r.mu (no lock-free reader), unlike wsStore.gen which Version() reads
-// without the lock. Converting them to atomic.Uint64 would be an unnecessary
-// semantic change.
+// under r.mu (no lock-free reader), unlike workspacestore.Store's gen which
+// stayed an atomic.Uint64 for parity with its pre-extraction field.
+// Converting them to atomic.Uint64 would be an unnecessary semantic change.
 type knownIDsStore struct {
 	// ids tracks ALL session IDs ever used by naozhi, including
 	// sessions that have been removed/reset/evicted. Used by the

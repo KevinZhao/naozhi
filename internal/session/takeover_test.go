@@ -24,11 +24,10 @@ import (
 )
 
 // newTakeoverTestRouter builds a Router that has every map Takeover and
-// spawnSession touch — workspaceOverrides in particular, which the
-// older newTestRouter helper leaves nil.
+// spawnSession touch which the older newTestRouter helper leaves nil
+// (wsStore is zero-value usable and needs no init).
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
-	r.wsStore.overrides = map[string]string{}
 	r.bkStore.backendOverrides = map[string]string{}
 	r.ss.idToKey = map[string]string{}
 	r.pp.spawningKeys = map[string]chan struct{}{}
@@ -55,10 +54,10 @@ func TestTakeover_NewKey(t *testing.T) {
 
 	// Workspace override must land on the chat key prefix, not the session key.
 	chatKey := chatKeyFor(key)
-	if got := r.wsStore.overrides[chatKey]; got != workspace {
+	if got, _ := r.wsStore.Lookup(chatKey); got != workspace {
 		t.Errorf("workspaceOverrides[%q] = %q, want %q", chatKey, got, workspace)
 	}
-	if !r.wsStore.dirty {
+	if !r.wsStore.Dirty() {
 		t.Error("wsOverridesDirty should be set after Takeover writes override")
 	}
 
@@ -211,11 +210,11 @@ func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected spawn error, got nil")
 	}
-	if len(r.wsStore.overrides) != 0 {
+	if r.wsStore.Len() != 0 {
 		t.Errorf("workspaceOverrides should remain empty for chatKey==key, got %v",
-			r.wsStore.overrides)
+			r.wsStore.Snapshot())
 	}
-	if r.wsStore.dirty {
+	if r.wsStore.Dirty() {
 		t.Error("wsOverridesDirty should not be set when override write is skipped")
 	}
 }
@@ -228,27 +227,28 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user5:general"
 	chatKey := chatKeyFor(key)
-	r.wsStore.overrides[chatKey] = "/tmp/existing"
+	// Seed = disk-loaded semantics: present, not dirty.
+	r.wsStore.Seed(map[string]string{chatKey: "/tmp/existing"})
 
 	// Same workspace: guard should see prev == workspace and skip dirty flip.
 	_, err := r.Takeover(context.Background(), key, "sess-y", "/tmp/existing", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if r.wsStore.dirty {
+	if r.wsStore.Dirty() {
 		t.Error("wsOverridesDirty should not flip when new workspace equals prior")
 	}
 
 	// Different workspace: must flip dirty.
-	r.wsStore.dirty = false
+	r.wsStore.MarkSavedIfUnchanged(r.wsStore.Gen())
 	_, err = r.Takeover(context.Background(), key, "sess-y", "/tmp/changed", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
-	if !r.wsStore.dirty {
+	if !r.wsStore.Dirty() {
 		t.Error("wsOverridesDirty should flip when workspace changes")
 	}
-	if got := r.wsStore.overrides[chatKey]; got != "/tmp/changed" {
+	if got, _ := r.wsStore.Lookup(chatKey); got != "/tmp/changed" {
 		t.Errorf("workspaceOverrides[%q] = %q, want /tmp/changed", chatKey, got)
 	}
 }

@@ -255,6 +255,46 @@ func (r *Router) reset() { delete(r.wsStore.overrides, "k") }
 	}
 }
 
+// TestCheck_QualifiedFacetTypeNotRecursed: a Router field whose type is a
+// QUALIFIED identifier (facet moved to its own package, #2495 step 1 —
+// wsStore workspacestore.Store) is NOT recursed: only the outer field is
+// accounted for. Method calls r.<outer>.Method() from an undeclared domain
+// still surface as drift on the OUTER field, so the outer annotation keeps
+// being enforced while the inner fields are left to the compiler.
+func TestCheck_QualifiedFacetTypeNotRecursed(t *testing.T) {
+	dir := writeFixture(t, map[string]string{
+		"router_core.go": `package session
+import "example.com/session/workspacestore"
+type Router struct {
+	// 读写: core, workspace
+	wsStore workspacestore.Store
+}
+func (r *Router) init() { r.wsStore.Seed(nil) }
+`,
+		"router_workspace.go": `package session
+func (r *Router) set() { r.wsStore.Set("k", "/ws") }
+`,
+		"router_cleanup.go": `package session
+func (r *Router) save() { _ = r.wsStore.Snapshot() }
+`,
+	})
+
+	vs, err := check(dir)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	// cleanup accesses r.wsStore but the outer annotation omits it → drift on
+	// the outer field only.
+	if !hasViolation(vs, "drift_omitted", "wsStore", "cleanup") {
+		t.Errorf("expected drift_omitted on outer wsStore/cleanup, got %+v", vs)
+	}
+	for _, v := range vs {
+		if v.Field != "wsStore" {
+			t.Errorf("qualified facet type must not yield inner-field findings, got %+v", v)
+		}
+	}
+}
+
 // TestParseAnnotation_DomainList verifies comma-segment leading-token parsing
 // and wildcard detection directly.
 func TestParseAnnotation_DomainList(t *testing.T) {
