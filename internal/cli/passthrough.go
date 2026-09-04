@@ -12,18 +12,11 @@ import (
 	"time"
 )
 
-// newSlotUUID returns a 128-bit random hex string suitable for the Claude
-// CLI's uuid field. We don't need RFC4122 formatting — CLI treats it as an
-// opaque round-trippable blob. Using crypto/rand avoids a new dep (google/uuid)
-// while still giving enough entropy that collisions are astronomically rare.
-//
-// crypto/rand never returns short reads on Linux; an error here is a sign of
-// a hard OS failure. We fall back to a hashed monotonic counter (mirroring
-// newEventUUID) rather than returning the all-zero UUID — every-zero would
-// silently break slot FIFO matching, which is worse than a tiny entropy hit.
-//
-// uuidFallbackSeq is declared in cli/uuid.go (package-scoped). The fallback
-// path is shared with newEventUUID so the seq counter is not duplicated.
+// newSlotUUID returns a 128-bit random hex string for the Claude CLI's uuid
+// field (an opaque round-tripped blob; RFC4122 formatting is not needed). On
+// a crypto/rand failure it falls back to a hashed counter (uuidFallbackSeq,
+// shared with newEventUUID) rather than an all-zero UUID, which would break
+// slot FIFO matching.
 func newSlotUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -35,20 +28,13 @@ func newSlotUUID() string {
 }
 
 // SendPassthrough writes a user message to the CLI in passthrough mode and
-// waits for the matching turn result. Multiple goroutines can call this
-// concurrently on the same Process — ordering is preserved by atomically
-// appending the sendSlot and writing stdin under a single lock.
-//
-// Unlike the legacy Send, SendPassthrough does not hold any "process busy"
-// flag: the CLI's own commandQueue handles queuing. naozhi only does the
-// uuid/text ↔ slot bookkeeping.
-//
-// Passthrough requires Protocol.SupportsReplay(); callers must check that
-// upfront and fall back to Send when false. Calling SendPassthrough on a
-// replay-less protocol would hang because no replay events arrive to claim
-// the slot.
-//
-// priority: "" | "now" | "next" | "later". "now" aborts the in-flight turn.
+// waits for the matching turn result. Safe for concurrent callers: ordering is
+// preserved by appending the sendSlot and writing stdin under one lock. Unlike
+// Send it holds no "busy" flag — the CLI's own commandQueue queues turns and
+// naozhi only does uuid ↔ slot bookkeeping. Requires
+// Protocol.SupportsReplay() (callers fall back to Send otherwise; without
+// replay events nothing would ever claim the slot).
+// priority: "" | "now" | "next" | "later"; "now" aborts the in-flight turn.
 func (p *Process) SendPassthrough(ctx context.Context, text string, images []Attachment,
 	onEvent EventCallback, priority string) (*SendResult, error) {
 
@@ -61,10 +47,8 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		return nil, ErrProcessExited
 	}
 
-	// Shrink oversized inline images to the vision backend's resize limits
-	// once, before the write. Mirrors Send (process_send.go): both the CLI
-	// payload and the dashboard bubble (buildUserEntry below) reference the
-	// same smaller bytes, and every transcript replay reuses them.
+	// Shrink oversized inline images once before the write (mirrors Send) so
+	// the CLI payload, the dashboard bubble and every replay share the bytes.
 	images = downscaleImagesForVision(images)
 
 	slot := &sendSlot{
@@ -78,12 +62,10 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 		enqueueAt: time.Now(),
 	}
 
-	// Lock order: shimWMu → slotsMu. This is the only place we take both.
-	// Holding shimWMu across slotsMu+append+write ensures the slot lands in
-	// pendingSlots in the exact order the NDJSON line hits the shim socket.
-	// Without this, two concurrent Send calls could see the inverse order
-	// (slot A queued first, but stdin B written first) and break FIFO-based
-	// turn-result attribution.
+	// Lock order: shimWMu → slotsMu (the only place both are taken). Holding
+	// shimWMu across append+write guarantees pendingSlots order equals the
+	// order lines hit the shim socket; otherwise two concurrent sends could
+	// invert them and break FIFO turn-result attribution.
 	p.shimWMu.Lock()
 	p.slotsMu.Lock()
 
@@ -95,59 +77,31 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 	p.pendingSlots = append(p.pendingSlots, slot)
 	p.slotsMu.Unlock()
 
-	// shimSendLocked equivalent for user messages: caller already holds
-	// shimWMu. We pass stdinWriter but cannot use the fast path — we need
-	// to push the raw NDJSON directly through the shim protocol so the shim
-	// sees one atomic "write" frame. The underlying shimWriter fast-path in
-	// shimStdinWriter already does this (single-line atomic shimSend).
-	// However, that path would re-acquire shimWMu via shimSend → dead-lock.
-	// We use WriteUserMessageLocked which is documented to skip the outer
-	// lock (the Protocol guarantees atomic write under already-held shimWMu).
-	//
-	// Concretely: our shimWriter.Write detects a single-line '\n'-terminated
-	// buffer and calls p.shimSend which takes shimWMu — that would dead-lock
-	// us. Workaround: write directly via a thin helper that reuses
-	// shimSendLocked.
+	// stdinWriter (shimWriter) would re-acquire shimWMu via shimSend and
+	// deadlock, so write through a helper that reuses shimSendLocked.
 	writeErr := p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
 	slot.writtenAt = time.Now()
 	p.shimWMu.Unlock()
 
 	if writeErr != nil {
-		// CLI never saw this message — remove slot now; caller gets the raw
-		// error. FIFO is not harmed because we wrote nothing to stdin.
+		// CLI never saw this message; FIFO is intact because nothing was
+		// written. Surface the canonical ErrProcessExited if the process died
+		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
-		// If the write failed because the process died between Alive()
-		// check and shim write, surface ErrProcessExited so upstream
-		// sees the canonical "process gone" signal rather than an opaque
-		// shim-pipe error.
 		if !p.Alive() {
 			return nil, ErrProcessExited
 		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
 
-	// Mirror Send's EventLog.Append for the user message so a later
-	// subscribe (session switch, reconnect) can re-render the bubble.
-	// readLoop filters the CLI's replay echo out of EventLog to avoid
-	// double-display against the dashboard's optimistic bubble, so without
-	// this append the user turn only lives in the client DOM and the JSONL
-	// on disk — not in naozhi's in-memory transcript. Placed after the
-	// successful stdin write so a rejected write (e.g. closed shim socket)
-	// does not leave a ghost entry; subscribers already poll after any
-	// Append via the live notify-subscribers path.
+	// Mirror Send's user-entry Append so a later subscribe can re-render the
+	// bubble (readLoop filters the CLI's replay echo out of EventLog). After
+	// the successful write so a rejected write leaves no ghost entry.
 	p.eventLog.Append(buildUserEntry(text, images))
 
-	// Defensive bail timer. Passthrough does not have a per-turn watchdog
-	// (CLI 本身和 shim 的 heartbeat 负责探测进程级死锁；slot 级超时由 bail
-	// 兜底)。Set to totalTimeout + 30s so in the rare case where readLoop
-	// and shim heartbeat both miss, the Send caller still unblocks.
-	//
-	// Phase A.8 reflection: v2.2 RFC specified a process-level watchdog
-	// keyed to turnStartedAt. In practice the CLI's heartbeat + cli_exited
-	// path (discardAllPending) covers hard dead-process scenarios, and
-	// shim's own watchdog covers hung-CLI scenarios. The per-slot bail is
-	// sufficient defensive cover; we add a process-level loop only if
-	// Phase C testing shows stuck slots in the wild.
+	// Defensive bail timer: passthrough has no per-turn watchdog (CLI 本身和
+	// shim 的 heartbeat 负责探测进程级死锁；slot 级超时由 bail 兜底)，so
+	// totalTimeout + 30s still unblocks the caller if both miss.
 	total := p.totalTimeout
 	if total <= 0 {
 		total = DefaultTotalTimeout
@@ -161,15 +115,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 	case err := <-slot.errCh:
 		return nil, err
 	case <-ctx.Done():
-		// Tombstone: keep slot in pendingSlots so FIFO positioning survives.
-		// When the real result arrives, fanout sees canceled=true and drops.
+		// Tombstone: keep the slot so FIFO positioning survives; fanout
+		// sees canceled=true and drops the late result.
 		p.slotsMu.Lock()
 		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
 		return nil, ctx.Err()
 	case <-bail.C:
-		// Pure defensive fallback. Record slot as canceled so a late result
-		// won't try to write to a resultCh whose caller is long gone.
+		// Mark canceled so a late result does not target a gone caller.
 		p.slotsMu.Lock()
 		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
@@ -179,28 +132,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Att
 }
 
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
-// to the shim, bypassing shimWriter's fast-path that would re-acquire
-// shimWMu. Caller MUST hold shimWMu.
+// to the shim via a pooled capture writer + shimSendLocked, bypassing
+// shimWriter's fast path that would re-acquire shimWMu. Caller MUST hold
+// shimWMu.
 func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []Attachment, priority string) error {
-	// We can't feed through stdinWriter (shimWriter) because its Write path
-	// calls p.shimSend which takes shimWMu. Build the payload ourselves via
-	// the protocol and push via shimSendLocked.
-	//
-	// For ClaudeProtocol, WriteUserMessageLocked expects an io.Writer that
-	// accepts one '\n'-terminated line. We feed a thin capture-writer and
-	// forward the captured bytes through shimSendLocked.
-	//
-	// R226-PERF-3: pool captureWriter + its backing slice (the slice is the
-	// dominant cost — typical user messages are 100B-4KB). The pool returns a
-	// pointer so the slice header stays heap-stable; reset to len 0 on Get to
-	// reuse capacity, return on Put.
 	cw := captureWriterPool.Get().(*captureWriter)
 	cw.bytes = cw.bytes[:0]
-	// R237-GO-11: oversized payloads (e.g. 11MB image messages) leave a giant
-	// backing array in the pool, defeating the "reuse small buffers" intent and
-	// inflating steady-state heap. Skip Put when cap exceeds the soft cutoff so
-	// the slice can be GC'd; the pool's New func will mint a fresh 4KiB writer
-	// for the next caller.
+	// Don't return oversized buffers (multi-MB image messages) to the pool;
+	// they would pin heap for the worker's lifetime.
 	defer func() {
 		if cap(cw.bytes) > captureWriterMaxKeepBytes {
 			return
@@ -211,24 +150,20 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []A
 		return err
 	}
 	line := cw.bytes
-	// Strip trailing newline — shimSendLocked re-adds its own framing via the
-	// shim's "write" frame structure.
+	// The shim "write" frame carries its own line framing.
 	if n := len(line); n > 0 && line[n-1] == '\n' {
 		line = line[:n-1]
 	}
 	if len(line) > maxStdinLineBytes {
 		return fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line), maxStdinLineBytes)
 	}
-	// shimSendLocked encodes shimClientMsg.Line as a JSON string, which copies
-	// the bytes into its own buffer. After Put returns to the pool, the slice
-	// backing array can be reused — the JSON encoding has already finished
-	// reading by then.
+	// string(line) copies, so the pooled buffer is free to reuse after Put.
 	return p.shimSendLocked(shimClientMsg{Type: "write", Line: string(line)})
 }
 
-// captureWriter is an io.Writer that accumulates bytes into an in-memory slice.
-// Used by writeUserMessageUnderShimLock to route Protocol.WriteUserMessageLocked
-// output through the shim's "write" frame instead of directly to stdin.
+// captureWriter is an io.Writer that accumulates bytes into an in-memory
+// slice so Protocol.WriteUserMessageLocked output can be routed through the
+// shim's "write" frame.
 type captureWriter struct {
 	bytes []byte
 }
@@ -238,25 +173,17 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// captureWriterPool reuses captureWriter values (and their backing byte
-// slices) across passthrough sends so the writer header + initial slice
-// allocation no longer heap-escape on every message. Each Get caller MUST
-// reset bytes via `c.bytes = c.bytes[:0]` before using the writer; Put
-// happens via defer in writeUserMessageUnderShimLock. R226-PERF-3.
+// captureWriterPool reuses captureWriter values and their backing slices
+// across passthrough sends. Get callers MUST reset via `c.bytes = c.bytes[:0]`.
 var captureWriterPool = sync.Pool{
 	New: func() any {
-		// 4KB initial capacity covers most messages; append grows as needed
-		// and the larger backing array is what we actually want to keep
-		// pooled for subsequent reuse.
 		return &captureWriter{bytes: make([]byte, 0, 4096)}
 	},
 }
 
-// captureWriterMaxKeepBytes caps the per-entry backing slice size that survives
-// a Put back into captureWriterPool. R237-GO-11: large payloads (image attach
-// blobs in particular) can produce multi-MiB capacity slices; if returned to
-// the pool they pin those bytes for the lifetime of the worker. 64KiB covers
-// every text-only passthrough payload while allowing the GC to reclaim outliers.
+// captureWriterMaxKeepBytes caps the backing slice size that survives a Put
+// back into captureWriterPool; 64KiB covers every text-only payload while
+// letting the GC reclaim image-blob outliers.
 const captureWriterMaxKeepBytes = 64 * 1024
 
 // removeSlotByID removes a single slot from pendingSlots. Used on write-fail.
@@ -268,9 +195,7 @@ func (p *Process) removeSlotByID(id uint64) {
 		if s.id == id {
 			old := p.pendingSlots
 			p.pendingSlots = append(old[:i], old[i+1:]...)
-			// Zero the now-unused tail element so GC can reclaim the
-			// dropped slot reference instead of leaving it dangling in
-			// the backing array until overwritten.
+			// Zero the tail so GC can reclaim the dropped slot.
 			old[len(old)-1] = nil
 			return
 		}
@@ -283,8 +208,7 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 	if len(victims) == 0 {
 		return
 	}
-	// Fast path: for ≤4 victims (common passthrough case: 1 owner per turn)
-	// a linear scan is allocation-free and faster than building a map.
+	// ≤4 victims (the common case): allocation-free linear scan beats a map.
 	kept := p.pendingSlots[:0]
 	if len(victims) <= 4 {
 		for _, s := range p.pendingSlots {
@@ -310,15 +234,11 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 			}
 		}
 	}
-	// Zero out the tail so GC can reclaim the trailing slot references.
 	for i := len(kept); i < len(p.pendingSlots); i++ {
 		p.pendingSlots[i] = nil
 	}
-	// Reclaim capacity when the slice has shrunk to <25% of its backing
-	// array: a session that briefly burst to maxPendingSlots then went
-	// idle would otherwise permanently hold a maxPendingSlots-sized
-	// backing array for the rest of its lifetime. Only copy if the win
-	// is real (len*4 < cap) to avoid thrashing on steady-state traffic.
+	// Shrink when <25% of the backing array is live so a burst to
+	// maxPendingSlots does not pin that array for the session's lifetime.
 	if cap(kept) > 8 && len(kept)*4 < cap(kept) {
 		shrunk := make([]*sendSlot, len(kept), len(kept)+2)
 		copy(shrunk, kept)
@@ -341,26 +261,13 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 	return nil
 }
 
-// handleReplayEventLocked dispatches a user replay event. The CLI emits
-// replays in one of two shapes:
-//
-//  1. Independent replay — uuid == naozhi's uuid, content carries exactly
-//     the original text. These appear both for single-message turns and
-//     for each message in a burst that the CLI will later batch. Matched
-//     by uuid.
-//
-//  2. Merged replay — uuid is CLI-synthesized (not in naozhi's pending
-//     slots). Content is a single string that concatenates the batch with
-//     a space separator (observed in live tests, not block arrays as the
-//     earlier RFC assumed). naozhi CANNOT reliably split this string, so
-//     we claim all not-yet-replayed pending slots instead: a merged replay
-//     means "every currently-enqueued, still-unclaimed message is part of
-//     this turn".
-//
-// Caller must hold slotsMu. This is the only place currentTurnSlots grows
-// for user replays.
+// handleReplayEventLocked dispatches a user replay event. Two shapes:
+// independent (uuid == a pending slot's uuid, matched by uuid) and merged
+// (CLI-synthesised uuid, content is the batch joined with spaces — not
+// splittable, so every not-yet-replayed pending slot is claimed: a merged
+// replay means the turn consumes all in-flight messages). Caller must hold
+// slotsMu; this is the only place currentTurnSlots grows for user replays.
 func (p *Process) handleReplayEventLocked(ev Event) {
-	// Independent replay: uuid matches a pending slot.
 	if slot := p.findSlotByUUIDLocked(ev.UUID); slot != nil {
 		if slot.replayed {
 			slog.Debug("passthrough: replay uuid already claimed", "uuid", ev.UUID, "slot_id", slot.id)
@@ -373,11 +280,7 @@ func (p *Process) handleReplayEventLocked(ev Event) {
 		return
 	}
 
-	// Merged replay: sweep up every pending slot that hasn't been claimed
-	// yet. This is correct because the CLI only generates a merged replay
-	// when it is about to start a turn that consumes all in-flight stdin
-	// user messages — there is no scenario where only a subset of pending
-	// slots should land in the merged group.
+	// Merged replay: sweep every unclaimed pending slot.
 	claimed := 0
 	for _, s := range p.pendingSlots {
 		if s.replayed {
@@ -393,12 +296,9 @@ func (p *Process) handleReplayEventLocked(ev Event) {
 }
 
 // fanoutTurnResult delivers one CLI result event to every slot the turn
-// claimed. The first claimed slot gets the full SendResult; the rest get a
-// follower SendResult with MergedWithHead pointing at the head slot.
-//
-// This is called from readLoop after releasing slotsMu to avoid holding the
-// mutex across channel sends (which can be blocking if the Send caller has
-// returned but resultCh has cap 1, it won't block in practice).
+// claimed: the head slot gets the full SendResult, followers get
+// MergedWithHead pointing at it. Called from readLoop after releasing slotsMu
+// so channel sends never happen under the lock.
 func fanoutTurnResult(owners []*sendSlot, ev Event) {
 	slog.Debug("passthrough: fanout", "owners", len(owners),
 		"result_len", len(ev.Result), "session", ev.SessionID)
@@ -451,13 +351,9 @@ func deliverSlotResult(s *sendSlot, r *SendResult) {
 
 // discardAllPending is used when the CLI is known dead or the session is
 // reset. All pending + currentTurn slots receive the given error; caller
-// should not touch slot state afterwards.
-//
-// currentTurnSlots 必须和 pendingSlots 一起被通知：有些 slot 已经被 replay
-// 从 pendingSlots 移入 currentTurnSlots，若只 nil 掉 currentTurnSlots 而不
-// 给它们投 errCh，对应的 SendPassthrough goroutine 会阻塞到 total+30s bail
-// timer 才返回，IM 用户表现为"无响应"而非明确错误，同时 goroutine + 栈
-// 内存悬挂 5.5 分钟。R192-CLI-P0-DiscardCurrentTurn。
+// should not touch slot state afterwards. currentTurnSlots 必须和 pendingSlots
+// 一起被通知，否则已被 replay 认领的 slot 会阻塞到 total+30s bail timer，IM
+// 用户表现为"无响应"而非明确错误。
 func (p *Process) discardAllPending(reason error) {
 	p.slotsMu.Lock()
 	victims := make([]*sendSlot, 0, len(p.pendingSlots)+len(p.currentTurnSlots))
@@ -480,27 +376,17 @@ func (p *Process) discardAllPending(reason error) {
 }
 
 // DiscardPassthroughPending is the exported surface for session/router to
-// trigger on /new, /clear, or a forced reset. Exported name is explicit so
-// callers don't confuse it with the internal discardAllPending used on
-// process death.
+// trigger on /new, /clear, or a forced reset.
 func (p *Process) DiscardPassthroughPending(reason error) {
 	p.discardAllPending(reason)
 }
 
-// onSystemInit marks the start of a new turn for the watchdog clock. It does
-// NOT clear currentTurnSlots: live experiments confirm the CLI emits
-// independent `isReplay:true` user events for enqueued messages *between*
-// turns (after the previous turn's result and before the next turn's init).
-// Those slot claims must survive into the next turn's result fan-out.
-// currentTurnSlots is instead zeroed by onTurnResult after the result is
-// delivered. See docs/rfc/passthrough-mode-validation.md (post-burst
-// observation) and §5.2.3 state machine.
-//
-// Also flips Process.State → Running so InterruptViaControl and the
-// dashboard "isRunning" probe see the passthrough turn as active. The
-// legacy Send path owns this flip inside Send() itself; passthrough needs
-// its own hook because the Send slot goroutine blocks on resultCh without
-// touching State.
+// onSystemInit marks the start of a new turn. It does NOT clear
+// currentTurnSlots: the CLI emits replay events for enqueued messages
+// between turns and those claims must survive into the next fan-out;
+// onTurnResult zeroes them after delivery. Also flips State → Running so
+// InterruptViaControl and the dashboard see the passthrough turn as active
+// (Send does this itself; passthrough callers block on resultCh instead).
 func (p *Process) onSystemInit() {
 	p.slotsMu.Lock()
 	p.turnStartedAt = time.Now()
@@ -515,17 +401,9 @@ func (p *Process) onSystemInit() {
 }
 
 // onTurnResult is called when readLoop sees a result event. It snapshots the
-// turn's claimed slots, strips them from pendingSlots, and returns them to
-// the caller for out-of-lock fanout.
-//
-// When isAbort is true (result.subtype == "error_during_execution"), the
-// CLI dropped the in-flight turn — typically due to a priority:"now" message
-// preempting it. Any pending slot that was written before the preemption
-// and never got its replay was discarded by the CLI. We identify them as
-// "unreplayed slots that existed before the earliest unclaimed priority:now
-// slot" and fire ErrAbortedByUrgent so their SendPassthrough callers unblock.
-// The caller still owns fanout for the actual claimed turn slots; those
-// just get the (empty) error result as a regular fanout.
+// turn's claimed slots, strips them from pendingSlots, and returns them for
+// out-of-lock fanout (an aborted turn's victims are handled separately by
+// reapAbortedPreempted).
 func (p *Process) onTurnResult() []*sendSlot {
 	p.slotsMu.Lock()
 	owners := p.currentTurnSlots
@@ -535,12 +413,9 @@ func (p *Process) onTurnResult() []*sendSlot {
 	pendingLeft := len(p.pendingSlots)
 	p.slotsMu.Unlock()
 
-	// Mirror the Send path's State→Ready transition on the last passthrough
-	// turn so the dashboard / IsRunning / InterruptViaControl see the session
-	// as idle. Only flip when we actually consumed owners (i.e. passthrough
-	// really drove this turn); a stray result with no slot claim might be a
-	// legacy Send path or a reconnect replay — leave that to the existing
-	// handler below in readLoop.
+	// Mirror Send's State→Ready on the last passthrough turn. Only when
+	// owners were consumed: a result with no claim may be a Send-path turn or
+	// a reconnect replay, which readLoop handles itself.
 	if len(owners) > 0 && pendingLeft == 0 {
 		p.mu.Lock()
 		if p.state == StateRunning {
@@ -551,14 +426,11 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
-// reapAbortedPreempted collects pending slots that were discarded by the CLI
-// when a priority:"now" preempted the active turn. An affected slot is one
-// that: (a) was not replayed before the abort result arrived, and (b) is
-// itself not a priority:"now" slot (those triggered the preemption and
-// should proceed into the next turn, not be reaped).
-//
-// Returns the victims after removing them from pendingSlots. Called on
-// result.subtype == "error_during_execution".
+// reapAbortedPreempted collects pending slots the CLI discarded when a
+// priority:"now" preempted the active turn (result.subtype ==
+// "error_during_execution"): slots not yet replayed that are not themselves
+// priority:"now" (those proceed into the next turn). Returns the victims
+// after removing them from pendingSlots.
 func (p *Process) reapAbortedPreempted() []*sendSlot {
 	p.slotsMu.Lock()
 	defer p.slotsMu.Unlock()
@@ -579,9 +451,7 @@ func (p *Process) reapAbortedPreempted() []*sendSlot {
 }
 
 // fireAbortErrors delivers ErrAbortedByUrgent to each aborted slot's caller.
-// Uses isCanceled() (not direct field read) to match deliverSlotResult and
-// avoid the "concurrent canceled-field write vs fireAbortErrors read" race
-// when reapAbortedPreempted releases slotsMu before fireAbortErrors runs.
+// isCanceled() (atomic) is required: slotsMu is already released here.
 func fireAbortErrors(victims []*sendSlot) {
 	for _, s := range victims {
 		if s.isCanceled() {
@@ -612,8 +482,7 @@ func (p *Process) PassthroughDepth() int {
 }
 
 // SupportsPassthrough reports whether this Process's backing protocol can run
-// in passthrough mode. Currently equivalent to ProtocolCaps(...).Replay
-// because replay events are required for naozhi ↔ CLI slot matching.
+// in passthrough mode (replay events are required for slot matching).
 func (p *Process) SupportsPassthrough() bool {
 	return p.caps.Replay
 }

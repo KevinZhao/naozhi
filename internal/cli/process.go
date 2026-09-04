@@ -30,43 +30,27 @@ const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
 	// maxScannerBufBytes caps a single NDJSON line read from the shim's stdout.
-	//
-	// Set 6 MiB below the shim's own per-line cap (16 MiB, see
-	// internal/shim/server.go maxServerLineBytes) so a single shim-side
-	// allocator decision (e.g. retry-with-larger-buffer) never causes the
-	// reader here to silently truncate a line. Lines between 10 MiB and
-	// 16 MiB are not "legal-but-dropped"; the shim itself rejects them at
-	// its own cap, so naozhi never sees them. The 6 MiB headroom is for
-	// buffered-event coalescing and base64-image-laden tool_result frames
-	// that sit a few MiB above the typical 50-200 KiB line size.
+	// Kept 6 MiB below the shim's own 16 MiB per-line cap (internal/shim/server.go
+	// maxServerLineBytes) so a shim-side allocator decision never makes this
+	// reader silently truncate; the headroom covers coalesced buffered events and
+	// base64-image-laden tool_result frames.
 	maxScannerBufBytes = 10 * 1024 * 1024
 
-	// maxStdinLineBytes is the largest single NDJSON line we will forward to
-	// the shim. The shim enforces 16 MB per line; we leave headroom for the
-	// shim-protocol JSON envelope added in shimClientMsg. Exceeding this
-	// value used to produce a silent "connection reset by peer" from the
-	// shim — now we fail fast with a clear error so the dashboard can surface it.
+	// maxStdinLineBytes is the largest single NDJSON line forwarded to the shim
+	// (which enforces 16 MB per line); headroom is for the shimClientMsg envelope.
+	// Exceeding it fails fast with ErrMessageTooLarge so the dashboard can surface it.
 	maxStdinLineBytes = 12 * 1024 * 1024
 
-	// lineBufShrinkThreshold caps how much capacity readLoop's lineBuf is
-	// allowed to retain across iterations before being shrunk back to the
-	// 4 KiB starting size.
-	//
-	// Sizing rationale: tool_result payloads and assistant text chunks in
-	// the wild commonly hit 50-200 KiB; the prior 64 KiB threshold fired
-	// on nearly every one of them, forcing the next large event in the
-	// same session to re-grow through 4→8→16→32→64→128 KiB doublings
-	// (~5 reallocs + copies). 256 KiB covers the realistic upper edge of
-	// legitimate events while still rejecting runaway growth from a buggy
-	// or adversarial shim. The tradeoff at 50 concurrent sessions is
-	// 50 × +192 KiB = +~10 MiB idle RSS in exchange for eliminating the
-	// reallocation churn from the common large-event path.
+	// lineBufShrinkThreshold caps the capacity readLoop's lineBuf may retain
+	// across iterations before shrinking back to 4 KiB. tool_result payloads and
+	// assistant text chunks commonly hit 50-200 KiB, so 256 KiB retains that
+	// capacity (one realloc per session, not per event) while still bounding
+	// runaway growth from a buggy shim: ~+10 MiB idle RSS at 50 sessions.
 	lineBufShrinkThreshold = 256 * 1024
 )
 
-// ErrMessageTooLarge is returned when a user message (after JSON encoding)
-// would exceed the shim's per-line limit. Callers should shrink the payload
-// (e.g., downscale images) before retrying.
+// ErrMessageTooLarge is returned when a user message (after JSON encoding) would
+// exceed the shim's per-line limit; callers should shrink the payload first.
 var ErrMessageTooLarge = errors.New("message too large for stream-json line")
 
 // Sentinel errors for watchdog timeouts.
@@ -76,69 +60,49 @@ var (
 )
 
 // ErrProcessExited is returned by Send when the CLI subprocess exits before
-// producing a result. Distinguishable from watchdog timeouts so callers
-// (managed.go, dispatch) can react with "spawn a new process next turn"
-// rather than counting it as a no-output stall.
+// producing a result; callers react by spawning a new process next turn.
 var ErrProcessExited = errors.New("process exited during send")
 
-// ErrProcessBusy is returned by Send when the (legacy, non-passthrough)
-// state machine is already StateRunning. Typed so dispatch.mapSendError
-// can reply "正在处理中" instead of falling into the generic /new reset
-// hint. Passthrough-mode processes do not emit this.
+// ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
+// machine is already StateRunning; dispatch maps it to "正在处理中".
 var ErrProcessBusy = errors.New("process busy")
 
-// Passthrough-mode sentinels. Kept in a separate block so callers can do
-// targeted errors.Is switches without depending on the wider process error
-// vocabulary.
+// Passthrough-mode sentinels (separate block for targeted errors.Is switches).
 var (
-	// ErrSessionReset fires when a user slash-command (/new, /clear) or a
-	// forced wrapper reset cancels all pending sends. Dispatcher should not
-	// surface this to IM because the user triggered it knowingly.
+	// ErrSessionReset fires when a user slash-command (/new, /clear) or a forced
+	// wrapper reset cancels all pending sends; not surfaced to IM (user-triggered).
 	ErrSessionReset = errors.New("session reset")
 
 	// ErrReconnectedUnknown fires when naozhi re-attaches to a shim+CLI that
-	// survived a naozhi restart and had pending messages in flight. naozhi
-	// cannot tell which messages were consumed, so every pending slot gets
-	// this error. Dispatcher should surface "状态未知，请查看历史或重发"
-	// so users can decide whether to resend.
+	// survived a restart with messages in flight: naozhi cannot tell which were
+	// consumed, so every pending slot gets it (dispatcher: 状态未知，请查看历史或重发).
 	ErrReconnectedUnknown = errors.New("reconnected: processing state unknown")
 
-	// ErrTooManyPending fires when Send is called while pendingSlots already
-	// holds maxPendingSlots entries. The message is rejected up front — CLI
-	// never sees it. Dispatcher maps this to sendAckBusy.
+	// ErrTooManyPending fires when Send is called with maxPendingSlots already
+	// pending; the message is rejected up front (dispatcher: sendAckBusy).
 	ErrTooManyPending = errors.New("too many pending messages")
 
-	// ErrOrphanedSlot is a pure defensive fallback: Send's select has a timer
-	// tripwire at totalTimeout + 30s in case watchdog and readLoop both miss
-	// delivering a result. Should only fire on genuine bugs.
+	// ErrOrphanedSlot is a defensive fallback: Send's totalTimeout+30s tripwire in
+	// case watchdog and readLoop both miss delivering a result. Fires only on bugs.
 	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
 )
 
-// maxPendingSlots caps the per-Process passthrough pending queue depth. 16
-// covers realistic IM bursts comfortably (CC TUI's equivalent is unbounded,
-// but this is a goroutine-leak / memory backstop rather than a business
-// limit). Can be tuned via Process.SetMaxPendingSlots.
+// maxPendingSlots caps the per-Process passthrough pending queue; a goroutine-
+// leak / memory backstop, not a business limit. Tunable via SetMaxPendingSlots.
 const maxPendingSlots = 16
 
-// ErrAbortedByUrgent fires when a priority:"now" stdin message causes the
-// CLI to drop the in-flight turn. Any older pending slot that was enqueued
-// before the urgent message and had not yet been replayed gets this error —
-// its text never reached the model. Dispatcher should tell the user the
-// message was superseded and let them decide whether to resend.
+// ErrAbortedByUrgent fires when a priority:"now" message makes the CLI drop the
+// in-flight turn: older pending slots not yet replayed get this error — their
+// text never reached the model, so the user must decide whether to resend.
 var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
 
-// ErrNoActiveTurn is returned by InterruptViaControl when the process is not
-// currently running a turn (StateSpawning, StateReady, or StateDead). The
-// caller didn't do anything wrong, but nothing was interrupted; logs should
-// not claim "aborted active turn" in this case.
+// ErrNoActiveTurn is returned by InterruptViaControl when no turn is running;
+// nothing was interrupted, so logs must not claim "aborted active turn".
 var ErrNoActiveTurn = errors.New("no active turn to interrupt")
 
-// processCloseTimeout bounds Close() while it waits for the shim to tear
-// down its listener + socket file. The shim-side path is closeStdin +
-// waitOrKill(5s) + listener.Close + os.Remove, so 8s gives comfortable
-// headroom; exceeding it falls through to Kill (which uses SIGUSR2 to
-// force the shim's immediate-shutdown path, see Kill()). Var (not const)
-// so tests can shorten it.
+// processCloseTimeout bounds Close() while the shim tears down its listener +
+// socket (closeStdin + waitOrKill(5s) + listener.Close + os.Remove, so 8s is
+// headroom); on expiry Close falls through to Kill. Var so tests can shorten it.
 var processCloseTimeout = 8 * time.Second
 
 func (s ProcessState) String() string {
@@ -150,11 +114,7 @@ func (s ProcessState) String() string {
 	case StateRunning:
 		return "running"
 	case StateDead:
-		// Was "ready" historically (session may be resumable), but that masqueraded
-		// crashed processes as idle in the dashboard — operators could not tell a
-		// passive CLI exit / shim EOF / readLoop panic from a genuine idle state.
-		// The dashboard falls back to the "new-card" dot for any unrecognised state
-		// and combines it with `dead_reason` to render a dead-card badge.
+		// Not "ready": the dashboard must not show crashed processes as idle.
 		return "dead"
 	default:
 		return "unknown"
@@ -165,12 +125,7 @@ func (s ProcessState) String() string {
 type Process struct {
 	shimConn net.Conn
 	// shimCloseOnce serialises shimConn.Close across Kill / Detach / Close /
-	// readLoop EOF paths. Without it, concurrent close races (e.g. Kill racing
-	// readLoop's EOF cleanup) trigger a "use of closed network connection"
-	// error from the second Close that callers must currently swallow with a
-	// blank `_ =`. The Once eliminates the misleading-debug-log surface and
-	// matches the closeOnce idiom already used by EventLog subscribers.
-	// R219-GO-3.
+	// readLoop EOF so a racing second Close never logs a misleading error.
 	shimCloseOnce sync.Once
 	shimR         *bufio.Reader
 	shimW         *bufio.Writer
@@ -181,28 +136,15 @@ type Process struct {
 	cliPID        int  // CLI PID reported by shim hello
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
-	// sessionID and state are protected by mu. External readers MUST use
-	// GetSessionID() / GetState() rather than reading the field directly to
-	// avoid racing readLoop's transition writes (system/init / result
-	// events). Unexported (R237-GO-2 / #623) so cross-package callers
-	// cannot silently bypass the locking contract by direct field access;
-	// the existing accessors already cover every external read site.
-	// R225-GO-9.
+	// sessionID and state are protected by mu. Readers MUST use SessionID() /
+	// State() rather than the fields directly to avoid racing readLoop's
+	// transition writes (#623).
 	sessionID string
 	state     ProcessState
-	// mu protects state / sessionID / onTurnDone. Read-only accessors
-	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
-	// ListSessions snapshots across N sessions and M tabs proceed in
-	// parallel instead of serialising through a single Mutex. Write paths
-	// (readLoop state transitions, Send state→Running, Interrupt
-	// snapshot-and-flag) continue to use Lock to preserve the existing
-	// "read state and set interrupted together under one lock" contract.
-	// R70-PERF-L3.
-	//
-	// totalCost is stored separately as an atomic.Uint64 (math.Float64bits)
-	// so Snapshot() paths that want lock-free reads (mirroring the
-	// ManagedSession.totalCost pattern, R183-CONCUR-M2) never have to
-	// nest p.mu.RLock under ownership of r.mu or sendMu.
+	// mu protects state / sessionID / onTurnDone. Accessors use RLock so Snapshot
+	// polls run in parallel; write paths (readLoop transitions, Send state→Running,
+	// Interrupt snapshot-and-flag) use Lock so "read state + set interrupted" stays
+	// atomic. totalCost is a separate atomic so readers never nest p.mu under r.mu.
 	mu sync.RWMutex
 
 	eventCh  chan Event
@@ -210,16 +152,9 @@ type Process struct {
 	killCh   chan struct{} // closed by Kill() to unblock readLoop
 	killOnce sync.Once
 
-	// lifecycleCtx is canceled when the process exits (readLoop returns,
-	// Kill() fires, or shim disconnects). Used to bind subagent-Resolve
-	// goroutines so a SIGTERM doesn't leave them spinning through the
-	// full retryLimit*retryInterval (≤ 3s) budget after the parent
-	// goroutine is gone. R218B-GO-3 (#644).
-	//
-	// Lazy-initialized via lifecycleCtxOnce on first lifecycleContext()
-	// call so legacy test fixtures that construct &Process{} (without
-	// newShimProcess) still work — the canceler watcher only spawns when
-	// at least one of done/killCh is non-nil.
+	// lifecycleCtx is canceled when the process exits (readLoop returns or Kill());
+	// binds subagent-Resolve goroutines so SIGTERM doesn't leave them spinning
+	// (#644). Lazily initialised so &Process{} test fixtures still work.
 	lifecycleCtxOnce   sync.Once
 	lifecycleCtxValue  context.Context
 	lifecycleCtxCancel context.CancelFunc
@@ -229,154 +164,89 @@ type Process struct {
 	interrupted     atomic.Bool // set by Interrupt(), cleared by next Send()
 	interruptedRun  atomic.Bool // true when Interrupt() was called while State==Running
 
-	// interruptSeq generates monotonic request_id suffixes for control_request
-	// interrupt messages. Per-process so parallel-running tests don't share the
-	// counter and dashboard traces stay readable. The CLI only uses request_id
-	// to echo back in the matching control_response; uniqueness inside one
-	// process connection is sufficient.
+	// interruptSeq generates request_id suffixes for control_request interrupts;
+	// the CLI only echoes it back, so per-connection uniqueness suffices.
 	interruptSeq atomic.Int64
 
-	// controlAckMu guards controlAcks: pending SetModel acknowledgement
-	// waiters keyed by the control request_id. readLoop's control_ack
-	// interception (handleShimStdout) delivers into the registered channel;
-	// entries are registered before the wire write and removed by the waiter
-	// (deferred), so an ack for an abandoned/timed-out request is dropped
-	// harmlessly. docs/rfc/dashboard-model-effort-control.md §4.4.
+	// controlAckMu guards controlAcks: pending SetModel ack waiters keyed by
+	// request_id, registered before the wire write and removed by the waiter, so
+	// a late ack is dropped harmlessly (docs/rfc/dashboard-model-effort-control.md §4.4).
 	controlAckMu sync.Mutex
 	controlAcks  map[string]chan error
 
 	eventLog  *EventLog
 	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 
-	// Normalized metadata, populated for ACP-class backends from
-	// _kiro.dev/metadata events and (eventually) for stream-json from
-	// result events / wall clock. Lock-free reads from Snapshot mirror
-	// the totalCost pattern. See docs/rfc/multi-backend.md §8.8.
+	// Normalized metadata from backend metadata events (ACP _kiro.dev/metadata).
+	// Lock-free reads from Snapshot. See docs/rfc/multi-backend.md §8.8.
 	contextUsagePercentBits atomic.Uint64 // math.Float64bits of last ContextUsagePercent
 	turnDurationMs          atomic.Int64  // last TurnDurationMs (ms)
-	// effort is the backend-reported thinking-effort tier (kiro:
-	// low/medium/high/xhigh/max). Empty for backends that never report it.
-	// atomic.Pointer[string] rather than an enum int so an unrecognised
-	// future kiro tier still reaches the dashboard — see EventMetadata.Effort
-	// and docs/rfc/kiro-effort-visibility.md §2. Mirrors the liveVersion
-	// pattern below (both are strings filled from event frames while the
-	// process runs, unlike model which is set once at spawn).
+	// effort is the backend-reported thinking-effort tier (kiro: low…max); empty
+	// when never reported. A string, not an enum, so an unrecognised future tier
+	// still reaches the dashboard (docs/rfc/kiro-effort-visibility.md §2).
 	effort atomic.Pointer[string]
-	// meteringMu guards meteringUsage. Replaced whole on each metadata
-	// event so reads copy and the typical (no-metering) case stays cheap.
-	// Read-mostly: dashboard Snapshot polls call MeteringUsage at 1Hz × N
-	// tabs while writes only happen on metadata events (≤1/turn). RWMutex
-	// lets concurrent reads proceed without serializing on the writer.
-	//
-	// R227-PERF-10: meteringLen mirrors len(meteringUsage) under
-	// meteringMu so MeteringUsage() can short-circuit without taking
-	// RLock when the slice is empty (claude-class backends and pre-
-	// metering kiro turns — the dominant Snapshot polling case).
+	// meteringMu guards meteringUsage (read-mostly: 1 Hz × N-tab polls, ≤1
+	// write/turn). meteringLen mirrors len(meteringUsage) under meteringMu so
+	// MeteringUsage() can skip the RLock when empty (claude-class backends).
 	meteringMu    sync.RWMutex
 	meteringUsage []MeteringEntry
-	// meteringIdx maps Unit → index into meteringUsage so applyMetadata's
-	// per-frame merge is O(n) instead of O(n×m) string-equality scan
-	// (R225-PERF-4 / R235-PERF-12). The slice is the canonical store —
-	// MeteringUsage()'s snapshot path returns a defensive copy of the
-	// slice unchanged, no map iteration on the read path. Lazily init'd
-	// on first applyMetadata call to keep the zero-metering case (claude
-	// + pre-metering kiro turns, the dominant deployment) allocation-free.
+	// meteringIdx maps Unit → index into meteringUsage (O(1) merge); lazily built
+	// on first applyMetadata so zero-metering sessions stay allocation-free.
 	meteringIdx map[string]int
 	meteringLen atomic.Int32
-	// meteringGen counts metering writes (#2345). Bumped under meteringMu
-	// after every applyMetadata merge that touched meteringUsage, so a
-	// reader that samples MeteringGen BEFORE calling MeteringUsage never
-	// pairs a gen with rows older than it. ManagedSession.Snapshot keys
-	// its per-session copy cache on this so the 1 Hz × N tabs poll stops
-	// paying make+copy for rows that only change once per turn.
+	// meteringGen counts metering writes (#2345), bumped under meteringMu, so a
+	// reader sampling MeteringGen BEFORE MeteringUsage never pairs a gen with
+	// older rows; ManagedSession.Snapshot keys its copy cache on it.
 	meteringGen atomic.Uint64
-	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
-	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
-	// readLoop starts. Empty string means "operator did not configure
-	// cli.backends[].model"; the dashboard renders that as
-	// "(模型未配置)". Atomic.Pointer[string] keeps Snapshot lock-free,
-	// matching how Wrapper.CLIVersion is exposed via WorkflowState. UI
-	// Round 5 R5-3.
+	// model is the spawn-time CLI model identifier, set once by Wrapper.Spawn
+	// before readLoop starts. Empty means cli.backends[].model is unconfigured
+	// (dashboard renders "(模型未配置)"). atomic.Pointer keeps Snapshot lock-free.
 	model atomic.Pointer[string]
-	// liveVersion is the CLI binary version self-reported by the running
-	// process in its system/init frame (claude_code_version). It is the
-	// version of the binary THIS process actually exec'd — authoritative
-	// even after the host claude was upgraded under a long-lived naozhi,
-	// where the spawn-time Wrapper.CLIVersion (detected once at startup)
-	// goes stale. Empty until the init frame arrives; the session layer
-	// falls back to the spawn-time value during that window. Mirrors the
-	// model LIVE-value pattern above. R20260612-live-version.
+	// liveVersion is the CLI binary version self-reported in system/init —
+	// authoritative for THIS process even after a host claude upgrade made the
+	// spawn-time Wrapper.CLIVersion stale. Empty until the init frame arrives.
 	liveVersion atomic.Pointer[string]
-	// onLiveVersion, when set, is invoked by setLiveVersion the first time a
-	// distinct binary version is observed in the init frame. Wrapper.Spawn
-	// wires it so the process can push its live version up to the owning
-	// wrapper for the global dashboard banner. Assigned once before
-	// startReadLoop, so no lock; nil for legacy &Process{} test fixtures.
-	// R20260612-global-version.
+	// onLiveVersion is invoked by setLiveVersion on each distinct binary version
+	// so the owning Wrapper can refresh the global dashboard banner. Assigned once
+	// before startReadLoop (no lock); nil for &Process{} test fixtures.
 	onLiveVersion func(string)
 	lastSeq       atomic.Int64  // last received shim seq, for reconnect
 	pongRecv      chan struct{} // signaled by readLoop on pong receipt
 
-	// readEventBuf is a reusable backing array handed to ReadEventInto so the
-	// single-event Claude hot path (the dominant frame) no longer allocates a
-	// fresh 1-element []Event per stdout frame — R20260603-PERF-10 (#1676).
-	// Exclusively owned by handleShimStdout, which runs only on the single
-	// readLoop goroutine, so no synchronisation is needed. Cap 2 covers ACP's
-	// max two-event turn-end split without re-growing. The returned slice is
-	// consumed (iterated) within the same frame before the next reuse.
+	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
+	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
+	// the same frame; cap 2 covers ACP's two-event turn-end split.
 	readEventBuf [2]Event
 
 	// onTurnDone is called by readLoop when a result event transitions the
-	// process from Running to Ready without an active Send(). This allows
-	// the session layer to broadcast state changes (e.g., after shim reconnect
-	// where isMidTurn set StateRunning but the CLI finished before Send was called).
-	// Protected by mu — use SetOnTurnDone to assign.
+	// process from Running to Ready without an active Send() (e.g. after a shim
+	// reconnect set StateRunning but the CLI finished before Send was called), so
+	// the session layer can broadcast state changes. Protected by mu — assign via
+	// SetOnTurnDone.
 	//
-	// Idempotency contract (R183-CONCUR-M1): implementations MUST be idempotent
-	// and safe to call multiple times in quick succession. readLoop fires the
-	// callback from several arms that may execute back-to-back inside a single
-	// iteration — notably the `result + reconnectedMidTurn` CAS path followed by
-	// `<-killCh` when Kill() races the mid-turn reconnect finishing. It is also
-	// fired by cli_exited, the fall-out StateDead path, and the panic-recover
-	// defer. Current session-layer callbacks (`r.notifyChange()` and Send()'s
-	// NotifyIdle → Broadcast) are already idempotent, but the contract is
-	// documented here so future callbacks do not silently regress.
+	// Implementations MUST be idempotent: readLoop may fire the callback more
+	// than once per turn from arms that run back-to-back — the result +
+	// reconnectedMidTurn CAS path followed by <-killCh, plus cli_exited, the
+	// fall-out StateDead path and the panic defer.
 	onTurnDone func()
 
-	// reconnectedMidTurn is set by SpawnReconnect when the last replayed event
-	// indicated the CLI was mid-turn at reconnect time. readLoop consults this
-	// flag to decide whether a stray `result` event (no active Send) should
-	// transition State Running→Ready on its own. Outside the reconnect path,
-	// the transition is owned by Send()'s defer and the readLoop must not race
-	// it — see the guard in readLoop. Loaded/stored atomically since it is
-	// cleared on the first such transition without taking p.mu.
+	// reconnectedMidTurn is set by SpawnReconnect when the CLI was mid-turn at
+	// reconnect. It lets readLoop transition a stray result (no active Send)
+	// Running→Ready; otherwise that transition is owned by Send()'s defer and
+	// readLoop must not race it. Atomic: cleared without taking p.mu.
 	reconnectedMidTurn atomic.Bool
 
-	// deathReason records why the process exited (passive death) or was killed.
-	// Written exactly once by the code path that transitions State→Dead.
-	// Read by session.ManagedSession.Send on ErrProcessExited (or via
-	// LoadDeathReason from router/dashboard). atomic.Pointer[string] provides
-	// type-safe lock-free reads; Load returns nil when never stored (distinct
-	// from a pointer to ""), enabling the first-writer-wins CAS below.
+	// deathReason records why the process died; written once (first-writer-wins
+	// CAS) by the path that transitions State→Dead. nil until stored.
 	deathReason atomic.Pointer[string]
 
-	// log is a pre-bound logger that readLoop/heartbeatLoop use so shim
-	// disconnect and readloop panic entries carry a "session" attribute
-	// without allocating a new slog handler chain on every log call.
-	// Initialised to slog.Default() in newShimProcess (so tests constructing
-	// Process directly keep their historical unattributed output) and
-	// upgraded once by SetSlogKey during Wrapper.Spawn / SpawnReconnect.
-	// Read lock-free via atomic.Pointer — writers are the one-shot
-	// constructor path (no concurrency with readLoop). R70-ARCH-M3.
+	// log is a pre-bound logger carrying the "session" attribute; set once by
+	// SetSlogKey before the reader goroutines start, so reads are lock-free.
 	log atomic.Pointer[slog.Logger]
 
-	// Passthrough slot machinery. Lives alongside the legacy Send path —
-	// when SendPassthrough is used, readLoop routes result events through
-	// fanoutTurnResult instead of eventCh. Legacy Send (used by ACP, tests,
-	// and pre-passthrough callers) is unaffected: pendingSlots stays nil
-	// and readLoop keeps the existing eventCh delivery.
-	//
-	// Lock ordering (documented in docs/rfc/passthrough-mode.md §5.2.6):
+	// Passthrough slot machinery: with SendPassthrough, readLoop routes results
+	// through fanoutTurnResult instead of eventCh (legacy Send leaves pendingSlots
+	// nil). Lock ordering (docs/rfc/passthrough-mode.md §5.2.6):
 	//   shimWMu → slotsMu  (Send path; append slot + write stdin atomically)
 	//   slotsMu alone      (readLoop, cancel, reconnect)
 	slotsMu          sync.Mutex
@@ -386,38 +256,23 @@ type Process struct {
 	inTurn           bool
 	slotIDGen        atomic.Uint64
 
-	// linker maps parallel-agent task_ids to on-disk transcript jsonl paths
-	// so the dashboard's /api/sessions/agent_events endpoint can stream each
-	// agent's internal events. Initialised by Wrapper.Spawn via InitLinker;
-	// nil for processes that predate the agent-team UI feature (test fakes).
+	// linker maps parallel-agent task_ids to transcript jsonl paths for the
+	// dashboard's agent_events endpoint. Set by InitLinker; nil in test fakes.
 	linker *SubagentLinker
-	// cwd is the working directory passed to Spawn. Captured so linker
-	// projectDir can be (re)derived on shim reconnect without plumbing
-	// SpawnOptions through every call site.
+	// cwd is the Spawn working directory, kept so the linker projectDir can be
+	// re-derived on shim reconnect.
 	cwd string
-	// cachedProjectDir is resolveProjectDir(cwd) computed once in
-	// InitLinker / SetCwdForLinker. cwd is immutable after spawn so the
-	// encoded path never changes; computing it on every system/init event
-	// wastes a full rune scan + os.UserHomeDir syscall. [R112714-PERF-2]
+	// cachedProjectDir is resolveProjectDir(cwd), computed once (cwd is immutable)
+	// to avoid a rune scan + os.UserHomeDir syscall per system/init event.
 	cachedProjectDir string
 }
 
-// sendSlot tracks one in-flight passthrough Send call. The slot is appended
-// to Process.pendingSlots atomically with the stdin write (see Process.Send
-// for the lock dance), then matched to the CLI's replay event by uuid (single
-// sender) or by text (merged sender). When the turn's result arrives, the
-// result is fanned out to every slot the turn claimed.
-//
-// canceled is the tombstone flag: when a Send caller leaves via ctx.Done, the
-// slot stays in pendingSlots so FIFO positioning isn't broken, but the fan-out
-// goroutine drops the result instead of trying to deliver to a channel with
-// no listener. See docs/rfc/passthrough-mode.md §5.2.2.
-//
-// canceled is atomic.Bool so isCanceled() can be read race-free outside
-// Process.slotsMu (fanoutTurnResult is documented to run after releasing
-// slotsMu — see §5.2 lock ordering). Writes still happen under slotsMu so
-// the FIFO ordering of pendingSlots is preserved relative to the cancel
-// event. R225-GO-1.
+// sendSlot tracks one in-flight passthrough Send call: appended to pendingSlots
+// atomically with the stdin write, matched to the CLI's replay event by uuid
+// (single sender) or text (merged sender), then handed the turn's result.
+// canceled is a tombstone (docs/rfc/passthrough-mode.md §5.2.2): a slot whose
+// caller left via ctx.Done stays in pendingSlots to keep FIFO order, but fan-out
+// drops its result. Atomic so fanout reads it lock-free after releasing slotsMu.
 type sendSlot struct {
 	id       uint64
 	uuid     string
@@ -435,19 +290,14 @@ type sendSlot struct {
 	writtenAt time.Time
 }
 
-// isCanceled reads canceled atomically. Used by fanout to avoid writing to a
-// resultCh whose listener already returned. Writes go through slotsMu (so the
-// cancel event is FIFO-ordered against pendingSlots mutations) but reads from
-// fanout are lock-free, matching the §5.2 lock ordering note.
+// isCanceled reads canceled atomically; fanout uses it lock-free outside
+// slotsMu, while writes go through slotsMu to stay FIFO-ordered.
 func (s *sendSlot) isCanceled() bool {
 	return s.canceled.Load()
 }
 
-// SetSlogKey records the session key associated with this process so
-// readLoop / heartbeatLoop log entries can be attributed. Called once per
-// lifetime immediately after construction by Wrapper.Spawn/SpawnReconnect
-// before startReadLoop runs, so Store is race-free with the reader goroutines.
-// R70-ARCH-M3.
+// SetSlogKey records the session key for readLoop / heartbeatLoop log entries.
+// Called once before startReadLoop, so Store is race-free with the readers.
 func (p *Process) SetSlogKey(key string) {
 	if key == "" {
 		return
@@ -479,33 +329,18 @@ const (
 )
 
 // setDeathReason records the death reason if not already set. First writer wins
-// so the root cause is preserved even when readLoop's unwind triggers a second
-// transition (e.g. cli_exited → defer hits the no-reason StateDead fallback).
-//
-// Uses atomic.Pointer[string].CompareAndSwap to close the TOCTOU gap between
-// Load and Store that a naive "check-then-store" would leave open. Without
-// CAS, two concurrent death paths (panic defer vs. cli_exited handler) can
-// both observe a nil pointer on Load and then both Store, letting the slower
-// goroutine overwrite the earlier classification.
-//
-// Each Store allocates a fresh *string (captured by address of a local); the
-// CAS loop retries while an empty string is in place (defensive — no code path
-// stores "" today, but tolerating the upgrade is cheap and forward-compatible).
+// (CAS, so concurrent death paths such as panic defer vs. cli_exited cannot
+// overwrite each other) and the root cause survives a second transition.
 func (p *Process) setDeathReason(reason string) {
 	if reason == "" {
 		return
 	}
-	// First attempt: store only if the pointer is still nil (never set).
-	// CompareAndSwap returns true on success, so a subsequent caller observing
-	// a non-nil pointer drops out here.
 	fresh := reason
 	if p.deathReason.CompareAndSwap(nil, &fresh) {
 		return
 	}
-	// Upgrade path: if somebody stored a pointer to "" explicitly (not taken
-	// today, but cheap to tolerate), swap it for the real reason. Snapshot
-	// the current pointer and CAS against it; a concurrent non-empty writer
-	// will invalidate our CAS and we bail to preserve first-writer-wins.
+	// Upgrade path: tolerate an explicit pointer to "" (no path stores it today);
+	// a concurrent non-empty writer invalidates our CAS, preserving first-writer-wins.
 	if cur := p.deathReason.Load(); cur != nil && *cur == "" {
 		_ = p.deathReason.CompareAndSwap(cur, &fresh)
 	}
@@ -519,43 +354,19 @@ func (p *Process) DeathReason() string {
 	return ""
 }
 
-// lifecycleContext returns a context tied to the process lifetime: it is
-// canceled when readLoop's `defer close(p.done)` fires, when Kill() closes
-// killCh, or when both channels are nil (test fixture path) — in the test
-// case the returned ctx is a never-canceled Background, since lifetime
-// signals don't exist.
-//
-// Lazy-init via sync.Once: the watcher goroutine only spawns on first call,
-// so legacy &Process{} test constructions that never invoke this method
-// pay zero cost. R218B-GO-3 (#644).
-//
-// Returned ctx is safe to share across goroutines; subagent Resolve callers
-// (process_readloop / InjectHistory) pass it directly to bind their work
-// to the process's life. Callers MUST NOT call the returned cancel function
-// — it's wired internally.
+// lifecycleContext returns a context canceled when readLoop's `defer
+// close(p.done)` fires or Kill() closes killCh (#644). Lazily initialised so
+// &Process{} test fixtures that never call it pay nothing. Safe to share across
+// goroutines; callers MUST NOT cancel it — that is wired internally.
 func (p *Process) lifecycleContext() context.Context {
 	p.lifecycleCtxOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		p.lifecycleCtxValue = ctx
 		p.lifecycleCtxCancel = cancel
-		// Watcher: cancel when either lifetime signal closes. Both channels
-		// can be nil in legacy tests; nil-channel receives block forever in
-		// a select, so we degrade gracefully rather than panic.
-		//
-		// R20260527-GO-13 (#1289): when both channels are nil, no watcher
-		// goroutine will ever invoke cancel(). The context.WithCancel
-		// allocation includes a goroutine-tracked timer/parent slot that
-		// must be released; without this proactive cancel(), every legacy
-		// &Process{} test that touches lifecycleContext leaks a context
-		// for the test binary's lifetime.
+		// Both channels nil (legacy test fixtures): no lifetime signal can ever
+		// fire, so cancel synchronously rather than leak the context (#1289);
+		// callers see an already-closed Done, i.e. "process is dead".
 		if p.done == nil && p.killCh == nil {
-			// R20260527-GO-13 (#1289): no lifetime signal can ever
-			// fire, so leaving the context live would leak the
-			// cancel func + parent's child-pointer for the lifetime
-			// of the test. Cancel synchronously: callers that do
-			// `<-ctx.Done()` see an already-closed Done channel,
-			// which mirrors the "process is dead" semantics that
-			// the absent done/killCh would communicate anyway.
 			cancel()
 			return
 		}
@@ -583,52 +394,34 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		cliPID:   cliPID,
 		shimPID:  shimPID,
 		state:    StateSpawning,
-		// R260528-PERF-9 (#1355): bumped 256→1024 so a TeamCreate fan-out
-		// (8 subagents × ~5 events/s, plus tool_use sub-block bursts) cannot
-		// fill the buffer before Send() drains it. Drops here force Send into
-		// the findResultSince ring-scan fallback which costs more under load
-		// than the extra ~24KB of backing array (1024 × ~24B Event header).
+		// 1024 so a TeamCreate fan-out (8 subagents × ~5 events/s) cannot fill the
+		// buffer before Send() drains it; drops force the findResultSince fallback (#1355).
 		eventCh:         make(chan Event, 1024),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 		eventLog:        NewEventLog(0),
-		// pongRecv buffers up to maxMisses+1 pongs so that a long GC pause or
-		// scheduler stall in heartbeatLoop does not drop pongs that arrive
-		// while no goroutine is selecting on the channel. Capacity 1 was
-		// fragile: the readLoop's "pong" arm uses a non-blocking send (drop
-		// on full), and a back-to-back pair of pongs queued during a stall
-		// would lose the second, causing heartbeatLoop to miscount as a
-		// pong-miss on the next ping cycle even though the shim was healthy.
-		// maxMisses (process_readloop.go:621) is the threshold for declaring
-		// the shim dead; sizing buffer at maxMisses+1 means even a stall
-		// spanning every miss in the budget cannot drop a pong before the
-		// receiver wakes up. R225-GO-6.
+		// maxMisses+1 so a heartbeatLoop scheduler stall cannot drop pongs
+		// (readLoop's pong arm is non-blocking) and miscount a healthy shim.
 		pongRecv: make(chan struct{}, 4),
 	}
 	p.stdinWriter = &shimWriter{p: p}
 	return p
 }
 
-// shimStdinWriter returns an io.Writer that sends data to CLI stdin via the shim.
-// Returns the same instance each call to preserve any buffered partial lines.
-// Always non-nil: initialized in newShimProcess to avoid lazy-init data races
-// when readLoop and Send call this concurrently on the SpawnReconnect path.
+// shimStdinWriter returns the io.Writer feeding CLI stdin via the shim. Same
+// instance each call (preserves buffered partial lines); initialised eagerly in
+// newShimProcess so readLoop and Send cannot race a lazy init on reconnect.
 func (p *Process) shimStdinWriter() io.Writer {
 	return p.stdinWriter
 }
 
 // startReadLoop begins the shim message reader goroutine and heartbeat.
-//
-// Initial state is StateReady EXCEPT on the reconnect-mid-turn path (#1778):
-// SpawnReconnect arms reconnectedMidTurn + sets StateRunning BEFORE calling
-// this so the flag and state are both in place before readLoop can consume the
-// live socket. Forcing StateReady here would clobber that, reopening the race
-// where the turn's terminating result arrives, the stray-result handler's CAS
-// consumes the flag, but state is Ready (so wasRunning is false) — leaving the
-// session stranded in Running forever once SpawnReconnect later re-set it.
-// We therefore preserve a pre-armed StateRunning.
+// Initial state is StateReady EXCEPT on the reconnect-mid-turn path (#1778),
+// where SpawnReconnect pre-armed reconnectedMidTurn + StateRunning: forcing
+// Ready here would let the stray-result CAS consume the flag with wasRunning
+// false, stranding the session in Running once SpawnReconnect re-sets it.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
 	if !(p.reconnectedMidTurn.Load() && p.state == StateRunning) {
@@ -639,7 +432,6 @@ func (p *Process) startReadLoop() {
 	go p.heartbeatLoop()
 }
 
-// findResultSince checks EventLog for a result entry logged after afterMS.
 // Alive returns true if the process has not exited.
 func (p *Process) Alive() bool {
 	select {
@@ -659,40 +451,20 @@ func (p *Process) IsRunning() bool {
 
 // Kill forcefully terminates the CLI process via shim.
 //
-// After sending the "kill" message and closing the naozhi-side conn, send
-// SIGUSR2 to the shim process itself so its immediate-shutdown path fires
-// (server.go SIGUSR2 handler → initiateShutdown → Run's <-s.done case →
-// listener.Close + os.Remove(socket)). Without this, a Kill leaves the
-// shim in its 30s disconnect grace period holding the socket alive, and
-// the next StartShim for the same key fails the dial-first guard — the
-// same "refusing to clobber" class of bug Close was rewritten to avoid
-// (UCCLEP-2026-04-26).
-//
-// shimPID may be 0 if the spawn path never observed a hello (tests,
-// legacy); we skip SIGUSR2 in that case. PID reuse is a theoretical
-// concern — we only signal while killOnce.Do is running, which bounds
-// the window to microseconds after the shim is known to have been alive,
-// so the risk is negligible.
+// After sending "kill" and closing the conn, SIGUSR2 makes the shim shut down
+// immediately (listener.Close + os.Remove(socket)); otherwise it holds the
+// socket for its 30s disconnect grace and the next StartShim for the same key
+// trips the "refusing to clobber" guard. Skipped when shimPID is 0 (no hello);
+// PID reuse is negligible since we signal microseconds after it was seen alive.
 func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
-		// Best-effort: send kill command with a short deadline to avoid blocking.
-		// If the write fails (conn already broken), the shim's disconnect watchdog
-		// will eventually kill the CLI.
-		//
-		// Hold shimWMu across SetWriteDeadline + shimSend + Close so we do not
-		// race a concurrent shimSend (heartbeat/ping/write) whose bufio.Writer
-		// is not safe against a concurrent Close()+Flush. shimSend already
-		// takes shimWMu for the write, so we acquire it here and call
-		// shimSendLocked which skips the re-lock.
+		// Best-effort kill with a short deadline (the shim's disconnect watchdog
+		// is the fallback). Hold shimWMu across deadline + send + Close: bufio.Writer
+		// is not safe against a concurrent Close()+Flush from heartbeat/interrupt.
 		p.shimWMu.Lock()
-		// If SetWriteDeadline fails (conn already closed / broken socket,
-		// "use of closed network connection" after GC finalize), skip the
-		// write entirely — without a deadline, shimSendLocked can block
-		// until OS TCP keepalive expires (minutes), holding shimWMu and
-		// starving every concurrent shimSend (heartbeat/ping/interrupt).
-		// R218B-GO-4: log the SetWriteDeadline error at debug to aid
-		// diagnosing transient socket failures during Kill.
+		// Skip the write if the deadline can't be set: without one shimSendLocked
+		// can block until TCP keepalive expires (minutes), starving shimWMu.
 		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			slog.Debug("kill: SetWriteDeadline failed, skipping shim kill send", "err", err)
 		} else {
@@ -704,12 +476,8 @@ func (p *Process) Kill() {
 		p.shimWMu.Unlock()
 
 		if p.shimPID > 0 {
-			// SIGUSR2: shim's signal handler flips initiateShutdown immediately
-			// and the main Run loop releases the listener and unlinks the
-			// socket. A failing Signal (shim already exited, PID reused) is
-			// fine — the socket is either already gone or will be reaped by
-			// Discover's F4 stat-check within 30s. Windows: no-op (shim is
-			// POSIX-only; see release.yml matrix note).
+			// A failing Signal (shim already gone) is fine — Discover's stat-check
+			// reaps the socket within 30s. No-op on Windows (shim is POSIX-only).
 			if err := osutil.SendShimReload(p.shimPID); err != nil {
 				slog.Debug("kill: SendShimReload failed (likely already exited)",
 					"shim_pid", p.shimPID, "err", err)
@@ -720,28 +488,15 @@ func (p *Process) Kill() {
 
 // Close gracefully shuts down the CLI and tears down the shim process.
 //
-// Sends "shutdown" instead of "close_stdin" so the shim's main loop walks
-// its full exit path: closeStdin → waitOrKill(CLI) → listener.Close +
-// os.Remove(socket). After p.done fires (shim EOF hits readLoop) the
-// socket file is gone and any fresh StartShim for the same key will bind
-// cleanly. "close_stdin" only terminated the CLI child and left the shim
-// listening for up to 30s grace, which is the UCCLEP-2026-04-26 root
-// cause for "refusing to clobber" on fast Reset+Recreate (fresh_context
-// cron, explicit Router.Reset, config drift).
-//
-// Callers that want the naozhi-restart-friendly "keep shim alive" semantics
-// must use Detach(), not Close().
+// Sends "shutdown" (not "close_stdin") so the shim walks its full exit path:
+// closeStdin → waitOrKill(CLI) → listener.Close + os.Remove(socket); once
+// p.done fires a fresh StartShim for the same key binds cleanly, whereas
+// "close_stdin" leaves the shim listening for up to 30s and trips "refusing to
+// clobber" on fast Reset+Recreate. To keep the shim alive, use Detach().
 func (p *Process) Close() {
-	// R175-P1: Close() previously called p.shimSend(...) directly, which has no
-	// write deadline. Kill() and Detach() both batch SetWriteDeadline+send
-	// under shimWMu for good reason — without it, a shim that is alive but
-	// whose TCP buffer is full (GC pause, stuck child, network wedge) pins
-	// shimWMu until the OS keepalive timer fires (minutes). All other
-	// shimSend callers (heartbeat, ping, interrupt) would block on the same
-	// lock, and Router.Reset / shutdown would stall past the SIGTERM grace.
-	// Mirror the Detach() pattern: grab shimWMu, set a short deadline, and
-	// only send if the deadline was accepted. Deadline failure means the
-	// conn is already broken, short-circuit to Kill().
+	// Short write deadline under shimWMu: a live shim with a full TCP buffer
+	// would otherwise pin shimWMu until OS keepalive (minutes), stalling
+	// heartbeat/interrupt and Router shutdown past SIGTERM grace.
 	p.shimWMu.Lock()
 	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		p.shimWMu.Unlock()
@@ -749,21 +504,14 @@ func (p *Process) Close() {
 		return
 	}
 	sendErr := p.shimSendLocked(shimClientMsg{Type: "shutdown"})
-	// R175-P2: clear the 2s write deadline *before* releasing shimWMu so a
-	// concurrent heartbeat ping inheriting the now-expired deadline cannot
-	// see a stale `i/o timeout` and call Kill() — which would bypass the
-	// graceful shim teardown this function is designed to drive (UCCLEP-
-	// 2026-04-26). Kept under the lock to close the race window entirely.
-	// SetWriteDeadline failure here is harmless: zero-time deadline is a
-	// "no deadline" signal, so even on error the connection is no worse off
-	// than before this defensive clear.
+	// Clear the deadline *before* releasing shimWMu so a concurrent heartbeat
+	// ping cannot inherit it, see a stale i/o timeout and Kill() — bypassing the
+	// graceful teardown. Failure is harmless (zero-time means "no deadline").
 	_ = p.shimConn.SetWriteDeadline(time.Time{})
 	p.shimWMu.Unlock()
 	if sendErr != nil {
-		// Write-path error (closed conn, deadline exceeded, EOF) means the
-		// shim will not process the shutdown — waiting processCloseTimeout
-		// on <-p.done just doubles teardown latency on the hot eviction
-		// path. Fall straight through to Kill().
+		// The shim will not process the shutdown; waiting processCloseTimeout on
+		// <-p.done would only double teardown latency. Fall through to Kill().
 		p.Kill()
 		return
 	}
@@ -777,21 +525,13 @@ func (p *Process) Close() {
 	}
 }
 
-// Detach disconnects from the shim without stopping the CLI.
-// Used during naozhi graceful shutdown to keep shim alive.
-//
-// Applies a short write deadline so Router.Shutdown's wg.Wait() cannot be
-// pinned by a dead/slow socket (TCP write timeout would otherwise stretch to
-// minutes, blocking SIGTERM handling).
+// Detach disconnects from the shim without stopping the CLI (naozhi graceful
+// shutdown). A short write deadline keeps Router.Shutdown's wg.Wait() from
+// being pinned for minutes by a dead/slow socket during SIGTERM handling.
 func (p *Process) Detach() {
 	p.shimWMu.Lock()
-	// If SetWriteDeadline fails (conn already closed / broken), skip the
-	// detach send — without a deadline, shimSendLocked can block on a
-	// dead socket until TCP keepalive expires (minutes), which is
-	// precisely what Detach is meant to avoid (Router.Shutdown's
-	// wg.Wait() would stall past SIGTERM grace). Same pattern as Kill().
-	// R218B-GO-4: log the SetWriteDeadline error at debug to aid
-	// diagnosing transient socket failures during Detach.
+	// Skip the send if the deadline can't be set: without one shimSendLocked
+	// can block until TCP keepalive expires. Same pattern as Kill().
 	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		slog.Debug("detach: SetWriteDeadline failed, skipping shim detach send", "err", err)
 	} else {
@@ -799,23 +539,15 @@ func (p *Process) Detach() {
 			slog.Debug("detach: shimSend failed", "err", err)
 		}
 	}
-	// R249-GO-17: mirror Close()'s R175-P2 pattern — zero the write deadline
-	// before closeShimConn so any defensive write attempt that sneaks in via
-	// a parallel teardown path (Kill, heartbeat) cannot inherit our 2s
-	// deadline and trigger a spurious i/o timeout. SetWriteDeadline on an
-	// already-closed conn returns an error which is harmless (zero-time
-	// means "no deadline" and the conn is about to be Close'd anyway).
+	// Zero the deadline before closeShimConn so a parallel teardown path (Kill,
+	// heartbeat) cannot inherit it and hit a spurious i/o timeout.
 	_ = p.shimConn.SetWriteDeadline(time.Time{})
 	p.closeShimConn()
 	p.shimWMu.Unlock()
 }
 
-// closeShimConn closes p.shimConn at most once across all teardown paths
-// (Kill / Detach / Close / readLoop EOF / connect-failure cleanup). Without
-// the sync.Once gate, the second concurrent Close returns "use of closed
-// network connection" which callers used to silently swallow with `_ =` —
-// hiding any genuine close error and producing misleading entries when
-// reviewers grep journalctl. R219-GO-3.
+// closeShimConn closes p.shimConn at most once across all teardown paths so a
+// second concurrent Close never logs a misleading error.
 func (p *Process) closeShimConn() {
 	p.shimCloseOnce.Do(func() {
 		if err := p.shimConn.Close(); err != nil {
@@ -833,14 +565,9 @@ func (p *Process) State() ProcessState {
 
 // SetOnTurnDone sets the callback invoked by readLoop when a result event
 // transitions the process from Running to Ready without an active Send().
-// Thread-safe: may be called while readLoop is running.
-//
-// The callback MUST be idempotent — readLoop can fire it multiple times in
-// rapid succession when a mid-turn reconnect CAS path is immediately followed
-// by a Kill (see the `onTurnDone` field godoc for the full list of fan-in
-// sites). Implementations should assume "invocation count ≥ state change
-// count" and perform only wake/broadcast/notify work that collapses naturally
-// under repeated calls.
+// Thread-safe. The callback MUST be idempotent — readLoop can fire it several
+// times in rapid succession (mid-turn reconnect CAS path immediately followed
+// by a Kill; see the onTurnDone field godoc), so do only wake/broadcast work.
 func (p *Process) SetOnTurnDone(fn func()) {
 	p.mu.Lock()
 	p.onTurnDone = fn
@@ -848,9 +575,8 @@ func (p *Process) SetOnTurnDone(fn func()) {
 }
 
 // SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
-// CLI binary version is first observed in the init frame. Wrapper.Spawn calls
-// this once before startReadLoop, so it is not synchronised — do not call it
-// after the read loop is running. R20260612-global-version.
+// CLI binary version is first observed. Not synchronised: Wrapper.Spawn calls
+// it once before startReadLoop; never call it while the read loop is running.
 func (p *Process) SetOnLiveVersion(fn func(string)) {
 	p.onLiveVersion = fn
 }
@@ -868,8 +594,7 @@ func (p *Process) TotalCost() float64 {
 }
 
 // ContextUsagePercent returns the last reported context-window utilisation
-// (0-100). Always 0 for backends that don't report it (claude stream-json
-// today). Lock-free.
+// (0-100); 0 for backends that don't report it (claude stream-json). Lock-free.
 func (p *Process) ContextUsagePercent() float64 {
 	return math.Float64frombits(p.contextUsagePercentBits.Load())
 }
@@ -880,11 +605,9 @@ func (p *Process) TurnDurationMs() int64 {
 	return p.turnDurationMs.Load()
 }
 
-// Effort returns the backend-reported thinking-effort tier for the most
-// recent turn ("low" / "medium" / "high" / "xhigh" / "max" on kiro). Empty
-// when the backend never reports one (claude, codex) or before the first
-// metadata frame arrives. Lock-free; mirrors Model / LiveVersion in
-// returning "" for the unset pointer.
+// Effort returns the backend-reported thinking-effort tier for the most recent
+// turn (kiro: low…max); "" when the backend never reports one (claude, codex)
+// or before the first metadata frame. Lock-free.
 func (p *Process) Effort() string {
 	if e := p.effort.Load(); e != nil {
 		return *e
@@ -893,13 +616,8 @@ func (p *Process) Effort() string {
 }
 
 // MeteringUsage returns a defensive copy of the most recent backend-reported
-// billing rows. Empty for backends that report cost only via TotalCost
-// (claude). Returns a fresh slice on every call so callers can safely retain
-// the result.
-//
-// R227-PERF-10: Snapshot polling at 1Hz × N tabs hits this on every poll;
-// claude-class sessions and pre-metering kiro turns leave the slice empty,
-// so an atomic length probe lets the dominant case skip the RLock entirely.
+// billing rows; nil for backends that report cost only via TotalCost (claude).
+// An atomic length probe lets that dominant polled case skip the RLock.
 func (p *Process) MeteringUsage() []MeteringEntry {
 	if p.meteringLen.Load() == 0 {
 		return nil
@@ -914,23 +632,17 @@ func (p *Process) MeteringUsage() []MeteringEntry {
 	return out
 }
 
-// MeteringGen returns the number of metering writes applied so far: 0 until
-// the first metering-bearing metadata frame, then +1 per frame. Rows returned
-// by MeteringUsage are unchanged while this value is unchanged, which lets
-// pollers cache the copy (#2345). Wait-free.
+// MeteringGen returns the number of metering writes applied so far. Rows
+// returned by MeteringUsage are unchanged while this value is unchanged, which
+// lets pollers cache the copy (#2345). Wait-free.
 func (p *Process) MeteringGen() uint64 {
 	return p.meteringGen.Load()
 }
 
-// applyMetadata stores normalized metadata observed on a Type:"metadata"
-// event. Called from readLoop. Cheap; ContextUsagePercent, TurnDurationMs and
-// Effort are atomically stored, MeteringUsage replaces the whole slice under
-// meteringMu. A kiro turn emits two metadata frames (early: context+effort,
-// final: adds metering+duration) so contention is still negligible.
-//
-// Every field is guarded on being non-zero: a frame that omits a field must
-// not regress the value a previous frame established. Pinned by
-// TestProcess_ApplyMetadata_AndAccessors.
+// applyMetadata stores normalized metadata from a Type:"metadata" event (called
+// from readLoop): scalars atomically, MeteringUsage merged under meteringMu.
+// Every field is guarded on being non-zero so a frame that omits a field never
+// regresses an earlier value (pinned by TestProcess_ApplyMetadata_AndAccessors).
 func (p *Process) applyMetadata(m *EventMetadata) {
 	if m == nil {
 		return
@@ -941,17 +653,12 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 	if m.TurnDurationMs > 0 {
 		p.turnDurationMs.Store(m.TurnDurationMs)
 	}
-	// Overwrite semantics (NOT the per-unit accumulation MeteringUsage below
-	// uses): effort is a current-state tier, so a mid-session change from
-	// xhigh to max must replace the old value. The non-empty guard keeps a
-	// frame that omits effort from blanking an already-known tier — kiro
-	// sends two frames per turn, and a future version dropping the field
-	// from one of them would otherwise flicker the dashboard chip off.
+	// Overwrite semantics (unlike the per-unit accumulation below): effort is a
+	// current-state tier, so xhigh→max mid-session must replace. The non-empty
+	// guard stops a frame that omits effort from blanking a known tier.
 	if m.Effort != "" {
-		// Change-gate mirrors setLiveVersion: the tier is constant across most
-		// sessions, so re-storing an identical value every frame would allocate
-		// a string header and dirty a cache line that the 1 Hz × N-tab Snapshot
-		// poll reads. Steady state is now allocation-free.
+		// Change-gate: re-storing an identical value every frame would allocate
+		// and dirty a cache line the 1 Hz × N-tab Snapshot poll reads.
 		if prev := p.effort.Load(); prev == nil || *prev != m.Effort {
 			e := m.Effort
 			p.effort.Store(&e)
@@ -959,21 +666,10 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 	}
 	if len(m.MeteringUsage) > 0 {
 		p.meteringMu.Lock()
-		// UI Round 5 R5-4: per-unit accumulator. kiro reports per-turn
-		// increments; session-level totals must be summed naozhi-side
-		// because kiro emits no running total. Each metadata frame's
-		// entries get folded into the session's running tally by Unit.
-		// Pre-existing units stay; new units are appended. Bounded
-		// growth: kiro currently emits only "credit"; even worst-case
-		// the unit set is ≤4 (credit, token, etc.).
-		// Hard cap on distinct units: the comment above asserts kiro
-		// emits ≤4 today, but a buggy upstream that started inventing
-		// new unit strings every turn would otherwise grow this slice
-		// without bound for the lifetime of the session. (R227-CR-11)
+		// kiro reports per-turn increments and no running total, so session totals
+		// are summed by Unit; maxMeteringUnits bounds growth from a buggy upstream.
 		const maxMeteringUnits = 16
-		// R225-PERF-4 / R235-PERF-12: O(1) Unit lookup via meteringIdx.
-		// Lazy init on first metadata frame so zero-metering sessions (the
-		// dominant deployment) never allocate this map.
+		// Lazy init so zero-metering sessions never allocate the map.
 		if p.meteringIdx == nil {
 			p.meteringIdx = make(map[string]int, maxMeteringUnits)
 			for i := range p.meteringUsage {
@@ -994,10 +690,8 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 			p.meteringIdx[in.Unit] = len(p.meteringUsage)
 			p.meteringUsage = append(p.meteringUsage, in)
 		}
-		// R227-PERF-10: publish the post-merge length so MeteringUsage's
-		// fast-path can skip the RLock. Stored under meteringMu so the
-		// read-side atomic Load sees the same length the slice actually
-		// has after Unlock.
+		// Publish the post-merge length under meteringMu so MeteringUsage's
+		// lock-free fast path sees the same length the slice has after Unlock.
 		p.meteringLen.Store(int32(len(p.meteringUsage)))
 		p.meteringGen.Add(1)
 		p.meteringMu.Unlock()
@@ -1009,22 +703,12 @@ func (p *Process) ProtocolName() string {
 	return p.protocol.Name()
 }
 
-// seedEffort pre-fills the effort tier from the spawn pin. `--effort <tier>`
-// is launch-time state on every EffortTier protocol (claude pins the session,
-// kiro overrides its configured default), so the tier the wrapper put in argv
-// IS the running tier — and claude never reports it back in a metadata frame,
-// which left Snapshot.Effort empty and the dashboard chip without a click
-// target (RFC dashboard-model-effort-control §4.1). Called by Wrapper.Spawn
-// before readLoop starts and by SeedEffortFromArgs on reconnect.
-//
-// Fill-if-unset (CompareAndSwap from nil): a backend-reported tier
-// (applyMetadata, kiro) is a live observation and must never be clobbered by
-// the static pin, whichever arrives first — on the reconnect path readLoop
-// may already have consumed a replayed metadata frame. applyMetadata's own
-// non-empty overwrite still lets a later report replace the seed.
-//
-// No-op on protocols without Caps.EffortTier (codex): BuildArgs dropped the
-// tier, so claiming it would misreport the session.
+// seedEffort pre-fills the effort tier from the spawn pin: `--effort <tier>` is
+// launch-time state on every EffortTier protocol and claude never reports it in
+// a metadata frame (RFC dashboard-model-effort-control §4.1). Fill-if-unset
+// (CAS from nil) so a backend-reported tier — possibly already replayed on
+// reconnect — is never clobbered by the static pin. No-op without
+// Caps.EffortTier (codex): BuildArgs dropped the tier, so claiming it would lie.
 func (p *Process) seedEffort(tier string) {
 	if tier == "" || !p.caps.EffortTier {
 		return
@@ -1033,18 +717,14 @@ func (p *Process) seedEffort(tier string) {
 	p.effort.CompareAndSwap(nil, &e)
 }
 
-// SeedEffortFromArgs is the reconnect-path seedEffort: Wrapper.SpawnReconnect
-// has no SpawnOptions, but the shim recorded the spawn argv
-// (shim.State.CLIArgs), so the tier is recovered from the same tokens
-// BuildArgs emitted. Exported for the session router's ReconnectShims loop.
+// SeedEffortFromArgs is the reconnect-path seedEffort: SpawnReconnect has no
+// SpawnOptions, so the tier is recovered from the shim-recorded spawn argv.
 func (p *Process) SeedEffortFromArgs(args []string) {
 	p.seedEffort(effortFromArgs(args))
 }
 
-// effortFromArgs extracts the tier from a `--effort <tier>` / `--effort=<tier>`
-// argv, last occurrence winning (CLI flag semantics). "" when absent or
-// dangling. Pure; parity with BuildArgs is pinned by
-// TestEffortFromArgs_RoundTripsBuildArgs.
+// effortFromArgs extracts the tier from `--effort <tier>` / `--effort=<tier>`,
+// last occurrence winning; "" when absent or dangling (parity with BuildArgs).
 func effortFromArgs(args []string) string {
 	tier := ""
 	for i := 0; i < len(args); i++ {
@@ -1062,7 +742,7 @@ func effortFromArgs(args []string) string {
 }
 
 // setModel records the spawn-time model. Called once by Wrapper.Spawn
-// before readLoop starts; never re-set afterwards. UI Round 5 R5-3.
+// before readLoop starts; never re-set afterwards.
 func (p *Process) setModel(model string) {
 	if model == "" {
 		p.model.Store(nil)
@@ -1072,9 +752,8 @@ func (p *Process) setModel(model string) {
 	p.model.Store(&m)
 }
 
-// Model returns the spawn-time CLI model identifier, or "" if the
-// operator did not configure one. Lock-free; safe to call from any
-// goroutine including Snapshot's hot read path.
+// Model returns the spawn-time CLI model identifier, or "" if the operator did
+// not configure one. Lock-free.
 func (p *Process) Model() string {
 	if m := p.model.Load(); m != nil {
 		return *m
@@ -1083,10 +762,8 @@ func (p *Process) Model() string {
 }
 
 // AvailableModels returns the agent-reported model manifest captured during
-// this process's Init (ACP only today; nil for protocols that don't report
-// one). Delegates to the per-process protocol instance via type assertion —
-// the manifest is an optional facet like ModelSetter, so stream-json/codex
-// stay untouched. docs/rfc/dashboard-model-effort-control.md §4.2.
+// Init (ACP only; nil otherwise). An optional protocol facet like ModelSetter,
+// hence the type assertion (docs/rfc/dashboard-model-effort-control.md §4.2).
 func (p *Process) AvailableModels() []ModelInfo {
 	if am, ok := p.protocol.(interface{ AvailableModels() []ModelInfo }); ok {
 		return am.AvailableModels()
@@ -1094,17 +771,10 @@ func (p *Process) AvailableModels() []ModelInfo {
 	return nil
 }
 
-// setLiveVersion records the CLI binary version self-reported in the
-// system/init frame. Called from readLoop when the init frame carries a
-// non-empty claude_code_version; never invoked with "". Lock-free.
-// R20260612-live-version.
-//
-// When the value actually changes (first observation, or a process that
-// reconnected onto an upgraded binary), it fires onLiveVersion so the
-// owning Wrapper can refresh its process-wide "latest observed version"
-// used by the global dashboard banner. The change-gate keeps the duplicate
-// captures (readLoop + Send() both hook the init frame) from firing the
-// callback twice. R20260612-global-version.
+// setLiveVersion records the CLI binary version self-reported in system/init
+// (lock-free) and, when it changes, fires onLiveVersion so the owning Wrapper
+// can refresh the global dashboard banner. The change-gate keeps the duplicate
+// init captures (readLoop + Send()) from firing the callback twice.
 func (p *Process) setLiveVersion(v string) {
 	if v == "" {
 		return
@@ -1120,9 +790,7 @@ func (p *Process) setLiveVersion(v string) {
 }
 
 // LiveVersion returns the CLI binary version self-reported by the running
-// process (system/init claude_code_version), or "" if the init frame has
-// not arrived yet. Lock-free; safe from Snapshot's hot read path.
-// R20260612-live-version.
+// process, or "" if the init frame has not arrived yet. Lock-free.
 func (p *Process) LiveVersion() string {
 	if v := p.liveVersion.Load(); v != nil {
 		return *v

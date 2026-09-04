@@ -1,15 +1,7 @@
 package cli
 
-// process_event_format.go — Event → EventEntry conversion and tool
-// input formatting.
-//
-// Owns pure conversion helpers + logEventAt (the only non-pure entry,
-// pairing conversion with EventLog.AppendBatch and the result-cost
-// atomic update).
-//
-// R227-ARCH-19: dropped the "Phase 5 of process-split / zero semantic
-// change" preamble — process-split landed in 2026-05 and the file is
-// no longer in flux; the historical context is preserved in git log.
+// process_event_format.go — Event → EventEntry conversion and tool input
+// formatting; logEventAt is the only non-pure entry (AppendBatch + cost atomic).
 
 import (
 	"encoding/json"
@@ -21,18 +13,13 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventEntriesFromEventAt converts an Event to zero or more EventEntry values
-// using a caller-supplied wall-clock to share a single time.Now() call between
-// ev.recvAt assignment and entry timestamping. Assistant messages can contain
-// multiple content blocks (thinking + tool_use + text); each block that maps
-// to a known type produces its own entry so downstream consumers (EventLog,
-// dashboard) don't silently drop blocks after the first. R67-PERF-9.
+// EventEntriesFromEventAt converts an Event to zero or more EventEntry values,
+// stamped with the caller-supplied wall-clock (shared with ev.recvAt). Each
+// known content block of an assistant message (thinking / tool_use / text)
+// yields its own entry so downstream consumers don't drop blocks after the first.
 func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
-	// Replay events are a passthrough-internal CLI ack for messages naozhi
-	// already showed to the user via the optimistic bubble. Writing them to
-	// EventLog causes double-display on the dashboard. readLoop already
-	// short-circuits replay events before logEventAt, but belt-and-suspenders:
-	// if any future caller passes a replay directly, still skip.
+	// Replay events are the CLI's ack for a message already shown via the
+	// optimistic bubble; logging them double-displays. readLoop skips them too.
 	if ev.Type == "user" && ev.IsReplay {
 		return nil
 	}
@@ -83,24 +70,17 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 				entry.DurationMS = ev.Usage.DurationMS
 			}
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response",
-			// 1p Anthropic auth (e.g. fable-5) streams per-turn telemetry
-			// system events the dashboard has no use for: "thinking_tokens"
-			// (extended-thinking token accounting) and "background_tasks_changed"
-			// (background-task list churn). Unlike Bedrock, these arrive many
-			// times per turn and, left un-skipped, fall through to the default
-			// `entry.Summary = ev.SubType` path and render as a run of bare
-			// ⚙ "thinking_tokens" / "background_tasks_changed" rows in the
-			// transcript. Drop them at the source so they never enter the
-			// EventLog ring / JSONL fan-out.
+			// 1p auth (e.g. fable-5) streams these telemetry events many times per
+			// turn; un-skipped they render as bare ⚙ rows. Drop at the source so they
+			// never enter EventLog.
 			"thinking_tokens", "background_tasks_changed":
 			return nil
 		}
 		return []clievent.EventEntry{entry}
 	case "assistant":
-		// ACP tool_call_update events (Sprint 5c / RFC §8.3 D17) carry no
-		// Message content — they're pure status/output progress updates
-		// for an existing tool_use bubble. Synthesise a thin entry so the
-		// dashboard can thread it onto the prior tool_use by ToolUseID.
+		// ACP tool_call_update events carry no Message content — pure progress for
+		// an existing tool_use bubble. Synthesise a thin entry the dashboard threads
+		// onto the prior tool_use by ToolUseID (Multi-Backend RFC §8.3 D17).
 		if ev.SubType == "tool_result" && ev.ToolCall != nil {
 			entry := base
 			entry.Type = "tool_use"
@@ -109,35 +89,22 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 				entry.Tool = ev.ToolCall.Title
 				entry.Summary = ev.ToolCall.Title
 			}
-			// R230-PERF-2: share the ToolCall pointer rather than copying
-			// the struct. ev.ToolCall is freshly allocated by ACPProtocol
-			// per event and never mutated after EventEntriesFromEventAt
-			// returns; downstream consumers (eventlog Append, dashboard
-			// Marshal) only read its fields. Append takes EventEntry by
-			// value so the pointer is shared but the entry struct stays
-			// owned by the ring buffer.
+			// Share the ToolCall pointer: ACPProtocol allocates it fresh per event and
+			// downstream (eventlog Append, dashboard Marshal) only reads it.
 			entry.ToolCall = ev.ToolCall
 			return []clievent.EventEntry{entry}
 		}
 		if ev.Message == nil {
 			return nil
 		}
-		// Skip the make() entirely when Content is empty — avoids the
-		// zero-cap slice-header alloc on rare empty thinking blocks.
+		// Skip the make() when Content is empty (rare empty thinking blocks).
 		if len(ev.Message.Content) == 0 {
 			return nil
 		}
-		// Pre-size to the content block count: single-block events pay 1
-		// alloc (same as the old nil+append path), and multi-block events
-		// (thinking+tool_use+text) avoid 2-3 append-driven growth reallocs.
+		// Pre-size so multi-block events avoid append-driven reallocs.
 		out := make([]clievent.EventEntry, 0, len(ev.Message.Content))
 		for _, block := range ev.Message.Content {
-			// R229-PERF-3: skip unknown block types BEFORE paying the
-			// `entry := base` struct copy (~240 B per iteration). The
-			// switch below already had `default: continue` at the tail —
-			// hoisting the same predicate avoids the wasted struct copy
-			// on event streams that mix thinking blocks with future
-			// unknown content kinds.
+			// Skip unknown block types BEFORE the ~240 B `entry := base` copy.
 			switch block.Type {
 			case "thinking", "tool_use", "text":
 			default:
@@ -147,9 +114,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 			switch block.Type {
 			case "thinking":
 				entry.Type = "thinking"
-				// R20260602190132-PERF-11: one UTF-8 scan derives both the
-				// 120-rune Summary and the EventDetailMaxRunes Detail rather
-				// than scanning block.Text twice from the head.
+				// One UTF-8 scan derives both Summary and Detail.
 				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, EventDetailMaxRunes)
 			case "tool_use":
 				entry.Type = "tool_use"
@@ -167,13 +132,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 					entry.Summary = textutil.TruncateRunes(inp.Description, 120)
 					entry.Background = inp.RunInBackground
 					entry.ToolUseID = block.ID
-					// R217-PERF-9: derive Detail from already-parsed
-					// agentInput to skip a second json.Unmarshal of
-					// block.Input via formatToolDetail →
-					// FormatToolInput("Agent", ...). The output mirrors the
-					// FormatToolInput Agent branch:
-					//   "Agent " + truncate(description, 60), or "Agent"
-					// when description is empty / input is malformed.
+					// Reuse the parsed agentInput instead of a second Unmarshal via
+					// formatToolDetail; output mirrors FormatToolInput's Agent branch.
 					if inp.Description != "" {
 						entry.Detail = "Agent " + textutil.TruncateRunes(inp.Description, 60)
 					} else {
@@ -185,54 +145,36 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
 						entry.Summary = TodosSummary(todos)
-						// Dashboard renderTodoList expects a JSON array of
-						// TodoItem, not the full `{"todos":[...]}` envelope
-						// that block.Input carries. R226-PERF-8: reuse the
-						// already-parsed RawMessage from block.Input instead
-						// of re-marshalling the typed slice — the frontend
-						// sees `[{...}, {...}]` either way, but we save the
-						// per-event Marshal+copy.
+						// Dashboard renderTodoList expects a JSON array of TodoItem, not the
+						// `{"todos":[...]}` envelope; reuse the parsed RawMessage (no re-Marshal).
 						entry.Detail = string(rawTodos)
 					}
 				default:
 					entry.Detail = formatToolDetail(block)
 				}
-				// Multi-Backend RFC §8.3 D17: ACP tool_call events bring a
-				// rich progress payload (kind / status / rawOutput) that
-				// the dashboard renders as a folded "▶ <title>: status →
-				// stdout" row. Forward the per-event ToolCall so the
-				// frontend doesn't have to re-derive it. Stream-json
-				// (Claude) leaves ev.ToolCall nil and uses the legacy
-				// Tool / Detail fields.
+				// ACP tool_call events carry a progress payload (kind / status / rawOutput)
+				// the dashboard renders as a folded row; forward it. Stream-json leaves
+				// ev.ToolCall nil and uses the legacy Tool / Detail fields (RFC §8.3 D17).
 				if ev.ToolCall != nil {
-					// R230-PERF-2: share the ToolCall pointer; see the
-					// matching tool_result branch above for the safety
-					// argument (read-only downstream, EventEntry stored
-					// by value in the ring buffer).
+					// Shared pointer; see the tool_result branch above.
 					entry.ToolCall = ev.ToolCall
 				}
 			case "text":
 				entry.Type = "text"
-				// R20260602190132-PERF-11: single-scan dual truncation; see
-				// the thinking branch above.
+				// Single-scan dual truncation; see the thinking branch.
 				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, 16000)
 			}
-			// No default branch: the outer guard switch above already
-			// `continue`s on unknown block.Type, so anything reaching this
-			// switch is one of the three handled kinds.
+			// No default: the guard switch above already skips unknown block.Type.
 			out = append(out, entry)
 		}
-		// Surface the AskUserQuestion card as a dedicated EventEntry alongside
-		// the tool_use bubble. Placing it AFTER the tool_use entry keeps the
-		// chronological transcript order (tool_use → interactive card) and
-		// preserves the Agent → task_started tool_use_id linkage above.
+		// AskUserQuestion card as its own entry, AFTER the tool_use so transcript
+		// order and the Agent → task_started tool_use_id linkage are preserved.
 		if ev.AskQuestion != nil {
 			entry := base
 			entry.Type = "ask_question"
 			entry.Tool = "AskUserQuestion"
 			entry.ToolUseID = ev.AskQuestion.ToolUseID
-			// Summary is a one-line digest used for sidebar preview;
-			// AskQuestion field carries the full card payload.
+			// Summary is the sidebar digest; AskQuestion carries the full card.
 			if len(ev.AskQuestion.Items) > 0 {
 				entry.Summary = textutil.TruncateRunes(ev.AskQuestion.Items[0].Question, 120)
 			} else {
@@ -246,18 +188,10 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 		}
 		return out
 	case "result":
-		// Result is purely turn-boundary metadata: cost, stopReason, sessionId.
-		// The visible assistant text was already logged by the assistant frames
-		// preceding this event — claude streams text content blocks turn-mid,
-		// and ACPProtocol.ReadEvent synthesises an assistant frame at stopReason
-		// (see protocol_acp.go) so both backends share the same invariant.
-		//
-		// Frontend dashboard.js INTERNAL_EVENT_TYPES filters "result" out so
-		// it never renders a bubble; ev.Result is preserved on the wire for
-		// process_send.Send() (passthrough SendResult.Text) but is not copied
-		// into Summary/Detail — earlier code that derived a parallel "text"
-		// entry from ev.Result produced a duplicate bubble whenever an
-		// assistant text frame had already been logged in the same turn.
+		// Result is turn-boundary metadata only. The visible text was already logged
+		// by preceding assistant frames (ACPProtocol.ReadEvent synthesises one at
+		// stopReason, so both backends share the invariant); copying ev.Result into
+		// Summary/Detail would duplicate the bubble. dashboard.js never renders "result".
 		entry := base
 		entry.Type = "result"
 		entry.Cost = ev.CostUSD
@@ -267,20 +201,17 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 }
 
 // logEventAt converts an Event to one or more EventEntry values and appends them to the event log.
-// readLoop passes the same time.Now() value that stamps ev.recvAt so timestamps match. R67-PERF-9.
+// readLoop passes the same time.Now() value that stamps ev.recvAt so timestamps match.
 func (p *Process) logEventAt(ev Event, nowMS int64) {
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return
 	}
-	// Update process-level cost tracking for result events.
 	if ev.Type == "result" {
 		p.totalCost.Store(math.Float64bits(ev.CostUSD))
 	}
-	// AppendBatch holds l.mu and notifies subscribers ONCE rather than
-	// once per entry. Multi-block assistant events (thinking + tool_use +
-	// text) would otherwise acquire both locks N times and wake
-	// eventPushLoop spuriously for each block.
+	// AppendBatch takes l.mu and notifies subscribers ONCE; per-entry Append
+	// would lock N times and wake eventPushLoop spuriously per block.
 	p.eventLog.AppendBatch(entries)
 }
 
@@ -299,11 +230,8 @@ func parseAgentInput(input json.RawMessage) agentInput {
 	}
 	var inp agentInput
 	if err := json.Unmarshal(input, &inp); err != nil {
-		// R188-PANIC-H1: upgrade from Debug to Warn. Silent zero-value return
-		// produces blank agent cards in the dashboard; at Warn operators can
-		// trace which CLI emitted a malformed Agent.input and whether the
-		// schema drifted (e.g. CLI emitting "input": "string" instead of
-		// {"subagent_type": ...}).
+		// Warn, not Debug: a silent zero-value return produces blank agent cards
+		// and hides which CLI emitted a malformed Agent.input.
 		slog.Warn("parseAgentInput: unmarshal failed",
 			"err", err, "input_len", len(input))
 	}
@@ -326,20 +254,15 @@ func shortPath(p string) string {
 		}
 	}
 	if len(p) > 50 {
-		// Snap the tail start to a rune boundary so a multi-byte (e.g. CJK)
-		// path segment isn't sliced mid-codepoint into invalid UTF-8. R20260609-LB-2.
+		// Snap to a rune boundary so CJK paths aren't sliced into invalid UTF-8.
 		return "..." + p[textutil.TailAtRuneBoundary(p, len(p)-47):]
 	}
 	return p
 }
 
-// Per-tool input shapes for FormatToolInput. Promoted from anonymous struct
-// literals inside the function body to package-level named types: the encoding/json
-// reflection cache keys on (Type, []byte) and a fresh anonymous-type literal
-// inside the function defeats reuse, costing a fresh reflect lookup + a small
-// alloc for the type's name on every event. Naming the types preserves the
-// "tool's payload shape lives next to the dispatch switch" readability while
-// stabilising the cache key. R229-PERF-2.
+// Per-tool input shapes for FormatToolInput, named at package level: the
+// encoding/json reflection cache keys on the type, and an anonymous struct
+// literal inside the function defeats reuse (reflect lookup + alloc per event).
 type (
 	toolInputFilePath struct {
 		FilePath string `json:"file_path"`
@@ -384,15 +307,13 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 	case "Glob":
 		var s toolInputPattern
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			// R187-PERF-L1: cap pattern to prevent an adversarial LLM response
-			// from inflating EventLog entries (300 runes matches the default
-			// tail below).
+			// Cap so an adversarial LLM response cannot inflate EventLog entries.
 			return toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 		}
 	case "Grep":
 		var s toolInputGrep
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			// R187-PERF-L1: cap pattern (see Glob note).
+			// Cap pattern (see Glob).
 			result := toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 			if s.Path != "" {
 				result += " in " + shortPath(s.Path)
@@ -415,16 +336,10 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			return toolName + " " + textutil.TruncateRunes(s.Description, 60)
 		}
 	default:
-		// R188-PERF-P2-C: replaced map[string]json.RawMessage decode with
-		// concrete struct — json.Decoder ignores unknown fields by default so
-		// MCP tools that add new schemas still work, and we skip the reflect
-		// + map alloc cost on the unknown-tool fallback path.
-		// Fallback: try common keys with a struct (rare path for unknown tools)
+		// Unknown tools: a concrete struct (json ignores unknown fields) beats a
+		// map decode and still works for MCP tools with new schemas.
 		var inp toolInputFallback
 		if json.Unmarshal(input, &inp) == nil {
-			// Avoid a []string{...} slice literal on the unknown-tool
-			// fallback path — a chain of short-circuit checks matches the
-			// previous semantics without the per-call slice alloc.
 			switch {
 			case inp.Description != "":
 				return toolName + " " + textutil.TruncateRunes(inp.Description, 80)
@@ -442,8 +357,6 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		}
 	}
 
-	// R215-PERF-P2-6: pass the underlying []byte directly instead of
-	// string(input) so MCP tools whose input is multi-KB don't pay a full
-	// heap copy on every event when the truncation path is the common case.
+	// Pass the []byte directly so multi-KB MCP inputs don't pay a string copy.
 	return toolName + ": " + textutil.TruncateRunesBytes(input, 300)
 }

@@ -1,31 +1,13 @@
-// History wiring for cli.Wrapper. This file declares the small surface the
-// session router needs to ask a Wrapper "give me a history.Source for this
-// session" without the cli package having to know which concrete backend
-// (claudejsonl, kirojsonl, ...) implements it.
+// History wiring for cli.Wrapper: the surface the session router uses to ask a
+// Wrapper for a HistorySource without cli knowing which backend
+// (claudejsonl, kirojsonl, codexjsonl, ...) implements it.
 //
-// Why a registry instead of direct imports:
-//
-//   - internal/history and internal/history/claudejsonl both import
-//     internal/cli (for cli.HistorySource / the factory registry). If cli imported either of them
-//     the build would cycle. The history package intentionally lives one
-//     level "above" cli in the dependency graph.
-//   - We want backend-specific factories (claudeHistoryFactory and the
-//     future kiroHistoryFactory) to be wired in their own packages so a
-//     new backend lands as a single new file, not a session-package edit.
-//   - init()-based registration keeps the binding side-effect explicit:
-//     any package that imports a history backend (e.g. session importing
-//     internal/history/claudejsonl) automatically gets its factory
-//     registered with cli.
-//
-// The HistorySource interface declared here is the canonical source of
-// truth for the history-pagination contract. R246-ARCH-1 (#761) collapsed
-// the previously-duplicated internal/history.Source down to a type alias
-// (`type Source = cli.HistorySource`) so adding or renaming a method on
-// HistorySource is now an immediate compile error across every history
-// backend instead of silent structural-satisfaction breakage. The alias
-// direction (history → cli) is forced by the import graph: cli cannot
-// import history without a cycle, but every backend already imports cli
-// for cli.HistorySource and RegisterHistoryFactory.
+// A registry rather than direct imports because internal/history and the
+// backends import cli (for HistorySource / RegisterHistoryFactory), so cli
+// importing them would cycle; init()-based registration means importing a
+// backend package (via internal/wireup) is what binds its factory. cli.HistorySource
+// is the canonical contract and history.Source is a type alias for it, so a
+// method change is a compile error in every backend (#761).
 package cli
 
 import (
@@ -36,20 +18,11 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// HistorySessionView is the minimum surface a *cli.Wrapper needs to
-// construct a history source for a session. Defined as an interface so
-// the cli package does not have to import internal/session (which would
-// cycle: session already imports cli).
-//
-// session.ManagedSession satisfies this interface today through:
-//   - SessionKey() — returns the immutable session key
-//   - Workspace() — returns the effective cwd
-//   - SessionID()  — returns the current CLI session ID
-//   - SnapshotChainIDs() — returns prevSessionIDs + current ID, oldest→newest
-//
-// SnapshotChainIDs in particular is invoked by claudejsonl's chain reader
-// on every LoadBefore call so a /new or workspace switch mid-pagination
-// is observed by the next page.
+// HistorySessionView is the minimum surface a *cli.Wrapper needs to construct
+// a history source for a session; an interface so cli does not import
+// internal/session (which imports cli). session.ManagedSession satisfies it.
+// SnapshotChainIDs (prevSessionIDs + current, oldest→newest) is re-read on
+// every LoadBefore so a /new or workspace switch mid-pagination is observed.
 type HistorySessionView interface {
 	SessionKey() string
 	Workspace() string
@@ -57,86 +30,61 @@ type HistorySessionView interface {
 	SnapshotChainIDs() []string
 }
 
-// HistoryWiring carries the directory configuration a HistoryFactoryFn
-// needs to construct a backend-specific source. The session router
-// populates this from RouterConfig at attachHistorySource time so the
-// factory itself stays pure (no router-internal references leak into
-// cli's public surface).
-//
-// All fields are optional. An empty value typically means "this backend
-// has no fallback source"; the factory is expected to return a noop
-// source rather than nil. Wrapper.NewHistorySource enforces non-nil at
-// the boundary regardless.
+// HistoryWiring carries the directory configuration a HistoryFactoryFn needs.
+// The session router fills it from RouterConfig so factories stay pure. All
+// fields are optional; a factory with a missing directory should return a
+// noop source rather than nil (Wrapper.NewHistorySource enforces non-nil).
 type HistoryWiring struct {
-	// ClaudeDir is the Claude CLI's projects/ root (~/.claude). The
-	// claude factory reads per-session JSONL files from beneath this
-	// directory.
+	// ClaudeDir is the Claude CLI's projects/ root (~/.claude).
 	ClaudeDir string
-	// KiroSessionsDir is ~/.kiro/sessions/cli. Wired from cmd/naozhi/main.go;
-	// the kirojsonl factory reads per-session JSONL files from beneath this
-	// directory. R228-CR-P3-6.
+	// KiroSessionsDir is ~/.kiro/sessions/cli (wired from cmd/naozhi/main.go).
 	KiroSessionsDir string
-	// CodexSessionsDir is ~/.codex/sessions. Wired from cmd/naozhi/main.go;
-	// the codexjsonl factory globs date-bucketed rollout files
-	// (YYYY/MM/DD/rollout-*-<threadId>.jsonl) beneath this directory.
+	// CodexSessionsDir is ~/.codex/sessions; the codexjsonl factory globs
+	// YYYY/MM/DD/rollout-*-<threadId>.jsonl beneath it.
 	CodexSessionsDir string
-	// EventLogDir is naozhi's per-session event log directory. Listed
-	// here for symmetry; current backend factories don't read it
-	// (naozhilog is the local tier in MergedSource and is wired
-	// separately by the session router) but a future backend that
-	// needed cross-session state could.
+	// EventLogDir is naozhi's per-session event log directory. Unused by the
+	// current factories (naozhilog is wired separately by the router).
 	EventLogDir string
 }
 
 // HistorySource is the read-only history view returned by a wrapper's
-// factory. Structurally identical to internal/history.Source —
-// implementations of one satisfy the other automatically.
+// factory. internal/history.Source is an alias of this type.
 type HistorySource interface {
 	LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error)
 }
 
-// NoopHistorySource is the always-empty HistorySource used when a backend
-// has no fallback or HistoryWiring is missing the directory it needs.
-// Callers always get a non-nil HistorySource so they can skip nil checks.
+// NoopHistorySource is the always-empty HistorySource used when a backend has
+// no fallback or HistoryWiring lacks the directory it needs, so callers never
+// see nil.
 type NoopHistorySource struct{}
 
-// LoadBefore always returns (nil, nil). Callers interpret this as "no
-// history available" on the first call.
+// LoadBefore always returns (nil, nil), i.e. "no history available".
 func (NoopHistorySource) LoadBefore(context.Context, int64, int) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 
 // HistoryFactoryFn produces a HistorySource for a session against a given
-// wiring snapshot. Returning nil is allowed; Wrapper.NewHistorySource
-// upgrades nil to NoopHistorySource{} so callers always have a valid
-// source to call LoadBefore on.
+// wiring snapshot. Returning nil is allowed; Wrapper.NewHistorySource upgrades
+// it to NoopHistorySource{}.
 type HistoryFactoryFn func(s HistorySessionView, deps HistoryWiring) HistorySource
 
-// historyFactoryRegistry maps backend ID → factory. Populated via
-// RegisterHistoryFactory from history backend init() blocks. Read-only
-// after process startup but guarded by a mutex anyway because tests can
-// register replacement factories from t.Run blocks.
+// historyFactoryRegistry maps backend ID → factory, populated from backend
+// init() blocks. Mutex-guarded because tests register replacement factories
+// from t.Run blocks.
 var (
 	historyFactoryMu       sync.RWMutex
 	historyFactoryRegistry = map[string]HistoryFactoryFn{}
 
-	// missingFactoryWarned dedups the "no history factory" Warn so a
-	// per-call NewHistorySource (the lookup runs on every history page,
-	// R240-ARCH-28) emits at most one line per offending backend ID.
-	// R249-ARCH-9 (#975): a dropped wireup blank-import used to degrade
-	// silently to NoopHistorySource — no signal that history was missing.
+	// missingFactoryWarned dedups the "no history factory" Warn to one line
+	// per backend ID, since the lookup runs on every history page (#975).
 	missingFactoryMu     sync.Mutex
 	missingFactoryWarned = map[string]bool{}
 )
 
-// RegisterHistoryFactory binds a backend ID to its history-source
-// factory. Intended to be called from a backend package's init() so the
-// binding happens whenever that package is imported. backendID "" is
-// silently ignored — the empty backend ID means "router default" at
-// session-construction time and never reaches a wrapper.
-//
-// Re-registering a backend ID overwrites the previous factory; the last
-// registration wins. Tests rely on this to inject failing factories.
+// RegisterHistoryFactory binds a backend ID to its history-source factory,
+// intended for a backend package's init(). backendID "" is ignored (it means
+// "router default" and never reaches a wrapper). Re-registering overwrites;
+// tests rely on this to inject failing factories.
 func RegisterHistoryFactory(backendID string, fn HistoryFactoryFn) {
 	if backendID == "" || fn == nil {
 		return
@@ -147,9 +95,7 @@ func RegisterHistoryFactory(backendID string, fn HistoryFactoryFn) {
 }
 
 // warnMissingHistoryFactory logs a one-time Warn for a non-empty backend ID
-// that has no registered history factory (likely a missing wireup
-// blank-import). Empty IDs are the router-default case and never warn.
-// R249-ARCH-9 (#975).
+// with no registered factory (likely a missing wireup blank-import) (#975).
 func warnMissingHistoryFactory(backendID string) {
 	if backendID == "" {
 		return
@@ -168,9 +114,8 @@ func warnMissingHistoryFactory(backendID string) {
 		"hint", "ensure the backend's history package is blank-imported via internal/wireup")
 }
 
-// pickHistoryFactory looks up the factory for a backend ID. Returns nil
-// when no factory is registered — Wrapper.NewHistorySource maps that to
-// NoopHistorySource so missing registrations never produce panics.
+// pickHistoryFactory looks up the factory for a backend ID; nil when none is
+// registered.
 func pickHistoryFactory(backendID string) HistoryFactoryFn {
 	if backendID == "" {
 		return nil
@@ -180,35 +125,22 @@ func pickHistoryFactory(backendID string) HistoryFactoryFn {
 	return historyFactoryRegistry[backendID]
 }
 
-// NewHistorySource constructs a HistorySource for the supplied session
-// using the latest factory registered for the wrapper's BackendID. Always
-// returns a non-nil source: a nil receiver, an unregistered backend, or a
-// factory that returns nil all degrade to NoopHistorySource so call sites
-// can treat the return value as never-nil.
+// NewHistorySource constructs a HistorySource for the supplied session using
+// the factory currently registered for the wrapper's BackendID. Always
+// non-nil: a nil receiver, an unregistered backend, or a nil-returning factory
+// all degrade to NoopHistorySource.
 //
-// R240-ARCH-28: looks up the factory from the package registry on every
-// call rather than caching it at NewWrapper time. Caching at construction
-// time silently dropped any RegisterHistoryFactory call that landed after
-// NewWrapper — a real hazard in tests that register backends per-t.Run
-// after constructing a Wrapper, and in any future ordering where a
-// backend init() runs lazily (e.g. blank-imported via wireup). The
-// registry's RWMutex makes the read cheap (~30 ns) and turns
-// "factory binding" into a runtime question rather than a construction
-// snapshot.
+// The registry is consulted on every call, not cached at NewWrapper time, so
+// a RegisterHistoryFactory that lands after construction (per-t.Run tests,
+// lazily imported backends) is honoured; the RWMutex read is ~30ns.
 func (w *Wrapper) NewHistorySource(s HistorySessionView, deps HistoryWiring) HistorySource {
 	if w == nil {
 		return NoopHistorySource{}
 	}
 	fn := pickHistoryFactory(w.BackendID)
 	if fn == nil {
-		// R249-ARCH-9 (#975): a non-empty BackendID with no registered
-		// factory means its wireup blank-import is missing (or its init()
-		// failed to register). The old path silently returned Noop, so a
-		// dropped wireup line manifested only as "history is mysteriously
-		// empty" with no operator-visible cause. Warn once per backend so
-		// the misconfiguration is diagnosable without spamming the per-page
-		// hot path. Empty BackendID is the legitimate router-default case
-		// and stays silent.
+		// Non-empty BackendID with no factory = missing wireup import; warn
+		// once so "history is empty" has an operator-visible cause (#975).
 		warnMissingHistoryFactory(w.BackendID)
 		return NoopHistorySource{}
 	}

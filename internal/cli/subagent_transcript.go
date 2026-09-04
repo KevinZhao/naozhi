@@ -15,54 +15,39 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// TranscriptReader streams a subagent's on-disk jsonl transcript (see RFC
-// v4 §3.4) and maps each line to an EventEntry using the table in §3.4.1.
+// TranscriptReader streams a subagent's on-disk jsonl transcript and maps
+// each line to EventEntry values (docs/rfc agent-team-ui §3.4).
 //
-// Instances are cheap and single-reader: construct once per
-// (key, task_id, jsonl_path) tuple. Read/Tail are NOT goroutine-safe with
-// each other; callers that want concurrent tail + one-shot fetch should
-// serialise via a mutex or use separate TranscriptReader instances.
-//
-// R233-PERF-4 / R228-PERF-3: each Read/Tail used to open+ReadAll+close the
-// file. With agent_tailer's 200 ms ticker × up to 50 active tailers that
-// burned ~250 fd-lifecycle syscalls/s for nothing — once the offset is
-// past the file size most polls have nothing to read. We now keep a
-// persistent *os.File and reopen only when the on-disk inode changes
-// (rotation / replacement). Callers SHOULD invoke Close when done so the
-// fd is released eagerly rather than waiting on the *os.File finalizer.
+// One instance per (key, task_id, jsonl_path); Read/Tail are not
+// goroutine-safe with each other. It holds a persistent *os.File (agent_tailer
+// polls at 200 ms × up to 50 tailers, mostly reading zero bytes) and reopens
+// only when the inode changes. Callers SHOULD Close when done so the fd is
+// released eagerly.
 type TranscriptReader struct {
 	path string
 
 	mu     sync.Mutex
 	offset int64
 	tail   []byte // half-written trailing line from previous Read
-	// readBuf is reused across Tail/Read polls so io.ReadAll's
-	// growth-doubling alloc chain (4 KiB → 8 KiB → 16 KiB) does not fire
-	// every poll. Hot-path agent_tailer at 200 ms × 50 tailers
-	// → 250 alloc/s without; reusing the buffer drops that to 0 in
-	// steady state. R231-PERF-3 / R232-PERF-3.
+	// readBuf is reused across polls so io.ReadAll's growth chain does not
+	// allocate every 200 ms.
 	readBuf []byte
-	// f is the persistent transcript fd; nil before the first read and
-	// after Close. statSig identifies the open file via os.FileInfo so
-	// a rotation (rm + create on the same path, or atomic rename swap)
-	// triggers a reopen via os.SameFile. R233-PERF-4 / R228-PERF-3.
+	// f is the persistent fd (nil before first read / after Close); statSig
+	// identifies its inode so a rotation triggers a reopen via os.SameFile.
 	f         *os.File
 	statSig   os.FileInfo
 	closeOnce sync.Once
 }
 
-// NewTranscriptReader constructs a reader anchored at path. path is trusted
-// — callers (HTTP handler / server tailer) must have already validated that
-// it lives under the ~/.claude/projects tree and passes agent-<hex>.jsonl
-// regex (§4 Security).
+// NewTranscriptReader constructs a reader anchored at path. path is trusted:
+// callers must already have validated it lives under ~/.claude/projects and
+// matches agent-<hex>.jsonl.
 func NewTranscriptReader(path string) *TranscriptReader {
 	return &TranscriptReader{path: path}
 }
 
 // Close releases the persistent transcript fd. Idempotent; subsequent
-// Read/Tail calls reopen on demand. Callers SHOULD invoke Close when
-// dropping the reader so the fd is released eagerly instead of waiting on
-// the *os.File finalizer. R233-PERF-4.
+// Read/Tail calls reopen on demand.
 func (r *TranscriptReader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
@@ -77,30 +62,20 @@ func (r *TranscriptReader) Close() error {
 	return err
 }
 
-// openOrReuse returns the cached fd when the on-disk inode still matches
-// what we previously opened, otherwise opens fresh. Returns reset=true
-// when the caller must drop bookkeeping (offset/tail) — that is, when a
-// prior fd existed and the inode swapped under us (rotation). The very
-// first open returns reset=false because offset/tail are already zero.
-//
-// On Stat/Open errors any prior fd is closed so a transient ENOENT does
-// not leave a stale handle behind. The caller MUST hold r.mu.
-//
-// R20260607-PERF-3 (#1884): the fast path (a live fd that we trust still
-// points at the current inode) returns immediately WITHOUT an os.Stat —
-// see readLocked, which only invokes the stat-bearing rotation re-probe
-// (reprobeRotation) when a poll reads zero fresh bytes. An actively-growing
-// file cannot have rotated, so re-statting it every 200ms was pure overhead
-// (≈250 stat(2)/s under 50 tailers).
+// openOrReuse returns the cached fd, or opens fresh. reset=true means a
+// prior fd existed and the inode swapped (rotation), so the caller must drop
+// offset/tail; the first open returns reset=false. On Stat/Open errors any
+// prior fd is closed. A live fd is returned WITHOUT an os.Stat — an actively
+// growing file cannot have rotated; readLocked re-probes only on a zero-byte
+// poll (#1884). Caller MUST hold r.mu.
 func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
 	if r.f != nil && r.statSig != nil {
 		return r.f, false, nil
 	}
 	st, err := os.Stat(r.path)
 	if err != nil {
-		// Path disappeared (logrotate window, /new prune). Drop any cached
-		// fd so the next call reopens cleanly. Surface err verbatim so the
-		// caller can branch on os.IsNotExist for 404 semantics.
+		// Path gone: drop the cached fd; surface err verbatim so callers can
+		// branch on os.IsNotExist.
 		if r.f != nil {
 			_ = r.f.Close()
 			r.f = nil
@@ -109,7 +84,6 @@ func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
 		return nil, false, err
 	}
 	if r.f != nil && r.statSig != nil && os.SameFile(r.statSig, st) {
-		// Same inode — reuse the open fd, keep offset/tail.
 		return r.f, false, nil
 	}
 	hadPrior := r.f != nil
@@ -122,9 +96,7 @@ func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	// Re-stat the just-opened fd so the cached signature reflects the
-	// inode actually held by f (a tight rotation race could swap the file
-	// between Stat and Open above).
+	// Re-stat the opened fd: a rotation could swap the file between Stat and Open.
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
@@ -132,20 +104,13 @@ func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
 	}
 	r.f = f
 	r.statSig = fi
-	// reset=true only when a prior fd existed and we just discarded it.
-	// First open keeps reset=false because offset/tail are already zero.
 	return r.f, hadPrior, nil
 }
 
 // Read returns up to `limit` EventEntry values with Time > afterMS. Entries
-// with Time == 0 pass through (map_row fills Time from the record's timestamp
-// field; if that parse fails Time stays 0 and the entry is still surfaced
-// so the dashboard can show something instead of dropping it).
-//
-// The `afterMS` filter is applied AFTER mapping, not during line scanning,
-// because a single jsonl line can collapse into 0 entries (skipped shapes)
-// or 1+ entries (assistant with thinking+tool_use+text), and we want stable
-// entry-level after-filtering.
+// with Time == 0 (unparseable timestamp) pass through so the dashboard shows
+// something. The filter applies after mapping because one jsonl line yields
+// 0..N entries.
 func (r *TranscriptReader) Read(afterMS int64, limit int) ([]clievent.EventEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -162,11 +127,6 @@ func (r *TranscriptReader) Tail() ([]clievent.EventEntry, error) {
 }
 
 func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.EventEntry, error) {
-	// R233-PERF-4 / R228-PERF-3: persistent fd. Prior open+ReadAll+close
-	// per call burned ~250 fd-lifecycle syscalls/s under agent_tailer's
-	// 200ms × up to 50 tailers, mostly to read zero new bytes. On a
-	// rotation (inode swap) openOrReuse closes the stale fd and opens
-	// fresh; the reset flag tells us to drop the now-stale offset/tail.
 	f, reset, err := r.openOrReuse()
 	if err != nil {
 		return nil, err
@@ -180,14 +140,9 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 	if err != nil {
 		return nil, err
 	}
-	// R20260607-PERF-3 (#1884): openOrReuse no longer stats the path on the
-	// fast (live-fd) path. A zero-byte poll is the only window in which a
-	// rotation (rm+create / atomic rename) can hide — an actively-growing
-	// file is provably the same inode — so probe for an inode swap exactly
-	// there. If the path now resolves to a different file, reopen, reset
-	// bookkeeping, and re-read once so rotation is still caught on the very
-	// next poll (preserving the prior every-poll-stat guarantee at a
-	// fraction of the syscall cost).
+	// A zero-byte poll is the only window in which a rotation can hide (a
+	// growing file is provably the same inode), so probe for an inode swap
+	// there and re-read once so rotation is caught on this poll (#1884).
 	if len(freshBytes) == 0 {
 		rotated, perr := r.reprobeRotation()
 		if perr != nil {
@@ -220,8 +175,7 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 	for consumed < len(data) {
 		nl := bytes.IndexByte(data[consumed:], '\n')
 		if nl < 0 {
-			// Partial trailing line — copy into r.tail (make a fresh slice
-			// so subsequent freshBytes reuse doesn't mutate it).
+			// Partial trailing line: copy so readBuf reuse cannot mutate it.
 			tail := make([]byte, len(data)-consumed)
 			copy(tail, data[consumed:])
 			r.tail = tail
@@ -239,42 +193,29 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 			}
 			out = append(out, e)
 			if limit > 0 && len(out) >= limit {
-				// Advance offset past the bytes we actually processed.
-				// Since we break early, `consumed` reflects the right boundary.
 				r.offset = advanceOffset(r.offset, readLen, consumed, data, freshBytes, len(r.tail))
 				return out, nil
 			}
 		}
 	}
-	// Advance offset by all fresh bytes consumed as complete lines.
-	// Bytes still held in r.tail are fresh-bytes that haven't terminated yet —
-	// we count them as "read" from the OS, and remember them in-memory, so
-	// offset advances fully.
+	// Bytes held in r.tail count as read from the OS, so offset advances fully.
 	r.offset += readLen
 	return out, nil
 }
 
 // readFresh seeks f to r.offset and reads everything available into the
-// reused r.readBuf, returning the fresh bytes. Caller must hold r.mu.
-//
-// Offset semantics: r.offset is the next file byte we haven't yet read as
-// part of a complete line. r.tail is the in-memory buffer of the most recent
-// incomplete trailing line seen on a prior read; its bytes have ALREADY been
-// consumed from the file from the OS's point of view (r.offset points past
-// them), so don't read them twice.
+// reused r.readBuf. r.offset points past the bytes already buffered in
+// r.tail (the OS has handed them out), so they are never read twice. Caller
+// must hold r.mu.
 func (r *TranscriptReader) readFresh(f *os.File) ([]byte, error) {
 	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
 		return nil, err
 	}
-	// Bound a single read so an unexpectedly large transcript (or a
-	// symlink-swap pointing at a huge file) cannot pin tens of MB on a
-	// hot polling path. Subagent jsonl files are typically a few hundred
-	// KB; 16 MB leaves ample headroom for long-running agents. (R227-CR-4)
+	// Bound one read so a huge transcript (or symlink swap) cannot pin tens
+	// of MB on the polling path; typical files are a few hundred KB.
 	const maxTranscriptReadBytes = 16 * 1024 * 1024
-	// R231-PERF-3 / R232-PERF-3: reuse r.readBuf across poll calls to
-	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
-	// r.readBuf[:0]; the cap is retained for next call unless it
-	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
+	// Retain readBuf capacity across polls unless a one-off oversized poll
+	// would pin memory.
 	const readBufRetainCap = 256 * 1024
 	r.readBuf = r.readBuf[:0]
 	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)
@@ -288,14 +229,11 @@ func (r *TranscriptReader) readFresh(f *os.File) ([]byte, error) {
 	return freshBytes, nil
 }
 
-// reprobeRotation runs the os.Stat(r.path) + os.SameFile rotation guard that
-// openOrReuse skips on the fast path. It is invoked only after a zero-byte
-// poll. Returns rotated=true (with r.f, r.statSig swapped to the new inode)
-// when the path now resolves to a different file; false when the inode is
-// unchanged (no new data, genuinely idle). On a path that disappeared the
-// cached fd is dropped and the os.IsNotExist-classifiable error surfaced, so
-// agent_tailer keeps its "agent terminated, jsonl gone" 404 semantics.
-// Caller must hold r.mu. R20260607-PERF-3 (#1884).
+// reprobeRotation runs the Stat + SameFile rotation guard after a zero-byte
+// poll. Returns rotated=true with r.f/r.statSig swapped to the new inode, or
+// false when unchanged. A vanished path drops the cached fd and surfaces the
+// os.IsNotExist error so agent_tailer keeps its 404 semantics. Caller must
+// hold r.mu.
 func (r *TranscriptReader) reprobeRotation() (bool, error) {
 	st, err := os.Stat(r.path)
 	if err != nil {
@@ -328,12 +266,9 @@ func (r *TranscriptReader) reprobeRotation() (bool, error) {
 	return true, nil
 }
 
-// advanceOffset adjusts r.offset after an early `break` on limit. We honor
 // readAllInto reads everything from r into the supplied buffer, growing it
-// in-place via append. Mirrors io.ReadAll's contract (read until EOF,
-// nil err on success) but lets the caller hand in a reusable backing slice
-// so steady-state polling does not allocate a new buffer for every call.
-// R231-PERF-3 / R232-PERF-3.
+// via append. Mirrors io.ReadAll (read until EOF, nil err on success) but
+// lets the caller reuse a backing slice across polls.
 func readAllInto(r io.Reader, buf []byte) ([]byte, error) {
 	if buf == nil {
 		buf = make([]byte, 0, 512)
@@ -353,16 +288,11 @@ func readAllInto(r io.Reader, buf []byte) ([]byte, error) {
 	}
 }
 
-// the invariant: r.offset + len(r.tail) points at the next byte the OS has
-// yet to hand us. When limit truncates processing mid-buffer, bytes between
-// `consumed` and the end of `data` are NOT re-buffered into r.tail — they
-// have to be re-read on next call, so r.offset stays put and r.tail is
-// emptied. This keeps the two bookkeeping cases (normal end vs early return)
-// symmetrical and auditable.
+// advanceOffset adjusts r.offset after an early `break` on limit: only the
+// fresh bytes fully consumed advance the offset; the remainder is re-read on
+// the next call rather than re-buffered into r.tail, keeping the invariant
+// that r.offset + len(r.tail) is the next byte the OS has yet to hand us.
 func advanceOffset(prev int64, readLen int64, consumed int, data, fresh []byte, tailLen int) int64 {
-	// Conservative: on early return, step offset forward only by the amount
-	// of `fresh` bytes fully consumed, keeping any remainder for the next
-	// Read pass.
 	priorBuffered := len(data) - len(fresh) // bytes that came from r.tail
 	freshConsumed := consumed - priorBuffered
 	if freshConsumed < 0 {
@@ -414,9 +344,8 @@ type transcriptMessage struct {
 }
 
 // transcriptUserBlock mirrors transcriptAssistantBlock for the user role.
-// Content stays as RawMessage so flattenToolResult can decode the
-// polymorphic shape (string vs []any) lazily — same boxing-avoidance
-// motivation as R232-CR-17 / R230B-PERF-4.
+// Content stays RawMessage so flattenToolResultRaw decodes the polymorphic
+// shape (string vs array) without interface boxing.
 type transcriptUserBlock struct {
 	Type    string          `json:"type"`
 	Text    string          `json:"text"`
@@ -433,9 +362,8 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 	// String form.
 	var s string
 	if err := json.Unmarshal(raw.Message.Content, &s); err == nil {
-		// §3.4.1: teammate-message control channel is the prompt/shutdown
-		// packet wrapper. Detect by substring — this shape is user-role only,
-		// never assistant, so the false-positive surface is tiny.
+		// teammate-message is the prompt/shutdown control-channel wrapper
+		// (user-role only, so substring detection is safe).
 		if strings.Contains(s, "<teammate-message teammate_id=") {
 			return nil
 		}
@@ -447,9 +375,8 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 		}}
 	}
 
-	// Array form. Typed decode avoids the `[]map[string]any` interface
-	// boxing per block — pollOnce is hot and replays may carry hundreds
-	// of tool_result blocks per assistant turn. R230B-PERF-4.
+	// Array form; typed decode avoids per-block interface boxing on the hot
+	// pollOnce path.
 	var blocks []transcriptUserBlock
 	if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
 		return nil
@@ -480,10 +407,8 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 				Detail:  detail,
 			}
 			if persistedPath != "" {
-				// Reuse Tool field as the persisted_path carrier so callers
-				// (server enrich + dashboard renderer) can special-case it
-				// without introducing a new EventEntry field. Prefix distinguishes
-				// from real tool names.
+				// Tool doubles as the persisted_path carrier; the prefix
+				// distinguishes it from real tool names.
 				entry.Tool = "persisted:" + persistedPath
 			}
 			out = append(out, entry)
@@ -492,10 +417,8 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 	return out
 }
 
-// transcriptAssistantBlock keeps tool_use input as RawMessage so the on-disk
-// replay path can hand it straight to FormatToolInput without the previous
-// map→Marshal→Unmarshal round-trip (R232-CR-17). pollOnce is hot enough that
-// the saved alloc per tool_use block is worth a typed decode.
+// transcriptAssistantBlock keeps tool_use input as RawMessage so it goes
+// straight to FormatToolInput without a Marshal round-trip.
 type transcriptAssistantBlock struct {
 	Type  string          `json:"type"`
 	Text  string          `json:"text"`
@@ -540,9 +463,8 @@ func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 			} else {
 				entry.Detail = block.Name
 			}
-			// Per RFC §3.4.1, Agent tool_use inside an agent transcript
-			// DOWNGRADES to plain tool_use — we explicitly disable drill-in
-			// for this phase (no nested agent views).
+			// Agent tool_use inside an agent transcript stays plain tool_use:
+			// no nested agent drill-in.
 			out = append(out, entry)
 		}
 	}
@@ -550,29 +472,20 @@ func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 }
 
 // toolResultArrayItem is the typed decode target for the array form of a
-// tool_result block's content (RFC §3.4.2). Keeping these as a struct
-// avoids the per-item interface boxing the old `[]map[string]any` path
-// imposed on every replay frame. R230B-PERF-4.
+// tool_result block's content.
 type toolResultArrayItem struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 }
 
-// flattenToolResultRaw normalises the three observed shapes of tool_result
-// content (RFC §3.4.2): string, array, or absent. Returns summary, detail,
-// persistedPath ("" when absent), skip.
-//
-// The string and []item paths are decoded directly from the RawMessage to
-// avoid the previous map[string]any boxing per item. Returns skip=true on
-// any decode failure (treated as malformed envelope) and on the
-// "tool_reference"-only array case (pure schema envelope, no UI value).
+// flattenToolResultRaw normalises the three shapes of tool_result content
+// (string, array, absent) into summary, detail, persistedPath ("" when
+// absent), skip. skip=true on decode failure and on a tool_reference-only
+// array (pure schema envelope, no UI value).
 func flattenToolResultRaw(c json.RawMessage) (string, string, string, bool) {
 	if len(c) == 0 {
 		return "", "", "", true
 	}
-	// String form: decoded with json.Unmarshal so escape sequences are
-	// resolved (the same semantics the old `case string:` arm had via
-	// json.Unmarshal into []map[string]any → string-typed elements).
 	var s string
 	if err := json.Unmarshal(c, &s); err == nil {
 		persisted := ""
@@ -611,9 +524,8 @@ func flattenToolResultRaw(c json.RawMessage) (string, string, string, bool) {
 }
 
 // persistedPathRe matches the "saved at: <abs path>" line in Claude CLI's
-// persisted-output envelope. Captures the absolute path; the basename is
-// then re-prefixed with tool-results/ so the client can fetch via the
-// /api/sessions/tool_result endpoint (§3.4.2, §3.5.1).
+// persisted-output envelope; the basename is re-prefixed with tool-results/
+// for the /api/sessions/tool_result endpoint.
 var persistedPathRe = regexp.MustCompile(`saved at:\s*(\S+)`)
 
 // toolResultBasenameRe whitelists persisted-output filenames. CLI today emits
@@ -627,10 +539,7 @@ func extractPersistedPath(s string) string {
 		return ""
 	}
 	abs := m[1]
-	// Strip any trailing non-path chars. Includes \r for CRLF-terminated
-	// lines the CLI may emit on Windows builds — without it, the basename
-	// regex would reject "abc.txt\r" as invalid and drop an otherwise
-	// valid persisted-output pointer. R201-SEC-L1.
+	// \r included so CRLF lines from Windows builds still pass the basename regex.
 	abs = strings.TrimRight(abs, ",; \r\n\t")
 	idx := strings.LastIndexByte(abs, '/')
 	var base string

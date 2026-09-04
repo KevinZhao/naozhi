@@ -8,25 +8,15 @@ import (
 	"strings"
 )
 
-// Auto-orientation for images that carry NO EXIF orientation flag.
-//
-// A sideways document photo whose pixels are physically rotated (with no
-// metadata to signal it) can't be fixed by the browser's
-// createImageBitmap(from-image) path. Instead we ask a small vision model
-// (Haiku) which edge of the image holds the TOP of the text, then bake the
-// matching clockwise rotation into the pixels with RotateJPEG.
-//
-// IMPORTANT prompt-design note (validated empirically): asking the model
-// "how many degrees clockwise to rotate" makes a small model flip the
-// direction (it answered 90 where 270 was correct). Asking instead which
-// EDGE the top of the text sits on ("up"/"down"/"left"/"right") is stable
-// and correct across repeated runs. We do the edge→degrees mapping here in
-// code, never in the model.
+// Auto-orientation for images with NO EXIF orientation flag: a small vision
+// model is asked which EDGE holds the top of the text and RotateJPEG bakes the
+// matching rotation into the pixels. The prompt deliberately asks for an edge,
+// not degrees — small models flip the direction when asked for degrees
+// (answered 90 where 270 was correct); the edge→degrees mapping lives in code.
 
-// orientSystemReminder is appended to the user text. The model output is
+// orientUserPrompt is the instruction sent with the image. Output is
 // hard-constrained to a 4-value enum; anything else is treated as "unknown"
-// and the image is left untouched (fail-safe). The instruction is phrased
-// as physical edges, NOT rotation degrees — see the note above.
+// and the image is left untouched (fail-safe).
 const orientUserPrompt = `The attached image may be a photo or scan of a document/text page that was captured sideways or upside down. Look ONLY at the orientation of the text/printed lines.
 
 Answer with EXACTLY ONE lowercase word and nothing else — no punctuation, no explanation:
@@ -48,10 +38,8 @@ type OrientVerdict struct {
 	DegreesCW int
 }
 
-// edgeToDegreesCW maps the model's edge answer to the clockwise rotation
-// that makes the text upright. Derived geometrically and confirmed by
-// rotating a real sideways scan: a page whose text-top points RIGHT needs a
-// 270° CW rotation (== 90° CCW) to stand upright.
+// edgeToDegreesCW maps the model's edge answer to the clockwise rotation that
+// makes the text upright (text-top pointing RIGHT needs 270° CW == 90° CCW).
 var edgeToDegreesCW = map[string]int{
 	"up":    0,
 	"left":  90,
@@ -59,11 +47,9 @@ var edgeToDegreesCW = map[string]int{
 	"right": 270,
 }
 
-// BuildOrientMessage constructs the stream-json NDJSON line (one user
-// message with an inline base64 image block + the instruction text) that is
-// piped to `claude -p --input-format stream-json`. Reuses the same
-// inputImageBlock/imageSource wire shape as a normal session message so the
-// CLI sees a familiar multimodal turn.
+// BuildOrientMessage constructs the stream-json NDJSON line (inline base64
+// image block + instruction text) piped to `claude -p --input-format
+// stream-json`, using the same wire shape as a normal session message.
 func BuildOrientMessage(jpeg []byte, mimeType string) ([]byte, error) {
 	if len(jpeg) == 0 {
 		return nil, fmt.Errorf("orient: empty image")
@@ -96,17 +82,11 @@ func BuildOrientMessage(jpeg []byte, mimeType string) ([]byte, error) {
 	return append(line, '\n'), nil
 }
 
-// ParseOrientStreamJSON scans the stream-json (NDJSON) stdout of a
-// `claude -p --output-format stream-json --verbose` run and extracts the
-// final text answer, then validates + maps it to an OrientVerdict.
-//
-// Fail-safe contract: on ANY ambiguity — no result line, multi-word output,
-// an unrecognised word, mixed content — it returns ("up"→0°-equivalent)
-// with ok=false so the caller leaves the image untouched. ok=true is
-// returned ONLY when the model emitted exactly one of the four enum words
-// AND it isn't "up" (a confident, actionable rotation). "up" returns
-// (verdict{up,0}, false) because there's nothing to do — callers treat
-// ok=false uniformly as "don't rotate".
+// ParseOrientStreamJSON extracts the final text answer from the stream-json
+// stdout of a `claude -p --output-format stream-json --verbose` run and maps
+// it to an OrientVerdict. Fail-safe: on ANY ambiguity (no result line,
+// multi-word or unrecognised output) it returns ({up,0}, false) so the caller
+// leaves the image untouched; ok=true only for a confident non-"up" edge.
 func ParseOrientStreamJSON(stdout []byte) (OrientVerdict, bool) {
 	var answer string
 	for _, raw := range bytes.Split(stdout, []byte("\n")) {
@@ -130,14 +110,12 @@ func ParseOrientStreamJSON(stdout []byte) (OrientVerdict, bool) {
 		}
 		switch ev.Type {
 		case "result":
-			// The terminal result event carries the final text in .result.
-			// An error subtype (e.g. "error_max_turns") leaves it empty.
+			// Error subtypes (e.g. "error_max_turns") leave .result empty.
 			if ev.Result != "" {
 				answer = ev.Result
 			}
 		case "assistant":
-			// Fallback: pull text from the last assistant message in case
-			// the result line is absent (older CLI builds).
+			// Fallback when the result line is absent (older CLI builds).
 			for _, b := range ev.Message.Content {
 				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
 					answer = b.Text
@@ -149,14 +127,10 @@ func ParseOrientStreamJSON(stdout []byte) (OrientVerdict, bool) {
 }
 
 // classifyOrientAnswer normalises a raw model answer to the enum and maps it
-// to degrees. Split out from the NDJSON scan so it can be unit-tested
-// directly against adversarial strings.
+// to degrees; split out so it can be unit-tested against adversarial strings.
 func classifyOrientAnswer(answer string) (OrientVerdict, bool) {
-	// Normalise: lowercase, trim surrounding whitespace and the punctuation a
-	// chatty model might add ("up." / "**left**" / `"right"`). We do NOT
-	// accept multi-word answers — a sentence means the model ignored the
-	// format, so we fail safe rather than substring-match "up" out of
-	// "I think it's up but...".
+	// Trim whitespace and chatty punctuation ("up." / "**left**"). Multi-word
+	// answers fail safe rather than substring-matching "up" out of a sentence.
 	norm := strings.ToLower(strings.TrimSpace(answer))
 	norm = strings.Trim(norm, ".,;:!?\"'*`()[]{} \t\r\n")
 	if norm == "" || strings.ContainsAny(norm, " \t\r\n") {
@@ -167,7 +141,6 @@ func classifyOrientAnswer(answer string) (OrientVerdict, bool) {
 		return OrientVerdict{Edge: "up", DegreesCW: 0}, false
 	}
 	if deg == 0 {
-		// "up": valid but no rotation needed — report not-actionable.
 		return OrientVerdict{Edge: "up", DegreesCW: 0}, false
 	}
 	return OrientVerdict{Edge: norm, DegreesCW: deg}, true

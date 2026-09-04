@@ -15,12 +15,10 @@ type RPCRequest struct {
 
 // RPCMessage is a generic JSON-RPC 2.0 message (request, response, or notification).
 //
-// ID is json.RawMessage rather than *int because the JSON-RPC 2.0 spec allows
-// id to be a string, number, or null, and at least one ACP backend (kiro
-// 2.3.0's session/request_permission, observed 2026-05-18) emits string UUIDs
-// like "82017692-c404-42d1-9334-ae28dfda0cee". A *int decoder would fail with
-// "cannot unmarshal string into Go struct field RPCMessage.id of type int" and
-// kill the whole readLoop. Helpers IDAsInt / IDAsString cover both shapes.
+// ID is json.RawMessage rather than *int because JSON-RPC 2.0 allows a string,
+// number or null id and kiro's session/request_permission emits string UUIDs;
+// a *int decoder would fail and kill the readLoop. IDAsInt / IDAsString cover
+// both shapes.
 type RPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -110,14 +108,11 @@ type ACPUpdateDetail struct {
 	ToolCallID    string          `json:"toolCallId,omitempty"`
 	Title         string          `json:"title,omitempty"`
 	Status        string          `json:"status,omitempty"`
-	// Kind classifies the tool category — e.g. "execute", "read", "write",
-	// "search". Multi-Backend RFC §8.3 D17 / V7 sample. Used by dashboard
-	// to pick a representative icon when rendering the progress row.
+	// Kind classifies the tool category ("execute", "read", "write",
+	// "search"); the dashboard picks the progress-row icon from it.
 	Kind string `json:"kind,omitempty"`
-	// RawInput / RawOutput are the tool's argument / result payloads. Kept
-	// as RawMessage so the dashboard can decide whether to render JSON or
-	// to extract a stdout string from the kiro-specific shape; cli/server
-	// don't need to decode them. RFC §8.3 D17 collapsible output panel.
+	// RawInput / RawOutput stay RawMessage: only the dashboard decodes them
+	// (JSON view or kiro-specific stdout extraction).
 	RawInput  json.RawMessage `json:"rawInput,omitempty"`
 	RawOutput json.RawMessage `json:"rawOutput,omitempty"`
 }
@@ -129,14 +124,11 @@ type ACPTextContent struct {
 }
 
 // ACPSessionNewResult is the result of session/new (and structurally of
-// session/load — kiro returns the same models envelope on both, F12).
+// session/load — kiro returns the same models envelope on both).
 type ACPSessionNewResult struct {
 	SessionID string `json:"sessionId"`
-	// Models carries the agent's model manifest: current selection + the
-	// full availableModels list (20 entries on kiro 2.20.2, F5). Parsed so
-	// the dashboard model popover can offer real choices instead of a
-	// hardcoded list; absent on agents that don't report it (nil-safe).
-	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// Models is the agent's model manifest (current selection + availableModels)
+	// feeding the dashboard model popover; nil on agents that don't report it.
 	Models *ACPModelsEnvelope `json:"models,omitempty"`
 }
 
@@ -162,11 +154,9 @@ type ModelInfo struct {
 }
 
 // ACPPermissionRequestParams is the params of a session/request_permission
-// request. naozhi's HandleEvent inspects Options to pick the optionId that
-// matches the desired allow_* kind rather than hardcoding the string —
-// kiro 2.3.0 uses underscored names (allow_once / allow_always / reject_once)
-// while the original ACP draft documented hyphenated forms, so the value
-// must come from the request.
+// request. HandleEvent picks the optionId whose Kind matches the desired
+// allow_* rather than hardcoding it: kiro uses underscored names while the
+// ACP draft documents hyphenated ones, so the value must come from the request.
 type ACPPermissionRequestParams struct {
 	SessionID string `json:"sessionId"`
 	ToolCall  struct {

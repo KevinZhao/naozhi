@@ -10,98 +10,38 @@ import (
 // Callers should fall back to SIGINT-based Interrupt() or to Collect mode.
 var ErrInterruptUnsupported = errors.New("protocol does not support stdin interrupt")
 
-// ErrSetModelUnsupported is returned by Process.SetModel when the session's
-// protocol does not implement the ModelSetter facet (codex today). Callers
-// (Router.SetSessionTuning) treat it as "record the override; it applies on
-// the next spawn via --model" rather than a hard failure.
+// ErrSetModelUnsupported is returned by Process.SetModel when the protocol does
+// not implement ModelSetter (codex). Router.SetSessionTuning treats it as "record
+// the override; it applies on the next spawn via --model", not a hard failure.
 // docs/rfc/dashboard-model-effort-control.md §4.4.
 var ErrSetModelUnsupported = errors.New("protocol does not support runtime model change")
 
 // ModelSetter is the OPTIONAL Protocol facet for runtime model switching,
-// surfaced via type assertion (same additive-extension pattern as
-// eventReaderInto / Capabilities — the Protocol god-interface stays
-// unchanged so existing implementations and test stubs do not break).
-//
-// Wire mapping (both verified live, docs/rfc/dashboard-model-effort-control.md §1):
-//   - ACP (kiro):        session/set_model RPC (F1). The response frame is
-//     intercepted by ReadEvent's pending-control table and surfaced as a
-//     Type:"control_ack" Event instead of a turn-end — without that
-//     interception the generic IsResponse branch would close the active
-//     turn mid-flight (F13 mid-turn safety depends on this).
-//   - stream-json (claude): control_request {subtype:"set_model"} (F6).
-//     The CLI's control_response is parsed into the same Type:"control_ack"
-//     Event; an error subtype carries the CLI's rejection text (e.g. the
-//     org-policy restriction of F7) in Event.Result.
-//
-// requestID is the caller's correlation key: it is echoed back verbatim in
-// the resulting control_ack Event's RPCRequestID regardless of protocol
-// (ACP maps its own numeric RPC id back to requestID internally), so
-// Process.SetModel can register its ack channel BEFORE writing — no
-// write-then-register race.
+// surfaced via type assertion so the Protocol interface stays unchanged.
+// Wire mapping (docs/rfc/dashboard-model-effort-control.md §1): ACP sends a
+// session/set_model RPC whose response ReadEvent intercepts via its
+// pending-control table and surfaces as a Type:"control_ack" Event (otherwise
+// the generic IsResponse branch would close the active turn mid-flight);
+// stream-json sends control_request {subtype:"set_model"} and parses the
+// control_response into the same control_ack (rejection text in Result).
+// requestID is echoed verbatim in the ack's RPCRequestID for both protocols,
+// so Process.SetModel can register its ack channel BEFORE writing.
 type ModelSetter interface {
-	// WriteSetModel writes a runtime model-change request to the agent's
-	// stdin. The eventual acknowledgement arrives asynchronously on the
-	// readLoop as a Type:"control_ack" Event with RPCRequestID==requestID;
-	// SubType "success" or "error" (Result carries the error text).
+	// WriteSetModel writes a runtime model-change request to stdin; the ack
+	// arrives on the readLoop as a control_ack Event with RPCRequestID==requestID.
 	WriteSetModel(w io.Writer, requestID, model string) error
 }
 
-// Protocol abstracts the communication protocol between naozhi and an AI CLI agent.
-// Implementations handle protocol-specific message formats, initialization handshakes,
-// and event parsing (e.g., Claude stream-json vs ACP JSON-RPC 2.0).
+// Protocol abstracts the communication protocol between naozhi and an AI CLI
+// agent (Claude stream-json vs ACP / codex JSON-RPC 2.0): message formats,
+// handshakes, and event parsing. ClaudeProtocol.ReadEvent is the reference
+// semantics; ACP's "one wire frame → multiple Events" is the only divergence.
 //
-// Capability surface (R214-ARCH-1):
-//
-//	The interface exposes individual SupportsPriority() / SupportsReplay() methods
-//	AND an opt-in Capabilities() Caps method (consumed via type assertion in
-//	ProtocolCaps). This dual track is INTENTIONAL and not a planned migration:
-//
-//	  - SupportsX methods are the compile-time-required surface every Protocol
-//	    implementation MUST satisfy. New consumers should call ProtocolCaps(p)
-//	    and read the returned Caps struct rather than calling SupportsX directly,
-//	    so they pick up future capability fields (SoftInterrupt, StreamJSON, …)
-//	    without per-call-site updates.
-//	  - Capabilities() is OPT-IN. An implementation that wants to override the
-//	    default mapping (e.g. to set SoftInterrupt=true once a backend grows
-//	    that affordance) provides it; otherwise ProtocolCaps synthesises Caps
-//	    from the SupportsX methods plus Name(). See ProtocolCaps below.
-//
-//	Removing the SupportsX methods would be a breaking change to every
-//	non-naozhi Protocol implementation; keeping both lets the Caps struct grow
-//	new fields without churn while preserving the minimal interface contract.
-//
-// # Contract anchor (R234-ARCH-12)
-//
-// Protocol is one of three event-pipeline interfaces that together
-// shape the cli → session → server data flow:
-//
-//   - Protocol (this interface) — ingest from a backend CLI's
-//     stdout/stdin into a sequence of typed Events.
-//     Implementations: protocol_claude.go (stream-json) and
-//     protocol_acp.go (kiro/Gemini JSON-RPC).
-//
-//   - PersistSink (eventlog.go) — outbound hook EventLog calls
-//     after every Append/AppendBatch with a defensive copy of the
-//     committed entries. Implementations: persist.Persister.SinkFor
-//     (production) and ad-hoc test sinks. SetPersistSink godoc has
-//     the store-ordering proof and the replayPhase semantics.
-//
-//   - Tailer (TranscriptReader.Read in subagent_transcript.go +
-//     server.AgentTailer) — pull-mode reader for subagent JSONL
-//     transcripts; emits the same EventEntry values into the
-//     dashboard fan-out so foreground turns and background-agent
-//     turns render through one rendering pipeline.
-//
-// The shared invariants across all three are documented in scattered
-// godoc today; R234-ARCH-12 plans a docs/rfc/event-pipeline-contracts.md
-// + an internal/cli/protocoltest fstest-style harness so a future
-// Gemini protocol implementation can validate against a vendored
-// fixture set rather than re-deriving the contract from
-// protocol_claude.go's behavior. Until that lands, treat
-// protocol_claude.go's ReadEvent as the reference semantics: ACP's
-// "one wire frame → multiple Events" is the only divergence to
-// account for, and the Returning-a-slice rationale below makes that
-// degree of freedom explicit.
+// Capability surface: SupportsPriority()/SupportsReplay() are the required
+// minimum every implementation must satisfy; the opt-in Capabilities() Caps
+// method (read via ProtocolCaps) overrides the default mapping. Both tracks are
+// intentional — removing SupportsX breaks external implementations, while Caps
+// grows fields without churn. New consumers should read ProtocolCaps(p).
 type Protocol interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string
@@ -114,29 +54,23 @@ type Protocol interface {
 	// For ACP, Model and ResumeID are handled via RPC in Init, not CLI flags.
 	BuildArgs(opts SpawnOptions) []string
 
-	// Init performs any handshake required after process spawn but before readLoop.
-	// For stream-json: no-op. For ACP: sends initialize + session/new or session/load.
-	// cwd is the workspace directory the agent should treat as its working directory
-	// (ACP passes this in session/new params; stream-json inherits os.Chdir set by
-	// the shim). Returns sessionID if established during init (empty if deferred to
-	// first message).
+	// Init performs any handshake required after spawn but before readLoop
+	// (stream-json: no-op; ACP: initialize + session/new or session/load). cwd
+	// is the agent's workspace (ACP passes it in session/new; stream-json
+	// inherits the shim's os.Chdir). Returns sessionID if established here.
 	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
 
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
 	WriteMessage(w io.Writer, text string, images []Attachment) error
 
-	// WriteUserMessageLocked is the passthrough-aware writer. The caller MUST
-	// already hold the per-process stdin write lock (Process.shimWMu). For
-	// protocols that do not honor uuid/priority (ACP), the extras are ignored
-	// and behavior degrades to WriteMessage. Used so Process.Send can append
-	// the sendSlot and write the NDJSON line under a single mutex — without
-	// this, concurrent Send calls can interleave slot-append vs stdin-write
-	// and break FIFO matching (see docs/rfc/passthrough-mode.md §5.2.2).
+	// WriteUserMessageLocked is the passthrough-aware writer; the caller MUST
+	// hold Process.shimWMu so Process.Send can append the sendSlot and write
+	// the NDJSON line under one mutex — otherwise concurrent Sends interleave
+	// and break FIFO matching (docs/rfc/passthrough-mode.md §5.2.2).
 	WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
 
 	// SupportsPriority reports whether this protocol forwards a top-level
-	// "priority" field to the backing agent. Callers gate /urgent behavior on
-	// this: false means "no `now` channel, fall back to interrupt+send".
+	// "priority" field; false means /urgent falls back to interrupt+send.
 	SupportsPriority() bool
 
 	// SupportsReplay reports whether the backing agent echoes stdin user
@@ -145,40 +79,20 @@ type Protocol interface {
 	// mode regardless of queue.mode config.
 	SupportsReplay() bool
 
-	// WriteInterrupt writes an in-band interrupt request to the agent's stdin.
-	// For stream-json, this emits the `control_request` message which the
-	// Claude CLI honours by terminating the active turn (including killing
-	// any in-flight tool invocation) and emitting a normal `result` event.
-	// requestID is an opaque identifier echoed back in the control_response.
-	// Protocols without stdin-level interrupt (e.g. ACP) return
-	// ErrInterruptUnsupported.
+	// WriteInterrupt writes an in-band interrupt request to stdin. For
+	// stream-json this is the `control_request` that ends the active turn
+	// (killing in-flight tools) with a normal `result`; requestID is echoed in
+	// the control_response. Protocols without one return ErrInterruptUnsupported.
 	WriteInterrupt(w io.Writer, requestID string) error
 
 	// ReadEvent parses a single NDJSON line from stdout into zero or more
-	// unified Events. Returns the events, an advisory done flag, and any error.
-	//
-	// IMPORTANT — done is NOT the turn-completion signal. Every production
-	// caller discards it (process_readloop.go handleShimStdout, wrapper.go
-	// replay, router_shim.go replay all read it as _). Turn-end is detected
-	// downstream by inspecting the emitted events: an event with
-	// Type=="result" (claude/ACP) or the codex turn-end frame closes the turn
-	// and unblocks the active Send(). A new protocol implementation MUST emit
-	// a result/turn-end Event to end a turn; returning done=true alone is
-	// silently ignored and would leave the session stuck in state=running.
-	// The flag is retained only because the existing test contract is
-	// load-bearing on it; treat it as advisory.
-	//
-	// Returning a slice (rather than a single Event) lets a protocol surface
-	// "one wire frame → multiple semantic events" without overloading a single
-	// Event with cross-cutting state. Today this matters for ACP turn-end:
-	// the JSON-RPC response that closes a turn carries the accumulated
-	// assistant text AND the cost/stopReason metadata; emitting them as two
-	// distinct events (assistant text + result) keeps downstream EventLog /
-	// dashboard consumers free of "result also carries visible text" special
-	// cases. claude stream-json always returns a one-element slice.
-	//
-	// Lines that should be silently skipped return a nil slice with
-	// done=false, err=nil.
+	// unified Events. Lines to skip return a nil slice with done=false, err=nil.
+	// done is advisory, NOT the turn-completion signal: every production caller
+	// discards it. Turn-end is detected from the emitted events (Type=="result"
+	// for claude/ACP, the codex turn-end frame), so an implementation MUST emit
+	// a result/turn-end Event or the session stays stuck in state=running. A
+	// slice lets ACP split the turn-closing JSON-RPC response into assistant
+	// text + result; claude stream-json always returns one element.
 	ReadEvent(line string) (events []Event, done bool, err error)
 
 	// HandleEvent allows the protocol to react to events (e.g., auto-grant permissions).
@@ -186,47 +100,23 @@ type Protocol interface {
 	HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 
-// eventReaderInto is the optional, allocation-aware ReadEvent variant
-// (R20260603-PERF-10, #1676). A Protocol that implements it lets the readLoop
-// hand in a reused backing array via buf so the common single-event frame does
-// not allocate a fresh 1-element []Event per stdout line. It is an additive
-// extension surfaced via type assertion rather than a new method on Protocol,
-// so the interface contract, all existing implementations, and the test stubs
-// stay unchanged; callers fall back to ReadEvent when the assertion misses.
-// The returned slice is backed by buf and is only valid until the next call
-// sharing that buf, so callers must consume it before reusing buf.
+// eventReaderInto is the optional allocation-aware ReadEvent variant (#1676):
+// the readLoop hands in a reused backing array via buf so the common
+// single-event frame does not allocate a fresh 1-element []Event per line.
+// Surfaced via type assertion (callers fall back to ReadEvent). The returned
+// slice is backed by buf and only valid until the next call sharing that buf.
 type eventReaderInto interface {
-	// The done return mirrors ReadEvent's advisory done — discarded by callers;
-	// turn-end is driven by a result/turn-end Event, not by this flag.
+	// done mirrors ReadEvent's advisory flag; turn-end is a result/turn-end Event.
 	ReadEventInto(line string, buf []Event) (events []Event, done bool, err error)
 }
 
-// ProtocolCore is the protocol-agnostic subset of Protocol that every
-// backend (Claude stream-json, ACP JSON-RPC, a future Gemini protocol)
-// can implement without degrading to a noop or panic. It is an ADDITIVE
-// facet split of the Protocol god-interface (R219-ARCH-6, #668): the
-// methods listed here are the seven that carry no stream-json-specific
-// semantics —
-//
-//	Name / Clone / BuildArgs / Init / WriteMessage / ReadEvent / HandleEvent
-//
-// The four passthrough-flavoured methods that the issue flags as
-// "stream-json-only" (WriteUserMessageLocked, WriteInterrupt,
-// SupportsPriority, SupportsReplay) live on ProtocolPassthroughExt below.
-// ACP's implementations of those degrade (WriteUserMessageLocked falls
-// back to WriteMessage; WriteInterrupt returns ErrInterruptUnsupported;
-// SupportsPriority/SupportsReplay return false), which is exactly the
-// "noop or panic" smell R219-ARCH-6 calls out.
-//
-// This facet is introduced WITHOUT shrinking Protocol: the full
-// interface still embeds both facets (see the redefinition note on
-// Protocol), so no existing caller, implementation, or test changes.
-// New consumers that only ingest/parse events (e.g. a transcript
-// re-player, or a protocol-detection probe) can depend on ProtocolCore
-// and stay forward-compatible with backends that never grew the
-// passthrough surface. The compile-time pins below guarantee
-// ProtocolCore + ProtocolPassthroughExt remain a strict partition of
-// Protocol, so a method rename/removal on either side fails the build.
+// ProtocolCore is the protocol-agnostic subset of Protocol that every backend
+// implements without degrading to a noop or panic; the passthrough-flavoured
+// methods live on ProtocolPassthroughExt. This is an additive facet split
+// (#668): Protocol still embeds both facets, so nothing existing changes.
+// Consumers that only ingest/parse events (transcript re-player, protocol
+// probe) depend on ProtocolCore and stay compatible with backends that never
+// grow the passthrough surface. The compile-time pins below keep the partition.
 type ProtocolCore interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string
@@ -243,31 +133,21 @@ type ProtocolCore interface {
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
 	WriteMessage(w io.Writer, text string, images []Attachment) error
 
-	// ReadEvent parses a single NDJSON line from stdout into zero or more
-	// unified Events. The done return is advisory and discarded by all
-	// production callers; turn-end is detected via a result/turn-end Event,
-	// not via done. See the Protocol.ReadEvent godoc for the full contract.
+	// ReadEvent parses a single NDJSON line into zero or more Events; done is
+	// advisory (see Protocol.ReadEvent for the full contract).
 	ReadEvent(line string) (events []Event, done bool, err error)
 
 	// HandleEvent allows the protocol to react to events.
 	HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 
-// ProtocolPassthroughExt is the stream-json-specific surface that
-// R219-ARCH-6 (#668) identifies as leaking into the core Protocol
-// interface. ACP implementations degrade these to noop / fallback /
-// ErrInterruptUnsupported. It is split out additively as the complement
-// of ProtocolCore; the compile-time pins below tie both facets back to
-// Protocol so the partition cannot silently drift.
-//
-// A future refactor may shrink Protocol to embed ProtocolCore only and
-// move passthrough wiring behind a `p.(ProtocolPassthroughExt)` type
-// assertion (the breaking step the issue proposes). This facet makes
-// that seam available now without forcing the breaking change.
+// ProtocolPassthroughExt is the stream-json-specific surface of Protocol
+// (#668); ACP / codex degrade these to noop / fallback / ErrInterruptUnsupported.
+// The complement of ProtocolCore; a future refactor may shrink Protocol to
+// ProtocolCore and reach this facet via type assertion.
 type ProtocolPassthroughExt interface {
-	// WriteUserMessageLocked is the passthrough-aware writer (caller holds
-	// the per-process stdin write lock). ACP ignores the extras and
-	// degrades to WriteMessage.
+	// WriteUserMessageLocked is the passthrough-aware writer (caller holds the
+	// per-process stdin write lock). ACP ignores the extras.
 	WriteUserMessageLocked(w io.Writer, uuid, text string, images []Attachment, priority string) error
 
 	// SupportsPriority reports whether this protocol forwards a top-level
@@ -283,68 +163,43 @@ type ProtocolPassthroughExt interface {
 	WriteInterrupt(w io.Writer, requestID string) error
 }
 
-// Compile-time guarantees that ProtocolCore and ProtocolPassthroughExt
-// are each a strict subset of Protocol (R219-ARCH-6 facet split, #668).
-// Mirrors the var _ subset pins used by the session-package facet split
-// in #430. A signature change or method removal on either facet — or on
-// Protocol — fails the package build instead of letting the facets
-// silently desync from the god-interface they partition.
+// Compile-time guarantees that ProtocolCore and ProtocolPassthroughExt are each
+// a strict subset of Protocol (#668), so a method change on either side fails
+// the build instead of letting the facets silently desync.
 var (
 	_ ProtocolCore           = (Protocol)(nil)
 	_ ProtocolPassthroughExt = (Protocol)(nil)
 )
 
-// Caps aggregates Protocol capabilities in a single type so consumers
-// can feature-route via a single accessor instead of individual
-// SupportsX() methods sprinkled everywhere. The struct is value-copy
-// cheap (all bool); future fields may include timeout tiers or
-// version hints. See RNEW-ARCH-404.
-//
-// Reserved-but-unread fields (R228-CR-2): only Replay is consumed on
-// hot paths (passthrough.go, process_readloop.go). Priority,
-// SoftInterrupt and StreamJSON are populated by every Protocol
-// implementation but currently have no consumers in production code —
-// they remain in the struct as forward-compatibility anchors so a
-// future feature gate (e.g. soft-cancel UX, priority-aware queueing)
-// can read them without rewriting the per-protocol Capabilities()
-// methods. Tests in protocol_caps_test.go pin the populated values so
-// the contract does not silently drift before a consumer is wired.
+// Caps aggregates Protocol capabilities so consumers feature-route via one
+// accessor instead of individual SupportsX() methods. Only Replay is consumed
+// on hot paths (passthrough.go, process_readloop.go); Priority, SoftInterrupt
+// and StreamJSON are populated but unread — forward-compatibility anchors a
+// future feature gate can read. protocol_caps_test.go pins the values.
 type Caps struct {
-	// Replay is the only field read in production today. true if the
-	// protocol replays stdin user messages back as events with a
-	// round-tripped uuid (Claude stream-json); required for passthrough
-	// slot matching.
+	// Replay is true if the protocol echoes stdin user messages back with a
+	// round-tripped uuid (Claude stream-json); required for passthrough matching.
 	Replay bool
 	// Priority is reserved. Set by ClaudeProtocol but not yet consumed —
 	// today /urgent gates on Process.SupportsPriority() directly.
 	Priority bool
-	// SoftInterrupt is reserved. true if WriteInterrupt is a safe soft
-	// cancel once a session is established (ACP session/cancel
-	// notification; Claude uses SIGINT). Pre-handshake calls may still
-	// return ErrInterruptUnsupported because there is nothing to cancel
-	// yet — see ACPProtocol.WriteInterrupt for the canonical example.
+	// SoftInterrupt is reserved. true if WriteInterrupt is a safe soft cancel
+	// once a session is established (ACP session/cancel); pre-handshake calls
+	// may still return ErrInterruptUnsupported (see ACPProtocol.WriteInterrupt).
 	SoftInterrupt bool
-	// StreamJSON is reserved. true if the protocol's wire format is
-	// stream-json (Claude) vs something else (ACP JSON-RPC). Today
-	// Name()=="acp" type-checks suffice; this field anticipates a
-	// third backend whose name does not encode the wire shape.
+	// StreamJSON is reserved. true if the wire format is stream-json (Claude);
+	// anticipates a backend whose Name() does not encode the wire shape.
 	StreamJSON bool
-	// EffortTier is true if BuildArgs honours SpawnOptions.Effort — i.e. the
-	// CLI accepts a thinking-effort tier (kiro's `acp --effort`, and the Claude
-	// CLI's own `--effort` since 2.1.226). Read by the composition root to
-	// reject `cli.backends[].effort` on a backend that would silently ignore
-	// it, so an operator never believes a configured tier is in force when it
-	// is not.
-	// docs/rfc/kiro-effort-control.md §4.3
+	// EffortTier is true if BuildArgs honours SpawnOptions.Effort (kiro's
+	// `acp --effort`, Claude CLI `--effort` ≥ 2.1.226). The composition root
+	// rejects `cli.backends[].effort` on a backend that would silently ignore
+	// it. docs/rfc/kiro-effort-control.md §4.3
 	EffortTier bool
 }
 
-// ProtocolCaps returns the capability set of any Protocol. Default
-// derives from existing SupportsReplay / SupportsPriority / Name()
-// so implementations without their own Capabilities() method still
-// get the right answer. Implementations that want direct control
-// can provide a Capabilities() Caps method; if found via type
-// assertion, that wins.
+// ProtocolCaps returns the capability set of any Protocol: an implementation's
+// own Capabilities() method wins; otherwise Caps is derived from
+// SupportsReplay / SupportsPriority / Name().
 func ProtocolCaps(p Protocol) Caps {
 	if cp, ok := p.(interface{ Capabilities() Caps }); ok {
 		return cp.Capabilities()
@@ -353,14 +208,10 @@ func ProtocolCaps(p Protocol) Caps {
 		Replay:     p.SupportsReplay(),
 		Priority:   p.SupportsPriority(),
 		StreamJSON: p.Name() != "acp",
-		// ACP is the only wire format whose CLI takes a tier flag today, and
-		// ACPProtocol.BuildArgs is what consumes SpawnOptions.Effort — so the
-		// derivation mirrors StreamJSON's inverse. A future non-ACP backend
-		// that grows a tier flag should implement Capabilities() rather than
-		// widen this default.
+		// Fallback derivation for protocols without Capabilities(). A backend
+		// that grows a tier flag or a soft interrupt should implement
+		// Capabilities() rather than widen this default.
 		EffortTier: p.Name() == "acp",
-		// SoftInterrupt absent from current surface; leave false by default.
-		// Backends wanting to opt in should implement Capabilities().
 	}
 }
 

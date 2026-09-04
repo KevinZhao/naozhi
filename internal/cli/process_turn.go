@@ -1,22 +1,8 @@
 package cli
 
-// process_turn.go — turn-boundary coordination helpers.
-//
-// This file owns:
-//   - findResultSince: EventLog fallback scanner used by Send when
-//     eventCh drops or closes before a result is delivered; also used
-//     by drainStaleEvents' timeout branches.
-//   - drainStaleEvents: settle-window guard that runs at the top of
-//     every Send turn to absorb any interrupted-turn residue before
-//     the new prompt is written.
-//   - isChanAlive: tiny invariant helper guarding against send-on-
-//     closed-eventCh panics; relies on readLoop's defer ordering.
-//   - sanitizeStderrLine + maxStderrLogLineBytes: ANSI / log-injection
-//     scrubber for CLI stderr, only referenced from readLoop but kept
-//     here to keep the turn-file's "log hygiene" job on one surface.
-//
-// R227-ARCH-19: dropped the "Phase 4 of process-split / zero semantic
-// change" preamble; refactor is complete, history lives in git log.
+// process_turn.go — turn-boundary helpers: findResultSince (EventLog fallback
+// for Send), drainStaleEvents (settle-window guard at the top of every turn),
+// isChanAlive (send-on-closed-eventCh guard) and sanitizeStderrLine.
 
 import (
 	"context"
@@ -30,37 +16,21 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// stderrSanitizeBuilderPool reuses strings.Builder allocations across
-// sanitizeStderrLine slow-path calls. R235-PERF-10 (#1015): under noisy CLI
-// stderr (CC schema warnings, Bedrock retries) the slow path was allocating
-// a fresh Builder + backing slice per line; pooling keeps the per-line cost
-// to one Reset + (at most) one re-Grow. b.String() copies the bytes so
-// returning the builder to the pool after the read is safe.
+// stderrSanitizeBuilderPool reuses strings.Builders across sanitizeStderrLine
+// slow-path calls (#1015); b.String() copies, so returning to the pool is safe.
 var stderrSanitizeBuilderPool = sync.Pool{
 	New: func() any { return &strings.Builder{} },
 }
 
-// interruptedSettleWindow caps how long a fresh Send waits for the previous
-// turn's result event to flush after Interrupt() was called. 500 ms balances
-// "long enough that an in-flight result still drains" against "short enough
-// that the new prompt isn't perceptibly delayed". Round-tested across
-// multiple review rounds; change with care and re-run drainStaleEvents tests.
+// interruptedSettleWindow caps how long a fresh Send waits for the interrupted
+// previous turn's result to flush: long enough for an in-flight result to drain,
+// short enough that the new prompt isn't perceptibly delayed.
 const interruptedSettleWindow = 500 * time.Millisecond
 
-// findResultSince checks EventLog for a result entry logged after afterMS.
-// Used as fallback when eventCh may have dropped events due to full buffer.
-//
-// R20260605B-CORR-1 (#1805): the "result" EventEntry deliberately carries
-// only cost + turn-boundary metadata — its Detail/Summary are empty
-// (process_event_format.go intentionally does NOT copy ev.Result into them to
-// avoid a duplicate dashboard bubble). The visible reply text was logged
-// separately as the preceding "text" assistant entry. The old code returned
-// SendResult{Text: result.Detail}, i.e. an EMPTY Text, so any caller that hit
-// this fallback (eventCh-drop / watchdog no-output / total-timeout — all on
-// the legacy ACP/cron Send path) silently surfaced a BLANK reply even though
-// the CLI produced a full answer. We now recover the reply from the most
-// recent "text" entry at or after the result (falling back to the latest
-// "text" entry in the turn) so the answer text is preserved.
+// findResultSince checks EventLog for a result entry logged after afterMS; the
+// fallback when eventCh may have dropped events. The "result" entry carries
+// only cost + turn metadata (its Detail is empty to avoid a duplicate dashboard
+// bubble), so the reply text is recovered from the preceding "text" entry (#1805).
 func (p *Process) findResultSince(afterMS int64) *SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -69,10 +39,7 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 		}
 		text := entries[i].Detail
 		if text == "" {
-			// The result entry never carries the reply text (#1805); recover
-			// it from the last assistant "text" entry that precedes this
-			// result within the same turn window. Detail holds the full
-			// (up to 16000-rune) text; Summary is the truncated preview.
+			// Detail holds the full text; Summary is only the truncated preview.
 			text = lastTextEntryBefore(entries, i)
 		}
 		return &SendResult{
@@ -86,8 +53,6 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 
 // lastTextEntryBefore returns the Detail of the most recent assistant "text"
 // entry at an index < resultIdx, or "" when the turn produced no text entry.
-// Used by findResultSince to recover the reply the empty-Detail "result"
-// entry does not carry. R20260605B-CORR-1 (#1805).
 func lastTextEntryBefore(entries []clievent.EventEntry, resultIdx int) string {
 	for j := resultIdx - 1; j >= 0; j-- {
 		if entries[j].Type == "text" && entries[j].Detail != "" {
@@ -97,45 +62,29 @@ func lastTextEntryBefore(entries []clievent.EventEntry, resultIdx int) string {
 	return ""
 }
 
-// drainStaleEvents clears residual events from previous turns.
-// When the previous turn was interrupted (SIGINT), waits briefly for the
-// interrupted result event so it doesn't pollute the next turn.
-//
-// Only drains events whose arrival predates this call. Using a cutoff
-// timestamp captured at entry avoids a race where readLoop concurrently
-// pushes a fresh event for the *new* turn into eventCh between the caller's
-// Send() and this drain; without the guard, that live event would be
-// swallowed and the Send would fall back to findResultSince.
+// drainStaleEvents clears residual events from previous turns; after an
+// Interrupt() it waits briefly for the interrupted result so it doesn't pollute
+// the next turn. Only events whose arrival predates the entry-time cutoff are
+// drained: readLoop may concurrently push a fresh event for the *new* turn, and
+// swallowing it would force Send into the findResultSince fallback.
 func (p *Process) drainStaleEvents(ctx context.Context) error {
 	cutoff := time.Now()
-	// Read-and-clear interrupted/interruptedRun atomically w.r.t. Interrupt()
-	// / InterruptViaControl(), which hold p.mu while Store-ing both flags. A
-	// naïve two-call Swap(false) here opened a window where a concurrent
-	// Interrupt between the two Swaps could Store interruptedRun=true after
-	// we Swap'd interrupted=false — the new Interrupt's intent would be lost
-	// (interruptedRun later Swap'd to false here, but interrupted already
-	// consumed, so the next Send's drainStaleEvents would see interrupted=
-	// false/interruptedRun=false and skip the settle window entirely — the
-	// SIGINT-produced result event leaks into the next turn). R39-CONCUR1.
+	// Read-and-clear both flags under p.mu, which Interrupt() holds while storing
+	// them; two unlocked Swaps could lose a concurrent Interrupt, skipping the
+	// settle window so the SIGINT result leaks into the next turn.
 	p.mu.Lock()
 	wasInterrupted := p.interrupted.Swap(false)
 	wasRunning := p.interruptedRun.Swap(false)
 	p.mu.Unlock()
 
-	// Backing storage is a stack-allocated [4]Event array — post-cutoff events
-	// during an interrupt are rare (typically 0-1, occasionally 2-3 from
-	// in-flight stream-json blocks). `holdback := holdbackArr[:0]` starts with
-	// cap=4, so the common post-interrupt shape appends without heap allocation;
-	// append promotes to the heap only when >4 post-cutoff events stack up,
-	// which has never been observed in practice. R64-PERF-M7.
+	// Stack-allocated [4]Event backing: post-cutoff events during an interrupt
+	// are rare (0-3), so the common case appends without heap allocation.
 	var holdbackArr [4]Event
 	holdback := holdbackArr[:0]
 
 	if wasInterrupted {
-		// Only wait for the interrupted result if the CLI was actively
-		// processing a turn when Interrupt() was called. An idle process
-		// won't produce a result event, so the settle timer would always
-		// expire causing an unnecessary 500ms delay.
+		// An idle process produces no result event, so the settle timer would
+		// always expire; only wait when a turn was actually running.
 		if wasRunning {
 			slog.Debug("send: draining interrupted turn result")
 			settle := time.NewTimer(interruptedSettleWindow)
@@ -147,22 +96,14 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 						goto drain
 					}
 					if ev.recvAt.After(cutoff) {
-						// Event produced after we entered the settle window
-						// belongs to the *new* turn. R29-DES1 (#773): the old
-						// code re-enqueued it and `goto drain` immediately —
-						// abandoning the settle wait. But the interrupted
-						// result event may still be in flight; if it arrives
-						// after drain's non-blocking sweep empties the channel
-						// it leaks into the new turn's output. Instead, hold
-						// the fresh event aside and KEEP waiting for the
-						// interrupted result (or the settle timeout) so it is
-						// reliably absorbed. Held events are re-enqueued for
-						// the live consumer at the end of drain.
+						// Post-cutoff event belongs to the *new* turn: hold it aside
+						// (re-enqueued at the end of drain) and KEEP waiting for the
+						// interrupted result — bailing now would let that result
+						// arrive after the sweep and leak into the new turn (#773).
 						holdback = append(holdback, ev)
 						continue
 					}
-					// Pre-cutoff non-result event from the interrupted turn —
-					// drop it (drained) and keep waiting for the result.
+					// Pre-cutoff non-result event: drained, keep waiting for the result.
 				case <-settle.C:
 					slog.Debug("send: settle timeout, no stale result")
 					goto drain
@@ -175,27 +116,16 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 		}
 	}
 drain:
-	// Non-blocking drain of any remaining buffered events that predate the
-	// cutoff. Events produced after cutoff are collected and re-enqueued at
-	// the end so the live consumer still observes them. Returning the moment
-	// we hit one post-cutoff event would leave any interleaved pre-cutoff
-	// stragglers in the channel where they would be consumed by the new
-	// turn as if they were current — producing phantom tool_use/assistant
-	// events from the prior turn.
-	//
-	// holdback may already carry fresh events captured during the settle
-	// window above (R29-DES1 / #773); we keep appending to the same slice.
+	// Non-blocking drain of remaining pre-cutoff events; post-cutoff events are
+	// held back and re-enqueued at the end. Returning at the first post-cutoff
+	// event would leave interleaved pre-cutoff stragglers to surface in the new
+	// turn as phantom events.
 	for {
 		select {
 		case <-ctx.Done():
-			// Re-enqueue anything we have already collected so we do not
-			// drop the fresh-turn events on cancellation. Guard against the
-			// readLoop having closed eventCh concurrently: sending on a
-			// closed channel panics regardless of the `default` arm in a
-			// select, because the send case is always ready-to-run on a
-			// closed channel and select will pick it. EventLog is the
-			// authoritative store for logged events, so dropping holdback
-			// when eventCh is torn down is safe.
+			// Re-enqueue held events. Guard on p.done: a send on a closed channel
+			// panics even with a `default` arm. EventLog is authoritative, so
+			// dropping holdback when eventCh is torn down is safe.
 			if isChanAlive(p.done) {
 				for _, ev := range holdback {
 					p.safeReenqueue(ev)
@@ -204,11 +134,8 @@ drain:
 			return ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
-				// Channel closed (process exited). Any post-cutoff events
-				// already in holdback were also logged to EventLog by readLoop
-				// before being pushed to eventCh (see logEvent call above), so
-				// the live Send() can recover a result via findResultSince().
-				// Dropping holdback here is safe because EventLog is authoritative.
+				// Process exited. holdback events are already in EventLog, so Send()
+				// recovers via findResultSince(); dropping them is safe.
 				return nil
 			}
 			if ev.recvAt.After(cutoff) {
@@ -216,8 +143,7 @@ drain:
 			}
 			// pre-cutoff events are dropped (drained)
 		default:
-			// Channel empty — push back any collected post-cutoff events.
-			// Same readLoop-closed guard as the ctx.Done arm above.
+			// Channel empty — push back held events (same closed guard as above).
 			if !isChanAlive(p.done) {
 				return nil
 			}
@@ -229,23 +155,15 @@ drain:
 	}
 }
 
-// safeReenqueue pushes a held-back post-cutoff event back onto p.eventCh for
-// the live consumer, non-blocking. The isChanAlive(p.done) guard at the call
-// site already establishes that readLoop had not closed eventCh when checked,
-// but that check and this send are not atomic: readLoop may close `done` and
-// then `eventCh` in the window between them (#1779). Sending on a closed
-// channel panics even through a `select { ... default }`, because the send
-// case is always ready-to-run on a closed channel and select picks it. We wrap
-// the send in a recover and silently drop on a send-on-closed panic: the
-// holdback events were already logged to EventLog by readLoop before being
-// pushed to eventCh, so the live Send() recovers the result via
-// findResultSince() and nothing is actually lost.
+// safeReenqueue pushes a held-back post-cutoff event back onto p.eventCh,
+// non-blocking. The caller's isChanAlive(p.done) check and this send are not
+// atomic — readLoop may close `done` then `eventCh` in between (#1779) and a
+// send on a closed channel panics even with `default` — so the send is wrapped
+// in recover; the event is already in EventLog, so nothing is lost.
 func (p *Process) safeReenqueue(ev Event) {
 	defer func() {
 		if r := recover(); r != nil {
-			// send-on-closed eventCh: readLoop tore the channel down between
-			// the isChanAlive guard and this send. EventLog is authoritative,
-			// so dropping the re-enqueue is safe. R-#1779.
+			// eventCh closed between the isChanAlive guard and this send.
 			slog.Debug("drainStaleEvents: re-enqueue raced eventCh close, dropped",
 				"type", ev.Type, "session", ev.SessionID)
 		}
@@ -253,20 +171,16 @@ func (p *Process) safeReenqueue(ev Event) {
 	select {
 	case p.eventCh <- ev:
 	default:
-		// eventCh is full; fresh events are being dropped here.
-		// findResultSince will recover the result from EventLog but
-		// surface the occurrence so operators can enlarge the
-		// channel if it persists under load.
+		// findResultSince recovers the result from EventLog, but surface the
+		// drop so operators can enlarge the channel if it persists under load.
 		slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
 			"type", ev.Type, "session", ev.SessionID)
 	}
 }
 
-// isChanAlive reports whether done is still open (readLoop still running, so
-// eventCh remains safe to send on). Invariant used here: readLoop closes
-// `done` strictly BEFORE `eventCh` on exit — so if `done` is still open,
-// `eventCh` is also still open. See process_readloop.go for the defer chain
-// that establishes this ordering.
+// isChanAlive reports whether done is still open, hence eventCh is safe to send
+// on: readLoop's defer chain closes `done` strictly BEFORE `eventCh`, so an open
+// `done` implies an open `eventCh`.
 func isChanAlive(done <-chan struct{}) bool {
 	select {
 	case <-done:
@@ -276,24 +190,20 @@ func isChanAlive(done <-chan struct{}) bool {
 	}
 }
 
-// maxStderrLogLineBytes caps stderr log lines so a runaway CLI stderr
-// cannot fill journald with a single multi-MB message. Used only by
-// sanitizeStderrLine below.
+// maxStderrLogLineBytes caps stderr log lines so a runaway CLI stderr cannot
+// fill journald with a single multi-MB message.
 const maxStderrLogLineBytes = 500
 
-// sanitizeStderrLine removes ANSI escape sequences (SGR color, cursor movement,
-// OSC/DCS) and truncates the stderr line so that terminal-aware log viewers
-// aren't colorized/repositioned by whatever the Claude CLI wrote, and so a
-// runaway stderr cannot fill the journal with a single multi-MB line.
+// sanitizeStderrLine removes ANSI escape sequences (SGR, cursor movement,
+// OSC/DCS) and truncates the stderr line so log viewers aren't colorized or
+// repositioned by CLI output and one line cannot flood the journal.
 func sanitizeStderrLine(line string) string {
 	if line == "" {
 		return line
 	}
-	// Pre-truncate before the ANSI scanner so a pathological single-line
-	// OSC sequence (ESC ] ... no BEL/ST for MBs) doesn't force a full-length
-	// strings.Builder allocation just to be truncated afterward. The shim
-	// caps stdin lines at 12 MB; without this, a crafted line would allocate
-	// the full builder before truncation.
+	// Pre-truncate before the ANSI scanner so a pathological multi-MB OSC
+	// sequence (no BEL/ST) doesn't allocate a full-length Builder just to be
+	// truncated afterward.
 	if len(line) > maxStderrLogLineBytes {
 		cut := maxStderrLogLineBytes
 		for cut > 0 && !utf8.RuneStart(line[cut]) {
@@ -301,16 +211,10 @@ func sanitizeStderrLine(line string) string {
 		}
 		line = line[:cut] + "…(truncated)"
 	}
-	// Fast path: most CLI stderr output is plain log text with neither ANSI
-	// escape sequences nor stray control bytes. Scanning once cheaply and
-	// returning the original string avoids a strings.Builder allocation and
-	// a full-line copy on the common path.
-	//
-	// R190-SEC-L1: ASCII-only fast path. If the line contains any non-ASCII
-	// byte, bail to the slow path so the terminating rune-map can drop
-	// C1/bidi/LS/PS codepoints (>= 0x20 at the byte level, >=0xC0 as UTF-8
-	// leading bytes). A compromised claude CLI emitting bidi overrides in
-	// stderr could otherwise reverse operator journalctl output verbatim.
+	// Fast path: plain ASCII log text returns without a Builder copy. Any
+	// non-ASCII byte takes the slow path so C1/bidi/LS/PS codepoints are dropped
+	// — a compromised CLI emitting bidi overrides could otherwise reverse
+	// operator journalctl output.
 	clean := true
 	for i := 0; i < len(line); i++ {
 		c := line[i]
@@ -371,10 +275,8 @@ func sanitizeStderrLine(line string) string {
 			i++
 			continue
 		}
-		// Non-ASCII: decode rune and drop if it's a known log-injection
-		// codepoint (C1 controls, bidi overrides/isolates, LS/PS). Folding
-		// this into the byte-level loop avoids the second strings.Map pass
-		// which always allocates a fresh backing string even on a no-op.
+		// Non-ASCII: drop known log-injection runes (C1, bidi overrides/isolates,
+		// LS/PS) inline rather than via a second, always-allocating strings.Map.
 		if c >= 0x80 {
 			r, sz := utf8.DecodeRuneInString(line[i:])
 			if osutil.IsLogInjectionRune(r) {
@@ -388,9 +290,7 @@ func sanitizeStderrLine(line string) string {
 		b.WriteByte(c)
 		i++
 	}
-	// The pre-truncation step above already capped the input length; the
-	// sanitizer only removes bytes from that capped input (ANSI escapes +
-	// control chars + log-injection runes), so the resulting builder is
-	// guaranteed to be no longer than the pre-truncated input.
+	// The sanitizer only removes bytes from the pre-truncated input, so the
+	// result is never longer than maxStderrLogLineBytes plus the marker.
 	return b.String()
 }

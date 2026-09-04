@@ -8,14 +8,10 @@ import (
 	"strings"
 )
 
-// BackendInfo describes a probed CLI backend available on this host.
-//
-// ReplyTag / ChipColor are the dashboard-facing fields populated from the
-// matching backend.Profile (and optional CLIBackendConfig.ChipColor override)
-// at /api/cli/backends serialization time — see
-// session.Router.BackendsList (internal/session/router_backend_manifest.go).
-// They live here rather than on backend.Profile so the JSON shape that the
-// dashboard.js frontend consumes is one struct, not a join. Multi-backend RFC §8.2.
+// BackendInfo describes a probed CLI backend available on this host. The
+// dashboard-facing fields (ReplyTag / ChipColor / Features / Models) are filled
+// from backend.Profile by session.Router.BackendsList at /api/cli/backends time;
+// they live here so dashboard.js consumes one struct, not a join (RFC §8.2).
 type BackendInfo struct {
 	ID          string `json:"id"`           // "claude" | "kiro"
 	DisplayName string `json:"display_name"` // "claude-code" | "kiro"
@@ -23,70 +19,39 @@ type BackendInfo struct {
 	Path        string `json:"path,omitempty"`
 	Version     string `json:"version,omitempty"`
 	Available   bool   `json:"available"`
-	// Models is the model manifest the dashboard's per-session model
-	// popover offers for this backend: agent-reported (kiro
-	// session/new|load availableModels, F5/F12) or the operator-declared
-	// cli.backends[].models fallback. Populated by Router.BackendsList;
-	// DetectBackendsCtx leaves it nil (dashboard-only field, same rule as
-	// Features). docs/rfc/dashboard-model-effort-control.md §4.2.
+	// Models is the model manifest the dashboard's per-session model popover
+	// offers: agent-reported (kiro availableModels) or the cli.backends[].models
+	// fallback. Dashboard-only; DetectBackendsCtx leaves it nil.
 	Models []ModelInfo `json:"models,omitempty"`
-	// ReplyTag is the short tag (e.g. "cc", "kiro") appended to IM replies
-	// and rendered in dashboard chips. Empty when no Profile is registered
-	// for the ID (legacy/unknown backend).
+	// ReplyTag is the short tag (e.g. "cc", "kiro") appended to IM replies and
+	// dashboard chips; empty when no Profile is registered for the ID.
 	ReplyTag string `json:"reply_tag,omitempty"`
-	// ChipColor is a CSS color string the dashboard uses for the backend
-	// chip background. Empty falls back to the dashboard's default token
-	// (--nz-accent). Format is whatever CSS accepts — "#7c5cff", "var(...)".
+	// ChipColor is the CSS color for the backend chip background; empty falls
+	// back to the dashboard's default token (--nz-accent).
 	ChipColor string `json:"chip_color,omitempty"`
-	// Features mirrors backend.Profile.Features verbatim — the dashboard
-	// reads it to gray out controls that the active backend doesn't
-	// support (askuser / passthrough / embedded_context / image_input /
-	// audio_input / mcp_http / mcp_sse). Missing key == false. Multi-Backend
-	// RFC §8.2.
-	//
-	// IMPORTANT: dashboard-only field. DetectBackendsCtx leaves this nil
-	// (the cli package cannot import internal/cli/backend without forming
-	// an import cycle). It is filled when the manifest is assembled — see
-	// session.Router.BackendsList (internal/session/router_backend_manifest.go)
-	// where backend.Get(id).Features is copied into each entry. Callers
-	// reading BackendInfo from DetectBackendsCtx directly will observe nil
-	// and must treat every feature as false (the safest degrade). R225-CR-7.
+	// Features mirrors backend.Profile.Features verbatim so the dashboard can gray
+	// out controls the backend lacks; missing key == false. Dashboard-only:
+	// DetectBackendsCtx leaves it nil (cli cannot import internal/cli/backend —
+	// cycle), and readers of that output must treat nil as all-false.
 	Features map[string]bool `json:"features,omitempty"`
 
-	// defaultBinary is the executable name detectCLI probes when callers
-	// don't pass an explicit CLIPath. It is the cli-side mirror of
-	// backend.Profile.DefaultBinary (the cli package can't import
-	// internal/cli/backend — cycle). Carried on the knownBackends slice
-	// rather than a parallel map so adding a backend is a single-row edit
-	// in one table instead of two hand-synced tables (#408). Unexported +
-	// unexported so the dashboard wire contract (BackendInfo JSON) stays a
-	// pure detection-result struct and gains no probe-internal field
-	// (encoding/json never emits unexported fields).
+	// defaultBinary is the executable detectCLI probes absent an explicit CLIPath
+	// — the cli-side mirror of backend.Profile.DefaultBinary (import cycle), kept
+	// on the row so adding a backend is a single-row edit (#408). Unexported: not wire.
 	defaultBinary string
 }
 
-// knownBackends enumerates every backend naozhi can drive, in preferred
-// default order. New backends (e.g. gemini-cli) get appended here once their
-// Protocol implementation lands.
-//
-// R0601-ARCH (#408): the default-binary mirror that used to live in a
-// parallel knownBackendBinaries map now rides on each row's unexported
-// defaultBinary field, so adding a backend is a single-row edit in this one
-// table instead of two hand-synced tables. The cli package still can't
-// import internal/cli/backend (cycle), so this remains the cli-side mirror
-// of backend.Profile.{ID,DefaultBinary}; backend/profile_*.go stays the
-// authoritative source for everything else (DisplayName, Features, …) and the
-// drift guard in detect_backend_mirror_test.go pins ID+binary parity in CI.
+// knownBackends enumerates every backend naozhi can drive, in preferred order.
+// cli-side mirror of backend.Profile.{ID,DefaultBinary} (import cycle);
+// detect_backend_mirror_test.go pins ID+binary parity in CI (#408).
 var knownBackends = []BackendInfo{
 	{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json", defaultBinary: "claude"},
 	{ID: "kiro", DisplayName: "kiro", Protocol: "acp", defaultBinary: "kiro-cli"},
 	{ID: "codex", DisplayName: "codex", Protocol: "codex-app-server", defaultBinary: "codex"},
 }
 
-// lookupBackend returns the knownBackends row for the given ID and whether it
-// was found. It is the single scan point over the knownBackends table so the
-// ID-keyed accessors (knownBackendBinary / isKnownBackendID / backendDisplayName)
-// share one source of truth instead of each open-coding the same loop. #408.
+// lookupBackend returns the knownBackends row for id — the single scan point
+// shared by knownBackendBinary / isKnownBackendID / backendDisplayName (#408).
 func lookupBackend(id string) (BackendInfo, bool) {
 	for _, b := range knownBackends {
 		if b.ID == id {
@@ -96,10 +61,8 @@ func lookupBackend(id string) (BackendInfo, bool) {
 	return BackendInfo{}, false
 }
 
-// knownBackendBinary returns the default executable name detectCLI probes for
-// the given backend ID, sourced from the knownBackends table. The second
-// return reports whether the ID is a known backend; callers fall back to the
-// "claude" launcher for unknown IDs (historical default-launcher behaviour).
+// knownBackendBinary returns the default executable detectCLI probes for the
+// backend ID and whether the ID is known; callers fall back to "claude".
 func knownBackendBinary(id string) (string, bool) {
 	b, ok := lookupBackend(id)
 	if !ok {
@@ -108,33 +71,18 @@ func knownBackendBinary(id string) (string, bool) {
 	return b.defaultBinary, true
 }
 
-// DetectBackendsCtx probes the filesystem and $PATH for each known backend
-// and returns a list of probe results. Backends whose binary cannot be
-// located are included with Available=false so the dashboard can surface
-// them as unavailable options instead of hiding them.
-//
-// The ctx is forwarded into detectVersionCtx so a caller-side cancellation
-// (e.g. naozhi SIGTERM during startup) aborts the in-flight --version
-// subprocess instead of blocking for the full 5s timeout per backend.
-// R55-QUAL-004.
+// DetectBackendsCtx probes the filesystem and $PATH for each known backend.
+// Missing backends are included with Available=false so the dashboard can show
+// them as unavailable. ctx is forwarded to detectVersionCtx so a startup SIGTERM
+// aborts the in-flight --version probe instead of waiting the full 5s per backend.
 func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 	out := make([]BackendInfo, 0, len(knownBackends))
 	for _, b := range knownBackends {
 		info := b
 		info.Path = detectCLI(b.ID)
-		// detectCLI returns the bare binary name (e.g. "kiro-cli") when
-		// nothing is found on disk, which would make detectVersion pay
-		// the full 5s subprocess timeout on every missing backend.
-		// Short-circuit via os.Stat for obviously-absent binaries so an
-		// operator with only claude installed doesn't wait for the kiro
-		// probe to time out at every naozhi restart.
-		//
-		// os.Stat does not search $PATH — when detectCLI returns a bare
-		// binary name (installed system-wide but not at a well-known
-		// absolute path), Stat fails with ENOENT and the backend is
-		// falsely marked unavailable. Fall back to exec.LookPath, which
-		// walks $PATH, to distinguish "not installed anywhere" from
-		// "installed via $PATH only".
+		// detectCLI may return a bare name; os.Stat short-circuits absent binaries so
+		// a missing backend doesn't pay the 5s --version timeout on every restart. Stat
+		// does not search $PATH, so try exec.LookPath before declaring it unavailable.
 		if _, statErr := os.Stat(info.Path); statErr != nil {
 			resolved, lookErr := exec.LookPath(info.Path)
 			if lookErr != nil {
@@ -151,23 +99,11 @@ func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 	return out
 }
 
-// parseVersionOutput extracts the semver-like version token from a
-// "<binary> --version" stdout payload.
-//
-// Output formats observed across our backends:
-//
-//	claude   → "2.1.143 (Claude Code)"   (version is the first token)
-//	kiro     → "kiro-cli 2.3.0"           (version is the second token)
-//
-// Strategy: walk whitespace-split tokens and return the first one whose
-// leading byte is a digit (the canonical semver shape). Anything else —
-// build banner, "version" prefix, dash-prefixed suffix — is skipped.
-// The 32-byte cap prevents a hostile / malformed --version response from
-// blowing up downstream slog attrs and JSON payloads.
-//
-// Lives in detect.go (not wrapper.go) because version parsing is a
-// detection concern: the function is only ever called by detectVersionCtx
-// to fill BackendInfo.Version. R228-ARCH-16.
+// parseVersionOutput extracts the semver-like token from "<binary> --version"
+// output: claude prints "2.1.143 (Claude Code)", kiro prints "kiro-cli 2.3.0",
+// so it returns the first whitespace-split token whose leading byte is a
+// digit. The 32-byte cap keeps a hostile --version from bloating slog/JSON
+// payloads.
 func parseVersionOutput(s string) string {
 	for _, tok := range strings.Fields(s) {
 		if len(tok) > 0 && tok[0] >= '0' && tok[0] <= '9' {
@@ -181,12 +117,8 @@ func parseVersionOutput(s string) string {
 }
 
 // SortBackendsAvailableFirst places available backends before unavailable
-// ones while preserving the knownBackends order within each group. Callers
-// use this for UI rendering so unusable entries drop to the tail.
+// ones, preserving knownBackends order within each group (UI rendering).
 func SortBackendsAvailableFirst(backends []BackendInfo) {
-	// R179-GO-P2: slices.SortStableFunc replaces sort.SliceStable — typed
-	// comparator avoids interface{} boxing and matches the rest of the
-	// codebase's generic-sort idiom.
 	slices.SortStableFunc(backends, func(a, b BackendInfo) int {
 		if a.Available == b.Available {
 			return 0

@@ -18,24 +18,16 @@ type Event struct {
 	Result    string            `json:"result,omitempty"`
 	CostUSD   float64           `json:"total_cost_usd,omitempty"`
 	Message   *AssistantMessage `json:"message,omitempty"`
-	// Model is populated for system/init events on stream-json (claude),
-	// where the CLI advertises the resolved model identifier (e.g.
-	// "global.anthropic.claude-opus-4-7[1m]"). readLoop forwards it to
-	// Process.setModel so the dashboard can show the LIVE model rather
-	// than the spawn-time SpawnOptions.Model — claude resolves env /
-	// CLI defaults internally, so we never know the answer before init.
-	// ACP path leaves this empty; SpawnOptions.Model from kiro config
-	// is authoritative there. UI Round 5 R5-3.
+	// Model is the resolved model id the claude CLI advertises on system/init
+	// (claude resolves env/CLI defaults internally, so it is only known after
+	// init). readLoop forwards it to Process.setModel for the live dashboard
+	// value. Empty on ACP, where SpawnOptions.Model is authoritative.
 	Model string `json:"model,omitempty"`
 
-	// ClaudeCodeVersion is populated for system/init events on stream-json
-	// (claude), where the CLI self-reports the version of the binary it is
-	// actually running (e.g. "2.1.174"). readLoop forwards it to
-	// Process.setLiveVersion so the dashboard can show the LIVE binary
-	// version rather than the spawn-time Wrapper.CLIVersion — the latter is
-	// detected once at naozhi startup and goes stale if the host claude is
-	// upgraded under a long-lived naozhi. ACP path leaves this empty.
-	// R20260612-live-version.
+	// ClaudeCodeVersion is the binary version the claude CLI self-reports on
+	// system/init. readLoop forwards it to Process.setLiveVersion; the
+	// spawn-time Wrapper.CLIVersion goes stale if the host claude is upgraded
+	// under a long-lived naozhi. Empty on ACP.
 	ClaudeCodeVersion string `json:"claude_code_version,omitempty"`
 
 	// Agent task fields (system/task_started, task_progress, task_notification).
@@ -67,28 +59,20 @@ type Event struct {
 	RawParams json.RawMessage `json:"-"`
 
 	// Metadata is populated for backend-emitted normalized status frames
-	// (Type:"metadata"). Today the only producer is ACPProtocol's
-	// _kiro.dev/metadata notification handler — kiro reports real
-	// contextUsagePercentage / turnDurationMs / meteringUsage every turn.
-	// Other backends (claude stream-json) leave this nil; the session layer
-	// fills equivalent fields from CostUSD / wall clock. Dashboard reads
-	// only the normalized SessionSnapshot fields, never this raw struct.
-	// See docs/rfc/multi-backend.md §8.8.
+	// (Type:"metadata"); today only ACPProtocol's _kiro.dev/metadata handler
+	// produces it. Other backends leave it nil and the session layer derives
+	// equivalents from CostUSD / wall clock. See docs/rfc/multi-backend.md §8.8.
 	Metadata *EventMetadata `json:"metadata,omitempty"`
 
 	// AskQuestion is populated for synthetic Type:"ask_question" events derived
-	// from an AskUserQuestion tool_use in the assistant stream. The CLI's
-	// headless -p mode auto-rejects the tool with is_error:true, so this is
-	// observational only — dispatch uses it to surface an interactive card.
-	// The user's answer flows back as a normal user message on the next turn.
-	// See docs/rfc/askuser-question.md and test/e2e/askuser/.
+	// from an AskUserQuestion tool_use. Headless -p auto-rejects the tool, so
+	// this is observational: dispatch renders an interactive card and the
+	// answer returns as a normal user message. See docs/rfc/askuser-question.md.
 	AskQuestion *clievent.AskQuestion `json:"ask_question,omitempty"`
 
-	// ToolCall is populated for ACP tool_call / tool_call_update events.
-	// Dashboard renders a progress row (pending → in_progress → completed
-	// / failed) with collapsible rawOutput. Multi-Backend RFC §8.3 D17.
-	// stream-json (Claude) leaves this nil — Claude tool-use events flow
-	// through Message.Content[].Type=="tool_use" instead.
+	// ToolCall is populated for ACP tool_call / tool_call_update events
+	// (dashboard progress row with collapsible rawOutput). nil on stream-json,
+	// where tool use flows through Message.Content[].Type=="tool_use".
 	ToolCall *clievent.ToolCall `json:"tool_call,omitempty"`
 
 	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
@@ -118,16 +102,11 @@ type EventMetadata struct {
 	// already captured via CostUSD).
 	MeteringUsage []MeteringEntry `json:"metering_usage,omitempty"`
 
-	// Effort is the backend's thinking-effort tier for the turn just
-	// reported. kiro: from _kiro.dev/metadata.effort, one of
-	// low/medium/high/xhigh/max. claude / codex report no equivalent and
-	// leave this empty.
-	//
-	// Stored as the backend's raw string rather than a naozhi-side enum on
-	// purpose: kiro owns the tier vocabulary, so a future version adding a
-	// sixth tier must flow through to the dashboard instead of being
-	// silently dropped by a stale allowlist. See
-	// docs/rfc/kiro-effort-visibility.md §2 (alternatives) / §5 R4.
+	// Effort is the backend's thinking-effort tier for the reported turn
+	// (kiro: _kiro.dev/metadata.effort, low/medium/high/xhigh/max; claude and
+	// codex leave it empty). Kept as the backend's raw string, not an enum, so
+	// a new kiro tier reaches the dashboard instead of being dropped by a
+	// stale allowlist. See docs/rfc/kiro-effort-visibility.md.
 	Effort string `json:"effort,omitempty"`
 }
 
@@ -160,36 +139,21 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
 }
 
-// maxAssistantMessageContentBytes caps the total bytes of an
-// AssistantMessage's content blocks accepted by ReadEvent. R229-SEC-10:
-// a tampered or buggy CLI / shim could emit a single 10 MiB+ event whose
-// nested content blocks are deeply structured but harmless-looking JSON;
-// every downstream stage (EventLog ring, dashboard fan-out, JSONL persist)
-// then pays O(N) per consumer. The 4 MiB ceiling sits comfortably above the
-// largest legitimate content payload observed in production
-// (base64 image + thinking block ≈ 1.5 MiB) yet caps single-event CPU /
-// memory amplification well below the 10 MiB shim line cap.
+// maxAssistantMessageContentBytes caps the total content-block bytes of an
+// AssistantMessage accepted by ReadEvent, so a tampered or buggy CLI/shim
+// cannot amplify one huge event through every downstream consumer (ring,
+// dashboard fan-out, persist). 4 MiB is well above the largest real payload
+// seen (~1.5 MiB) and below the 10 MiB shim line cap.
 const maxAssistantMessageContentBytes = 4 * 1024 * 1024
 
-// EventDetailMaxRunes is the rune-count cap applied to EventEntry.Detail (and
-// SubagentLinker.Resolve description args, which flow into the same Detail
-// field after persistence). Detail is the verbatim quoted text shown in
-// dashboard previews; the dashboard collapses anything longer behind a
-// "show more" affordance, so storing past this bound just bloats the ring
-// buffer + persisted jsonl.
-//
-// 2000 runes was chosen empirically: it fits ~10 lines of typical assistant
-// prose at 80 columns (the dashboard preview height before scroll), large
-// enough to convey context for tool decisions while small enough that a
-// burst of 50 tool_use entries adds <100 KB to the ring buffer's RSS.
-// Centralising the constant here lets the cap evolve in one place even
-// though the surface area touches process_event_format / process_send /
-// process_event_query / subagent_transcript. Exported (not just package-
-// internal) because merged.contentKey normalises Detail down to this cap
-// before comparing tiers: live user prompts are capped here while the
-// fallback history readers cap the same text at history.DetailMaxRunes
-// (16000), so without the normalisation cross-tier dedup could never
-// match a prompt longer than this bound.
+// EventDetailMaxRunes is the rune cap applied to EventEntry.Detail (and to
+// SubagentLinker.Resolve description args, which land in the same field).
+// The dashboard collapses longer text anyway, so storing more only bloats the
+// ring and persisted jsonl; 2000 runes ≈ 10 lines of prose, and 50 tool_use
+// entries add <100 KB. Exported because merged.contentKey normalises Detail to
+// this cap before comparing tiers (history readers cap at
+// history.DetailMaxRunes=16000), otherwise cross-tier dedup could never match
+// a prompt longer than this bound.
 const EventDetailMaxRunes = 2000
 
 // contentBytes sums the user-visible byte size of an AssistantMessage's
@@ -231,11 +195,8 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 		m.Content = nil
 		return nil
 	}
-	// Route on the first non-whitespace byte to avoid speculatively
-	// Unmarshal-ing into []ContentBlock when the shape is a bare string.
-	// The old two-try fallback allocated (and partially filled) a
-	// []ContentBlock slice every time we hit the replay-text path before
-	// discarding it.
+	// Route on the first non-whitespace byte so the bare-string shape never
+	// speculatively allocates a []ContentBlock.
 	first := firstJSONByte(raw.Content)
 	switch first {
 	case '[':
@@ -244,9 +205,8 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 			m.Content = blocks
 			return nil
 		}
-		// Strict array decode failed (e.g. a single malformed block from a
-		// backend emitting a new shape). Rather than discarding the whole
-		// message, decode element-by-element and keep the blocks that parse.
+		// Strict array decode failed (e.g. one malformed block): keep the
+		// blocks that parse rather than dropping the whole message.
 		var rawBlocks []json.RawMessage
 		if err := json.Unmarshal(raw.Content, &rawBlocks); err == nil {
 			blocks = blocks[:0]
@@ -335,15 +295,11 @@ type Attachment struct {
 
 // InputMessage is what we write to claude CLI stdin.
 //
-// UUID: naozhi-assigned message id, round-tripped back on the matching replay
-// event when --replay-user-messages is enabled. Used for passthrough slot
-// matching (see docs/rfc/passthrough-mode.md §5.2). Omitted when empty to
-// stay compatible with legacy non-passthrough writers.
-//
-// Priority: one of "now" | "next" | "later" | "". An empty string lets the
-// CLI default (currently "next") kick in. "now" causes the CLI to abort the
-// in-flight turn (verified via V2 — print.ts:1858-1863). Ignored by protocols
-// that do not advertise SupportsPriority().
+// UUID is the naozhi-assigned id round-tripped on the matching replay event
+// (--replay-user-messages) for passthrough slot matching
+// (docs/rfc/passthrough-mode.md §5.2); omitted when empty. Priority is
+// "now" | "next" | "later" | "" (CLI default "next"); "now" aborts the
+// in-flight turn. Ignored by protocols without SupportsPriority().
 type InputMessage struct {
 	Type     string       `json:"type"`
 	Message  InputContent `json:"message"`
@@ -391,14 +347,10 @@ func splitAttachments(atts []Attachment) (inline []Attachment, refs []Attachment
 }
 
 // prependFileRefHint returns text with a Read-tool instruction prepended when
-// refs is non-empty. When refs is empty the original text is returned
-// unchanged (byte-identical to the pre-PDF code path — important because it
-// keeps the stream-json NDJSON wire form stable for image-only sends).
-//
-// The hint intentionally mentions workspace-relative paths with forward
-// slashes: the CLI Read tool resolves relative paths against the session
-// working directory (SpawnOptions.WorkingDir) which naozhi always sets to
-// the resolved workspace root (see internal/session/router.go:1629).
+// refs is non-empty; with no refs the text is returned unchanged so the NDJSON
+// wire form of image-only sends is stable. Paths are workspace-relative with
+// forward slashes because the CLI Read tool resolves them against
+// SpawnOptions.WorkingDir, which naozhi sets to the workspace root.
 func prependFileRefHint(text string, refs []Attachment) string {
 	if len(refs) == 0 {
 		return text
@@ -414,14 +366,9 @@ func prependFileRefHint(text string, refs []Attachment) string {
 	b.WriteString("Read the following file(s) with the Read tool before responding:\n")
 	for _, r := range refs {
 		p := r.WorkspacePath
-		// The Read tool accepts both absolute and workspace-relative paths;
-		// we always write forward-slash relative paths so the same string
-		// shown to the user in the dashboard is what Claude sees.
 		if p == "" {
-			// A file_ref without a WorkspacePath is a caller bug — skip it
-			// rather than injecting an empty bullet that would confuse the
-			// model. The sender pipeline is expected to populate this before
-			// calling NewUserMessageWithMeta.
+			// A file_ref without WorkspacePath is a caller bug; skip it rather
+			// than inject an empty bullet.
 			continue
 		}
 		b.WriteString("  - ")
@@ -461,33 +408,17 @@ func formatBytesShort(n int64) string {
 	}
 }
 
-// NewUserMessageWithMeta is the passthrough-aware constructor. When uuid /
-// priority are empty strings they are omitted from the JSON (legacy-identical
-// payload). When non-empty they are serialised as top-level fields.
-//
-// The CLI (verified against 2.1.126) accepts any top-level uuid/priority on
-// the NDJSON user message and round-trips uuid on the corresponding replay
-// event. Priority "now" is an explicit abort signal (print.ts:1858-1863).
-//
-// DEADCODE-10 (#1203): the legacy `NewUserMessage(text, images)` wrapper
-// (a one-line shim that called this constructor with empty uuid/priority)
-// has been retired — production callers (protocol_claude.go's user-turn
-// path) all use NewUserMessageWithMeta directly so they can plumb uuid +
-// priority. Tests that need the no-meta shape pass empty strings here
-// explicitly, making the "no uuid / no priority" intent obvious at the
-// call site.
+// NewUserMessageWithMeta builds the stdin user message. Empty uuid / priority
+// are omitted from the JSON; non-empty values are serialised as top-level
+// fields, which the CLI accepts and (for uuid) round-trips on the replay
+// event. Priority "now" is an explicit abort signal.
 func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority string) InputMessage {
-	// file_ref attachments do NOT produce a content block — they are surfaced
-	// to Claude via a prepended instruction in the text, so the CLI's native
-	// Read tool picks them up. Split once here so subsequent logic only has to
-	// reason about inline bytes.
+	// file_ref attachments produce no content block; they reach Claude via
+	// the prepended Read-tool hint instead.
 	inline, refs := splitAttachments(atts)
 
-	// Prepend the Read-tool hint before the user's own text. The hint is in
-	// English because the CC base system prompt is English-primary and
-	// language-mixed prompts have been observed to cause the model to switch
-	// reply language unpredictably. Original filenames (often Chinese) are
-	// preserved verbatim in the hint for user recognition.
+	// The hint is English because language-mixed prompts make the model
+	// switch reply language unpredictably; original filenames stay verbatim.
 	effectiveText := prependFileRefHint(text, refs)
 
 	var content any

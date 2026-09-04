@@ -1,14 +1,8 @@
 // protocol_acp.go is the production ACP (Agent Client Protocol) backend
-// adapter. It is NOT a test/doc placeholder — internal/cli/backend's kiro
-// profile (profile_kiro.go) wires *ACPProtocol into every kiro-backed
-// session via Profile.NewProtocol, and TestProfile_Kiro_NewProtocol pins
-// that contract so a regression here would fail CI.
-//
-// R217-ARCH-9 (#629): the question "is this file production-active?" is
-// answered "yes, kiro backend"; do not build-tag this file out without
-// also retiring the kiro profile. Future ACP-flavoured backends (Gemini,
-// custom JSON-RPC peers) reuse this same adapter via the same Protocol
-// interface — extending behaviour belongs here, not in a parallel file.
+// adapter: the kiro backend uses it via internal/cli/backend/profile_kiro.go,
+// so it must not be build-tagged out without also retiring the kiro profile
+// (#629). Future ACP-flavoured backends (Gemini, custom JSON-RPC peers)
+// extend this adapter.
 package cli
 
 import (
@@ -32,41 +26,34 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// acpStopReasonKey is the on-wire key that ACP uses inside a session/prompt
-// response Result to carry the turn-end reason. Most kiro responses ship as
-// `null` or `{}` so checking for this byte sequence before json.Unmarshal
-// skips the reflect+alloc cost on the streaming hot path. R227-PERF-15.
+// acpStopReasonKey is the on-wire key ACP uses in a session/prompt response
+// Result for the turn-end reason. Most kiro responses are `null` or `{}`, so
+// a byte check before json.Unmarshal skips reflect+alloc on the hot path.
 var acpStopReasonKey = []byte(`"stopReason"`)
 
-// acpEncBuf bundles a *bytes.Buffer + *json.Encoder into a single pooled
-// pair so the WriteMessage / permissionResponse hot paths skip the per-call
-// json.Marshal allocator. Mirrors process_shim_io.go's shimSendBufPool
-// pattern — see R247-PERF-12.
+// acpEncBuf bundles a *bytes.Buffer + *json.Encoder into one pooled pair so the
+// WriteMessage / permissionResponse hot paths skip the per-call json.Marshal
+// allocator. Mirrors process_shim_io.go's shimSendBufPool.
 type acpEncBuf struct {
 	buf *bytes.Buffer
 	enc *json.Encoder
 }
 
-// acpEncPool reuses encoder/buffer pairs across ACP send calls. ACP turn
-// frames carry potentially-large image payloads (up to ~400KB base64 per
-// pasted screenshot); the encoder writes via the buffer pointer so a single
-// Reset between uses is safe.
+// acpEncPool reuses encoder/buffer pairs across ACP send calls; the encoder
+// writes via the buffer pointer so a single Reset between uses is safe.
 var acpEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
 		enc := json.NewEncoder(buf)
-		// JSON-RPC frames are NDJSON; the agent CLI sees user prompts /
-		// permission selections that may legitimately contain '<', '>',
-		// '&'. The default HTML escaping would corrupt those payloads.
-		// Mirrors shimSendBufPool's SetEscapeHTML(false).
+		// User prompts / permission selections may legitimately contain '<', '>',
+		// '&'; default HTML escaping would corrupt them (mirrors shimSendBufPool).
 		enc.SetEscapeHTML(false)
 		return &acpEncBuf{buf: buf, enc: enc}
 	},
 }
 
-// acpEncBufMaxCap caps the pool entry capacity. Image-bearing prompts can
-// inflate a buffer to >256KB; oversized entries are dropped on Put so the
-// pool does not retain multi-MB backing arrays past their useful life.
+// acpEncBufMaxCap caps the pool entry capacity; image-bearing prompts inflate
+// a buffer to >256KB and oversized entries are dropped on Put.
 const acpEncBufMaxCap = 64 * 1024
 
 func putACPEncBuf(e *acpEncBuf) {
@@ -76,38 +63,22 @@ func putACPEncBuf(e *acpEncBuf) {
 	acpEncPool.Put(e)
 }
 
-// acpB64BufPool reuses []byte scratch buffers used by base64 encoding of
-// per-image payloads in WriteMessage. R247-PERF-17: replaces the
-// base64.StdEncoding.EncodeToString hot path which allocated an encode
-// buffer + a separate string copy per image. AppendEncode lets us reuse
-// the encode buffer across calls; the final string conversion still
-// allocates (Data field is `string` — changing it to []byte would shift
-// the alloc into encoding/json's marshaller without net savings) but the
-// encode-side buffer is now amortised across the process lifetime.
-//
-// Multi-image turns (4-5 attached screenshots × ~400KB base64 each) are
-// the realistic worst case; a single shared pool entry with a pre-grown
-// 16KB capacity covers the common 1-image case in zero growths and
-// degrades gracefully to grow-and-discard for the outlier large-image
-// case (see acpB64BufMaxCap).
+// acpB64BufPool reuses []byte scratch buffers for base64-encoding per-image
+// payloads via AppendEncode. The final string conversion still allocates (the
+// Data field is `string`) but the encode buffer is amortised. A 16KB entry
+// covers the 1-image case; outliers grow and are discarded (acpB64BufMaxCap).
 var acpB64BufPool = sync.Pool{
 	New: func() any {
-		// 16KB seeds cover small screenshots without growing; larger
-		// payloads cause the slice to grow naturally.
 		b := make([]byte, 0, 16*1024)
 		return &b
 	},
 }
 
-// acpB64BufMaxCap matches acpEncBufMaxCap (64KB) — buffers that grew past
-// this on a multi-MB outlier image are dropped on Put rather than retained
-// forever.
+// acpB64BufMaxCap matches acpEncBufMaxCap; buffers grown past it are dropped on Put.
 const acpB64BufMaxCap = 64 * 1024
 
-// encodeImageBase64 returns a base64-encoded string of img using a pooled
-// scratch buffer for the encode step. The returned string is freshly
-// allocated (mandatory for the JSON marshaller's `Data string` field) but
-// the encode buffer is recycled. R247-PERF-17.
+// encodeImageBase64 base64-encodes img via a pooled scratch buffer; the
+// returned string is fresh (the marshaller's `Data string` field needs it).
 func encodeImageBase64(img []byte) string {
 	bp := acpB64BufPool.Get().(*[]byte)
 	buf := (*bp)[:0]
@@ -120,23 +91,15 @@ func encodeImageBase64(img []byte) string {
 	return out
 }
 
-// toolJSONMaxRunes caps the rune count of tool_call input/output payloads
-// stuffed into Event.ToolCall before they are forwarded to dashboard / IM
-// renderers. 16 KiB runes is generous enough to hold a typical Read /
-// Bash / Edit invocation in full while keeping a hostile / runaway tool
-// from blowing up the WS frame size and slog attrs. Aligned with the
-// 16K cap that process_event_format.go uses for full-content fields like
-// entry.Detail on assistant text (line 200) and Result blocks (line 233);
-// the label paths use a much smaller 300-rune cap, but those render only
-// short summaries. tool_call payloads are full-content, so 16K is correct.
+// toolJSONMaxRunes caps tool_call input/output payloads in Event.ToolCall
+// before dashboard / IM rendering. 16 KiB holds a typical Read / Bash / Edit
+// invocation in full while keeping a runaway tool from blowing up WS frames
+// and slog attrs; aligned with process_event_format.go's full-content cap.
 const toolJSONMaxRunes = 16000
 
-// truncateToolJSON converts a raw JSON byte slice into a string, capped at
-// toolJSONMaxRunes runes with a "..." marker appended when truncated.
-// Defers the string() conversion to TruncateRunesBytes so the heap copy is
-// elided whenever truncation is the common case (which it is — most tool
-// payloads are small but a stray Bash output can be MB-scale). nil / empty
-// input returns "" so callers can treat the field as optional.
+// truncateToolJSON converts raw JSON to a string capped at toolJSONMaxRunes
+// (with "..." when truncated). TruncateRunesBytes elides the heap copy in the
+// common truncating case; nil / empty input returns "" (field is optional).
 func truncateToolJSON(b []byte) string {
 	if len(b) == 0 {
 		return ""
@@ -144,23 +107,16 @@ func truncateToolJSON(b []byte) string {
 	return textutil.TruncateRunesBytes(b, toolJSONMaxRunes)
 }
 
-// toolCallLabelMaxBytes caps the byte length of ToolCall.Title / Kind / Status
-// before they are forwarded to dashboard / IM renderers. These fields come
-// from the agent (kiro/ACP, untrusted across the protocol boundary) and are
-// rendered into chip text/colour without further sanitization. A hostile or
-// runaway agent could send bidi-override or oversized strings that distort
-// the dashboard UI; cap to a tight 256 bytes and strip log-injection runes
-// (C0/C1/bidi/LS/PS) consistently with the rest of the codebase.
+// toolCallLabelMaxBytes caps ToolCall.Title / Kind / Status before they reach
+// dashboard / IM renderers. They come from the agent (untrusted across the
+// protocol boundary) and render into chip text/colour unescaped, so a hostile
+// agent could distort the UI with bidi-override or oversized strings.
 const toolCallLabelMaxBytes = 256
 
-// sanitizeToolCallLabel cleans a short ACP-supplied label field.
-//
-// LOSSY: control characters and bidi/LS-PS runes are replaced with `_`
-// (via osutil.SanitizeForLog), and the result is byte-capped at
-// toolCallLabelMaxBytes. Callers that need the original verbatim string
-// must source it from a different field (e.g. truncateToolJSON for raw
-// tool input/output). Empty input is preserved so optional fields stay
-// optional.
+// sanitizeToolCallLabel cleans a short ACP-supplied label field. LOSSY: control
+// and bidi/LS-PS runes become `_` (osutil.SanitizeForLog) and the result is
+// byte-capped at toolCallLabelMaxBytes; callers needing the verbatim string
+// must use another field (e.g. truncateToolJSON). Empty stays empty.
 func sanitizeToolCallLabel(s string) string {
 	if s == "" {
 		return ""
@@ -168,97 +124,64 @@ func sanitizeToolCallLabel(s string) string {
 	return osutil.SanitizeForLog(s, toolCallLabelMaxBytes)
 }
 
-// ErrACPRPC wraps any agent-side JSON-RPC error ("error" field populated).
-// Typed so dispatch / upstream layers can errors.Is-classify ACP failures
-// distinctly from transport / timeout / parse faults.
+// ErrACPRPC wraps any agent-side JSON-RPC error, typed so dispatch / upstream
+// layers can errors.Is-classify it apart from transport / timeout / parse faults.
 var ErrACPRPC = errors.New("acp rpc error")
 
-// ErrACPTimeout is returned when waitForResponse gives up on a specific
-// JSON-RPC id after the acpHandshakeTimeout deadline. Callers can treat it
-// as a transient failure (retry next turn) rather than a permanent protocol
-// break.
+// ErrACPTimeout is returned when readUntilResponse gives up on a JSON-RPC id
+// after acpHandshakeTimeout. Callers may treat it as transient (retry next turn).
 var ErrACPTimeout = errors.New("acp response timeout")
 
-// acpHandshakeTimeout caps how long ACP RPC waits for a matching response
-// before surfacing ErrACPTimeout. Distinct from the unrelated 30s
-// shimAuthReadDeadline (shim/server.go) and cronSlowThreshold (cron):
-// keeping them named separately avoids cross-tuning by accident.
+// acpHandshakeTimeout caps how long an ACP RPC waits for its response. Named
+// separately from shimAuthReadDeadline / cronSlowThreshold to avoid cross-tuning.
 const acpHandshakeTimeout = 30 * time.Second
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
 type ACPProtocol struct {
 	mu sync.Mutex
-	// nextID is Int64 to avoid sign flip if a very long-running connector
-	// ever surpassed 2^31 RPC calls (it currently won't in practice, but the
-	// wider type costs nothing and removes the overflow footgun).
-	// NOTE: allocID() narrows to int for RPCRequest.ID/RPCMessage.ID JSON
-	// compatibility; 64-bit platforms only (naozhi does not support 32-bit).
+	// nextID is Int64 so a long-running connector can never sign-flip; allocID
+	// narrows to int for RPCRequest.ID JSON compatibility (64-bit only).
 	nextID atomic.Int64
-	// sessionID was previously guarded by mu, but mu also serialises
-	// agent_message_chunk text accumulation (textBuf) on the high-frequency
-	// streaming path. Splitting sessionID into atomic.Pointer[string] lets
-	// concurrent WriteMessage / WriteInterrupt / readLoop turn-boundary
-	// reads bypass mu and not contend with per-chunk textBuf writes. Init
-	// stores once per process lifetime before startReadLoop; reconnect
-	// spins up a fresh ACPProtocol instance (so the "writes once" claim
-	// holds per instance — never amended). nil/unset surfaces as "" via
-	// loadSessionID's nil-deref guard. R226-PERF-11 / R227-CR-14.
+	// sessionID is an atomic.Pointer rather than mu-guarded so WriteMessage /
+	// WriteInterrupt / readLoop turn-boundary reads never contend with the
+	// per-chunk textBuf writes mu serialises. Init stores it once per instance.
 	sessionID atomic.Pointer[string]
-	// textBuf accumulates assistant_message_chunk text during a turn.
-	// Guarded by mu since it's mutated from readLoop and reset from
-	// WriteMessage / on turn boundary; sessionID's split-out (above) is
-	// what makes mu's contention narrowly scoped to textBuf again.
+	// textBuf accumulates agent_message_chunk text during a turn. Guarded by
+	// mu: mutated from readLoop, reset from WriteMessage / at turn boundary.
 	textBuf strings.Builder
-	// thoughtBuf accumulates agent_thought_chunk text during a turn.
-	// kiro streams reasoning in very fine chunks (~2 chars each, 100s per
-	// turn); accumulating here and flushing a single "thinking" block at
-	// the turn boundary avoids flooding EventLog with empty per-chunk rows.
-	// Guarded by mu, same lifecycle as textBuf.
+	// thoughtBuf accumulates agent_thought_chunk text during a turn. kiro streams
+	// reasoning in ~2-char chunks (100s per turn); flushing one "thinking" block
+	// at turn boundary avoids flooding EventLog. Guarded by mu like textBuf.
 	thoughtBuf strings.Builder
-	// BackendID labels metric increments emitted by this protocol instance.
-	// Multi-Backend RFC §10 (Sprint 6a): ReadEvent → metrics.RecordProtocolRPCError
-	// and WriteInterrupt → metrics.RecordACPCancel both need to know which
-	// CLI backend they belong to; piping it through here keeps protocol code
-	// independent of the cli/backend registry. Empty string falls back to
-	// LabelEmpty in the metric — useful for tests that don't wire it.
+	// BackendID labels metric increments so protocol code stays independent of
+	// the cli/backend registry; empty falls back to LabelEmpty (unwired tests).
 	BackendID string
 
-	// ctrlMu guards pendingControl. A dedicated mutex (not mu) so the
-	// per-response lookup on the readLoop never contends with the
-	// high-frequency textBuf accumulation that mu serialises.
+	// ctrlMu guards pendingControl; a dedicated mutex so the per-response lookup
+	// on the readLoop never contends with the textBuf accumulation under mu.
 	ctrlMu sync.Mutex
-	// pendingControl maps an in-flight control RPC's numeric id (today only
-	// session/set_model) to the caller's correlation requestID. ReadEvent's
-	// IsResponse branch consults this table FIRST: a matching response is
-	// surfaced as a Type:"control_ack" Event instead of being treated as the
-	// session/prompt turn-end — without this, a mid-turn set_model response
-	// would falsely close the active turn (F13 depends on the interception).
-	// Entries are removed on match; a response that never arrives leaks one
-	// int→string pair until process teardown (bounded: one entry per
-	// SetModel call, and Process.SetModel serialises via its ack table).
-	// docs/rfc/dashboard-model-effort-control.md §4.4.
+	// pendingControl maps an in-flight control RPC id (today only
+	// session/set_model) to the caller's requestID. ReadEvent's IsResponse
+	// branch consults it FIRST and surfaces a match as a Type:"control_ack"
+	// Event — otherwise a mid-turn set_model response would falsely close the
+	// active turn. Entries are removed on match (a lost response leaks one entry
+	// until teardown). docs/rfc/dashboard-model-effort-control.md §4.4.
 	pendingControl map[int]string
 
-	// availableModels caches the agent-reported model manifest from
-	// session/new / session/load results (F5/F12). Written once during Init
-	// (before readLoop starts), read later by the /api/cli/backends manifest
-	// path on arbitrary goroutines — hence atomic.
-	// docs/rfc/dashboard-model-effort-control.md §4.2.
+	// availableModels caches the agent-reported model manifest from session/new
+	// / session/load results. Written once in Init, read on arbitrary goroutines
+	// by the /api/cli/backends path — hence atomic. dashboard-model-effort-control.md §4.2.
 	availableModels atomic.Pointer[[]ModelInfo]
 }
 
 func (p *ACPProtocol) Name() string { return "acp" }
 
-// storeSessionID publishes the session id atomically so concurrent
-// readers see a consistent value. atomic.Pointer requires a pointer
-// parameter; the indirection is negligible compared with the lock-acquire
-// it replaces. R226-PERF-11.
+// storeSessionID publishes the session id atomically.
 func (p *ACPProtocol) storeSessionID(id string) {
 	p.sessionID.Store(&id)
 }
 
-// loadSessionID returns the published session id, or "" before Init has
-// written one. R226-PERF-11.
+// loadSessionID returns the published session id, or "" before Init wrote one.
 func (p *ACPProtocol) loadSessionID() string {
 	if s := p.sessionID.Load(); s != nil {
 		return *s
@@ -266,48 +189,31 @@ func (p *ACPProtocol) loadSessionID() string {
 	return ""
 }
 
-// Clone returns a fresh ACPProtocol that retains BackendID so per-spawn
-// metrics labelling is preserved across the wrapper.Spawn → proto.Clone()
-// pipeline.
+// Clone returns a fresh ACPProtocol retaining BackendID so metric labelling survives proto.Clone().
 func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{BackendID: p.BackendID} }
 
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
-	// kiro-cli acp accepts `--model <ID>` to seed the initial session's model
-	// (verified on kiro 2.3.0: session/new result.models.currentModelId echoes
-	// the flag value; omitting it falls back to "auto"). Plumbed through so
-	// `cli.backends[].model` lands on kiro the same way it does on Claude.
-	// Empty Model means "let kiro pick its default" — do not pass an empty
-	// flag value, kiro would reject the argv.
+	// kiro-cli acp accepts `--model <ID>` to seed the session's model (verified
+	// on kiro 2.3.0; omitting it falls back to "auto"). Never pass an empty
+	// flag value — kiro rejects the argv.
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
-	// `--effort <tier>` overrides kiro's own configured default
-	// (chat.modelDefaults[<model>].output_config.effort), letting naozhi own
-	// the tier without touching the operator's interactive kiro. Verified on
-	// 2.16.0 for BOTH session/new and session/load, so resume keeps the tier
-	// as long as the flag is passed again — a resume spawned without it
-	// silently reverts to kiro's global default.
-	//
-	// The value is a closed set validated at config load; empty means "pass
-	// no flag". docs/rfc/kiro-effort-control.md
+	// `--effort <tier>` overrides kiro's configured default so naozhi owns the
+	// tier. Verified on 2.16.0 for BOTH session/new and session/load — a resume
+	// spawned without the flag silently reverts to kiro's default. Closed set
+	// validated at config load; empty means no flag. docs/rfc/kiro-effort-control.md
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)
 	}
-	// Mirror ClaudeProtocol's ExtraArgs guard (capExtraArgsBytes lives in
-	// protocol_claude.go) so an ACP backend cannot bypass the ARG_MAX
-	// defense merely by routing the same user-supplied args through here.
+	// Same ARG_MAX / denied-flag guard as ClaudeProtocol so ACP cannot bypass it.
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
 }
 
-// acpInitParams matches the parameters of the ACP "initialize" RPC.
-// Mirrors the spec subset naozhi sends: protocolVersion + clientCapabilities
-// + clientInfo. Defined as a named struct so json marshaling skips the
-// reflect-on-map-of-interface code path used by map[string]any. Cold path
-// (one call per spawn) but keeps the style consistent with acpPromptParams
-// (R228-PERF-4) so future readers don't have to reason about why one RPC
-// uses map and another uses struct. R230-PERF-1.
+// acpInitParams matches the parameters of the ACP "initialize" RPC. A named
+// struct so json marshaling skips the reflect-on-map-of-interface path.
 type acpInitParams struct {
 	ProtocolVersion    int                   `json:"protocolVersion"`
 	ClientCapabilities acpClientCapabilities `json:"clientCapabilities"`
@@ -330,15 +236,9 @@ type acpClientInfo struct {
 }
 
 // acpSessionLoadParams matches the parameters of the ACP "session/load" RPC.
-// R230-PERF-1.
-//
-// McpServers is REQUIRED by the ACP schema (same as session/new) and must be
-// at least an empty array. Incident 2026-07-14: naozhi omitted the field and
-// kiro-cli 2.12.1's serde rejected the request at the deserialization phase
-// ("missing field `mcpServers`"), then dropped the connection and exited 0 —
-// surfacing in naozhi as "acp session/load: read ACP response: cli exited
-// during init" and breaking every kiro resume even after the resume-target
-// pre-check was fixed (#2364).
+// McpServers is REQUIRED (at least an empty array): kiro-cli's serde rejects a
+// request missing it, drops the connection and exits 0, surfacing as "cli
+// exited during init" and breaking every kiro resume (#2364).
 type acpSessionLoadParams struct {
 	SessionID  string `json:"sessionId"`
 	Cwd        string `json:"cwd"`
@@ -346,17 +246,13 @@ type acpSessionLoadParams struct {
 }
 
 // acpSessionNewParams matches the parameters of the ACP "session/new" RPC.
-// MCPServers is currently always empty (naozhi does not register MCP servers
-// at session-new time); kept as []any to preserve wire shape if upstream
-// kiro starts requiring an explicit empty array versus omitting the field.
-// R230-PERF-1.
+// McpServers is always empty but must be an explicit array (see acpSessionLoadParams).
 type acpSessionNewParams struct {
 	Cwd        string `json:"cwd"`
 	McpServers []any  `json:"mcpServers"`
 }
 
 func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, error) {
-	// Step 1: initialize handshake
 	initID := p.allocID()
 	initReq := RPCRequest{
 		JSONRPC: "2.0", ID: initID, Method: "initialize",
@@ -373,10 +269,8 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		return "", fmt.Errorf("acp initialize: %w", err)
 	}
 
-	// Step 2: session/new or session/load. The cwd passed into Init is the
-	// session's workspace (opts.WorkingDir in SpawnOptions); fall back to
-	// os.TempDir() only when the caller omitted one (tests, startup probe)
-	// so the ACP agent still lands in a valid filesystem location.
+	// cwd is the session workspace (opts.WorkingDir); fall back to os.TempDir()
+	// only when the caller omitted one (tests, startup probe).
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
@@ -386,10 +280,8 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 			JSONRPC: "2.0", ID: loadID, Method: "session/load",
 			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd, McpServers: []any{}},
 		}
-		// R232-CR-15 note applies to session/load too: the Msg variant keeps
-		// the metric emission uniform AND gives us the result payload —
-		// kiro returns the same models envelope on load as on new (F12), so
-		// resume refreshes the manifest cache just like a fresh spawn.
+		// The Msg variant returns the result payload: kiro returns the same models
+		// envelope on load as on new, so resume refreshes the manifest cache too.
 		resp, err := p.sendAndWaitResponseMsg(rw, loadReq)
 		if err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
@@ -401,11 +293,8 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 			JSONRPC: "2.0", ID: p.allocID(), Method: "session/new",
 			Params: acpSessionNewParams{Cwd: cwd, McpServers: []any{}},
 		}
-		// R232-CR-15: route session/new through the shared helper so the
-		// metric emission and readUntilResponse contract stay in lockstep
-		// with initialize / session/load (the previous hand-written
-		// Marshal+WriteLine+readUntilResponse triple skipped the
-		// RecordProtocolRPCError call site).
+		// Shared helper keeps metric emission and the readUntilResponse contract
+		// in lockstep with initialize / session/load.
 		resp, err := p.sendAndWaitResponseMsg(rw, newReq)
 		if err != nil {
 			return "", fmt.Errorf("acp session/new: %w", err)
@@ -422,8 +311,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 }
 
 // captureModels best-effort parses a session/load result for the models
-// envelope. Parse failures are ignored — the manifest is an enhancement,
-// never a reason to fail Init (RFC §5: "解析失败不阻塞 Init").
+// envelope; parse failures are ignored (the manifest must never fail Init).
 func (p *ACPProtocol) captureModels(result json.RawMessage) {
 	var parsed ACPSessionNewResult
 	if err := json.Unmarshal(result, &parsed); err != nil {
@@ -433,9 +321,8 @@ func (p *ACPProtocol) captureModels(result json.RawMessage) {
 }
 
 // storeModels normalises and publishes the agent-reported model manifest.
-// Entries without a modelId are dropped (nothing to feed set_model / --model
-// with). nil / empty envelopes leave any previously stored list in place —
-// a transiently silent agent must not wipe a good manifest.
+// Entries without a modelId are dropped; nil / empty envelopes leave the
+// previous list in place so a transiently silent agent never wipes a good one.
 func (p *ACPProtocol) storeModels(env *ACPModelsEnvelope) {
 	if env == nil || len(env.AvailableModels) == 0 {
 		return
@@ -453,9 +340,8 @@ func (p *ACPProtocol) storeModels(env *ACPModelsEnvelope) {
 	p.availableModels.Store(&models)
 }
 
-// AvailableModels returns the agent-reported model manifest captured during
-// Init ("" before the handshake / on agents that don't report one). The
-// returned slice is shared — callers must not mutate it.
+// AvailableModels returns the manifest captured during Init (nil before the
+// handshake / on agents that report none). Shared slice — do not mutate.
 func (p *ACPProtocol) AvailableModels() []ModelInfo {
 	if v := p.availableModels.Load(); v != nil {
 		return *v
@@ -463,61 +349,42 @@ func (p *ACPProtocol) AvailableModels() []ModelInfo {
 	return nil
 }
 
-// acpImageSource is the inner "source" object inside an ACP image content
-// block. Promoted from an inline map[string]string so json.Marshal can use
-// the precomputed reflect cache (one-time cost) instead of paying the
-// per-call map iteration + interface boxing each WriteMessage invocation.
-// R228-PERF-4.
+// acpImageSource is the inner "source" object of an ACP image content block;
+// a named struct so json.Marshal uses the reflect cache (no per-call boxing).
 type acpImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
 }
 
-// acpPromptBlock represents a single content block in an ACP session/prompt
-// "prompt" array. ACP accepts heterogeneous block types ("image" + "text"),
-// each with disjoint fields. Two variants are encoded as one struct via
-// pointer fields:
-//
-//   - text block: only Type + Text. Source is nil (omitempty drops it).
-//     Text uses a *string so empty text produces {"type":"text","text":""}
-//     (byte-equal to the prior map[string]string{"type":"text","text":""}
-//     literal) instead of being silently dropped by omitempty.
-//   - image block: only Type + Source. Text is nil (omitempty drops it).
+// acpPromptBlock is one content block of an ACP session/prompt "prompt" array;
+// text and image variants are encoded in one struct via pointer fields. Text
+// is a *string so empty text still produces {"type":"text","text":""}
+// instead of being dropped by omitempty.
 type acpPromptBlock struct {
 	Type   string          `json:"type"`
 	Source *acpImageSource `json:"source,omitempty"`
 	Text   *string         `json:"text,omitempty"`
 }
 
-// acpPromptParams is the typed shape of session/prompt's params field.
-// Replaces a map[string]any so RPCRequest.Params marshaling does not have
-// to iterate a 2-key map + box each value into interface{} per call.
+// acpPromptParams is the typed shape of session/prompt's params (no map boxing).
 type acpPromptParams struct {
 	SessionID string           `json:"sessionId"`
 	Prompt    []acpPromptBlock `json:"prompt"`
 }
 
 func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment) error {
-	// sessionID lives on its own atomic.Pointer so this read does not
-	// contend with per-chunk textBuf writes happening on readLoop.
-	// R226-PERF-11.
 	sid := p.loadSessionID()
 	p.mu.Lock()
-	p.textBuf.Reset()    // reset text accumulator for new turn
-	p.thoughtBuf.Reset() // reset thinking accumulator for new turn
+	p.textBuf.Reset()
+	p.thoughtBuf.Reset()
 	p.mu.Unlock()
 
-	// Build prompt content blocks. R228-PERF-4: typed []acpPromptBlock
-	// replaces []any so the encoding/json reflect cache hits the same
-	// concrete shape every call instead of paying a per-block map +
-	// interface{} boxing cost on the WriteMessage hot path.
+	// Typed []acpPromptBlock so the encoding/json reflect cache hits the same
+	// concrete shape every call (no per-block map + interface{} boxing).
 	hasText := text != ""
 	prompt := make([]acpPromptBlock, 0, len(images)+1)
 	for _, img := range images {
-		// R247-PERF-17: encodeImageBase64 reuses a pooled []byte scratch
-		// for the AppendEncode step, halving the per-image allocation
-		// vs the prior base64.StdEncoding.EncodeToString call.
 		prompt = append(prompt, acpPromptBlock{
 			Type: "image",
 			Source: &acpImageSource{
@@ -528,9 +395,8 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment
 		})
 	}
 	if hasText || len(prompt) == 0 {
-		// Always emit a non-nil *string so the wire frame keeps the
-		// "text" key even for empty text — matches the prior map literal
-		// `map[string]string{"type":"text","text":""}` byte-for-byte.
+		// Non-nil *string so the wire frame keeps the "text" key even for
+		// empty text.
 		t := text
 		prompt = append(prompt, acpPromptBlock{Type: "text", Text: &t})
 	}
@@ -543,9 +409,7 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment
 			Prompt:    prompt,
 		},
 	}
-	// R247-PERF-12: pooled encoder/buffer pair. json.Encoder.Encode appends
-	// its own trailing '\n' per NDJSON framing, so no manual append is
-	// required (matches the prior `data = append(data, '\n')` semantics).
+	// Pooled encoder; Encode appends the NDJSON trailing '\n' itself.
 	eb := acpEncPool.Get().(*acpEncBuf)
 	defer putACPEncBuf(eb)
 	eb.buf.Reset()
@@ -556,41 +420,20 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []Attachment
 	return err
 }
 
-// WriteInterrupt sends a session/cancel notification (no id) over stdin to
-// abort the in-flight session/prompt. ACP semantics (verified against
-// kiro 2.3.0 on 2026-05-18, see docs/rfc/multi-backend-validation.md V1):
-//
-//   - session/cancel is a JSON-RPC NOTIFICATION (no id field), not a request.
-//     Sending it as a request triggered "Method not found" on kiro.
-//   - The original session/prompt RPC is then completed with
-//     {"result":{"stopReason":"cancelled"}, "id": <prompt-id>} within ms;
-//     readLoop already turns that into a normal turn-complete event, so no
-//     extra synchronization is required here.
-//   - Up to ~10 in-flight chunks may still arrive after the cancel notification
-//     (network in-flight); the readLoop tolerates them harmlessly.
-//   - The same sessionId immediately accepts the next session/prompt.
-//
-// Returns ErrInterruptUnsupported only when no session is established yet —
-// before the initialize/session_new handshake completes there is no session
-// to cancel. Callers see ErrInterruptUnsupported as "fall back to SIGINT"
-// (Process.Interrupt).
-//
-// requestID is ignored: notifications carry no id, so naozhi has no
-// correlation to log against. The control_request_id parameter is kept in
-// the Protocol interface for the stream-json side (control_request requires
-// it).
+// WriteInterrupt sends a session/cancel notification (no id) to abort the
+// in-flight session/prompt (verified against kiro 2.3.0,
+// docs/rfc/multi-backend-validation.md V1): it must be a NOTIFICATION — as a
+// request kiro answers "Method not found"; the prompt RPC then completes with
+// stopReason "cancelled" within ms, which readLoop treats as a normal
+// turn-end; a few in-flight chunks may still arrive harmlessly. Returns
+// ErrInterruptUnsupported before a session exists (callers fall back to SIGINT).
 func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	sid := p.loadSessionID()
 	if sid == "" {
 		return ErrInterruptUnsupported
 	}
-	// R226-PERF-9: hand-build the static envelope and only json.Marshal
-	// the variable sid so we skip reflective marshalling of a tiny fixed
-	// notification. encoding/json takes a fast-path for plain string
-	// values (no struct reflection) and yields a properly escaped JSON
-	// string with surrounding quotes — identical to what the previous
-	// struct-based Marshal produced for the params.sessionId field.
-	// Newline appended for line-based ACP framing.
+	// Static envelope + json.Marshal of sid only: the plain-string fast path
+	// yields a properly escaped, quoted JSON string with no struct reflection.
 	sidJSON, err := json.Marshal(sid)
 	if err != nil {
 		return fmt.Errorf("acp marshal session/cancel: %w", err)
@@ -603,17 +446,14 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if _, err := w.Write(out); err != nil {
 		return fmt.Errorf("acp write session/cancel: %w", err)
 	}
-	// Multi-Backend RFC §10 (Sprint 6a): record only successful sends.
-	// The pre-handshake "no session yet" branch above returns early
-	// (ErrInterruptUnsupported) and intentionally does NOT count — those
-	// aren't real cancels reaching the agent.
+	// Record only successful sends; the pre-handshake early return is not a
+	// real cancel reaching the agent.
 	metrics.RecordACPCancel(p.BackendID)
 	return nil
 }
 
-// WriteUserMessageLocked ignores uuid and priority — ACP has neither concept.
-// Sessions whose protocol has SupportsReplay()==false fall back to Collect
-// mode regardless of queue.mode config (see dispatcher selection logic).
+// WriteUserMessageLocked ignores uuid and priority — ACP has neither concept,
+// so such sessions fall back to Collect mode regardless of queue.mode.
 func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []Attachment, _ string) error {
 	return p.WriteMessage(w, text, images)
 }
@@ -630,8 +470,7 @@ func (p *ACPProtocol) registerPendingControl(id int, requestID string) {
 }
 
 // takePendingControl removes and returns the caller requestID for a control
-// RPC id, or ("", false) when the id is not an in-flight control request
-// (i.e. it is the session/prompt response — the normal turn-end path).
+// RPC id; ("", false) means it is the session/prompt response (normal turn-end).
 func (p *ACPProtocol) takePendingControl(id int) (string, bool) {
 	p.ctrlMu.Lock()
 	defer p.ctrlMu.Unlock()
@@ -651,20 +490,13 @@ func (p *ACPProtocol) dropPendingControl(id int) {
 }
 
 // WriteSetModel sends a session/set_model RPC to switch the live session's
-// model. Verified on kiro 2.20.2 (F1/F13, docs/rfc/dashboard-model-effort-control.md §1):
-//
-//   - The RPC succeeds mid-turn without disturbing the in-flight prompt;
-//     the new model applies from the next turn.
-//   - kiro validates NOTHING here — an unknown modelId returns success and
-//     the failure surfaces on the next prompt (F10). Callers must validate
-//     against the availableModels manifest before invoking.
-//   - The switch is process-bound, not persisted by kiro (F2); callers own
-//     re-applying it via --model on every respawn.
-//
-// The response is intercepted by ReadEvent via pendingControl and emitted as
-// a control_ack Event carrying requestID — see the ModelSetter godoc.
-// Returns ErrSetModelUnsupported before the handshake (no session to target),
-// mirroring WriteInterrupt's pre-handshake contract.
+// model (verified on kiro 2.20.2, docs/rfc/dashboard-model-effort-control.md
+// §1): it succeeds mid-turn and applies from the next turn; kiro validates
+// NOTHING — an unknown modelId returns success and fails on the next prompt,
+// so callers validate against availableModels first; the switch is
+// process-bound, so callers re-apply --model on respawn. ReadEvent intercepts
+// the response via pendingControl (see ModelSetter). Returns
+// ErrSetModelUnsupported before the handshake.
 func (p *ACPProtocol) WriteSetModel(w io.Writer, requestID, model string) error {
 	sid := p.loadSessionID()
 	if sid == "" {
@@ -700,28 +532,18 @@ type acpSetModelParams struct {
 func (p *ACPProtocol) SupportsPriority() bool { return false }
 func (p *ACPProtocol) SupportsReplay() bool   { return false }
 
-// Capabilities returns the hard-coded Caps for ACP JSON-RPC.
-// ACP has no stdin-level interrupt, but session/cancel is a safe soft
-// cancel RPC once the initialize+session_new handshake has completed,
-// so SoftInterrupt=true. WriteInterrupt still returns
-// ErrInterruptUnsupported in the narrow pre-handshake window where
-// there is no session to cancel; callers fall back to SIGINT. The
-// SoftInterrupt bit advertises the post-handshake capability — its
-// godoc on Caps.SoftInterrupt reflects this. See RNEW-ARCH-404.
-// EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort <tier>`,
-// which kiro honours for both session/new and session/load (verified on 2.16.0).
+// Capabilities returns the hard-coded Caps for ACP JSON-RPC. SoftInterrupt=true:
+// session/cancel is a safe soft cancel once the handshake completed (before
+// that WriteInterrupt returns ErrInterruptUnsupported → SIGINT fallback).
+// EffortTier=true: BuildArgs forwards SpawnOptions.Effort as `--effort`.
 func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false,
 		EffortTier: true}
 }
 
-// ReadEventInto is the allocation-aware variant of ReadEvent
-// (R20260603-PERF-10, #1676). ACP's per-frame return shapes are diverse (zero,
-// one, or two events), so rather than thread buf through every return site we
-// reuse the caller's backing array on the common path by copying the parsed
-// events into buf when they fit. The two-event turn-end split (cap 2 in the
-// readLoop buffer) and all single-event frames avoid the fresh slice header;
-// only a hypothetical >cap result falls back to the ReadEvent allocation.
+// ReadEventInto is the allocation-aware variant of ReadEvent (#1676). ACP's
+// per-frame shapes vary (zero/one/two events), so the parsed events are copied
+// into buf when they fit; only a >cap result falls back to ReadEvent's slice.
 func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
 	events, done, err := p.ReadEvent(line)
 	if err != nil || len(events) == 0 || cap(buf) < len(events) {
@@ -732,22 +554,18 @@ func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, er
 
 func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
-	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy.
-	// R222-PERF-3 (#700) — see protocol_claude.go for the safety contract.
+	// Aliased bytes: json.Unmarshal only reads its input (#700).
 	if err := json.Unmarshal(stringToBytesUnsafe(line), &msg); err != nil {
 		return nil, false, err
 	}
 
-	// Notification: session/update
 	if msg.IsNotification() && msg.Method == "session/update" {
 		ev, done, err := p.parseSessionUpdate(msg.Params)
 		if err != nil || ev.Type == "" {
 			return nil, done, err
 		}
-		// R229-SEC-10: cap total content bytes to bound per-event CPU /
-		// memory amplification across downstream consumers (EventLog ring,
-		// JSONL persist, dashboard fan-out). Mirror of the cap applied in
-		// ClaudeProtocol.ReadEvent.
+		// Cap total content bytes to bound downstream CPU / memory amplification
+		// (EventLog ring, JSONL persist, dashboard fan-out); mirrors ClaudeProtocol.
 		if ev.Message != nil {
 			if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
 				return nil, done, fmt.Errorf("acp: event content exceeds %d bytes (got %d), dropping",
@@ -757,11 +575,9 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		return []Event{ev}, done, nil
 	}
 
-	// Notification: _kiro.dev/metadata — kiro's per-turn status frame.
-	// Carries contextUsagePercentage (0-1 float), turnDurationMs, meteringUsage.
-	// We surface it as a synthetic Type:"metadata" Event so dispatch / Process
-	// can update the SessionView normalize fields without parsing private
-	// methods elsewhere. See docs/rfc/multi-backend.md §8.8 / V10.
+	// _kiro.dev/metadata is kiro's per-turn status frame (contextUsagePercentage,
+	// turnDurationMs, meteringUsage), surfaced as a synthetic Type:"metadata"
+	// Event so Process can update SessionView. docs/rfc/multi-backend.md §8.8.
 	if msg.IsNotification() && msg.Method == "_kiro.dev/metadata" {
 		ev, done, err := parseKiroMetadata(msg.Params)
 		if err != nil || ev.Type == "" {
@@ -770,11 +586,9 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		return []Event{ev}, done, nil
 	}
 
-	// Request from agent: session/request_permission.
-	// IDAsString tolerates kiro's UUID strings as well as numeric ids; HandleEvent
-	// echoes whatever the agent sent back verbatim. RawParams carries the raw
-	// options[] so HandleEvent can pick the optionId by kind without hardcoding
-	// the vendor-specific identifier.
+	// session/request_permission: IDAsString tolerates kiro's UUID strings as
+	// well as numeric ids (HandleEvent echoes the id verbatim); RawParams carries
+	// options[] so HandleEvent can pick the optionId by kind, not by vendor name.
 	if msg.IsRequest() && msg.Method == "session/request_permission" {
 		ev := Event{Type: "permission_request", RawParams: msg.Params}
 		if id, ok := msg.IDAsString(); ok {
@@ -783,16 +597,12 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		return []Event{ev}, false, nil
 	}
 
-	// Response (turn complete for session/prompt)
 	if msg.IsResponse() {
 		// Control-RPC interception (docs/rfc/dashboard-model-effort-control.md
-		// §4.4): a response matching an in-flight session/set_model id is an
-		// acknowledgement, NOT the session/prompt turn-end. It must be routed
-		// out as a control_ack BEFORE the generic turn-end handling below —
-		// otherwise a mid-turn set_model response would flush textBuf and
-		// close the active turn (operator-visible as a truncated reply).
-		// Checked for both success and error shapes so a rejected control RPC
-		// doesn't fall through into the ErrACPRPC turn-failure path either.
+		// §4.4): a response matching an in-flight session/set_model id is an ack,
+		// NOT the session/prompt turn-end, and must be routed out BEFORE the
+		// turn-end handling below or a mid-turn set_model would flush textBuf and
+		// truncate the reply. Checked for both success and error shapes.
 		if id, ok := msg.IDAsInt(); ok {
 			if reqID, pending := p.takePendingControl(id); pending {
 				ev := Event{Type: "control_ack", SubType: "success", RPCRequestID: reqID}
@@ -804,41 +614,21 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 			}
 		}
 		if msg.Error != nil {
-			// Multi-Backend RFC §10 (Sprint 6a): record per-(backend, method,
-			// code) RPC errors. Method on a Response is unknown without
-			// caller-side correlation, so we pass "" and let operators read
-			// the labeled vector by code+backend. Future enhancement: track
-			// the in-flight method per RPC id (small table indexed by allocID).
+			// Method on a Response is unknown without caller-side correlation, so
+			// pass "" and let operators read the vector by code+backend.
 			metrics.RecordProtocolRPCError(p.BackendID, "", strconv.Itoa(msg.Error.Code))
-			// R184-SEC-M1: msg.Error.Message comes from the ACP agent (kiro /
-			// Gemini CLI / etc), a separate trust boundary. The error string
-			// flows into slog attrs (`readLoop` Warn) and surfaces on the
-			// dashboard, so untrusted control characters / bidi overrides must
-			// be scrubbed before they reach structured logs. Matches the
-			// R172-SEC-M4 / R175-SEC-P1 / R183-SEC-H1 sanitize policy.
-			//
-			// done=true: an error response to session/prompt closes that turn
-			// from kiro's POV — there will be no further events for this id.
-			// Returning done=false would leave the session stuck in
-			// state=running until the next interrupt/restart (operator-visible
-			// as "kiro session never replies"; reproduced live 2026-05-19).
-			// readLoop translates ErrACPRPC into a synthetic result event so
-			// the dashboard sees the failure instead of a silent skip.
+			// msg.Error.Message crosses a trust boundary (the ACP agent) and flows
+			// into slog attrs + the dashboard, so control chars / bidi are scrubbed.
+			// done=true: an error response to session/prompt closes that turn from
+			// kiro's POV; done=false would leave the session stuck in state=running.
+			// readLoop turns ErrACPRPC into a synthetic result event.
 			return nil, true, fmt.Errorf("%w %d: %s", ErrACPRPC,
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
-		// Decode the optional stopReason so callers can distinguish a normal
-		// turn end from a cancelled one. ACP spec values: "end_turn",
-		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
-		// the raw string in SubType — same field used by stream-json events.
-		//
-		// R227-PERF-15: short-circuit when the response carries no stopReason
-		// at all (kiro 2.3.0 commonly returns `null` or `{}` on success).
-		// json.Unmarshal of an empty / null Result still pays a reflect setup
-		// + struct-field walk; bytes.Contains is a tight scan that skips both.
-		// R235-PERF-20: length-fast-path skips even the bytes.Contains call
-		// for `null` (4 bytes) / `{}` (2 bytes) — the key cannot fit there.
+		// Decode the optional stopReason ("end_turn", "cancelled", "max_tokens",
+		// "tool_use_failure", "refusal") into SubType. kiro commonly returns `null`
+		// or `{}`, so a length check + bytes.Contains skips a pointless Unmarshal.
 		var stop struct {
 			StopReason string `json:"stopReason"`
 		}
@@ -852,39 +642,14 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		thought := p.thoughtBuf.String()
 		p.thoughtBuf.Reset()
 		p.mu.Unlock()
-		// sessionID lives on its own atomic.Pointer; read after releasing
-		// mu so the textBuf-only critical section stays narrow.
-		// R226-PERF-11.
+		// Read sid after releasing mu so the critical section stays textBuf-only.
 		sid := p.loadSessionID()
 
-		// Turn boundary emits up to THREE events:
-		//
-		//   0. (optional) A synthesised assistant frame carrying the accumulated
-		//      reasoning as a single "thinking" content block. agent_thought_chunk
-		//      notifications feed thoughtBuf only (no per-chunk EventLog entry, to
-		//      avoid flooding the log with kiro's ~300 fine chunks/turn); flushing
-		//      here renders it like Claude's thinking. Skipped when thoughtBuf is
-		//      empty. Reasoning is NOT plumbed into the result's Result field, so
-		//      it never leaks into the IM reply text.
-		//
-		//   1. A synthesised assistant frame carrying the accumulated text as
-		//      a single "text" content block. This is the only place in the
-		//      ACP path where the visible reply materialises — agent_message_chunk
-		//      notifications carry incremental text but never make it onto
-		//      EventLog (they only feed textBuf), so without this event the
-		//      dashboard would have no bubble to render.
-		//
-		//   2. A pure result event carrying cost/stopReason/sessionId. Result
-		//      is still populated so process_send.Send() can plumb the text
-		//      into SendResult.Text for passthrough callers — but the
-		//      EventLog converter (process_event_format.go) treats result
-		//      strictly as turn metadata and never derives a visible entry
-		//      from it, so the assistant frame above is the single source
-		//      of the user-facing bubble.
-		//
-		// Emitting both as a slice (rather than overloading one Event with
-		// "result also carries text") keeps every downstream consumer free
-		// of the ACP/claude special case: each event has exactly one role.
+		// Turn boundary emits up to THREE events: an optional "thinking" frame
+		// (thoughtBuf; per-chunk rows would flood EventLog), an assistant "text"
+		// frame — the ONLY place the visible reply materialises, since chunks only
+		// feed textBuf — and a pure result event. Result still carries the text
+		// for SendResult.Text, but EventLog treats result as turn metadata only.
 		var events []Event
 		if thought != "" {
 			events = append(events, Event{
@@ -916,11 +681,9 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	return nil, false, nil
 }
 
-// permissionResponse encodes a JSON-RPC response to session/request_permission.
-// ID is json.RawMessage so the original agent-supplied id (UUID string for
-// kiro 2.3.0, int for some implementations) is round-tripped verbatim — the
-// JSON-RPC spec requires the response id to match the request id exactly,
-// including type. See V7b in docs/rfc/multi-backend-validation.md.
+// permissionResponse is the JSON-RPC response to session/request_permission.
+// ID is json.RawMessage so the agent-supplied id (UUID string for kiro, int
+// elsewhere) round-trips verbatim — the spec requires an exact match, type included.
 type permissionResponse struct {
 	JSONRPC string           `json:"jsonrpc"`
 	ID      json.RawMessage  `json:"id"`
@@ -936,12 +699,10 @@ type permissionOutcome struct {
 	OptionID string `json:"optionId"`
 }
 
-// pickAllowOptionID returns the optionId of the first allow_* kind in opts,
-// or empty string when none match. Reading the optionId from the request is
-// required because vendor implementations differ on the exact identifier:
-// kiro 2.3.0 emits underscored names (allow_once / allow_always / reject_once)
-// while older ACP drafts documented hyphenated forms. Hardcoding either form
-// breaks the other backend silently.
+// pickAllowOptionID returns the optionId of the first allow_* kind in opts, or
+// "" when none match. The id must be read from the request because vendors
+// differ (kiro emits allow_once / allow_always; older ACP drafts hyphenated
+// forms) — hardcoding either breaks the other silently.
 func pickAllowOptionID(opts []ACPPermissionOption) string {
 	// Prefer allow_once over allow_always so naozhi never auto-grants
 	// persistent permissions on behalf of the user.
@@ -968,10 +729,9 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}
-	// Pick optionId from the request's options[] rather than hardcoding.
-	// Falls back to "allow_once" string when params parsing fails — better to
-	// guess than to leave a permission_request unanswered (which stalls the
-	// turn indefinitely). The unknown-vendor branch is exercised in tests.
+	// Pick optionId from the request's options[]; fall back to "allow_once" when
+	// parsing fails — better to guess than to leave a permission_request
+	// unanswered, which stalls the turn indefinitely.
 	chosen := "allow_once"
 	if len(ev.RawParams) > 0 {
 		var params ACPPermissionRequestParams
@@ -988,18 +748,10 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 		}
 	}
 
-	// id may be empty when the original request had no id (a malformed
-	// request from the agent). Echo back json null so the JSON-RPC spec is
-	// at least syntactically honored.
-	//
-	// R247-PERF-22: Atoi-then-Itoa round-trip dropped — if the original
-	// wire value parsed cleanly as an integer, the source string is already
-	// a valid JSON number literal (Atoi tolerates a strict subset of
-	// strconv.ParseInt with no leading whitespace, no underscores, no
-	// scientific notation, no surrounding quotes). Reusing the source
-	// string avoids one alloc per permission response. The non-integer
-	// branch keeps json.Marshal so escape-sensitive characters in a
-	// string-typed id stay correctly quoted.
+	// An empty id (malformed agent request) echoes json null so the JSON-RPC
+	// shape is at least syntactically honored. A string that parses via Atoi is
+	// already a valid JSON number literal, so reuse it verbatim (no alloc);
+	// otherwise json.Marshal keeps string ids quoted and escaped.
 	idRaw := json.RawMessage(`null`)
 	if ev.RPCRequestID != "" {
 		if _, err := strconv.Atoi(ev.RPCRequestID); err == nil {
@@ -1017,7 +769,7 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 			Outcome: permissionOutcome{Outcome: "selected", OptionID: chosen},
 		},
 	}
-	// R247-PERF-12: pooled encoder/buffer pair shared with WriteMessage.
+	// Pooled encoder shared with WriteMessage.
 	eb := acpEncPool.Get().(*acpEncBuf)
 	defer putACPEncBuf(eb)
 	eb.buf.Reset()
@@ -1041,28 +793,23 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 	case "agent_message_chunk":
 		var content ACPTextContent
 		if err := json.Unmarshal(update.Update.Content, &content); err != nil {
-			// Log the raw payload so diagnosing an upstream schema drift does
-			// not require reproducing the session; without this the user sees
-			// an empty reply and we have no trail.
+			// Log so an upstream schema drift is diagnosable without reproducing
+			// the session; otherwise the user sees an empty reply and no trail.
 			slog.Warn("acp: agent_message_chunk content unmarshal failed",
 				"err", err,
 				"raw_len", len(update.Update.Content))
 		} else if content.Text != "" {
 			p.mu.Lock()
-			// Cap the streaming buffer at the same ceiling we apply to
-			// finalised assistant messages. Without this, a malicious /
-			// runaway ACP peer can stream chunks indefinitely before the
-			// turn-complete event runs the contentBytes check, OOM-ing
-			// the process. We silently truncate at the boundary; the
-			// downstream contentBytes guard will surface the size to logs.
+			// Cap the streaming buffer at the finalised-message ceiling: without it
+			// a runaway ACP peer can stream chunks indefinitely before the turn-end
+			// contentBytes check runs and OOM the process. Truncate silently; the
+			// downstream guard surfaces the size to logs.
 			if room := maxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
 				if len(content.Text) <= room {
 					p.textBuf.WriteString(content.Text)
 				} else {
-					// Split on a rune boundary so a CJK / emoji codepoint
-					// straddling room does not leave invalid UTF-8 in the
-					// buffer (assistant message bytes are forwarded verbatim
-					// to the IM/dashboard renderers).
+					// Rune-boundary split so a CJK / emoji codepoint straddling room
+					// never leaves invalid UTF-8 (bytes are forwarded verbatim to renderers).
 					n := textutil.TruncateAtRuneBoundary(content.Text, room)
 					p.textBuf.WriteString(content.Text[:n])
 				}
@@ -1072,10 +819,8 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "agent_thought_chunk":
-		// Reasoning stream. Accumulate into thoughtBuf (mirrors
-		// agent_message_chunk) and flush a single "thinking" block at the
-		// turn boundary so the dashboard renders it like Claude's thinking,
-		// instead of dropping the content on the default branch.
+		// Reasoning stream: accumulate into thoughtBuf and flush one "thinking"
+		// block at turn boundary so the dashboard renders it like Claude's thinking.
 		var content ACPTextContent
 		if err := json.Unmarshal(update.Update.Content, &content); err != nil {
 			slog.Warn("acp: agent_thought_chunk content unmarshal failed",
@@ -1096,14 +841,10 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "tool_call":
-		// Initial invocation. Status defaults to "" (interpreted as
-		// "pending" by the dashboard); subsequent tool_call_update
-		// events thread by ID and may set "completed" / "failed".
-		// Multi-Backend RFC §8.3 D17 / V7 sample.
-		// Sanitize agent-supplied label fields (Title/Kind/Status) before
-		// they reach the dashboard/IM renderers — kiro is across the
-		// protocol trust boundary and these fields render directly into
-		// chip text/colour without further escaping.
+		// Initial invocation. Status defaults to "" ("pending" on the dashboard);
+		// tool_call_update events thread by ID and may set completed / failed.
+		// Label fields are sanitized: kiro is across the trust boundary and they
+		// render directly into chip text/colour.
 		sanitizedTitle := sanitizeToolCallLabel(update.Update.Title)
 		return Event{
 			Type:      "assistant",
@@ -1143,16 +884,10 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 	}
 }
 
-// allocID returns a monotonically increasing RPC id.
-//
-// R185-GO-L1: the narrowing from int64 → int is a deliberate contract —
-// RPCRequest.ID and RPCMessage.ID are `int` to keep JSON marshaling
-// idiomatic, and on 64-bit platforms (the only naozhi build target) int
-// is a full 64-bit word so the conversion is lossless for any id the
-// connector can produce in its lifetime. On a 32-bit target the top 32
-// bits would silently truncate and collide with earlier ids; we document
-// this here rather than adding a runtime guard because cross-compiling
-// naozhi to 32-bit is not supported.
+// allocID returns a monotonically increasing RPC id. The int64 → int
+// narrowing is deliberate: RPCRequest.ID is `int` for idiomatic JSON
+// marshaling and naozhi only ships 64-bit builds, where it is lossless; a
+// 32-bit target would truncate and collide ids.
 func (p *ACPProtocol) allocID() int {
 	return int(p.nextID.Add(1) - 1)
 }
@@ -1163,13 +898,9 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 }
 
 // sendAndWaitResponseMsg writes req then blocks until a matching response
-// arrives, returning the parsed RPCMessage on success. The Init flow uses
-// this for session/new where the SessionID must be parsed from result.models;
-// callers that don't need the response payload should use sendAndWaitResponse
-// (which discards the message and only surfaces the error). R232-CR-15
-// collapses the previously hand-written Marshal+WriteLine+readUntilResponse
-// triple in Init's session/new branch onto this single helper so all three
-// handshake RPCs go through the same metric-emitting code path.
+// arrives, returning the parsed RPCMessage. All handshake RPCs go through here
+// so they share one metric-emitting code path; callers that don't need the
+// payload use sendAndWaitResponse.
 func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMessage, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -1180,31 +911,19 @@ func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMe
 	}
 	resp, err := p.readUntilResponse(rw, req.ID)
 	if err != nil {
-		// Multi-Backend RFC §10 (Sprint 6a): record handshake / RPC errors
-		// at the call site since we know req.Method here. We always pass
-		// code="" — extracting the JSON-RPC code from ErrACPRPC would
-		// require re-parsing the structured error string built by
-		// fmt.Errorf("%w %d: ...") which is fragile. The metric still
-		// distinguishes "init failed" from "prompt failed" via the method
-		// label, the higher-signal split, and operators can split protocol
-		// errors from transport errors (ErrACPTimeout) via err type if
-		// needed at the slog layer.
-		// TODO(R222-OBS-MULTIBACKEND-LEGACY): once readUntilResponse returns
-		// a typed error carrying the int code (instead of formatting it
-		// into the message), pass that here as the code label.
+		// Record at the call site where req.Method is known. code="" always:
+		// extracting the JSON-RPC code from ErrACPRPC would mean re-parsing the
+		// formatted error string. Method already splits "init failed" from
+		// "prompt failed"; transport errors (ErrACPTimeout) are separable by type.
 		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
 	}
 	return resp, err
 }
 
-// normalizeContextUsage maps kiro's contextUsagePercentage onto a 0-100
-// percent range, accepting both 0-1 fractions and already-percent inputs
-// (see parseKiroMetadata header for why both forms occur in the wild).
-// Negative inputs (impossible per spec) are floored to 0; values > 100
-// are clamped — running past 100% is a real state on kiro when context
-// overflows, but the dashboard's red band already triggers at 95% and
-// the progress-bar width caps at 100%, so persisting a 116.78 just
-// confuses operators.
+// normalizeContextUsage maps kiro's contextUsagePercentage onto 0-100,
+// accepting both 0-1 fractions and already-percent inputs (see parseKiroMetadata).
+// Negatives floor to 0; values > 100 (real on kiro when context overflows) are
+// clamped because the dashboard's bands and bar width cap at 100 anyway.
 func normalizeContextUsage(v float64) float64 {
 	if v < 0 {
 		return 0
@@ -1218,71 +937,39 @@ func normalizeContextUsage(v float64) float64 {
 	return v
 }
 
-// parseKiroMetadata decodes a _kiro.dev/metadata notification into a
-// normalized Type:"metadata" Event. Field mappings (verified against kiro
-// 2.3.0, V10):
-//   - contextUsagePercentage (float)      → ContextUsagePercent (0-100, clamped)
-//   - turnDurationMs (int)                → TurnDurationMs
-//   - meteringUsage [{value, unit, unitPlural}] → MeteringUsage
-//   - effort (string)                     → Effort (low/medium/high/xhigh/max)
-//
-// kiro emits TWO metadata frames per turn (verified on kiro 2.16.0,
-// 2026-08-01): an early one carrying contextUsagePercentage + effort, then a
-// second at turn end that adds meteringUsage + turnDurationMs. Both carry
-// effort, so applyMetadata's non-empty guard keeps the tier stable even if a
-// future version omits it from one of the frames.
-//
-// contextUsagePercentage scaling: PoC validation captured kiro 2.3.0 emitting
-// 0-1 fractions (e.g. 0.0285 ≈ 2.85%), but a live deployment caught values
-// > 1 — kiro lets the counter run past 100% when context overflows, and a
-// later patch may also have reshaped the field to direct percentages. We
-// detect both shapes:
-//   - value <= 1.0  → treat as 0-1 fraction, multiply by 100
-//   - value > 1.0   → treat as already-percentage, keep as-is
-//
-// then clamp to [0, 100] so the dashboard's red/yellow/green bands and the
-// progress-bar width never fight ridiculous inputs.
-//
-// Schema drift: log-and-skip rather than erroring so a future kiro version
-// that reshapes the payload doesn't break readLoop. Returning the synthetic
-// Event with an empty Metadata pointer would cause applyMetadata to no-op,
-// so on parse failure we return the same zero-Event-skip contract used by
-// parseSessionUpdate's default branch.
+// parseKiroMetadata (below) decodes a _kiro.dev/metadata notification into a
+// Type:"metadata" Event (contextUsagePercentage, turnDurationMs, meteringUsage,
+// effort). kiro emits TWO frames per turn (verified on 2.16.0): an early one
+// with contextUsagePercentage + effort, then one at turn end adding
+// meteringUsage + turnDurationMs. contextUsagePercentage arrives both as a 0-1
+// fraction and as a percentage that may exceed 100 (see normalizeContextUsage).
+// Schema drift is log-and-skip (zero Event) so a reshaped payload never breaks readLoop.
 
-// kiroMeteringEntry mirrors a single entry of kiro's `meteringUsage`
-// array.  Promoted to a named type so the encoding/json type-descriptor
-// cache is shared across calls (anonymous nested struct types have
-// caller-local identity and force a fresh reflect-type lookup per
-// parseKiroMetadata invocation — R228-PERF-4 applied the same fix to
-// acpPromptBlock / acpImageSource).
+// kiroMeteringEntry mirrors one entry of kiro's `meteringUsage` array. Named so
+// the encoding/json type-descriptor cache is shared across calls (anonymous
+// nested struct types force a fresh reflect lookup per invocation).
 type kiroMeteringEntry struct {
 	Value      float64 `json:"value"`
 	Unit       string  `json:"unit"`
 	UnitPlural string  `json:"unitPlural"`
 }
 
-// kiroMetadataParams is the named decoder shape for the kiro metadata
-// notification body — see kiroMeteringEntry for the cache rationale.
+// kiroMetadataParams is the named decoder shape for the kiro metadata body.
 type kiroMetadataParams struct {
 	SessionID              string              `json:"sessionId"`
 	ContextUsagePercentage float64             `json:"contextUsagePercentage"`
 	TurnDurationMs         int64               `json:"turnDurationMs"`
 	MeteringUsage          []kiroMeteringEntry `json:"meteringUsage"`
-	// Effort is decoded lazily as RawMessage rather than string so a future
-	// kiro that reshapes the field (it is already a nested
-	// output_config.effort object in kiro's own settings file) cannot fail the
-	// whole-struct Unmarshal. A type error there would discard the ENTIRE
-	// frame — taking contextUsagePercentage, turnDurationMs and meteringUsage
-	// down with it and silently zeroing cost / context / duration in the
-	// dashboard. Losing a decorative new field must never cost us the fields
-	// that already shipped. See effortFromRaw.
+	// Effort is RawMessage rather than string so a future kiro that reshapes
+	// the field (already a nested output_config.effort object in kiro's own
+	// settings) cannot fail the whole-struct Unmarshal and discard the frame's
+	// context / duration / metering fields with it. See effortFromRaw.
 	Effort json.RawMessage `json:"effort"`
 }
 
 // effortFromRaw coerces the raw `effort` value to a tier string. Only a JSON
-// string is accepted; any other shape (object, array, number, null) yields ""
-// so the rest of the metadata frame survives intact. Mirrors the log-and-skip
-// posture parseKiroMetadata takes for the frame as a whole.
+// string is accepted; any other shape yields "" so the rest of the metadata
+// frame survives intact (same log-and-skip posture as parseKiroMetadata).
 func effortFromRaw(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -1294,12 +981,9 @@ func effortFromRaw(raw json.RawMessage) string {
 			"err", err, "raw", osutil.SanitizeForLog(string(raw), 64))
 		return ""
 	}
-	// The tier is process-controlled and held for the Process lifetime, then
-	// re-marshalled on every /api/sessions poll. The real vocabulary is 3-6
-	// chars; cap well above that so a pathological value cannot be retained
-	// or amplified. Mirrors the maxMeteringUnits bound on the sibling field.
-	// No ellipsis: the tier is an identifier, and "…" would corrupt the value
-	// the dashboard shows rather than usefully signalling truncation.
+	// The tier is held for the Process lifetime and re-marshalled on every
+	// /api/sessions poll; cap it so an anomalous value cannot be retained or
+	// amplified. No ellipsis: "…" would corrupt an identifier the dashboard shows.
 	return textutil.TruncateRunesNoEllipsis(s, maxEffortRunes)
 }
 
@@ -1333,28 +1017,23 @@ func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 	}, false, nil
 }
 
-// readUntilResponse reads lines until a JSON-RPC response with the matching ID is found.
-// Notifications are silently consumed during this process.
-// Times out after 30 seconds to prevent deadlocking the caller.
+// readUntilResponse reads lines until a JSON-RPC response with the matching ID
+// is found, silently consuming notifications. Times out after
+// acpHandshakeTimeout so the caller can never deadlock.
 func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage, error) {
 	type readResult struct {
 		msg *RPCMessage
 		err error
 	}
-	// R232-PERF-5: ch buffered cap 1 so a final-frame send from the goroutine
-	// after caller timeout never blocks; done is an atomic.Bool instead of a
-	// chan struct{} to drop the per-handshake chan alloc (handshake fires 3x
-	// per session start, batched startup paths produced ~9 chan allocs each).
-	// Caller signals abandonment with done.Store(true); goroutine polls it
-	// between ReadLine calls and via send()'s pre-channel-send check.
+	// ch is buffered (cap 1) so a final-frame send from the goroutine after the
+	// caller timed out never blocks; done is an atomic.Bool (no per-handshake
+	// chan alloc) that the caller sets on abandonment and the goroutine polls
+	// between ReadLine calls and inside send.
 	ch := make(chan readResult, 1)
 	var done atomic.Bool
-	// send forwards a final result to the caller; if the caller has already
-	// timed out (done.Load() == true) we drop it instead of blocking forever
-	// on ch (cap 1 means a previous send + abandonment would otherwise pin
-	// the goroutine). Without this, a slow ACP peer that emits one final
-	// frame after handshake timeout pinned the goroutine until the pipe
-	// closed, sometimes minutes later when the process itself was killed.
+	// send drops the result when the caller has already timed out; otherwise a
+	// slow ACP peer emitting one final frame after handshake timeout would pin
+	// this goroutine until the pipe closed, possibly minutes later.
 	send := func(r readResult) {
 		if done.Load() {
 			return
@@ -1362,9 +1041,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		select {
 		case ch <- r:
 		default:
-			// Channel already holds an earlier result the caller will read,
-			// or the caller raced timeout-then-load between our Load and
-			// send. Either way drop — caller cap is 1.
+			// ch already holds a result or the caller raced timeout; drop (cap is 1).
 		}
 	}
 	go func() {
@@ -1385,15 +1062,12 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			if err := json.Unmarshal(line, &msg); err != nil {
 				continue
 			}
-			// expectedID is int because naozhi-originated requests always use
-			// int ids (see allocID). msg.ID is RawMessage to tolerate string
-			// ids on agent-originated requests; for matching responses we
-			// expect numeric round-trip.
+			// naozhi-originated requests always use int ids (allocID); msg.ID is
+			// RawMessage only to tolerate string ids on agent-originated requests.
 			gotID, gotOK := msg.IDAsInt()
 			if msg.IsResponse() && gotOK && gotID == expectedID {
 				if msg.Error != nil {
-					// R184-SEC-M1: sanitize RPC error text before it bubbles
-					// up through caller slog attrs. See ReadEvent above.
+					// Sanitize agent-supplied error text before it reaches slog attrs.
 					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
 						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
 					return
@@ -1401,8 +1075,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				send(readResult{&msg, nil})
 				return
 			}
-			// Check if caller gave up (timeout). The goroutine will be fully
-			// freed when the process pipe closes; this just avoids useless work.
+			// Caller gave up (timeout): stop early rather than parse frames nobody reads.
 			if done.Load() {
 				return
 			}
@@ -1417,24 +1090,18 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		return r.msg, r.err
 	case <-timer.C:
 		done.Store(true)
-		// R184-CONCUR-H1: `done` is only polled between ReadLine calls; a
-		// reader parked inside the underlying bufio.ReadBytes syscall never
-		// observes it. If the goroutine has a shim-backed reader, poke the
-		// underlying net.Conn's read deadline so ReadBytes returns
-		// immediately with i/o timeout, letting the reader goroutine exit
-		// instead of lingering for the lifetime of the shim connection.
+		// `done` is only polled between ReadLine calls; a reader parked inside
+		// bufio.ReadBytes never observes it. For a shim-backed reader, poke the
+		// net.Conn read deadline so ReadBytes returns i/o timeout and the
+		// goroutine exits instead of lingering for the connection's lifetime.
 		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil && sl.proc.shimConn != nil {
-			// Pulse the deadline to unblock any in-flight ReadBytes, then
-			// clear it so subsequent operations on shimConn (e.g. if caller
-			// fails to Kill/Close promptly) are not prematurely cancelled.
-			// The reader goroutine observing EOF/err is what we want — not
-			// permanently arming an expired deadline.
+			// Pulse then clear the deadline so later shimConn operations are not
+			// prematurely cancelled; the reader observing an error is all we need.
 			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
 			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
 		}
-		// Non-shim readers (no SetReadDeadline hook) leak the goroutine
-		// until the underlying ACP process pipe closes — tracked as
-		// R224-GO-2 NEEDS-DESIGN. (R227-CR-10)
+		// Non-shim readers (no SetReadDeadline hook) leak the goroutine until the
+		// ACP process pipe closes — known limitation, no fix designed yet.
 		return nil, fmt.Errorf("%w (id=%d)", ErrACPTimeout, expectedID)
 	}
 }

@@ -1,8 +1,6 @@
-// File eventlog_agents.go: per-turn subagent tracking — applyEntryStateLocked, the O(1) sidecar
-// indexes (taskIndex / toolUseIndex / agentRingByToolUse), task_done
-// callbacks, and the TurnAgents / Subagents / BgSubagents accessors.
-// Split from eventlog.go per docs/rfc/eventlog-split.md (ARCH-EVENTLOG-SPLIT);
-// the EventLog struct and constructor live in eventlog.go.
+// File eventlog_agents.go: per-turn subagent tracking — applyEntryStateLocked,
+// the O(1) sidecar indexes (taskIndex / toolUseIndex / agentRingByToolUse),
+// task_done callbacks, and the TurnAgents / Subagents / BgSubagents accessors.
 
 package cli
 
@@ -14,37 +12,29 @@ import (
 )
 
 // subagentRef points to a SubagentInfo entry inside either turnAgents or
-// bgAgents. The taskIndex sidecar uses this to skip the O(N) range-scan in
-// applyEntryStateLocked's task_progress / task_done arms when a TeamCreate
-// fan-out has spawned 8+ subagents emitting 5+ progress events/s each.
-// R260528-PERF-6 (#1353).
+// bgAgents; the taskIndex sidecar uses it to skip the linear scan in
+// applyEntryStateLocked's task_progress / task_done arms (#1353).
 type subagentRef struct {
 	background bool // true ⇒ index into bgAgents, false ⇒ turnAgents
 	index      int
 }
 
-// agentRingPos pins the ring-buffer slots that hold the "agent" and
-// "task_start" entries for one ToolUseID, so SetAgentInternalID can reach
-// them in O(1). -1 means "not yet appended" (the agent entry typically
-// lands first; task_start arrives 0-200ms later via system.task_started).
-// The pair is enough because SetAgentInternalID writes exactly those two
-// entry types — no other ring entry needs the InternalAgentID/JSONLPath/
-// FirstPromptID linkage. R260528-PERF-22 (#1360).
+// agentRingPos pins the ring slots holding the "agent" and "task_start"
+// entries for one ToolUseID so SetAgentInternalID reaches them in O(1).
+// -1 means "not yet appended" (task_start lands 0-200ms after agent). Only
+// these two entry types carry the linker payload (#1360).
 type agentRingPos struct {
 	agentIdx     int
 	taskStartIdx int
 }
 
-// noAgentRingPos is the zero value used for fresh map inserts: both
-// slots unknown.
+// noAgentRingPos is the initial value for fresh map inserts: both slots unknown.
 var noAgentRingPos = agentRingPos{agentIdx: -1, taskStartIdx: -1}
 
 // SubagentInfo holds display information about an active sub-agent in the current turn.
-// Fields below "Background" are added by RFC v4 agent-team-ui §3.2.2 to surface
-// per-agent linkage (task_id/tool_use_id), lifecycle status, and aggregator
-// metrics. All values are derived from EventEntry fields or server-side tailer
-// state (§3.5.4 enrichSnapshot); none are persisted independently — the
-// canonical source remains the ring-buffered EventEntry list.
+// Everything is derived from EventEntry fields or server-side tailer state
+// (enrichSnapshot); nothing is persisted independently — the ring-buffered
+// EventEntry list stays canonical.
 type SubagentInfo struct {
 	Name       string `json:"name"`
 	Activity   string `json:"activity,omitempty"`   // task description from agent event
@@ -53,49 +43,33 @@ type SubagentInfo struct {
 	ToolUseID  string `json:"tool_use_id,omitempty"`
 	TaskType   string `json:"task_type,omitempty"`
 	// InternalAgentID mirrors EventEntry.InternalAgentID once SubagentLinker
-	// resolves the task_id → on-disk agent-<hex>.jsonl mapping. Empty before
-	// async Resolve completes (~0.1-3s grace) and on tombstoned tasks.
+	// resolves the on-disk agent-<hex>.jsonl; empty until async Resolve
+	// completes and on tombstoned tasks.
 	InternalAgentID string `json:"internal_agent_id,omitempty"`
 	Status          string `json:"status,omitempty"`        // "spawned" | "running" | "completed" | "error"
 	StartedAtMS     int64  `json:"started_at_ms,omitempty"` // task_start wall-clock
-	// Aggregator-injected fields (server.enrichSnapshot). LastTool/LastDetail
-	// come from the silent tailer's parse of the agent transcript; ToolUses
-	// and DurationMS use task_notification's usage payload when present,
-	// otherwise the tailer's running counters.
+	// Aggregator-injected (server.enrichSnapshot): LastTool/LastDetail from the
+	// silent tailer; ToolUses/DurationMS from task_notification usage when
+	// present, else the tailer's running counters.
 	LastTool   string `json:"last_tool,omitempty"`
 	LastDetail string `json:"last_detail,omitempty"`
 	ToolUses   int    `json:"tool_uses,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
-// pendingTaskDone captures a task_done callback invocation that
-// applyEntryStateLocked wants to run *after* the caller has released l.mu.
-// Deferring the dispatch keeps Append / AppendBatch's "one lock acquisition
-// per call" contract intact — firing inline and re-acquiring would let a
-// concurrent Append slip between batch entries and interleave ring-buffer
-// writes. R201-CRIT-1.
+// pendingTaskDone is a task_done callback that applyEntryStateLocked defers
+// until the caller has released l.mu, preserving Append/AppendBatch's single
+// lock acquisition (firing inline and re-locking would let a concurrent
+// Append interleave ring writes mid-batch).
 type pendingTaskDone struct {
 	TaskID string
 	Status string
 }
 
-// applyEntryStateLocked updates per-turn agent tracking for a single entry.
-// Caller MUST hold l.mu. Summary atomic writes are the caller's responsibility
-// so that AppendBatch can coalesce multiple per-type updates into one Store.
-//
-// Returns (true, pending) when the entry is a "task_done" event that warrants
-// an external callback dispatch; callers should accumulate pending patches
-// and fire them after releasing l.mu via fireTaskDoneCallbacks.
-// entryAffectsAgentState reports whether an entry's Type causes
-// applyEntryStateLocked to perform any work. The hot path is dominated
-// by `assistant_text` / `tool_use` / `tool_result` / `system` events
-// which fall through the switch's default arm with zero work; gating
-// the call site on this predicate avoids the O(N) turnAgents/bgAgents
-// scans that the default arm would still trigger inside the switch
-// dispatch when called per-entry under l.mu (R240-PERF-3 / R240-PERF-2
-// — the AppendBatch replay path runs 500-entry InjectHistory bursts
-// where typically <5% are agent-state events). The predicate must
-// stay in lockstep with applyEntryStateLocked's case labels.
+// entryAffectsAgentState reports whether applyEntryStateLocked does any work
+// for this Type. Hot-path types (assistant_text / tool_use / tool_result /
+// system) fall through its default arm, so callers gate on this to skip the
+// dispatch under l.mu. Must stay in lockstep with the case labels below.
 func entryAffectsAgentState(t string) bool {
 	switch t {
 	case "agent", "task_start", "task_progress", "task_done", "result", "user":
@@ -104,6 +78,11 @@ func entryAffectsAgentState(t string) bool {
 	return false
 }
 
+// applyEntryStateLocked updates per-turn agent tracking for a single entry.
+// Caller MUST hold l.mu. Summary atomics are the caller's job so AppendBatch
+// can coalesce them into one Store. Returns (true, pending) for a "task_done"
+// entry that warrants a callback; callers fire it after releasing l.mu via
+// fireTaskDoneCallbacks.
 func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pending pendingTaskDone) {
 	switch e.Type {
 	case "agent":
@@ -114,13 +93,9 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 		if label == "" {
 			label = "agent"
 		}
-		// task_start matching below requires a non-empty ToolUseID
-		// (`l.turnAgents[i].ToolUseID != ""` guard at line ~793). In
-		// production Claude CLI always emits ToolUseID with the agent
-		// tool_use; an empty value here means the entry will live in
-		// turnAgents/bgAgents but never link to its task_start, leaving
-		// Status stuck at "spawned" indefinitely. Surface this as a
-		// warn so the upstream emitter can be diagnosed (R20260527-COR-14).
+		// task_start matching requires a non-empty ToolUseID; without it the
+		// entry never links and Status sticks at "spawned". Warn so the
+		// upstream emitter can be diagnosed.
 		if e.ToolUseID == "" {
 			slog.Warn("cli/eventlog: agent entry missing ToolUseID; task_start linkage will be dropped",
 				"name", label,
@@ -155,19 +130,11 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 		}
 		l.turnAgentCount.Store(int32(len(l.turnAgents) + len(l.bgAgents)))
 	case "task_start":
-		// task_started arrives 0-200ms after the "agent" tool_use. Match
-		// by ToolUseID (authoritative; Agent tool_use → system.task_started
-		// carries the same id). RFC §3.2 deliberately skips InternalAgentID
-		// here — SubagentLinker.Resolve is async and fills it via
-		// SetAgentInternalID below once the on-disk jsonl is located.
-		//
-		// R260528-PERF-6 (#1353): seed taskIndex sidecar so the
-		// task_progress/task_done arms can find the SubagentInfo by TaskID
-		// without scanning turnAgents/bgAgents linearly.
-		// R240-PERF-2 (#1041): same ToolUseID→ref sidecar avoids the
-		// linear scan here too. Falls through to the legacy scan when the
-		// sidecar misses (e.g. agent entry was injected via AppendBatch
-		// history replay before the sidecar was populated).
+		// Match by ToolUseID (Agent tool_use → system.task_started carry the
+		// same id). InternalAgentID is filled later by SetAgentInternalID once
+		// the async linker locates the jsonl. Try the toolUseIndex sidecar
+		// first and seed taskIndex; fall back to the scan when the sidecar
+		// misses (e.g. agent entry arrived via history replay).
 		if e.ToolUseID != "" {
 			if ref, ok := l.toolUseIndex[e.ToolUseID]; ok {
 				var slice []SubagentInfo
@@ -219,14 +186,9 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 			}
 		}
 	case "task_progress":
-		// Update live counters from the parent stream. Aggregator in
-		// agent_tailer.go may also push meta, but the parent stream is
-		// authoritative for totals when present.
-		//
-		// R260528-PERF-6 (#1353): O(1) sidecar lookup. Ref index is stable
-		// for the turn — turnAgents/bgAgents only grow via append between
-		// result/user resets, never reorder. Falls through to the linear
-		// scan if the sidecar is stale (e.g. taskIndex reset by an
+		// The parent stream is authoritative for totals when present. Sidecar
+		// index is stable within a turn (slices only grow between resets);
+		// fall back to the scan if it is stale (e.g. taskIndex reset by an
 		// out-of-order result before a stray progress event).
 		if ref, ok := l.taskIndex[e.TaskID]; ok && e.TaskID != "" {
 			var slice []SubagentInfo
@@ -248,9 +210,6 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 				return false, pendingTaskDone{}
 			}
 		}
-		// Fallback linear scan preserves byte-identical behaviour for
-		// out-of-order progress events whose task_start did not seed the
-		// sidecar (TaskID then was "", or already cleared on result reset).
 		for i := range l.turnAgents {
 			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
 				if e.LastTool != "" {
@@ -285,7 +244,6 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 			status = "completed"
 		}
 		matched := false
-		// R260528-PERF-6 (#1353): O(1) sidecar lookup before the scan.
 		if ref, ok := l.taskIndex[e.TaskID]; ok && e.TaskID != "" {
 			var slice []SubagentInfo
 			if ref.background {
@@ -339,11 +297,9 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 		}
 		return false, pendingTaskDone{}
 	case "result", "user":
-		// R230-PERF-5: a turn that spawned dozens of subagents (e.g. a
-		// TeamCreate fan-out) inflates the backing array; subsequent
-		// SnapshotTurnAgents copies pay len*sizeof on every Snapshot even
-		// when the live count is zero. Drop the array when it grew past a
-		// typical-turn threshold so the next turn re-grows from scratch.
+		// Turn boundary. Drop backing arrays/maps that grew past a typical
+		// turn so a TeamCreate fan-out doesn't pin them (and inflate every
+		// later Snapshot copy); small ones are reused in place.
 		const subagentTurnRetainCap = 8
 		if cap(l.turnAgents) > subagentTurnRetainCap {
 			l.turnAgents = nil
@@ -355,10 +311,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 		} else {
 			l.bgAgents = l.bgAgents[:0]
 		}
-		// R260528-PERF-6 (#1353) / R240-PERF-2 (#1041): reset sidecars
-		// in lockstep with the slices they index. Drop the map when it
-		// grew past the typical turn cap so a fan-out turn doesn't pin
-		// the bucket array; small maps reuse via Go-1.21+ runtime mapclear.
+		// Sidecars reset in lockstep with the slices they index.
 		if len(l.taskIndex) > subagentTurnRetainCap {
 			l.taskIndex = nil
 		} else {
@@ -373,12 +326,8 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 				delete(l.toolUseIndex, k)
 			}
 		}
-		// R260528-PERF-22 (#1360): reset alongside sibling sidecars.
-		// A turn boundary makes prior ring positions semantically dead —
-		// any later ToolUseID rebind would land on a fresh "agent"
-		// Append that re-seeds the entry above. Drop the map when it
-		// grew past the typical fan-out cap so a TeamCreate with 8+
-		// subagents doesn't pin the bucket array indefinitely.
+		// Prior ring positions are dead after a turn boundary; a later
+		// ToolUseID rebind lands on a fresh "agent" Append that re-seeds.
 		if len(l.agentRingByToolUse) > subagentTurnRetainCap {
 			l.agentRingByToolUse = nil
 		} else {
@@ -386,10 +335,7 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 				delete(l.agentRingByToolUse, k)
 			}
 		}
-		// Most non-agent turns leave turnAgentCount at zero already;
-		// skipping the redundant atomic Store avoids cache-coherence
-		// traffic on every result event in agent-free workloads.
-		// (R227-PERF-14)
+		// Skip the redundant atomic Store on agent-free turns.
 		if l.turnAgentCount.Load() != 0 {
 			l.turnAgentCount.Store(0)
 		}
@@ -398,16 +344,10 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 }
 
 // SetOnAgentTaskDone installs a callback that fires when a "task_done"
-// EventEntry is appended. Atomic store — multiple subscribers are
-// forbidden (setting a second time replaces the first). Used by the
-// server-side tailer registry to stop tailers promptly once the parent
-// stream marks an agent task finished. nil clears.
-//
-// Prefer OnAgentTaskDone for new code: it returns a cancel func that
-// matches the Subscribe() idiom, so callback registration and channel
-// subscription share one mental model (R246-ARCH-20 / #802 P0 subset).
-// The set/clear semantics are unchanged here -- a future PR can promote
-// the field to a slice + EventFilter and unify the dispatch path itself.
+// EventEntry is appended. Single subscriber: setting again replaces the
+// previous callback; nil clears. Used by the server-side tailer registry to
+// stop tailers once the parent stream marks a task finished. Prefer
+// OnAgentTaskDone for new code (cancel-func idiom matching Subscribe).
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	if fn == nil {
 		l.onAgentTaskDoneFn.Store(nil)
@@ -416,23 +356,10 @@ func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	l.onAgentTaskDoneFn.Store(&fn)
 }
 
-// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone per
-// R246-ARCH-20 / #802 (P0 subset). Registration shape now matches
-// Subscribe(): both return a cancel func that detaches the consumer
-// without the caller needing to remember "pass nil to clear".
-//
-// Multi-subscriber semantics still resolve to last-writer-wins because
-// the underlying single-pointer storage is unchanged in this P0 step --
-// the goal here is to unify the *registration idiom* so the eventlog
-// API surface stops asking callers to choose between Set/clear-via-nil
-// (callback channel) vs Subscribe/cancel (notification channel). A
-// follow-up PR can promote the storage to a []func + filter and the
-// idiom does not have to change again.
-//
-// The returned cancel is idempotent. If fn is nil, the call is a no-op
-// and the returned cancel is also a no-op (mirrors Subscribe's pre-
-// closed-channel-on-CloseSubscribers branch in spirit: callers can
-// safely defer cancel without conditional checks).
+// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone, matching
+// Subscribe's registration idiom (#802). Storage is still a single pointer,
+// so semantics remain last-writer-wins. The returned cancel is idempotent;
+// a nil fn is a no-op with a no-op cancel so callers can defer it blindly.
 func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
 	if fn == nil {
 		return func() {}
@@ -442,20 +369,15 @@ func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
 	var cancelOnce sync.Once
 	return func() {
 		cancelOnce.Do(func() {
-			// CompareAndSwap so a later SetOnAgentTaskDone / OnAgentTaskDone
-			// caller's installed pointer is not clobbered by a stale cancel
-			// from this registration. Last-writer-wins is preserved without
-			// the cancel func acting as a delayed nil-clear on whatever the
-			// next consumer just installed.
+			// CompareAndSwap so a stale cancel cannot clear a callback that a
+			// later registration installed.
 			l.onAgentTaskDoneFn.CompareAndSwap(stored, nil)
 		})
 	}
 }
 
-// loadAgentTaskDoneFn returns the current on-task-done callback so the
-// dispatch loops (single + batch) below can read it without taking a
-// lock. Returns nil when no callback is wired — callers must treat
-// that as a no-op. R233B-PERF-6.
+// loadAgentTaskDoneFn returns the current on-task-done callback (nil when
+// none is wired) without taking a lock.
 func (l *EventLog) loadAgentTaskDoneFn() func(taskID, status string) {
 	if p := l.onAgentTaskDoneFn.Load(); p != nil {
 		return *p
@@ -463,13 +385,9 @@ func (l *EventLog) loadAgentTaskDoneFn() func(taskID, status string) {
 	return nil
 }
 
-// fireTaskDoneCallbacks dispatches previously-collected task_done callbacks
-// outside l.mu. Append/AppendBatch accumulate pendingTaskDone entries while
-// holding l.mu, release the lock cleanly, and then call this helper — so a
-// slow callback (e.g. tailer registry closing 50 tailers) cannot block
-// concurrent Appends or interleave ring-buffer writes. R201-CRIT-1.
-//
-// Safe to call with an empty slice; common case on non-task_done appends.
+// fireTaskDoneCallbacks dispatches task_done callbacks collected under l.mu
+// after the lock has been released, so a slow callback (e.g. closing 50
+// tailers) cannot block concurrent Appends. Safe with an empty slice.
 func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
 	if len(pending) == 0 {
 		return
@@ -483,12 +401,8 @@ func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
 	}
 }
 
-// fireOneTaskDoneCallback is the single-entry fast path used by Append's
-// hot path to avoid a one-slot slice literal escape. Append observes at
-// most one pending task_done per call (a single Event maps to one
-// EventEntry), so the batch-shaped helper above is unnecessary overhead
-// here. AppendBatch keeps using the slice variant because it accumulates
-// across multi-entry batches. R224-PERF-1 / R232-CR-16.
+// fireOneTaskDoneCallback is Append's single-entry fast path (one Event maps
+// to at most one task_done), avoiding a heap-escaping one-slot slice.
 func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
 	fn := l.loadAgentTaskDoneFn()
 	if fn == nil {
@@ -497,15 +411,10 @@ func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
 	fn(pending.TaskID, pending.Status)
 }
 
-// recordAgentRingPosLocked stores the ring index of an agent / task_start
-// entry that was just appended (slot = ringIdx) so SetAgentInternalID can
-// hop straight to it. Caller MUST hold l.mu and have already advanced
-// l.head past the slot. Skips entries with empty ToolUseID (those have no
-// linker-resolved payload to backfill anyway). R260528-PERF-22 (#1360).
-//
-// The map is created lazily because most sessions never spawn an agent;
-// allocating an empty map per EventLog would burn ~64B per idle session
-// across the 50-500-session deployments naozhi targets.
+// recordAgentRingPosLocked stores the ring index of a just-appended agent /
+// task_start entry so SetAgentInternalID can hop straight to it. Caller MUST
+// hold l.mu. Entries without ToolUseID have no linker payload to backfill and
+// are skipped. The map is lazy because most sessions never spawn an agent.
 func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx int) {
 	if toolUseID == "" {
 		return
@@ -528,21 +437,10 @@ func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx
 	l.agentRingByToolUse[toolUseID] = pos
 }
 
-// SetAgentInternalID writes the SubagentLinker-resolved linkage back into
-// the most recent matching "agent" / "task_start" EventEntry and the live
-// SubagentInfo. Called from the Linker's OnResolve callback.
-//
-// All four fields are written together so persistHistory's next flush captures
-// a self-contained record that SeedFromHistory can re-consume on restart
-// (RFC v4 §3.3.7). Idempotent: repeated calls with the same values are no-ops;
-// distinct internal_agent_id for the same tool_use_id overwrites (Resolve
-// should never produce divergent values for the same tool_use_id, but the
-// guard keeps the state machine simple if it ever does).
 // backfillSubagentInternalID writes internalAgentID into the live
-// SubagentInfo for toolUseID via the O(1) toolUseIndex sidecar. Returns true
-// when the indexed slot validated and was written; false (caller falls back to
-// the linear scan) when the sidecar lacks the key or the indexed slot no longer
-// matches the ToolUseID. Callers must hold l.mu. R164029-PERF-7 (#1597).
+// SubagentInfo for toolUseID via the toolUseIndex sidecar. Returns false when
+// the sidecar lacks the key or the indexed slot does not match, and the
+// caller falls back to the linear scan. Caller must hold l.mu (#1597).
 func (l *EventLog) backfillSubagentInternalID(toolUseID, internalAgentID string) bool {
 	ref, ok := l.toolUseIndex[toolUseID]
 	if !ok {
@@ -562,6 +460,11 @@ func (l *EventLog) backfillSubagentInternalID(toolUseID, internalAgentID string)
 	return true
 }
 
+// SetAgentInternalID writes the SubagentLinker-resolved linkage into the most
+// recent matching "agent" / "task_start" EventEntry and the live SubagentInfo.
+// Called from the Linker's OnResolve callback. All fields are written together
+// so the next persist flush is a self-contained record SeedFromHistory can
+// re-consume. Idempotent; a different id for the same tool_use_id overwrites.
 func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID string) {
 	if toolUseID == "" {
 		return
@@ -569,16 +472,8 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Backfill live SubagentInfo first (hot read path for Snapshot).
-	//
-	// R164029-PERF-7 (#1597): the toolUseIndex sidecar (keyed by ToolUseID,
-	// populated on the "agent" Append) gives an O(1) slot lookup, so a
-	// TeamCreate fan-out's per-resolve OnResolve callback no longer walks
-	// turnAgents+bgAgents linearly under wlock while readLoop's hot Append
-	// path queues behind it. Re-validate ToolUseID at the indexed slot (the
-	// slices only grow within a turn and the sidecar is reset on the same
-	// turn boundary, but the guard keeps a stale index from corrupting an
-	// unrelated row) and fall back to the linear scan on any miss.
+	// Live SubagentInfo first (Snapshot's hot read path): O(1) sidecar with
+	// slot re-validation, linear scan on miss.
 	if !l.backfillSubagentInternalID(toolUseID, internalAgentID) {
 		for i := range l.turnAgents {
 			if l.turnAgents[i].ToolUseID == toolUseID {
@@ -594,25 +489,13 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 		}
 	}
 
-	// R260528-PERF-22 (#1360): O(1) ring-slot lookup via the
-	// agentRingByToolUse sidecar. Every "agent" and "task_start"
-	// Append/AppendBatch call records its ring index here, so the
-	// linker's OnResolve callback no longer walks up to 50 ring slots
-	// under wlock per resolve. A TeamCreate fan-out with 8 subagents
-	// previously paid 8×O(50)=400 slot reads holding the write lock;
-	// this collapses to two direct slot writes. The legacy bounded
-	// scan stays as the fallback path so callers that lost the sidecar
-	// (entry replayed via injectHistory before this PR's deploy, or
-	// the rare ring-rotation case where the agent slot was overwritten
-	// before resolve) keep working unchanged.
+	// Ring entries via the agentRingByToolUse sidecar. Re-validate
+	// Type+ToolUseID at each slot so a ring rotation that overwrote the
+	// original entry cannot leak the payload into an unrelated row (#1360).
 	var foundAgent, foundTaskStart bool
 	if pos, ok := l.agentRingByToolUse[toolUseID]; ok {
 		if pos.agentIdx >= 0 && pos.agentIdx < l.maxSize {
 			e := &l.entries[pos.agentIdx]
-			// Re-validate Type+ToolUseID at the indexed slot so a
-			// concurrent ring rotation that overwrote the original
-			// "agent" entry with an unrelated event cannot leak the
-			// linker payload into the wrong row.
 			if e.Type == "agent" && e.ToolUseID == toolUseID {
 				e.InternalAgentID = internalAgentID
 				e.JSONLPath = jsonlPath
@@ -634,14 +517,10 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 		}
 	}
 
-	// Fallback: bounded reverse scan for entries the sidecar did not
-	// pin (e.g. a legacy persisted-history replay before the sidecar
-	// was wired, or a stale entry whose ring slot got overwritten by
-	// a turn-spanning event burst). R225-PERF-13: cap at
-	// setAgentInternalIDMaxScan and break once both expected entries
-	// (one "agent" + one "task_start" with this ToolUseID) have been
-	// backfilled so the wlock isn't held for an O(maxSize) walk while
-	// every Append call queues behind it.
+	// Fallback for entries the sidecar did not pin (history replay, or a slot
+	// overwritten by a burst): bounded reverse scan, stopping once both the
+	// agent and task_start entries are backfilled, so the wlock is never held
+	// for an O(maxSize) walk.
 	start := (l.head - l.count + l.maxSize) % l.maxSize
 	scanLimit := l.count
 	if scanLimit > setAgentInternalIDMaxScan {
@@ -677,12 +556,8 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 }
 
 // TurnAgents returns a copy of all currently active agents (foreground + background)
-// in the current turn. Both are cleared on turn boundaries (result/user events).
-// Returns nil when no agents are active.
-//
-// Fast path: most sessions have no active sub-agents at any given time, so
-// the atomic turnAgentCount lets Snapshot skip the RLock + 0-length slice
-// allocation on the common empty read. R220-PERF-6.
+// in the current turn, or nil when none. Both sets clear on turn boundaries.
+// The atomic turnAgentCount lets the common empty read skip RLock + alloc.
 func (l *EventLog) TurnAgents() []SubagentInfo {
 	if l.turnAgentCount.Load() == 0 {
 		return nil
@@ -694,7 +569,7 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 	if nTurn == 0 && nBg == 0 {
 		return nil
 	}
-	// Single-side fast paths: only one copy needed, no merge allocation.
+	// Single-side fast paths: one copy, no merge allocation.
 	if nBg == 0 {
 		return append([]SubagentInfo(nil), l.turnAgents...)
 	}
@@ -707,10 +582,8 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 	return out
 }
 
-// Subagents returns a copy of foreground turn agents only. Used by dashboard
-// snapshot enrichment (server.enrichSnapshot) where banner solo/team rows
-// need to stay separated from long-lived [bg] tags. Tests also use this to
-// pin per-agent lifecycle state without the foreground/background merge.
+// Subagents returns a copy of foreground turn agents only, for snapshot
+// enrichment that keeps banner rows separate from long-lived [bg] tags.
 func (l *EventLog) Subagents() []SubagentInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -723,7 +596,6 @@ func (l *EventLog) Subagents() []SubagentInfo {
 }
 
 // BgSubagents returns a copy of background (run_in_background) turn agents.
-// Symmetric with Subagents — see that method's doc for rationale.
 func (l *EventLog) BgSubagents() []SubagentInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
