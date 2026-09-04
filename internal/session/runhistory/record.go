@@ -1,10 +1,6 @@
 // Package runhistory persists per-run wall-clock timing for ordinary
 // (non-cron) sessions and serves the dashboard's run-history timeline and
-// summary stats. It mirrors the cron run-history model (one JSON file per
-// run + an in-memory recent ring; no index.json) but is deliberately
-// leaner: a SessionRun stores no prompt/response bodies, so the cron
-// over-cap truncation machinery is unnecessary here.
-//
+// stats: one JSON file per run + an in-memory recent ring, no index.json.
 // See docs/rfc/session-run-metrics.md.
 package runhistory
 
@@ -17,8 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// Outcome classifies how a single run terminated. It is the dashboard's
-// authoritative "did the task complete?" signal, paired with DurationMS.
+// Outcome classifies how a single run terminated.
 type Outcome string
 
 const (
@@ -28,13 +23,10 @@ const (
 	OutcomeCanceled  Outcome = "canceled"  // user interrupt / context canceled
 )
 
-// SessionRun is one round-trip ("run") through a session: from the moment
-// the user message is handed to the CLI until the turn's terminal result.
-// Wall-clock is measured by naozhi itself, not self-reported by the CLI.
-//
-// It intentionally omits prompt and response text: history must not leak
-// conversation content cross-tenant, and omitting bodies keeps each record
-// tiny (~150 B) so a per-session ring of them stays cheap.
+// SessionRun is one round-trip through a session, from handing the user
+// message to the CLI until the turn's terminal result; wall-clock measured
+// by naozhi itself. Prompt and response text are omitted so history cannot
+// leak conversation content cross-tenant and each record stays ~150 B.
 type SessionRun struct {
 	RunID       string                  `json:"run_id"`               // 16-char hex, naozhi-generated
 	SessionKey  string                  `json:"session_key"`          // {channel}:{chatType}:{id}
@@ -48,8 +40,7 @@ type SessionRun struct {
 	CostUSD     float64                 `json:"cost_usd,omitempty"`
 }
 
-// SessionRunStats is the aggregate view shown above a session's timeline.
-// Computed on demand from the recent ring; never persisted.
+// SessionRunStats is the aggregate view above a session's timeline; never persisted.
 type SessionRunStats struct {
 	Count        int     `json:"count"`
 	TotalMS      int64   `json:"total_ms"`
@@ -62,8 +53,7 @@ type SessionRunStats struct {
 	TimeoutCnt   int     `json:"timeout_count"`
 }
 
-// hexIDLen is the byte length of a generated run ID's entropy (8 bytes ->
-// 16 hex chars), matching the cron run-ID shape.
+// hexIDLen is the run-ID entropy in bytes (8 -> 16 hex chars), like cron.
 const hexIDLen = 8
 
 // NewRunID returns a fresh 16-char lowercase-hex run identifier.
@@ -75,9 +65,9 @@ func NewRunID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// isValidRunID reports whether s is a non-empty lowercase-hex string of at
-// most 64 bytes — the gate that keeps stray filenames (temp files, dotfiles,
-// path-traversal attempts) out of the on-disk run directory and List output.
+// isValidRunID reports whether s is non-empty lowercase hex of at most 64
+// bytes — the gate keeping stray filenames / path traversal out of the run
+// directory and List output.
 func isValidRunID(s string) bool {
 	if len(s) == 0 || len(s) > 64 {
 		return false

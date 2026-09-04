@@ -9,10 +9,8 @@ import (
 )
 
 // Classify maps a Send/SendPassthrough error to an (Outcome, ErrorClass)
-// pair. A nil error is a completed run. Timeout sentinels come from the cli
-// package (session already depends on cli); generic context errors map to
-// runtelemetry's shared error classes so the wire value stays consistent
-// with cron/sysession without introducing a session->cron dependency.
+// pair; nil is a completed run. Context errors map to runtelemetry's shared
+// classes so the wire value matches cron/sysession without a cron import.
 func Classify(err error) (Outcome, runtelemetry.ErrorClass) {
 	switch {
 	case err == nil:

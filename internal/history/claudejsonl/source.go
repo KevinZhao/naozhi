@@ -1,18 +1,10 @@
 // Package claudejsonl implements history.Source on top of the Claude Code
 // CLI's per-session JSONL transcripts under ~/.claude/projects/.
 //
-// Each session key may span several Claude session IDs (a "chain") — the
-// CLI rotates IDs on /new, --resume, or workspace switches, and naozhi
-// tracks the chain in ManagedSession.prevSessionIDs. LoadBefore walks the
-// chain newest → oldest via discovery.LoadHistoryChainBeforeCtx, which
-// handles the reverse JSONL tail-read and the strictly-less-than filter.
-//
-// The chain is supplied through a callback rather than a snapshot: the
-// session can mutate its chain (new /new, resume, workspace change) while
-// a pagination request is in flight, and we want the next page to see
-// the latest chain. The callback is expected to return a consistent
-// oldest → newest slice; ManagedSession.SnapshotChainIDs is responsible
-// for the locking.
+// A session key may span several Claude session IDs (a "chain"; the CLI
+// rotates IDs on /new, --resume, workspace switches). LoadBefore walks the
+// chain newest → oldest via discovery.LoadHistoryChainBeforeCtx. The chain is
+// supplied through a callback so a page in flight sees the latest chain.
 package claudejsonl
 
 import (
@@ -23,50 +15,33 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-// ChainIDsFunc returns the Claude session ID chain for a session, in
-// oldest → newest order (matching ManagedSession.prevSessionIDs + current
-// session ID). Re-evaluated on every LoadBefore call so the result always
-// reflects the latest chain state.
+// ChainIDsFunc returns the Claude session ID chain, oldest → newest.
+// Re-evaluated on every LoadBefore call.
 type ChainIDsFunc func() []string
 
 // Source is the claude-code JSONL-backed history.Source.
 type Source struct {
-	claudeDir string       // ~/.claude (or override) — empty disables the source
-	cwd       string       // session workspace, used for fast path in projDirName
-	chainIDs  ChainIDsFunc // produces the current session-ID chain
+	claudeDir string // ~/.claude (or override) — empty disables the source
+	cwd       string
+	chainIDs  ChainIDsFunc
 }
 
-// New constructs a Source. If claudeDir is empty or chainIDs is nil, the
-// Source degrades to a zero-result implementation (equivalent to history.Noop)
-// so misconfiguration never produces a nil-pointer panic at call time.
+// New constructs a Source. Empty claudeDir or nil chainIDs yields a
+// zero-result Source rather than a nil-pointer panic.
 func New(claudeDir, cwd string, chainIDs ChainIDsFunc) *Source {
 	return &Source{claudeDir: claudeDir, cwd: cwd, chainIDs: chainIDs}
 }
 
-// init registers this backend's factory with cli.Wrapper so any
-// *cli.Wrapper constructed with BackendID="claude" picks up the
-// claude-jsonl history source automatically. The registration is
-// keyed only on the canonical backend ID — the empty-string alias
-// is handled by cli.normalizeBackendID before the lookup.
-//
-// Importing this package anywhere (session.NewRouter does so today;
-// future cmd-level wireup will likely consolidate) triggers the
-// registration via Go's init order. Sprint 1a: keep the binding
-// here so session can drop its direct dispatch in attachHistorySource
-// without simultaneously moving the import.
+// init registers the claude history factory with cli and wires
+// discovery.ThumbnailFn (the sole injection point). Without ThumbnailFn image
+// blocks in rehydrated JSONL history are silently dropped — no build error.
 func init() {
 	cli.RegisterHistoryFactory("claude", factory)
-	// Sole injection point for discovery.ThumbnailFn. Without it, image
-	// blocks in rehydrated Claude JSONL history are silently dropped (text
-	// still renders, no panic). Reuses cli.MakeThumbnail's OOM pre-check,
-	// concurrency semaphore, and panic recovery instead of re-decoding here.
-	// Removing this line is a silent image-loss regression, not a build error.
 	discovery.ThumbnailFn = cli.MakeThumbnail
 }
 
-// factory is the cli.HistoryFactoryFn for claude-code. Returns
-// cli.NoopHistorySource when the wiring lacks a ClaudeDir so misconfig
-// at the router level still yields a non-nil source.
+// factory returns cli.NoopHistorySource when the wiring lacks a ClaudeDir so
+// a router-level misconfig still yields a non-nil source.
 func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
 	if deps.ClaudeDir == "" {
 		return cli.NoopHistorySource{}
@@ -74,9 +49,8 @@ func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource
 	return New(deps.ClaudeDir, s.Workspace(), s.SnapshotChainIDs)
 }
 
-// LoadBefore returns up to `limit` entries strictly older than beforeMS,
-// in chronological order. Walks the session chain newest → oldest and
-// stops as soon as the limit is met or ctx is cancelled.
+// LoadBefore returns up to `limit` entries strictly older than beforeMS, in
+// chronological order, walking the session chain newest → oldest.
 func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -88,9 +62,7 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	// discovery returns entries in chronological order within each JSONL
-	// and flattens oldest-chain-first; the strict-< filter is applied
-	// against each line during the reverse read, so we never have to
-	// post-filter here.
+	// discovery applies the strict-< filter during the reverse read and
+	// flattens oldest-chain-first; no post-filter needed here.
 	return discovery.LoadHistoryChainBeforeCtx(ctx, s.claudeDir, ids, s.cwd, beforeMS, limit), nil
 }

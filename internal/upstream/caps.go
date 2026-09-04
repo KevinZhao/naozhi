@@ -1,16 +1,7 @@
 // upstream/caps.go: derive the reverse-node Capabilities slice that
-// accompanies the register frame.
-//
-// Sprint 6b of docs/rfc/multi-backend.md spec'd this auto-derivation
-// so that an operator running `naozhi` as a sub-node behind a primary
-// no longer needs to maintain a hand-curated `upstream.capabilities`
-// list parallel to the backend.Profile registry. Adding kiro / gemini
-// to RegisterDefaults at compile time automatically widens what this
-// node advertises.
-//
-// The output is deterministic (sort.Strings) so packet captures and
-// primary-side logs match across reconnects — useful for diffing
-// "what did this node advertise yesterday vs now" in incident triage.
+// accompanies the register frame. Auto-derived from the backend.Profile
+// registry (docs/rfc/multi-backend.md) so a sub-node needs no hand-curated
+// `upstream.capabilities` list; output is sorted for deterministic wire output.
 package upstream
 
 import (
@@ -19,17 +10,10 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
-// derivedCaps walks every registered backend.Profile and returns the
-// sorted union of RequiredNodeCaps. Empty when:
-//   - no profiles are registered (test paths that skip
-//     backend.RegisterDefaults), or
-//   - every registered profile has nil/empty RequiredNodeCaps (the
-//     legacy claude-only build).
-//
-// The empty-result branch returns nil rather than []string{} so the
-// resulting ReverseMsg omits the Capabilities field via omitempty —
-// preserving wire compatibility with primaries on a naozhi version
-// that predates capability negotiation.
+// derivedCaps returns the sorted union of RequiredNodeCaps across every
+// registered backend.Profile. Returns nil (not []string{}) when empty so the
+// ReverseMsg omits Capabilities via omitempty, keeping wire compatibility
+// with primaries that predate capability negotiation.
 func derivedCaps() []string {
 	var seen map[string]struct{}
 	for _, p := range backend.All() {

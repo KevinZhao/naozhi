@@ -1,71 +1,41 @@
-// Package sessionkey owns the canonical key prefixes used to namespace
-// router sessions across subsystems (cron / sys / scratch).
+// Package sessionkey owns the canonical key prefixes that namespace
+// router sessions across subsystems (cron / sys / scratch / project).
 //
-// Why a dedicated leaf package: the prefixes were previously defined in
-// internal/session and re-used by internal/cron / internal/sysession via
-// session.IsCronKey / session.IsSysKey / session.IsScratchKey. That
-// forced cron and sysession to import session just for these constants,
-// which contributed to the cron → session reverse import cycle the
-// cron-sysession-merge RFC closes. Moving the prefix vocabulary to a
-// dedicated leaf lets every subsystem reference the same constants
-// without depending on each other.
-//
-// Invariant: this package MUST NOT import any other internal/* package.
-// Enforced by depguard in .golangci.yml — a future change that adds an
-// internal import here breaks lint.
+// Invariant: this package MUST NOT import any other internal/* package
+// (enforced by depguard in .golangci.yml), so every subsystem can share it.
 package sessionkey
 
 import "strings"
 
-// Prefix constants. Each is the literal substring written at the start
-// of a router session key to identify which subsystem owns the session.
-//
-// Wire-stable: these strings appear in dashboard WS subscriptions, in
-// session.Router lookups, in cron_jobs.json cron stub keys, etc.
-// Renaming requires a coordinated migration across the entire codebase.
+// Prefix constants: the literal substring at the start of a router session
+// key identifying the owning subsystem. Wire-stable: they appear in dashboard
+// WS subscriptions, session.Router lookups and cron_jobs.json stub keys.
 const (
 	CronKeyPrefix    = "cron:"
 	SysKeyPrefix     = "sys:"
 	ScratchKeyPrefix = "scratch:"
 	// ProjectKeyPrefix is the namespace prefix for project-scoped session
-	// keys. The canonical key shape is `project:{name}:planner`. R040034-ARCH-2
-	// (#1412): consolidated from the former internal/keyspec leaf package — it
-	// shared this namespace concept with internal/sessionkey but lived as a
-	// parallel zero-dep leaf, splitting the "session-key vocabulary" across
-	// two indistinguishable packages. A single owner is now the source of
-	// truth for cron / sys / scratch / project prefixes.
+	// keys; the canonical key shape is `project:{name}:planner`.
 	ProjectKeyPrefix = "project:"
 )
 
 // DashboardPlatform is the platform segment (parts[0]) of dashboard-
-// originated session keys. Used together with DashboardProjectChatType
-// to identify project-stable keys without confusing them with the
-// planner namespace (whose platform segment is "project").
+// originated session keys.
 const DashboardPlatform = "dashboard"
 
 // DashboardProjectChatType is the chatType segment (parts[1]) of a
-// project-level stable dashboard session key. The canonical shape is
+// project-level stable dashboard session key, shaped
 // `dashboard:pj:<workspace-hash>:<agent>` (see internal/session.ProjectStableKey).
-//
-// Deliberately "pj" rather than "project": the planner namespace already
-// uses ProjectKeyPrefix ("project:") with the platform segment equal to
-// "project". A chatType of "project" here would invite a future
-// `parts[1]=="project"` check to misclassify a dashboard stable key as a
-// planner key. "pj" shares no token with the planner namespace, so the
-// two stay unambiguous at both the platform and chatType segments.
+// "pj" rather than "project" so no segment collides with the planner
+// namespace (`project:...`), keeping the two unambiguous.
 const DashboardProjectChatType = "pj"
 
-// PlannerKeySuffix is the trailing token that distinguishes a planner
-// key from any future `project:{name}:<role>` sub-roles. Today every
-// `project:` key is a planner key, but the constant exists so adding
-// a new role (e.g. `project:foo:tasks`) does not require rewriting
-// the suffix-match logic in two places. R040034-ARCH-2 (#1412):
-// migrated from internal/keyspec.
+// PlannerKeySuffix is the trailing token that distinguishes a planner key
+// from any future `project:{name}:<role>` sub-role.
 const PlannerKeySuffix = ":planner"
 
-// CronKey returns the canonical router key for a cron job ID.
-// Format: "cron:<jobID>" — jobID typically a 16-char hex from
-// cron.generateHexID.
+// CronKey returns the canonical router key "cron:<jobID>" (jobID is a
+// 16-char hex from cron.generateHexID).
 func CronKey(jobID string) string { return CronKeyPrefix + jobID }
 
 // SysKey returns the canonical router key for a system-session daemon ID.
@@ -86,31 +56,19 @@ func IsSysKey(s string) bool { return strings.HasPrefix(s, SysKeyPrefix) }
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
 
 // IsDashboardProjectKey reports whether key is a project-level stable
-// dashboard session key: platform segment (parts[0]) == "dashboard" AND
-// chatType segment (parts[1]) == "pj". Pure string scan, no allocation —
-// keeps the sessionkey leaf package zero-dependency.
-//
-// A key has the shape `{platform}:{chatType}:{id}:{agent}`. We only need
-// the first two segments, so we scan for the second colon rather than
-// splitting the whole key. Returns false for any key with fewer than the
-// `dashboard:pj:` prefix, including the planner namespace (`project:...`,
-// platform != "dashboard") and scratch/cron/sys keys.
+// dashboard session key (`dashboard:pj:<id>...`). Pure prefix scan, no
+// allocation; false for planner (`project:...`), scratch, cron and sys keys.
 func IsDashboardProjectKey(key string) bool {
 	const prefix = DashboardPlatform + ":" + DashboardProjectChatType + ":"
 	if !strings.HasPrefix(key, prefix) {
 		return false
 	}
-	// Require a non-empty id segment after the prefix so a bare
-	// "dashboard:pj:" (missing workspace hash) is not accepted.
+	// A bare "dashboard:pj:" (missing workspace hash) is not accepted.
 	return len(key) > len(prefix)
 }
 
 // CronJobIDFromKey returns the trailing job ID of a cron key, or the empty
-// string when s is not a cron key. Convenience for the common pattern
-//
-//	if IsCronKey(s) { jobID := s[len(CronKeyPrefix):] }
-//
-// where the conditional + slice arithmetic gets duplicated across handlers.
+// string when s is not a cron key.
 func CronJobIDFromKey(s string) string {
 	if !IsCronKey(s) {
 		return ""
@@ -118,30 +76,17 @@ func CronJobIDFromKey(s string) string {
 	return s[len(CronKeyPrefix):]
 }
 
-// PlannerKeyFor returns the canonical planner session key for the
-// given project name. Callers must have validated `name` against the
-// project name regex (see internal/project.ValidateProjectName) —
-// sessionkey performs no validation so it can stay zero-dep.
-//
-// Format: `project:{name}:planner`. R040034-ARCH-2 (#1412): migrated
-// from internal/keyspec. Migration of existing literals must continue
-// to satisfy:
-//
-//	PlannerKeyFor("foo") == "project:foo:planner"
-//
-// which is asserted by both internal/project and internal/session
-// format-locked tests.
+// PlannerKeyFor returns the canonical planner session key
+// `project:{name}:planner`. Callers must have validated `name` against the
+// project name regex (internal/project.ValidateProjectName); sessionkey
+// performs no validation so it can stay zero-dep.
 func PlannerKeyFor(name string) string {
 	return ProjectKeyPrefix + name + PlannerKeySuffix
 }
 
-// IsPlannerKey reports whether the given key is a planner session
-// key. Returns false for both the empty-name edge case
-// (`project::planner`) and any key missing the prefix or suffix.
-//
-// The empty-name rejection mirrors the pre-extraction logic so that
-// any caller migrating to sessionkey sees identical behaviour.
-// R040034-ARCH-2 (#1412): migrated from internal/keyspec.
+// IsPlannerKey reports whether key is a planner session key. Returns false
+// for the empty-name edge case (`project::planner`) and any key missing
+// the prefix or suffix.
 func IsPlannerKey(key string) bool {
 	if !strings.HasPrefix(key, ProjectKeyPrefix) {
 		return false
@@ -149,24 +94,13 @@ func IsPlannerKey(key string) bool {
 	if !strings.HasSuffix(key, PlannerKeySuffix) {
 		return false
 	}
-	// Reject the boundary case "project::planner" — the {name} segment
-	// must be non-empty for the key to identify a real project.
+	// The {name} segment must be non-empty to identify a real project.
 	return len(key) > len(ProjectKeyPrefix)+len(PlannerKeySuffix)
 }
 
-// PlannerNameFromKey extracts {name} from a planner key. Returns the
-// empty string for any non-planner input (including keys shorter than
-// prefix+suffix, missing prefix/suffix, or the empty-name edge case
-// `project::planner`).
-//
-// R20260526-CR-009: previously the function sliced unconditionally and
-// would panic on `slice bounds out of range` when given a too-short
-// input. The godoc told callers to gate on IsPlannerKey first, but a
-// silent caller bug would crash with an uninformative runtime panic.
-// The self-defense IsPlannerKey gate makes the function total: well-
-// formed callers pay one extra HasPrefix+HasSuffix check (cheap), ill-
-// formed callers get a typed empty-string instead of a panic.
-// R040034-ARCH-2 (#1412): migrated from internal/keyspec.
+// PlannerNameFromKey extracts {name} from a planner key. Returns the empty
+// string for any non-planner input (the IsPlannerKey gate makes the
+// function total instead of panicking on too-short input).
 func PlannerNameFromKey(key string) string {
 	if !IsPlannerKey(key) {
 		return ""

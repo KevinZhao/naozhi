@@ -15,22 +15,11 @@ import (
 )
 
 // RetiredStore tracks the wall-clock instant a session left the live sidebar
-// (Router.Reset / Router.Remove → notifyKeyRetired). The dashboard history
-// drawer sorts by this instant so "the most recently closed session" appears
-// at the top regardless of when its JSONL was last appended — JSONL mtime is
-// only the last-message timestamp, which can be days older than the moment
-// the operator actually closed the panel.
-//
-// Persisted as a single JSON file alongside sessions.json so the order
-// survives naozhi restarts. Best-effort: a corrupt/missing file degrades to
-// "no entries known", and the dashboard falls back to LastActive ordering.
-//
-// Concurrency: all public methods acquire mu. Save() is debounced — callers
-// invoke MarkRetired in the lifecycle hot path (no I/O on the critical
-// section) and a periodic flusher (or explicit Flush at shutdown) writes to
-// disk. The on-disk file may lag the in-memory state by up to flushInterval;
-// this is acceptable because RetiredAt is a UX hint, not a correctness
-// invariant.
+// (Router.Reset / Router.Remove → notifyKeyRetired) so the dashboard history
+// drawer can sort by it rather than by JSONL mtime. Persisted as one JSON
+// file alongside sessions.json; best-effort — a corrupt/missing file degrades
+// to LastActive ordering. All public methods take mu; MarkRetired does no I/O
+// and Save runs from a periodic flusher, so disk may lag memory (a UX hint).
 type RetiredStore struct {
 	path string
 
@@ -38,31 +27,20 @@ type RetiredStore struct {
 	entries map[string]int64 // sessionID → unix ms
 	dirty   bool
 
-	// gen counts mutations to entries. Save snapshots gen under the lock
-	// alongside the entries copy, then after the unlocked marshal+write only
-	// clears dirty when gen is unchanged. This closes the window where a
-	// concurrent MarkRetired (lifecycle hot path, runs while Save is doing its
-	// unlocked WriteFileAtomic+fsync) sets dirty=true for an entry that the
-	// in-flight write does NOT include — without the gen guard Save would
-	// unconditionally clear dirty and that entry would never be flushed,
-	// losing it across a restart. R20260610-085718-LB-6 (#2011).
+	// gen counts mutations. Save snapshots it with the entries copy and only
+	// clears dirty afterwards if gen is unchanged; otherwise a MarkRetired
+	// landing during the unlocked write would have dirty cleared for an entry
+	// the write did not include, losing it across a restart (#2011).
 	gen uint64
 
-	// maxEntries caps how many sessionIDs the store will retain after a
-	// Prune call. Without a cap a long-running deployment grows the JSON
-	// file without bound — the history drawer only displays sessions
-	// from the last 7 days but the store has no inherent expiry knob
-	// because RetiredAt timestamps may post-date the corresponding JSONL
-	// mtime by weeks (tab leaves the panel long after the chat ended).
-	// Default 4096 = ~80 KB on disk; a busy operator closes ~50 sessions
-	// per week so the cap protects against pathological cases without
-	// trimming legitimate history.
+	// maxEntries caps how many sessionIDs survive Prune; RetiredAt may post-date
+	// the JSONL mtime by weeks, so the store has no natural expiry. Default
+	// 4096 (~80 KB) far exceeds a busy operator's ~50 closed sessions per week.
 	maxEntries int
 }
 
-// retiredStoreFileV1 is the on-disk schema. Version field reserved for
-// future migrations — readers tolerate unknown fields via json.Unmarshal's
-// default behaviour, writers always emit the current version.
+// retiredStoreFileV1 is the on-disk schema; Version is reserved for future
+// migrations and readers tolerate unknown fields.
 type retiredStoreFileV1 struct {
 	Version int              `json:"version"`
 	Entries map[string]int64 `json:"entries"`
@@ -70,19 +48,13 @@ type retiredStoreFileV1 struct {
 
 const retiredStoreVersion = 1
 
-// DefaultRetiredStoreMaxEntries is the cap used when callers don't override
-// it via NewRetiredStoreWithCap. Exposed as a constant so tests can assert
-// the production value without re-deriving the math.
+// DefaultRetiredStoreMaxEntries is the cap used when callers don't override it
+// via NewRetiredStoreWithCap.
 const DefaultRetiredStoreMaxEntries = 4096
 
-// NewRetiredStore constructs a store backed by `path`. An empty path
-// disables persistence (in-memory only) — used by tests and by deployments
-// without a state directory configured. Returns a usable store even when
-// the file does not yet exist; the first Save() will create it.
-//
-// Load errors are logged via the error return but do not block construction:
-// a corrupt store should not prevent naozhi from starting, since RetiredAt
-// is purely a UX sort hint.
+// NewRetiredStore constructs a store backed by `path` (empty = in-memory only);
+// the first Save() creates the file. Load errors are returned but do not block
+// construction, since RetiredAt is purely a UX sort hint.
 func NewRetiredStore(path string) (*RetiredStore, error) {
 	return NewRetiredStoreWithCap(path, DefaultRetiredStoreMaxEntries)
 }
@@ -132,12 +104,9 @@ func (rs *RetiredStore) load() error {
 }
 
 // MarkRetired records `now` as the instant `sessionID` left the live sidebar.
-// Idempotent across multiple calls — the most recent timestamp wins so a
-// Reset → Remove (rare but legal) sequence reports the Remove instant.
-// sessionID may be empty for sessions that never had a UUID assigned (e.g.
-// resume failed before the CLI returned init); callers should skip those.
-//
-// Marks dirty for the next Save(); does not perform I/O.
+// The most recent timestamp wins, so a Reset → Remove sequence reports the
+// Remove instant. An empty sessionID (resume failed before init) is ignored.
+// Marks dirty for the next Save(); does no I/O.
 func (rs *RetiredStore) MarkRetired(sessionID string, now time.Time) {
 	if sessionID == "" {
 		return
@@ -179,22 +148,17 @@ func (rs *RetiredStore) Snapshot() map[string]int64 {
 	return out
 }
 
-// Save writes the current map atomically to disk via tmpfile + rename.
-// No-op when the path is empty or the store has not been mutated since the
-// last successful Save. Returns nil on a no-op.
-//
-// Callers may invoke Save from a periodic ticker (the typical wiring) and
-// once at shutdown to flush the final retirement.
+// Save writes the current map atomically to disk; a no-op (nil) when the path
+// is empty or nothing changed since the last successful Save. Called from a
+// periodic ticker and once at shutdown.
 func (rs *RetiredStore) Save() error {
 	rs.mu.Lock()
 	if rs.path == "" || !rs.dirty {
 		rs.mu.Unlock()
 		return nil
 	}
-	// Snapshot under lock so the JSON encode runs on a stable copy and
-	// concurrent MarkRetired calls don't race the marshaller. Capture gen
-	// alongside the snapshot so we can detect mutations that land during the
-	// unlocked write window (see the gen field doc / #2011).
+	// Snapshot under lock so the encode runs on a stable copy; gen detects
+	// mutations that land during the unlocked write window (#2011).
 	snap := make(map[string]int64, len(rs.entries))
 	for k, v := range rs.entries {
 		snap[k] = v
@@ -215,19 +179,12 @@ func (rs *RetiredStore) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir retired store: %w", err)
 	}
-	// osutil.WriteFileAtomic handles tmpfile + fsync + rename + dir-fsync,
-	// replacing the inlined boilerplate (and adding a directory fsync that
-	// the previous code lacked).
 	if err := osutil.WriteFileAtomic(rs.path, data, 0o600); err != nil {
 		return fmt.Errorf("write retired store: %w", err)
 	}
 
 	rs.mu.Lock()
-	// Only clear dirty when no mutation landed during the unlocked write
-	// window. A concurrent MarkRetired bumps gen for an entry the just-written
-	// snapshot did not contain; clearing dirty unconditionally would strand
-	// that entry until the next mutation (and lose it entirely if it was the
-	// last one before shutdown). R20260610-085718-LB-6 (#2011).
+	// Only clear dirty if no mutation landed during the unlocked write (#2011).
 	if rs.gen == savedGen {
 		rs.dirty = false
 	}
@@ -254,9 +211,7 @@ func (rs *RetiredStore) Prune(cutoffMs int64) int {
 			id string
 			ts int64
 		}
-		// O(N log N) trim — Prune is called on a slow ticker (≥1m) so the
-		// extra sort is negligible vs. the I/O the missed prune would
-		// cost. Sort ascending by ts; drop the prefix that exceeds the cap.
+		// Prune runs on a slow (≥1m) ticker, so an O(N log N) sort is fine.
 		all := make([]kv, 0, len(rs.entries))
 		for k, v := range rs.entries {
 			all = append(all, kv{k, v})

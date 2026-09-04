@@ -8,13 +8,9 @@ import (
 	"syscall"
 )
 
-// PidAlive checks whether a process with the given PID still exists.
-// Returns true if the process is alive (or owned by another user — EPERM).
-//
-// Windows build-only stub: naozhi is a Linux daemon (see signal_windows.go);
-// this file keeps GOOS=windows compilation green without changing runtime
-// behaviour on the supported platform. Uses os.FindProcess + Signal(0) because
-// syscall.Kill is not available on Windows.
+// PidAlive reports whether a process with the given PID exists (EPERM counts
+// as alive). Windows build stub via os.FindProcess + Signal(0); naozhi is a
+// Linux daemon (see signal_windows.go).
 func PidAlive(pid int) bool {
 	if pid <= 0 {
 		return false

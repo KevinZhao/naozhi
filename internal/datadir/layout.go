@@ -1,22 +1,8 @@
 // Package datadir centralises the on-disk layout policy for naozhi's data
-// root. Before this package each subsystem (session store, event log, cron
-// jobs + runs) independently joined its own paths under <dataDir>/ and ran
-// its own os.MkdirAll(..., 0o700) with subtly different hardening, so adding
-// a fourth subsystem duplicated the dance again and there was no single
-// source of truth for "given the data root, where does X live and how is its
-// directory mode/symlink policy enforced". R250-ARCH-13 (#1175).
-//
-// Two halves:
-//   - Path constructors (SessionsPath / EventsRoot / CronJobsPath /
-//     CronRunsRoot) name the canonical location of each subsystem's state
-//     relative to a shared <dataDir>.
-//   - EnsureDir is the shared "create + lock down" primitive: MkdirAll at
-//     0o700, then a symlink / non-directory guard and a perm-tightening
-//     chmod so a pre-existing 0o755 tree (laid down by an older version or
-//     raced ahead by another local user) is corrected, and a redirect via a
-//     planted symlink is refused. This mirrors the hardening the cron run
-//     store grew (R234-SEC-4 / R245-SEC-1 / R247-SEC-12) so new adopters
-//     inherit it for free instead of re-deriving a weaker version.
+// root: path constructors name where each subsystem's state lives under
+// <dataDir>, and EnsureDir is the shared create-and-lock-down primitive
+// (0o700, symlink/non-directory guard, perm tightening) so every adopter
+// inherits the same hardening (#1175).
 package datadir
 
 import (
@@ -27,15 +13,13 @@ import (
 	"path/filepath"
 )
 
-// DirMode is the contractual mode for every naozhi-owned data directory.
-// 0o700 keeps session state, event logs, and cron job/run JSON (which embed
-// script source, env values, and output summaries) unreadable by other OS
-// users on a shared host.
+// DirMode is the mode for every naozhi-owned data directory: 0o700 keeps
+// session state, event logs and cron JSON (script source, env values, output)
+// unreadable by other OS users on a shared host.
 const DirMode fs.FileMode = 0o700
 
-// SessionsPath returns the session store file (<dataDir>/sessions.json).
-// Sidecars (meta, known-ids, workspace-overrides) are derived from this path
-// by the session package and live in the same directory.
+// SessionsPath returns the session store file (<dataDir>/sessions.json);
+// sidecars live in the same directory.
 func SessionsPath(dataDir string) string {
 	if dataDir == "" {
 		return ""
@@ -52,11 +36,7 @@ func EventsRoot(dataDir string) string {
 }
 
 // UISettingsPath returns the dashboard UI-preferences file
-// (<dataDir>/ui-settings.json). Holds operator-chosen presentation state
-// (today: theme) that the dashboard used to keep only in browser
-// localStorage; persisting it server-side lets the choice survive a
-// browser/device change or a cache clear. Single-user model: one file for
-// the whole instance (docs note in internal/uiprefs).
+// (<dataDir>/ui-settings.json); one file for the whole single-user instance.
 func UISettingsPath(dataDir string) string {
 	if dataDir == "" {
 		return ""
@@ -64,8 +44,7 @@ func UISettingsPath(dataDir string) string {
 	return filepath.Join(dataDir, "ui-settings.json")
 }
 
-// CronJobsPath returns the cron job definitions file
-// (<dataDir>/cron_jobs.json).
+// CronJobsPath returns the cron job definitions file (<dataDir>/cron_jobs.json).
 func CronJobsPath(dataDir string) string {
 	if dataDir == "" {
 		return ""
@@ -83,11 +62,8 @@ func CronRunsRoot(dataDir string) string {
 }
 
 // CLIDebugRoot returns the per-session CLI debug-log directory
-// (<dataDir>/cli-debug). Populated only when the operator opts in via the
-// NAOZHI_CLI_DEBUG env var; the directory holds the raw `claude --debug-file`
-// output (HTTP request/response + retry status codes) for one spawned CLI per
-// session, so a leaked file would expose prompt/tool internals — hence it
-// inherits the same 0o700 EnsureDir hardening as the other state roots.
+// (<dataDir>/cli-debug), populated only under NAOZHI_CLI_DEBUG. It holds raw
+// `claude --debug-file` output (prompt/tool internals), hence 0o700 EnsureDir.
 func CLIDebugRoot(dataDir string) string {
 	if dataDir == "" {
 		return ""
@@ -95,26 +71,12 @@ func CLIDebugRoot(dataDir string) string {
 	return filepath.Join(dataDir, "cli-debug")
 }
 
-// EnsureDir creates path (and parents) at DirMode and tightens it down to a
-// safe state, returning an error only when path cannot be made usable as a
-// private directory.
-//
-// Steps:
-//  1. MkdirAll(path, 0o700) — fails hard if the directory can't be created.
-//  2. Lstat the leaf: reject a symlink or non-directory (a planted
-//     <dataDir>/X → /etc symlink would otherwise silently redirect every
-//     subsequent write outside the data root; MkdirAll does not error on a
-//     symlink-to-dir). This is the authoritative redirect guard.
-//  3. Chmod the leaf to 0o700 when it carries looser perms. MkdirAll only
-//     applies perm to directories it actually creates, so a pre-existing
-//     0o755 tree keeps its mode without this step. Chmod failure is logged
-//     and tolerated (containers with read-only / non-owned bind mounts can't
-//     chmod) — the Lstat redirect guard, not the mode, is the security
-//     boundary.
-//
-// Empty path is a no-op (nil) so callers that derive the path from an
-// unset data root degrade quietly, matching the prior os.MkdirAll-guarded
-// call sites.
+// EnsureDir creates path (and parents) at DirMode and tightens it: Lstat
+// rejects a symlink or non-directory leaf (a planted <dataDir>/X → /etc
+// symlink would redirect every write outside the data root; MkdirAll does not
+// error on a symlink-to-dir) — this guard is the security boundary. A looser
+// pre-existing mode is chmod'ed to 0o700; chmod failure is logged and
+// tolerated (read-only / non-owned bind mounts). Empty path is a no-op.
 func EnsureDir(path string) error {
 	if path == "" {
 		return nil

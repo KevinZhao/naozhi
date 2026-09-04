@@ -23,20 +23,14 @@ var (
 )
 
 // StripMarkdown removes common Markdown notation from s so the remaining
-// plain text can be shown in a single-line UI slot (sidebar preview,
-// notification snippet). It is deliberately heuristic: the goal is "no
-// visible `##` / `**` / backticks", not a spec-complete CommonMark render.
-//
-// Handled: ATX headings, blockquote prefixes, list bullets / ordered
-// markers, horizontal rules, fenced-code fence lines (the code itself is kept
-// verbatim, including for an unclosed trailing fence), inline code
-// backticks, ~~strike~~, paired emphasis (** __ * _ — a delimiter only counts
-// when its opener is preceded by start-of-line / whitespace and its closer is
-// followed by end / whitespace / punctuation, so "5*3", "a/*.go", snake_case
-// and "__init__.py" stay literal), links, images. Lines are joined with a
-// single space and runs of whitespace collapse, so the result never contains
-// a newline. If stripping would leave nothing (e.g. "###"), the
-// whitespace-collapsed input is returned instead of an empty preview.
+// plain text fits a single-line UI slot (sidebar preview, notification
+// snippet). Heuristic, not a CommonMark render: handles ATX headings,
+// blockquotes, list markers, horizontal rules, fence lines (code kept
+// verbatim), inline code, ~~strike~~, paired emphasis (only when the opener
+// follows start/whitespace and the closer precedes end/whitespace/punct, so
+// "5*3", "a/*.go", snake_case and "__init__.py" stay literal), links and
+// images. Lines join with a single space and whitespace collapses. If
+// stripping leaves nothing (e.g. "###"), the collapsed input is returned.
 func StripMarkdown(s string) string {
 	if s == "" {
 		return ""

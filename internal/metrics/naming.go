@@ -6,29 +6,19 @@ import (
 	"strings"
 )
 
-// naming.go codifies the metric naming convention so the "8 prefixes, no
-// enforced suffix" chaos (R247-ARCH-6 / #622) stops growing. It does NOT
-// rename any existing metric — the on-disk /debug/vars JSON shape and the
-// docs/ops/pprof.md doc-sync contract both pin the current names — it gives
-// new code a single factory (Name) plus a validator (ValidName) so every
-// future metric is forced into the shape:
+// naming.go codifies the metric naming convention (#622) without renaming
+// existing metrics — /debug/vars JSON and the docs/ops/pprof.md doc-sync
+// contract pin current names. Name is the factory and ValidName the
+// validator for the shape:
 //
 //	naozhi_<subsystem>_<name>_<suffix>
-//
-// where <subsystem> is one of the registered Subsystem* constants and
-// <suffix> matches the Kind. Today this is the convention layer the proposed
-// metrics.New(subsystem, name, kind) factory needs; the expvar→Prometheus
-// collector adapter is a follow-up that can build on Name() unchanged.
 
-// NamePrefix is the mandatory leading token on every naozhi metric. expvar
-// is a single global namespace shared with the stdlib (cmdline / memstats),
-// so the prefix is what keeps naozhi metrics greppable and collision-free.
+// NamePrefix is the mandatory leading token; expvar is one global namespace
+// shared with the stdlib (cmdline / memstats).
 const NamePrefix = "naozhi"
 
 // Subsystem is the second token — the area of the process the metric covers.
-// The set is closed: a new subsystem MUST be added here so the registry of
-// known prefixes stays discoverable in one place instead of being implied by
-// scattered string literals.
+// The set is closed: a new subsystem MUST be added here.
 type Subsystem string
 
 const (
@@ -60,38 +50,31 @@ var KnownSubsystems = []Subsystem{
 }
 
 // Kind selects the metric's semantic and the suffix the name must carry.
-// expvar is untyped (every value is an int64), so the suffix is the only
-// signal a dashboard / Prometheus adapter has to tell a monotonic counter
-// from an instantaneous gauge.
+// expvar is untyped, so the suffix is the only counter-vs-gauge signal a
+// dashboard / Prometheus adapter has.
 type Kind int
 
 const (
 	// KindCounter is a monotonically-increasing event count. Suffix: _total.
 	KindCounter Kind = iota
-	// KindGaugeInflight is an instantaneous count of in-flight work.
-	// Suffix: _inflight.
+	// KindGaugeInflight is an instantaneous count of in-flight work. Suffix: _inflight.
 	KindGaugeInflight
-	// KindGaugeActive is an instantaneous count of active resources
-	// (e.g. live sessions). Suffix: _active.
+	// KindGaugeActive is an instantaneous count of active resources. Suffix: _active.
 	KindGaugeActive
-	// KindGaugeMillis is an instantaneous millisecond duration (startup
-	// phase timings). Suffix: _ms.
+	// KindGaugeMillis is an instantaneous millisecond duration. Suffix: _ms.
 	KindGaugeMillis
-	// KindHistogramSum is the running-sum component of a histogram.
-	// Suffix: _sum.
+	// KindHistogramSum is the running-sum component of a histogram. Suffix: _sum.
 	KindHistogramSum
-	// KindHistogramBucket is the cumulative-bucket component of a
-	// histogram. Suffix: _bucket.
+	// KindHistogramBucket is the cumulative-bucket component of a histogram. Suffix: _bucket.
 	KindHistogramBucket
 )
 
-// validSuffixes is the closed set of recognised trailing tokens. ValidName
-// accepts a name ending in any of these, optionally followed by the
-// _by_backend label-double-write modifier (Multi-Backend RFC §10).
+// validSuffixes is the closed set of trailing tokens; ValidName also accepts
+// the _by_backend label-double-write modifier after any of them.
 var validSuffixes = []string{"total", "inflight", "active", "ms", "sum", "bucket"}
 
-// labelModifier marks the legacy/labeled double-write twin of a metric
-// (e.g. naozhi_cli_spawn_total_by_backend alongside naozhi_cli_spawn_total).
+// labelModifier marks the labeled double-write twin of a metric
+// (e.g. naozhi_cli_spawn_total_by_backend).
 const labelModifier = "by_backend"
 
 // suffix returns the mandatory trailing token for the kind.
@@ -114,17 +97,13 @@ func (k Kind) suffix() string {
 	}
 }
 
-// segmentRE matches a single valid name segment: lowercase, digits, no
-// leading/trailing underscore, internal underscores allowed.
+// segmentRE matches one name segment: lowercase snake_case, no
+// leading/trailing underscore.
 var segmentRE = regexp.MustCompile(`^[a-z0-9]+(_[a-z0-9]+)*$`)
 
-// Name builds a convention-compliant metric name from its parts, or returns
-// an error describing the first violation. The returned name is
-// "naozhi_<subsystem>_<name>_<suffix>".
-//
-// name is the free-form middle portion (e.g. "create", "run_failed",
-// "auth_fail_invalid_token"); it must be lowercase snake_case and must NOT
-// already carry the kind suffix (Name appends it).
+// Name builds "naozhi_<subsystem>_<name>_<suffix>" or returns the first
+// violation. name is the free-form middle (lowercase snake_case) and must
+// NOT already carry the kind suffix.
 func Name(sub Subsystem, name string, kind Kind) (string, error) {
 	if !isKnownSubsystem(sub) {
 		return "", fmt.Errorf("metrics.Name: unknown subsystem %q (add it to KnownSubsystems)", sub)
@@ -142,10 +121,8 @@ func Name(sub Subsystem, name string, kind Kind) (string, error) {
 	return fmt.Sprintf("%s_%s_%s_%s", NamePrefix, sub, name, suf), nil
 }
 
-// ValidName reports whether full is a convention-compliant metric name:
-// prefix == naozhi, second token is a known subsystem, and the name ends in
-// a recognised kind suffix. Used by the conformance test and available to
-// any future registration helper that wants to fail loud on a typo.
+// ValidName reports whether full is convention-compliant: naozhi prefix,
+// known subsystem, recognised kind suffix.
 func ValidName(full string) bool {
 	if !strings.HasPrefix(full, NamePrefix+"_") {
 		return false
@@ -159,8 +136,7 @@ func ValidName(full string) bool {
 	if tail == "" {
 		return false
 	}
-	// Strip the optional labeled double-write modifier so the base suffix
-	// check below treats e.g. "..._total_by_backend" the same as "..._total".
+	// Strip the optional label modifier so "..._total_by_backend" validates like "..._total".
 	tail = strings.TrimSuffix(tail, "_"+labelModifier)
 	if tail == "" {
 		return false
@@ -182,9 +158,8 @@ func isKnownSubsystem(sub Subsystem) bool {
 	return false
 }
 
-// matchSubsystem finds the known subsystem that prefixes rest. Longest match
-// wins so "auto_chain" is preferred over a hypothetical "auto". Returns the
-// matched subsystem and whether one was found.
+// matchSubsystem finds the known subsystem prefixing rest; longest match
+// wins ("auto_chain" over a hypothetical "auto").
 func matchSubsystem(rest string) (Subsystem, bool) {
 	var best Subsystem
 	found := false

@@ -2,29 +2,20 @@ package i18n
 
 import "strings"
 
-// NormalizeLocale canonicalizes a locale string per §3.3, returning the
-// BCP-47 canonical form ("zh-CN" or "en-US") for whitelisted inputs and the
-// empty string for everything else.
-//
-// Ordered rules:
-//  1. trim spaces; lowercase
-//  2. strip POSIX encoding suffix (".utf-8", ".gbk", etc.)
-//  3. "_" → "-"
-//  4. prefix "zh" / "zh-hans*" / "zh-hant*" / "zh-*" → "zh-CN"
-//  5. prefix "en" / "en-*" → "en-US"
-//  6. otherwise → ""
+// NormalizeLocale canonicalizes a locale string to "zh-CN" / "en-US" for
+// whitelisted inputs and "" otherwise: trim + lowercase, strip POSIX encoding
+// (".utf-8") and modifier ("@euro") suffixes, "_" → "-", then match the
+// "zh"/"zh-*" and "en"/"en-*" prefixes.
 func NormalizeLocale(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return ""
 	}
 
-	// Strip POSIX encoding suffix: everything from the first '.'.
 	if dot := strings.IndexByte(s, '.'); dot >= 0 {
 		s = s[:dot]
 	}
 
-	// Also strip POSIX modifier (e.g. "@euro") if present.
 	if at := strings.IndexByte(s, '@'); at >= 0 {
 		s = s[:at]
 	}

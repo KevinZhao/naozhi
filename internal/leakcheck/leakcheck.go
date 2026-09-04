@@ -1,40 +1,12 @@
-// Package leakcheck is a tiny test-only helper for asserting that a
-// piece of code did not leak goroutines.
+// Package leakcheck is a tiny test-only helper for asserting that a piece of
+// code did not leak goroutines: Check snapshots runtime.NumGoroutine and, when
+// the deferred closure runs, fails the test if the count stayed above
+// baseline+grace after a bounded settle window, printing a stack dump (#679).
 //
-// # Why this package exists (R247-ARCH-22, #679)
-//
-// A code-review across cron / sysession / router / dispatch found 31
-// ad-hoc `sync.WaitGroup` sites; tests built around them assert "Close
-// waits for the goroutine to exit" but cannot assert "no other
-// goroutine was leaked along the way". The full review proposes
-// `go.uber.org/goleak` as the long-term answer; pulling in a new
-// external dependency for a P3 cleanup is too heavy.
-//
-// This package is the minimum-viable seed: a `Check(t)` helper that
-// snapshots the running-goroutine count at a defer-friendly point and
-// fails the enclosing test if the count grew beyond a small grace
-// window by the time the test exits.
-//
-// The implementation is deliberately tolerant:
-//
-//   - We allow a small drift (default 2) because the runtime sometimes
-//     parks short-lived service goroutines (HTTP idle conns, GC sweeper)
-//     that were not started by the code under test. Without the drift
-//     window the helper would be too noisy to be useful.
-//   - We poll for a bounded retry window because a clean shutdown is
-//     never instantaneous: a test that calls `relay.Close()` and
-//     immediately checks the count would race the worker goroutines on
-//     their way to `runtime.goexit`. A 250ms ramp-down is plenty for
-//     anything the test suite legitimately holds.
-//   - When the helper does fail, it prints the goroutine stack dump so
-//     the postmortem doesn't have to re-run the test under -trace.
-//
-// Coverage policy: this package is opt-in. Tests that already use
-// per-WaitGroup contracts (e.g. node/relay_waitgroup_test.go) get an
-// additional safety net by adding `defer leakcheck.Check(t)()` at the
-// top — leaks that bypass the WG (a goroutine started outside the WG
-// scope) now fail the test instead of silently inflating the
-// integration-test runtime.
+// It is deliberately tolerant: a small grace absorbs runtime service
+// goroutines (HTTP idle conns, GC sweeper) not started by the code under test,
+// and the settle window absorbs workers still on their way to runtime.goexit.
+// Opt-in per test via `defer leakcheck.Check(t)()`.
 package leakcheck
 
 import (
@@ -43,59 +15,39 @@ import (
 	"time"
 )
 
-// DefaultGrace is the maximum number of "extra" goroutines tolerated
-// at the end of a test without triggering a leak failure. Two extras
-// covers the common case where the runtime parks an HTTP idle-conn
-// reaper and a goroutine for the test's t.Cleanup helper.
+// DefaultGrace is the number of extra goroutines tolerated at test end; two
+// covers an HTTP idle-conn reaper plus a t.Cleanup helper.
 const DefaultGrace = 2
 
-// DefaultSettleWindow is the bounded retry window we wait for goroutines
-// to exit before declaring a leak. 250ms is generous enough for any
-// shutdown path the codebase legitimately uses, and short enough that
-// a leak still fails the test promptly.
+// DefaultSettleWindow bounds how long the check waits for goroutines to exit
+// before declaring a leak.
 const DefaultSettleWindow = 250 * time.Millisecond
 
-// Check snapshots the current goroutine count and returns a closure
-// suitable for `defer` at the top of a test:
+// Check snapshots the current goroutine count and returns a closure for
+// `defer` at the top of a test:
 //
-//	func TestX(t *testing.T) {
-//	    defer leakcheck.Check(t)()
-//	    ... start workers, do work, shut down ...
-//	}
+//	defer leakcheck.Check(t)()
 //
-// The returned closure waits up to DefaultSettleWindow for the count
-// to fall back to the captured baseline+DefaultGrace. If the count
-// stays elevated past the window, the test fails with a goroutine
-// stack dump.
-//
-// Check uses runtime.NumGoroutine for the count and runtime.Stack for
-// the dump on failure. There is no dependency on testing.M / TestMain
-// so unit-test files can opt in one test at a time.
+// The closure applies DefaultGrace / DefaultSettleWindow via CheckWith.
 func Check(t TB) func() {
 	t.Helper()
 	return CheckWith(t, DefaultGrace, DefaultSettleWindow)
 }
 
-// TB is the subset of testing.TB this package needs. Exposing the
-// subset (rather than taking *testing.T directly) lets the package's
-// own self-tests inject a fake to verify the failure path without
-// flunking the parent test.
+// TB is the subset of testing.TB this package needs; self-tests inject a fake
+// to verify the failure path.
 type TB interface {
 	Helper()
 	Errorf(format string, args ...any)
 }
 
-// CheckWith is the parameterised form of [Check]. It is exposed so a
-// known-noisy test (one that legitimately leaves a long-lived helper
-// goroutine running for the duration of the test, e.g. an httptest
-// server's accept loop) can pass a larger grace window without
-// disabling the check entirely.
+// CheckWith is the parameterised form of [Check] for tests that legitimately
+// keep a long-lived helper goroutine (e.g. an httptest accept loop).
 func CheckWith(t TB, grace int, settle time.Duration) func() {
 	t.Helper()
 	baseline := runtime.NumGoroutine()
 	return func() {
 		t.Helper()
-		// Bounded poll: most shutdown paths complete inside a few ms.
 		deadline := time.Now().Add(settle)
 		var current int
 		for time.Now().Before(deadline) {
@@ -105,8 +57,7 @@ func CheckWith(t TB, grace int, settle time.Duration) func() {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		// One last read after the window so the failure message is
-		// honest about the final count, not a stale poll value.
+		// Final read so the failure message reports the current count.
 		current = runtime.NumGoroutine()
 		if current <= baseline+grace {
 			return
@@ -116,19 +67,14 @@ func CheckWith(t TB, grace int, settle time.Duration) func() {
 	}
 }
 
-// dumpStacks returns the current process-wide goroutine stack dump,
-// trimmed to a reasonable size so a failing test doesn't flood the
-// log output. We cap at 64 KiB which is enough to capture ~30 stacks
-// at typical depth — far more than the few extra goroutines any leaky
-// test will have lying around.
+// dumpStacks returns the goroutine stack dump capped at 64 KiB (~30 stacks)
+// so a failing test does not flood the log.
 func dumpStacks() string {
 	const cap = 64 << 10
 	buf := make([]byte, cap)
 	n := runtime.Stack(buf, true)
 	out := string(buf[:n])
-	// Drop the *runtime.Stack* and *leakcheck.dumpStacks* frames at the
-	// top — they're never the cause of the leak and they distract the
-	// reader.
+	// Drop the runtime.Stack / dumpStacks frames at the top.
 	if i := strings.Index(out, "\ngoroutine "); i > 0 {
 		out = out[i+1:]
 	}

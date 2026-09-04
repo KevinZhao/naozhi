@@ -6,25 +6,15 @@ import (
 	"github.com/naozhi/naozhi/internal/assets"
 )
 
-// maxRawBytes caps a single raw-asset read (RFC §5 / evaluation K). 1 MiB is
-// far beyond any real SKILL.md / agent.md / hooks.json.
+// maxRawBytes caps a single raw-asset read; far beyond any real SKILL.md.
 const maxRawBytes = 1 << 20
 
-// readCapped reads up to cap bytes from path. If the file is larger than cap
-// it returns errTooLarge rather than a truncated body (a truncated SKILL.md
-// would render misleadingly). The path must already be validated by the
-// caller (resolveUnder).
+// readCapped reads up to cap bytes from path, returning ErrTooLarge rather
+// than a truncated body. The path must already be validated by resolveUnder.
 //
-// O_NOFOLLOW closes the TOCTOU window between resolveUnder's EvalSymlinks
-// check and this open: an attacker with write access to ~/.claude could swap
-// the final path component for a symlink to an arbitrary file after the check
-// but before the read. With O_NOFOLLOW the open fails if the final component
-// is a symlink, mirroring the O_NOFOLLOW hardening in dashboard files.go
-// (R219-SEC-2) and memory handler.go (R20260606-SEC-6). [R202606d-SEC-1]
-//
-// openNoFollow is platform-specialised: the unix build uses O_NOFOLLOW for a
-// kernel-atomic refusal; the windows build (which lacks O_NOFOLLOW) falls back
-// to an Lstat→Open shim. naozhi's production target is Linux.
+// openNoFollow closes the TOCTOU window between resolveUnder's EvalSymlinks
+// and this open (a writer to ~/.claude could swap the final component for a
+// symlink). Unix uses O_NOFOLLOW; windows falls back to Lstat→Open.
 func readCapped(path string, cap int64) ([]byte, error) {
 	f, err := openNoFollow(path)
 	if err != nil {
@@ -32,7 +22,7 @@ func readCapped(path string, cap int64) ([]byte, error) {
 	}
 	defer f.Close()
 
-	// Read cap+1 so we can distinguish "exactly cap" from "over cap".
+	// Read cap+1 to distinguish "exactly cap" from "over cap".
 	data, err := io.ReadAll(io.LimitReader(f, cap+1))
 	if err != nil {
 		return nil, err

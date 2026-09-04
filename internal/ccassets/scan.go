@@ -13,11 +13,8 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-// scanMarkdownDir scans the direct *.md files in dir (non-recursive), reading
-// each file's frontmatter. Used for agents/commands (one .md = one asset).
-// kind is "agent" or "command". For commands the name comes from the filename
-// (commands have no `name:` frontmatter, §1.2-5); for agents the frontmatter
-// name wins, falling back to the filename.
+// scanMarkdownDir scans the direct *.md files in dir for agents/commands. A
+// command's name is its filename; an agent's frontmatter name wins.
 func scanMarkdownDir(dir, kind, relPrefix string, src assets.Source) ([]assets.Asset, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -35,7 +32,7 @@ func scanMarkdownDir(dir, kind, relPrefix string, src assets.Source) ([]assets.A
 		meta, _ := readFrontmatter(filepath.Join(dir, ent.Name()))
 		name := meta.name
 		if name == "" || kind == "command" {
-			name = base // command: filename is canonical; agent: degrade
+			name = base
 		}
 		out = append(out, assets.Asset{
 			Kind:        kind,
@@ -48,8 +45,7 @@ func scanMarkdownDir(dir, kind, relPrefix string, src assets.Source) ([]assets.A
 	return out, nil
 }
 
-// hooksFile mirrors the subset of a hooks.json we surface: events map to
-// arrays of entries, each with an id + description (§1.2 / decision D2).
+// hooksFile mirrors the subset of a hooks.json we surface.
 type hooksFile struct {
 	Hooks map[string][]hookEntry `json:"hooks"`
 }
@@ -60,9 +56,7 @@ type hookEntry struct {
 	Description string `json:"description"`
 }
 
-// scanHooksJSON parses one hooks.json and expands each hook entry to its own
-// Asset (decision D2). All entries share the same RelPath; Anchor=hook id
-// disambiguates them. A missing file yields nothing.
+// scanHooksJSON expands each hook entry to its own Asset (same RelPath, Anchor=id).
 func scanHooksJSON(path, relPath string, src assets.Source) []assets.Asset {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -78,7 +72,7 @@ func scanHooksJSON(path, relPath string, src assets.Source) []assets.Asset {
 		for _, e := range entries {
 			name := e.ID
 			if name == "" {
-				name = e.Matcher + ":" + event // degrade
+				name = e.Matcher + ":" + event
 			}
 			out = append(out, assets.Asset{
 				Kind:        "hook",
@@ -105,8 +99,7 @@ type mcpServer struct {
 	URL     string   `json:"url"`
 }
 
-// scanMCP parses ~/.claude/.mcp.json; each server becomes one Asset
-// (Source=user, Anchor=server key). Missing file yields nothing (D3).
+// scanMCP turns each server in ~/.claude/.mcp.json into one Asset (Anchor=key).
 func scanMCP(home string) []assets.Asset {
 	path := filepath.Join(home, ".mcp.json")
 	data, err := os.ReadFile(path)
@@ -137,10 +130,7 @@ func scanMCP(home string) []assets.Asset {
 	return out
 }
 
-// encodeProjectDir maps an absolute repo root to Claude's projects/<encoded>
-// directory name. Delegates to discovery.ClaudeProjectSlug which is the single
-// source of truth for the encoding (strips control bytes, "/" → "-").
-// R20260603-CODE-2.
+// encodeProjectDir maps a repo root to Claude's projects/<encoded> dir name.
 func encodeProjectDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
@@ -148,9 +138,7 @@ func encodeProjectDir(repoRoot string) string {
 	return discovery.ClaudeProjectSlug(repoRoot)
 }
 
-// scanMemory scans ONLY the current repoRoot's project memory dir
-// (~/.claude/projects/<encoded>/memory/*.md) — not all projects (§3.2 step 5,
-// evaluation D). Empty repoRoot yields nothing.
+// scanMemory scans ONLY the current repoRoot's ~/.claude/projects/<encoded>/memory/*.md.
 func scanMemory(home, repoRoot string) []assets.Asset {
 	if repoRoot == "" || home == "" {
 		return nil

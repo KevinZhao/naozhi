@@ -17,19 +17,12 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// ThumbnailFn turns raw image bytes into a small JPEG data URI
-// ("data:image/jpeg;base64,...") capped at maxDim pixels on the long edge,
-// returning "" when the image cannot be decoded or is too large.
-//
-// It is a package-level injection point rather than a direct import of
-// internal/cli so that discovery stays a leaf package (depending only on
-// clievent + textutil). internal/history/claudejsonl.init wires it to
-// cli.MakeThumbnail, reusing that function's OOM pre-check, concurrency
-// semaphore, and panic recovery instead of re-implementing a decoder here.
-//
-// When nil (no backend wired the injection), image blocks in history are
-// silently skipped — behaviour identical to before this hook existed, so
-// discovery unit tests and any un-wired path never panic or lose text.
+// ThumbnailFn turns raw image bytes into a small JPEG data URI capped at
+// maxDim pixels on the long edge, returning "" when the image cannot be
+// decoded or is too large. It is an injection point (wired by
+// internal/history/claudejsonl to cli.MakeThumbnail) so discovery stays a
+// leaf package that does not import internal/cli. When nil, image blocks in
+// history are silently skipped.
 var ThumbnailFn func(data []byte, maxDim int) string
 
 // historyThumbMaxDim matches the live-message path (process_send.go's
@@ -42,12 +35,9 @@ const dataURIPrefix = "data:image/"
 
 // historyLine is the minimal schema for a ~/.claude/projects/.../{sessionId}.jsonl line.
 //
-// UUID is Claude's own record identifier, stable across re-reads of the
-// same file. naozhi adopts it verbatim as EventEntry.UUID so MergedSource
-// can dedup a Claude-JSONL-derived entry against the naozhi-native
-// persisted copy of the same turn. When UUID is absent (rare — some
-// older CLI versions omit it on assistant records), DeriveLegacyUUID
-// produces a stable fallback from (time + summary + detail).
+// UUID is Claude's own record identifier; naozhi adopts it as EventEntry.UUID
+// so MergedSource can dedup against the naozhi-native copy of the same turn.
+// When absent, DeriveLegacyUUID produces a stable fallback.
 type historyLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp"` // RFC3339
@@ -81,10 +71,9 @@ type imageSource struct {
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
 func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
-	// Defence-in-depth path-traversal guard: reject non-UUID sessionIDs before
-	// joining into a filepath, matching the sibling resolveJSONLPath guard in
-	// history_tail.go. Prevents an attacker-controlled sessionID like
-	// "../../etc/passwd" from escaping claudeDir/projects.
+	// Path-traversal guard: reject non-UUID sessionIDs before joining into a
+	// filepath (mirrors resolveJSONLPath) so "../../etc/passwd" cannot
+	// escape claudeDir/projects.
 	if !IsValidSessionID(sessionID) {
 		return nil, nil
 	}
@@ -105,44 +94,28 @@ func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error
 	return parseJSONL(path)
 }
 
-// findSessionJSONL searches claudeDir/projects/**/{sessionID}.jsonl.
-// Package-level wrapper delegates to DefaultScanner so historical callers
-// keep the same signature while gaining the pathCache. Tests that need
-// isolation (or that want to exercise a fresh cold-start cache) should
-// construct their own *Scanner via NewScanner() and call findSessionJSONL
-// directly on it.
+// findSessionJSONL searches claudeDir/projects/**/{sessionID}.jsonl via
+// DefaultScanner's pathCache. Tests needing isolation use NewScanner().
 func findSessionJSONL(claudeDir, sessionID string) (string, error) {
 	return DefaultScanner().findSessionJSONL(claudeDir, sessionID)
 }
 
-// findSessionJSONL performs the slow O(projects) fan-out scan, fronted by
-// a per-Scanner pathCache. Cache semantics:
-//
-//   - Positive hit (path != "", cached from a prior success): os.Stat
-//     the cached path; if it still exists, return immediately (1 syscall
-//     vs N). If Stat fails we drop the entry and fall through to a full
-//     rescan — claude CLI can rename or delete JSONL files during
-//     history compaction, so the cache must self-heal.
-//   - Negative hit (path == "", negativeUntil in the future): return
-//     ("", nil) without touching the disk. Caps the blast radius of a
-//     startup burst where 10 resume-chain goroutines look up the same
-//     missing sessionID concurrently.
-//   - Miss / expired negative: run the real scan and record the result
-//     (positive or negative) back into the cache.
+// findSessionJSONL performs the O(projects) fan-out scan, fronted by the
+// per-Scanner pathCache. A positive hit is re-validated with one os.Stat and
+// evicted on failure (claude CLI renames/deletes JSONLs during compaction);
+// a fresh negative hit returns ("", nil) without touching disk so a startup
+// burst of resume-chain lookups for the same missing ID shares one scan.
 func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) {
 	key := pathCacheKey(claudeDir, sessionID)
 
 	if path, ok := s.pathCacheLookup(key); ok {
 		if path == "" {
-			// Cached negative verdict still fresh.
 			return "", nil
 		}
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}
-		// Stale positive entry — file moved or deleted. Evict and fall
-		// through to a fresh scan so the next lookup can re-learn the
-		// new location (or confirm true absence).
+		// Stale positive entry — file moved or deleted; evict and rescan.
 		s.pathCacheInvalidate(key)
 	}
 
@@ -150,8 +123,7 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			// Cache the negative result so a missing ~/.claude/projects
-			// dir doesn't rerun ReadDir for every subsequent lookup.
+			// Cache the negative so a missing projects dir doesn't rerun ReadDir per lookup.
 			s.pathCacheStoreNegative(key)
 			return "", nil
 		}
@@ -171,10 +143,8 @@ func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) 
 	return "", nil
 }
 
-// pathCacheKey packs claudeDir + sessionID into a struct map key. A
-// struct key (vs a packed "dir\x00id" string) avoids the per-call string
-// concatenation+allocation on the hot lookup path while still keeping the
-// two fields distinct so similarly-named claude dirs cannot collide.
+// pathCacheKey packs claudeDir + sessionID into a struct key, avoiding the
+// per-call string concatenation a packed "dir\x00id" key would cost.
 func pathCacheKey(claudeDir, sessionID string) pathKey {
 	return pathKey{dir: claudeDir, id: sessionID}
 }
@@ -197,10 +167,8 @@ func (s *Scanner) pathCacheLookup(key pathKey) (string, bool) {
 	return "", false
 }
 
-// pathCacheStorePositive commits a successfully-resolved path. Eviction
-// is skipped when the map size is within bounds; above cap we drop
-// expired negative entries first (positive entries are strictly more
-// valuable because each represents a full ReadDir already amortized).
+// pathCacheStorePositive commits a resolved path, evicting first when the
+// map is at cap.
 func (s *Scanner) pathCacheStorePositive(key pathKey, path string) {
 	s.pathCache.Lock()
 	defer s.pathCache.Unlock()
@@ -210,9 +178,8 @@ func (s *Scanner) pathCacheStorePositive(key pathKey, path string) {
 	s.pathCache.entries[key] = pathCacheEntry{path: path}
 }
 
-// pathCacheStoreNegative commits a "scanned and didn't find it" verdict
-// with a bounded TTL so a later-created JSONL is still picked up on
-// the next lookup.
+// pathCacheStoreNegative commits a "not found" verdict with a bounded TTL so
+// a later-created JSONL is still picked up.
 func (s *Scanner) pathCacheStoreNegative(key pathKey) {
 	s.pathCache.Lock()
 	defer s.pathCache.Unlock()
@@ -224,8 +191,7 @@ func (s *Scanner) pathCacheStoreNegative(key pathKey) {
 	}
 }
 
-// pathCacheInvalidate drops a cached entry, used by callers that just
-// observed the cached path no longer exists on disk.
+// pathCacheInvalidate drops an entry whose cached path has vanished from disk.
 func (s *Scanner) pathCacheInvalidate(key pathKey) {
 	s.pathCache.Lock()
 	delete(s.pathCache.entries, key)
@@ -233,18 +199,10 @@ func (s *Scanner) pathCacheInvalidate(key pathKey) {
 }
 
 // evictPathCacheLocked enforces pathCacheMaxEntries. Caller MUST hold
-// s.pathCache.Lock(). Strategy:
-//  1. First pass drops expired negative entries — cheap wins that were
-//     going to fall through to a rescan anyway.
-//  2. If the map is still above cap (all entries are positive, or all
-//     negatives are still fresh), drop an arbitrary slice of entries until
-//     we are back under cap. Without this fallback a long-running process
-//     that sees tens of thousands of distinct sessionIDs (resume chain
-//     replays, dashboard queries) would grow the map without bound once
-//     all 2048 slots hold positive entries. Map iteration order is
-//     randomised in Go, so "arbitrary" is effectively random eviction —
-//     simple, allocation-free, and good enough; LRU would require a
-//     doubly-linked list that costs more than the ReadDir we'd save.
+// s.pathCache.Lock(). First pass drops expired negative entries; if still
+// above cap (all positive or fresh-negative) it drops arbitrary entries —
+// Go's randomised map iteration makes that effectively random eviction,
+// allocation-free and cheaper than an LRU list would be.
 func (s *Scanner) evictPathCacheLocked() {
 	now := time.Now()
 	for k, v := range s.pathCache.entries {
@@ -255,9 +213,8 @@ func (s *Scanner) evictPathCacheLocked() {
 	if len(s.pathCache.entries) < pathCacheMaxEntries {
 		return
 	}
-	// Second pass: drop arbitrary entries (random via map iteration) until
-	// we drop below cap. Leave pathCacheEvictBatch headroom so the next
-	// store isn't forced to re-evict immediately.
+	// Second pass: drop arbitrary entries until below cap, leaving
+	// pathCacheEvictBatch headroom so the next store isn't forced to re-evict.
 	excess := len(s.pathCache.entries) - pathCacheMaxEntries + pathCacheEvictBatch
 	for k := range s.pathCache.entries {
 		if excess <= 0 {
@@ -276,14 +233,11 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	defer f.Close()
 
 	entries := make([]clievent.EventEntry, 0, 128)
-	// bufio.Reader (not bufio.Scanner): the Claude CLI inlines uploaded
-	// images as base64 into a single NDJSON line, so one user turn with a
-	// few screenshots can balloon past 5-10 MB. bufio.Scanner aborts the
-	// WHOLE file with "token too long" on the first such line, blanking the
-	// dashboard history. readJSONLLine instead skips just the oversized
-	// line (its inline-image payload carries no text worth displaying) and
-	// keeps parsing the rest. The 4 MB threshold matches parseTail's
-	// maxCarryBytes so both read paths agree on which lines they drop.
+	// bufio.Reader, not bufio.Scanner: the CLI inlines uploaded images as
+	// base64 on a single NDJSON line (5-10 MB), and Scanner would abort the
+	// whole file with "token too long". readJSONLLine skips just that line;
+	// its 4 MB threshold matches parseTail's maxCarryBytes so both readers
+	// drop the same lines.
 	r := bufio.NewReaderSize(f, 64*1024)
 	for {
 		line, oversized, rerr := readJSONLLine(r)
@@ -301,50 +255,29 @@ func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	}
 }
 
-// maxJSONLLineBytes caps a single JSONL line's content length (excluding the
-// terminating '\n') before readJSONLLine treats it as unparseable junk and
-// skips it. Equal to parseTail's maxCarryBytes and measured the same way
-// (newline-free content), so the forward (preview) and reverse (sidebar
-// pagination) readers drop the exact same oversized lines — typically a user
-// turn with inline base64 images, which contributes no display text anyway.
+// maxJSONLLineBytes caps a JSONL line's content length (excluding '\n')
+// before readJSONLLine skips it. Equal to parseTail's maxCarryBytes so the
+// forward and reverse readers drop exactly the same oversized lines.
 const maxJSONLLineBytes = 4 * 1024 * 1024
 
-// readJSONLLine reads one '\n'-terminated line from r.
-//
-//   - Normal line: returns the line bytes (without the trailing '\n'),
-//     oversized=false. The slice is only valid until the next read — callers
-//     (parseHistoryLine) must consume it before reading again.
-//   - Oversized line (total > maxJSONLLineBytes): the remainder of the line
-//     is drained and discarded, returns oversized=true with nil bytes.
-//     Retained memory is bounded at ~maxJSONLLineBytes — once the running
-//     total crosses the cap we stop appending to buf, so a 50 MB line costs
-//     at most one cap's worth of buffer, never the line's full length.
-//   - At EOF: returns the final unterminated line (if any) plus io.EOF.
-//
-// err is io.EOF once the file is exhausted (possibly alongside a final
-// line); any other non-nil err is a real read failure.
+// readJSONLLine reads one '\n'-terminated line from r. A normal line is
+// returned without its '\n' (the slice is only valid until the next read); a
+// line over maxJSONLLineBytes is drained and reported as oversized=true with
+// nil bytes, retaining at most ~maxJSONLLineBytes of memory; at EOF the final
+// unterminated line (if any) is returned with io.EOF. Any other non-nil err
+// is a real read failure.
 func readJSONLLine(r *bufio.Reader) (line []byte, oversized bool, err error) {
 	frag, err := r.ReadSlice('\n')
 	if !errors.Is(err, bufio.ErrBufferFull) {
-		// Fast path: a complete line fit in the reader's buffer (or we hit
-		// EOF / a real error). frag aliases the reader's internal buffer —
-		// trim the newline and hand it straight to the caller; no copy.
+		// Fast path: a complete line fit in the reader's buffer (or EOF / real
+		// error). frag aliases the internal buffer; hand it over without copying.
 		return trimNewline(frag), false, err
 	}
 
-	// Slow path: the line is longer than the reader buffer. Track the
-	// content length (excluding the line-terminating '\n') in `content` —
-	// this is what the threshold is measured against, matching parseTail's
-	// maxCarryBytes which also counts newline-free content, so the forward
-	// and reverse readers drop the exact same lines. Only retain bytes in
-	// `buf` while still under the cap: once content crosses maxJSONLLineBytes
-	// the line is doomed to be skipped, so we stop growing buf and just drain
-	// to the newline — peak retained memory stays ~maxJSONLLineBytes instead
-	// of the 2× a doubling append would reach on a multi-MB line.
-	//
-	// A mid-line fragment (ErrBufferFull) never contains '\n', so all its
-	// bytes are content; only the final fragment carries the terminator,
-	// which trimNewline strips before counting.
+	// Slow path: the line exceeds the reader buffer. `content` counts bytes
+	// excluding the terminator (like parseTail's maxCarryBytes) and buf only
+	// grows while under the cap, so an oversized line is drained, not retained.
+	// Mid-line fragments never contain '\n'; only the final one carries it.
 	content := len(frag)
 	buf := append([]byte(nil), frag...)
 	for {
@@ -362,9 +295,8 @@ func readJSONLLine(r *bufio.Reader) (line []byte, oversized bool, err error) {
 			break
 		}
 		if content > maxJSONLLineBytes {
-			// Drain the rest of this line without retaining it. err lands on
-			// nil (newline consumed, more lines may follow) or io.EOF (file
-			// ended mid-oversized-line); the caller treats both correctly.
+			// Drain the rest of the line without retaining it; err ends as nil
+			// or io.EOF, both handled by the caller.
 			for errors.Is(err, bufio.ErrBufferFull) {
 				_, err = r.ReadSlice('\n')
 			}
@@ -389,16 +321,10 @@ func trimNewline(b []byte) []byte {
 	return b
 }
 
-// uuidFromClaudeLine returns a stable UUID for a single-entry
-// Claude JSONL line (user records today). Prefers Claude's own uuid
-// field; falls back to DeriveLegacyUUID keyed on (time + type +
-// summary + detail) when the line predates uuid or the field is
-// missing.
-//
-// Output shape matches cli.newEventUUID (32 lowercase hex chars):
-// when Claude supplies a dash-separated UUID we strip dashes so
-// both code paths produce the same width (MergedSource compares
-// the string verbatim).
+// uuidFromClaudeLine returns a stable UUID for a single-entry Claude JSONL
+// line: Claude's own uuid (dashes stripped to match cli.newEventUUID's 32
+// hex chars, which MergedSource compares verbatim), or DeriveLegacyUUID over
+// (time + type + summary + detail) when it is missing.
 func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) string {
 	if u := normalizeClaudeUUID(hl.UUID); u != "" {
 		return u
@@ -406,18 +332,13 @@ func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) s
 	return textutil.DeriveLegacyUUID(ts, typ, summary, detail)
 }
 
-// uuidFromClaudeBlock handles assistant records whose line-level UUID
-// covers ALL text blocks collectively. When the JSONL line has a
-// uuid, we derive per-block identities by hashing (line UUID +
-// block index) so two text blocks at the same timestamp stay
-// distinguishable. Missing uuid falls back to DeriveLegacyUUID over
-// (ts + block index + summary) — the index keeps distinct blocks in
-// the same line from collapsing.
+// uuidFromClaudeBlock derives per-block identities for assistant records,
+// whose line-level UUID covers all text blocks. Block 0 inherits the line
+// UUID (the common single-block case); later blocks hash (line UUID + block
+// index) so two text blocks at the same timestamp stay distinct. A missing
+// uuid falls back to DeriveLegacyUUID over (ts + block index + summary).
 func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary, detail string) string {
 	if u := normalizeClaudeUUID(hl.UUID); u != "" {
-		// For multi-block assistant lines, first block inherits the
-		// line UUID directly (the common case — 1 text block per
-		// line). Subsequent blocks rehash so they don't collide.
 		if blockIndex == 0 {
 			return u
 		}
@@ -426,15 +347,14 @@ func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary,
 	return textutil.DeriveLegacyUUID(ts, typ, summary+"#"+intToA(blockIndex), detail)
 }
 
-// normalizeClaudeUUID strips dashes from a Claude-style UUID so its
-// shape matches cli.newEventUUID's dashless 32-char hex. An empty
-// input returns empty. Non-hex input returns empty so the caller
-// falls back to DeriveLegacyUUID rather than produce a garbage key.
+// normalizeClaudeUUID strips dashes from a Claude-style UUID so its shape
+// matches cli.newEventUUID's dashless 32-char hex. Empty or non-hex input
+// returns "" so the caller falls back to DeriveLegacyUUID.
 func normalizeClaudeUUID(u string) string {
 	if u == "" {
 		return ""
 	}
-	// R236-PERF-1: stack [32]byte avoids per-row alloc on JSONL replay.
+	// Stack buffer avoids a per-row alloc on JSONL replay.
 	var b [32]byte
 	n := 0
 	for i := 0; i < len(u); i++ {
@@ -448,7 +368,6 @@ func normalizeClaudeUUID(u string) string {
 		if n >= 32 {
 			return ""
 		}
-		// Lowercase ASCII hex.
 		if c >= 'A' && c <= 'F' {
 			c = c + 32
 		}
@@ -482,31 +401,24 @@ func intToA(n int) string {
 	return string(out)
 }
 
-// extractText handles content that is either a plain string or []block.
-// Thin wrapper over extractTextAndImages for callers that only want text
-// (assistant blocks, legacy tests) — signature preserved deliberately.
+// extractText handles content that is either a plain string or []block; thin
+// wrapper over extractTextAndImages for callers that only want text.
 func extractText(raw json.RawMessage) string {
 	text, _ := extractTextAndImages(raw)
 	return text
 }
 
-// extractTextAndImages decodes message content (a plain string or a []block)
-// into its concatenated text plus the thumbnail data URIs of any image
-// blocks. Images are decoded from base64 and downsampled via ThumbnailFn
-// (injected as cli.MakeThumbnail) so history responses carry small
-// thumbnails, never the multi-hundred-KB originals. A nil ThumbnailFn, a
-// corrupt base64 payload, or a decode failure each skips just that one
-// image without dropping the surrounding text.
+// extractTextAndImages decodes message content (a plain string or []block)
+// into its concatenated text plus thumbnail data URIs of any image blocks;
+// an image that cannot be thumbnailed is skipped without dropping the text.
 func extractTextAndImages(raw json.RawMessage) (string, []string) {
 	if len(raw) == 0 {
 		return "", nil
 	}
-	// Try string first.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s, nil
 	}
-	// Try array of blocks.
 	var blocks []historyBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", nil
@@ -529,9 +441,8 @@ func extractTextAndImages(raw json.RawMessage) (string, []string) {
 }
 
 // thumbnailFromBase64 decodes a base64 image payload and downsamples it to a
-// data URI, returning "" if ThumbnailFn is unset, the base64 is malformed,
-// or the image cannot be thumbnailed (e.g. too large — ThumbnailFn's own
-// pixel pre-check returns "" rather than OOM-ing).
+// data URI, returning "" if ThumbnailFn is unset, the base64 is malformed, or
+// the image cannot be thumbnailed.
 func thumbnailFromBase64(b64 string) string {
 	if ThumbnailFn == nil {
 		return ""

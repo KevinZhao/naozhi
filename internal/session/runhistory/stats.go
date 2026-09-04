@@ -2,9 +2,8 @@ package runhistory
 
 import "sort"
 
-// ComputeStats aggregates a slice of runs into a SessionRunStats. The input
-// is treated as read-only (a defensive copy of the durations is sorted
-// internally for percentiles). An empty input yields the zero value.
+// ComputeStats aggregates runs into a SessionRunStats without mutating the
+// input. An empty input yields the zero value.
 func ComputeStats(runs []SessionRun) SessionRunStats {
 	var st SessionRunStats
 	st.Count = len(runs)
@@ -37,14 +36,12 @@ func ComputeStats(runs []SessionRun) SessionRunStats {
 	return st
 }
 
-// percentile returns the p-th percentile (0-100) of an already-sorted,
-// non-empty slice using nearest-rank. Callers guarantee len(sorted) > 0.
+// percentile returns the nearest-rank p-th percentile of a sorted, non-empty slice.
 func percentile(sorted []int64, p int) int64 {
 	n := len(sorted)
 	if n == 1 {
 		return sorted[0]
 	}
-	// Nearest-rank: rank = ceil(p/100 * n), 1-based, clamped to [1, n].
 	rank := (p*n + 99) / 100
 	if rank < 1 {
 		rank = 1

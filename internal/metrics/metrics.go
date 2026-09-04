@@ -1,495 +1,272 @@
-// Package metrics exposes a small set of process-wide counters backed by
-// stdlib expvar. The goal is operator observability — a naozhi deployment
-// promises "10K users" scale but historically shipped zero metrics (only
-// pprof), so post-incident analysis relied on parsing journalctl. This
-// package adds counters covering the highest-signal lifecycle events:
-//
-//   - SessionCreateTotal:     successful spawnSession calls
-//   - SessionEvictTotal:      LRU eviction frees a slot
-//   - CLISpawnTotal:          wrapper.Spawn returns a Process (new CLI child)
-//   - WSAuthFailTotal:        WebSocket auth_fail reply emitted (aggregate)
-//   - WSAuthFailRateLimitedTotal: subset of WSAuthFailTotal triggered by the
-//     per-IP rate limiter (brute-force throttling active). R172-ARCH-D10.
-//   - WSAuthFailInvalidTokenTotal: subset of WSAuthFailTotal triggered by a
-//     wrong token presented to an otherwise-allowed IP. R172-ARCH-D10.
-//   - ShimRestartTotal:       shim.Manager.StartShimWithBackend succeeds
-//   - SpawnPanicRecoveredTotal: panicSafeSpawn absorbs a wrapper.Spawn panic
-//     (shim exec crash / bogus protocol Init / etc.). A non-zero value is an
-//     operator-actionable reliability signal: the recover path keeps naozhi
-//     alive but the underlying bug should be investigated. R172-ARCH-D10.
-//   - ShimReconnectGraceBackfillTotal: deferred JSONL history load fired for a
-//     shim-managed session whose ReconnectShims pass did not supply history
-//     within shimReconnectGraceDelay (R53-ARCH-001 fallback path).
-//     R172-ARCH-D10.
-//   - Interrupt{Sent,NoTurn,Unsupported,Error}Total: per-outcome counts for
-//     Router.InterruptSessionViaControl. NoSession is deliberately NOT
-//     counted — a key-does-not-exist lookup isn't a signal about interrupt
-//     behaviour, and counting it would blur the denominator when computing
-//     "interrupts that reached the CLI" ratios. R172-ARCH-D10.
-//
-// Counters are published via the stdlib expvar package, which auto-registers
-// itself on /debug/vars. Exposing them requires routing /debug/vars through
-// the dashboard mux — the naozhi HTTP server registers that route via
-// internal/server (see debug_expvar.go) behind the same auth + loopback
-// guard as pprof.
+// Package metrics exposes process-wide counters and gauges backed by stdlib
+// expvar, published on /debug/vars (routed through the dashboard mux by
+// internal/server debug_expvar.go behind the same auth + loopback guard as
+// pprof).
 //
 // Design choices:
 //
-//  1. Use expvar.Int (atomic int64 + JSON marshaling) rather than a custom
-//     type. Zero dependencies, stdlib-stable since Go 1.0. A future upgrade
-//     to Prometheus client_golang would replace the vars with prometheus
-//     counters without touching call sites (accept an interface, return
-//     struct).
-//  2. Counters are package-level singletons exposed as *expvar.Int so call
-//     sites write `metrics.SessionCreateTotal.Add(1)` with no further
-//     wiring. This mirrors the stdlib http.DefaultServeMux pattern.
-//  3. No labels. expvar is untyped; label cardinality enforcement belongs
-//     to a real metrics lib. For MVP observability the absence of labels
-//     is a feature (operators can't accidentally blow up memory with
-//     per-user tags).
+//  1. expvar.Int (atomic int64 + JSON) rather than a custom type: zero
+//     dependencies. A Prometheus migration would swap the vars without
+//     touching call sites.
+//  2. Package-level singletons, so call sites write
+//     `metrics.SessionCreateTotal.Add(1)` with no further wiring.
+//  3. No labels on the base counters; labeled vectors (labeled.go) bound
+//     cardinality explicitly.
 package metrics
 
 import "expvar"
 
 var (
-	// SessionCreateTotal counts successful spawnSession completions. Incremented
-	// only on the happy path — Spawn errors, panic-safe spawn recoveries, and
-	// exempt-session creations are excluded. A burst here shortly before CLI
-	// spawn backpressure usually indicates a misbehaving IM client.
+	// SessionCreateTotal counts successful spawnSession completions (happy
+	// path only; Spawn errors, panic recoveries and exempt sessions excluded).
 	SessionCreateTotal = expvar.NewInt("naozhi_session_create_total")
 
-	// SessionEvictTotal counts LRU evictions. Rising monotonically under load
-	// means session cap is too low for the live user population; the cap is
-	// controlled by session.max_procs in config.yaml.
+	// SessionEvictTotal counts LRU evictions; rising under load means
+	// session.max_procs is too low for the live user population.
 	SessionEvictTotal = expvar.NewInt("naozhi_session_evict_total")
 
 	// CLISpawnTotal counts wrapper.Spawn successes. Always ≥ SessionCreateTotal
-	// because Spawn is also called for exempt sessions (planner / scratch) that
-	// do not go through the normal SessionCreateTotal path. A delta growth much
-	// larger than SessionCreateTotal indicates exempt-session churn.
+	// because exempt sessions (planner / scratch) also spawn.
 	CLISpawnTotal = expvar.NewInt("naozhi_cli_spawn_total")
 
-	// WSAuthFailTotal counts WebSocket auth_fail replies. Rising fast is a
-	// classic credential-spray signal; combined with /api/auth/login Retry-After
-	// 429 events in journalctl, it's the primary brute-force indicator.
-	// Incremented for BOTH rate-limited and invalid-token branches; use the
-	// dedicated *RateLimited / *InvalidToken counters below to tell them apart
-	// when triaging whether the limiter is already engaging.
+	// WSAuthFailTotal counts WebSocket auth_fail replies (both rate-limited and
+	// invalid-token branches; see the two subset counters below). A fast rise
+	// is the primary brute-force indicator.
 	WSAuthFailTotal = expvar.NewInt("naozhi_ws_auth_fail_total")
 
-	// WSAuthFailRateLimitedTotal counts WS auth_fail replies caused by the
-	// per-IP token-bucket limiter firing — the IP may still know a valid
-	// token, but its connect-rate blew past the burst. A sustained delta here
-	// under constant delta on *InvalidTokenTotal suggests a looping client
-	// (e.g. dashboard reconnect storm) rather than a credential spray; the
-	// inverse ratio is the brute-force signature. R172-ARCH-D10.
+	// WSAuthFailRateLimitedTotal counts auth_fail replies from the per-IP
+	// limiter. A sustained delta with flat *InvalidTokenTotal suggests a
+	// looping client (reconnect storm) rather than a credential spray.
 	WSAuthFailRateLimitedTotal = expvar.NewInt("naozhi_ws_auth_fail_rate_limited_total")
 
-	// WSAuthFailInvalidTokenTotal counts WS auth_fail replies caused by the
-	// presented token not matching dashboardToken. Unlike *RateLimitedTotal,
-	// this increments AFTER the limiter admits the attempt, so a fast-rising
-	// counter here specifically signals credential spray on a single IP that
-	// is pacing itself under the limiter threshold. R172-ARCH-D10.
+	// WSAuthFailInvalidTokenTotal counts auth_fail replies for a wrong token
+	// after the limiter admitted the attempt — a paced credential spray.
 	WSAuthFailInvalidTokenTotal = expvar.NewInt("naozhi_ws_auth_fail_invalid_token_total")
 
-	// ShimRestartTotal counts shim.StartShimWithBackend successes. Under
-	// zero-downtime restart operators expect this to roughly match the number
-	// of live sessions at restart time. Growing between restarts indicates
-	// shim crash / respawn churn.
+	// ShimRestartTotal counts shim.StartShimWithBackend successes; growth
+	// between restarts indicates shim crash / respawn churn.
 	ShimRestartTotal = expvar.NewInt("naozhi_shim_restart_total")
 
 	// SpawnPanicRecoveredTotal counts panics absorbed by panicSafeSpawn in
-	// session.Router (wraps cli.Wrapper.Spawn). Each increment corresponds to
-	// a slog.Error("spawnSession: wrapper.Spawn panicked", ...) record with a
-	// full stack trace — operators should grep journalctl for those lines to
-	// find the root cause. The counter itself is the at-a-glance "has a panic
-	// ever happened on this process lifetime?" indicator without scanning
-	// logs. R172-ARCH-D10.
+	// session.Router. Each increment pairs with a slog.Error stack trace;
+	// non-zero means a bug to investigate.
 	SpawnPanicRecoveredTotal = expvar.NewInt("naozhi_spawn_panic_recovered_total")
 
-	// PanicRecoveredTotal is a global counter for panics that crossed a
-	// recover() boundary anywhere in the process. Dimensional split by call
-	// site is NOT provided — operators can correlate with slog.Error stack
-	// dumps (which every recover site already emits) by timestamp. Distinct
-	// from SpawnPanicRecoveredTotal which is spawn-specific and a subset of
-	// this total.
-	//
-	// Wired into the highest-signal recover sites (dashboard WS readPump,
-	// federated remote-node send/interrupt goroutines, dispatch ownerLoop,
-	// feishu cleanupNoncesTick). Non-zero is an operator-actionable
-	// reliability signal: the recover path kept naozhi alive but the
-	// underlying bug should be investigated. OBS1.
+	// PanicRecoveredTotal counts panics that crossed any recover() boundary
+	// (dashboard WS readPump, remote-node send/interrupt, dispatch ownerLoop,
+	// feishu cleanupNoncesTick). No per-site split — correlate with the
+	// slog.Error stack dumps by timestamp. Superset of SpawnPanicRecoveredTotal.
 	PanicRecoveredTotal = expvar.NewInt("naozhi_panic_recovered_total")
 
 	// ShimReconnectGraceBackfillTotal counts deferred JSONL history loads that
-	// fired because a shim-managed session was still missing history after
-	// shimReconnectGraceDelay elapsed (the R53-ARCH-001 fallback). The happy
-	// path — ReconnectShims populates history within the grace window — does
-	// NOT increment this counter; only the fallback branch does. A non-zero
-	// value means operators should investigate why ReconnectShims skipped the
-	// session (shim died between shimManagedKeys() and Discover is the common
-	// cause). R172-ARCH-D10.
+	// fired because ReconnectShims had not supplied history within
+	// shimReconnectGraceDelay. Non-zero: investigate why the shim was skipped.
 	ShimReconnectGraceBackfillTotal = expvar.NewInt("naozhi_shim_reconnect_grace_backfill_total")
 
 	// InterruptSentTotal counts InterruptViaControl outcomes where the
-	// control_request actually reached the CLI. This is the "happy path" for
-	// dashboard interrupt button presses. Combined with the other Interrupt*
-	// counters, operators can tell at a glance whether users are hitting
-	// interrupt usefully (Sent) or uselessly (NoTurn). R172-ARCH-D10.
+	// control_request reached the CLI. NoSession is deliberately not counted
+	// in any Interrupt* counter — a missing key says nothing about interrupts.
 	InterruptSentTotal = expvar.NewInt("naozhi_interrupt_sent_total")
 
-	// InterruptNoTurnTotal counts InterruptViaControl outcomes where the
-	// session exists but has no active turn. A consistently high delta here
-	// relative to InterruptSentTotal indicates users expect interrupt to "do
-	// something" on an idle session — a UX hint that the button should be
-	// disabled or labelled differently when no turn is running. R172-ARCH-D10.
+	// InterruptNoTurnTotal counts InterruptViaControl outcomes on a session
+	// with no active turn (UX hint: interrupt pressed while idle).
 	InterruptNoTurnTotal = expvar.NewInt("naozhi_interrupt_no_turn_total")
 
-	// InterruptUnsupportedTotal counts InterruptViaControl outcomes where the
-	// active protocol (e.g. ACP) has no stdin-level interrupt primitive. The
-	// router falls back to SIGINT in this branch; a growing delta here tells
-	// operators how much their deployment depends on the SIGINT fallback,
-	// which has different semantics (kills the whole CLI). R172-ARCH-D10.
+	// InterruptUnsupportedTotal counts outcomes where the protocol (e.g. ACP)
+	// has no stdin-level interrupt and the router fell back to SIGINT.
 	InterruptUnsupportedTotal = expvar.NewInt("naozhi_interrupt_unsupported_total")
 
-	// InterruptErrorTotal counts InterruptViaControl outcomes where the
-	// transport write failed (shim socket dead / broken pipe). A non-zero
-	// value almost always means F6's reconcile path has work to do — the
-	// shim is likely zombied. Pair with naozhi_shim_restart_total to see
-	// whether reconcile is actually clearing them. R172-ARCH-D10.
+	// InterruptErrorTotal counts outcomes where the transport write failed
+	// (shim socket dead); pair with naozhi_shim_restart_total.
 	InterruptErrorTotal = expvar.NewInt("naozhi_interrupt_error_total")
 
-	// EventLogPersistWrittenTotal counts individual EventEntry records
-	// successfully committed to <keyhash>.log by the per-session
-	// persister. Rising in lock-step with conversation traffic is the
-	// expected signal — a pause while traffic continues means either
-	// the persister goroutine stalled or the PersistSink channel is
-	// saturated (see EventLogPersistDroppedTotal for that path). RFC §6.3.
+	// EventLogPersistWrittenTotal counts EventEntry records committed to
+	// <keyhash>.log by the per-session persister.
 	EventLogPersistWrittenTotal = expvar.NewInt("naozhi_eventlog_persist_written_total")
 
-	// EventLogPersistDroppedTotal counts EventEntry records dropped
-	// because the per-session PersistSink channel was full when the
-	// Append hot path tried to enqueue. A sustained non-zero delta
-	// here is an operator-actionable signal: the disk or writer
-	// goroutine is not draining fast enough and live dashboard events
-	// are being lost from the persistent tier (they survive only in
-	// the in-memory ring). RFC §3.2.3 / §6.3.
+	// EventLogPersistDroppedTotal counts records dropped because the
+	// PersistSink channel was full. A sustained delta means the writer is not
+	// draining and those events survive only in the in-memory ring.
 	EventLogPersistDroppedTotal = expvar.NewInt("naozhi_eventlog_persist_dropped_total")
 
-	// EventLogPersistFsyncTotal counts fsync(log) / fsync(idx) calls
-	// the persister has issued. Two fsyncs per debounce window in
-	// normal operation (log first, idx second); a value that grows
-	// well past the expected ~10/s rate indicates the debounce is
-	// not coalescing (misconfiguration of FlushInterval) or there
-	// are many tiny Flush() calls forcing out-of-band fsyncs. RFC §6.3.
+	// EventLogPersistFsyncTotal counts fsync(log) / fsync(idx) calls; growth
+	// well past ~10/s means the debounce is not coalescing.
 	EventLogPersistFsyncTotal = expvar.NewInt("naozhi_eventlog_persist_fsync_total")
 
-	// EventLogPersistMalformedLinesTotal counts records the persister
-	// refused to write because schema.MarshalRecord rejected them
-	// (oversize record, encoding failure). Zero in steady state; a
-	// delta implies an upstream caller is producing malformed entries
-	// and the corresponding slog.Warn has the offending UUID / size.
-	// RFC §6.3.
+	// EventLogPersistMalformedLinesTotal counts records schema.MarshalRecord
+	// rejected (oversize / encoding failure); the paired slog.Warn has details.
 	EventLogPersistMalformedLinesTotal = expvar.NewInt("naozhi_eventlog_persist_malformed_lines_total")
 
-	// EventLogPersistReplayLeakTotal counts batches that reached the
-	// PersistSink with replayPhase=true. In production this MUST stay
-	// at 0: a non-zero value means some caller installed the sink
-	// BEFORE InjectHistory completed, violating RFC §3.2.2's ordering
-	// contract. The Persister drops the batch (preventing the
-	// infinite-persist loop), so dashboard behaviour doesn't degrade
-	// visibly, but a monitor paging on `*ReplayLeakTotal != 0` is
-	// recommended so the underlying bug gets a fix. RFC §3.2.3.
+	// EventLogPersistReplayLeakTotal counts batches reaching the PersistSink
+	// with replayPhase=true — a sink installed before InjectHistory finished.
+	// Must stay 0 in production; the Persister drops the batch.
 	EventLogPersistReplayLeakTotal = expvar.NewInt("naozhi_eventlog_persist_replay_leak_total")
 
-	// AttachmentRefBumpTotal counts .meta rewrites performed by the
-	// attachment refcount tracker (see docs/rfc/attachment-refcount.md).
-	// Each increment represents one ReferencingKeyHashes / LastReferencedAt
-	// update; coalesce collapses N rapid bumps on the same (session,
-	// attachment) pair into a single increment. Delta rate roughly
-	// tracks "new image events reaching disk" multiplied by the number
-	// of distinct attachments referenced.
+	// AttachmentRefBumpTotal counts .meta rewrites by the attachment refcount
+	// tracker (docs/rfc/attachment-refcount.md); rapid bumps on one
+	// (session, attachment) pair coalesce into a single increment.
 	AttachmentRefBumpTotal = expvar.NewInt("naozhi_attachment_ref_bump_total")
 
-	// AttachmentRefClearTotal counts .meta rewrites performed during
-	// session removal (OnSessionRemoved walks the workspace dir and
-	// drops the keyhash from every attachment that references it).
-	// A single session deletion may bump this by the number of
-	// attachments it touched. Steady zero in normal operation; a
-	// delta matches an operator clicking × on a dashboard card.
+	// AttachmentRefClearTotal counts .meta rewrites during session removal
+	// (one per attachment the removed session referenced).
 	AttachmentRefClearTotal = expvar.NewInt("naozhi_attachment_ref_clear_total")
 
-	// AttachmentRefMetaErrorTotal counts tracker errors writing the
-	// .meta sidecar — usually missing sidecar (legacy attachments
-	// without the refcount fields), ENOSPC, or permission denied.
-	// Non-zero steady-state is a signal the tracker cannot keep up:
-	// attachments will fall back to upload-only TTL GC.
+	// AttachmentRefMetaErrorTotal counts tracker errors writing the .meta
+	// sidecar (missing sidecar, ENOSPC, EACCES); affected attachments fall
+	// back to upload-only TTL GC.
 	AttachmentRefMetaErrorTotal = expvar.NewInt("naozhi_attachment_ref_meta_error_total")
 
 	// AttachmentRefDropTotal counts bumps rejected by the tracker's
-	// non-blocking enqueue path (channel at capacity). Mirrors the
-	// event-log Persister's drop counter — operator runbook is the
-	// same: investigate disk latency / writer stall.
+	// non-blocking enqueue (channel full); runbook as for the persister drop.
 	AttachmentRefDropTotal = expvar.NewInt("naozhi_attachment_ref_drop_total")
 
-	// AttachmentGCReapedTotal counts attachment payloads actually
-	// deleted by the attachment-gc daemon (live mode only; dry-run
-	// increments AttachmentGCWouldReap* instead). See
-	// docs/rfc/attachment-gc-daemon.md §6.
+	// AttachmentGCReapedTotal counts payloads deleted by the attachment-gc
+	// daemon (live mode only; docs/rfc/attachment-gc-daemon.md §6).
 	AttachmentGCReapedTotal = expvar.NewInt("naozhi_attachment_gc_reaped_total")
 
-	// AttachmentGCWouldReapLegacyTotal / NoRefs / Expired bucket the
-	// would-remove decisions by reason so operators can read the risk
-	// composition of a dry-run before flipping dry_run off (RFC §6 E4):
-	//   - legacy_no_meta: no sidecar, decided by date-dir TTL (safe-ish)
-	//   - meta_no_refs:   sidecar but no refs — MAY be a not-yet-bumped
-	//                     active reference (high-risk bucket)
-	//   - refs_expired:   referenced once, last ref past refTTL (safe)
-	// Populated in both dry-run and live mode for observability.
+	// AttachmentGCWouldReap{Legacy,NoRefs,Expired}Total bucket would-remove
+	// decisions by reason (populated in dry-run and live mode):
+	//   - legacy_no_meta: no sidecar, decided by date-dir TTL
+	//   - meta_no_refs:   sidecar but no refs — may be a not-yet-bumped active reference (high risk)
+	//   - refs_expired:   last ref past refTTL
 	AttachmentGCWouldReapLegacyTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_legacy_total")
 	AttachmentGCWouldReapNoRefsTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_no_refs_total")
 	AttachmentGCWouldReapExpiredTotal = expvar.NewInt("naozhi_attachment_gc_would_reap_expired_total")
 
-	// AttachmentGCSweepTotal counts attachment-gc daemon Tick
-	// invocations (success + error). A flat counter is the operator's
-	// proof the GC is actually running on its cadence.
+	// AttachmentGCSweepTotal counts attachment-gc Tick invocations (success + error).
 	AttachmentGCSweepTotal = expvar.NewInt("naozhi_attachment_gc_sweep_total")
 
-	// AttachmentGCErrorTotal counts WORKSPACE-LEVEL GC errors (a single
-	// root's GCWithRefs returned err, i.e. ReadDir failed). Per-FILE
-	// remove failures are logged but NOT counted here — they do not
-	// abort the sweep. RFC §6.
+	// AttachmentGCErrorTotal counts workspace-level GC errors (ReadDir
+	// failed); per-file remove failures are logged but not counted.
 	AttachmentGCErrorTotal = expvar.NewInt("naozhi_attachment_gc_error_total")
 
-	// CronExecutionSlowTotal counts cron executions that exceeded
-	// cronSlowThreshold wall-clock — a poor-man's histogram for R208-OBS1
-	// residual. Counter is monotonic (never resets); correlate with
-	// naozhi_cron_execution_failed_total (existing) to classify slow-vs-
-	// failed outcomes. A full histogram would require expvar gauge
-	// infrastructure; this counter lets ops add a Grafana single-stat
-	// alert without schema churn.
+	// CronExecutionSlowTotal counts cron executions exceeding
+	// cronSlowThreshold; cron_histogram.go carries the full distribution.
 	CronExecutionSlowTotal = expvar.NewInt("naozhi_cron_execution_slow_total")
 
-	// CronSendBudgetDoubledTotal counts cron run completions where the
-	// sendCtx (Send-phase WithTimeout(jobTimeout)) was entered after the
-	// spawn phase had already burned more than half of jobTimeout. The
-	// scheduler intentionally splits the budget — spawn ctx and sendCtx do
-	// NOT share a clock — so a slow GetOrCreate followed by a long-running
-	// Send can stretch a single cron run to ~2×jobTimeout wall clock
-	// (R230B-GO-1 / R222-GO-1 rationale; see scheduler.executeOpt). That
-	// design is intentional, but operators of long-budget jobs (300s+)
-	// historically had no signal when this branch fired. This counter pairs
-	// with a slog.Warn ("cron send budget exceeds job/2") so a runbook can
-	// alert on either rising delta or grep journalctl for the specific job.
-	// R240-GO-4.
+	// CronSendBudgetDoubledTotal counts cron runs whose Send phase started
+	// after the spawn phase had burned more than half of jobTimeout. Spawn ctx
+	// and sendCtx deliberately do not share a clock, so one run can stretch to
+	// ~2×jobTimeout; pairs with the "cron send budget exceeds job/2" WARN.
 	CronSendBudgetDoubledTotal = expvar.NewInt("naozhi_cron_send_budget_doubled_total")
 
-	// CronNotifyPartialTotal counts cron completion-notice deliveries that
-	// stopped before all chunks were sent — either because the per-target
-	// replyCtx deadline (cronNotifyTimeout, default 30s) was reached
-	// mid-loop, or because a chunk's ReplyWithRetry failed and the loop
-	// aborted to avoid interleaving the remaining chunks with foreign
-	// messages. Monotonic; pairs with the existing per-event slog.Warn in
-	// scheduler_notify.go's notifyTarget. A rising delta tells operators
-	// that IM recipients are seeing truncated cron output (slow/failing
-	// webhook) so they should lean on the dashboard run-detail panel as the
-	// surface of record. Distinct from the hard chunk-cap WARN
-	// (cronNotifyMaxChunks), which is a deterministic truncation rather than
-	// a delivery-time failure. R249-CR-26 (#966).
+	// CronNotifyPartialTotal counts completion-notice deliveries that stopped
+	// before all chunks were sent (replyCtx deadline hit, or a chunk's
+	// ReplyWithRetry failed). Distinct from the deterministic
+	// cronNotifyMaxChunks truncation WARN (#966).
 	CronNotifyPartialTotal = expvar.NewInt("naozhi_cron_notify_partial_total")
 
-	// CronStopBudgetExceededGCTotal / CronStopBudgetExceededDrainTotal /
-	// CronStopBudgetExceededTriggerTotal count Scheduler.Stop() phases that
-	// blew through their per-phase budget. Three separate counters (rather
-	// than a labeled vector) keep the schema flat under expvar without a
-	// helper indirection. Pairs with the existing per-phase slog.Warn so
-	// operators tracking systemd TimeoutStopSec breaches can alert on
-	// rising deltas without grepping journalctl.
-	//
-	// Phase mapping:
-	//   - GC      : cold-start GC goroutine wait exceeded gcWaitBudget (5s)
-	//   - Drain   : cron.Stop() drain exceeded stopBudget (30s)
+	// CronStopBudgetExceeded{GC,Drain,Trigger}Total count Scheduler.Stop()
+	// phases that blew their budget (#1083):
+	//   - GC      : cold-start GC goroutine wait exceeded gcWaitBudget
+	//   - Drain   : cron.Stop() drain exceeded stopBudget
 	//   - Trigger : triggerWG.Wait remaining-budget slice exceeded
-	//
-	// R250-GO-20 (#1083). Mirrors the CronSendBudgetDoubledTotal precedent.
 	CronStopBudgetExceededGCTotal      = expvar.NewInt("naozhi_cron_stop_budget_exceeded_gc_total")
 	CronStopBudgetExceededDrainTotal   = expvar.NewInt("naozhi_cron_stop_budget_exceeded_drain_total")
 	CronStopBudgetExceededTriggerTotal = expvar.NewInt("naozhi_cron_stop_budget_exceeded_trigger_total")
 
-	// CronRunStartedTotal counts cron run starts (after CAS gate, before
-	// IM notify). Pairs with CronRunEndedTotal — the difference (modulo
-	// inflight) approximates "runs interrupted by panic / process crash".
-	// Wired in scheduler.executeOpt's started branch.
+	// CronRunStartedTotal counts cron run starts (after the CAS gate). Its
+	// difference from CronRunEndedTotal (modulo inflight) approximates runs
+	// lost to panic / process crash.
 	CronRunStartedTotal = expvar.NewInt("naozhi_cron_run_started_total")
 
 	// CronRunEndedTotal counts cron run terminal transitions across all
-	// states (succeeded/failed/skipped/timed_out/canceled). Aggregated
-	// counter — per-state breakdown lives on naozhi_cron_run_<state>_total
-	// below. Wired in recordResult / overlap-skip branches.
+	// states; the per-state breakdown follows below.
 	CronRunEndedTotal = expvar.NewInt("naozhi_cron_run_ended_total")
 
-	// CronRunSucceededTotal / CronRunFailedTotal / CronRunSkippedTotal /
-	// CronRunTimedOutTotal / CronRunCanceledTotal — per-state breakdown of
-	// cron run terminations. The state taxonomy mirrors RunState in
-	// internal/cron/job.go; adding a new state requires a new counter
-	// here so dashboards stay in lockstep.
+	// CronRun{Succeeded,Failed,Skipped,TimedOut,Canceled}Total break down cron
+	// run terminations by state, mirroring RunState in internal/cron/job.go;
+	// a new state needs a new counter here.
 	CronRunSucceededTotal = expvar.NewInt("naozhi_cron_run_succeeded_total")
 	CronRunFailedTotal    = expvar.NewInt("naozhi_cron_run_failed_total")
 	CronRunSkippedTotal   = expvar.NewInt("naozhi_cron_run_skipped_total")
 	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
 
-	// CronSandboxRunFailedTotal counts sandbox-placement cron runs that
-	// ended in RunStateFailed (failed-clean, failed-transport, unavailable).
-	// Timed-out runs are counted in CronSandboxRunTimedOutTotal and canceled
-	// runs are not counted here — the timeout split (#2091) keeps this counter
-	// free of double-counting. Sandbox failures additionally land in the
-	// per-state counters above; this dedicated counter exists because transport
-	// failures carry §6.2 double-run risk and operators alert on them
+	// CronSandboxRunFailedTotal counts sandbox-placement runs ending in
+	// RunStateFailed (timed-out runs go to CronSandboxRunTimedOutTotal, #2091).
+	// Transport failures carry double-run risk, so operators alert on this
 	// specifically (agentcore-cloud-sandbox RFC §6.2).
 	CronSandboxRunFailedTotal = expvar.NewInt("naozhi_cron_sandbox_run_failed_total")
 
-	// CronSandboxRunTimedOutTotal counts sandbox-placement cron runs that
-	// ended in RunStateTimedOut. Kept separate from CronSandboxRunFailedTotal
-	// (which counts only genuine RunStateFailed — see #2091/R20260614-LOGIC-9)
-	// so failure alerts don't drown out sandbox deadlines, and from the
-	// path-mixed CronRunTimedOutTotal so operators can isolate sandbox
-	// timeouts from local-run timeouts.
+	// CronSandboxRunTimedOutTotal counts sandbox-placement runs ending in
+	// RunStateTimedOut, isolated from local-run timeouts.
 	CronSandboxRunTimedOutTotal = expvar.NewInt("naozhi_cron_sandbox_run_timed_out_total")
 
-	// SysessionRunStartedTotal counts sysession daemon run starts (after the
-	// per-daemon CAS gate, before tick IO). Mirrors CronRunStartedTotal for
-	// the sysession subsystem (#1723 RFC §6 Phase 1.5). Bumped unconditionally
-	// inside emitRunStarted — before the nil-broadcaster early return — so the
-	// counter never drifts from the broadcast path (cron R230C-GO-15 rationale).
+	// SysessionRunStartedTotal counts sysession daemon run starts (#1723 RFC §6
+	// Phase 1.5). Bumped inside emitRunStarted before the nil-broadcaster
+	// early return so it never drifts from the broadcast path.
 	SysessionRunStartedTotal = expvar.NewInt("naozhi_sysession_run_started_total")
 
-	// SysessionRunEndedTotal counts sysession daemon run terminal transitions
-	// across all states. Pairs with SysessionRunStartedTotal — the difference
-	// (modulo inflight) approximates "runs interrupted by panic / process
-	// crash". Mirrors CronRunEndedTotal; bumped unconditionally inside
-	// emitRunEnded before the nil-broadcaster early return.
+	// SysessionRunEndedTotal counts sysession run terminal transitions; bumped
+	// inside emitRunEnded before the nil-broadcaster early return.
 	SysessionRunEndedTotal = expvar.NewInt("naozhi_sysession_run_ended_total")
 
-	// CronRunInflight is a gauge of currently executing cron runs. Bumped
-	// on CAS-gate success, decremented on terminal transition. Naming uses
-	// no `_total` suffix so the doc-sync regex treats it as a gauge.
+	// CronRunInflight gauges currently executing cron runs. No `_total`
+	// suffix so the doc-sync regex treats it as a gauge.
 	CronRunInflight = expvar.NewInt("naozhi_cron_run_inflight")
 
-	// CronWatchdogInterruptTimeoutTotal counts cron deadline-watchdog
-	// timeouts where InterruptViaControl did not return inside
-	// watchdogInterruptTimeoutDefault (3s). Each tick is a smoking gun for
-	// a wedged stdin write to the CLI shim — the inner goroutine in
-	// runDeadlineWatchdog publishes its result whenever
-	// InterruptViaControl finally unblocks (typically on the next
-	// session.Reset), but until then it stays parked, and a busy job that
-	// keeps timing out can stack inner goroutines per run. R20260527122801-SEC-3
-	// (#1327): pre-counter, the timeout fired silently — the only signal
-	// was a slow-rising goroutine count or a Reset on the next fresh tick.
-	// Operators wanting to alert on wedged shims now have a direct delta
-	// to compare against naozhi_shim_restart_total. The fired-but-
-	// successful path (InterruptViaControl returned non-nil before the
-	// timer) is NOT counted here — it bumps the regular CronRun*Total
-	// counters via finishRun's normal terminal classification.
+	// CronWatchdogInterruptTimeoutTotal counts deadline-watchdog timeouts where
+	// InterruptViaControl did not return within watchdogInterruptTimeoutDefault
+	// — a wedged stdin write to the shim; compare against
+	// naozhi_shim_restart_total (#1327). Late-but-successful interrupts are
+	// not counted here.
 	CronWatchdogInterruptTimeoutTotal = expvar.NewInt("naozhi_cron_watchdog_interrupt_timeout_total")
 
-	// --- Startup phase timing gauges (RNEW-OPS-414) -----------------------
-	//
-	// Cold-start observability: historically the only signal operators had
-	// for a slow boot was grepping journalctl timestamps across slog lines.
-	// These gauges record milliseconds from process start (t0 captured in
-	// main) to the end of each logical phase, set exactly once per process.
-	// Values are cumulative (phase N ms = total ms from t0 through phase N)
-	// so operators can read the table top-to-bottom and see per-phase
-	// duration as the difference between adjacent rows.
-	//
-	// Gauge semantics (not counter): values are written once via Set, never
-	// Add'd. Naming uses `_ms` suffix — NOT `_total` — so dashboards treat
-	// them as gauges and the `*_total` doc-sync regex correctly ignores
-	// them. Using expvar.Int (int64 millis) keeps zero dependencies and
-	// avoids float encoding surprises downstream. Prometheus migration
-	// path: swap to `prometheus.NewGauge` with `_milliseconds` suffix, or
-	// to `_seconds` converted to float.
-	//
-	// Measurement pattern at each call site:
-	//     metrics.StartupPhaseXxxMs.Set(time.Since(t0).Milliseconds())
-	// Set takes <1µs and cannot block boot.
+	// Startup phase gauges: milliseconds from process start (t0 in main) to
+	// the end of each phase, Set exactly once per process. Values are
+	// cumulative, so per-phase duration is the difference between adjacent
+	// rows. `_ms` suffix (not `_total`) marks them as gauges for dashboards
+	// and the doc-sync regex.
 
-	// StartupPhaseConfigMs is set after config.Load returns — captures
-	// flag parsing + YAML read + env-file resolution cost. Unusually high
-	// (>500ms on a warm disk) points at a very large config or slow
-	// filesystem.
+	// StartupPhaseConfigMs is set after config.Load returns.
 	StartupPhaseConfigMs = expvar.NewInt("naozhi_startup_phase_config_ms")
 
-	// StartupPhaseRouterMs is set after session.NewRouter returns —
-	// captures sessions.json load, eventlog dir scan, wrapper map
-	// assembly, and backend version probes. This is typically the largest
-	// phase on a warm host with many persisted sessions.
+	// StartupPhaseRouterMs is set after session.NewRouter returns (sessions.json
+	// load, eventlog scan, backend probes) — typically the largest phase.
 	StartupPhaseRouterMs = expvar.NewInt("naozhi_startup_phase_router_ms")
 
-	// StartupPhaseShimReconnectMs is set after router.ReconnectShimsCtx
-	// returns — captures stat() + handshake against each surviving shim
-	// from the previous naozhi run. Worst case ≈ N_shims × 15s handshake
-	// timeout; a slow value here means shim sockets are stuck (SIGTERM
-	// arriving now will abort cleanly thanks to the ctx plumbing).
+	// StartupPhaseShimReconnectMs is set after router.ReconnectShimsCtx returns;
+	// worst case ≈ N_shims × 15s handshake timeout.
 	StartupPhaseShimReconnectMs = expvar.NewInt("naozhi_startup_phase_shim_reconnect_ms")
 
-	// StartupPhasePlatformsMs is set after platform adapters are
-	// registered AND the parallel init WG (transcriber + project scan)
-	// has drained — so a slow transcribe.New or projects.Scan is visible
-	// here rather than hidden inside a goroutine.
+	// StartupPhasePlatformsMs is set after platform adapters register and the
+	// parallel init WG (transcriber + project scan) drains.
 	StartupPhasePlatformsMs = expvar.NewInt("naozhi_startup_phase_platforms_ms")
 
-	// StartupPhaseSchedulerMs is set after scheduler.Start returns —
-	// captures cron store load + jitter planning. A slow value here
-	// usually means the cron store file grew large; see
-	// cron.StorePath.
+	// StartupPhaseSchedulerMs is set after scheduler.Start returns (cron store
+	// load + jitter planning).
 	StartupPhaseSchedulerMs = expvar.NewInt("naozhi_startup_phase_scheduler_ms")
 
-	// StartupPhaseServerMs is set after server.NewWithOptions returns —
-	// captures route registration, WS hub wiring, and dashboard asset
-	// mounting. Not including srv.Start (HTTP listen loop) because that
-	// runs in a goroutine for the remainder of the process lifetime.
+	// StartupPhaseServerMs is set after server.NewWithOptions returns; excludes
+	// srv.Start, which runs for the process lifetime.
 	StartupPhaseServerMs = expvar.NewInt("naozhi_startup_phase_server_ms")
 
 	// StartupPhaseReadyMs is set just before main blocks on the shutdown
-	// select — the effective "naozhi is up" moment. Compare against
-	// systemd's START_USEC to cross-check TimeoutStartSec margin.
+	// select — the "naozhi is up" moment.
 	StartupPhaseReadyMs = expvar.NewInt("naozhi_startup_phase_ready_ms")
 
-	// AutoChainOriginsLengthMismatch counts ManagedSession.SetPrevSessionOrigins
-	// invocations that observed a length drift between prevSessionIDs and
-	// prevSessionOrigins (RFC v3 Arch-MINOR-1). Steady-state must be 0;
-	// any increment indicates a code path violated the append-only
-	// invariant on prev_session_ids.
+	// AutoChainOriginsLengthMismatch counts SetPrevSessionOrigins calls that
+	// observed a length drift between prevSessionIDs and prevSessionOrigins.
+	// Must stay 0: prev_session_ids is append-only.
 	AutoChainOriginsLengthMismatch = expvar.NewInt("naozhi_auto_chain_origins_length_mismatch_total")
 
 	// AutoChainRetiredOnStartup counts sessions whose prev_session_ids chain
-	// had auto-spawn / auto-backfill segments stripped by the one-time startup
-	// cleanup that replaced the auto-workspace-chain backfill (RFC
-	// docs/rfc/project-stable-session-key.md §9.2). One increment per session
-	// touched; idempotent across restarts (a cleaned chain has no auto-*
-	// origins left, so a second startup is a no-op and does not increment).
+	// had auto-* segments stripped by the one-time startup cleanup
+	// (docs/rfc/project-stable-session-key.md §9.2). Idempotent across restarts.
 	AutoChainRetiredOnStartup = expvar.NewInt("naozhi_auto_chain_retired_on_startup_total")
 
 	// ToolCallLeakDetectedTotal counts turns whose result text tripped the
-	// leaked-tool-call detector (the model wrote <invoke> XML as prose instead
-	// of a structured tool_use, so nothing executed and the turn stalled). A
-	// rising delta quantifies the underlying model regression rate — watch it
-	// after a model-default change (e.g. the PR#2050 sonnet→settings.json
-	// switch). Incremented regardless of whether auto-recovery is enabled.
+	// leaked-tool-call detector (<invoke> XML written as prose, so nothing
+	// executed). Incremented regardless of whether auto-recovery is enabled.
 	ToolCallLeakDetectedTotal = expvar.NewInt("naozhi_session_toolcall_leak_detected_total")
 
 	// ToolCallLeakRecoveredTotal counts leaked turns where the auto-continue
-	// re-send produced a clean (non-leaking) follow-up result. This is the
-	// success path: the operator never had to type "continue". Always ≤
-	// ToolCallLeakDetectedTotal; the gap is failures plus the flag-off skips.
+	// re-send produced a clean result. Always ≤ ToolCallLeakDetectedTotal.
 	ToolCallLeakRecoveredTotal = expvar.NewInt("naozhi_session_toolcall_leak_recovered_total")
 
 	// ToolCallLeakRecoveryFailedTotal counts leaked turns where recovery ran
-	// but did not yield a clean result — the process died mid-recovery, or the
-	// model leaked again on the single retry (cap=1). The returned text has the
-	// leaked XML stripped so no-fold channels stay readable. A sustained delta
-	// here means the continue-prompt is not steering the model off the leak.
+	// but did not yield a clean result (process died, or leaked again on the
+	// single retry). The returned text has the leaked XML stripped.
 	ToolCallLeakRecoveryFailedTotal = expvar.NewInt("naozhi_session_toolcall_leak_recovery_failed_total")
 )

@@ -16,12 +16,8 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// maxTranscriptBytes caps the byte length of a returned transcript. AWS
-// Transcribe streaming sessions are bounded to 4hr but per-message IM voice
-// is ≤ 5min; 16KB is well above any plausible Mandarin/English transcription
-// at that duration (≈ 200 chars/sec spoken × 5min × 4 byte/rune ≈ 240KB
-// upper bound, real-world is sub-KB). Bound the field so a runaway server
-// stream cannot fan out unbounded text into IM message buffers. R247-SEC-18.
+// maxTranscriptBytes caps a returned transcript (real-world is sub-KB) so a
+// runaway server stream cannot fan unbounded text into IM message buffers.
 const maxTranscriptBytes = 16 * 1024
 
 // Service transcribes audio bytes to text.
@@ -29,9 +25,8 @@ type Service interface {
 	Transcribe(ctx context.Context, data []byte, mimeType string) (string, error)
 }
 
-// Config for Amazon Transcribe Streaming.
-// LanguageCode accepts a single BCP-47 code (e.g. "zh-CN") or a comma-separated
-// list (e.g. "zh-CN,en-US") to enable automatic multi-language identification.
+// Config for Amazon Transcribe Streaming. A comma-separated LanguageCode
+// ("zh-CN,en-US") enables automatic multi-language identification.
 type Config struct {
 	Region       string // default: us-east-1
 	LanguageCode string // BCP-47, default: zh-CN; comma-separated for multi-language
@@ -74,18 +69,17 @@ func newWithClient(client transcribeAPI, cfg Config) *awsService {
 }
 
 func (s *awsService) Transcribe(ctx context.Context, data []byte, mimeType string) (string, error) {
-	// Detect real format from magic bytes, fallback to mimeType hint
+	// Magic bytes win over the mimeType hint.
 	detected := DetectFormat(data)
 	if detected != "" {
 		mimeType = detected
 	}
 
-	// Supported formats can be sent directly
 	if isSupportedByStreaming(mimeType) {
 		return s.streamFromBuffer(ctx, data, mimeType)
 	}
 
-	// Unsupported formats: stream through ffmpeg → PCM → Transcribe concurrently
+	// Unsupported formats: ffmpeg → PCM → Transcribe concurrently.
 	return s.streamFromFFmpeg(ctx, data)
 }
 
@@ -99,10 +93,8 @@ func (s *awsService) streamFromBuffer(ctx context.Context, data []byte, mimeType
 	}
 
 	stream := resp.GetStream()
-	// R186-RELY-H1 / R178-T: the sender goroutine uses stream.Writer; if
-	// collectTranscripts returns early (Reader.Err, partial result, ctx
-	// cancellation) the deferred stream.Close would race with an in-flight
-	// Writer.Send. Gate the Close on the sender's completion instead.
+	// If collectTranscripts returns early the deferred stream.Close would race
+	// an in-flight Writer.Send; gate the Close on the sender's completion.
 	senderDone := make(chan struct{})
 	defer func() {
 		<-senderDone
@@ -118,14 +110,9 @@ func (s *awsService) streamFromBuffer(ctx context.Context, data []byte, mimeType
 				Value: types.AudioEvent{AudioChunk: data[i:end]},
 			}); err != nil {
 				slog.Debug("transcribe send chunk failed", "err", err)
-				// R242-GO-15: break → fall-through to Writer.Close()
-				// below is intentional. Even on send error we still
-				// need to close the writer so the AWS SDK signals EOF
-				// to the service and collectTranscripts' Reader.Err
-				// surfaces a server-side error (otherwise the events
-				// channel hangs until ctx cancellation). Do NOT swap
-				// `break` for `return` — Writer.Close must run on
-				// every exit path of this goroutine.
+				// break (not return): Writer.Close must run on every exit path
+				// so the SDK signals EOF and collectTranscripts' Reader.Err
+				// surfaces instead of hanging until ctx cancellation.
 				break
 			}
 		}
@@ -135,8 +122,8 @@ func (s *awsService) streamFromBuffer(ctx context.Context, data []byte, mimeType
 	return collectTranscripts(stream)
 }
 
-// streamFromFFmpeg starts ffmpeg PCM conversion and streams output directly to Transcribe.
-// Conversion and upload run concurrently via pipe.
+// streamFromFFmpeg starts ffmpeg PCM conversion and streams output directly
+// to Transcribe; conversion and upload run concurrently via pipe.
 func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string, error) {
 	pcm, err := startPCMStream(ctx, data)
 	if err != nil {
@@ -153,29 +140,22 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 }
 
 // pumpPCMToTranscribe streams ffmpeg PCM output into the Transcribe event
-// stream and collects the resulting transcript. Split out of streamFromFFmpeg
-// so the sender goroutine + ffmpeg-error propagation logic is unit-testable
-// with a mocked event stream (the SDK output's eventStream field is unexported,
-// so the seam has to live below resp.GetStream()).
+// stream and collects the transcript. Split out so the sender goroutine and
+// ffmpeg-error propagation are unit-testable with a mocked event stream.
 func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribestreaming.StartStreamTranscriptionEventStream) (string, error) {
-	// R186-RELY-H1 / R178-T: see streamFromBuffer; wait for sender goroutine
-	// before stream.Close() to avoid use-after-close on Writer.Send.
+	// Wait for the sender goroutine before stream.Close() (see streamFromBuffer).
 	senderDone := make(chan struct{})
 	defer func() {
 		<-senderDone
 		stream.Close()
 	}()
 
-	// pcm.Close() reaps ffmpeg and returns its non-zero exit error. The Close
-	// runs inside the sender goroutine (its sole owner), so carry the result
-	// back over a buffered (cap-1) channel: the send never blocks even if the
-	// reader bails, and the receive below happens-after that send — so reading
-	// the ffmpeg error is race-free without a second join. #1781: previously
-	// the error was discarded (`defer pcm.Close()`), so a transcode failure
-	// surfaced as ("", nil) — a silent success masking a conversion error.
+	// The sender goroutine solely owns pcm.Close() and carries ffmpeg's exit
+	// error over a buffered (cap-1) channel: the send never blocks and the
+	// receive happens-after it. Discarding it would turn a transcode failure
+	// into a silent ("", nil) success (#1781).
 	ffmpegErrCh := make(chan error, 1)
 
-	// Read from ffmpeg stdout → send to Transcribe, concurrently with ffmpeg
 	go func() {
 		defer close(senderDone)
 		defer func() { ffmpegErrCh <- pcm.Close() }()
@@ -183,12 +163,8 @@ func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribe
 		for {
 			n, readErr := pcm.Read(buf)
 			if n > 0 {
-				// The chunk copy is required because `buf` is reused across
-				// iterations; AWS Go SDK v2 currently serializes AudioChunk
-				// synchronously inside Send, but that behaviour is not part
-				// of the public contract. Removing the copy to "optimize"
-				// would introduce a race if the SDK ever adds async
-				// buffering. R187-RELY-L1.
+				// buf is reused; the SDK serializing AudioChunk synchronously
+				// is not part of its public contract, so copy.
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
 				if sendErr := stream.Writer.Send(ctx, &types.AudioStreamMemberAudioEvent{
@@ -210,24 +186,16 @@ func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribe
 
 	transcript, err := collectTranscripts(stream)
 	if err != nil {
-		// R202606j-CR-003: previously this returned immediately and the
-		// ffmpeg exit error was discarded — an operator seeing only the
-		// Transcribe failure had no signal that the underlying conversion
-		// (e.g. an unsupported codec) was the real cause. The sender
-		// goroutine is the sole owner of pcm.Close() and always sends its
-		// result on the buffered (cap-1) ffmpegErrCh before closing
-		// senderDone, so join senderDone first, then read the ffmpeg error
-		// race-free and join it onto the transcript error when present.
+		// Join the ffmpeg exit error so an operator sees when the conversion
+		// (e.g. unsupported codec) was the real cause; senderDone first, race-free.
 		<-senderDone
 		if ffmpegErr := <-ffmpegErrCh; ffmpegErr != nil {
 			return "", errors.Join(err, fmt.Errorf("audio convert: %w", ffmpegErr))
 		}
 		return "", err
 	}
-	// #1781: a non-empty transcript means usable PCM still reached Transcribe
-	// before ffmpeg died, so prefer the partial result over the error; only
-	// surface the convert error when nothing was transcribed (otherwise we'd
-	// discard a good result for a benign late ffmpeg hiccup).
+	// A non-empty transcript means usable PCM reached Transcribe before ffmpeg
+	// died; surface the convert error only when nothing was transcribed (#1781).
 	if transcript == "" {
 		if ffmpegErr := <-ffmpegErrCh; ffmpegErr != nil {
 			return "", fmt.Errorf("audio convert: %w", ffmpegErr)
@@ -236,15 +204,10 @@ func pumpPCMToTranscribe(ctx context.Context, pcm *pcmStream, stream *transcribe
 	return transcript, nil
 }
 
-// collectTranscripts reads final transcript results from the stream.
-//
-// R247-SEC-18: AWS Transcribe responses flow into IM message paths and slog
-// attributes. A crafted/exploited upstream could embed bidi (U+202A..E /
-// U+2066..9), LS/PS (U+2028/9), or C0/C1 control runes that flip log
-// rendering or split slog lines. Pipe the joined transcript through
-// osutil.SanitizeForLog (same scrub used by cron sanitiseRunResult) before
-// returning. SanitizeForLog preserves CJK / emoji / valid printable
-// codepoints — only the documented injection-class runes become "_".
+// collectTranscripts reads final transcript results from the stream. Responses
+// flow into IM messages and slog attributes, so the joined transcript passes
+// through osutil.SanitizeForLog to strip bidi / LS-PS / C0-C1 control runes a
+// crafted upstream could use to flip log rendering (CJK / emoji preserved).
 func collectTranscripts(stream *transcribestreaming.StartStreamTranscriptionEventStream) (string, error) {
 	var parts []string
 	for event := range stream.Reader.Events() {
@@ -278,10 +241,8 @@ func (s *awsService) buildInput(encoding types.MediaEncoding, sampleRate int32) 
 	}
 	if s.isMultiLang() {
 		input.IdentifyMultipleLanguages = true
-		// Normalize: strip spaces around each language code and drop empty
-		// segments so leading/trailing commas (",en-US" / "zh-CN,") or doubles
-		// (",,") do not leave PreferredLanguage = "" and trip AWS API 400.
-		// R185-REL-M1.
+		// Strip spaces and drop empty segments so stray commas (",en-US",
+		// "zh-CN,", ",,") do not leave PreferredLanguage = "" (AWS 400).
 		raw := strings.Split(s.cfg.LanguageCode, ",")
 		parts := raw[:0]
 		for _, p := range raw {
@@ -290,20 +251,14 @@ func (s *awsService) buildInput(encoding types.MediaEncoding, sampleRate int32) 
 			}
 		}
 		if len(parts) == 0 {
-			// Degrade gracefully: multi-lang config that resolved to zero
-			// entries falls back to single-LanguageCode with the raw string
-			// (AWS will return a clearer "invalid LanguageCode" if still bad).
+			// Fall back to single-LanguageCode with the raw string (AWS errors clearly).
 			input.IdentifyMultipleLanguages = false
 			input.LanguageCode = types.LanguageCode(s.cfg.LanguageCode)
 			return input
 		}
 		if len(parts) == 1 {
-			// R202606c-CR-001: a comma that stripped down to a single entry
-			// (e.g. "zh-CN," with a trailing comma) is effectively single-
-			// language. AWS Transcribe Streaming rejects
-			// IdentifyMultipleLanguages=true with fewer than two LanguageOptions
-			// (400 BadRequestException), so degrade to single-LanguageCode using
-			// the one surviving normalized entry rather than the raw string.
+			// AWS rejects IdentifyMultipleLanguages=true with fewer than two
+			// LanguageOptions (400), so degrade to single-LanguageCode.
 			input.IdentifyMultipleLanguages = false
 			input.LanguageCode = types.LanguageCode(parts[0])
 			return input
@@ -366,12 +321,8 @@ func DetectFormat(data []byte) string {
 	if len(data) >= 8 && string(data[4:8]) == "ftyp" {
 		return "audio/mp4"
 	}
-	// RIFF is a generic container header shared by WAV, AVI, WEBP, AIFF-RIFF
-	// and others. Only the WAVE subtype (bytes 8..12) is an audio stream we
-	// want to admit as audio/wav — returning audio/wav for a WEBP image or
-	// AVI video would have that asset mislabelled downstream (Whisper/
-	// ffmpeg spends cycles on an audio decode that will never produce
-	// speech). Require the 4-byte subtype explicitly.
+	// RIFF is shared by WAV, AVI, WEBP, AIFF-RIFF; only the WAVE subtype is
+	// audio, otherwise a WEBP image or AVI video would be mislabelled.
 	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
 		return "audio/wav"
 	}

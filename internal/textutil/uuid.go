@@ -6,36 +6,16 @@ import (
 	"strconv"
 )
 
-// DeriveLegacyUUID computes a stable UUID for a legacy event entry that
-// does not have an UUID field set. Used by the Claude CLI JSONL reader
-// (internal/discovery) and the historical replay path so that two
-// separate ingests of the same Claude message map onto the same event
-// identity, allowing MergedSource to dedup them against newer naozhi-
-// native records.
-//
-// The derivation is intentionally deterministic and stable across naozhi
-// versions — changing the hash input would break dedup for any entry
-// produced by an older naozhi. The inputs we hash are:
+// DeriveLegacyUUID computes a stable UUID for a legacy event entry without a
+// UUID field, so two ingests of the same Claude message (JSONL reader and
+// replay) map onto one identity and MergedSource can dedup them. Hash input:
 //
 //	"v1" | timestamp(unix ms) | type | summary | detail
 //
-// Time + summary is usually enough to identify an event uniquely within a
-// session; detail is folded in for tool_use / result events where summary
-// is a repetitive one-liner ("Bash", "Read") but detail carries the actual
-// command / output.
-//
-// The "v1" prefix guards against accidentally migrating to a new
-// derivation rule without bumping — any change here MUST flip the prefix
-// to "v2" and carry a CHANGELOG note that MergedSource's dedup window is
-// effectively reset.
-//
-// Scope of that contract: it governs the hash RULE in this function (the
-// field set, ordering, separators, digest). A call site correcting which
-// values it passes (e.g. codexjsonl folding the real detail where it
-// mistakenly passed "" — #2336/#2445) is a bug fix, not a rule change; it
-// shifts UUIDs only for entries that were colliding or mis-derived, none
-// of which are ever persisted (derived UUIDs are recomputed per LoadBefore
-// and replay batches never reach the persist sink).
+// The rule (field set, order, separators, digest) MUST stay stable across
+// naozhi versions; any change must flip the "v1" prefix to "v2". A call site
+// correcting the values it passes is a bug fix, not a rule change — derived
+// UUIDs are recomputed per LoadBefore and never persisted (#2445).
 func DeriveLegacyUUID(timeMS int64, typ, summary, detail string) string {
 	h := sha256.New()
 	h.Write([]byte("v1\x00"))

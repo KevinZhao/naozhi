@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// stringify converts an arg value to its display string. Strings pass through
-// unchanged; everything else uses fmt's default formatting.
+// stringify renders v as a string; strings pass through unchanged.
 func stringify(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -14,11 +13,9 @@ func stringify(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// compiledTemplate is a pre-scanned message template. It splits a string into
-// alternating literal and placeholder segments so rendering is allocation-light
-// and never re-parses at T() time.
+// compiledTemplate is a pre-scanned message template split into alternating
+// literal and placeholder segments so render never re-parses.
 type compiledTemplate struct {
-	// segments alternate literal/placeholder per the isArg flags.
 	segments []segment
 }
 
@@ -27,8 +24,7 @@ type segment struct {
 	isArg bool
 }
 
-// compile scans {name} tokens. A "{" with no matching "}" (or an empty name
-// "{}") is treated as literal text, preserving the raw characters.
+// compile scans {name} tokens; an unmatched "{" or empty name stays literal.
 func compile(tmpl string) *compiledTemplate {
 	ct := &compiledTemplate{}
 	i := 0
@@ -41,15 +37,13 @@ func compile(tmpl string) *compiledTemplate {
 		open += i
 		close := strings.IndexByte(tmpl[open:], '}')
 		if close < 0 {
-			// No closing brace: rest is literal.
 			ct.segments = append(ct.segments, segment{text: tmpl[i:]})
 			break
 		}
 		close += open
 		name := tmpl[open+1 : close]
 		if name == "" || strings.ContainsAny(name, "{") {
-			// Empty or malformed placeholder: emit "{" as literal and continue
-			// scanning after it so nested/odd braces don't swallow content.
+			// Malformed placeholder: emit "{" as literal and rescan after it.
 			ct.segments = append(ct.segments, segment{text: tmpl[i : open+1]})
 			i = open + 1
 			continue
@@ -63,8 +57,7 @@ func compile(tmpl string) *compiledTemplate {
 	return ct
 }
 
-// render fills placeholders from args. A missing arg leaves the literal
-// "{name}" in place (passthrough). Extra args are ignored.
+// render fills placeholders from args; a missing arg leaves "{name}" literal.
 func (ct *compiledTemplate) render(args map[string]any) string {
 	var sb strings.Builder
 	for _, seg := range ct.segments {
@@ -83,20 +76,14 @@ func (ct *compiledTemplate) render(args map[string]any) string {
 	return sb.String()
 }
 
-// Printer is locale-bound. It holds a *Bundle pointer (not map refs) so a
-// future atomic.Pointer Reload can redirect lookups (NNH1).
+// Printer is a locale-bound view of a Bundle.
 type Printer struct {
 	locale string
 	bundle *Bundle
 }
 
-// T renders a key with named args. Behavior:
-//   - unknown key (or unknown locale) → "[" + key + "]"
-//   - missing arg in map → placeholder "{name}" left unchanged
-//   - extra args ignored
-//
-// At most one args map is consulted (the first). Passing no map renders the
-// template with no substitutions, leaving any placeholders literal.
+// T renders key with named args: unknown key or locale → "[key]"; a missing
+// arg leaves "{name}" literal; extra args ignored. Only the first map is used.
 func (p *Printer) T(key string, args ...map[string]any) string {
 	localeMsgs, ok := p.bundle.msgs[p.locale]
 	if !ok {

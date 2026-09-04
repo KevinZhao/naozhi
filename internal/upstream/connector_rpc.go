@@ -1,11 +1,7 @@
-// connector_rpc.go owns the reverse-RPC method dispatch — the 18-case
-// switch invoked by handleConn for every "request" frame received from
-// the primary. Each branch validates inputs, calls into router /
-// projectMgr / discovery / dispatch, and marshals the response via the
-// marshalResult helper that lives in connector.go. Connection lifecycle
-// (write loop, ping, drain budget, subscribe state) lives in
-// connector_conn.go; live event streaming lives in connector_subscribe.go.
-// Split is purely organisational — all three files are package upstream.
+// connector_rpc.go owns the reverse-RPC method dispatch invoked by handleConn
+// for every "request" frame from the primary. Each branch validates inputs,
+// calls into router / projectMgr / discovery, and marshals the response via
+// marshalResult (connector.go).
 package upstream
 
 import (
@@ -29,22 +25,13 @@ import (
 
 // handleRequest dispatches a reverse-RPC request received from the primary.
 //
-// Context selection matrix (RNEW-008):
-//
-//   - connCtx ("connection-scoped"): cancelled when handleConn returns
-//     (WebSocket drop, ping timeout, graceful shutdown). Use for any work
-//     whose result is meaningless after this connection ends, so
-//     reconnects do not leak goroutines. Examples: `send` stream waits,
-//     synchronous `fetch_events`, `router.GetOrCreate` called on the
-//     RPC's behalf.
-//
-//   - appCtx ("app-scoped"): cancelled only when the Connector shuts
-//     down entirely. Use when the work MUST outlive the current WS
-//     connection — typically takeover / discovery waits where the
-//     CLI child process is expected to survive reconnects.
-//
-// New RPC branches: default to connCtx. Only switch to appCtx when you
-// can justify in a comment why cross-reconnect persistence is required.
+// Context rule: connCtx is cancelled when handleConn returns (WS drop, ping
+// timeout, shutdown) — use it for work that is meaningless once this
+// connection ends (send, fetch_events, GetOrCreate, restart_planner) so
+// reconnects do not leak goroutines. appCtx is cancelled only when the
+// Connector shuts down — takeover and close_discovered use it because the
+// CLI child must survive a reconnect while WaitAndCleanup / Takeover run.
+// New branches default to connCtx.
 func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
@@ -69,13 +56,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("fetch_discovered_preview params: %w", err)
 		}
-		// Defense-in-depth: the HTTP dashboard path validates on the
-		// control-node side and `discovery.LoadHistoryChainTailCtx` also
-		// validates internally, but validating here at the RPC boundary
-		// mirrors the `takeover` / `close_discovered` handlers and prevents
-		// a future refactor from removing the internal check and exposing
-		// `{".."}` / path-traversal inputs from a compromised primary.
-		// R65-SEC-M-1.
+		// Defense-in-depth at the RPC boundary (mirrors takeover /
+		// close_discovered) so a compromised primary cannot pass ".." /
+		// path-traversal session IDs even if the internal check is removed.
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
@@ -97,10 +80,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		sess := c.router.SessionFor(p.Key)
 		if sess == nil {
-			// R180-SEC-M1 / R180-GO-P1: %q escapes any bidi/C1/newline bytes
-			// that ValidateSessionKey would accept but would break log
-			// parsing / bidi-flip the terminal if they reach slog via the
-			// returned err.Error() on the opposite node.
+			// %q escapes bidi/C1/newline bytes that would otherwise reach slog
+			// on the opposite node via err.Error().
 			return nil, fmt.Errorf("session not found: %q", p.Key)
 		}
 		// #2456: re-admit the watermark ms (same rule as the WS subscribe
@@ -108,15 +89,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(sess.EventEntriesSince(cli.SinceInclusive(p.After)))
 
 	case "fetch_backends":
-		// No params. Return THIS node's backend manifest so the primary's
-		// node-aware picker renders our backends + default (picker
-		// node-aware fix). detected is nil here: it exists only to show
-		// "installed but unconfigured" backends in a LOCAL dashboard's
-		// doctor panel, and a remote picker only reads backends+default —
-		// probing --version per binary on every picker open would also add
-		// a fork-storm to the reverse-RPC hot path. BackendsManifest
-		// coerces nil to an empty JSON array so the frontend's
-		// Array.isArray(detected) guard still holds.
+		// Return THIS node's backend manifest for the primary's node-aware
+		// picker. detected is nil: it only feeds a LOCAL dashboard's doctor
+		// panel, and probing --version per binary would add a fork-storm to
+		// the reverse-RPC hot path. BackendsManifest coerces nil to [].
 		return marshalResult(c.router.BackendsManifest(nil))
 
 	case "send":
@@ -131,38 +107,26 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := session.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("send key: %w", err)
 		}
-		// Reject oversized text at the reverse-RPC trust boundary before it
-		// reaches sess.Send → CoalesceMessages. Without this a compromised or
-		// misconfigured primary could push up to ~16 MB (the WS read cap)
-		// straight into CLI stdin, relying only on the shim's 12 MB line
-		// ceiling to reject it. Matches the primary-side dashboard cap
-		// chain (maxWSSendTextBytes=1 MB → coalesce soft cap 4 MB → shim
-		// 12 MB). R68-SEC-H1.
-		//
-		// Source of truth lives in internal/limits so this reverse-RPC
-		// trust boundary doesn't have to import dispatch (R228-ARCH-9).
+		// Reject oversized text at the trust boundary before it reaches CLI
+		// stdin; a compromised primary could otherwise push up to the WS read
+		// cap (~16 MB). The cap lives in internal/limits so this package does
+		// not import dispatch.
 		if n := len(p.Text); n > limits.MaxCoalescedText {
 			return nil, fmt.Errorf("send text too long: %d bytes", n)
 		}
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
-			// Syntactic pre-check before filepath.Clean/EvalSymlinks. Clean
-			// silently folds `/home/../etc` into `/etc`, so a post-Clean
-			// prefix check under an empty defaultWorkspace would let any
-			// absolute path through on single-user deployments. R68-SEC-M2.
+			// Syntactic pre-check before Clean/EvalSymlinks: Clean folds
+			// `/home/../etc` into `/etc`, defeating a post-Clean prefix check.
 			if err := session.ValidateRemoteWorkspacePath(p.Workspace); err != nil {
 				return nil, fmt.Errorf("workspace path invalid: %w", err)
 			}
-			// When no allowed root is configured (defaultWorkspace=="") on this
-			// reverse node, we cannot bound the workspace to any prefix. A
-			// compromised/misconfigured primary could otherwise push any
-			// absolute path (e.g. `/etc`) and spawn a CLI session rooted
-			// there. Refuse rather than trust. R68-SEC-M2.
+			// With no allowed root configured the workspace cannot be bounded;
+			// refuse rather than let a compromised primary root a CLI session
+			// anywhere (e.g. /etc).
 			if c.defaultWorkspace == "" {
 				return nil, fmt.Errorf("workspace overrides disabled: no allowed root configured on this node")
 			}
-			// Sanitize workspace path via shared helper — EvalSymlinks +
-			// Clean + IsAbs + allowed-root prefix check. R237-CR-6 (#709).
 			ws, err := c.sanitizeWorkspacePath(p.Workspace, "workspace", false)
 			if err != nil {
 				return nil, err
@@ -173,11 +137,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err != nil {
 			return nil, fmt.Errorf("get session: %w", err)
 		}
-		// Send is async: primary subscribed before sending, events arrive via streamEvents.
-		// Use connCtx so a relay disconnect cancels in-flight sends, preventing
-		// goroutine accumulation across reconnect cycles. Register with the
-		// handleConn waitgroup so a dropped connection waits for in-flight
-		// sends to return before tearing down subscriptions.
+		// Send is async: the primary subscribed before sending, so events arrive
+		// via streamEvents. connCtx lets a relay disconnect cancel in-flight
+		// sends; wg makes a dropped connection wait for them before teardown.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -189,28 +151,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if _, err := sess.Send(connCtx, p.Text, nil, nil); err != nil {
 				if connCtx.Err() == nil {
 					slog.Warn("connector send failed", "key", p.Key, "err", err)
-					// R49-REL-CONNECTOR-SEND-RESULT-LOSS: the RPC already
-					// returned {"status":"accepted"} to primary, so a plain
-					// log.Warn leaves the UI showing "sent" while the message
-					// actually failed. Inject a system event into this
-					// session's EventLog so subscribed dashboards surface
-					// the failure on the next event push. Keep the message
-					// compact and classifier-friendly; full detail stays
-					// in the slog line above.
-					//
-					// R172-SEC-M4: err.Error() originates from a remote /
-					// transport stack — it may contain C1 controls, bidi
-					// overrides, or LS/PS characters that byte-level
-					// `< 0x20` gates miss. The summary is broadcast to every
-					// dashboard WS client subscribed to this session AND
-					// appended to persistedHistory (journalctl / sessions
-					// persistence), so an unsanitized error string here is a
-					// log-injection primitive that can flip terminal output
-					// under `tail -f` for operators and pollute dashboard
-					// rendering. Sanitize through osutil.SanitizeForLog and
-					// cap at 512 bytes — long remote stack traces beyond
-					// that point add noise without diagnostic value (full
-					// detail is already in the slog.Warn above).
+					// The RPC already returned "accepted", so surface the failure
+					// into this session's EventLog for subscribed dashboards. The
+					// error text comes from a remote transport stack and is
+					// broadcast to WS clients + persisted, so sanitize it (log
+					// injection) and cap at 512 bytes; full detail is in slog above.
 					sess.LogSystemEvent("发送失败：" + osutil.SanitizeForLog(err.Error(), 512))
 				}
 			}
@@ -254,23 +199,17 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		// Validate CWD against workspace root (same check as "send" RPC).
 		if cwd != "unknown" {
-			// Syntactic pre-check always — even with empty defaultWorkspace,
-			// `..` traversal / control bytes / non-absolute paths have no
-			// business reaching filepath.Clean. R68-SEC-M2.
+			// Syntactic pre-check always — traversal / control bytes / relative
+			// paths must not reach filepath.Clean.
 			if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
 				return nil, fmt.Errorf("takeover cwd invalid: %w", err)
 			}
-			// When no allowed root is configured on this reverse node, refuse
-			// the cwd override — the takeover would otherwise spawn a CLI
-			// session rooted wherever the primary pointed. Aligns with the
-			// "send" RPC above so both call sites have the same policy.
-			// R68-SEC-M2.
+			// No allowed root configured: refuse the cwd override (same policy
+			// as "send").
 			if c.defaultWorkspace == "" {
 				return nil, fmt.Errorf("takeover cwd overrides disabled: no allowed root configured on this node")
 			}
-			// R237-CR-6 (#709): shared helper. Takeover does NOT tolerate
-			// ENOENT — the shim is still alive in the directory, so the
-			// path must resolve.
+			// Takeover does not tolerate ENOENT: the shim is still alive in the directory.
 			cleanCWD, err := c.sanitizeWorkspacePath(cwd, "takeover cwd", false)
 			if err != nil {
 				return nil, err
@@ -280,10 +219,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		cwdKey := session.SanitizeCWDKey(cwd)
 		key := session.TakeoverKey(cwdKey)
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
-		// Track with connection wg so reconnect waits for in-flight cleanup rather
-		// than letting goroutines pile up across reconnect cycles. Use appCtx so a
-		// transient connection drop does not abort cleanup already in progress;
-		// appCtx outlives connCtx, but wg keeps accounting honest.
+		// wg keeps reconnect waiting for in-flight cleanup; appCtx so a
+		// transient connection drop does not abort cleanup already in progress.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -306,10 +243,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(map[string]string{"status": "accepted", "key": key})
 
 	case "close_discovered":
-		// Proxied from primary's handleClose — no discovered-cache check here:
-		// the primary already verified PID ∈ discovered before forwarding, and
-		// the RPC caller is an authenticated node. ProcStartTime still guards
-		// against PID reuse between primary's check and this kill.
+		// Proxied from the primary's handleClose: the primary already verified
+		// PID ∈ discovered and the caller is an authenticated node.
+		// ProcStartTime still guards against PID reuse.
 		var p struct {
 			PID           int    `json:"pid"`
 			SessionID     string `json:"session_id"`
@@ -328,34 +264,19 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
-		// CWD flows into discovery.WaitAndCleanup which builds a lockDir path
-		// and os.RemoveAll it (protected by filepath.Rel sandbox, but we still
-		// reject syntactic `..` traversal / control bytes / non-absolute paths
-		// up front to avoid depending on a single defense layer). Parallels the
-		// takeover-side check at line 520. R-close-discovered-cwd-validate.
-		//
-		// When defaultWorkspace is configured, additionally enforce the same
-		// EvalSymlinks + allowedRoot prefix check that takeover performs. This
-		// closes the gap called out in the 2026-05-08 security review: without
-		// it a primary could point close_discovered at a CWD outside the
-		// reverse node's configured root, and WaitAndCleanup would derive the
-		// lockDir from that path. When defaultWorkspace is empty we fall back
-		// to syntactic-only validation to preserve compatibility with single-
-		// node deployments that never configure an allowed root.
+		// CWD feeds discovery.WaitAndCleanup, which derives a lockDir and
+		// os.RemoveAll's it. Reject syntactic traversal / control bytes /
+		// relative paths up front; when defaultWorkspace is configured also
+		// enforce the EvalSymlinks + allowed-root check takeover performs. Empty
+		// defaultWorkspace falls back to syntactic-only validation (single-node).
 		if p.CWD != "" {
 			if err := session.ValidateRemoteWorkspacePath(p.CWD); err != nil {
 				return nil, fmt.Errorf("close_discovered cwd invalid: %w", err)
 			}
 			if c.defaultWorkspace != "" {
-				// Unlike takeover (which expects the CWD to exist because
-				// the shim is still running inside it), close_discovered
-				// frequently runs AFTER the Claude CLI has exited and the
-				// working directory may already be gone. tolerateMissing=true
-				// downgrades fs.ErrNotExist to "fall back to the cleaned
-				// syntactic path", and the helper still enforces IsAbs +
-				// allowed-root prefix so a relocated-but-existed attacker
-				// payload like "/etc/passwd" cannot slip through.
-				// R237-CR-6 (#709).
+				// close_discovered often runs after the CLI exited and its CWD is
+				// gone: tolerateMissing falls back to the cleaned path while
+				// still enforcing IsAbs + allowed-root.
 				cleanCWD, err := c.sanitizeWorkspacePath(p.CWD, "close_discovered cwd", true)
 				if err != nil {
 					return nil, err
@@ -399,24 +320,21 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("restart_planner params: %w", err)
 		}
-		// R181-SEC-P2-2: validate project_name at the trust boundary so
-		// bidi/C1/newline bytes never reach ErrNotFound / slog attrs on
-		// the miss path. Consistent with update_config below.
+		// Validate project_name at the trust boundary so bidi/C1/newline bytes
+		// never reach ErrNotFound / slog attrs on the miss path.
 		if err := project.ValidateProjectName(p.ProjectName); err != nil {
 			return nil, fmt.Errorf("restart_planner: %w", err)
 		}
-		// Delegate planner-view opts derivation to Resolver when wired;
-		// preserves the "do not inherit defaults" contract of
-		// administrative planner restarts (docs/rfc/key-resolver.md §2.2
-		// #7). Legacy inlined path retained for headless/test callers.
+		// The resolver derives planner-view opts without inheriting defaults
+		// (docs/rfc/key-resolver.md §2.2, #7); the inline path serves
+		// headless/test callers without a resolver.
 		var plannerKey string
 		var opts session.AgentOpts
 		if c.resolver != nil {
 			key, plannerOpts, ok := c.resolver.ResolveForPlannerKey(p.ProjectName)
 			if !ok {
-				// Use %q so bidi/C1/newline bytes in the primary-supplied
-				// name cannot forge structured-log fields when the remote
-				// side logs this error. R177-SEC-2.
+				// %q so bytes in the primary-supplied name cannot forge
+				// structured-log fields when the remote side logs this error.
 				return nil, fmt.Errorf("project not found: %q", p.ProjectName)
 			}
 			plannerKey = key
@@ -452,10 +370,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("update_config params: %w", err)
 		}
-		// R181-SEC-P2-2: validate project_name up front so the surrounding
-		// ErrNotFound (now %q-escaped per project/manager.go:228) and
-		// ValidateConfig error paths never log attacker-controlled bidi /
-		// newline bytes.
+		// Validate project_name up front so the ErrNotFound / ValidateConfig
+		// error paths never log attacker-controlled bidi / newline bytes.
 		if err := project.ValidateProjectName(p.ProjectName); err != nil {
 			return nil, fmt.Errorf("update_config: %w", err)
 		}
@@ -467,12 +383,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("invalid config: %w", err)
 		}
 		// Same validation the dashboard HTTP handler enforces: a compromised
-		// or misconfigured primary must not be able to push unbounded prompts,
-		// NUL-truncated argv, or flag-injected model names through the
-		// reverse-RPC trust boundary. R68-SEC-H2.
-		// R180-GO-P1: wrap to match the surrounding handleRequest style
-		// (every other error return uses "<method>: %w") so caller slog
-		// attrs identify which RPC method triggered the validation failure.
+		// primary must not push unbounded prompts, NUL-truncated argv, or
+		// flag-injected model names through the reverse-RPC trust boundary.
 		if err := project.ValidateConfig(cfg); err != nil {
 			return nil, fmt.Errorf("update_config validate: %w", err)
 		}
@@ -504,11 +416,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := session.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("interrupt_session key: %w", err)
 		}
-		// Prefer the non-destructive control_request path so the CLI
-		// subprocess survives. Raw SIGINT via InterruptSession kills Claude
-		// `-p` outright, which tears down the shim and forces a brand-new
-		// spawn on the next message (losing resume context and leaking
-		// socket files). Matches the dashboard HTTP / WS handlers. R67-GO-2.
+		// Prefer the non-destructive control_request path: raw SIGINT kills
+		// Claude `-p` outright, forcing a fresh spawn (losing resume context and
+		// leaking socket files). Matches the dashboard HTTP / WS handlers.
 		outcome := c.router.InterruptSessionSafe(p.Key)
 		interrupted := outcome == session.InterruptSent
 		return marshalResult(map[string]bool{"interrupted": interrupted})
@@ -524,12 +434,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := session.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("set_session_label key: %w", err)
 		}
-		// Full validation (length + UTF-8 + C0/C1 control gate) via the
-		// shared validator. The dashboard-facing HTTP path already validates
-		// on the control-node side; this second check defends the
-		// server-role node against a compromised control-node shipping
-		// labels with log-injection or terminal-corruption bytes directly
-		// to the reverse-RPC worker. R64-GO-H3 / L1.
+		// Full validation (length + UTF-8 + C0/C1 control gate) again on the
+		// server-role node: defends against a compromised control node shipping
+		// log-injection / terminal-corruption bytes.
 		label, err := session.ValidateUserLabel(p.Label)
 		if err != nil {
 			return nil, fmt.Errorf("set_session_label label: %w", err)
@@ -545,10 +452,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("set_favorite params: %w", err)
 		}
-		// R182-SEC-M1: mirror restart_planner / update_config — validate
-		// project_name at the trust boundary so bidi/C1/newline bytes
-		// cannot reach ErrNotFound wrap (see manager.go:208 also upgraded
-		// to %q for defense-in-depth) or subsequent slog attrs.
+		// Validate project_name at the trust boundary (mirrors restart_planner
+		// / update_config).
 		if err := project.ValidateProjectName(p.ProjectName); err != nil {
 			return nil, fmt.Errorf("set_favorite: %w", err)
 		}
@@ -561,9 +466,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(map[string]any{"status": "ok", "favorite": p.Favorite})
 
 	default:
-		// %q so any bidi/C1/newline bytes in a primary-injected method name
-		// are escaped rather than propagating verbatim into the error
-		// string that the remote logs. R177-SEC-2.
+		// %q so bidi/C1/newline bytes in a primary-injected method name are
+		// escaped before the remote logs the error string.
 		return nil, fmt.Errorf("unknown method: %q", req.Method)
 	}
 }

@@ -11,10 +11,9 @@ import (
 	"strings"
 )
 
-// envelopeCategory returns a short, non-sensitive label for the already-
-// classified friendly message, used as the slog "category" field so
-// operators can correlate log entries without the raw error text leaking
-// sk-ant- keys, request_ids, or internal hostnames.
+// envelopeCategory returns a short, non-sensitive label for the friendly
+// message, used as the slog "category" field so logs never carry the raw
+// error text (sk-ant- keys, request_ids, internal hostnames).
 func envelopeCategory(friendly string) string {
 	switch {
 	case strings.HasPrefix(friendly, "⏱️ Claude API 调用过于频繁"):
@@ -38,35 +37,24 @@ func envelopeCategory(friendly string) string {
 	}
 }
 
-// envelopePrefixScanBytes bounds how many leading bytes we lowercase when
-// probing whether a result string looks like an API-error envelope. Keeping
-// the scan small avoids an O(N) copy on every normal assistant reply (tens
-// of KB) just to discover the text is not an error.
+// envelopePrefixScanBytes bounds how many leading bytes are lowercased when
+// probing for an API-error envelope, avoiding an O(N) copy per normal reply.
 const envelopePrefixScanBytes = 64
 
-// Localize rewrites common Claude / Anthropic API error strings that surface
-// verbatim in the CLI result into friendlier Chinese guidance for IM users.
-// When no known pattern matches, the original text is returned unchanged —
-// non-error results always pass through.
+// Localize rewrites Claude / Anthropic API error envelopes that surface
+// verbatim in CLI output into friendlier Chinese guidance for IM users.
+// Non-envelope text (anything not starting with "API Error") passes through
+// unchanged so prose mentioning "rate limit" is never mangled.
 //
-// Detection is deliberately conservative: we only transform strings that
-// look like top-level API error envelopes (start with "API Error" or are
-// short, error-only payloads). This avoids mangling legitimate content that
-// happens to contain a keyword like "rate limit" in prose.
-//
-// Privacy: the raw error is NOT appended to the IM reply — it may contain
-// internal infrastructure details (proxy URLs, request IDs, or, in the
-// worst case, leaked credentials). The full text is logged at Warn so
-// operators retain diagnostics without exposing them to end users.
+// Privacy: the raw error is never appended to the IM reply nor logged — it
+// may contain proxy URLs, request IDs or leaked credentials.
 func Localize(text string) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return text
 	}
 
-	// Lowercase only the leading prefix for envelope detection — normal
-	// assistant replies can be tens of KB; a full ToLower on every reply
-	// just to test HasPrefix is a wasteful allocation on the IM hot path.
+	// Lowercase only the leading prefix; replies can be tens of KB.
 	prefix := trimmed
 	if len(prefix) > envelopePrefixScanBytes {
 		prefix = prefix[:envelopePrefixScanBytes]
@@ -78,11 +66,8 @@ func Localize(text string) string {
 		return text
 	}
 
-	// Only lowercase the full body now that we know it is an error envelope.
 	lower := strings.ToLower(trimmed)
 
-	// Classify. If no known pattern matches, fall through to a generic
-	// user-facing message — the raw error goes to the log, not IM.
 	var friendly string
 	switch {
 	case strings.Contains(lower, "rate_limit") || strings.Contains(lower, "rate limit"):
@@ -95,9 +80,8 @@ func Localize(text string) string {
 		friendly = "💳 Claude API 额度已用尽，请联系管理员充值后重试。"
 	case strings.Contains(lower, "context_length") || strings.Contains(lower, "prompt is too long") || strings.Contains(lower, "maximum context"):
 		friendly = "📏 对话上下文已超出模型上限，请发送 /new 开启新会话。"
-	// Narrower match: require the canonical Anthropic error codes so a tool
-	// output like `git push: forbidden` forwarded through the CLI does not
-	// collapse into the generic "permission / 内容策略" branch.
+	// Require canonical Anthropic codes so tool output like
+	// `git push: forbidden` does not land in the permission branch.
 	case strings.Contains(lower, "permission_error") || strings.Contains(lower, "permission_denied") || strings.Contains(lower, "request_forbidden"):
 		friendly = "🚫 Claude 拒绝了本次请求（权限或内容策略），请调整后重试。"
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
@@ -108,9 +92,7 @@ func Localize(text string) string {
 		friendly = "⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。"
 	}
 
-	// Log only non-sensitive diagnostics: error category and envelope length.
-	// The raw envelope is intentionally NOT logged — it may contain sk-ant-
-	// keys, request_ids, or internal hostnames (R20260601-SEC-1).
+	// Raw envelope deliberately not logged (may contain keys/request_ids).
 	slog.Warn("claude api error envelope localized",
 		"category", envelopeCategory(friendly),
 		"envelope_len", len(trimmed),

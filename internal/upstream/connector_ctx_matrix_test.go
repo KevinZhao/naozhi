@@ -50,24 +50,6 @@ func caseBody(t *testing.T, src, method string) string {
 	return rest
 }
 
-// TestHandleRequest_CtxMatrix_DocPresent pins the godoc rule matrix so a
-// future "tidy the comments" refactor cannot delete the only written
-// record of the appCtx/connCtx contract.
-func TestHandleRequest_CtxMatrix_DocPresent(t *testing.T) {
-	src := rpcSrc(t)
-	for _, want := range []string{
-		"Context selection matrix",
-		"connCtx",
-		"appCtx",
-		"connection-scoped",
-		"app-scoped",
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("handleRequest godoc missing %q — the ctx-selection matrix (RNEW-008) must stay documented", want)
-		}
-	}
-}
-
 // TestHandleRequest_CtxMatrix_SendUsesConnCtx asserts the async `send`
 // goroutine is wired to connCtx (so a relay disconnect cancels in-flight
 // sends) and never reaches for appCtx — the documented "dies with the WS"

@@ -1,10 +1,6 @@
 // Package i18n provides locale resolution and message rendering for naozhi.
-//
-// This file holds the pure-logic core (Bundle/Printer construction). It has
-// zero net/http dependency: HTTP requests are parsed by callers into plain
-// strings before reaching ResolveDashboard. The embed.FS + YAML Load() path,
-// config wiring, and dashboard-facing helpers are intentionally deferred to a
-// follow-up slice; this package currently imports only stdlib + golang.org/x/text.
+// It is zero-HTTP: callers parse requests into plain strings before calling
+// ResolveDashboard.
 package i18n
 
 import (
@@ -13,7 +9,7 @@ import (
 	"golang.org/x/text/language"
 )
 
-// HeuristicCfg controls the CJK rune-ratio language guess (§3.5, NNM5).
+// HeuristicCfg controls the CJK rune-ratio language guess.
 type HeuristicCfg struct {
 	Enabled      bool
 	CJKThreshold float64
@@ -21,33 +17,24 @@ type HeuristicCfg struct {
 }
 
 // Bundle holds all locales. Immutable after construction; concurrent T() is
-// safe. There is no Reload() API in this slice. A future Reload MUST use an
-// atomic.Pointer[Bundle] swap; because Printer holds only *Bundle (not map
-// refs), swapping the pointer is sufficient to redirect future T() calls while
-// keeping live Printer values valid (NNH1).
+// safe. Printer holds only *Bundle (not map refs) so a future Reload can swap
+// an atomic.Pointer[Bundle] without invalidating live Printers.
 type Bundle struct {
 	defaultLocale string
 	supported     []string
 	heuristicCfg  HeuristicCfg
 	msgs          map[string]map[string]*compiledTemplate
 
-	// matcherOnce/cachedMatcher memoize the x/text language.Matcher. The
-	// Bundle is immutable after construction and language.Matcher is safe for
-	// concurrent use, so building it once (instead of per Accept-Language
-	// request) avoids re-parsing supportedTags + rebuilding the matcher trie on
-	// every inbound HTTP request. R202606j-CR-002.
+	// matcherOnce/cachedMatcher memoize the language.Matcher: the Bundle is
+	// immutable and Matcher is concurrency-safe, so build it once per Bundle
+	// rather than per request.
 	matcherOnce   sync.Once
 	cachedMatcher language.Matcher
 }
 
-// NewForTest builds a Bundle from an in-memory map (locale → key → template
-// string), bypassing YAML/embed. Intended for unit tests only.
-//
-// The default locale and supported set are derived from the supplied messages:
-// the first key found while ranging is non-deterministic, so callers that need
-// a specific default should ensure "zh-CN" is present (it is treated as the
-// preferred default when available). The heuristic config uses the design
-// defaults ({true, 0.3, 4}).
+// NewForTest builds a Bundle from an in-memory map (locale → key → template),
+// bypassing YAML/embed. Default locale prefers "zh-CN" (see pickDefault);
+// heuristic config uses {true, 0.3, 4}.
 func NewForTest(messages map[string]map[string]string) *Bundle {
 	msgs := make(map[string]map[string]*compiledTemplate, len(messages))
 	supported := make([]string, 0, len(messages))
@@ -70,8 +57,7 @@ func NewForTest(messages map[string]map[string]string) *Bundle {
 	}
 }
 
-// pickDefault prefers "zh-CN" (the design default), then "en-US", else the
-// first available locale, else "zh-CN" for an empty bundle.
+// pickDefault prefers "zh-CN", then "en-US", else the first locale, else "zh-CN".
 func pickDefault(supported []string) string {
 	for _, l := range supported {
 		if l == "zh-CN" {
@@ -89,9 +75,8 @@ func pickDefault(supported []string) string {
 	return "zh-CN"
 }
 
-// For returns a locale-bound Printer. It does not validate locale against the
-// supported set; an unknown locale yields a Printer whose T falls back to the
-// "[key]" form for every key.
+// For returns a locale-bound Printer. An unknown locale is not rejected; its
+// T falls back to "[key]" for every key.
 func (b *Bundle) For(locale string) *Printer {
 	return &Printer{locale: locale, bundle: b}
 }

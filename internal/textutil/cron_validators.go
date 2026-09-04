@@ -1,20 +1,7 @@
-// Package textutil — cron_validators.go: dependency-free input validators and
-// markdown-punct escaping shared by the IM `/cron` slash-command edge
-// (internal/dispatch), the dashboard cron HTTP edge (internal/dashboard/cron),
-// and the cron scheduler itself (internal/cron).
-//
-// R20260603140013-ARCH-1 (#1707): these helpers began life in internal/cron
-// (ValidatePromptStrict / ValidateScheduleChars / MaxIDLen / EscapeMarkdownPunct).
-// IM dispatch imported them by concrete type, coupling the slash-command layer
-// to the cron domain package so dispatch was recompiled on any cron change and
-// could not be tested without the real cron package. The logic carries zero
-// cron semantics — it is pure input-character / size / markdown policy — so it
-// now lives in this leaf package (same rationale that moved RedactSecrets here,
-// #1571). internal/cron keeps thin aliases so its own callers and the dashboard
-// edge stay unchanged; dispatch imports textutil directly.
-//
-// Policies must stay in lockstep across all surfaces because they all guard the
-// same on-disk cron_jobs.json schema.
+// cron_validators.go: dependency-free input validators and markdown-punct
+// escaping shared by the IM `/cron` edge, the dashboard cron HTTP edge and
+// the cron scheduler. Policies must stay in lockstep across all surfaces
+// because they all guard the same on-disk cron_jobs.json schema (#1707).
 
 package textutil
 
@@ -27,49 +14,33 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// Shared input bounds for cron-related trust boundaries (IM `/cron` commands
-// and dashboard HTTP endpoints).
+// Shared input bounds for the cron trust boundaries (IM `/cron`, dashboard HTTP).
 const (
-	// MaxCronPromptBytes bounds the prompt body accepted by both the IM
-	// `/cron add` command and the dashboard cron POST/PATCH endpoints. Every
-	// cron run replays the full prompt through the CLI, so runaway sizes
-	// multiply across invocations.
+	// MaxCronPromptBytes bounds the prompt body accepted by `/cron add` and the
+	// dashboard cron endpoints; every run replays the full prompt via the CLI.
 	MaxCronPromptBytes = 8 * 1024
 
-	// MaxCronIDLen bounds cron job IDs flowing in via the IM `/cron <op> <id>`
-	// commands and the dashboard URL/JSON parameters. Generated IDs are
-	// 16-char hex; 64 bytes leaves slack for future ID schemes while
-	// preventing multi-MB inputs from propagating into log/error allocations
-	// on the miss path.
+	// MaxCronIDLen bounds cron job IDs from IM commands and dashboard URL/JSON
+	// parameters. Generated IDs are 16-char hex; 64 leaves slack for future schemes.
 	MaxCronIDLen = 64
 
-	// MaxCronScheduleBytes caps the schedule expression length. robfig/cron
-	// expressions are short (e.g. "@every 30m", "0 9 * * *"); anything beyond
-	// this is almost certainly abuse.
+	// MaxCronScheduleBytes caps the schedule expression; robfig/cron expressions
+	// are short ("@every 30m", "0 9 * * *"), so anything beyond this is abuse.
 	MaxCronScheduleBytes = 256
 )
 
-// ErrInvalidCronPrompt is returned by ValidateCronPromptStrict when a prompt
-// fails the shared cron-prompt safety policy (size cap / UTF-8 / C0 / DEL /
-// C1 / bidi / LS / PS). Sentinel form so callers can errors.Is and surface a
-// stable user message instead of string-matching.
+// ErrInvalidCronPrompt is returned (wrapped) by ValidateCronPromptStrict so
+// callers can errors.Is and surface a stable user message.
 var ErrInvalidCronPrompt = errors.New("cron: invalid prompt")
 
-// ErrInvalidCronSchedule is returned by ValidateCronScheduleChars when a
-// schedule expression fails the shared char policy. Sentinel form so callers
-// can errors.Is.
+// ErrInvalidCronSchedule is returned (wrapped) by ValidateCronScheduleChars.
 var ErrInvalidCronSchedule = errors.New("cron: invalid schedule")
 
 // ValidateCronPromptStrict enforces the shared size + character policy for a
-// cron prompt body before it is persisted to cron_jobs.json.
-//
-// Policy:
-//   - len ≤ MaxCronPromptBytes
-//   - utf8.ValidString
-//   - no C0 controls except \t \n \r; no DEL (0x7f)
-//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
-//
-// Returns a wrapped ErrInvalidCronPrompt. Empty prompt is rejected here.
+// cron prompt body before it is persisted to cron_jobs.json: len ≤
+// MaxCronPromptBytes, valid UTF-8, no C0 controls except \t \n \r, no DEL,
+// and no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS).
+// Returns a wrapped ErrInvalidCronPrompt; empty prompt is rejected.
 func ValidateCronPromptStrict(prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("%w: must not be empty", ErrInvalidCronPrompt)
@@ -95,11 +66,8 @@ func ValidateCronPromptStrict(prompt string) error {
 		}
 		return fmt.Errorf("%w: contains control characters", ErrInvalidCronPrompt)
 	}
-	// R202606e-PERF-005: IsLogInjectionRune only ever flags non-ASCII runes
-	// (C1 / bidi / LS / PS), so a pure-ASCII prompt can skip the second
-	// rune-decoding scan entirely — matching ValidateCronScheduleChars's
-	// existing guard. An 8KB ASCII prompt thus pays one byte scan instead of
-	// a redundant rune scan on top.
+	// IsLogInjectionRune only flags non-ASCII runes, so a pure-ASCII prompt
+	// skips the rune-decoding scan.
 	if !anyHighBit {
 		return nil
 	}
@@ -112,17 +80,11 @@ func ValidateCronPromptStrict(prompt string) error {
 }
 
 // ValidateCronScheduleChars enforces the shared character + size policy for a
-// cron schedule expression before it reaches robfig/cron's parser.
-//
-// Policy:
-//   - len ≤ MaxCronScheduleBytes
-//   - utf8.ValidString
-//   - no C0 controls and no DEL (0x7f); unlike prompts, schedules forbid
-//     tab/newline too — robfig/cron expressions are whitespace-separated
-//     single-line tokens, so an embedded \t or \n is always malformed
-//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
-//
-// Returns a wrapped ErrInvalidCronSchedule. Empty schedule is rejected here.
+// cron schedule expression before it reaches robfig/cron's parser: len ≤
+// MaxCronScheduleBytes, valid UTF-8, no C0 controls or DEL (unlike prompts,
+// tab/newline are forbidden too — expressions are single-line tokens), and
+// no rune flagged by osutil.IsLogInjectionRune. Returns a wrapped
+// ErrInvalidCronSchedule; empty schedule is rejected.
 func ValidateCronScheduleChars(schedule string) error {
 	if len(schedule) == 0 {
 		return fmt.Errorf("%w: must not be empty", ErrInvalidCronSchedule)
@@ -156,9 +118,7 @@ func ValidateCronScheduleChars(schedule string) error {
 	return nil
 }
 
-// cronMarkdownPunctReplacer replaces the markdown link-syntax characters
-// `[`, `]`, `(`, `)` with full-width visually-similar codepoints
-// (U+FF3B / U+FF3D / U+FF08 / U+FF09).
+// cronMarkdownPunctReplacer maps `[` `]` `(` `)` to full-width look-alikes.
 var cronMarkdownPunctReplacer = strings.NewReplacer(
 	"[", "［",
 	"]", "］",
@@ -167,10 +127,9 @@ var cronMarkdownPunctReplacer = strings.NewReplacer(
 )
 
 // EscapeCronMarkdownPunct replaces the markdown link-syntax characters
-// `[`, `]`, `(`, `)` with full-width visually-similar codepoints so an
-// attacker-controlled cron Title or result body cannot smuggle `[text](url)`
-// clickable links into an IM notice. A ContainsAny fast-path avoids any
-// allocation on the common ASCII-clean case. Idempotent on clean input.
+// `[`, `]`, `(`, `)` with full-width look-alikes so an attacker-controlled
+// cron Title or result body cannot smuggle `[text](url)` clickable links into
+// an IM notice. Allocation-free on the common clean case; idempotent.
 func EscapeCronMarkdownPunct(s string) string {
 	if !strings.ContainsAny(s, "[]()") {
 		return s
