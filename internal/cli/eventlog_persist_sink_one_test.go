@@ -5,19 +5,21 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/quick"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // captureSinkOne records every PersistSinkOne invocation. Mirrors
 // captureSink but for the single-entry contract added in #410.
 type captureSinkOne struct {
 	mu        sync.Mutex
-	entries   []EventEntry
+	entries   []clievent.EventEntry
 	replays   []bool
 	callCount atomic.Int64
 }
 
 func (c *captureSinkOne) asSink() PersistSinkOne {
-	return func(entry EventEntry, replayPhase bool) {
+	return func(entry clievent.EventEntry, replayPhase bool) {
 		c.mu.Lock()
 		c.entries = append(c.entries, entry)
 		c.replays = append(c.replays, replayPhase)
@@ -28,11 +30,11 @@ func (c *captureSinkOne) asSink() PersistSinkOne {
 
 func (c *captureSinkOne) count() int { return int(c.callCount.Load()) }
 
-func (c *captureSinkOne) last() (EventEntry, bool, bool) {
+func (c *captureSinkOne) last() (clievent.EventEntry, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.entries) == 0 {
-		return EventEntry{}, false, false
+		return clievent.EventEntry{}, false, false
 	}
 	return c.entries[len(c.entries)-1], c.replays[len(c.replays)-1], true
 }
@@ -48,7 +50,7 @@ func TestEventLog_SetPersistSinkPair_AppendUsesSingle(t *testing.T) {
 	one := &captureSinkOne{}
 	l.SetPersistSinkPair(batch.asSink(), one.asSink())
 
-	l.Append(EventEntry{Type: "user", Summary: "hi"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
 
 	if batch.batchCount() != 0 {
 		t.Errorf("slice sink called %d times for Append; expected 0", batch.batchCount())
@@ -78,7 +80,7 @@ func TestEventLog_SetPersistSinkPair_AppendBatchUsesSlice(t *testing.T) {
 	one := &captureSinkOne{}
 	l.SetPersistSinkPair(batch.asSink(), one.asSink())
 
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "user", Summary: "a"},
 		{Type: "user", Summary: "b"},
 	})
@@ -104,7 +106,7 @@ func TestEventLog_SetPersistSinkPair_FallbackWhenSingleNil(t *testing.T) {
 	batch := &captureSink{}
 	l.SetPersistSinkPair(batch.asSink(), nil)
 
-	l.Append(EventEntry{Type: "user", Summary: "x"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "x"})
 
 	if batch.batchCount() != 1 {
 		t.Errorf("slice sink called %d times; expected 1 fallback", batch.batchCount())
@@ -126,7 +128,7 @@ func TestEventLog_SetPersistSink_ClearsPairedSingle(t *testing.T) {
 	batch2 := &captureSink{}
 	l.SetPersistSink(batch2.asSink())
 
-	l.Append(EventEntry{Type: "user", Summary: "after-switch"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "after-switch"})
 
 	if one.count() != 0 {
 		t.Errorf("paired single sink fired after SetPersistSink override (count=%d)", one.count())
@@ -152,7 +154,7 @@ func TestEventLog_SetPersistSinkPair_NilBatchClearsAll(t *testing.T) {
 	// Uninstall.
 	l.SetPersistSinkPair(nil, nil)
 
-	l.Append(EventEntry{Type: "user", Summary: "after-clear"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "after-clear"})
 
 	if batch.batchCount() != 0 {
 		t.Errorf("slice sink fired post-clear (count=%d)", batch.batchCount())
@@ -177,8 +179,8 @@ func TestEventLog_PairedSingle_ReplayInvokeTotal(t *testing.T) {
 	one := &captureSinkOne{}
 	l.SetPersistSinkPair(batch.asSink(), one.asSink())
 
-	l.Append(EventEntry{Type: "user", Summary: "p1"})
-	l.Append(EventEntry{Type: "user", Summary: "p2"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "p1"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "p2"})
 
 	if got := l.ReplayInvokeTotal(); got != 0 {
 		t.Errorf("paired single dispatch bumped replay counter unexpectedly: %d", got)
@@ -201,7 +203,7 @@ func TestEventLog_PairedSingle_ConcurrentAppend(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			l.Append(EventEntry{Type: "user", Summary: "x"})
+			l.Append(clievent.EventEntry{Type: "user", Summary: "x"})
 		}
 	}()
 	go func() {
@@ -230,7 +232,7 @@ func TestEventLog_PairedSingle_ConcurrentAppend(t *testing.T) {
 func TestEventLog_PairedSingle_PreservesEntryFields(t *testing.T) {
 	one := &captureSinkOne{}
 	l := NewEventLog(64)
-	l.SetPersistSinkPair(func([]EventEntry, bool) {}, one.asSink())
+	l.SetPersistSinkPair(func([]clievent.EventEntry, bool) {}, one.asSink())
 
 	check := func(typ, summary string, cost float64) bool {
 		one.mu.Lock()
@@ -238,7 +240,7 @@ func TestEventLog_PairedSingle_PreservesEntryFields(t *testing.T) {
 		one.replays = nil
 		one.callCount.Store(0)
 		one.mu.Unlock()
-		l.Append(EventEntry{Type: typ, Summary: summary, Cost: cost})
+		l.Append(clievent.EventEntry{Type: typ, Summary: summary, Cost: cost})
 		got, _, ok := one.last()
 		if !ok {
 			return false

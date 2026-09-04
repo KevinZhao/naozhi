@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -62,7 +63,7 @@ const (
 // via the `before=` path. R68-PERF-H1.
 const maxHistoryPushEntries = 50
 
-func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
+func capHistoryBatch(entries []clievent.EventEntry) []clievent.EventEntry {
 	if len(entries) <= maxHistoryPushEntries {
 		return entries
 	}
@@ -87,14 +88,14 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 // returned []byte is safe to hand to wsClient.SendRaw concurrently from
 // multiple goroutines — SendRaw enqueues a slice header into a per-client
 // channel and the writePump never mutates the underlying buffer.
-func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.EventEntry) ([]byte, error) {
+func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent.EventEntry) ([]byte, error) {
 	// R20260604-SEC-10: scrub credential token shapes (sk-ant-, ghp_, AKIA, …)
 	// from the free-text Summary/Detail fields before the bytes are marshalled
 	// and fanned out to dashboard WS clients (where they would also persist to
 	// IndexedDB history). This mirrors the textutil.RedactSecrets pass that
 	// dispatch.decorateReplyText and cron finishRun already apply on the IM
 	// path; the live dashboard WS stream was the one egress that handed raw
-	// cli.EventEntry text to the browser. marshalHistoryFrame is the single
+	// clievent.EventEntry text to the browser. marshalHistoryFrame is the single
 	// serialization choke point for both the backfill and live-push paths, so
 	// redacting here covers every WS history frame exactly once.
 	//
@@ -219,7 +220,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 	// across every notify wave by backfillSubscriberEvents. The drain consumes
 	// it synchronously (marshal + SendRaw) and never retains it, so reuse is
 	// race-free — each goroutine owns its own buf.
-	var evBuf []cli.EventEntry
+	var evBuf []clievent.EventEntry
 	for {
 		select {
 		case _, ok := <-notify:
@@ -305,15 +306,14 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // Behavior note: on marshal error the helper returns without advancing
 // the cursor (matches the regular-notify arm's `continue` path), so the
 // same entries are retried from the same watermark on the next notify.
-func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *cli.SinceCursor, buf []cli.EventEntry) (bool, []cli.EventEntry) {
-	// R20260604-PERF-25 (#1740): pass the caller's per-goroutine buffer (sliced
-	// to [:0]) into EventEntriesSinceAppend so BOTH the dead-session
-	// (persistedHistory) and the live-process path reuse capacity instead of
-	// allocating a fresh []cli.EventEntry per notify wave. The entries are
-	// consumed synchronously below (marshal + SendRaw, which copies only the
-	// frame bytes), never retained past this call, so reusing the buffer on the
-	// next notify is safe. The (possibly grown) buffer is returned so the caller
-	// can keep it for the next iteration.
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *cli.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
+	// R20260604-PERF-25 (#1740): pass the caller's per-goroutine buffer (sliced to [:0])
+	// into EventEntriesSinceAppend so BOTH the dead-session (persistedHistory) and the
+	// live-process path reuse capacity instead of allocating a fresh []clievent.EventEntry
+	// per notify wave. The entries are consumed synchronously below (marshal + SendRaw,
+	// which copies only the frame bytes), never retained past this call, so reusing the
+	// buffer on the next notify is safe. The (possibly grown) buffer is returned so the
+	// caller can keep it for the next iteration.
 	//
 	// QueryAfter re-admits the watermark millisecond; Filter drops the
 	// already-delivered UUIDs in place, so the backing array (and its

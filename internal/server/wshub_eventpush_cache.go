@@ -10,7 +10,7 @@ package server
 import (
 	"sync"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // File: wshub_eventpush_cache.go
@@ -139,7 +139,7 @@ func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 func (c *historyMarshalCache) getOrMarshal(
 	key string,
 	lastTime int64,
-	entries []cli.EventEntry,
+	entries []clievent.EventEntry,
 	marshal func() ([]byte, error),
 ) (data []byte, fromCache bool, err error) {
 	if len(entries) == 0 {

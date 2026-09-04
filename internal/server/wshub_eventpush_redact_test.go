@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestRedactEntrySecrets pins R20260604-SEC-10: the WS history frame path must
@@ -15,7 +15,7 @@ func TestRedactEntrySecrets(t *testing.T) {
 	const secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"
 
 	t.Run("redacts summary and detail", func(t *testing.T) {
-		in := []cli.EventEntry{
+		in := []clievent.EventEntry{
 			{Type: "text", Summary: "key is " + secret, Detail: "also " + secret + " here"},
 		}
 		out := redactEntrySecrets(in)
@@ -31,7 +31,7 @@ func TestRedactEntrySecrets(t *testing.T) {
 	})
 
 	t.Run("does not mutate shared input buffer", func(t *testing.T) {
-		in := []cli.EventEntry{
+		in := []clievent.EventEntry{
 			{Type: "text", Summary: "leak " + secret},
 		}
 		origSummary := in[0].Summary
@@ -45,7 +45,7 @@ func TestRedactEntrySecrets(t *testing.T) {
 	})
 
 	t.Run("clean input is aliased not copied", func(t *testing.T) {
-		in := []cli.EventEntry{
+		in := []clievent.EventEntry{
 			{Type: "text", Summary: "nothing sensitive here", Detail: "plain detail"},
 			{Type: "result", Summary: "done"},
 		}
@@ -66,7 +66,7 @@ func TestRedactEntrySecrets(t *testing.T) {
 	})
 
 	t.Run("only later entry dirty still preserves earlier entries", func(t *testing.T) {
-		in := []cli.EventEntry{
+		in := []clievent.EventEntry{
 			{Type: "text", Summary: "clean one"},
 			{Type: "text", Summary: "dirty " + secret},
 		}

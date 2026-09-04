@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -36,10 +36,10 @@ func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *test
 	var wantTimes []int64
 	ts := int64(1)
 	for _, w := range widths {
-		batch := make([]cli.EventEntry, 0, w)
+		batch := make([]clievent.EventEntry, 0, w)
 		for i := 0; i < w; i++ {
 			sum := fmt.Sprintf("e-%d", ts)
-			batch = append(batch, cli.EventEntry{
+			batch = append(batch, clievent.EventEntry{
 				UUID:    fmt.Sprintf("u-%d", ts),
 				Time:    ts,
 				Type:    "user",

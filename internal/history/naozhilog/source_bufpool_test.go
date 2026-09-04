@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestSource_BufReaderPool_ConcurrentReads pins R20260603-PERF-4: the pooled
@@ -20,7 +20,7 @@ func TestSource_BufReaderPool_ConcurrentReads(t *testing.T) {
 
 	const nEntries = 40
 	for i := 0; i < nEntries; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID:    "uuid" + string(rune('A'+i%26)) + string(rune('0'+i%10)),
 			Time:    int64(100 + i),
 			Type:    "text",

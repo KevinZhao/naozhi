@@ -10,7 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -32,7 +32,7 @@ type mockRemoteWS struct {
 	subKeys map[string]struct{}
 	handler http.HandlerFunc
 
-	apiEvents []cli.EventEntry
+	apiEvents []clievent.EventEntry
 }
 
 // mockWSConn wraps a websocket.Conn with a write mutex to avoid races.
@@ -172,7 +172,7 @@ func TestWSRelay_EventForwarding(t *testing.T) {
 	mock.broadcast(node.ServerMsg{
 		Type:  "event",
 		Key:   "test:d:u:general",
-		Event: &cli.EventEntry{Time: 1000, Type: "text", Summary: "hello"},
+		Event: &clievent.EventEntry{Time: 1000, Type: "text", Summary: "hello"},
 	})
 
 	msg := readClientMsg(t, client, 2*time.Second)
@@ -189,7 +189,7 @@ func TestWSRelay_EventForwarding(t *testing.T) {
 
 func TestWSRelay_MultipleClients(t *testing.T) {
 	mock := newMockRemoteWS("")
-	mock.apiEvents = []cli.EventEntry{{Time: 500, Type: "init", Summary: "init"}}
+	mock.apiEvents = []clievent.EventEntry{{Time: 500, Type: "init", Summary: "init"}}
 	ts := httptest.NewServer(mock.handler)
 	defer ts.Close()
 
@@ -221,7 +221,7 @@ func TestWSRelay_MultipleClients(t *testing.T) {
 	mock.broadcast(node.ServerMsg{
 		Type:  "event",
 		Key:   "test:d:u:general",
-		Event: &cli.EventEntry{Time: 2000, Type: "text", Summary: "shared"},
+		Event: &clievent.EventEntry{Time: 2000, Type: "text", Summary: "shared"},
 	})
 
 	e1 := readClientMsg(t, client1, 2*time.Second)

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -145,7 +146,7 @@ func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
 // because a single jsonl line can collapse into 0 entries (skipped shapes)
 // or 1+ entries (assistant with thinking+tool_use+text), and we want stable
 // entry-level after-filtering.
-func (r *TranscriptReader) Read(afterMS int64, limit int) ([]EventEntry, error) {
+func (r *TranscriptReader) Read(afterMS int64, limit int) ([]clievent.EventEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.readLocked(afterMS, limit)
@@ -154,13 +155,13 @@ func (r *TranscriptReader) Read(afterMS int64, limit int) ([]EventEntry, error) 
 // Tail reads any content written since the last Read/Tail call, returning
 // entries in chronological order. Equivalent to Read(lastSeenMS, -1) but
 // skips the time filter — tailer callers already know the previous watermark.
-func (r *TranscriptReader) Tail() ([]EventEntry, error) {
+func (r *TranscriptReader) Tail() ([]clievent.EventEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.readLocked(0, 0)
 }
 
-func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, error) {
+func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.EventEntry, error) {
 	// R233-PERF-4 / R228-PERF-3: persistent fd. Prior open+ReadAll+close
 	// per call burned ~250 fd-lifecycle syscalls/s under agent_tailer's
 	// 200ms × up to 50 tailers, mostly to read zero new bytes. On a
@@ -213,7 +214,7 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 	}
 
 	var (
-		out      []EventEntry
+		out      []clievent.EventEntry
 		consumed int
 	)
 	for consumed < len(data) {
@@ -376,7 +377,7 @@ func advanceOffset(prev int64, readLen int64, consumed int, data, fresh []byte, 
 // mapJSONLLine transforms one subagent jsonl record into zero or more
 // EventEntry values. Malformed lines yield nil (dropped silently so one
 // corrupted record does not abort an otherwise-valid transcript).
-func mapJSONLLine(line []byte) []EventEntry {
+func mapJSONLLine(line []byte) []clievent.EventEntry {
 	var raw transcriptLine
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil
@@ -392,7 +393,7 @@ func mapJSONLLine(line []byte) []EventEntry {
 		if raw.SubType != "api_error" {
 			return nil
 		}
-		return []EventEntry{{Time: ts, Type: "system", Summary: "api_error"}}
+		return []clievent.EventEntry{{Time: ts, Type: "system", Summary: "api_error"}}
 	default:
 		return nil
 	}
@@ -424,7 +425,7 @@ type transcriptUserBlock struct {
 
 // mapUserLine handles content as either plain string (teammate control channel
 // or plain prompt) or array of blocks (typically [{"tool_result": ...}]).
-func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
+func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 	if raw.Message == nil || len(raw.Message.Content) == 0 {
 		return nil
 	}
@@ -438,7 +439,7 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 		if strings.Contains(s, "<teammate-message teammate_id=") {
 			return nil
 		}
-		return []EventEntry{{
+		return []clievent.EventEntry{{
 			Time:    ts,
 			Type:    "text",
 			Summary: textutil.TruncateRunes(s, 120),
@@ -454,14 +455,14 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 		return nil
 	}
 
-	var out []EventEntry
+	var out []clievent.EventEntry
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
 			if block.Text == "" {
 				continue
 			}
-			out = append(out, EventEntry{
+			out = append(out, clievent.EventEntry{
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
@@ -472,7 +473,7 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 			if skip {
 				continue
 			}
-			entry := EventEntry{
+			entry := clievent.EventEntry{
 				Time:    ts,
 				Type:    "tool_result",
 				Summary: summary,
@@ -502,7 +503,7 @@ type transcriptAssistantBlock struct {
 	Input json.RawMessage `json:"input"`
 }
 
-func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
+func mapAssistantLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 	if raw.Message == nil || len(raw.Message.Content) == 0 {
 		return nil
 	}
@@ -510,25 +511,25 @@ func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
 	if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
 		return nil
 	}
-	var out []EventEntry
+	var out []clievent.EventEntry
 	for _, block := range blocks {
 		switch block.Type {
 		case "thinking":
-			out = append(out, EventEntry{
+			out = append(out, clievent.EventEntry{
 				Time:    ts,
 				Type:    "thinking",
 				Summary: textutil.TruncateRunes(block.Text, 120),
 				Detail:  textutil.TruncateRunes(block.Text, EventDetailMaxRunes),
 			})
 		case "text":
-			out = append(out, EventEntry{
+			out = append(out, clievent.EventEntry{
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
 				Detail:  textutil.TruncateRunes(block.Text, EventDetailMaxRunes),
 			})
 		case "tool_use":
-			entry := EventEntry{
+			entry := clievent.EventEntry{
 				Time:    ts,
 				Type:    "tool_use",
 				Tool:    block.Name,

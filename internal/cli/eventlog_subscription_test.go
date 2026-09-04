@@ -9,6 +9,8 @@ package cli
 import (
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestEventSubscription_NotifyFiresOnAppend(t *testing.T) {
@@ -17,7 +19,7 @@ func TestEventSubscription_NotifyFiresOnAppend(t *testing.T) {
 	sub := l.SubscribeNew()
 	defer sub.Cancel()
 
-	l.Append(EventEntry{Type: "user", Summary: "hi"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
 
 	select {
 	case <-sub.Notify():

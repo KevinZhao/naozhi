@@ -82,14 +82,14 @@ type Event struct {
 	// observational only — dispatch uses it to surface an interactive card.
 	// The user's answer flows back as a normal user message on the next turn.
 	// See docs/rfc/askuser-question.md and test/e2e/askuser/.
-	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
+	AskQuestion *clievent.AskQuestion `json:"ask_question,omitempty"`
 
 	// ToolCall is populated for ACP tool_call / tool_call_update events.
 	// Dashboard renders a progress row (pending → in_progress → completed
 	// / failed) with collapsible rawOutput. Multi-Backend RFC §8.3 D17.
 	// stream-json (Claude) leaves this nil — Claude tool-use events flow
 	// through Message.Content[].Type=="tool_use" instead.
-	ToolCall *ToolCall `json:"tool_call,omitempty"`
+	ToolCall *clievent.ToolCall `json:"tool_call,omitempty"`
 
 	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
 	// Used by drainStaleEvents to distinguish events belonging to a previous
@@ -139,20 +139,6 @@ type MeteringEntry struct {
 	Unit       string  `json:"unit"`
 	UnitPlural string  `json:"unit_plural,omitempty"`
 }
-
-// ToolCall, AskQuestion, AskQuestionItem, AskQuestionOpt are leaf record
-// types living in `internal/cli/clievent`. The aliases below keep every
-// existing call site (`cli.ToolCall`, `cli.AskQuestion`, ...) compiling
-// while letting `internal/discovery` and other leaf consumers import the
-// leaf pkg directly without pulling in the cli surface (R217-ARCH-3 #626 —
-// diamond import break). See `internal/cli/clievent/types.go` for full
-// field documentation.
-type (
-	ToolCall        = clievent.ToolCall
-	AskQuestion     = clievent.AskQuestion
-	AskQuestionItem = clievent.AskQuestionItem
-	AskQuestionOpt  = clievent.AskQuestionOpt
-)
 
 // TaskUsage holds resource consumption stats from agent task events.
 type TaskUsage struct {

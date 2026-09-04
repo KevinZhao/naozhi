@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -233,7 +234,7 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.refCount.Add(1)
 	}
 	// R249-PERF-4 (#926): pool the replay buffer instead of allocating
-	// a fresh up-to-500-element []cli.EventEntry per attach. The pool
+	// a fresh up-to-500-element []clievent.EventEntry per attach. The pool
 	// is keyed by len(t.buffered) so a tab joining a hot run with 500
 	// buffered events grows the underlying slice once and subsequent
 	// attaches at similar buffer depths reuse the grown slice. The
@@ -250,7 +251,7 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 	// pool dance would be churning a pool slot under a high subscribe
 	// rate. meta is still snapshotted under the lock so the late-meta
 	// nudge below stays correct.
-	var buffered []cli.EventEntry
+	var buffered []clievent.EventEntry
 	var bufferedHandle tailerBufferedHandle
 	if len(t.buffered) > 0 {
 		buffered, bufferedHandle = acquireTailerBufferedSlice(len(t.buffered))

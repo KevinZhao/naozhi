@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestInjectHistory_ForwardCopyOutsideLock pins R237-PERF-6 (#667): the
@@ -26,9 +26,9 @@ func TestInjectHistory_ForwardCopyOutsideLock(t *testing.T) {
 	s.storeProcess(proc)
 
 	const batchSize = 200
-	entries := make([]cli.EventEntry, batchSize)
+	entries := make([]clievent.EventEntry, batchSize)
 	for i := range entries {
-		entries[i] = cli.EventEntry{Type: "user", Summary: "x", Time: int64(i)}
+		entries[i] = clievent.EventEntry{Type: "user", Summary: "x", Time: int64(i)}
 	}
 
 	var readerIters atomic.Int64
@@ -93,11 +93,11 @@ func waitForReaderProgress(t *testing.T, counter *atomic.Int64, baseline int64) 
 // because proc consumes the slice across goroutine boundaries.
 func TestInjectHistory_ForwardSliceIsDefensiveCopy(t *testing.T) {
 	s := &ManagedSession{key: "test:defensive"}
-	captured := make(chan []cli.EventEntry, 1)
+	captured := make(chan []clievent.EventEntry, 1)
 	proc := &capturingProc{fakeProcess: newIdleProc(), captured: captured}
 	s.storeProcess(proc)
 
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "first", Time: 1},
 		{Type: "text", Summary: "reply", Time: 2},
 	}
@@ -126,10 +126,10 @@ func TestInjectHistory_ForwardSliceIsDefensiveCopy(t *testing.T) {
 // handed to InjectHistory.
 type capturingProc struct {
 	*fakeProcess
-	captured chan []cli.EventEntry
+	captured chan []clievent.EventEntry
 }
 
-func (c *capturingProc) InjectHistory(entries []cli.EventEntry) {
+func (c *capturingProc) InjectHistory(entries []clievent.EventEntry) {
 	select {
 	case c.captured <- entries:
 	default:

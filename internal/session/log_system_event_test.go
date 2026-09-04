@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestLogSystemEvent_AppendsToPersistedHistory covers the proc=nil branch:
@@ -111,9 +111,9 @@ func TestLogSystemEvent_BoundedByMaxPersistedHistory(t *testing.T) {
 
 	// Pre-fill with maxPersistedHistory-1 non-system entries so the cap
 	// is hit exactly after the next LogSystemEvent call.
-	filler := make([]cli.EventEntry, maxPersistedHistory-1)
+	filler := make([]clievent.EventEntry, maxPersistedHistory-1)
 	for i := range filler {
-		filler[i] = cli.EventEntry{Type: "text", Summary: "fill", Time: int64(i + 1)}
+		filler[i] = clievent.EventEntry{Type: "text", Summary: "fill", Time: int64(i + 1)}
 	}
 	s.InjectHistory(filler)
 

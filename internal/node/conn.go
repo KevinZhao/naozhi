@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // EventSink can receive JSON event messages pushed from a remote session.
@@ -46,8 +46,8 @@ type NodeFetcher interface {
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
-	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
-	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
+	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error)
+	FetchEvents(ctx context.Context, key string, after int64) ([]clievent.EventEntry, error)
 	// FetchBackends returns the remote node's /api/cli/backends payload
 	// ({backends, default, detected}) verbatim as raw JSON, so the dashboard
 	// node-aware picker renders the remote node's backend list + default.

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -409,7 +410,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]Event, bool, error
 				SubType:   subType,
 				SessionID: n.ThreadID,
 				ToolUseID: n.Item.ID,
-				ToolCall: &ToolCall{
+				ToolCall: &clievent.ToolCall{
 					ID:     n.Item.ID,
 					Title:  sanitizeToolCallLabel(n.Item.Title),
 					Kind:   sanitizeToolCallLabel(n.Item.Type),

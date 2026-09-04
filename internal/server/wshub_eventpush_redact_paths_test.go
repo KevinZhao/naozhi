@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestMarshalHistoryFrame_RedactsOnEveryPath pins R20260607-PERF-1 (#1888):
@@ -18,7 +18,7 @@ import (
 //  3. multi-subscriber getOrMarshal cache path (both miss and hit)
 func TestMarshalHistoryFrame_RedactsOnEveryPath(t *testing.T) {
 	const secret = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBB"
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "text", Time: 100, Summary: "leak " + secret, Detail: "detail " + secret},
 	}
 

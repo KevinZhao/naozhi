@@ -19,11 +19,11 @@
 // The unification plan is now partly landed: internal/eventlog/api
 // publishes the single `EventStore` interface (Appender + Reader +
 // Subscriber), CI-gated by api_backends_test.go (PR #1755). The
-// behaviour-free contract, expressed against cli.EventEntry, is:
+// behaviour-free contract, expressed against clievent.EventEntry, is:
 //
 //	type EventStore interface {
-//	    Append(e cli.EventEntry)         // Appender
-//	    AppendBatch(entries []cli.EventEntry)
+//	    Append(e clievent.EventEntry)         // Appender
+//	    AppendBatch(entries []clievent.EventEntry)
 //	    LoadBefore(...)                  // Reader = cli.HistorySource
 //	    SubscribeNew() cli.EventSubscription // Subscriber
 //	}
@@ -57,6 +57,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/merged"
@@ -114,7 +115,7 @@ var bridgeEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
 		enc := json.NewEncoder(buf)
-		// Match cli.EventEntry JSON shape: persist tier reads back via
+		// Match clievent.EventEntry JSON shape: persist tier reads back via
 		// json.Unmarshal which already accepts unescaped HTML chars,
 		// and disabling escape avoids needless byte expansion.
 		enc.SetEscapeHTML(false)
@@ -163,13 +164,13 @@ const batchScratchMaxCap = 4096
 
 // newEventLogSink translates a per-key persist.PersistSink (which
 // accepts persist.Entry batches) into the cli.PersistSink contract
-// (which accepts cli.EventEntry batches).
+// (which accepts clievent.EventEntry batches).
 //
 // Two packages meet here precisely because neither cli nor persist
 // imports the other — schema.Record.Entry is json.RawMessage, so
 // the hop is always "cli marshals EventEntry → persist writes raw
 // bytes". This helper is the only place the conversion lives so a
-// future change to cli.EventEntry's JSON shape doesn't force every
+// future change to clievent.EventEntry's JSON shape doesn't force every
 // session call site to re-bridge.
 //
 // Ordering contract (RFC §3.2.2 / attachment-refcount §3.2): this
@@ -192,7 +193,7 @@ const batchScratchMaxCap = 4096
 // to dropping the entire batch (which would otherwise include many
 // valid siblings).
 func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSink {
-	return func(entries []cli.EventEntry, replayPhase bool) {
+	return func(entries []clievent.EventEntry, replayPhase bool) {
 		if len(entries) == 0 {
 			return
 		}
@@ -319,7 +320,7 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 // stack-allocated [1]persist.Entry slice) matches the inline code that
 // previously lived in newEventLogSink — extracting it here changes no
 // semantics, only call shape. (#410)
-func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string, e cli.EventEntry, replayPhase bool) {
+func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string, e clievent.EventEntry, replayPhase bool) {
 	eb := bridgeEncPool.Get().(*bridgeEncBuf)
 	eb.buf.Reset()
 	if err := eb.enc.Encode(e); err != nil {
@@ -358,7 +359,7 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 // marshal/refcount logic so the wire format and attachment-tracker
 // behaviour are byte-identical between the two dispatch paths. (#410)
 func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSinkOne {
-	return func(e cli.EventEntry, replayPhase bool) {
+	return func(e clievent.EventEntry, replayPhase bool) {
 		persistOneEntry(persisterSink, attachTracker, keyhash, e, replayPhase)
 	}
 }

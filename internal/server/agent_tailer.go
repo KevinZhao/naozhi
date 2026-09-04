@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -69,7 +70,7 @@ type agentTailer struct {
 	mu         sync.Mutex
 	subs       map[*wsClient]struct{}
 	refCount   atomic.Int32 // mirrors len(subs); Go 1.19+ idiom (match tailerRegistry.count)
-	buffered   []cli.EventEntry
+	buffered   []clievent.EventEntry
 	meta       node.AgentMetaPatch
 	lastActive time.Time
 	startedAt  time.Time
@@ -139,7 +140,7 @@ func (t *agentTailer) pollOnce() bool {
 			// pin their referenced data through the next 500 events.
 			n := copy(t.buffered, t.buffered[over:])
 			for i := n; i < len(t.buffered); i++ {
-				t.buffered[i] = cli.EventEntry{}
+				t.buffered[i] = clievent.EventEntry{}
 			}
 			t.buffered = t.buffered[:n]
 		}
@@ -289,7 +290,7 @@ func (t *agentTailer) pollOnce() bool {
 // calls are avoided. The caller still holds t.mu when invoking this
 // helper so the meta writes themselves remain mutually exclusive with
 // MetaSnapshot readers. R228-PERF-4.
-func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry, now time.Time) {
+func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.Time) {
 	switch e.Type {
 	case "tool_use":
 		t.meta.ToolUses++

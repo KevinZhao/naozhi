@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestScanLastSummaries_ResponseStripsMarkdown pins #2435 item 1 on the
@@ -12,7 +12,7 @@ import (
 // live EventLog store so the card does not flip between "判分" and "## 判分".
 func TestScanLastSummaries_ResponseStripsMarkdown(t *testing.T) {
 	t.Parallel()
-	_, _, response := scanLastSummaries([]cli.EventEntry{
+	_, _, response := scanLastSummaries([]clievent.EventEntry{
 		{Type: "user", Summary: "打分"},
 		{Type: "text", Summary: "## 判分\n**≈129.5/150** `b466411`"},
 	})
@@ -29,7 +29,7 @@ func TestSnapshot_LastResponse_LiveStripsMarkdown(t *testing.T) {
 	s := &ManagedSession{key: "test:direct:alice:general"}
 	proc := NewTestProcess()
 	s.storeProcess(proc)
-	proc.EventLog.Append(cli.EventEntry{Type: "text", Summary: "### 结论\n> **完成**"})
+	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "### 结论\n> **完成**"})
 	if got, want := s.Snapshot().LastResponse, "结论 完成"; got != want {
 		t.Errorf("Snapshot.LastResponse = %q, want %q", got, want)
 	}

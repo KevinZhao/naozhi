@@ -23,7 +23,7 @@ import (
 //
 // WHY length-prefix instead of bare JSONL:
 //
-//   - cli.EventEntry records with inline Images data URIs are routinely
+//   - clievent.EventEntry records with inline Images data URIs are routinely
 //     30-80 KiB, an order of magnitude above POSIX PIPE_BUF (4 KiB).
 //     `write(2)` of a buffer larger than PIPE_BUF is NOT guaranteed
 //     atomic, so a reader opening the file while the writer is mid-call

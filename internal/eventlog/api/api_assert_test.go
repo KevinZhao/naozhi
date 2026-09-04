@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/api"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
@@ -50,7 +51,7 @@ func TestRingRoundTripViaEventStore(t *testing.T) {
 	}
 
 	// 单条：Append 后通知到达、可读回。
-	store.Append(cli.EventEntry{Time: 1000, Type: "user", Summary: "a"})
+	store.Append(clievent.EventEntry{Time: 1000, Type: "user", Summary: "a"})
 	select {
 	case <-sub.Notify():
 	default:
@@ -62,7 +63,7 @@ func TestRingRoundTripViaEventStore(t *testing.T) {
 	}
 
 	// 批量：AppendBatch 保序追加。
-	store.AppendBatch([]cli.EventEntry{
+	store.AppendBatch([]clievent.EventEntry{
 		{Time: 2000, Type: "user", Summary: "b"},
 		{Time: 3000, Type: "user", Summary: "c"},
 	})
@@ -77,8 +78,8 @@ func TestRingRoundTripViaEventStore(t *testing.T) {
 	}
 
 	// 溢出：cap-4 ring 第 5 条挤出最旧的 "a"。
-	store.Append(cli.EventEntry{Time: 4000, Type: "user", Summary: "d"})
-	store.Append(cli.EventEntry{Time: 5000, Type: "user", Summary: "e"})
+	store.Append(clievent.EventEntry{Time: 4000, Type: "user", Summary: "d"})
+	store.Append(clievent.EventEntry{Time: 5000, Type: "user", Summary: "e"})
 	got, err = store.LoadBefore(context.Background(), 0, 10)
 	if err != nil || len(got) != 4 {
 		t.Fatalf("after overflow: LoadBefore = %+v, %v; want 4 entries, nil", got, err)

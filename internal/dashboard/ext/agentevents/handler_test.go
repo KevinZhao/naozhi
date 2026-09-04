@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
@@ -75,7 +76,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	path := writeTranscript(t, dir, "aaaaaaaaaaaaaaaaa", []string{line})
 
 	linker := cli.NewSubagentLinker()
-	linker.SeedFromHistory([]cli.EventEntry{{
+	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",
 		TaskID:          "t1",
@@ -98,7 +99,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var got []cli.EventEntry
+	var got []clievent.EventEntry
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", []string{line1, line2})
 
 	linker := cli.NewSubagentLinker()
-	linker.SeedFromHistory([]cli.EventEntry{{
+	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_A",
 		TaskID:          "ta",
@@ -200,7 +201,7 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var got []cli.EventEntry
+	var got []clievent.EventEntry
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if len(got) != 1 || got[0].Summary != "new" {
 		t.Errorf("after filter: got=%+v", got)

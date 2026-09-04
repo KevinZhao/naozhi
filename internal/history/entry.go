@@ -1,7 +1,7 @@
 package history
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -21,7 +21,7 @@ const (
 	DetailMaxRunes  = 16000
 )
 
-// NewDerivedEntry builds the canonical cli.EventEntry for an external-CLI
+// NewDerivedEntry builds the canonical clievent.EventEntry for an external-CLI
 // transcript line from its (timestamp, type, full text) triple. It is THE
 // single derivation recipe shared by every fallback history source:
 // truncate fullText to the (SummaryMaxRunes, DetailMaxRunes) caps, then
@@ -35,9 +35,9 @@ const (
 // and 120-rune summary but differing in the detail tail derive distinct
 // UUIDs (#2336) — this recipe used to be copy-pasted per source and the
 // codex copy silently drifted to detail="", which is why it now lives here.
-func NewDerivedEntry(timeMS int64, entryType, fullText string) cli.EventEntry {
+func NewDerivedEntry(timeMS int64, entryType, fullText string) clievent.EventEntry {
 	summary, detail := textutil.TruncateRunesPair(fullText, SummaryMaxRunes, DetailMaxRunes)
-	return cli.EventEntry{
+	return clievent.EventEntry{
 		UUID:    textutil.DeriveLegacyUUID(timeMS, entryType, summary, detail),
 		Time:    timeMS,
 		Type:    entryType,

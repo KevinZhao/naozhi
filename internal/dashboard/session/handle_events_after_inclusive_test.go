@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 )
 
@@ -25,14 +25,14 @@ func TestHandleEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	})
 	t.Cleanup(r.Shutdown)
 	proc := sessionpkg.NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "a", Type: "thinking", Summary: "..."})
 	r.InjectSession(key, proc)
 	h := New(Deps{Router: r})
 
 	// Client polled once and rendered "a" (cursor = 2000); the sibling lands
 	// in the same millisecond afterwards.
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "answer"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, UUID: "b", Type: "text", Summary: "answer"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key="+key+"&after=2000", nil)
 	rec := httptest.NewRecorder()
@@ -40,7 +40,7 @@ func TestHandleEvents_AfterReadmitsWatermarkMillisecond(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var got []cli.EventEntry
+	var got []clievent.EventEntry
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}

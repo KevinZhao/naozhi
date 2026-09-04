@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 
@@ -445,7 +446,7 @@ type Router struct {
 	// live under. Empty disables the event log persistence entirely —
 	// useful for tests and for deployments that explicitly opt out via
 	// configuration. When non-empty, the Router uses eventLogPersister
-	// to spool cli.EventEntry batches to disk and naozhilog.Source to
+	// to spool clievent.EventEntry batches to disk and naozhilog.Source to
 	// read them back on restart / pagination.
 	// 读写: core (init), lifecycle (attachHistorySource), cleanup (dropEventLog)
 	eventLogDir string
@@ -704,14 +705,14 @@ type HistoryLoader interface {
 	// LoadHistoryChainTail walks the JSONL files for ids (newest→oldest)
 	// under claudeDir/cwd and returns up to limit entries. ctx cancellation
 	// aborts the load promptly.
-	LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry
+	LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry
 }
 
 // discoveryHistoryLoader is the production HistoryLoader backed by the
 // discovery package. Stateless; the zero value is ready to use.
 type discoveryHistoryLoader struct{}
 
-func (discoveryHistoryLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
+func (discoveryHistoryLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
 	return discovery.LoadHistoryChainTailCtx(ctx, claudeDir, ids, cwd, limit)
 }
 

@@ -3,11 +3,11 @@
 //
 // Splitting these out of `internal/cli` breaks the diamond import that
 // would otherwise form: session → discovery → cli ← session. R217-ARCH-3
-// (#626). The cli package re-exports each type via a Go type alias so
-// existing call sites that say `cli.EventEntry` keep compiling without
-// any rewrite — only packages that historically imported cli purely for
-// these record types (today: `internal/discovery`) can now bind to the
-// leaf and stop pulling in the rest of the cli surface.
+// (#626). The cli package originally re-exported each type via a Go type
+// alias (`cli.EventEntry`); that alias was removed in #2496 step 1 so
+// every consumer — history/*, node, dashboard/*, session, cli itself —
+// imports this leaf directly and the package dependency graph reflects
+// who actually needs the process-management surface in cli.
 //
 // New record types should land here only when they are pure data shapes
 // with no behaviour and are consumed by ≥2 packages above the cli
@@ -21,8 +21,8 @@ package clievent
 //
 // Field semantics are documented inline below; they were lifted as-is
 // from internal/cli/eventlog.go (R217-ARCH-3 #626 — diamond-import
-// extraction). cli.EventEntry remains as a type alias for backward
-// compatibility with the ~365 existing call sites.
+// extraction). The `cli.EventEntry` alias that bridged the move was
+// dropped in #2496 step 1; refer to this type as clievent.EventEntry.
 type EventEntry struct {
 	// UUID is a 32-char lowercase hex identity for this event,
 	// assigned at Append-time by EventLog.stampUUID. Stable across

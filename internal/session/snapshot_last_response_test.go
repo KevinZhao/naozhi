@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestSnapshot_LastResponse_LiveProcess verifies the live-process branch of
@@ -22,8 +22,8 @@ func TestSnapshot_LastResponse_LiveProcess(t *testing.T) {
 	}
 
 	// Append a user prompt + assistant text via the canonical event path.
-	proc.EventLog.Append(cli.EventEntry{Type: "user", Summary: "hi"})
-	proc.EventLog.Append(cli.EventEntry{Type: "text", Summary: "hello there"})
+	proc.EventLog.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
+	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "hello there"})
 
 	if got, want := s.Snapshot().LastResponse, "hello there"; got != want {
 		t.Errorf("after text Snapshot.LastResponse = %q, want %q", got, want)
@@ -56,7 +56,7 @@ func TestSnapshot_LastResponse_LiveOverridesCache(t *testing.T) {
 	storeAtomicString(&s.lastResponse, "old cached reply")
 
 	proc := NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Type: "text", Summary: "fresh reply"})
+	proc.EventLog.Append(clievent.EventEntry{Type: "text", Summary: "fresh reply"})
 	s.storeProcess(proc)
 
 	if got, want := s.Snapshot().LastResponse, "fresh reply"; got != want {
@@ -71,7 +71,7 @@ func TestSnapshot_LastResponse_LiveOverridesCache(t *testing.T) {
 func TestScanLastSummaries_Response(t *testing.T) {
 	t.Parallel()
 
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "first question"},
 		{Type: "thinking", Summary: "..."},
 		{Type: "text", Summary: "first answer"},
@@ -99,7 +99,7 @@ func TestScanLastSummaries_Response(t *testing.T) {
 func TestScanLastSummaries_NoResponse(t *testing.T) {
 	t.Parallel()
 
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "do work"},
 		{Type: "tool_use", Summary: "Bash"},
 		{Type: "thinking", Summary: "..."},

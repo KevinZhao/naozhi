@@ -3,7 +3,7 @@
 //
 // Responsibilities:
 //
-//   - Write cli.EventEntry batches to durable per-session <keyhash>.log
+//   - Write clievent.EventEntry batches to durable per-session <keyhash>.log
 //     files with strict log→idx→fsync ordering.
 //   - Maintain a sparse <keyhash>.idx sidecar that drives O(1) rotate
 //     tail-cut and startup recovery.
@@ -16,7 +16,7 @@
 //   - Reading event history back: that lives in
 //     internal/history/naozhilog, which builds a history.Source on top
 //     of the same files persist writes.
-//   - cli.EventEntry semantics: this package treats entries as opaque
+//   - clievent.EventEntry semantics: this package treats entries as opaque
 //     JSON bytes wrapped in the schema.Record envelope. EventEntry
 //     drift is caught at the cli-package round-trip tests, not here.
 //   - Merging local + Claude JSONL sources: that is MergedSource's job.
@@ -61,7 +61,7 @@
 // persist.PersistSink (in entry.go) and cli.PersistSink (in
 // internal/cli/eventlog.go) are deliberately distinct types — the
 // former takes persist.Entry (post-marshal schema record), the
-// latter takes []cli.EventEntry (pre-marshal in-memory shape). The
+// latter takes []clievent.EventEntry (pre-marshal in-memory shape). The
 // bridge in internal/session/eventlog_bridge.go is the only place
 // that translates between them. R237-ARCH-13 proposes the rename
 // to internal/eventlog/{ring, persist, replay} so package names

@@ -17,6 +17,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -26,7 +27,7 @@ import (
 // multiple content blocks (thinking + tool_use + text); each block that maps
 // to a known type produces its own entry so downstream consumers (EventLog,
 // dashboard) don't silently drop blocks after the first. R67-PERF-9.
-func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
+func EventEntriesFromEventAt(ev Event, nowMS int64) []clievent.EventEntry {
 	// Replay events are a passthrough-internal CLI ack for messages naozhi
 	// already showed to the user via the optimistic bubble. Writing them to
 	// EventLog causes double-display on the dashboard. readLoop already
@@ -36,7 +37,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		return nil
 	}
 	now := nowMS
-	base := EventEntry{Time: now}
+	base := clievent.EventEntry{Time: now}
 
 	switch ev.Type {
 	case "system":
@@ -94,7 +95,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			"thinking_tokens", "background_tasks_changed":
 			return nil
 		}
-		return []EventEntry{entry}
+		return []clievent.EventEntry{entry}
 	case "assistant":
 		// ACP tool_call_update events (Sprint 5c / RFC §8.3 D17) carry no
 		// Message content — they're pure status/output progress updates
@@ -116,7 +117,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			// value so the pointer is shared but the entry struct stays
 			// owned by the ring buffer.
 			entry.ToolCall = ev.ToolCall
-			return []EventEntry{entry}
+			return []clievent.EventEntry{entry}
 		}
 		if ev.Message == nil {
 			return nil
@@ -129,7 +130,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		// Pre-size to the content block count: single-block events pay 1
 		// alloc (same as the old nil+append path), and multi-block events
 		// (thinking+tool_use+text) avoid 2-3 append-driven growth reallocs.
-		out := make([]EventEntry, 0, len(ev.Message.Content))
+		out := make([]clievent.EventEntry, 0, len(ev.Message.Content))
 		for _, block := range ev.Message.Content {
 			// R229-PERF-3: skip unknown block types BEFORE paying the
 			// `entry := base` struct copy (~240 B per iteration). The
@@ -260,7 +261,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		entry := base
 		entry.Type = "result"
 		entry.Cost = ev.CostUSD
-		return []EventEntry{entry}
+		return []clievent.EventEntry{entry}
 	}
 	return nil
 }

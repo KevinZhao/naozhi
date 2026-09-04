@@ -3,7 +3,7 @@ package session
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // loadProcess returns the currently attached processIface, or nil when
@@ -171,7 +171,7 @@ func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 // persistedHistory slice so the caller re-seeds; adopt treats the slice as
 // already in proc.EventLog and returns nothing. See adoptProcessAlreadySeeded
 // for the symmetric path.
-func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []cli.EventEntry {
+func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []clievent.EventEntry {
 	s.historyMu.Lock()
 	if proc == nil {
 		// R231-CQ-2: nil parameter = "session is now process-less" (detach
@@ -197,9 +197,9 @@ func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []
 	}
 	s.storeProcess(proc)
 	n := len(s.persistedHistory)
-	var snapshot []cli.EventEntry
+	var snapshot []clievent.EventEntry
 	if n > 0 {
-		snapshot = make([]cli.EventEntry, n)
+		snapshot = make([]clievent.EventEntry, n)
 		copy(snapshot, s.persistedHistory)
 	}
 	s.persistedSeededLen = n

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // These tests pin RFC v4 agent-team-ui §3.3 SubagentLinker behaviour:
@@ -299,7 +301,7 @@ func TestLinker_SeedFromHistory_Bypasses_Scan(t *testing.T) {
 	// must live under ~/.claude/projects because R201-SEC-M1's prefix
 	// check now rejects anything outside that root even for seeded entries.
 	jsonl := filepath.Join(home, ".claude", "projects", "-test", "s", "subagents", "agent-77777777777777777.jsonl")
-	entries := []EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "agent", ToolUseID: "toolu_H", Subagent: "hist-1"},
 		{
 			Type:            "task_start",

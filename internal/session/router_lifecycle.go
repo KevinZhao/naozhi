@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -813,7 +814,7 @@ func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, float64, 
 // live events accumulated since the JSONL snapshot was last loaded;
 // the live-but-suspended branch (no process, or alive waiting) falls
 // back to the persisted snapshot.
-func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]cli.EventEntry, []string, int64) {
+func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resumeID string) ([]clievent.EventEntry, []string, int64) {
 	if oldSess == nil {
 		return nil, nil, 0
 	}
@@ -834,7 +835,7 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	//     loadProcess returns (the pointer can only be replaced by storeProcess
 	//     under sendMu, which we don't acquire — but the old Process keeps its
 	//     own eventLog alive until GC, so reading entries from it is sound).
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	// #2089: capture the user-turn count alongside the snapshot so the spawn
 	// path can seed persistedUserTurns without a second independent O(n)
 	// rescan. For the persisted-snapshot branch the count is the already
@@ -844,9 +845,9 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	userTurns := int64(-1)
 	oldSess.historyMu.RLock()
 	p := oldSess.loadProcess()
-	var persistedSnapshot []cli.EventEntry
+	var persistedSnapshot []clievent.EventEntry
 	if (p == nil || p.Alive()) && len(oldSess.persistedHistory) > 0 {
-		persistedSnapshot = make([]cli.EventEntry, len(oldSess.persistedHistory))
+		persistedSnapshot = make([]clievent.EventEntry, len(oldSess.persistedHistory))
 		copy(persistedSnapshot, oldSess.persistedHistory)
 		userTurns = oldSess.persistedUserTurns.Load()
 	}
@@ -890,7 +891,7 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 // countUserTurns returns the number of Type=="user" entries in entries.
 // Shared by collectPreviousHistory (#2089) and the recount contract so the
 // "what counts as a user turn" rule lives in one place.
-func countUserTurns(entries []cli.EventEntry) int64 {
+func countUserTurns(entries []clievent.EventEntry) int64 {
 	var n int64
 	for i := range entries {
 		if entries[i].Type == "user" {
@@ -1199,7 +1200,7 @@ func (r *Router) bindNewSessionHistory(
 	resumeID string,
 	workspace string,
 	prevIDs []string,
-	oldHistory []cli.EventEntry,
+	oldHistory []clievent.EventEntry,
 ) {
 	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
 	r.installPersistSink(proc, key)
@@ -1220,7 +1221,7 @@ func (r *Router) installFreshSessionLocked(
 	accessProfileID string,
 	wrapper *cli.Wrapper,
 	resumeID string,
-	oldHistory []cli.EventEntry,
+	oldHistory []clievent.EventEntry,
 	prevIDs []string,
 	oldTotalCost float64,
 	oldCostSpent float64,
@@ -1439,7 +1440,7 @@ func (r *Router) loadResumeHistoryOnSpawn(
 	s *ManagedSession,
 	key, resumeID, workspace string,
 	prevIDs []string,
-	oldHistory []cli.EventEntry,
+	oldHistory []clievent.EventEntry,
 ) {
 	if resumeID == "" || r.claudeDir == "" || len(oldHistory) > 0 {
 		return

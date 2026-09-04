@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLogSatisfiesAppenderAndSubscriber_R20260602_091302_ARCH_2 anchors
@@ -22,7 +23,7 @@ func TestEventLogSatisfiesAppenderAndSubscriber_R20260602_091302_ARCH_2(t *testi
 // (cli.HistorySource) the way naozhilog.Source / merged do.
 type stubReader struct{}
 
-func (stubReader) LoadBefore(context.Context, int64, int) ([]cli.EventEntry, error) {
+func (stubReader) LoadBefore(context.Context, int64, int) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 
@@ -40,7 +41,7 @@ type fullStore struct {
 	stubReader
 }
 
-func (f fullStore) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (f fullStore) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	return f.stubReader.LoadBefore(ctx, beforeMS, limit)
 }
 

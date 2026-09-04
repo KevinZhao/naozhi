@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestShimReconnect_NoDoubleInjectContract pins the R231-CQ-1 fix at source
@@ -122,7 +122,7 @@ func TestShimReconnect_HasInjectedHistorySkipsLoad(t *testing.T) {
 	s := &ManagedSession{key: "feishu:direct:alice:general"}
 
 	// Tier1 populates persistedHistory before the shim-reconnect runs.
-	tier1 := []cli.EventEntry{
+	tier1 := []clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "tier1-msg-a"},
 		{Time: 2000, Type: "text", Summary: "tier1-reply-a"},
 		{Time: 3000, Type: "user", Summary: "tier1-msg-b"},

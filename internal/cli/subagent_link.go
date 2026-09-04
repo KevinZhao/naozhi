@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // agentHexRe whitelists the hex component of an agent-<hex>.jsonl filename
@@ -866,7 +868,7 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 // this check, an attacker who could mutate sessions/*.jsonl (e.g. via a
 // separate file-disclosure bug or filesystem-level compromise) could
 // redirect agent_events streaming to an arbitrary readable file.
-func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
+func (l *SubagentLinker) SeedFromHistory(entries []clievent.EventEntry) {
 	if len(entries) == 0 {
 		return
 	}

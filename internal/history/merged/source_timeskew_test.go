@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Regression suite for the cross-tier clock-skew dedup failure.
@@ -35,19 +35,19 @@ import (
 //
 //   - typ=="user"  — naozhi → CLI, so local is EARLIER than the fallback twin.
 //   - otherwise    — CLI → naozhi, so local is LATER than the fallback twin.
-func skewedPair(typ, text string, localTime, skewMS int64) (local, fallback cli.EventEntry) {
+func skewedPair(typ, text string, localTime, skewMS int64) (local, fallback clievent.EventEntry) {
 	fbTime := localTime - skewMS // local lags (assistant output)
 	if typ == "user" {
 		fbTime = localTime + skewMS // local leads (user message)
 	}
-	local = cli.EventEntry{
+	local = clievent.EventEntry{
 		UUID:    "bac2936f69e96fc17a532928505827a6",
 		Time:    localTime,
 		Type:    typ,
 		Summary: text,
 		Detail:  text,
 	}
-	fallback = cli.EventEntry{
+	fallback = clievent.EventEntry{
 		UUID:    "6a7f36b5a0994467ba9604ceaced1b7a",
 		Time:    fbTime,
 		Type:    typ,
@@ -81,8 +81,8 @@ func TestMerged_ClockSkewDoesNotDuplicate(t *testing.T) {
 			t.Run(tc.typ+"/skew="+strconv.FormatInt(skew, 10)+"ms", func(t *testing.T) {
 				local, fallback := skewedPair(tc.typ, tc.text, 1785505503898, skew)
 				m := &Source{
-					Local:    &stubSource{entries: []cli.EventEntry{local}},
-					Fallback: &stubSource{entries: []cli.EventEntry{fallback}},
+					Local:    &stubSource{entries: []clievent.EventEntry{local}},
+					Fallback: &stubSource{entries: []clievent.EventEntry{fallback}},
 				}
 				got, err := m.LoadBefore(context.Background(), 0, 100)
 				if err != nil {
@@ -107,8 +107,8 @@ func TestMerged_ClockSkewDoesNotDuplicate(t *testing.T) {
 func TestMerged_ClockSkewBeyondTolerance_NotCollapsed(t *testing.T) {
 	local, fallback := skewedPair("user", "继续", 1785508722370, contentSkewLeadMS+1)
 	m := &Source{
-		Local:    &stubSource{entries: []cli.EventEntry{local}},
-		Fallback: &stubSource{entries: []cli.EventEntry{fallback}},
+		Local:    &stubSource{entries: []clievent.EventEntry{local}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{fallback}},
 	}
 	got, _ := m.LoadBefore(context.Background(), 0, 100)
 	if len(got) != 2 {
@@ -131,8 +131,8 @@ func TestMerged_RepeatedSameTextTurns_CardinalityPreserved(t *testing.T) {
 	l2.UUID, f2.UUID = "aaaa0000000000000000000000000002", "bbbb0000000000000000000000000002"
 
 	m := &Source{
-		Local:    &stubSource{entries: []cli.EventEntry{l1, l2}},
-		Fallback: &stubSource{entries: []cli.EventEntry{f1, f2}},
+		Local:    &stubSource{entries: []clievent.EventEntry{l1, l2}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{f1, f2}},
 	}
 	got, _ := m.LoadBefore(context.Background(), 0, 100)
 	if len(got) != 2 {
@@ -152,7 +152,7 @@ func TestMerged_RepeatedSameTextTurns_CardinalityPreserved(t *testing.T) {
 func TestMerged_FallbackOnlyRepeats_BothKept(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "f1", Time: 1000, Type: "user", Summary: "继续", Detail: "继续"},
 			{UUID: "f2", Time: 2000, Type: "user", Summary: "继续", Detail: "继续"},
 		}},
@@ -173,16 +173,16 @@ func TestMerged_FallbackOnlyRepeats_BothKept(t *testing.T) {
 // local rows, because doing so would have hidden that defect entirely.
 func TestMerged_MoreLocalThanFallback_ExtraLocalSurvives(t *testing.T) {
 	const text = "分析并整理归档"
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			mk("l1", 1785505498634), mk("l2", 1785505498634), mk("l3", 1785505498634),
 		}},
 		// Within tolerance of all three locals (Δ=1191 ms — the observed
 		// cold-spawn user-message skew).
-		Fallback: &stubSource{entries: []cli.EventEntry{mk("f1", 1785505499825)}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{mk("f1", 1785505499825)}},
 	}
 	got, _ := m.LoadBefore(context.Background(), 0, 100)
 	if len(got) != 3 {
@@ -213,12 +213,12 @@ func TestMerged_MoreLocalThanFallback_ExtraLocalSurvives(t *testing.T) {
 // emitted lNew + fNew — dropping a real message AND still double-rendering.
 func TestMerged_FallbackOnlyTurnNotSwallowedByLocalTwin(t *testing.T) {
 	const text = "继续"
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{mk("lNew", 5000)}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{mk("lNew", 5000)}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			mk("fOld", 3500), // distinct earlier turn, fallback-only
 			mk("fNew", 5001), // same turn as lNew (1 ms skew)
 		}},
@@ -251,12 +251,12 @@ func TestMerged_FallbackOnlyTurnNotSwallowedByLocalTwin(t *testing.T) {
 // content credit and the next copy then found no credit to match.
 func TestMerged_FallbackRecordReadTwice_DedupsAgainstFirstCopy(t *testing.T) {
 	const text = "hello world"
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "text", Summary: text, Detail: text}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "text", Summary: text, Detail: text}
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{mk("l1", 1000)}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{mk("l1", 1000)}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			mk("f1", 1001), mk("f1", 1001), // same record twice
 		}},
 	}
@@ -278,12 +278,12 @@ func TestMerged_FallbackRecordReadTwice_DedupsAgainstFirstCopy(t *testing.T) {
 // both sides, which is why contentKey uses it instead.
 func TestMerged_ImageBearingUserTurnDedups(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{{
+		Local: &stubSource{entries: []clievent.EventEntry{{
 			UUID: "localnative", Time: 5000, Type: "user",
 			Summary: "看这个 [+1 image(s)]", Detail: "看这个",
 			Images: []string{"data:image/jpeg;base64,A="},
 		}}},
-		Fallback: &stubSource{entries: []cli.EventEntry{{
+		Fallback: &stubSource{entries: []clievent.EventEntry{{
 			UUID: "claudeuuid", Time: 5200, Type: "user",
 			Summary: "看这个", Detail: "看这个",
 		}}},
@@ -305,13 +305,13 @@ func TestMerged_ImageBearingUserTurnDedups(t *testing.T) {
 // of how many, so all three fallback sends below collapse against local's
 // single row and two real turns are silently lost.
 func TestMerged_MoreFallbackThanLocal_ExcessSurvives(t *testing.T) {
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: "继续", Detail: "继续"}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: "继续", Detail: "继续"}
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{mk("lOne", 5000)}},
+		Local: &stubSource{entries: []clievent.EventEntry{mk("lOne", 5000)}},
 		// Three distinct sends, all inside the user lead window of local.
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			mk("fA", 5500), mk("fB", 6500), mk("fC", 7500),
 		}},
 	}
@@ -330,12 +330,12 @@ func TestMerged_MoreFallbackThanLocal_ExcessSurvives(t *testing.T) {
 // single row pairs with its nearest twin, leaving the distinct turn unpaired
 // and therefore rendered.
 func TestMerged_FallbackOnlyTurnOnCausalSide(t *testing.T) {
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: "继续", Detail: "继续"}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: "继续", Detail: "继续"}
 	}
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{mk("l", 10000)}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{mk("l", 10000)}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			mk("fTwin", 10001),     // the real twin (1 ms)
 			mk("fDistinct", 11391), // a distinct turn, still inside lead=3000
 		}},
@@ -367,8 +367,8 @@ func TestMerged_FallbackOnlyTurnOnCausalSide(t *testing.T) {
 // Without the direction check, a symmetric window would accept both.
 func TestMerged_SkewWindowIsDirectional(t *testing.T) {
 	const text = "继续"
-	mk := func(typ, uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: typ, Summary: text, Detail: text}
+	mk := func(typ, uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: typ, Summary: text, Detail: text}
 	}
 	cases := []struct {
 		name       string
@@ -391,8 +391,8 @@ func TestMerged_SkewWindowIsDirectional(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Source{
-				Local:    &stubSource{entries: []cli.EventEntry{mk(tc.typ, "l1", tc.localTime)}},
-				Fallback: &stubSource{entries: []cli.EventEntry{mk(tc.typ, "f1", tc.fbTime)}},
+				Local:    &stubSource{entries: []clievent.EventEntry{mk(tc.typ, "l1", tc.localTime)}},
+				Fallback: &stubSource{entries: []clievent.EventEntry{mk(tc.typ, "f1", tc.fbTime)}},
 			}
 			got, _ := m.LoadBefore(context.Background(), 0, 100)
 			wantN := 2
@@ -412,14 +412,14 @@ func TestMerged_SkewWindowIsDirectional(t *testing.T) {
 // change the rendered set. A stateful, consume-as-you-go dedup fails this.
 func TestMerged_DedupVerdictIsOrderIndependent(t *testing.T) {
 	const text = "同一句话"
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
 	}
-	local := []cli.EventEntry{mk("l1", 1000), mk("l2", 9000)}
-	fwd := []cli.EventEntry{mk("f1", 1001), mk("f2", 5000), mk("f3", 9001)}
-	rev := []cli.EventEntry{mk("f3", 9001), mk("f2", 5000), mk("f1", 1001)}
+	local := []clievent.EventEntry{mk("l1", 1000), mk("l2", 9000)}
+	fwd := []clievent.EventEntry{mk("f1", 1001), mk("f2", 5000), mk("f3", 9001)}
+	rev := []clievent.EventEntry{mk("f3", 9001), mk("f2", 5000), mk("f1", 1001)}
 
-	count := func(fb []cli.EventEntry) int {
+	count := func(fb []clievent.EventEntry) int {
 		m := &Source{Local: &stubSource{entries: local}, Fallback: &stubSource{entries: fb}}
 		got, _ := m.LoadBefore(context.Background(), 0, 100)
 		return len(got)
@@ -445,11 +445,11 @@ func TestMerged_DedupVerdictIsOrderIndependent(t *testing.T) {
 // this guards a local-only shape.
 func TestMerged_ContentlessEntries_NotCrossMatched(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "t1", Time: 1000, Type: "result"},
 			{UUID: "t2", Time: 2000, Type: "result"},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "t3", Time: 3000, Type: "result"},
 		}},
 	}
@@ -466,11 +466,11 @@ func TestMerged_ContentlessEntries_NotCrossMatched(t *testing.T) {
 func TestMerged_ClockSkew_SlowPath(t *testing.T) {
 	const a, b = "second turn", "first turn"
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "nativeB", Time: 2000, Type: "text", Summary: a, Detail: a},
 			{UUID: "nativeA", Time: 1000, Type: "text", Summary: b, Detail: b},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "claudeB", Time: 1999, Type: "text", Summary: a, Detail: a}, // 1ms skew
 			{UUID: "claudeA", Time: 981, Type: "text", Summary: b, Detail: b},  // 19ms skew
 		}},
@@ -495,16 +495,16 @@ func TestMerged_ClockSkew_SlowPath(t *testing.T) {
 // disagreeing.
 func TestMerged_TwoTiersTwoCopies_PairwiseMatched(t *testing.T) {
 	const text = "ok"
-	mk := func(uuid string, ts int64) cli.EventEntry {
-		return cli.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
+	mk := func(uuid string, ts int64) clievent.EventEntry {
+		return clievent.EventEntry{UUID: uuid, Time: ts, Type: "user", Summary: text, Detail: text}
 	}
-	local := []cli.EventEntry{mk("l1", 1000), mk("l2", 1900)}
-	forward := []cli.EventEntry{mk("f1", 1002), mk("f2", 1905)}
-	reversed := []cli.EventEntry{mk("f2", 1905), mk("f1", 1002)}
+	local := []clievent.EventEntry{mk("l1", 1000), mk("l2", 1900)}
+	forward := []clievent.EventEntry{mk("f1", 1002), mk("f2", 1905)}
+	reversed := []clievent.EventEntry{mk("f2", 1905), mk("f1", 1002)}
 
 	for _, tc := range []struct {
 		name string
-		fb   []cli.EventEntry
+		fb   []clievent.EventEntry
 	}{{"forward", forward}, {"reversed", reversed}} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Source{
@@ -531,10 +531,10 @@ func TestMerged_TwoTiersTwoCopies_PairwiseMatched(t *testing.T) {
 func TestMerged_UUIDMatchAndDistinctLaterTurn(t *testing.T) {
 	const text = "重复文本"
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "shared", Time: 1000, Type: "user", Summary: text, Detail: text},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			// Same record read twice (exact UUID match) — dropped.
 			{UUID: "shared", Time: 1000, Type: "user", Summary: text, Detail: text},
 			// A genuinely different turn far outside the window — must survive.
@@ -564,10 +564,10 @@ func TestMerged_UUIDMatchAndDistinctLaterTurn(t *testing.T) {
 func TestMerged_ClockSkewRespectsBeforeMS(t *testing.T) {
 	const text = "boundary"
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "localAbove", Time: 300, Type: "text", Summary: text, Detail: text},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "fallbackBelow", Time: 299, Type: "text", Summary: text, Detail: text},
 		}},
 	}
@@ -593,15 +593,15 @@ func TestPairContent_RemovesExactlyMinNM(t *testing.T) {
 	for _, typ := range []string{"user", "text"} {
 		for n := 0; n <= 4; n++ {
 			for m := 0; m <= 4; m++ {
-				local := make([]cli.EventEntry, n)
+				local := make([]clievent.EventEntry, n)
 				for i := range local {
-					local[i] = cli.EventEntry{
+					local[i] = clievent.EventEntry{
 						UUID: "l" + strconv.Itoa(i), Time: 10000, Type: typ, Detail: "s",
 					}
 				}
-				fallback := make([]cli.EventEntry, m)
+				fallback := make([]clievent.EventEntry, m)
 				for i := range fallback {
-					fallback[i] = cli.EventEntry{
+					fallback[i] = clievent.EventEntry{
 						UUID: "f" + strconv.Itoa(i), Time: 10000, Type: typ, Detail: "s",
 					}
 				}
@@ -629,8 +629,8 @@ func TestPairContent_WindowBoundary(t *testing.T) {
 			{lag, true}, {lag + 1, false},
 			{-lead, true}, {-lead - 1, false},
 		} {
-			local := []cli.EventEntry{{UUID: "l", Time: 100000 + tc.delta, Type: typ, Detail: "d"}}
-			fallback := []cli.EventEntry{{UUID: "f", Time: 100000, Type: typ, Detail: "d"}}
+			local := []clievent.EventEntry{{UUID: "l", Time: 100000 + tc.delta, Type: typ, Detail: "d"}}
+			fallback := []clievent.EventEntry{{UUID: "f", Time: 100000, Type: typ, Detail: "d"}}
 			paired := len(pairContent(local, fallback, 0, nil)) == 1
 			if paired != tc.want {
 				t.Errorf("type=%s delta=%+dms: paired=%v want=%v (lead=%d lag=%d)",
@@ -648,11 +648,11 @@ func TestPairContent_ClusteredDoesNotStrandPairs(t *testing.T) {
 	const typ = "text"
 	_, lag := skewWindowFor(typ)
 	for shift := int64(0); shift <= lag; shift += 37 {
-		local := []cli.EventEntry{
+		local := []clievent.EventEntry{
 			{UUID: "l1", Time: 5000, Type: typ, Detail: "d"},
 			{UUID: "l2", Time: 5000 + shift, Type: typ, Detail: "d"},
 		}
-		fallback := []cli.EventEntry{
+		fallback := []clievent.EventEntry{
 			{UUID: "f1", Time: 5000 - lag, Type: typ, Detail: "d"},
 			{UUID: "f2", Time: 5000, Type: typ, Detail: "d"},
 		}
@@ -670,8 +670,8 @@ func TestPairContent_ClusteredDoesNotStrandPairs(t *testing.T) {
 // twin rendering as the very duplicate this fix exists to remove.
 func TestPairContent_PairsNearestNotEarliest(t *testing.T) {
 	const text = "好的，已完成。"
-	local := []cli.EventEntry{{UUID: "lRow", Time: 10000, Type: "text", Detail: text}}
-	fallback := []cli.EventEntry{
+	local := []clievent.EventEntry{{UUID: "lRow", Time: 10000, Type: "text", Detail: text}}
+	fallback := []clievent.EventEntry{
 		{UUID: "fDistinct", Time: 9501, Type: "text", Detail: text}, // Δ=499, distinct turn
 		{UUID: "fTwin", Time: 10000, Type: "text", Detail: text},    // Δ=0, the real twin
 	}
@@ -723,10 +723,10 @@ func TestPairBucket_NearestFirstDoesNotStrandPairs(t *testing.T) {
 // — finds nothing left to pair with and renders.
 func TestPairContent_UUIDDroppedEntryKeepsItsSlot(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "X", Time: 1000, Type: "text", Detail: "d"},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "X", Time: 1000, Type: "text", Detail: "d"}, // dropped by UUID
 			{UUID: "Y", Time: 1000, Type: "text", Detail: "d"}, // same turn, rehashed uuid
 		}},

@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -390,13 +391,13 @@ func (s *ManagedSession) recountPersistedUserTurnsLocked() {
 
 // EventEntries returns the event log entries for this session.
 // Returns persisted history when the process is nil or dead.
-func (s *ManagedSession) EventEntries() []cli.EventEntry {
+func (s *ManagedSession) EventEntries() []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntries()
 	}
 	s.historyMu.RLock()
-	out := make([]cli.EventEntry, len(s.persistedHistory))
+	out := make([]clievent.EventEntry, len(s.persistedHistory))
 	copy(out, s.persistedHistory)
 	s.historyMu.RUnlock()
 	return out
@@ -404,9 +405,9 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 
 // EventEntriesAppend is the buffer-reusing variant of EventEntries: it appends
 // this session's full event log onto dst and returns the grown slice instead of
-// always allocating a fresh []cli.EventEntry + full copy.
+// always allocating a fresh []clievent.EventEntry + full copy.
 //
-// R20260607-PERF-6 (#1885): EventEntries() allocates make([]cli.EventEntry,len)
+// R20260607-PERF-6 (#1885): EventEntries() allocates make([]clievent.EventEntry,len)
 // + copy on every call. The startup-discovery scan (EventEntriesForKey, called
 // per-session in router_discovery) and collectPreviousHistory (every spawn/reset)
 // run it across O(N sessions) of dead sessions, each ~120 KB for 500-entry
@@ -417,7 +418,7 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // across calls; the returned slice shares the backing array with dst. The
 // live-process branch forwards through proc.EventEntries() (the ring's own
 // snapshot) and appends it, so dst's prefix is preserved in every branch.
-func (s *ManagedSession) EventEntriesAppend(dst []cli.EventEntry) []cli.EventEntry {
+func (s *ManagedSession) EventEntriesAppend(dst []clievent.EventEntry) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return append(dst, proc.EventEntries()...)
@@ -486,7 +487,7 @@ func (s *ManagedSession) loadCliProcess() *cli.Process {
 }
 
 // EventLastN returns the most recent n event entries.
-func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
+func (s *ManagedSession) EventLastN(n int) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventLastN(n)
@@ -494,12 +495,12 @@ func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	if n <= 0 || n >= len(s.persistedHistory) {
-		out := make([]cli.EventEntry, len(s.persistedHistory))
+		out := make([]clievent.EventEntry, len(s.persistedHistory))
 		copy(out, s.persistedHistory)
 		return out
 	}
 	start := len(s.persistedHistory) - n
-	out := make([]cli.EventEntry, n)
+	out := make([]clievent.EventEntry, n)
 	copy(out, s.persistedHistory[start:])
 	return out
 }
@@ -514,11 +515,11 @@ func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 // and (b) AppendBatch assigns a single wall-clock to zero-Time entries
 // while older entries might still arrive with real earlier timestamps
 // from resume paths.
-func sortEntriesByTimeStable(entries []cli.EventEntry) {
+func sortEntriesByTimeStable(entries []clievent.EventEntry) {
 	if len(entries) < 2 {
 		return
 	}
-	slices.SortStableFunc(entries, func(a, b cli.EventEntry) int {
+	slices.SortStableFunc(entries, func(a, b clievent.EventEntry) int {
 		return cmp.Compare(a.Time, b.Time)
 	})
 }
@@ -538,7 +539,7 @@ func sortEntriesByTimeStable(entries []cli.EventEntry) {
 // (startup backfill replays prev-session IDs in reverse-chain order).
 // We do a full linear scan + stable sort so paginated fetches see
 // chronological output.
-func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
+func (s *ManagedSession) EventEntriesSince(afterMS int64) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
@@ -593,7 +594,7 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	// 0-5-entry result. afterMS=0 full replay still happens (e.g. first
 	// load of a dead session) and will pay a few reallocations growing past
 	// 16, but that path is rare; we trade it for the common case.
-	out := make([]cli.EventEntry, 0, 16)
+	out := make([]clievent.EventEntry, 0, 16)
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
 			out = append(out, e)
@@ -609,7 +610,7 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 // R20260604-PERF-25 (#1740): ProcessEventReader now exposes
 // EventEntriesSinceAppend, so the live path forwards dst straight into the
 // EventLog's append-mode query and reuses the caller's buffer — previously
-// this branch allocated a fresh []cli.EventEntry on every notify wave (5 evt/s
+// this branch allocated a fresh []clievent.EventEntry on every notify wave (5 evt/s
 // × N sessions × per-tab subscribers).
 //
 // Callers that poll at 1Hz per N WS tabs (backfillSubscriberEvents) can pass
@@ -617,7 +618,7 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 // appends into existing capacity instead of allocating. Ownership: the caller
 // must not retain dst across calls; the returned slice shares backing array
 // with dst.
-func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+func (s *ManagedSession) EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		// Empty dst is the hot path (backfillSubscriberEvents always passes
@@ -634,7 +635,7 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 		// reusing the backing array when capacity allows (the #1740 win).
 		// R20260607-PERF-002 (#1922): the previous
 		// append(dst, proc.EventEntriesSince(afterMS)...) made EventLog
-		// allocate a fresh []cli.EventEntry, silently defeating the
+		// allocate a fresh []clievent.EventEntry, silently defeating the
 		// buffer-reuse optimization whenever dst had residual entries.
 		//
 		// When the spare capacity sufficed, `appended` already occupies dst's
@@ -676,7 +677,7 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 	// non-empty sorted slice whose last element is strictly > afterMS.
 	// Binary-search for the first entry with Time > afterMS, then bulk-append
 	// the tail instead of scanning every element individually.
-	i, _ := slices.BinarySearchFunc(s.persistedHistory, afterMS, func(e cli.EventEntry, t int64) int {
+	i, _ := slices.BinarySearchFunc(s.persistedHistory, afterMS, func(e clievent.EventEntry, t int64) int {
 		if e.Time <= t {
 			return -1
 		}
@@ -705,7 +706,7 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 //
 // beforeMS <= 0 is treated as "no upper bound" — equivalent to the tail
 // of the log, matching EventLastN semantics. limit <= 0 returns nil.
-func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
 	}
@@ -738,7 +739,7 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 // without a deduplication step. The trade-off is one extra round trip
 // on the page that straddles the memory-bottom; on all subsequent pages
 // memory returns empty and disk is queried directly.
-func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []cli.EventEntry {
+func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
 	}
@@ -764,7 +765,7 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 // countVisibleEntries returns how many entries the dashboard would render as
 // chat bubbles (the inverse of the INTERNAL_EVENT_TYPES filter). Shared by the
 // visible-aware reader below.
-func countVisibleEntries(entries []cli.EventEntry) int {
+func countVisibleEntries(entries []clievent.EventEntry) int {
 	n := 0
 	for i := range entries {
 		if cli.IsVisibleEntry(entries[i]) {
@@ -800,7 +801,7 @@ func countVisibleEntries(entries []cli.EventEntry) int {
 // visibleTarget <= 0 falls back to a plain EventLastN(maxTotal). The ctx
 // bounds disk I/O — callers on the WS subscribe handshake pass a short
 // timeout so a slow filesystem can't stall the first frame.
-func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []cli.EventEntry {
+func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {
 	return s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 }
 
@@ -821,7 +822,7 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 // so the probe sees disk history even when the ring is short. An empty slice
 // (idle/empty session) reports hasMore=false. The ctx bounds both the initial
 // visible-aware read and the probe.
-func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]cli.EventEntry, bool) {
+func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]clievent.EventEntry, bool) {
 	entries := s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 	if len(entries) == 0 {
 		return entries, false
@@ -847,12 +848,12 @@ func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget,
 	return entries, false
 }
 
-func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []cli.EventEntry {
+func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {
 	if maxTotal <= 0 {
 		maxTotal = maxVisibleTotal
 	}
 	// Memory tier: contiguous tail carrying up to visibleTarget visible entries.
-	var mem []cli.EventEntry
+	var mem []clievent.EventEntry
 	if proc := s.loadProcess(); proc != nil {
 		mem = proc.EventLastNVisible(visibleTarget, maxTotal)
 	} else {
@@ -881,7 +882,7 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 	// previous. After the loop we reverse-iterate pages to produce the final
 	// older slice in ascending-Time order, avoiding the O(n²) cost of
 	// prepending each chunk into a growing slice on every iteration.
-	var pages [][]cli.EventEntry
+	var pages [][]clievent.EventEntry
 	// runningOlder tracks len(pages[0])+…+len(pages[k]) incrementally so the
 	// total-payload ceiling check is O(1) per iteration instead of O(pages).
 	// R20260603-PERF-9.
@@ -916,7 +917,7 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 	for _, p := range pages {
 		totalOlder += len(p)
 	}
-	older := make([]cli.EventEntry, 0, totalOlder)
+	older := make([]clievent.EventEntry, 0, totalOlder)
 	for i := len(pages) - 1; i >= 0; i-- {
 		older = append(older, pages[i]...)
 	}
@@ -927,7 +928,7 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 // carrying at least visibleTarget visible entries (or up to maxTotal entries).
 // The no-process analogue of EventLog.LastNVisible. Read-only copy under the
 // history lock.
-func (s *ManagedSession) persistedHistoryTailVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+func (s *ManagedSession) persistedHistoryTailVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	n := len(s.persistedHistory)
@@ -951,7 +952,7 @@ func (s *ManagedSession) persistedHistoryTailVisible(visibleTarget, maxTotal int
 			}
 		}
 	}
-	out := make([]cli.EventEntry, n-start)
+	out := make([]clievent.EventEntry, n-start)
 	copy(out, s.persistedHistory[start:])
 	return out
 }
@@ -988,14 +989,14 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 	if summary == "" {
 		return
 	}
-	entry := cli.EventEntry{
+	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "system",
 		Summary: summary,
 	}
 	// Reuse InjectHistory so proc/persistedHistory routing stays in one
 	// place and subscribers wake via the existing notifySubscribers path.
-	s.InjectHistory([]cli.EventEntry{entry})
+	s.InjectHistory([]clievent.EventEntry{entry})
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
@@ -1040,7 +1041,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 // R110-P1: response capture extends the existing prompt/activity scan so
 // suspended/dead sessions still surface a sidebar second-line preview after
 // shim reconnect (which replays history into a fresh EventLog).
-func scanLastSummaries(entries []cli.EventEntry) (prompt, activity, response string) {
+func scanLastSummaries(entries []clievent.EventEntry) (prompt, activity, response string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		if prompt == "" && e.Type == "user" {

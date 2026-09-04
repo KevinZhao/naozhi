@@ -3,6 +3,8 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLog_EntriesSince_ConcurrentAppend pins the R220-PERF-3 (#685)
@@ -20,7 +22,7 @@ func TestEventLog_EntriesSince_ConcurrentAppend(t *testing.T) {
 	l := NewEventLog(500)
 	// Seed enough entries that EntriesSince has something to reverse.
 	for i := 0; i < 100; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "seed"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "seed"})
 	}
 
 	var wg sync.WaitGroup
@@ -33,7 +35,7 @@ func TestEventLog_EntriesSince_ConcurrentAppend(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				l.Append(EventEntry{Time: int64(base*iters + i + 1000), Type: "live"})
+				l.Append(clievent.EventEntry{Time: int64(base*iters + i + 1000), Type: "live"})
 			}
 		}(w)
 	}
@@ -59,7 +61,7 @@ func TestEventLog_EntriesBefore_ConcurrentAppend(t *testing.T) {
 	l := NewEventLog(500)
 	// Seed entries so EntriesBefore has something to scan and reverse.
 	for i := 0; i < 100; i++ {
-		l.Append(EventEntry{Time: int64(i + 1), Type: "seed"})
+		l.Append(clievent.EventEntry{Time: int64(i + 1), Type: "seed"})
 	}
 
 	var wg sync.WaitGroup
@@ -72,7 +74,7 @@ func TestEventLog_EntriesBefore_ConcurrentAppend(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				l.Append(EventEntry{Time: int64(base*iters + i + 1000), Type: "live"})
+				l.Append(clievent.EventEntry{Time: int64(base*iters + i + 1000), Type: "live"})
 			}
 		}(w)
 	}

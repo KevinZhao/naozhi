@@ -54,6 +54,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -81,12 +82,12 @@ var _ history.Source = (*Source)(nil)
 //     RFC §3.4's "naozhi local → Claude fallback" safety net.
 //   - Only when BOTH sources fail do we return the local error (the
 //     caller gets SOMETHING actionable to surface).
-func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if s == nil || limit <= 0 {
 		return nil, nil
 	}
 
-	var local, fallback []cli.EventEntry
+	var local, fallback []clievent.EventEntry
 	var localErr, fallbackErr error
 
 	if s.Local != nil {
@@ -121,7 +122,7 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // tie-break semantics — a divergence here would let identical inputs
 // produce different orders depending on which path fired, breaking
 // the dashboard's paginate-by-Time cursor invariant.
-func entryCmp(a, b cli.EventEntry) int {
+func entryCmp(a, b clievent.EventEntry) int {
 	if c := cmp.Compare(a.Time, b.Time); c != 0 {
 		return c
 	}
@@ -216,7 +217,7 @@ func entryCmp(a, b cli.EventEntry) int {
 //
 // The 0x1f unit separator keeps field boundaries unambiguous so a value
 // can't be forged by content that happens to contain the delimiter.
-func contentKey(e cli.EventEntry) string {
+func contentKey(e clievent.EventEntry) string {
 	if e.Detail == "" && len(e.Images) == 0 {
 		return ""
 	}
@@ -366,8 +367,8 @@ type dupSet map[int]struct{}
 //   - An unpaired local row cannot absorb anything, so a fallback-only turn
 //     is only ever dropped when it truly has an unpaired same-content twin
 //     inside the window.
-func pairContent(local, fallback []cli.EventEntry, beforeMS int64, localUUIDs map[string]struct{}) dupSet {
-	visible := func(e cli.EventEntry) bool {
+func pairContent(local, fallback []clievent.EventEntry, beforeMS int64, localUUIDs map[string]struct{}) dupSet {
+	visible := func(e clievent.EventEntry) bool {
 		return beforeMS <= 0 || e.Time < beforeMS
 	}
 
@@ -562,7 +563,7 @@ func typeOfKey(k string) string {
 // manufactured by some future path that skipped Append. We don't
 // try to synthesize a dedup key here because any rule we pick
 // risks collapsing unrelated events.
-func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
+func mergeDedup(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
 	if len(local) == 0 && len(fallback) == 0 {
 		return nil
 	}
@@ -602,7 +603,7 @@ func mergeDedup(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEnt
 // where forcing the second IsSortedFunc walk was pure overhead (R202606g-PERF-001,
 // #2307). For len > 1 it delegates to slices.IsSortedFunc so the defensive
 // concat+sort fallback still fires on a genuine contract violation.
-func isSortedContract(s []cli.EventEntry) bool {
+func isSortedContract(s []clievent.EventEntry) bool {
 	if len(s) <= 1 {
 		return true
 	}
@@ -618,7 +619,7 @@ func isSortedContract(s []cli.EventEntry) bool {
 // (seeded in step 1 below) or from an earlier fallback entry (added
 // to seen on emit). Empty UUIDs bypass dedup entirely and are kept
 // as-is; see the package-level comment on "Missing UUID".
-func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
+func mergeSorted(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
 	// Fast paths: when only one tier carries data (the common upgrade
 	// case — events/ empty so fallback fills the gap, or Claude JSONL
 	// absent so only local has rows) the dedup `seen` map is pure waste:
@@ -632,7 +633,7 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// for every i in order — i.e. local filtered by emit's cutoff. No map,
 	// no dedup. Element-for-element identical to the general path.
 	if len(fallback) == 0 {
-		out := make([]cli.EventEntry, 0, len(local))
+		out := make([]clievent.EventEntry, 0, len(local))
 		for _, e := range local {
 			if beforeMS > 0 && e.Time >= beforeMS {
 				continue
@@ -657,7 +658,7 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// means a `b, <empty>, b` run still drops the trailing `b`, matching the
 	// reference's global-set "keep first occurrence" rule element-for-element.
 	if len(local) == 0 {
-		out := make([]cli.EventEntry, 0, len(fallback))
+		out := make([]clievent.EventEntry, 0, len(fallback))
 		lastUUID := ""
 		for _, e := range fallback {
 			if beforeMS > 0 && e.Time >= beforeMS {
@@ -701,8 +702,8 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// LOCAL events; those are always emitted via the local branch.
 	contentDups := pairContent(local, fallback, beforeMS, seen)
 
-	out := make([]cli.EventEntry, 0, len(local)+len(fallback))
-	emit := func(e cli.EventEntry) {
+	out := make([]clievent.EventEntry, 0, len(local)+len(fallback))
+	emit := func(e clievent.EventEntry) {
 		if beforeMS > 0 && e.Time >= beforeMS {
 			return
 		}
@@ -718,7 +719,7 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 	// twice via a resume chain dedups against its first copy. contentDups
 	// is immutable, so the content verdict is a fixed function of the
 	// inputs and cannot drift with walk order.
-	fallbackDup := func(fi int, f cli.EventEntry) bool {
+	fallbackDup := func(fi int, f clievent.EventEntry) bool {
 		if f.UUID != "" {
 			if _, dup := seen[f.UUID]; dup {
 				return true
@@ -779,9 +780,9 @@ func mergeSorted(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEn
 // fast path's happy-path semantics stay obvious to readers, and so
 // future refactors to the fast path can't accidentally regress the
 // defensive behaviour.
-func mergeSortFallback(local, fallback []cli.EventEntry, beforeMS int64) []cli.EventEntry {
+func mergeSortFallback(local, fallback []clievent.EventEntry, beforeMS int64) []clievent.EventEntry {
 	seen := make(map[string]struct{}, len(local))
-	out := make([]cli.EventEntry, 0, len(local)+len(fallback))
+	out := make([]clievent.EventEntry, 0, len(local)+len(fallback))
 	for _, e := range local {
 		if beforeMS > 0 && e.Time >= beforeMS {
 			continue

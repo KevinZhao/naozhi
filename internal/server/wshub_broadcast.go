@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -422,7 +422,7 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		return
 	}
 	h.fanOutToSubscribers(key, func() any {
-		ev := cli.EventEntry{
+		ev := clievent.EventEntry{
 			Time:    time.Now().UnixMilli(),
 			Type:    "system",
 			Summary: summary,

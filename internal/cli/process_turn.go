@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -87,7 +88,7 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 // entry at an index < resultIdx, or "" when the turn produced no text entry.
 // Used by findResultSince to recover the reply the empty-Detail "result"
 // entry does not carry. R20260605B-CORR-1 (#1805).
-func lastTextEntryBefore(entries []EventEntry, resultIdx int) string {
+func lastTextEntryBefore(entries []clievent.EventEntry, resultIdx int) string {
 	for j := resultIdx - 1; j >= 0; j-- {
 		if entries[j].Type == "text" && entries[j].Detail != "" {
 			return entries[j].Detail

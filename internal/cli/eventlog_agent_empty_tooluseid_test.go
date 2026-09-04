@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLog_AgentEntry_EmptyToolUseID_Warns pins R20260527-COR-14 (#1296):
@@ -21,7 +23,7 @@ func TestEventLog_AgentEntry_EmptyToolUseID_Warns(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	l := NewEventLog(8)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:     "agent",
 		Subagent: "orphan-agent",
 		// ToolUseID intentionally empty
@@ -50,7 +52,7 @@ func TestEventLog_AgentEntry_NonEmptyToolUseID_NoWarn(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	l := NewEventLog(8)
-	l.Append(EventEntry{
+	l.Append(clievent.EventEntry{
 		Type:      "agent",
 		Subagent:  "good-agent",
 		ToolUseID: "toolu_01XYZ",

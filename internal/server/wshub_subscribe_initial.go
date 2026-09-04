@@ -6,6 +6,7 @@ package server
 
 import (
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -14,7 +15,7 @@ import (
 // the after-millisecond itself (#2432) via cli.SinceInclusive — shared with
 // the HTTP poll fallback and the relay fetch_events RPC (#2456) so the three
 // catch-up reads cannot drift apart again.
-func entriesSinceReconnect(sess *session.ManagedSession, after int64) []cli.EventEntry {
+func entriesSinceReconnect(sess *session.ManagedSession, after int64) []clievent.EventEntry {
 	return sess.EventEntriesSince(cli.SinceInclusive(after))
 }
 
@@ -32,9 +33,9 @@ func emptyInitialHistoryWanted(msg node.ClientMsg, state string) bool {
 }
 
 // nonNilEntries guarantees the frame serialises as `events: []`, never null.
-func nonNilEntries(entries []cli.EventEntry) []cli.EventEntry {
+func nonNilEntries(entries []clievent.EventEntry) []clievent.EventEntry {
 	if entries == nil {
-		return []cli.EventEntry{}
+		return []clievent.EventEntry{}
 	}
 	return entries
 }

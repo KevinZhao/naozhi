@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestRegisterHistoryFactory_LastWriteWins pins the documented
@@ -54,6 +56,6 @@ type recordingHistorySource struct {
 	tag string
 }
 
-func (r *recordingHistorySource) LoadBefore(context.Context, int64, int) ([]EventEntry, error) {
+func (r *recordingHistorySource) LoadBefore(context.Context, int64, int) ([]clievent.EventEntry, error) {
 	return nil, nil
 }

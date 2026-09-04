@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestExtractLastPromptFromProcess_UsesLastN pins the R20260603000023-PERF-12
@@ -20,7 +20,7 @@ func TestExtractLastPromptFromProcess_UsesLastN(t *testing.T) {
 	// Fill entries well beyond extractLastPromptScanN so a full-copy path would
 	// read them, but a LastN(extractLastPromptScanN) tail would not.
 	for i := 0; i < extractLastPromptScanN*2; i++ {
-		proc.EventLog.Append(cli.EventEntry{
+		proc.EventLog.Append(clievent.EventEntry{
 			Time:    int64(i + 1),
 			Type:    "text",
 			Summary: "old-response",
@@ -29,9 +29,9 @@ func TestExtractLastPromptFromProcess_UsesLastN(t *testing.T) {
 
 	// Append the target entries near the tail (within LastN window).
 	base := int64(extractLastPromptScanN * 2)
-	proc.EventLog.Append(cli.EventEntry{Time: base + 1, Type: "user", Summary: "my-prompt"})
-	proc.EventLog.Append(cli.EventEntry{Time: base + 2, Type: "tool_use", Summary: "my-activity"})
-	proc.EventLog.Append(cli.EventEntry{Time: base + 3, Type: "text", Summary: "my-response"})
+	proc.EventLog.Append(clievent.EventEntry{Time: base + 1, Type: "user", Summary: "my-prompt"})
+	proc.EventLog.Append(clievent.EventEntry{Time: base + 2, Type: "tool_use", Summary: "my-activity"})
+	proc.EventLog.Append(clievent.EventEntry{Time: base + 3, Type: "text", Summary: "my-response"})
 
 	s := &ManagedSession{key: "test:extract"}
 	s.storeProcess(proc)
@@ -54,9 +54,9 @@ func TestExtractLastPromptFromProcess_UsesLastN(t *testing.T) {
 func TestExtractLastPromptFromProcess_DoesNotOverwrite(t *testing.T) {
 	t.Parallel()
 	proc := NewTestProcess()
-	proc.EventLog.Append(cli.EventEntry{Time: 1, Type: "user", Summary: "proc-prompt"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2, Type: "tool_use", Summary: "proc-activity"})
-	proc.EventLog.Append(cli.EventEntry{Time: 3, Type: "text", Summary: "proc-response"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1, Type: "user", Summary: "proc-prompt"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2, Type: "tool_use", Summary: "proc-activity"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 3, Type: "text", Summary: "proc-response"})
 
 	s := &ManagedSession{key: "test:extract-nowrit"}
 	storeAtomicString(&s.lastPrompt, "pre-set")

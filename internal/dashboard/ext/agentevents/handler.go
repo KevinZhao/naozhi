@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -228,7 +229,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		// An empty transcript must serialise as `[]`, not `null`:
 		// agent_view.js treats a falsy body as "no data" and never
 		// subscribes to the live feed (permanent spinner).
-		entries = []cli.EventEntry{}
+		entries = []clievent.EventEntry{}
 	}
 	httputil.WriteJSON(w, entries)
 }

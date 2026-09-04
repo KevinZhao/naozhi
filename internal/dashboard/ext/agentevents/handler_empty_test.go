@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
@@ -19,7 +20,7 @@ func TestAgentEvents_EmptyTranscriptReturnsEmptyArray(t *testing.T) {
 	path := writeTranscript(t, dir, "bbbbbbbbbbbbbbbbb", nil)
 
 	linker := cli.NewSubagentLinker()
-	linker.SeedFromHistory([]cli.EventEntry{{
+	linker.SeedFromHistory([]clievent.EventEntry{{
 		Type:            "task_start",
 		ToolUseID:       "toolu_T",
 		TaskID:          "t1",

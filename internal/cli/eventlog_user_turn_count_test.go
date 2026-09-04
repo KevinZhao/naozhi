@@ -3,6 +3,8 @@ package cli
 import (
 	"sync"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLog_UserTurnCount_Append locks the per-Append increment contract.
@@ -18,20 +20,20 @@ func TestEventLog_UserTurnCount_Append(t *testing.T) {
 	}
 
 	// Non-user entries must NOT increment.
-	l.Append(EventEntry{Type: "system", Summary: "boot"})
-	l.Append(EventEntry{Type: "thinking", Summary: "..."})
-	l.Append(EventEntry{Type: "tool_use", Summary: "Read"})
-	l.Append(EventEntry{Type: "result", Summary: "done"})
+	l.Append(clievent.EventEntry{Type: "system", Summary: "boot"})
+	l.Append(clievent.EventEntry{Type: "thinking", Summary: "..."})
+	l.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read"})
+	l.Append(clievent.EventEntry{Type: "result", Summary: "done"})
 	if got := l.UserTurnCount(); got != 0 {
 		t.Errorf("after non-user appends count = %d, want 0", got)
 	}
 
 	// Each user entry bumps by one.
-	l.Append(EventEntry{Type: "user", Summary: "hi"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "hi"})
 	if got := l.UserTurnCount(); got != 1 {
 		t.Errorf("after 1 user = %d, want 1", got)
 	}
-	l.Append(EventEntry{Type: "user", Summary: "again"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "again"})
 	if got := l.UserTurnCount(); got != 2 {
 		t.Errorf("after 2 user = %d, want 2", got)
 	}
@@ -46,7 +48,7 @@ func TestEventLog_UserTurnCount_AppendBatch(t *testing.T) {
 	t.Parallel()
 
 	l := NewEventLog(20)
-	entries := []EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "first"},
 		{Type: "tool_use", Summary: "Read"},
 		{Type: "thinking", Summary: "..."},
@@ -62,13 +64,13 @@ func TestEventLog_UserTurnCount_AppendBatch(t *testing.T) {
 
 	// Empty batch is a no-op and must not touch the counter.
 	l.AppendBatch(nil)
-	l.AppendBatch([]EventEntry{})
+	l.AppendBatch([]clievent.EventEntry{})
 	if got := l.UserTurnCount(); got != 3 {
 		t.Errorf("after empty batches count = %d, want 3", got)
 	}
 
 	// Batch with no user entries also leaves the counter alone.
-	l.AppendBatch([]EventEntry{
+	l.AppendBatch([]clievent.EventEntry{
 		{Type: "tool_use", Summary: "Write"},
 		{Type: "result", Summary: "done"},
 	})
@@ -87,7 +89,7 @@ func TestEventLog_UserTurnCount_SurvivesRingEviction(t *testing.T) {
 	// Tiny ring buffer: entries beyond maxSize get evicted.
 	l := NewEventLog(3)
 	for i := 0; i < 10; i++ {
-		l.Append(EventEntry{Type: "user", Summary: "msg"})
+		l.Append(clievent.EventEntry{Type: "user", Summary: "msg"})
 	}
 	if got := l.UserTurnCount(); got != 10 {
 		t.Errorf("count = %d, want 10 (eviction must not decrement)", got)
@@ -116,7 +118,7 @@ func TestEventLog_UserTurnCount_ConcurrentAppends(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perG; i++ {
-				l.Append(EventEntry{Type: "user", Summary: "concurrent"})
+				l.Append(clievent.EventEntry{Type: "user", Summary: "concurrent"})
 			}
 		}()
 	}

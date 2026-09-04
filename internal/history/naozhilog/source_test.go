@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 )
 
@@ -37,9 +37,9 @@ func newPersister(t *testing.T, key string) (*persist.Persister, *Source, persis
 }
 
 // persistOne is a test-only adapter that does what session.Router's
-// bridge will do in Phase 4: marshal a cli.EventEntry into
+// bridge will do in Phase 4: marshal a clievent.EventEntry into
 // persist.Entry and hand it to the sink.
-func persistOne(t *testing.T, sink persist.PersistSink, e cli.EventEntry) {
+func persistOne(t *testing.T, sink persist.PersistSink, e clievent.EventEntry) {
 	t.Helper()
 	buf, err := json.Marshal(e)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestSource_LoadLatest_EmptyDir(t *testing.T) {
 func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 
-	inputs := []cli.EventEntry{
+	inputs := []clievent.EventEntry{
 		{UUID: "aaaa11", Time: 100, Type: "user", Summary: "hi"},
 		{UUID: "bbbb22", Time: 200, Type: "text", Summary: "hello back"},
 		{
@@ -117,7 +117,7 @@ func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 func TestSource_LoadLatest_RespectsLimit(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	for i := 0; i < 10; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(100 + i),
 			Type: "user",
@@ -148,7 +148,7 @@ func TestSource_LoadLatest_RespectsLimit(t *testing.T) {
 func TestSource_LoadBefore_FiltersAndOrders(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	for i := 0; i < 10; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(100 + i),
 			Type: "user",
@@ -179,7 +179,7 @@ func TestSource_LoadBefore_FiltersAndOrders(t *testing.T) {
 func TestSource_LoadBefore_RespectsLimit(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	for i := 0; i < 10; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(100 + i),
 			Type: "user",
@@ -211,7 +211,7 @@ func TestSource_LoadBefore_RespectsLimit(t *testing.T) {
 func TestSource_LoadBefore_ZeroBeforeMS(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	for i := 0; i < 5; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(100 + i),
 			Type: "user",
@@ -241,7 +241,7 @@ func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	const n = 60
 	for i := 0; i < n; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID:    "uuid-" + rune2hex(i),
 			Time:    int64(1000 + i), // distinct ms so ordering is unambiguous
 			Type:    "user",
@@ -284,7 +284,7 @@ func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
 	}
 }
 
-func times(es []cli.EventEntry) []int64 {
+func times(es []clievent.EventEntry) []int64 {
 	out := make([]int64, len(es))
 	for i, e := range es {
 		out[i] = e.Time
@@ -292,7 +292,7 @@ func times(es []cli.EventEntry) []int64 {
 	return out
 }
 
-func equalTimes(a, b []cli.EventEntry) bool {
+func equalTimes(a, b []clievent.EventEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -324,7 +324,7 @@ func TestSource_DisabledConfig(t *testing.T) {
 func TestSource_ContextCancel(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 	for i := 0; i < 100; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(i),
 			Type: "user",
@@ -350,7 +350,7 @@ func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k2")
 	// Write 20 records with distinct timestamps so boundary tests are unambiguous.
 	for i := 0; i < 20; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID:    "bsearch-" + rune2hex(i),
 			Time:    int64(2000 + i*10), // 2000, 2010, …, 2190
 			Type:    "user",
@@ -396,7 +396,7 @@ func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
 func TestLoadBefore_NoSliceAlias_FullScan(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "alias-full")
 	for i := 0; i < 5; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "u" + rune2hex(i),
 			Time: int64(100 + i),
 			Type: "user",
@@ -438,7 +438,7 @@ func TestLoadBefore_NoSliceAlias_ViaIdx(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "alias-idx")
 	// Write enough entries that the idx has multiple entries (IdxStride=2).
 	for i := 0; i < 30; i++ {
-		persistOne(t, sink, cli.EventEntry{
+		persistOne(t, sink, clievent.EventEntry{
 			UUID: "v" + rune2hex(i),
 			Time: int64(200 + i),
 			Type: "user",

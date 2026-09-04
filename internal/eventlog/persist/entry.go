@@ -1,15 +1,15 @@
 package persist
 
 // Entry is the producer-side unit the Persister consumes. It carries
-// the already-serialised JSON bytes of a cli.EventEntry plus the
+// the already-serialised JSON bytes of a clievent.EventEntry plus the
 // two fields persist needs to address it (TimeMS for idx sparse
 // sampling / startup recovery, and the implicit ordering given by
 // the surrounding slice).
 //
-// Why not pass cli.EventEntry directly: persist must not import cli
+// Why not pass clievent.EventEntry directly: persist must not import cli
 // (cli imports schema; cli and persist are peers, both downstream of
 // schema). The session / router layer owns the adapter that marshals
-// cli.EventEntry into Entry and calls PersistSink; the adapter lives
+// clievent.EventEntry into Entry and calls PersistSink; the adapter lives
 // in internal/session/eventlog_bridge.go.
 //
 // Lifecycle of Entry.JSON (R20260531A-PERF-3, #1524):

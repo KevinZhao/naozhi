@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -139,11 +140,11 @@ func TestReplyTracker_AskQuestion_SetsFlag(t *testing.T) {
 	// Deliver an assistant event carrying AskQuestion.
 	tracker.onEvent(cli.Event{
 		Type: "assistant",
-		AskQuestion: &cli.AskQuestion{
+		AskQuestion: &clievent.AskQuestion{
 			ToolUseID: "tu-1",
-			Items: []cli.AskQuestionItem{{
+			Items: []clievent.AskQuestionItem{{
 				Question: "Which style?",
-				Options:  []cli.AskQuestionOpt{{Label: "A"}, {Label: "B"}},
+				Options:  []clievent.AskQuestionOpt{{Label: "A"}, {Label: "B"}},
 			}},
 		},
 	})
@@ -202,11 +203,11 @@ func TestDispatcher_AskQuestionFired_SuppressesImages(t *testing.T) {
 		if onEvent != nil {
 			onEvent(cli.Event{
 				Type: "assistant",
-				AskQuestion: &cli.AskQuestion{
+				AskQuestion: &clievent.AskQuestion{
 					ToolUseID: "tu-99",
-					Items: []cli.AskQuestionItem{{
+					Items: []clievent.AskQuestionItem{{
 						Question: "confirm?",
-						Options:  []cli.AskQuestionOpt{{Label: "yes"}},
+						Options:  []clievent.AskQuestionOpt{{Label: "yes"}},
 					}},
 				},
 			})

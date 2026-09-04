@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -26,10 +27,10 @@ type fakeProcess struct {
 	isAlive       bool
 	isRunning     bool
 	closeOnce     sync.Once
-	entries       []cli.EventEntry // returned by EventEntries
-	totalCost     float64          // returned by TotalCost
-	userTurnCount int64            // returned by UserTurnCount (test-only)
-	lastEventAt   time.Time        // returned by LastEventAt (test-only)
+	entries       []clievent.EventEntry // returned by EventEntries
+	totalCost     float64               // returned by TotalCost
+	userTurnCount int64                 // returned by UserTurnCount (test-only)
+	lastEventAt   time.Time             // returned by LastEventAt (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -53,7 +54,7 @@ func newDeadProc() *fakeProcess {
 	return &fakeProcess{isAlive: false, isRunning: false}
 }
 
-func newDeadProcWithEntries(entries []cli.EventEntry) *fakeProcess {
+func newDeadProcWithEntries(entries []clievent.EventEntry) *fakeProcess {
 	return &fakeProcess{isAlive: false, entries: entries}
 }
 
@@ -108,28 +109,28 @@ func (f *fakeProcess) TotalCost() float64 {
 }
 
 func (f *fakeProcess) DeathReason() string { return "" }
-func (f *fakeProcess) EventEntries() []cli.EventEntry {
+func (f *fakeProcess) EventEntries() []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.entries) == 0 {
 		return nil
 	}
-	cp := make([]cli.EventEntry, len(f.entries))
+	cp := make([]clievent.EventEntry, len(f.entries))
 	copy(cp, f.entries)
 	return cp
 }
-func (f *fakeProcess) EventLastN(n int) []cli.EventEntry {
+func (f *fakeProcess) EventLastN(n int) []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entries := f.entries
 	if n > 0 && n < len(entries) {
 		entries = entries[len(entries)-n:]
 	}
-	cp := make([]cli.EventEntry, len(entries))
+	cp := make([]clievent.EventEntry, len(entries))
 	copy(cp, entries)
 	return cp
 }
-func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := len(f.entries)
@@ -151,23 +152,23 @@ func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.Event
 			}
 		}
 	}
-	cp := make([]cli.EventEntry, n-start)
+	cp := make([]clievent.EventEntry, n-start)
 	copy(cp, f.entries[start:])
 	return cp
 }
-func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
+func (f *fakeProcess) EventEntriesSince(afterMS int64) []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, e := range f.entries {
 		if e.Time > afterMS {
-			cp := make([]cli.EventEntry, len(f.entries)-i)
+			cp := make([]clievent.EventEntry, len(f.entries)-i)
 			copy(cp, f.entries[i:])
 			return cp
 		}
 	}
 	return nil
 }
-func (f *fakeProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+func (f *fakeProcess) EventEntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, e := range f.entries {
@@ -182,13 +183,13 @@ func (f *fakeProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int6
 	}
 	return dst[:0]
 }
-func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
 		return nil
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]cli.EventEntry, 0, limit)
+	out := make([]clievent.EventEntry, 0, limit)
 	for i := len(f.entries) - 1; i >= 0 && len(out) < limit; i-- {
 		e := f.entries[i]
 		if beforeMS > 0 && e.Time >= beforeMS {
@@ -237,9 +238,9 @@ func (f *fakeProcess) InterruptViaControl() error {
 	f.mu.Unlock()
 	return err
 }
-func (f *fakeProcess) PID() int                         { return 0 }
-func (f *fakeProcess) InjectHistory(_ []cli.EventEntry) {}
-func (f *fakeProcess) TurnAgents() []cli.SubagentInfo   { return nil }
+func (f *fakeProcess) PID() int                              { return 0 }
+func (f *fakeProcess) InjectHistory(_ []clievent.EventEntry) {}
+func (f *fakeProcess) TurnAgents() []cli.SubagentInfo        { return nil }
 
 // Normalize-layer stubs (multi-backend §8.8) — fakeProcess is used by router
 // tests that pre-date multi-backend, so all three return zero values to
@@ -1700,13 +1701,13 @@ func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
 
 // captureHistoryFrom simulates the history-collection branch in spawnSession:
 // prefer dead process EventEntries (includes live events) over persistedHistory.
-func captureHistoryFrom(s *ManagedSession) []cli.EventEntry {
-	var captured []cli.EventEntry
+func captureHistoryFrom(s *ManagedSession) []clievent.EventEntry {
+	var captured []clievent.EventEntry
 	s.sendMu.Lock()
 	if p := s.loadProcess(); p != nil && !p.Alive() {
 		captured = p.EventEntries()
 	} else if len(s.persistedHistory) > 0 {
-		captured = make([]cli.EventEntry, len(s.persistedHistory))
+		captured = make([]clievent.EventEntry, len(s.persistedHistory))
 		copy(captured, s.persistedHistory)
 	}
 	s.sendMu.Unlock()
@@ -1718,13 +1719,13 @@ func captureHistoryFrom(s *ManagedSession) []cli.EventEntry {
 // persistedHistory when the old process is dead. This ensures live events
 // accumulated since the last JSONL load are preserved across process restarts.
 func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
-	liveEntries := []cli.EventEntry{
+	liveEntries := []clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "first message"},
 		{Time: 2000, Type: "text", Summary: "first reply"},
 		{Time: 3000, Type: "user", Summary: "second message (live)"},
 		{Time: 4000, Type: "text", Summary: "second reply (live)"},
 	}
-	stalePersisted := []cli.EventEntry{
+	stalePersisted := []clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "first message"},
 		{Time: 2000, Type: "text", Summary: "first reply"},
 	}
@@ -1751,7 +1752,7 @@ func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
 // the old session has no process (service-restart scenario), persistedHistory
 // is used as the history source, with JSONL reload as a further fallback.
 func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
-	persisted := []cli.EventEntry{
+	persisted := []clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "startup-loaded entry"},
 	}
 
@@ -2689,7 +2690,7 @@ func TestCollectPreviousHistory(t *testing.T) {
 	})
 
 	t.Run("resume same id: chain unchanged, persistedHistory cloned", func(t *testing.T) {
-		persisted := []cli.EventEntry{
+		persisted := []clievent.EventEntry{
 			{Time: 1000, Type: "user", Summary: "hi"},
 			{Time: 1001, Type: "assistant", Summary: "yo"},
 			{Time: 1002, Type: "user", Summary: "again"},
@@ -2853,7 +2854,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		accessProfileID string,
 		wrapper *cli.Wrapper,
 		resumeID string,
-		oldHistory []cli.EventEntry,
+		oldHistory []clievent.EventEntry,
 		prevIDs []string,
 		oldTotalCost float64,
 		oldCostSpent float64,

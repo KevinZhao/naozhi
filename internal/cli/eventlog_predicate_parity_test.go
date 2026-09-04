@@ -17,6 +17,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestEventLog_EntryAffectsAgentState_LockstepWithApplySwitch(t *testing.T) {
@@ -57,13 +59,13 @@ func TestEventLog_EntryAffectsAgentState_LockstepWithApplySwitch(t *testing.T) {
 	// gate type "agent" appends to turnAgents; non-gate type "tool_use"
 	// must not.
 	beforeCount := l.turnAgentCount.Load()
-	l.applyEntryStateLocked(EventEntry{Type: "agent", Subagent: "a", ToolUseID: "u1"})
+	l.applyEntryStateLocked(clievent.EventEntry{Type: "agent", Subagent: "a", ToolUseID: "u1"})
 	if l.turnAgentCount.Load() == beforeCount {
 		t.Error("applyEntryStateLocked(agent) did not bump turnAgentCount; gate-type behaviour drifted")
 	}
 
 	beforeCount = l.turnAgentCount.Load()
-	l.applyEntryStateLocked(EventEntry{Type: "tool_use", Tool: "Bash"})
+	l.applyEntryStateLocked(clievent.EventEntry{Type: "tool_use", Tool: "Bash"})
 	if l.turnAgentCount.Load() != beforeCount {
 		t.Error("applyEntryStateLocked(tool_use) bumped turnAgentCount; default-arm should be a no-op")
 	}

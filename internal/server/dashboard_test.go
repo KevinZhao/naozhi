@@ -14,7 +14,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -170,7 +170,7 @@ func seedEventSession(t *testing.T, srv *Server, times ...int64) string {
 	key := "test:d:u:general"
 	proc := session.NewTestProcess()
 	for _, ts := range times {
-		proc.EventLog.Append(cli.EventEntry{Time: ts, Type: "text", Summary: "msg"})
+		proc.EventLog.Append(clievent.EventEntry{Time: ts, Type: "text", Summary: "msg"})
 	}
 	srv.router.InjectSession(key, proc)
 	return key
@@ -190,7 +190,7 @@ func seedTypedEventSession(t *testing.T, srv *Server, events ...typedEvent) stri
 	key := "test:d:u:general"
 	proc := session.NewTestProcess()
 	for _, e := range events {
-		proc.EventLog.Append(cli.EventEntry{Time: e.time, Type: e.typ, Summary: "x"})
+		proc.EventLog.Append(clievent.EventEntry{Time: e.time, Type: e.typ, Summary: "x"})
 	}
 	srv.router.InjectSession(key, proc)
 	return key
@@ -227,7 +227,7 @@ func TestHandleAPISessionEvents_InitialPageIsVisibleAware(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestHandleAPISessionEvents_BeforeStaysTimeOrdered(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestHandleAPISessionEvents_BeforePaginatesBackwards(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.sessionH.HandleEvents(w, req)
 
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -434,12 +434,12 @@ func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
 // Using a local stub avoids cross-package test imports and keeps the disk-tier
 // expectations self-contained.
 type fakeEventsSource struct {
-	entries []cli.EventEntry
+	entries []clievent.EventEntry
 	called  int
 }
 
 // LoadBefore implements history.Source with a fixed result.
-func (f *fakeEventsSource) LoadBefore(_ context.Context, _ int64, _ int) ([]cli.EventEntry, error) {
+func (f *fakeEventsSource) LoadBefore(_ context.Context, _ int64, _ int) ([]clievent.EventEntry, error) {
 	f.called++
 	return f.entries, nil
 }
@@ -459,7 +459,7 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	if sess == nil {
 		t.Fatalf("session %q not registered", key)
 	}
-	src := &fakeEventsSource{entries: []cli.EventEntry{
+	src := &fakeEventsSource{entries: []clievent.EventEntry{
 		{Time: 100, Type: "text", Summary: "ancient-1"},
 		{Time: 200, Type: "text", Summary: "ancient-2"},
 	}}
@@ -475,7 +475,7 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) 
 	if sess == nil {
 		t.Fatalf("session %q not registered", key)
 	}
-	src := &fakeEventsSource{entries: []cli.EventEntry{{Time: 100, Summary: "ancient"}}}
+	src := &fakeEventsSource{entries: []clievent.EventEntry{{Time: 100, Summary: "ancient"}}}
 	sess.SetHistorySource(src)
 
 	// before=2500 — memory has {1000, 2000} matching; no need for Source.
@@ -561,7 +561,7 @@ func TestHandleAPISessionEvents_LimitClampedAtMax(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1366,7 +1366,7 @@ func TestHandlePreview_CWDHintResolvesContent(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
 	}
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil {
 		t.Fatalf("decode body: %v (body=%q)", err, w.Body.String())
 	}

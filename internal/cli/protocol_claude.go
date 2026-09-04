@@ -12,6 +12,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -747,7 +748,7 @@ type askUserQuestionInput struct {
 // to avoid running the per-block walk for assistant events that don't
 // reference the tool — the cheap substring scan is ~1000× faster than the
 // structural iteration when no AQ tool_use is present (R234-PERF-16 / #1008).
-func extractAskQuestion(blocks []ContentBlock) *AskQuestion {
+func extractAskQuestion(blocks []ContentBlock) *clievent.AskQuestion {
 	for _, b := range blocks {
 		if b.Type != "tool_use" || b.Name != "AskUserQuestion" || len(b.Input) == 0 {
 			continue
@@ -766,20 +767,20 @@ func extractAskQuestion(blocks []ContentBlock) *AskQuestion {
 		if len(inp.Questions) == 0 {
 			return nil
 		}
-		items := make([]AskQuestionItem, 0, len(inp.Questions))
+		items := make([]clievent.AskQuestionItem, 0, len(inp.Questions))
 		for _, q := range inp.Questions {
-			opts := make([]AskQuestionOpt, 0, len(q.Options))
+			opts := make([]clievent.AskQuestionOpt, 0, len(q.Options))
 			for _, o := range q.Options {
-				opts = append(opts, AskQuestionOpt{Label: o.Label, Description: o.Description})
+				opts = append(opts, clievent.AskQuestionOpt{Label: o.Label, Description: o.Description})
 			}
-			items = append(items, AskQuestionItem{
+			items = append(items, clievent.AskQuestionItem{
 				Question:    q.Question,
 				Header:      q.Header,
 				MultiSelect: q.MultiSelect,
 				Options:     opts,
 			})
 		}
-		return &AskQuestion{ToolUseID: b.ID, Items: items}
+		return &clievent.AskQuestion{ToolUseID: b.ID, Items: items}
 	}
 	return nil
 }

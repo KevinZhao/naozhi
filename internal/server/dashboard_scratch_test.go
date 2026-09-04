@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -249,12 +249,12 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 	srv := newScratchTestServer(t)
 	proc := session.NewTestProcess()
 	// Append 6 events; the 4th (t=4000) is the quoted user message.
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "user", Detail: "q1 before"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text", Detail: "a1 before"})
-	proc.EventLog.Append(cli.EventEntry{Time: 3000, Type: "tool_use", Tool: "Read", Summary: "noise"})
-	proc.EventLog.Append(cli.EventEntry{Time: 4000, Type: "user", Detail: "the quoted question"})
-	proc.EventLog.Append(cli.EventEntry{Time: 5000, Type: "text", Detail: "a2 after"})
-	proc.EventLog.Append(cli.EventEntry{Time: 6000, Type: "user", Detail: "q2 after"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "user", Detail: "q1 before"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Detail: "a1 before"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 3000, Type: "tool_use", Tool: "Read", Summary: "noise"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 4000, Type: "user", Detail: "the quoted question"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 5000, Type: "text", Detail: "a2 after"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 6000, Type: "user", Detail: "q2 after"})
 	srv.router.InjectSession("feishu:direct:alice:general", proc)
 
 	body := `{"source_key":"feishu:direct:alice:general","quote":"the quoted question","source_message_time":4000,"context_turns":5}`
@@ -350,11 +350,11 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 	proc := session.NewTestProcess()
 	// Six events across the log; no single one is marked as the quote
 	// because we are exercising the timestamp-less path.
-	proc.EventLog.Append(cli.EventEntry{Time: 1000, Type: "user", Detail: "old-q1"})
-	proc.EventLog.Append(cli.EventEntry{Time: 2000, Type: "text", Detail: "old-a1"})
-	proc.EventLog.Append(cli.EventEntry{Time: 3000, Type: "tool_use", Tool: "Read", Summary: "noise"})
-	proc.EventLog.Append(cli.EventEntry{Time: 4000, Type: "user", Detail: "new-q2"})
-	proc.EventLog.Append(cli.EventEntry{Time: 5000, Type: "text", Detail: "new-a2"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 1000, Type: "user", Detail: "old-q1"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 2000, Type: "text", Detail: "old-a1"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 3000, Type: "tool_use", Tool: "Read", Summary: "noise"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 4000, Type: "user", Detail: "new-q2"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 5000, Type: "text", Detail: "new-a2"})
 	srv.router.InjectSession("feishu:direct:alice:general", proc)
 
 	// No source_message_time field → server treats as 0 and takes the tail.

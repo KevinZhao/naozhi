@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestAcquireTailerBufferedSlice_RoundTrip pins the contract that
@@ -24,7 +24,7 @@ func TestAcquireTailerBufferedSlice_RoundTrip(t *testing.T) {
 		if cap(s) < 8 {
 			t.Fatalf("trial %d: got cap=%d, want >= 8", trial, cap(s))
 		}
-		s = append(s, cli.EventEntry{Type: "test"})
+		s = append(s, clievent.EventEntry{Type: "test"})
 		releaseTailerBufferedSlice(s, h)
 	}
 }
@@ -40,8 +40,8 @@ func TestAcquireTailerBufferedSlice_RoundTrip(t *testing.T) {
 // every field uniformly. R249-PERF-4 (#926).
 func TestReleaseTailerBufferedSlice_ZeroClears(t *testing.T) {
 	s, h := acquireTailerBufferedSlice(4)
-	s = append(s, cli.EventEntry{Type: "assistant", Summary: "hello", Images: []string{"img1"}})
-	s = append(s, cli.EventEntry{Type: "tool_use", Tool: "bash", ImagePaths: []string{"p1"}})
+	s = append(s, clievent.EventEntry{Type: "assistant", Summary: "hello", Images: []string{"img1"}})
+	s = append(s, clievent.EventEntry{Type: "tool_use", Tool: "bash", ImagePaths: []string{"p1"}})
 
 	releaseTailerBufferedSlice(s, h)
 
@@ -49,7 +49,7 @@ func TestReleaseTailerBufferedSlice_ZeroClears(t *testing.T) {
 	// place, so positions 0..1 must now hold zero-valued EventEntry.
 	// Cap-truncation reaches the slots even though len was reset to 0.
 	full := s[:cap(s)]
-	zero := cli.EventEntry{}
+	zero := clievent.EventEntry{}
 	for i := 0; i < 2; i++ {
 		if !reflect.DeepEqual(full[i], zero) {
 			t.Errorf("entry %d not cleared: got %+v", i, full[i])
@@ -70,7 +70,7 @@ func TestAcquireTailerBufferedSlice_NilHandleRelease(t *testing.T) {
 		}
 	}()
 	releaseTailerBufferedSlice(nil, tailerBufferedHandle{})
-	releaseTailerBufferedSlice([]cli.EventEntry{{}}, tailerBufferedHandle{})
+	releaseTailerBufferedSlice([]clievent.EventEntry{{}}, tailerBufferedHandle{})
 }
 
 // TestAcquireTailerBufferedSlice_GrowsCap pins that requesting a hint

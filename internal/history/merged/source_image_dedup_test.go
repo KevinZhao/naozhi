@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // These tests pin the image-only user-message dedup fix (dashboard "顺序
@@ -28,15 +28,15 @@ const (
 // TestContentKey_ImageOnlyUserMessage: Detail=="" + Images → a non-empty
 // identity that matches across tiers and separates different image sets.
 func TestContentKey_ImageOnlyUserMessage(t *testing.T) {
-	local := cli.EventEntry{Type: "user", Detail: "", Images: []string{thumbA}}
-	fallback := cli.EventEntry{Type: "user", Detail: "", Images: []string{thumbA}}
+	local := clievent.EventEntry{Type: "user", Detail: "", Images: []string{thumbA}}
+	fallback := clievent.EventEntry{Type: "user", Detail: "", Images: []string{thumbA}}
 	if k := contentKey(local); k == "" {
 		t.Fatal("contentKey(image-only user entry) = \"\" — image identity missing, duplicate bubbles return")
 	}
 	if contentKey(local) != contentKey(fallback) {
 		t.Error("same thumbnails must produce the same content key across tiers")
 	}
-	other := cli.EventEntry{Type: "user", Detail: "", Images: []string{thumbB}}
+	other := clievent.EventEntry{Type: "user", Detail: "", Images: []string{thumbB}}
 	if contentKey(local) == contentKey(other) {
 		t.Error("different thumbnails must NOT share a content key (would collapse distinct messages)")
 	}
@@ -47,14 +47,14 @@ func TestContentKey_ImageOnlyUserMessage(t *testing.T) {
 	}
 	// Entries with neither Detail nor Images (e.g. a local `result` event)
 	// must keep abstaining.
-	if k := contentKey(cli.EventEntry{Type: "result"}); k != "" {
+	if k := contentKey(clievent.EventEntry{Type: "result"}); k != "" {
 		t.Errorf("contentKey(no Detail, no Images) = %q, want \"\"", k)
 	}
 	// Detail-bearing entries must be keyed by Detail alone — Images must not
 	// perturb the existing text identity (text+image messages already dedup
 	// via Detail on both tiers).
-	withText := cli.EventEntry{Type: "user", Detail: "hello", Images: []string{thumbA}}
-	textOnly := cli.EventEntry{Type: "user", Detail: "hello"}
+	withText := clievent.EventEntry{Type: "user", Detail: "hello", Images: []string{thumbA}}
+	textOnly := clievent.EventEntry{Type: "user", Detail: "hello"}
 	if contentKey(withText) != contentKey(textOnly) {
 		t.Error("Detail-bearing key must ignore Images (text+image vs text-only same Detail)")
 	}
@@ -66,11 +66,11 @@ func TestContentKey_ImageOnlyUserMessage(t *testing.T) {
 // must emit exactly ONE user bubble — the local one (richer render path).
 func TestMerged_ImageOnlyUserDedup(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "local-user", Time: 5000, Type: "user", Summary: " [+1 image(s)]", Images: []string{thumbA}},
 			{UUID: "local-text", Time: 6000, Type: "text", Summary: "reply", Detail: "reply"},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			// Claude stamps the user record later (cold-spawn worst case ~1.4s).
 			{UUID: "claude-user", Time: 6391, Type: "user", Images: []string{thumbA}},
 		}},
@@ -98,10 +98,10 @@ func TestMerged_ImageOnlyUserDedup(t *testing.T) {
 // thumbnail content, not "any image-only message nearby".
 func TestMerged_ImageOnlyDistinctMessagesSurvive(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "local-user-a", Time: 5000, Type: "user", Images: []string{thumbA}},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			// Different image, 400ms later — inside the user skew window but
 			// NOT the same message.
 			{UUID: "claude-user-b", Time: 5400, Type: "user", Images: []string{thumbB}},
@@ -120,10 +120,10 @@ func TestMerged_ImageOnlyDistinctMessagesSurvive(t *testing.T) {
 // apart in time are two separate sends of the same picture, not one turn.
 func TestMerged_ImageOnlyOutsideSkewWindowSurvives(t *testing.T) {
 	m := &Source{
-		Local: &stubSource{entries: []cli.EventEntry{
+		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "local-user-1", Time: 5000, Type: "user", Images: []string{thumbA}},
 		}},
-		Fallback: &stubSource{entries: []cli.EventEntry{
+		Fallback: &stubSource{entries: []clievent.EventEntry{
 			// Same image re-sent 10s later — outside contentSkewLeadMS.
 			{UUID: "claude-user-2", Time: 15000, Type: "user", Images: []string{thumbA}},
 		}},

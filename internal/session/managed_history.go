@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -254,13 +254,13 @@ func (s *ManagedSession) RebuildChainFiltered(keepMask []bool) int {
 // nil when the ring is empty so callers don't pay a zero-length alloc.
 // R215-ARCH-P1-1: pre-requisite accessor for splitting Router into
 // sub-aggregates without leaking ManagedSession internals.
-func (s *ManagedSession) SnapshotPersistedHistory() []cli.EventEntry {
+func (s *ManagedSession) SnapshotPersistedHistory() []clievent.EventEntry {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	if len(s.persistedHistory) == 0 {
 		return nil
 	}
-	out := make([]cli.EventEntry, len(s.persistedHistory))
+	out := make([]clievent.EventEntry, len(s.persistedHistory))
 	copy(out, s.persistedHistory)
 	return out
 }
@@ -272,7 +272,7 @@ func (s *ManagedSession) SnapshotPersistedHistory() []cli.EventEntry {
 // produces a strictly Time-descending result — the caller can obtain ascending
 // order by a cheap slices.Reverse instead of a full sort. Only relevant when
 // proc is nil; live-process sessions go through proc.EventEntriesBefore directly.
-func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cli.EventEntry, bool) {
+func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]clievent.EventEntry, bool) {
 	if limit <= 0 {
 		return nil, false
 	}
@@ -285,7 +285,7 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cl
 	// Walk backward collecting up to `limit` entries strictly older than
 	// beforeMS. persistedHistory is not guaranteed to be sorted, so a full
 	// linear walk is the conservative choice.
-	out := make([]cli.EventEntry, 0, limit)
+	out := make([]clievent.EventEntry, 0, limit)
 	for i := len(s.persistedHistory) - 1; i >= 0 && len(out) < limit; i-- {
 		e := s.persistedHistory[i]
 		if beforeMS > 0 && e.Time >= beforeMS {
@@ -303,7 +303,7 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cl
 
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
-func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
+func (s *ManagedSession) InjectHistory(entries []clievent.EventEntry) {
 	s.injectHistory(entries, false)
 }
 
@@ -315,7 +315,7 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 // conversation. Callers that previously did `if !s.hasInjectedHistory() { … ;
 // s.InjectHistory(…) }` have a check-then-act TOCTOU; this collapses it into
 // one critical section.
-func (s *ManagedSession) InjectHistoryIfEmpty(entries []cli.EventEntry) bool {
+func (s *ManagedSession) InjectHistoryIfEmpty(entries []clievent.EventEntry) bool {
 	return s.injectHistory(entries, true)
 }
 
@@ -324,7 +324,7 @@ func (s *ManagedSession) InjectHistoryIfEmpty(entries []cli.EventEntry) bool {
 // mutating state if persistedHistory already holds entries (checked under the
 // same lock that performs the append). When onlyIfEmpty is false it always
 // injects and returns true.
-func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty bool) bool {
+func (s *ManagedSession) injectHistory(entries []clievent.EventEntry, onlyIfEmpty bool) bool {
 	if len(entries) > maxPersistedHistory {
 		slog.Debug("inject history: batch exceeds cap, truncating oldest",
 			"key", s.key,
@@ -458,7 +458,7 @@ func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty boo
 	// `s.persistedHistory = …` reslices the header). seededLen is
 	// committed under the lock so no second InjectHistory can re-forward
 	// the same entries.
-	var tail []cli.EventEntry
+	var tail []clievent.EventEntry
 	if proc != nil && s.persistedSeededLen < len(s.persistedHistory) {
 		tail = s.persistedHistory[s.persistedSeededLen:]
 		s.persistedSeededLen = len(s.persistedHistory)
@@ -490,7 +490,7 @@ func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty boo
 	// alive for GC — its contents stay readable and unchanged for any
 	// outstanding tail reader.
 	if proc == nil && !s.persistedHistorySorted && len(s.persistedHistory) > 1 {
-		sorted := make([]cli.EventEntry, len(s.persistedHistory))
+		sorted := make([]clievent.EventEntry, len(s.persistedHistory))
 		copy(sorted, s.persistedHistory)
 		sortEntriesByTimeStable(sorted)
 		s.persistedHistory = sorted
@@ -510,7 +510,7 @@ func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty boo
 		// the slice and may outlive this call, while the caller's
 		// entries slice and `tail`'s backing array are owned by us — a
 		// fresh allocation severs both ties cleanly.
-		forward := make([]cli.EventEntry, len(tail))
+		forward := make([]clievent.EventEntry, len(tail))
 		copy(forward, tail)
 		proc.InjectHistory(forward)
 	}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // fakeHistoryLoader records its invocation and returns canned entries,
@@ -14,10 +14,10 @@ type fakeHistoryLoader struct {
 	calls   int
 	lastIDs []string
 	lastCWD string
-	entries []cli.EventEntry
+	entries []clievent.EventEntry
 }
 
-func (f *fakeHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, ids []string, cwd string, _ int) []cli.EventEntry {
+func (f *fakeHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, ids []string, cwd string, _ int) []clievent.EventEntry {
 	f.calls++
 	f.lastIDs = ids
 	f.lastCWD = cwd
@@ -43,7 +43,7 @@ func TestNewRouter_HistoryLoaderDefault(t *testing.T) {
 // lets unit tests stub out the discovery chain.
 func TestNewRouter_HistoryLoaderInjected(t *testing.T) {
 	t.Parallel()
-	want := []cli.EventEntry{{Time: 1, Type: "user", Summary: "hi"}}
+	want := []clievent.EventEntry{{Time: 1, Type: "user", Summary: "hi"}}
 	fake := &fakeHistoryLoader{entries: want}
 	r := NewRouter(RouterConfig{HistoryLoader: fake})
 	if r.historyLoader != fake {

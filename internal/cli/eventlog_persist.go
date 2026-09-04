@@ -5,6 +5,8 @@
 
 package cli
 
+import "github.com/naozhi/naozhi/internal/cli/clievent"
+
 // PersistSinkOne is the single-entry counterpart to PersistSink. When
 // installed alongside (or in lieu of) the slice-shaped PersistSink via
 // SetPersistSinkPair, it is preferred by Append's hot path so the
@@ -22,7 +24,7 @@ package cli
 // they care about (Images / ImagePaths / AskQuestion / ToolCall) — the
 // EventEntry struct itself is passed by value, but its slice/pointer
 // fields share backing memory with the ring buffer slot.
-type PersistSinkOne func(entry EventEntry, replayPhase bool)
+type PersistSinkOne func(entry clievent.EventEntry, replayPhase bool)
 
 // PersistSink is the event log's persistence hook contract.
 // cli.EventLog calls the stored sink (when set) after every Append
@@ -67,7 +69,7 @@ type PersistSinkOne func(entry EventEntry, replayPhase bool)
 // in-package type for sub-agent linkage). Until that lands, treat
 // the two PersistSink names as a documented refactor seam, not a
 // drift.
-type PersistSink func(entries []EventEntry, replayPhase bool)
+type PersistSink func(entries []clievent.EventEntry, replayPhase bool)
 
 // SetPersistSink installs the on-disk persistence hook. See the
 // PersistSink contract + the sinkReady field godoc for the full
@@ -196,7 +198,7 @@ func (l *EventLog) SetPersistSinkPair(batch PersistSink, single PersistSinkOne) 
 // callers pass a freshly-copied slice (not a view into the ring
 // buffer) because the ring can wrap and overwrite slots shortly
 // after.
-func (l *EventLog) invokePersistSink(entries []EventEntry) {
+func (l *EventLog) invokePersistSink(entries []clievent.EventEntry) {
 	p := l.persistSinkPtr.Load()
 	if p == nil {
 		return
@@ -222,7 +224,7 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 // derivation + replayInvokeTotal counter as invokePersistSink keeps the
 // telemetry surface unified: a sink-pair caller and a slice-only caller
 // observe identical counter behaviour. (#410)
-func (l *EventLog) invokePersistSinkOne(entry EventEntry) bool {
+func (l *EventLog) invokePersistSinkOne(entry clievent.EventEntry) bool {
 	p := l.persistSinkOnePtr.Load()
 	if p == nil {
 		return false

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 func TestEventLog_NotifyVsUnsub_NoSendOnClosedPanic(t *testing.T) {
@@ -39,7 +41,7 @@ func TestEventLog_NotifyVsUnsub_NoSendOnClosedPanic(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < appends; i++ {
-			l.Append(EventEntry{Time: int64(i), Type: "user", Summary: "x"})
+			l.Append(clievent.EventEntry{Time: int64(i), Type: "user", Summary: "x"})
 		}
 		close(stop)
 	}()
@@ -64,5 +66,5 @@ func TestEventLog_NotifyVsUnsub_NoSendOnClosedPanic(t *testing.T) {
 
 	// One more notify after all unsubs to confirm the EventLog is still
 	// healthy (no goroutine wedged on subMu).
-	l.Append(EventEntry{Type: "user", Summary: "tail"})
+	l.Append(clievent.EventEntry{Type: "user", Summary: "tail"})
 }

@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -39,8 +40,8 @@ type EventCallback func(ev Event)
 // because the CLI echoes a replay event, but readLoop filters replays out
 // of EventLog (see process.go ~755), so without an explicit append the
 // user's typed message disappears on the next session re-subscribe.
-func buildUserEntry(text string, images []Attachment) EventEntry {
-	entry := EventEntry{
+func buildUserEntry(text string, images []Attachment) clievent.EventEntry {
+	entry := clievent.EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
 		Summary: textutil.TruncateRunes(text, 120),

@@ -3,7 +3,7 @@ package sysession
 import (
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/api"
 )
@@ -11,7 +11,7 @@ import (
 // RawSystemSessionRouter is the producer-side router shape, satisfied
 // directly by the concrete *session.Router. It differs from the
 // daemon-facing SystemSessionRouter on exactly one method:
-// EventEntriesForKey here returns []cli.EventEntry (the router's native
+// EventEntriesForKey here returns []clievent.EventEntry (the router's native
 // type) instead of the sysession-local []SystemEventEntry.
 //
 // This interface is the ONLY place in the package that mentions
@@ -27,13 +27,13 @@ type RawSystemSessionRouter interface {
 	SetUserLabelWithOrigin(key, label, origin string) bool
 	ClearUserLabelOrigin(key string) bool
 	RegisterSystemStub(key, workspace, lastPrompt string)
-	EventEntriesForKey(key string) []cli.EventEntry
+	EventEntriesForKey(key string) []clievent.EventEntry
 }
 
 // routerAdapter bridges a RawSystemSessionRouter to the cli-free
 // SystemSessionRouter consumed by daemons. Every method except
 // EventEntriesForKey is a straight pass-through; EventEntriesForKey
-// down-projects each cli.EventEntry onto the ≤2-field SystemEventEntry
+// down-projects each clievent.EventEntry onto the ≤2-field SystemEventEntry
 // mirror so the daemon code path never references internal/cli.
 //
 // R20260602-PERF-1 (#1578): the projection also drops non-user and

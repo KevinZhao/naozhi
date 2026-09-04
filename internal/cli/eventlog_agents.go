@@ -9,6 +9,8 @@ package cli
 import (
 	"log/slog"
 	"sync"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // subagentRef points to a SubagentInfo entry inside either turnAgents or
@@ -102,7 +104,7 @@ func entryAffectsAgentState(t string) bool {
 	return false
 }
 
-func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendingTaskDone) {
+func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pending pendingTaskDone) {
 	switch e.Type {
 	case "agent":
 		label := e.Subagent

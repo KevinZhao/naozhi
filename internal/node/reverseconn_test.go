@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // setupReverseConnPair creates a ReverseServer + test HTTP server and dials in
@@ -128,7 +128,7 @@ func TestReverseConn_FetchEvents(t *testing.T) {
 		if err := wsConn.ReadJSON(&req); err != nil {
 			return
 		}
-		result, _ := json.Marshal([]cli.EventEntry{{Time: 1000, Type: "text"}})
+		result, _ := json.Marshal([]clievent.EventEntry{{Time: 1000, Type: "text"}})
 		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
 	}()
 
@@ -252,7 +252,7 @@ func TestReverseConn_ReadLoop_event(t *testing.T) {
 	rc.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
-	event := &cli.EventEntry{Time: 1234, Type: "text", Summary: "hello"}
+	event := &clievent.EventEntry{Time: 1234, Type: "text", Summary: "hello"}
 	wsConn.WriteJSON(ReverseMsg{Type: "event", Key: "mykey", Event: event})
 
 	// Wait for delivery.
@@ -738,7 +738,7 @@ func TestReverseConn_FetchDiscoveredPreview(t *testing.T) {
 		if err := wsConn.ReadJSON(&req); err != nil {
 			return
 		}
-		result, _ := json.Marshal([]cli.EventEntry{{Time: 100, Type: "text"}})
+		result, _ := json.Marshal([]clievent.EventEntry{{Time: 100, Type: "text"}})
 		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
 	}()
 
@@ -968,9 +968,9 @@ func TestReverseConn_EventsCappedOnPush(t *testing.T) {
 
 	// Build 800 events — well above the 500 cap. Each entry carries an
 	// ascending Time so we can verify the tail (last 500) survives.
-	events := make([]cli.EventEntry, 800)
+	events := make([]clievent.EventEntry, 800)
 	for i := range events {
-		events[i] = cli.EventEntry{Time: int64(i + 1), Type: "text"}
+		events[i] = clievent.EventEntry{Time: int64(i + 1), Type: "text"}
 	}
 	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
 
@@ -988,8 +988,8 @@ func TestReverseConn_EventsCappedOnPush(t *testing.T) {
 		t.Fatal("expected history message delivered to subscriber")
 	}
 	var parsed struct {
-		Type   string           `json:"type"`
-		Events []cli.EventEntry `json:"events"`
+		Type   string                `json:"type"`
+		Events []clievent.EventEntry `json:"events"`
 	}
 	if err := json.Unmarshal(msgs[0], &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -1023,9 +1023,9 @@ func TestReverseConn_EventsUnderCapPassesThrough(t *testing.T) {
 	rc.subs["mykey"] = []EventSink{sink}
 	rc.subMu.Unlock()
 
-	events := make([]cli.EventEntry, 100)
+	events := make([]clievent.EventEntry, 100)
 	for i := range events {
-		events[i] = cli.EventEntry{Time: int64(i + 1), Type: "text"}
+		events[i] = clievent.EventEntry{Time: int64(i + 1), Type: "text"}
 	}
 	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
 
@@ -1042,7 +1042,7 @@ func TestReverseConn_EventsUnderCapPassesThrough(t *testing.T) {
 		t.Fatal("expected history message delivered to subscriber")
 	}
 	var parsed struct {
-		Events []cli.EventEntry `json:"events"`
+		Events []clievent.EventEntry `json:"events"`
 	}
 	if err := json.Unmarshal(msgs[0], &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)

@@ -11,7 +11,7 @@ package main
 import (
 	"encoding/json"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -55,10 +55,10 @@ func newUpstreamPreviewFunc(claudeDir string) func(sessionID string) (json.RawMe
 	return func(sessionID string) (json.RawMessage, error) {
 		entries, err := discovery.LoadHistory(claudeDir, sessionID, "")
 		if err != nil {
-			return json.Marshal([]cli.EventEntry{})
+			return json.Marshal([]clievent.EventEntry{})
 		}
 		if entries == nil {
-			entries = []cli.EventEntry{}
+			entries = []clievent.EventEntry{}
 		}
 		return json.Marshal(entries)
 	}

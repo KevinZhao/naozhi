@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // oversizedToolResults is a single ToolResults record well past the 1 MiB
@@ -17,7 +17,7 @@ func oversizedToolResults(size int) string {
 		strings.Repeat("z", size))
 }
 
-func summaries(entries []cli.EventEntry) []string {
+func summaries(entries []clievent.EventEntry) []string {
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, e.Summary)

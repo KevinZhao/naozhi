@@ -10,6 +10,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -41,10 +42,10 @@ func (f *fakeCapNode) FetchProjects(_ context.Context) ([]map[string]any, error)
 func (f *fakeCapNode) FetchDiscovered(_ context.Context) ([]map[string]any, error) {
 	return nil, nil
 }
-func (f *fakeCapNode) FetchDiscoveredPreview(_ context.Context, _ string) ([]cli.EventEntry, error) {
+func (f *fakeCapNode) FetchDiscoveredPreview(_ context.Context, _ string) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
-func (f *fakeCapNode) FetchEvents(_ context.Context, _ string, _ int64) ([]cli.EventEntry, error) {
+func (f *fakeCapNode) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 func (f *fakeCapNode) FetchBackends(_ context.Context) (json.RawMessage, error) {

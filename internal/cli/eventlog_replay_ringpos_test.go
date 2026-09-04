@@ -2,6 +2,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestEventLog_ReplayBatch_RecordsAgentRingPos pins R20260601-PERF-9 (#1549):
@@ -14,7 +16,7 @@ func TestEventLog_ReplayBatch_RecordsAgentRingPos(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(50)
 
-	l.AppendBatchReplay([]EventEntry{
+	l.AppendBatchReplay([]clievent.EventEntry{
 		{Type: "assistant_text", Summary: "hi"},
 		{Type: "agent", Subagent: "a1", ToolUseID: "toolu_R"},
 		{Type: "tool_use", ToolUseID: "toolu_other"},
@@ -45,9 +47,9 @@ func TestEventLog_ReplayBatch_NonAgentNoSidecar(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(50)
 
-	entries := make([]EventEntry, 0, 100)
+	entries := make([]clievent.EventEntry, 0, 100)
 	for i := 0; i < 100; i++ {
-		entries = append(entries, EventEntry{Type: "assistant_text", Summary: "x"})
+		entries = append(entries, clievent.EventEntry{Type: "assistant_text", Summary: "x"})
 	}
 	l.AppendBatchReplay(entries)
 

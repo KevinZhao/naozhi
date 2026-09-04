@@ -3,21 +3,21 @@ package node
 import (
 	"encoding/json"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // ServerMsg is a message sent from the server to the WebSocket client.
 type ServerMsg struct {
-	Type   string           `json:"type"`             // auth_ok, auth_fail, subscribed, unsubscribed, history, event, send_ack, send_error, pong, error, agent_event, agent_meta, agent_done, agent_subscribe_rejected
-	Key    string           `json:"key,omitempty"`    // session key
-	Event  *cli.EventEntry  `json:"event,omitempty"`  // single event (push); also reused for agent_event body
-	Events []cli.EventEntry `json:"events,omitempty"` // event batch (history)
-	ID     string           `json:"id,omitempty"`     // correlation ID from client
-	Status string           `json:"status,omitempty"` // ack status: accepted, busy, error; also task_done status
-	State  string           `json:"state,omitempty"`  // session state
-	Reason string           `json:"reason,omitempty"` // additional context
-	Error  string           `json:"error,omitempty"`  // error message
-	Node   string           `json:"node,omitempty"`   // source node
+	Type   string                `json:"type"`             // auth_ok, auth_fail, subscribed, unsubscribed, history, event, send_ack, send_error, pong, error, agent_event, agent_meta, agent_done, agent_subscribe_rejected
+	Key    string                `json:"key,omitempty"`    // session key
+	Event  *clievent.EventEntry  `json:"event,omitempty"`  // single event (push); also reused for agent_event body
+	Events []clievent.EventEntry `json:"events,omitempty"` // event batch (history)
+	ID     string                `json:"id,omitempty"`     // correlation ID from client
+	Status string                `json:"status,omitempty"` // ack status: accepted, busy, error; also task_done status
+	State  string                `json:"state,omitempty"`  // session state
+	Reason string                `json:"reason,omitempty"` // additional context
+	Error  string                `json:"error,omitempty"`  // error message
+	Node   string                `json:"node,omitempty"`   // source node
 	// RetryAfter is advisory: when set on auth_fail rate-limit replies, the
 	// client should wait at least this many seconds before retrying. Mirrors
 	// the HTTP Retry-After header the /api/auth/login 429 branch emits, so
@@ -137,20 +137,20 @@ type ReverseMsg struct {
 	ProtocolVersion int `json:"protocol_version,omitempty"`
 	// Capabilities advertises optional feature tags (e.g. "gemini", "acp",
 	// "askuser") on register. Unknown tags are ignored, not rejected.
-	Capabilities []string         `json:"capabilities,omitempty"`
-	NodeID       string           `json:"node_id,omitempty"`
-	Token        string           `json:"token,omitempty"`
-	DisplayName  string           `json:"display_name,omitempty"`
-	Hostname     string           `json:"hostname,omitempty"`
-	ReqID        string           `json:"req_id,omitempty"`
-	Method       string           `json:"method,omitempty"`
-	Params       json.RawMessage  `json:"params,omitempty"`
-	Result       json.RawMessage  `json:"result,omitempty"`
-	Error        string           `json:"error,omitempty"`
-	Key          string           `json:"key,omitempty"`
-	After        int64            `json:"after,omitempty"`
-	Event        *cli.EventEntry  `json:"event,omitempty"`
-	Events       []cli.EventEntry `json:"events,omitempty"`
-	State        string           `json:"state,omitempty"`
-	Reason       string           `json:"reason,omitempty"`
+	Capabilities []string              `json:"capabilities,omitempty"`
+	NodeID       string                `json:"node_id,omitempty"`
+	Token        string                `json:"token,omitempty"`
+	DisplayName  string                `json:"display_name,omitempty"`
+	Hostname     string                `json:"hostname,omitempty"`
+	ReqID        string                `json:"req_id,omitempty"`
+	Method       string                `json:"method,omitempty"`
+	Params       json.RawMessage       `json:"params,omitempty"`
+	Result       json.RawMessage       `json:"result,omitempty"`
+	Error        string                `json:"error,omitempty"`
+	Key          string                `json:"key,omitempty"`
+	After        int64                 `json:"after,omitempty"`
+	Event        *clievent.EventEntry  `json:"event,omitempty"`
+	Events       []clievent.EventEntry `json:"events,omitempty"`
+	State        string                `json:"state,omitempty"`
+	Reason       string                `json:"reason,omitempty"`
 }

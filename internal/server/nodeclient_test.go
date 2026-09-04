@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -109,7 +109,7 @@ func TestNodeClient_FetchEvents(t *testing.T) {
 			http.Error(w, "bad after", 400)
 			return
 		}
-		json.NewEncoder(w).Encode([]cli.EventEntry{
+		json.NewEncoder(w).Encode([]clievent.EventEntry{
 			{Time: 2000, Type: "text", Summary: "hello"},
 			{Time: 3000, Type: "result", Summary: "done"},
 		})
@@ -133,7 +133,7 @@ func TestNodeClient_FetchEvents_NoAfter(t *testing.T) {
 	var gotAfter string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAfter = r.URL.Query().Get("after")
-		json.NewEncoder(w).Encode([]cli.EventEntry{})
+		json.NewEncoder(w).Encode([]clievent.EventEntry{})
 	}))
 	defer ts.Close()
 
@@ -300,7 +300,7 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 			http.Error(w, "bad key", 400)
 			return
 		}
-		json.NewEncoder(w).Encode([]cli.EventEntry{
+		json.NewEncoder(w).Encode([]clievent.EventEntry{
 			{Time: 1000, Type: "text", Summary: "hello"},
 		})
 	}))
@@ -317,7 +317,7 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	json.NewDecoder(w.Body).Decode(&entries)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))

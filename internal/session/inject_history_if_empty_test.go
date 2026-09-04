@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-func mkEntries(prefix string, n int) []cli.EventEntry {
-	out := make([]cli.EventEntry, n)
+func mkEntries(prefix string, n int) []clievent.EventEntry {
+	out := make([]clievent.EventEntry, n)
 	base := time.Now().UnixMilli()
 	for i := range out {
-		out[i] = cli.EventEntry{Type: "user", Summary: prefix, Time: base + int64(i)}
+		out[i] = clievent.EventEntry{Type: "user", Summary: prefix, Time: base + int64(i)}
 	}
 	return out
 }

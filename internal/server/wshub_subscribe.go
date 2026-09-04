@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -37,7 +38,7 @@ const initialHistoryDiskTimeout = 2 * time.Second
 // hasMore reports whether any event strictly older than the slice still exists
 // (ring or disk); the dashboard mounts its "load earlier" affordance off this
 // flag instead of guessing from the returned slice length.
-func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) ([]cli.EventEntry, bool) {
+func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) ([]clievent.EventEntry, bool) {
 	target := limit
 	if target <= 0 || target > session.DefaultVisibleTarget {
 		// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, not a
@@ -225,7 +226,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		snap := sess.Snapshot()
 		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
 
-		var entries []cli.EventEntry
+		var entries []clievent.EventEntry
 		var hasMore bool
 		switch {
 		case msg.After > 0:
@@ -328,7 +329,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 
 	snap := sess.Snapshot()
 
-	var entries []cli.EventEntry
+	var entries []clievent.EventEntry
 	var hasMore bool
 	switch {
 	case msg.After > 0:
@@ -372,7 +373,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	} else if emptyInitialHistoryWanted(msg, snap.State) {
 		// Empty Initial frame consumes the client's _initialSubscribe flag so
 		// the pane shows a placeholder instead of staying blank (#2432).
-		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
+		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []clievent.EventEntry{}, HasMore: initialHasMorePtr(msg, hasMore), Initial: true})
 	}
 
 	spawned = true

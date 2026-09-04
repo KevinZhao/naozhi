@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestManagedState_DerivedStates pins the R176-ARCH-N4 (#432) state-machine
@@ -44,7 +44,7 @@ func TestManagedState_DerivedStates(t *testing.T) {
 
 	t.Run("dead: no live proc, no session id, but has history", func(t *testing.T) {
 		s := &ManagedSession{key: "k"}
-		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Type: "user", Summary: "hi"})
+		s.persistedHistory = append(s.persistedHistory, clievent.EventEntry{Type: "user", Summary: "hi"})
 		if got := s.ManagedState(); got != StateDead {
 			t.Fatalf("ManagedState = %v, want StateDead", got)
 		}

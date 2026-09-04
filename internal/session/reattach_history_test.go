@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestReattachProcess_SeedsPersistedHistoryIntoFreshProc pins the bug fix:
@@ -19,7 +19,7 @@ func TestReattachProcess_SeedsPersistedHistoryIntoFreshProc(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	// Simulate tier1: persistedHistory is populated while proc is still nil.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "hello"},
 		{Time: 1500, Type: "text", Summary: "hi back"},
 	})
@@ -55,7 +55,7 @@ func TestInjectHistory_AfterReattach_DoesNotDoubleInject(t *testing.T) {
 	s.ReattachProcessNoCallback(proc, "session-uuid")
 
 	// Now tier1 lands its batch.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "msg-a"},
 		{Time: 2000, Type: "user", Summary: "msg-b"},
 	})
@@ -74,7 +74,7 @@ func TestInjectHistory_AfterReattach_DoesNotDoubleInject(t *testing.T) {
 func TestReattachProcess_AfterInjectHistory_DoesNotDoubleInject(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "msg-a"},
 		{Time: 2000, Type: "user", Summary: "msg-b"},
 	})
@@ -94,7 +94,7 @@ func TestReattachProcess_AfterInjectHistory_DoesNotDoubleInject(t *testing.T) {
 func TestInjectHistory_NewTailAfterReattach_ForwardsOnlyTail(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 1000, Type: "user", Summary: "old-1"},
 		{Time: 2000, Type: "user", Summary: "old-2"},
 	})
@@ -102,7 +102,7 @@ func TestInjectHistory_NewTailAfterReattach_ForwardsOnlyTail(t *testing.T) {
 	s.ReattachProcessNoCallback(proc, "uuid")
 
 	// Now a new tail arrives.
-	s.InjectHistory([]cli.EventEntry{
+	s.InjectHistory([]clievent.EventEntry{
 		{Time: 3000, Type: "user", Summary: "new-3"},
 	})
 
@@ -140,7 +140,7 @@ func TestReattachProcess_ConcurrentInjectHistory(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				s.InjectHistory([]cli.EventEntry{{
+				s.InjectHistory([]clievent.EventEntry{{
 					Time: int64(w*1000 + i),
 					Type: "user",
 					// Distinct summaries: writer index and sequence
@@ -183,7 +183,7 @@ func TestReattachProcess_ConcurrentInjectHistory(t *testing.T) {
 func TestEventEntries_DefaultEndpoint_ReturnsFullHistoryAfterReattach(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	historic := []cli.EventEntry{
+	historic := []clievent.EventEntry{
 		{Time: 100, Type: "user", Summary: "first user"},
 		{Time: 200, Type: "text", Summary: "first reply"},
 		{Time: 300, Type: "user", Summary: "second user"},
@@ -211,7 +211,7 @@ func TestEventEntries_DefaultEndpoint_ReturnsFullHistoryAfterReattach(t *testing
 	// And after one more turn lands on the live proc, EventEntries() must
 	// return historic + new — not just the new entry, which is what the
 	// post-fix mem-tier branch in EventEntriesBeforeCtx also relies on.
-	proc.EventLog.Append(cli.EventEntry{Time: 400, Type: "user", Summary: "post-restart turn"})
+	proc.EventLog.Append(clievent.EventEntry{Time: 400, Type: "user", Summary: "post-restart turn"})
 	got = s.EventEntries()
 	if len(got) != len(historic)+1 {
 		t.Fatalf("after live turn len=%d want %d", len(got), len(historic)+1)
@@ -233,9 +233,9 @@ func TestReattachProcess_PersistedHistoryCapTrim(t *testing.T) {
 	s := &ManagedSession{key: "k"}
 
 	const total = maxPersistedHistory + 250
-	batch := make([]cli.EventEntry, total)
+	batch := make([]clievent.EventEntry, total)
 	for i := range batch {
-		batch[i] = cli.EventEntry{
+		batch[i] = clievent.EventEntry{
 			Time:    int64(i + 1),
 			Type:    "user",
 			Summary: "seq-" + strconv.Itoa(i),
@@ -266,7 +266,7 @@ func TestReattachProcess_PersistedHistoryCapTrim(t *testing.T) {
 		t.Errorf("last entry=%q want %q", got[len(got)-1].Summary, wantLast)
 	}
 
-	tail := []cli.EventEntry{
+	tail := []clievent.EventEntry{
 		{Time: int64(total + 1), Type: "user", Summary: "post-cap-1"},
 		{Time: int64(total + 2), Type: "user", Summary: "post-cap-2"},
 	}

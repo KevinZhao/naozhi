@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment"
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 )
 
@@ -83,7 +83,7 @@ func TestTrackerIntegration_BumpsMetaThroughSink(t *testing.T) {
 		persist.KeyHash(key),
 	)
 	// Fire a live event carrying the attachment path.
-	sink([]cli.EventEntry{{
+	sink([]clievent.EventEntry{{
 		UUID:       "abc",
 		Time:       1700000000000,
 		Type:       "user",
@@ -131,7 +131,7 @@ func TestTrackerIntegration_ReplayPhaseSkipsBump(t *testing.T) {
 		r.attachmentTracker,
 		persist.KeyHash(key),
 	)
-	sink([]cli.EventEntry{{
+	sink([]clievent.EventEntry{{
 		UUID: "rrr", Time: 1, Type: "user",
 		ImagePaths: []string{rel},
 	}}, true /* replayPhase */)
@@ -168,7 +168,7 @@ func TestTrackerIntegration_RemoveClearsRefs(t *testing.T) {
 		r.attachmentTracker,
 		persist.KeyHash(key),
 	)
-	sink([]cli.EventEntry{{UUID: "u", Time: 1, Type: "user", ImagePaths: []string{rel}}}, false)
+	sink([]clievent.EventEntry{{UUID: "u", Time: 1, Type: "user", ImagePaths: []string{rel}}}, false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -236,5 +236,5 @@ func TestTrackerIntegration_DisabledConfig(t *testing.T) {
 		nil, "",
 	)
 	// Should not panic.
-	sink([]cli.EventEntry{{Type: "user", Time: 1, ImagePaths: []string{".naozhi/attachments/x/y.png"}}}, false)
+	sink([]clievent.EventEntry{{Type: "user", Time: 1, ImagePaths: []string{".naozhi/attachments/x/y.png"}}}, false)
 }

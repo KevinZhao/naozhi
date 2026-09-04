@@ -6,7 +6,7 @@
 // Why a registry instead of direct imports:
 //
 //   - internal/history and internal/history/claudejsonl both import
-//     internal/cli (for cli.EventEntry). If cli imported either of them
+//     internal/cli (for cli.HistorySource / the factory registry). If cli imported either of them
 //     the build would cycle. The history package intentionally lives one
 //     level "above" cli in the dependency graph.
 //   - We want backend-specific factories (claudeHistoryFactory and the
@@ -25,13 +25,15 @@
 // backend instead of silent structural-satisfaction breakage. The alias
 // direction (history → cli) is forced by the import graph: cli cannot
 // import history without a cycle, but every backend already imports cli
-// for cli.EventEntry.
+// for cli.HistorySource and RegisterHistoryFactory.
 package cli
 
 import (
 	"context"
 	"log/slog"
 	"sync"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // HistorySessionView is the minimum surface a *cli.Wrapper needs to
@@ -90,7 +92,7 @@ type HistoryWiring struct {
 // factory. Structurally identical to internal/history.Source —
 // implementations of one satisfy the other automatically.
 type HistorySource interface {
-	LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]EventEntry, error)
+	LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error)
 }
 
 // NoopHistorySource is the always-empty HistorySource used when a backend
@@ -100,7 +102,7 @@ type NoopHistorySource struct{}
 
 // LoadBefore always returns (nil, nil). Callers interpret this as "no
 // history available" on the first call.
-func (NoopHistorySource) LoadBefore(context.Context, int64, int) ([]EventEntry, error) {
+func (NoopHistorySource) LoadBefore(context.Context, int64, int) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
 

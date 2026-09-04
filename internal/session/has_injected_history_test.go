@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestHasInjectedHistory_Empty verifies the happy-path-unknown signal: a
@@ -26,7 +26,7 @@ func TestHasInjectedHistory_Empty(t *testing.T) {
 func TestHasInjectedHistory_AfterInject(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{}
-	entries := []cli.EventEntry{
+	entries := []clievent.EventEntry{
 		{Type: "user", Summary: "hello", Time: time.Now().UnixMilli()},
 	}
 	s.InjectHistory(entries)
@@ -48,7 +48,7 @@ func TestHasInjectedHistory_ConcurrentReadWrite(t *testing.T) {
 	go func() {
 		defer close(done)
 		time.Sleep(10 * time.Millisecond)
-		s.InjectHistory([]cli.EventEntry{
+		s.InjectHistory([]clievent.EventEntry{
 			{Type: "user", Summary: "x", Time: time.Now().UnixMilli()},
 		})
 	}()

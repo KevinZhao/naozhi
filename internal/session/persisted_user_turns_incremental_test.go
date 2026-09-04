@@ -3,7 +3,7 @@ package session
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // The O(n) oracle is the production countUserTurns helper (router_lifecycle.go):
@@ -29,7 +29,7 @@ func assertCountMatchesOracle(t *testing.T, s *ManagedSession) {
 // full rescan after every InjectHistory.
 func TestInjectHistory_IncrementalCount_PureAppend(t *testing.T) {
 	s := &ManagedSession{key: "k"}
-	batches := [][]cli.EventEntry{
+	batches := [][]clievent.EventEntry{
 		{{Time: 1, Type: "user"}, {Time: 2, Type: "text"}},
 		{{Time: 3, Type: "user"}, {Time: 4, Type: "user"}, {Time: 5, Type: "init"}},
 		{{Time: 6, Type: "tool_use"}},
@@ -58,7 +58,7 @@ func TestInjectHistory_IncrementalCount_AppendThenTrim(t *testing.T) {
 		if i%2 == 0 {
 			typ = "user"
 		}
-		s.InjectHistory([]cli.EventEntry{{Time: ts, Type: typ}})
+		s.InjectHistory([]clievent.EventEntry{{Time: ts, Type: typ}})
 		assertCountMatchesOracle(t, s)
 	}
 	// After trimming, persistedHistory holds exactly maxPersistedHistory entries.
@@ -78,13 +78,13 @@ func TestInjectHistory_IncrementalCount_AppendThenTrim(t *testing.T) {
 func TestInjectHistory_IncrementalCount_OverCapSingleBatch(t *testing.T) {
 	s := &ManagedSession{key: "k"}
 	total := maxPersistedHistory + 137
-	entries := make([]cli.EventEntry, total)
+	entries := make([]clievent.EventEntry, total)
 	for i := range entries {
 		typ := "text"
 		if i%3 == 0 {
 			typ = "user"
 		}
-		entries[i] = cli.EventEntry{Time: int64(i + 1), Type: typ}
+		entries[i] = clievent.EventEntry{Time: int64(i + 1), Type: typ}
 	}
 	s.InjectHistory(entries)
 	assertCountMatchesOracle(t, s)
@@ -101,24 +101,24 @@ func TestInjectHistory_IncrementalCount_OverCapSingleBatch(t *testing.T) {
 // entries — the trickiest equivalence case for the increment/decrement math.
 func TestInjectHistory_IncrementalCount_SecondBatchTriggersTrim(t *testing.T) {
 	s := &ManagedSession{key: "k"}
-	first := make([]cli.EventEntry, 300)
+	first := make([]clievent.EventEntry, 300)
 	for i := range first {
 		typ := "text"
 		if i%2 == 0 {
 			typ = "user"
 		}
-		first[i] = cli.EventEntry{Time: int64(i + 1), Type: typ}
+		first[i] = clievent.EventEntry{Time: int64(i + 1), Type: typ}
 	}
 	s.InjectHistory(first)
 	assertCountMatchesOracle(t, s)
 
-	second := make([]cli.EventEntry, 400)
+	second := make([]clievent.EventEntry, 400)
 	for i := range second {
 		typ := "tool_use"
 		if i%4 == 0 {
 			typ = "user"
 		}
-		second[i] = cli.EventEntry{Time: int64(1000 + i), Type: typ}
+		second[i] = clievent.EventEntry{Time: int64(1000 + i), Type: typ}
 	}
 	s.InjectHistory(second)
 	assertCountMatchesOracle(t, s)
@@ -128,9 +128,9 @@ func TestInjectHistory_IncrementalCount_SecondBatchTriggersTrim(t *testing.T) {
 // leaves the count untouched and still oracle-consistent.
 func TestInjectHistory_IncrementalCount_EmptyBatch(t *testing.T) {
 	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]cli.EventEntry{{Time: 1, Type: "user"}})
+	s.InjectHistory([]clievent.EventEntry{{Time: 1, Type: "user"}})
 	s.InjectHistory(nil)
-	s.InjectHistory([]cli.EventEntry{})
+	s.InjectHistory([]clievent.EventEntry{})
 	assertCountMatchesOracle(t, s)
 	if got := s.persistedUserTurns.Load(); got != 1 {
 		t.Fatalf("count = %d, want 1", got)
