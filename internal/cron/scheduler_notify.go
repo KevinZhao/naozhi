@@ -1,9 +1,7 @@
-// scheduler_notify.go: IM completion-notice routing for cron runs.
-//
-// Split out of scheduler.go to keep the dispatch surface (NotifyTarget +
-// resolveNotifyTarget priority ladder + deliverNotice + chunked notifyTarget)
-// in one place. No behaviour change. Methods stay on *Scheduler so the
-// notifySender snapshot / s.notifyDefault fields remain accessible without exporting.
+// scheduler_notify.go: IM completion-notice routing for cron runs — the
+// NotifyTarget + resolveNotifyDecision priority ladder, deliverNotice and the
+// chunked notifyTarget. Methods stay on *Scheduler so the notifySender
+// snapshot / s.notifyDefault fields remain accessible without exporting.
 
 package cron
 
@@ -26,12 +24,9 @@ type NotifyTarget struct {
 // IsSet reports whether both fields are populated.
 func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 
-// NotifySource enumerates which branch of resolveNotifyDecision selected
-// the target. R241-ARCH-12 (#520): the 5-branch decision tree was
-// inline-opaque — callers (dashboard, debug logging) could not inspect
-// why a particular target was selected. Returning the source alongside
-// the target lets diagnostic surfaces explain the resolution without
-// duplicating the priority ladder logic.
+// NotifySource enumerates which branch of resolveNotifyDecision selected the
+// target, so diagnostic surfaces can explain the resolution without
+// duplicating the priority ladder (#520).
 type NotifySource int
 
 const (
@@ -90,38 +85,23 @@ func (s NotifySource) String() string {
 }
 
 // NotifyDecision pairs the resolved NotifyTarget with the source branch
-// that produced it. R241-ARCH-12 (#520).
+// that produced it.
 type NotifyDecision struct {
 	Target NotifyTarget
 	Source NotifySource
 }
 
-// cronNotifyTimeout is defined in tuning.go (R249-CR-16 #959 / R249-ARCH-23
-// #987), which documents its relationship to the inner PlatformReplyMaxAttempts
-// retry budget and the stopBudget shutdown contract alongside the other cron
-// tuning knobs.
+// cronNotifyTimeout is defined in tuning.go alongside the other cron tuning
+// knobs, which document its relationship to the inner
+// limits.PlatformReplyMaxAttempts retry budget and the stopBudget contract.
 
-// The per-call retry budget for platform.ReplyWithRetry now lives on
-// limits.PlatformReplyMaxAttempts (R20260527-ARCH-8) so cron's
-// notifyTarget and dispatch's reply paths share a single source of
-// truth instead of mirrored "KEEP-IN-SYNC" copies.
-
-// cronNotifyMaxChunks bounds how many chunks notifyTarget will attempt
-// to deliver from a single CronRun result. R236-SEC-15 (#568): the
-// composite worst case is chunks × PlatformReplyMaxAttempts × per-attempt
-// platformReplyTimeout, which can exceed cronNotifyTimeout (30s) when
-// a chatty job emits many small chunks under a slow platform. The
-// existing replyCtx.Err() check inside the loop already cuts off mid-
-// flush on deadline, but a hard chunk cap (1) bounds the worst-case
-// alloc / per-chunk slog volume on success and (2) makes the eventual
-// truncated payload a known shape rather than "whatever fit in 30s".
-//
-// 5 was picked as the smallest value that comfortably covers realistic
-// cron output (a single 4-page result at platform.DefaultMaxReplyLen
-// chunks to ~3-4 messages on Feishu/iOS). Operators with chronically
-// long results should lean on the dashboard run-detail panel rather
-// than IM as the surface of record; the truncation WARN below makes
-// the cap visible so it doesn't silently drop output.
+// cronNotifyMaxChunks bounds how many chunks notifyTarget will deliver from a
+// single CronRun result: chunks × PlatformReplyMaxAttempts × per-attempt
+// timeout can otherwise exceed cronNotifyTimeout on a slow platform (#568).
+// The cap bounds worst-case alloc / slog volume and makes the truncated
+// payload a known shape; 5 comfortably covers realistic cron output (a
+// 4-page result chunks to ~3-4 messages). The truncation WARN in
+// notifyTarget makes the cap visible.
 const cronNotifyMaxChunks = 5
 
 // resolveNotifyTarget picks the IM destination for this execution's
@@ -132,25 +112,17 @@ const cronNotifyMaxChunks = 5
 //  4. notify==nil (unset) preserves legacy behavior: IM-created jobs reply
 //     to their own source chat; dashboard-created jobs stay silent.
 //
-// Thin wrapper around resolveNotifyDecision; preserved as the historical
-// caller surface so existing call sites remain a single map lookup. New
-// callers wanting to inspect *which branch* selected the target should
-// call resolveNotifyDecision directly. R241-ARCH-12 (#520).
+// Thin wrapper around resolveNotifyDecision for callers that only need the
+// target.
 func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat string, notify *bool) NotifyTarget {
 	return s.resolveNotifyDecision(platName, chatID, notifyPlat, notifyChat, notify).Target
 }
 
-// resolveNotifyDecision exposes both the chosen NotifyTarget and the
-// branch (NotifySource) that selected it. The 5-branch decision tree
-// was previously inline-opaque (R241-ARCH-12, #520); callers that want
-// to debug "why did this run go silent / fan out to dashboard" can now
-// log decision.Source rather than recomputing the priority ladder.
-//
-// Behaviour mirrors the previous resolveNotifyTarget exactly — including
-// the slog.Warn for "enabled but no target", which still fires only on
-// the NotifySourceDefaultMissing branch so the warning frequency does
-// not change. Callers MUST NOT re-emit a warning when they observe
-// NotifySourceDefaultMissing.
+// resolveNotifyDecision exposes both the chosen NotifyTarget and the branch
+// (NotifySource) that selected it, so callers debugging "why did this run go
+// silent" can log decision.Source. The slog.Warn for "enabled but no target"
+// fires only on the NotifySourceDefaultMissing branch; callers MUST NOT
+// re-emit a warning when they observe it.
 func (s *Scheduler) resolveNotifyDecision(platName, chatID, notifyPlat, notifyChat string, notify *bool) NotifyDecision {
 	// Explicit disable wins over everything.
 	if notify != nil && !*notify {
@@ -193,50 +165,24 @@ func (s *Scheduler) resolveNotifyDecision(platName, chatID, notifyPlat, notifyCh
 	return NotifyDecision{Source: NotifySourceNone}
 }
 
-// deliverNotice sends a result/error message to the resolved target.
-// No-op when target is unset or the platform is not registered.
+// deliverNotice sends a result/error message to the resolved target. No-op
+// when target is unset, text is empty, or the platform is not registered.
 //
-// R242-GO-14 (#575): caller is the cron-tick goroutine (or
-// freshContextPreflightP0's error path); we Add(1) to triggerWG and spawn
-// notifyTarget on a child goroutine. Stop() drains triggerWG with the
-// stopBudget (~30s, see scheduler.go Stop CONTRACT) and notifyTarget's
-// replyCtx is parented on s.stopCtx, so an in-flight notify is implicitly
-// "drained" by Stop's wait — there is no separate notify-drain channel.
-// The cron-tick goroutine itself does NOT block on this call (we return
-// once the goroutine is spawned), but it DOES contribute to the same
-// triggerWG that bounds shutdown. Callers must not assume completion-by-
-// return; observability lives in slog only.
-//
-// R242-GO-13: delivery is dispatched on a goroutine tracked by triggerWG.
-// Previously synchronous: the cron-tick callback (or freshContextPreflightP0
-// error path) blocked on the IM reply chain (chunk × retry × per-call HTTP),
-// extending the run's wall-clock by up to cronNotifyTimeout (30s) before
-// the next tick / preflight could proceed. finishRun has already stamped
-// the terminal state by the time we reach this call, so the operator-
-// facing record is final — the only thing the caller is waiting for is
-// the network. Stop() drains triggerWG within the same stopBudget that
-// previously bounded the synchronous path, so shutdown latency is
-// unchanged.
-//
-// Add(1) is performed BEFORE the `go` launch so a Stop() landing between
-// here and the goroutine's first scheduling tick still observes the
-// in-flight delivery and waits for it (matching the contract documented
-// in scheduler.go's Stop CONTRACT block — every triggerWG.Add must
-// pair with a `defer s.triggerWG.Done()` on its own goroutine).
+// Delivery runs on a goroutine tracked by triggerWG so the cron-tick caller
+// never blocks on the IM reply chain (chunk × retry × HTTP); finishRun has
+// already stamped the terminal state, so the record is final. Stop() drains
+// triggerWG within stopBudget and notifyTarget's replyCtx is parented on
+// s.stopCtx, so an in-flight notify is implicitly drained by Stop's wait.
+// Add(1) happens BEFORE the `go` launch so a Stop() racing the goroutine's
+// first schedule still observes it. Completion is observable via slog only.
 func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	if !target.IsSet() {
 		return
 	}
-	// R20260526-CR-017: empty text is a no-op — short-circuit before
-	// triggerWG.Add so an empty notice does not spawn a goroutine that
-	// then walks platform.SplitText("", maxLen) → [""] and consumes one
-	// limits.PlatformReplyMaxAttempts retry budget on a zero-byte chunk. The
-	// empty-text path is reachable when a non-failing run produced no
-	// IM-visible output (e.g. a job that wrote only to disk and an
-	// upstream caller still routed the empty Result through).
-	// The early return MUST land before triggerWG.Add(1); otherwise a
-	// concurrent Stop() observing the just-incremented counter would
-	// block on triggerWG.Wait until the empty-send goroutine drains.
+	// Empty text short-circuits BEFORE triggerWG.Add(1): otherwise the
+	// goroutine would Split("") → [""] and burn a retry budget on a zero-byte
+	// chunk, and a concurrent Stop() would block on triggerWG.Wait until it
+	// drained.
 	if text == "" {
 		return
 	}
@@ -248,35 +194,21 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 }
 
 // notifyTarget sends a message to an arbitrary platform/chat (notify target).
-//
-// R250-CR-18 (#1151): aborts the chunk loop on the first ReplyWithRetry
-// failure rather than continuing to push subsequent chunks. Once any chunk
-// fails the user's reading order is already broken (they would see
-// chunk[0]+chunk[3]+chunk[4] interleaved with whatever else lands in the
-// channel between retries), so finishing the message is just adding noise.
-// A single aggregated WARN ("cron notify partial: K/N chunks delivered")
-// replaces the prior "one WARN per failed chunk" stream so operators can
-// match a single log line to a single dropped message instead of having
-// to reconstruct chunk boundaries from N independent warnings.
+// The chunk loop aborts on the first Reply failure: once any chunk fails the
+// reader's ordering is already broken, so pushing the rest is noise. One
+// aggregated WARN ("cron notify partial: K/N chunks delivered") replaces a
+// per-chunk stream so operators match one log line to one dropped message
+// (#1151).
 func (s *Scheduler) notifyTarget(plat, chatID, text string) {
-	// R20260527122801-GO-014: short-circuit before SplitText alloc when
-	// stopCtx already cancelled — the parent goroutine may have been
-	// scheduled before Stop fired, so deliverNotice's triggerWG.Add(1)
-	// can land on a dead Scheduler and pay for SplitText's chunk walk
-	// of a long result before the existing replyCtx.Err() check at
-	// line ~188 catches it. The lower-level guard stays as the
-	// authoritative cancel observation; this is an early bail for
-	// the alloc.
+	// Early bail before the Split alloc when stopCtx is already cancelled —
+	// deliverNotice's goroutine may be scheduled after Stop fired. The
+	// replyCtx.Err() check in the loop stays the authoritative observation.
 	if s.stopCtx != nil && s.stopCtx.Err() != nil {
 		return
 	}
-	// R20260527-PERF-1 (#1116): empty text is a no-op. deliverNotice already
-	// guards its async path, but notifyTarget is also reachable directly
-	// (in-package call sites + future callers) where platform.SplitText("",
-	// maxLen) returns [""] and the loop below would burn one
-	// limits.PlatformReplyMaxAttempts retry budget pushing a zero-byte chunk.
-	// Short-circuit here so the empty-text contract holds at this layer too,
-	// independent of how the caller reached us.
+	// Empty text is a no-op at this layer too (notifyTarget is reachable
+	// directly): Split("") → [""] would burn a retry budget on a zero-byte
+	// chunk (#1116).
 	if text == "" {
 		return
 	}
@@ -290,50 +222,30 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
-	// R243-SEC-14 (#799): replyCtx chains to s.stopCtx so a hung webhook
-	// POST short-circuits the moment Scheduler.Stop() cancels stopCtx —
-	// previously parented on Background, which left triggerWG.Wait pinned
-	// at the full stopBudget (30s) waiting for the per-target timer to
-	// expire even though the operator had already signalled shutdown.
-	// The per-target ceiling stays at cronNotifyTimeout so a slow-but-
-	// progressing chunk-flush during normal operation is unchanged; only
-	// the shutdown path observes the new short-circuit. Cancelled mid-
-	// flush appears to ReplyWithRetry as a context error and the existing
-	// "cron notify partial" WARN aggregator records the partial delivery
-	// — same observability shape as a chunk-failure mid-stream.
+	// #799: replyCtx is parented on s.stopCtx (not context.Background) so a
+	// hung webhook POST short-circuits the moment Scheduler.Stop cancels
+	// stopCtx instead of pinning triggerWG.Wait for the full stopBudget. The
+	// per-target ceiling stays cronNotifyTimeout; a mid-flush cancel surfaces
+	// through the "cron notify partial" WARN like any chunk failure.
 	parent := s.stopCtx
 	if parent == nil {
-		// Defensive: a Scheduler that was never NewScheduler'd (e.g. a
-		// hand-constructed test fake) won't have stopCtx wired. Fall back
-		// to Background so the per-target timeout still bounds the call;
-		// production paths (NewScheduler) always set stopCtx so the
-		// fallback is dead code in normal operation but keeps the package
-		// usable from narrow unit tests.
+		// Only a hand-constructed test fake lacks stopCtx (NewScheduler always
+		// sets it); fall back so the per-target timeout still bounds the call.
 		parent = context.Background()
 	}
-	// R249-ARCH-23 (#987): cronNotifyTimeout is the OUTER per-target ceiling.
-	// The INNER retry budget is limits.PlatformReplyMaxAttempts (inside each
-	// ReplyWithRetry below), shared with dispatch. The composite worst case for
-	// a multi-chunk flush is cronNotifyMaxChunks × PlatformReplyMaxAttempts ×
-	// per-attempt platformReplyTimeout; replyCtx (bound here) and the
-	// replyCtx.Err() check in the loop cut it off so it cannot outrun the
-	// per-target deadline. See the budget table at the top of tuning.go.
+	// cronNotifyTimeout is the OUTER per-target ceiling; the INNER retry budget
+	// is limits.PlatformReplyMaxAttempts inside each Reply. replyCtx plus the
+	// replyCtx.Err() loop check keep the composite from outrunning the
+	// deadline (budget table in tuning.go).
 	replyCtx, replyCancel := context.WithTimeout(parent, cronNotifyTimeout)
 	defer replyCancel()
-	// #725: the PlatformReplier adapter owns the platform.DefaultMaxReplyLen
-	// fallback (MaxReplyLength returns the default when the platform reports
-	// <=0) and the SplitText delegation, so cron no longer imports platform.
+	// The PlatformReplier adapter owns the DefaultMaxReplyLen fallback and the
+	// SplitText delegation, so cron never imports platform (#725).
 	maxLen := r.MaxReplyLength()
-	// #2181 (cron companion to dispatch's #2136): platforms whose reply is
-	// authorised by a single-use token (e.g. WeChat iLink) can deliver only ONE
-	// message per inbound turn — the token is consumed by the first send and
-	// reuse is rejected upstream. Fanning a long notify result into N chunks
-	// would deliver only chunk [1/N] and silently lose [2/N]..[N/N]. Collapse to
-	// a single rune-safe-truncated message with a visible "…(truncated)" marker
-	// so the recipient knows the notice was cut, and return before the chunk
-	// loop. The single-use bit flows through the cron.PlatformReplier interface
-	// (wireup adapter delegates to platform.UsesSingleUseReplyToken) so cron
-	// never imports platform.
+	// Single-use-token platforms (e.g. WeChat iLink) deliver only ONE message
+	// per inbound turn; fanning into N chunks would silently lose 2..N.
+	// Collapse to one rune-safe-truncated message with a visible "…(truncated)"
+	// marker and return before the chunk loop (#2181).
 	if r.UsesSingleUseReplyToken() {
 		if utf8.RuneCountInString(text) > maxLen {
 			text = truncateForSingleReply(text, maxLen)
@@ -341,68 +253,49 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		if _, err := r.Reply(replyCtx, chatID, text); err != nil {
 			metrics.CronNotifyPartialTotal.Add(1)
 			slog.Warn("cron notify: single-use reply send failed",
-				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err) // R090135-LOGIC-3: chatID is attacker-influenced
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err) // chatID is attacker-influenced
 		}
 		return
 	}
 	chunks := r.Split(text, maxLen)
-	// R236-SEC-15 (#568): cap the chunk count before the loop. The
-	// composite chunks × retries × per-attempt budget can otherwise
-	// exceed cronNotifyTimeout when a chatty job lands on a slow
-	// platform; capping makes the worst case bounded and surfaces the
-	// truncation in slog so operators see the dropped tail.
+	// Cap the chunk count before the loop (#568) and surface the truncation in
+	// slog so operators see the dropped tail.
 	totalChunks := len(chunks)
 	dropped := 0
 	if totalChunks > cronNotifyMaxChunks {
 		dropped = totalChunks - cronNotifyMaxChunks
 		chunks = chunks[:cronNotifyMaxChunks]
 		slog.Warn("cron notify: chunk count exceeds cap; tail dropped",
-			"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), // R090135-LOGIC-3: chatID is attacker-influenced
+			"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), // chatID is attacker-influenced
 			"total", totalChunks, "cap", cronNotifyMaxChunks,
 			"dropped", dropped)
 	}
 	delivered := 0
 	for i, chunk := range chunks {
-		// R235-GO-5: short-circuit on the shared replyCtx deadline so a long
-		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
-		// (limits.PlatformReplyMaxAttempts × per-attempt budget) consumes the budget mid-loop.
+		// Short-circuit on the shared replyCtx deadline so a long chunk list
+		// cannot run past cronNotifyTimeout when each Reply consumes budget.
 		if err := replyCtx.Err(); err != nil {
-			// R249-CR-26 (#966): record partial delivery so a rising delta
-			// surfaces "IM recipients are seeing truncated cron output".
+			// Partial-delivery counter (#966): a rising delta means recipients
+			// are seeing truncated cron output.
 			metrics.CronNotifyPartialTotal.Add(1)
-			// R236-SEC-15 follow-up: fold the cap-dropped tail (`dropped`)
-			// into the remaining count. `chunks` was already truncated to
-			// cronNotifyMaxChunks above, so `len(chunks)-i` alone would
-			// undercount what the recipient never saw — operators reading
-			// this WARN must see the full undelivered tail.
+			// Fold the cap-dropped tail into "remaining" so the WARN reports
+			// the full undelivered tail, not just the post-cap subset.
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
-				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // R090135-LOGIC-3: chatID is attacker-influenced
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // chatID is attacker-influenced
 				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
-		// #725: r.Reply passes replyCtx through unchanged to
-		// platform.ReplyWithRetry (with limits.PlatformReplyMaxAttempts),
-		// so the R243-SEC-14 (#799) stopCtx parent chain still short-circuits
-		// a hung webhook the moment Scheduler.Stop cancels stopCtx.
+		// r.Reply passes replyCtx through unchanged (#725), so the #799 stopCtx
+		// chain still short-circuits a hung webhook on Stop.
 		if _, err := r.Reply(replyCtx, chatID, chunk); err != nil {
-			// R250-CR-18: abort on first chunk failure. Subsequent sends
-			// would interleave with foreign messages the user receives in
-			// the meantime, so partial delivery is worse than a clean
-			// truncation. Aggregate the count into a single WARN so log
-			// readers can match one line to one dropped notify.
-			//
-			// R249-CR-26 (#966): same partial-delivery counter as the
-			// deadline branch above — operators alert on the aggregate
-			// rather than distinguishing deadline-vs-failure (the WARN
-			// carries that detail for the journalctl drill-down).
+			// Abort on first chunk failure (#1151); same partial-delivery
+			// counter as the deadline branch (#966) — operators alert on the
+			// aggregate.
 			metrics.CronNotifyPartialTotal.Add(1)
-			// R236-SEC-15 follow-up: report the ORIGINAL chunk count
-			// (len(chunks)+dropped) as total so the WARN reflects every
-			// chunk the recipient was supposed to receive, not just the
-			// post-cap subset. Without this a cap-truncated message that
-			// then fails mid-send under-reports the true loss.
+			// Report the ORIGINAL chunk count (len(chunks)+dropped) as total so
+			// a cap-truncated message that then fails does not under-report.
 			slog.Warn("cron notify partial: chunks dropped after send failure",
-				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // R090135-LOGIC-3: chatID is attacker-influenced
+				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err, // chatID is attacker-influenced
 				"delivered", delivered, "total", len(chunks)+dropped,
 				"failed_index", i)
 			return
@@ -413,27 +306,20 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 
 // singleReplyTruncMarker is appended (within the rune budget) when a cron
 // notify to a single-use-token platform must be truncated to fit one message.
-// #2181. Copied verbatim from internal/dispatch (dispatch.go's #2136 fix):
-// cron CANNOT import internal/dispatch or internal/platform (the
-// no_platform_import_test.go invariant), so this small dup matches the
-// codebase's existing cron↔dispatch boundary handling.
+// Duplicated from internal/dispatch because cron cannot import dispatch or
+// platform (no_platform_import_test.go) (#2181).
 const singleReplyTruncMarker = "\n…(truncated)"
 
 // singleReplyTruncMarkerRunes is the rune width of singleReplyTruncMarker,
-// computed once at init rather than on every truncateForSingleReply call
-// (the marker is a compile-time constant). R202606e-PERF-003. Mirrors
-// internal/dispatch.
+// computed once rather than on every truncateForSingleReply call.
 var singleReplyTruncMarkerRunes = utf8.RuneCountInString(singleReplyTruncMarker)
 
 // truncateForSingleReply trims text to at most maxRunes runes, reserving room
 // for a visible truncation marker so the recipient knows the reply was cut.
 // When maxRunes is too small to fit the marker, it falls back to a bare
-// rune-safe truncation (content kept maximal, marker dropped). #2181 — mirrors
-// internal/dispatch.truncateForSingleReply (the #2136 fix) exactly.
-//
-// R202606e-PERF-001: uses textutil.TruncateRunesNoEllipsis (zero-alloc
-// sub-slice of the original string, walks only up to the truncation point)
-// rather than materialising the whole reply as a []rune.
+// rune-safe truncation (content kept maximal, marker dropped). Mirrors
+// internal/dispatch.truncateForSingleReply (#2181). TruncateRunesNoEllipsis
+// sub-slices the original string without materialising a []rune.
 func truncateForSingleReply(text string, maxRunes int) string {
 	keep := maxRunes - singleReplyTruncMarkerRunes
 	if keep <= 0 {

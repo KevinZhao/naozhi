@@ -12,32 +12,20 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// sandboxAttention is the §7.4 confirmation-queue record. A sandbox run that
-// ends in an UNKNOWN-fate state writes one of these; it stays on disk until an
-// operator resolves it (confirm-done or replay), which is the only human step
-// in the §6.2 double-run containment.
-//
-// Two producers write it:
-//
-//   - executeSandbox's failed-transport branch, but ONLY when the job declared
-//     side_effects=true (RFC §6.2 rule 3: a side-effecting job must not
-//     auto-replay; it waits for a human to check whether the side effect
-//     already happened). A side-effect-free transport failure is safe to just
-//     re-run and never enters the queue.
-//   - reconcileOneSandboxOrphan (§6.5): a run orphaned by a naozhi restart.
-//     Orphans of side-effecting jobs enter the queue too (the microVM may have
-//     completed and pushed a PR while naozhi was down).
-//
-// Stored at <store-dir>/sandboxattention/<runID>.json (flat, like
-// sandboxpending) — the queue is small (operator-actioned) and a flat dir
-// scans fast. RunID is scheduler-generated hex, path-safe by construction.
+// sandboxAttention is the confirmation-queue record: a sandbox run that ends
+// in an UNKNOWN-fate state writes one, and it stays on disk until an operator
+// resolves it (confirm-done or replay) — the only human step in the double-run
+// containment. Producers: executeSandbox's failed-transport branch (only when
+// the job declared side_effects=true; a side-effect-free failure is safe to
+// re-run) and reconcileOneSandboxOrphan (a restart-orphaned side-effecting run
+// may have pushed a PR while naozhi was down). Stored flat at
+// <store-dir>/sandboxattention/<runID>.json; RunID is scheduler hex.
 type sandboxAttention struct {
 	JobID string `json:"job_id"`
 	RunID string `json:"run_id"`
-	// RuntimeSessionID is the platform session id of the orphaned/lost run —
-	// the handle ReplaySandboxRun needs to satisfy §6.2 rule 1 (StopSession
-	// before any replay). Empty only for records written without a known
-	// session (defensive; replay then treats the fate as already-terminal).
+	// RuntimeSessionID is the platform session id of the lost run — the handle
+	// ReplaySandboxRun needs to StopSession before any replay. Empty only for
+	// records written without a known session.
 	RuntimeSessionID string `json:"runtime_session_id,omitempty"`
 	// Reason classifies why the run needs attention, surfaced in the queue
 	// card. One of attentionReason* below.
@@ -53,8 +41,8 @@ type sandboxAttention struct {
 }
 
 const (
-	// attentionReasonTransport: stream lost mid-run, microVM fate unknown,
-	// job declares side effects (RFC §6.2 rule 3).
+	// attentionReasonTransport: stream lost mid-run, microVM fate unknown, job
+	// declares side effects.
 	attentionReasonTransport = "transport"
 	// attentionReasonOrphaned: naozhi restarted while the run was in flight
 	// (RFC §6.5); the orphan reconcile Stopped the microVM but a side effect
@@ -68,12 +56,10 @@ func (s *Scheduler) sandboxAttentionDir() string {
 	return s.stateSubtree("sandboxattention")
 }
 
-// writeSandboxAttention persists one queue record. Best-effort: a write
-// failure logs and returns (the run's terminal record is already durable; the
-// queue entry is an operator convenience, not a correctness invariant). The
-// run's failed-transport CronRun still warns "check for side effects", so a
-// missed queue entry degrades to "operator reads run history" not "silent
-// double-run" — the §6.2 safety is in the no-auto-replay rule, not the queue.
+// writeSandboxAttention persists one queue record. Best-effort: the run's
+// terminal record is already durable and still warns "check for side effects",
+// so a missed queue entry degrades to "operator reads run history" — the
+// safety is in the no-auto-replay rule, not the queue.
 func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger) {
 	dir := s.sandboxAttentionDir()
 	if dir == "" {
@@ -92,10 +78,8 @@ func (s *Scheduler) writeSandboxAttention(rec sandboxAttention, lg *slog.Logger)
 		lg.Warn("cron sandbox: attention marshal failed", "err", err)
 		return
 	}
-	// Atomic write so a crash mid-write cannot leave a truncated queue record
-	// that ListSandboxAttention silently skips as corrupt — the §7.4 record is
-	// the only durable signal that a side-effecting orphan needs human
-	// confirmation (R20260614-ARCH-3).
+	// Atomic write so a crash mid-write cannot leave a truncated record that
+	// ListSandboxAttention skips as corrupt.
 	if err := osutil.WriteFileAtomic(filepath.Join(dir, rec.RunID+".json"), b, 0o600); err != nil {
 		lg.Warn("cron sandbox: attention write failed; run not enqueued for confirmation", "err", err)
 	}
@@ -203,9 +187,8 @@ func (s *Scheduler) ListSandboxAttention() []SandboxAttentionItem {
 	return out
 }
 
-// SandboxAttentionCount returns the number of unresolved queue records — the
-// header cron-badge attention counter (RFC §7.2 "把 failed-transport 与
-// orphaned 计入待处理"). Cheap dir-entry count; skips non-.json noise.
+// SandboxAttentionCount returns the number of unresolved queue records (the
+// header cron-badge counter). Cheap dir-entry count; skips non-.json noise.
 func (s *Scheduler) SandboxAttentionCount() int {
 	dir := s.sandboxAttentionDir()
 	if dir == "" {

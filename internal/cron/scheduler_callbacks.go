@@ -1,22 +1,9 @@
 // scheduler_callbacks.go: cron-side run-event types + emit helpers +
-// per-state metrics bumps.
-//
-// Phase D (RFC §3.5) collapsed three legacy SetOn* setters
-// (SetOnExecute / SetOnRunStarted / SetOnRunEnded) and their
-// atomic.Pointer storage into a single SchedulerDeps.Telemetry
-// (runtelemetry.Broadcaster) injected at construction. The cron-local
-// Run{Started,Ended}Event types are kept for two reasons:
-//   - cron internals (executeOpt / finishRun / emitOverlapSkipped)
-//     populate them with cron-specific fields (Trigger=cron.TriggerKind,
-//     ErrorClass=cron.ErrorClass) before translating to the wire
-//     runtelemetry.RunEndedEvent
-//   - the emit helpers are private (lowercase), so external callers
-//     reach the broadcast surface only through SchedulerDeps.Telemetry
-//     or SetTelemetry
-//
-// No behaviour change vs the pre-Phase-D pipeline: per-state metrics
-// still bump in finishRun, RunStarted still fires post-CAS pre-IO,
-// RunEnded still fires after persistence settles.
+// per-state metrics bumps. The cron-local Run{Started,Ended}Event types carry
+// cron-specific fields (Trigger=cron.TriggerKind, ErrorClass=cron.ErrorClass)
+// and are translated to the wire runtelemetry shapes inside the private emit
+// helpers, so external callers reach the broadcast surface only through
+// SchedulerDeps.Telemetry or SetTelemetry (RFC §3.5).
 
 package cron
 
@@ -54,20 +41,11 @@ type RunEndedEvent struct {
 	Trigger    TriggerKind
 }
 
-// SetTelemetry installs (or replaces) the broadcaster late, after
-// construction. Used by cmd/naozhi which builds Scheduler before the
-// Hub exists, then injects the broadcaster once dashboard.go finishes
-// wiring.
-//
-// R20260527-GO-1: storage is atomic.Pointer[runtelemetry.Broadcaster].
-// Earlier revisions used a plain field on the assumption that
-// SetTelemetry only fires during single-threaded boot, but cmd/naozhi
-// orchestration is not strictly boot-only — wiring goroutines can call
-// SetTelemetry while cron tick goroutines are already invoking
-// emitRunStarted / emitRunEnded, racing the read path. atomic.Pointer
-// keeps the read path lock-free and free of data races.
-//
-// Passing nil clears the broadcaster (returns to no-broadcast mode).
+// SetTelemetry installs (or replaces) the broadcaster after construction:
+// cmd/naozhi builds the Scheduler before the Hub exists and injects once
+// dashboard.go finishes wiring. Storage is atomic.Pointer because wiring
+// goroutines can call this while cron tick goroutines are already inside
+// emitRunStarted / emitRunEnded. Passing nil clears the broadcaster.
 func (s *Scheduler) SetTelemetry(b runtelemetry.Broadcaster) {
 	if b == nil {
 		s.telemetry.Store(nil)
@@ -89,13 +67,10 @@ func (s *Scheduler) loadTelemetry() runtelemetry.Broadcaster {
 }
 
 // emitRunStarted translates a cron-local RunStartedEvent to the shared
-// runtelemetry shape and forwards through the configured broadcaster.
-// nil broadcaster (tests / no-WS) is silently dropped — the metric bump
-// happens unconditionally so dashboard counts stay accurate.
-//
-// R230C-GO-15: CronRunStartedTotal bumps here, not at the call sites,
-// so the counter cannot drift from the broadcast event count when a
-// new emit path lands.
+// runtelemetry shape and forwards through the configured broadcaster; a nil
+// broadcaster (tests / no-WS) is silently dropped. CronRunStartedTotal bumps
+// here, not at call sites, so the counter cannot drift from the broadcast
+// event count when a new emit path lands.
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 	metrics.CronRunStartedTotal.Add(1)
 	b := s.loadTelemetry()
@@ -138,16 +113,8 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // CronRun<State>Total family AND the sandbox-specific CronSandboxRun*Total
 // pair (gated by sandbox, i.e. finishArgs.sandbox). Callers must never bump
 // these counters directly; run_metrics_owner_contract_test.go pins that.
-//
-// #2173 (R202606-ARCH-4): the sandbox counters used to be bumped by the
-// callers of finishRun (finishSandboxRunWith + both reconcileOneSandboxOrphan
-// branches), each of which had to remember which states finishRun had already
-// counted. That split produced the timed-out double-count
-// (R20260613-GOLANG-002), the missing timed-out sandbox counter
-// (R20260614-LOGIC-9) and the undercounted orphan path (R20260614-GO-001).
-// Owning the whole state→counter mapping here makes those classes of drift
-// structurally impossible: a sandbox terminal state advances exactly the
-// generic bucket plus (for Failed / TimedOut) its dedicated sandbox bucket.
+// Owning the whole state→counter mapping here makes double-count / missing-
+// counter drift structurally impossible (#2173).
 func (s *Scheduler) bumpRunStateMetrics(state RunState, sandbox bool) {
 	switch state {
 	case RunStateSucceeded:
@@ -162,9 +129,8 @@ func (s *Scheduler) bumpRunStateMetrics(state RunState, sandbox bool) {
 	case RunStateTimedOut:
 		metrics.CronRunTimedOutTotal.Add(1)
 		if sandbox {
-			// #2091 / R20260614-LOGIC-9: a dedicated bucket so failure-only
-			// alerts still see sandbox deadlines, kept out of
-			// CronSandboxRunFailedTotal so a timeout is never double-counted.
+			// Dedicated bucket so failure-only alerts still see sandbox
+			// deadlines without double-counting into CronSandboxRunFailedTotal (#2091).
 			metrics.CronSandboxRunTimedOutTotal.Add(1)
 		}
 	case RunStateCanceled:

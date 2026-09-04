@@ -43,31 +43,12 @@ func TestSpawnCtxParentedOnStopCtx(t *testing.T) {
 	}
 }
 
-// TestSpawnCancelEarlyDocumented re-pins the R250-GO-15 (#1078) eager-
-// cancel comment that explains why spawnCancel runs at GetOrCreate exit
-// rather than relying on the function-end defer. The comment is the
-// design rationale for the timer-heap pressure cited in #680: even with
-// stopCtx parenting, a 500-job deployment running a slow Send phase
-// would otherwise pin 500 spawn timers for the full Send window. The
-// explicit eager cancel drops each timer the moment GetOrCreate
-// returns, so timer-heap occupancy tracks "currently in spawn phase",
-// not "currently executing".
-//
-// If a future refactor strips the rationale comment, this test fails
-// and forces a conscious re-review against the timer-heap concern.
-func TestSpawnCancelEarlyDocumented(t *testing.T) {
+// TestSpawnCancelDeferSafetyNet pins the bottom-of-function `defer spawnCancel()`
+// that backs the eager cancel at GetOrCreate exit (#1078).
+func TestSpawnCancelDeferSafetyNet(t *testing.T) {
 	t.Parallel()
 	src := readSchedulerRunSource(t)
-	for _, anchor := range []string{
-		"R250-GO-15",          // anchor for the eager-cancel commit
-		"timer",               // timer-heap rationale
-		"defer spawnCancel()", // the bottom-of-function safety net
-	} {
-		if !strings.Contains(src, anchor) {
-			t.Errorf("scheduler_run.go missing spawnCtx rationale anchor %q;\n"+
-				"R242-PERF-14 (#680) timer-heap design hinges on the eager-cancel + defer pair.\n"+
-				"Do NOT strip the comment without re-reviewing against the 500-job worst case",
-				anchor)
-		}
+	if !strings.Contains(src, "defer spawnCancel()") {
+		t.Error("scheduler_run.go missing `defer spawnCancel()` safety net (#1078)")
 	}
 }

@@ -1,13 +1,8 @@
 // scheduler_finish.go: terminal hooks for every cron execution path
 // (write side) plus run-history queries the dashboard reads (read side).
-//
-// Centralising the finish path here keeps the seven branches of executeOpt
-// converging on a single struct literal (finishArgs) and lets the dashboard
-// query API (CurrentRun / ListRuns / RecentRuns / GetRun) live next to the
-// writers that produce the records — when the schema of CronRun changes,
-// readers and writers move together. No behaviour change. Methods stay on
-// *Scheduler so the s.mu / s.jobs / s.runStore / s.runningJobs fields
-// remain accessible without exporting.
+// Keeping readers and writers together means a CronRun schema change moves
+// both at once. Methods stay on *Scheduler so the s.mu / s.jobs / s.runStore /
+// s.runningJobs fields remain accessible without exporting.
 
 package cron
 
@@ -28,19 +23,9 @@ import (
 
 // RunHistoryReader is the read-only slice of *Scheduler that dashboard
 // handlers concerned solely with cron run history (transcript / detail /
-// list endpoints) actually need. Today those handlers take the entire
-// *cron.Scheduler even though they only call the four query methods below,
-// which transitively couples a history-read endpoint to the router /
-// platforms / execute path carried by *Scheduler.
-//
-// R250-ARCH-9 (#1172): exporting this interface lets server-side handlers be
-// retyped from `*cron.Scheduler` to `cron.RunHistoryReader`, shrinking their
-// dependency surface to history-read and opening the door to a future
-// runs-only export path that does not wedge through the full scheduler. It is
-// additive and behaviour-preserving: *Scheduler already satisfies it (the
-// methods below are unchanged), so existing callers compile untouched. The
-// underlying runStore stays unexported — the read surface is what callers
-// need, not the storage type.
+// list endpoints) need, so a history-read endpoint is not coupled to the
+// router / platforms / execute path carried by *Scheduler (#1172). The
+// underlying runStore stays unexported.
 type RunHistoryReader interface {
 	// CurrentRun returns the inflight snapshot for jobID, or (zero, false)
 	// when the job is not currently executing.
@@ -54,9 +39,7 @@ type RunHistoryReader interface {
 	Run(jobID, runID string) (*CronRun, error)
 }
 
-// Compile-time proof that *Scheduler satisfies the narrow read interface so a
-// future signature change to the query methods can't silently drift the
-// dashboard's coupling reduction out from under RunHistoryReader.
+// Compile-time proof that *Scheduler satisfies RunHistoryReader.
 var _ RunHistoryReader = (*Scheduler)(nil)
 
 // CurrentRun returns the inflight snapshot for jobID, or (zero, false) when
@@ -67,10 +50,8 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 	if !ok {
 		return runInflightView{}, false
 	}
-	// Defensive: runningJobs is sync.Map[string]*runInflight by contract,
-	// but the type-erased Load makes a future refactor that stores a
-	// different type or a nil value silently panic here. The two-value
-	// assertion + nil check turns that into a graceful "no inflight".
+	// Defensive: the type-erased Load would otherwise panic if a refactor
+	// stores a different type or a nil value; degrade to "no inflight".
 	inf, ok := v.(*runInflight)
 	if !ok || inf == nil {
 		return runInflightView{}, false
@@ -80,11 +61,8 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 
 // ListRuns returns up to limit CronRunSummary entries for jobID, newest
 // first. before is a cutoff (only runs with StartedAt < before); zero
-// means "no cutoff" (latest page).
-//
-// Safe to call when persistence is disabled (StorePath empty): returns
-// nil. The dashboard list endpoint and detail endpoint both go through
-// this method so the runs/ schema stays opaque to server/.
+// means "no cutoff" (latest page). Returns nil when persistence is disabled
+// (StorePath empty).
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
 	if !s.runStoreEnabled() {
 		return nil
@@ -113,39 +91,25 @@ func (s *Scheduler) Run(jobID, runID string) (*CronRun, error) {
 
 // --- runStore write / lifecycle facade (#509) ---
 //
-// The read-side query methods above (CurrentRun / ListRuns / RecentRuns /
-// GetRun) already routed every dashboard read through *Scheduler instead of
-// touching s.runStore directly. The write / lifecycle side historically still
-// reached into s.runStore.<method> from four scheduler files (Append /
-// RecentSessionIDs / trimAllCtx / DeleteJob), plus an open-coded
-// `s == nil || !s.runStore.enabled()` guard scattered across both sides.
-//
-// The wrappers below complete the half-facade: every package-internal access
-// to the runStore now goes through a *Scheduler method, so the storage type's
-// surface is reachable from exactly one file. This is purely behaviour-
-// preserving forwarding — each wrapper applies the same nil/enabled guard the
-// call sites already used and forwards verbatim, preserving the runStore's own
-// lock discipline (s.mu > jobLock > entry.mu) untouched. The AST gate test
-// TestNoDirectRunStoreAccess pins the invariant: no non-wrapper cron file may
-// reference s.runStore.* again. Sub-package extraction + boundary-type export
-// remain deferred to Phase 2 (RFC cron-runstore-facade; gated on the
-// import-cycle review per runstore.go's R238-ARCH-12 note).
+// Every package-internal access to the runStore goes through a *Scheduler
+// method in this file, so the storage type's surface is reachable from exactly
+// one file. Each wrapper applies the nil/enabled guard and forwards verbatim,
+// leaving the runStore's own lock discipline (s.mu > jobLock > entry.mu)
+// untouched. TestNoDirectRunStoreAccess pins the invariant.
 
 // runStoreEnabled reports whether run-history persistence is live: a non-nil
-// Scheduler whose runStore is enabled (StorePath set). Consolidates the
-// `s == nil || !s.runStore.enabled()` guard that the write/lifecycle call
-// sites previously open-coded. runStore.enabled() already tolerates a nil
-// runStore receiver, so this never panics on a partially-constructed
+// Scheduler whose runStore is enabled (StorePath set). runStore.enabled()
+// tolerates a nil receiver, so this never panics on a partially-constructed
 // Scheduler.
 func (s *Scheduler) runStoreEnabled() bool {
 	return s != nil && s.runStore.enabled()
 }
 
 // jobStillExists reports whether jobID is still present in s.jobs under a
-// short s.mu read lock. Used by finishRun (#2058) to re-check job existence
-// in the lock-out window between recordTerminalResult (which released s.mu)
-// and the runs/<jobID>/ disk write, so a concurrent DeleteJobByID does not
-// get its runs subtree resurrected by appendRun's ensureJobDir.
+// short s.mu read lock. finishRun uses it to re-check job existence between
+// recordTerminalResult (which released s.mu) and the runs/<jobID>/ disk write,
+// so a concurrent DeleteJobByID does not get its runs subtree resurrected by
+// appendRun's ensureJobDir (#2058).
 func (s *Scheduler) jobStillExists(jobID string) bool {
 	s.mu.RLock()
 	_, exists := s.jobs[jobID]
@@ -154,9 +118,8 @@ func (s *Scheduler) jobStillExists(jobID string) bool {
 }
 
 // appendRun persists one CronRun via the runStore. No-op when persistence is
-// disabled. Forwards verbatim — Append owns its per-job jobLock internally
-// (the disk write is now hoisted out of the lock; see runstore.go), so this
-// wrapper holds no scheduler lock and changes no lock posture.
+// disabled. Append owns its per-job jobLock internally, so this wrapper holds
+// no scheduler lock.
 func (s *Scheduler) appendRun(run *CronRun) {
 	if !s.runStoreEnabled() {
 		return
@@ -165,9 +128,8 @@ func (s *Scheduler) appendRun(run *CronRun) {
 }
 
 // recentSessionIDs returns up to n distinct non-empty SessionID strings from
-// jobID's newest-first run history. No-op (nil) when persistence is disabled.
-// Forwards to runStore.RecentSessionIDs, which reads off the cache ring under
-// entry.mu (cold path falls back to disk) — no scheduler lock involved.
+// jobID's newest-first run history; nil when persistence is disabled. Reads
+// off the cache ring under entry.mu — no scheduler lock involved.
 func (s *Scheduler) recentSessionIDs(jobID string, n int) []string {
 	if !s.runStoreEnabled() {
 		return nil
@@ -176,10 +138,8 @@ func (s *Scheduler) recentSessionIDs(jobID string, n int) []string {
 }
 
 // trimAllRuns runs the retention GC pass across every job's runs/ subtree.
-// No-op when persistence is disabled. Forwards to runStore.trimAllCtx, which
-// takes each per-job jobLock internally and honours ctx cancellation at job
-// boundaries (cold-start GC interruptibility, R234-GO-3) — the wrapper neither
-// holds nor reorders any lock.
+// No-op when persistence is disabled. runStore.trimAllCtx takes each per-job
+// jobLock internally and honours ctx cancellation at job boundaries.
 func (s *Scheduler) trimAllRuns(ctx context.Context, now time.Time) {
 	if !s.runStoreEnabled() {
 		return
@@ -188,158 +148,112 @@ func (s *Scheduler) trimAllRuns(ctx context.Context, now time.Time) {
 }
 
 // deleteJobRuns removes jobID's entire runs/ subtree and reclaims its jobLock.
-// No-op when persistence is disabled. Forwards to runStore.DeleteJob, which
-// acquires the per-job jobLock internally; this wrapper is called from
-// deleteJobPostCleanup outside s.mu, preserving the existing call-site lock
-// posture.
+// No-op when persistence is disabled. Called from deleteJobPostCleanup outside
+// s.mu; runStore.DeleteJob acquires the per-job jobLock internally.
 func (s *Scheduler) deleteJobRuns(jobID string) {
 	if !s.runStoreEnabled() {
 		return
 	}
 	s.runStore.DeleteJob(jobID)
-	// agentcore §5.1: also drop this job's input-snapshot manifests so a
-	// deleted job leaves no orphaned snapshot tree alongside its purged
-	// runs/. Blobs are content-addressed and shared across jobs, so they
-	// are NOT removed here — a deduped blob may still back another job's
-	// snapshot. TODO(agentcore §5.2): a blob GC pass (refcount or
-	// mark-sweep against live manifests) for the runsnapshots/blobs/ tree;
-	// Phase 1 accepts blob accumulation (one ≤MaxPromptBytes blob per
-	// distinct prompt, deduped) as bounded-in-practice.
+	// agentcore §5.1: also drop this job's input-snapshot manifests. Blobs are
+	// content-addressed and shared across jobs, so they are NOT removed here.
+	// TODO(agentcore §5.2): blob GC pass (refcount or mark-sweep against live
+	// manifests) for the runsnapshots/blobs/ tree.
 	s.deleteJobSnapshots(jobID)
-	// Drop sandbox event logs written by sandboxEventSink (§6.1). A 60-minute
-	// sandbox run can accumulate several MB; leaving this tree orphaned on job
-	// deletion is a bounded but observable disk leak. R20260614-LOGIC-2.
+	// Drop sandbox event logs written by sandboxEventSink (§6.1); a 60-minute
+	// sandbox run can accumulate several MB.
 	s.deleteJobSandboxEvents(jobID)
-	// §7.4: drop any unresolved confirmation-queue records for this job — a
-	// deleted job has nothing left to confirm or replay, and a stale queue
-	// entry would let the operator "replay" a run whose job no longer exists
-	// (ReplaySandboxRun would then fail ErrJobNotFound, but better to not show
-	// it at all).
+	// §7.4: drop unresolved confirmation-queue records — a deleted job has
+	// nothing left to confirm or replay.
 	s.deleteJobAttention(jobID)
 }
 
-// finishArgs bundles the parameters of finishRun so each call site reads
-// as a struct literal — many fields are optional (errClass / errMsg / sessionID
-// / result / skipPersist) and a positional signature would be brittle.
-//
-// snapshot fields (prompt/workDir/fresh) are populated only on paths that
-// have already taken the snapshotJob() — overlapSkipped / pre-snapshot
-// preflight failures pass them as zero values, which CronRun renders as
-// empty (the dashboard will fall back to Job.Prompt for display).
+// finishArgs bundles the parameters of finishRun so each call site reads as a
+// struct literal — many fields are optional and a positional signature would
+// be brittle. Snapshot fields (prompt/workDir/fresh) are zero on paths that
+// never took snapshotJob() (overlapSkipped / pre-snapshot preflight failures);
+// the dashboard falls back to Job.Prompt for display.
 type finishArgs struct {
-	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job
-	// 因为 emitRunEnded 需要 Job.ID 作为事件 key（其余字段由 finishRun 构造
-	// CronRun 时填）；DeleteJob 中途的竞态由 recordResultP0WithSanitised 内
-	// jobs[id] 二次校验。
+	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job，
+	// 因为 emitRunEnded 需要 Job.ID 作为事件 key；DeleteJob 中途的竞态由
+	// recordTerminalResult 内 jobs[id] 二次校验。
 	job *Job
-	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对
-	// 应；finishRun 据此发 RunEnded，订阅方 (dashboard hub) 用 RunID 配
-	// 对 started→ended 帧。
+	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对应；
+	// 订阅方 (dashboard hub) 用 RunID 配对 started→ended 帧。
 	runID     string
 	startedAt time.Time
-	// trigger 与 RunStartedEvent.Trigger 必须一致；errMsg/result 经过
-	// sanitiseRunResult / redactPathsInCronError 流水线后才会进 ws/disk。
+	// trigger 与 RunStartedEvent.Trigger 必须一致。
 	trigger TriggerKind
-	// state 决定 metrics 计数桶 + 是否进 succeeded/failed counters。
-	// Skipped 不计入 Failed（dashboard "失败率" 排除 overlap 噪音）。
+	// state 决定 metrics 计数桶；Skipped 不计入 Failed。
 	state RunState
-	// sessionID 是 GetOrCreate 分配的 CLI session_id（fresh=true 路径
-	// 必为空字符串——CAS 进入 spawn 但还未 GetOrCreate；持久化模式下
-	// 是上一次的 session_id）。空值 dashboard 隐藏「打开会话」按钮。
+	// sessionID 是 GetOrCreate 分配的 CLI session_id（fresh=true 路径必为
+	// 空字符串）。空值 dashboard 隐藏「打开会话」按钮。
 	sessionID string
-	// result 是 CLI 末轮文本输出（已经 RFC §6 的 sanitiseRunResult，包
-	// 括 4K rune 截断 + …[truncated] 后缀 + SanitizeForLog 控制字符过滤）。
+	// result 是 CLI 末轮文本输出（已经 sanitiseRunResult：4K rune 截断 +
+	// …[truncated] 后缀 + SanitizeForLog 控制字符过滤）。
 	result string
-	// errClass 是机器可读的错误分类（PreflightFailed / WorkDirUnreachable
-	// / Canceled / Timeout / SpawnFailed / SendFailed / OverlapSkipped 等）。
-	// dashboard 用它选图标 + i18n 文案；errMsg 仅作展开详情。
+	// errClass 是机器可读的错误分类；dashboard 用它选图标 + i18n 文案，
+	// errMsg 仅作展开详情。
 	errClass ErrorClass
-	// errMsg 是人类可读错误（ASCII 控制符已 escape，绝对路径已 redact）。
-	// 严格 ≤ maxCronErrMsgRunes (512 runes)，超长被 SanitizeForLog 截断。
+	// errMsg 是人类可读错误（控制符已 escape，绝对路径已 redact），
+	// ≤ maxCronErrMsgRunes。
 	errMsg string
-	// skipPersist 同时控制两件事：跳过 Job 字段更新（LastRunAt/LastResult/
-	// LastError/LastErrorClass/Counters）和跳过 CronRun 磁盘历史。当前所有
-	// 调用点这两件事都同步：canceled / overlap_skipped / job-deleted-mid-
-	// execute 三种 transient 终态 — 都不应该污染 Job 快照，也不应该塞进
-	// runs/<jobID>/。如果将来要独立控制（比如"想记历史但不更新 Counters"），
-	// 拆成 skipJobUpdate / skipHistoryRecord 两个 bool；当前合一是 RFC §5
-	// 状态机表的直接映射。Metrics + WS broadcast 不受 skipPersist 影响——
-	// 故意如此，dashboard 必须能看到 skipped/canceled 帧。R220-ARCH-1.
+	// skipPersist 同时跳过 Job 字段更新和 CronRun 磁盘历史：canceled /
+	// overlap_skipped / job-deleted-mid-execute 三种 transient 终态都不应
+	// 污染 Job 快照或 runs/<jobID>/。Metrics + WS broadcast 不受影响——
+	// dashboard 必须能看到 skipped/canceled 帧。
 	skipPersist bool
 	prompt      string
 	workDir     string
 	fresh       bool
-	// endedAt, when non-zero, overrides the s.now() read inside finishRun.
-	// The success path in executeOpt sets this once so observeSuccessLatency
-	// and finishRun share the same clock read (R20260607-GO-002: injectable
-	// clock; avoids an extra s.now() step that would advance step-based test
-	// clocks an extra tick). Zero value means finishRun calls s.now() itself.
+	// endedAt, when non-zero, overrides the s.now() read inside finishRun so
+	// observeSuccessLatency and finishRun share one clock read (step-based
+	// test clocks would otherwise advance an extra tick).
 	endedAt time.Time
-	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded
-	// 之前调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步
-	// ok=false；caller 自己的 defer 也调一次作兜底（覆盖 jitter-window
-	// 早返路径）。done bool 保证两次调用只清理一次，并且因为 finalizer
-	// 是 per-run 栈对象，run-A 的 defer 只会看到 run-A 的 done=true，
-	// 永远不会动到 run-B 已抢占的 *runInflight 字段。emitOverlapSkipped
-	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
-	// 路径释放）。R246-GO-3 (#689).
+	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded 之前
+	// 调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步 ok=false；
+	// caller 的 defer 再调一次作兜底，done bool 保证只清理一次且只动本 run 的
+	// gate。emitOverlapSkipped 必须传 nil（其 inflight gate 归并发 run 拥有）。
 	finalizer *runFinalizer
-	// replayOf links this run to the original it replayed (agentcore §7.3).
-	// "" for normal runs. finishRun copies it into the CronRun record so the
-	// dashboard can render the replay chain.
+	// replayOf links this run to the original it replayed (agentcore §7.3);
+	// "" for normal runs.
 	replayOf string
 	// sandboxMeta is the cloud-execution receipt for placement=sandbox runs
-	// (RFC §7.3). nil for local runs — finishRun attaches it to the CronRun
-	// only when non-nil, so a local run's record carries no sandbox_meta.
+	// (RFC §7.3); nil for local runs, whose record then carries no sandbox_meta.
 	sandboxMeta *SandboxRunMeta
-	// costUSD is the per-run cost for LOCAL runs, taken from
-	// SendResult.CostUSD (R202606e-ARCH-1 #2280). finishRun persists it onto
-	// CronRun.CostUSD; sandbox runs leave it 0 and carry cost via sandboxMeta.
+	// costUSD is the per-run cost for LOCAL runs (SendResult.CostUSD, #2280);
+	// sandbox runs leave it 0 and carry cost via sandboxMeta.
 	costUSD float64
 	// sandbox marks a placement=sandbox run so bumpRunStateMetrics also
 	// advances the CronSandboxRun{Failed,TimedOut}Total buckets (#2173).
 	// Deliberately separate from sandboxMeta != nil: pre-invoke failures
-	// (unavailable / preflight) carry no receipt yet are still sandbox runs.
+	// carry no receipt yet are still sandbox runs.
 	sandbox bool
 }
 
 // finishRun is the single terminal hook for every cron execution path.
 // It centralises:
 //   - per-state metrics increment (CronRun*Total)
-//   - persistent state write via recordResult (success / non-canceled error)
+//   - persistent state write via recordTerminalResult (success / non-canceled error)
 //   - cron_run_ended WS broadcast
-//   - JobRunCounters bump (under s.mu, alongside recordResult)
+//   - JobRunCounters bump (under s.mu, alongside recordTerminalResult)
 //
-// Centralising avoids the historical pattern of recordResult-and-deliver-and-
-// log scattered across executeOpt's seven branches; adding a new error class
-// is now one mapping plus one finishArgs literal at the call site.
+// Adding a new error class is one mapping plus one finishArgs literal at the
+// call site.
 func (s *Scheduler) finishRun(a finishArgs) {
-	// R243-ARCH-6 (#837): defensive nil-job guard. Every current call site
-	// passes a non-nil *Job, but finishRun unconditionally dereferences
-	// a.job (recordTerminalResult(a.job, …), a.job.ID in the Append +
-	// emitRunEnded paths). A future call site that synthesises a finishArgs
-	// with a nil job — or a races where the snapshot path leaves job unset —
-	// would panic the cron-tick goroutine. robfig's Recover wrapper turns
-	// that into a swallowed panic ABOVE this frame, which is the worst
-	// outcome for the three-write terminal protocol: a RunStarted frame was
-	// already broadcast, but the panic skips finalize() + emitRunEnded, so
-	// the inflight gate stays running=true and subscribers see a started
-	// frame with no matching ended frame (orphaned "running" badge forever).
-	// Finalize the inflight gate (if any) and bail loudly instead — the same
-	// defensive philosophy as CurrentRun's nil-inflight guard. The finalizer
-	// is per-run stack-local, so this releases exactly this run's gate.
+	// Defensive nil-job guard (#837): a panic here would be swallowed by
+	// robfig's Recover ABOVE this frame, skipping finalize() + emitRunEnded and
+	// leaving an orphaned "running" badge forever. Finalize this run's gate
+	// and bail loudly instead.
 	if a.job == nil {
 		slog.Error("cron: finishRun called with nil job; finalizing inflight gate and skipping terminal protocol",
 			"run_id", a.runID, "state", string(a.state), "err_class", string(a.errClass))
 		a.finalizer.finalize()
 		return
 	}
-	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
-	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
-	// Default clock is time.Now(), byte-identical to the prior inline read.
-	// R20260607-GO-002: when the caller pre-computed endedAt (success path
-	// in executeOpt), reuse it so observeSuccessLatency and finishRun share
-	// a single s.now() read rather than advancing step-based clocks twice.
+	// endedAt via the injected clock (#643) so DurationMS is deterministic
+	// under a fake clock; reuse the caller's pre-computed value when set so
+	// step-based clocks are not advanced twice.
 	endedAt := a.endedAt
 	if endedAt.IsZero() {
 		endedAt = s.now()
@@ -349,29 +263,11 @@ func (s *Scheduler) finishRun(a finishArgs) {
 		durationMS = 0 // monotonic clock skew safety
 	}
 
-	// Persist (LastRunAt/LastResult/LastError/Counters) for terminal paths
-	// that historically updated state. Canceled / shutdown paths skipPersist
-	// to preserve "next start retries" semantics; same paths also skip the
-	// CronRun history record (transient by definition; would inflate runs/
-	// with shutdown noise).
-	//
-	// SECURITY: persistedResult / persistedErrMsg are post-redact + post-
-	// sanitise strings. Both the on-disk CronRun and the WS broadcast must
-	// use these — never the raw a.result / a.errMsg — otherwise an error
-	// containing an absolute filesystem path (e.g. "session error: open
-	// /home/ops/private-repo: permission denied") leaks the workspace
-	// layout to every authenticated dashboard client. R220-SEC-1.
-	//
-	// On the skipPersist path recordResultP0WithSanitised is bypassed, so
-	// we apply the same redact + sanitise pipeline inline. Cheap (regex-
-	// free path scan + ASCII control filter) and ensures no broadcast
-	// branch can echo raw err.Error() / fmt.Sprintf output to clients.
-	//
-	// jobPersistOK 表示 Job 字段 + cron_jobs.json 落盘是否真的成功。
-	// false → marshal 失败回滚了 Job in-memory 字段，或者 Job 已被并发
-	// 删除。两种情况下都不该再写 CronRun history（dashboard list 读
-	// Job 字段，timeline 读 CronRun，二者必须同步可见或同步缺失）。
-	// 这是 R220-ARCH-2 一致性窗口的修复。
+	// jobPersistOK=false → Job 字段回滚（marshal 失败）或 Job 已被并发删除，
+	// 此时不得再写 CronRun history（list 读 Job 字段、timeline 读 CronRun，
+	// 必须同步可见或同步缺失）。SECURITY: 落盘与 WS 广播只能用 persistedResult /
+	// persistedErrMsg（已 redact + sanitise），绝不用原始 a.result / a.errMsg——
+	// 错误串里的绝对路径会把工作区布局泄漏给所有 dashboard 客户端。
 	persistedResult := a.result
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
@@ -382,89 +278,26 @@ func (s *Scheduler) finishRun(a finishArgs) {
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
 	}
 
-	// R230C-GO-8: bump per-state metric AFTER persistence settles. Previous
-	// ordering bumped pre-persist, so a marshal-failure rollback still left
-	// CronRunSucceededTotal +1 even though Job state had been reverted, with
-	// dashboards over-reporting throughput vs durable runs.
-	//
-	// Skip-persist paths (canceled / shutdown / overlap-skipped) still bump
-	// because by definition no Job rollback is possible — the metric is the
-	// only durable record those runs leave. Persist-attempted paths bump
-	// only when jobPersistOK == true.
-	//
-	// #2173: the sandbox-specific buckets (CronSandboxRun{Failed,TimedOut}Total)
-	// sit behind this SAME gate — a deliberate change from the pre-#2173
-	// finishSandboxRunWith, which bumped them unconditionally before calling
-	// finishRun. A persist failure (marshal error rollback / job deleted
-	// mid-flight) therefore no longer counts a sandbox failure while leaving
-	// CronRunFailedTotal untouched; the sandbox bucket is a strict subset of the
-	// generic one, so the two can never disagree. That path is still observable:
-	// recordTerminalResult logs "persist failed; in-memory result reverted" at
-	// Warn, and CronRunEndedTotal still advances (started/ended stay balanced).
+	// Bump per-state metric only AFTER persistence settles, so a marshal-failure
+	// rollback never leaves CronRunSucceededTotal +1 against a reverted Job.
+	// skipPersist paths bump unconditionally (no Job rollback is possible; the
+	// metric is their only durable record). The sandbox buckets sit behind the
+	// SAME gate (#2173) so they remain a strict subset of the generic ones.
 	if a.skipPersist || jobPersistOK {
 		s.bumpRunStateMetrics(a.state, a.sandbox)
 	}
 
-	// CronRun history (P1). Conditions:
-	//   - skipPersist=false（这次 run 应该被记录）
-	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
-	//   - runStore 启用
-	//
-	// R249-ARCH-28 (#992) 两步写盘的崩溃语义（非事务，无法在文件化存储下
-	// 做真原子，故此处明确契约 + 由 TestPersistOrdering_RunsNeverDivergeAheadOfJob
-	// 钉死）：
-	//   1. recordTerminalResult 先把 Job 字段（含 LastSessionID）写入
-	//      cron_jobs.json，成功才返回 jobPersistOK=true。
-	//   2. 仅当 jobPersistOK=true 才调用 runStore.Append 写
-	//      runs/<jobID>/<runID>.json。
-	// 这把 divergence 钳到唯一一个安全方向——崩溃只可能发生在 (1) 成功、
-	// (2) 尚未落盘之间，结果是「cron_jobs.json 的 RunCounters/LastSessionID
-	// 领先一条，runs/ 缺最新一条」。dashboard list 读 Job 字段、timeline 读
-	// CronRun：此方向下 list 可能多报一次成功而 timeline 暂缺该行，是
-	// over-report（可观测、可自愈：下次 run 重新对齐），而非 under-report。
-	// 反方向（runs/ 有记录但 Job 端无对应计数）在结构上不可能发生——Append
-	// 被 jobPersistOK gate 卡死，绝不先于 Job 持久化执行。
-	//
-	// R250-SEC-5 (#1094): a.prompt is the snapshot Job.Prompt at execute
-	// time. New jobs flow through containsCronUnsafe / validateCronPrompt
-	// at the dashboard / IM write edge AND a defence-in-depth scan inside
-	// loadJobs. But a cron_jobs.json predating those gates can carry a
-	// legacy Prompt with C0 / C1 / bidi runes — every CronRun.Prompt
-	// persisted thereafter inherits them, landing in operator-side log
-	// scrapers and SIEMs that read runs/<jobID>/<runID>.json directly.
-	// Run the same SanitizeForLog scrub at the persist boundary so the
-	// stored record matches what handleRunDetail (read-side) would produce.
-	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
-	// fsync that immediately follow.
+	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、runStore
+	// 启用。两步写盘非事务（#992）：先 cron_jobs.json 成功才 Append runs/；崩溃
+	// 只可能让 Job 计数领先一条而 runs/ 缺最新一条（over-report，下次 run 自愈），
+	// 反方向结构上不可能。a.prompt 在此再过一次 SanitizeForLog（#1094）：旧
+	// cron_jobs.json 可能带 C0/C1/bidi 的 legacy Prompt。
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	// #2058: recordTerminalResult confirmed s.jobs[id] existed, then RELEASED
-	// s.mu before returning jobPersistOK=true. appendRun below writes the
-	// physically-separate runs/<jobID>/ store under only its own per-job
-	// jobLock (never s.mu), across a non-trivial marshal+fsync window. A
-	// concurrent DeleteJobByID in that window drops the job from s.jobs AND
-	// runStore.DeleteJob → RemoveAll(runs/<jobID>); appendRun would then
-	// ensureJobDir → MkdirAll, RESURRECTING an orphaned runs/<jobID>/ subtree
-	// for a job that no longer exists (a bounded disk leak: deterministic
-	// runIDs mean the same-ID job rarely rebuilds to reclaim it, and the empty
-	// dir survives age/count trimming). Re-check existence under s.mu right
-	// before the write so a job deleted in the window does not get a resurrected
-	// record.
-	//
-	// #2479: the pre-write check alone is not enough. Append's ensureJobDir +
-	// WriteFileAtomic run OUTSIDE jobLock (#1335) and DeleteJob reclaims the
-	// jobLock entry after its RemoveAll, so a delete landing AFTER the
-	// pre-write check cannot be serialised against the write: the record is
-	// written back into a directory cron_jobs.json no longer knows about.
-	// Unlike the crash window documented above (runs/ is short one record,
-	// self-heals on the next run), this direction leaves a permanent orphan.
-	// Closure is a double check: (1) pre-write jobStillExists gate below
-	// (#2058) skips the write in the common case; (2) post-write
-	// jobStillExists after appendRun returns, and when the job is gone
-	// runStore.dropOrphanRun removes exactly the <runID>.json we wrote plus
-	// rmdir-if-empty of runs/<jobID>/. Any delete is either before (1) —
-	// nothing written — or before (2) — written then dropped — so no
-	// interleaving leaves the orphan behind. CI hit the residual window for
-	// real; TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir pins it.
+	// #2058 / #2479: recordTerminalResult released s.mu before returning, and
+	// Append's dir create + write run outside jobLock, so a concurrent
+	// DeleteJobByID could resurrect an orphaned runs/<jobID>/. Double check:
+	// (1) pre-write jobStillExists skips the write; (2) post-write re-check
+	// drops exactly the record we wrote (dropOrphanRun). Both pinned by tests.
 	if s.finishRunPreAppendHook != nil {
 		s.finishRunPreAppendHook(a.job.ID)
 	}
@@ -482,53 +315,34 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			WorkDir:    a.workDir,
 			Fresh:      a.fresh,
 			Result:     persistedResult,
-			// R050103C-CORR-7 (#1910): ResultBytes is the STORED byte count —
-			// persistedResult has already passed through recordTerminalResult's
-			// truncateWithSuffix (≤ maxStoredResultRunes) + redactSecretsInResult +
-			// SanitizeForLog. It is deliberately NOT the raw Claude output size, so
-			// it must not be used for billing / capacity analysis of upstream output
-			// (a truncated long answer and a genuinely short answer are
-			// indistinguishable here). It measures on-disk footprint only, matching
-			// what the dashboard renders.
+			// ResultBytes is the STORED byte count (post-truncate/redact/sanitise),
+			// not the raw Claude output size — on-disk footprint only, matching
+			// what the dashboard renders (#1910).
 			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
 			ReplayOf:    a.replayOf,
-			// Sandbox execution receipt (RFC §7.3) — nil for local runs, so
-			// their record carries no sandbox_meta key (wire-read-safe).
+			// nil for local runs, so their record carries no sandbox_meta key.
 			SandboxMeta: a.sandboxMeta,
-			// R202606e-ARCH-1 (#2280): local-run cost (0 for sandbox runs,
-			// which report cost via SandboxMeta instead).
+			// local-run cost; 0 for sandbox runs, which report via SandboxMeta.
 			CostUSD: a.costUSD,
 		})
-		// #2479 (2): post-write re-check. See the block comment above.
+		// #2479 (2): post-write re-check; see above.
 		if !s.jobStillExists(a.job.ID) {
 			s.runStore.dropOrphanRun(a.job.ID, a.runID)
 			slog.Info("cron run: job deleted during history write; dropped orphan run record",
 				"job_id", a.job.ID, "run_id", a.runID)
 		}
-		// R250-PERF-7: a new run record may introduce a SessionID the
-		// cache does not know about; drop the snapshot so the next
-		// KnownSessionIDs() call rebuilds.
+		// A new run record may introduce a SessionID the cache does not know
+		// about; drop the snapshot so the next KnownSessionIDs() call rebuilds.
 		s.invalidateKnownSessionsCache()
 	}
 
-	// Broadcast last so server-side hub locks aren't held while we hold s.mu.
-	// ErrorMsg uses persistedErrMsg (post-redact, post-sanitise) — see the
-	// SECURITY note above for why a.errMsg is never used here.
-	//
-	// R246-GO-3 (#689): finalize before the broadcast so a dashboard list
-	// arriving concurrently with cron_run_ended observes CurrentRun(jobID)
-	// == ok:false rather than the stale runInflightView{Phase:Spawning}
-	// the defer would otherwise leave until executeOpt returns. The
-	// finalizer is per-run stack-local; finishRun fires it first, the
-	// executeOpt defer fires it second as a no-op (done flag set). Run-A's
-	// defer can NEVER reset run-B's freshly-installed metadata because
-	// run-A's done=true short-circuits run-A's defer regardless of whether
-	// a racing run-B has won the next CAS — the gate isolation comes from
-	// per-run finalizer identity, not from any atomic on *runInflight.
-	// emitOverlapSkipped passes nil here (its inflight gate belongs to
-	// the concurrent owning run we must not release).
+	// Finalize before the broadcast (#689) so a dashboard list arriving
+	// concurrently with cron_run_ended observes CurrentRun(jobID) == ok:false.
+	// The finalizer is per-run stack-local: the executeOpt defer fires second as
+	// a no-op and can never reset a racing run-B's freshly-installed metadata.
+	// Broadcast last so hub locks aren't held while we hold s.mu.
 	a.finalizer.finalize()
 
 	s.emitRunEnded(RunEndedEvent{
@@ -546,134 +360,65 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	metrics.CronRunEndedTotal.Add(1)
 }
 
-// sanitiseRunResult applies the same rune truncation + SanitizeForLog
-// pipeline that recordResultP0WithSanitised uses, factored out so the
-// skipPersist path of finishRun can reach the same byte-output without
-// touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
-//
-// truncateWithSuffix (limits.go) handles the rune trim + suffix; we extend
-// SanitizeForLog's byte cap by len(truncatedSuffix) so a 4K-rune input that
-// just got "…[truncated]" appended doesn't have its suffix byte-clipped on
-// the way out. R232-PERF-9 / R234-CR-1.
+// sanitiseRunResult applies the same rune truncation + secret redaction +
+// SanitizeForLog pipeline that recordTerminalResult uses, factored out so the
+// skipPersist path of finishRun reaches byte-identical output without touching
+// s.mu. SanitizeForLog's byte cap is extended by len(truncatedSuffix) so a
+// just-appended "…[truncated]" suffix is not byte-clipped.
 func sanitiseRunResult(s string) string {
 	s = truncateWithSuffix(s, maxStoredResultRunes)
-	// R234-SEC-7 (#1006): scrub well-known secret-prefix patterns
-	// (sk-ant-, ghp_, AKIA, …) BEFORE SanitizeForLog so a leaked token in
-	// Claude output never lands on disk or the dashboard WS broadcast.
-	// Idempotent: the [REDACTED] marker does not start with any registered
-	// prefix, so re-running the redactor on a previously-scrubbed string
-	// is a no-op. Mirrors redactPathsInCronError's call ordering on the
-	// errMsg path (see recordTerminalResult below).
+	// Redact BEFORE SanitizeForLog so a leaked token never lands on disk or the
+	// WS broadcast (#1006). Idempotent: [REDACTED] starts with no registered
+	// prefix.
 	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
 
-// localizeNotice is the canonical notice-pipeline helper: sanitise (truncate/
-// redact secrets) then localize API-error envelopes before text reaches any
-// IM channel or notification path. Factored from the two hand-written call
-// sites in scheduler_run.go and sandbox.go (R20260615-030459-ARC-1) so the
-// privacy-critical pipeline (R234-SEC-1 / R20260531070014-ARCH-1) has a
-// single authoritative definition and divergence between call sites is
-// prevented.
+// localizeNotice is the canonical notice-pipeline helper: sanitise (truncate /
+// redact secrets) then localize API-error envelopes before text reaches any IM
+// channel. Single definition shared by scheduler_run.go and sandbox.go so the
+// privacy-critical pipeline cannot diverge between call sites.
 func localizeNotice(s string) string { return apierr.Localize(sanitiseRunResult(s)) }
 
-// sanitiseRunErrMsg applies the cron error-redaction + log-injection
-// scrub used by recordResultP0WithSanitised, for skipPersist branches
-// (canceled / shutdown / overlap-skipped) whose error strings still
+// sanitiseRunErrMsg applies the cron error-redaction + log-injection scrub used
+// by recordTerminalResult, for skipPersist branches whose error strings still
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
-	// R20260531-SEC-8: scrub well-known secret-prefix patterns BEFORE
-	// SanitizeForLog so a leaked token in an error string (LastError) never
-	// lands on disk (cron_jobs.json) or the dashboard WS broadcast. Mirrors
-	// sanitiseRunResult's call ordering on the success path.
+	// Secrets BEFORE SanitizeForLog, mirroring sanitiseRunResult.
 	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
 // emitOverlapSkipped runs the full RunStarted→finishRun lifecycle for a
 // CAS-rejected execution attempt (a tick or TriggerNow that lost the
-// concurrency gate to an already-in-flight run of the same job). Despite
-// the "Skipped" terminology, this function emits BOTH a RunStarted event
-// AND drives finishRun (which emits RunEnded), so subscribers see the
-// same started→ended pair they would for a normal run; the state field
-// carries RunStateSkipped + ErrClassOverlapSkipped so dashboards render
-// it as a no-op pill instead of a real run timeline.
-//
-// CronRunStartedTotal (via emitRunStarted) and the per-state finished
-// metric (via finishRun) both bump. The dual emit is intentional: it
-// keeps the runs/<id> dashboard drawer renderable and prevents
-// subscriber state machines from missing the "started" anchor when a
-// manual TriggerNow collides with an in-flight run.
-//
-// The CAS gate trips before any inflight metadata is populated, so we
-// synthesise a RunID + StartedAt locally; finishRun's skipPersist=true
-// short-circuit keeps the synthetic run off disk (it only exists in the
-// WS broadcast stream).
-//
-// R246-CR-013 (#747): kept as a named function despite having a single
-// call site (executeOpt's CAS-fail branch in scheduler_run.go) for two
-// reasons:
-//
-//  1. The 5-line synthesise-RunID + start + finish dance is a
-//     non-trivial composition over emitRunStarted + finishRun + a
-//     hand-built finishArgs literal. Inlining at the call site would
-//     bury the "skipped runs go through the same lifecycle as real
-//     runs" contract inside the executeOpt function, where it competes
-//     for attention with the run-success/error happy path.
-//  2. Future call sites are anticipated (not hypothetical): when other
-//     CAS-style guards land — e.g. a per-workspace cap that rejects
-//     spawn before reaching the per-job CAS, or a backpressure-driven
-//     manual skip — they will need the same "emit started+ended pair
-//     so subscriber timelines stay consistent" semantics. Having the
-//     helper avoid copy-pasting the 5-line dance across each future
-//     guard preserves the single-place edit point for the lifecycle
-//     contract (e.g. if RunEvent gains a new required field).
-//
-// Reviewers tempted to inline this back into executeOpt: please add the
-// new caller(s) first, then re-evaluate.
-//
-// R241-ARCH-13 (#521) proposed a lite-path (metric-only + single WS
-// event) on the CAS-fail fast path to relieve hub lock pressure under
-// bursty triggers. Won't-fix: the started→ended pair is load-bearing
-// for subscriber state machines (dashboard run timeline, history-panel
-// indexers, drawer rendering). Dropping the started frame would leave
-// the dashboard with an "ended without started" frame that subscribers
-// either drop (silent UX regression) or render as an orphan (misleading
-// "skipped from nowhere" pill). The metric-only variant cannot replace
-// the WS event without breaking the subscriber contract, and combining
-// the two events into a single composite event would force a schema
-// change in the cron WS protocol — disproportionate to the savings on
-// a path that fires only when CAS already lost (i.e. the in-flight run
-// is paying the dominant cost). Hub lock pressure is bounded by the
-// per-job CAS itself: at most one overlap-skipped per tick per job.
+// concurrency gate to an in-flight run of the same job). It emits BOTH a
+// RunStarted event AND drives finishRun (RunEnded) with RunStateSkipped +
+// ErrClassOverlapSkipped: the started→ended pair is load-bearing for
+// subscriber state machines (dashboard timeline / drawer), so a metric-only
+// or ended-only variant is not acceptable (#521). finishRun's skipPersist
+// keeps the synthetic run off disk. Kept as a named helper (#747) so future
+// CAS-style guards reuse the same lifecycle contract.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassOverlapSkipped, "previous run still in flight", "overlap-skipped")
 }
 
 // emitSyntheticSkipped synthesises a started→ended pair for a CAS-bypassing
-// guard that rejects a tick before any inflight metadata is populated. Used
-// by both emitOverlapSkipped (per-job CAS lost) and the router=nil
-// short-circuit in executeOpt (R20260527122801-CR-13 #1323) so dashboards
-// see the same lifecycle frames they would for a real run, with the
-// errClass distinguishing why the run never reached spawn.
-//
-// logTag distinguishes the slog message on the rare RunID-mint failure
-// path so operators can tell which guard tripped.
+// guard that rejects a tick before any inflight metadata is populated. Used by
+// emitOverlapSkipped and the router=nil short-circuit in executeOpt (#1323) so
+// dashboards see the same lifecycle frames as a real run, with errClass
+// distinguishing why the run never reached spawn. logTag distinguishes the
+// slog message on the rare RunID-mint failure path.
 func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass ErrorClass, errMsg, logTag string) {
 	runID, err := generateRunID()
 	if err != nil {
-		// R242-CR-14 (#706): rand failure on the synthetic-skip path is
-		// already degraded; suppressing the WS frame is strictly better
-		// than panicking from the cron tick goroutine. Operators still
-		// see the underlying guard's slog.Error.
+		// rand failure: suppressing the WS frame beats panicking from the cron
+		// tick goroutine (#706); the underlying guard's slog.Error still shows.
 		slog.Error("cron: failed to generate run ID for synthetic skipped event; suppressing",
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
 		return
 	}
-	// R247-ARCH-11 (#643): synthetic started→ended pair uses the injected
-	// clock so a fake clock can drive a deterministic startedAt/endedAt for
-	// skipped-run lifecycle assertions.
+	// Injected clock so a fake clock drives deterministic startedAt/endedAt.
 	startedAt := s.now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
@@ -692,27 +437,14 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 	})
 }
 
-// JobState is the runtime-mutable terminal-result half of the Job
-// god-struct: the LastRunAt / LastResult / LastError / LastErrorClass /
-// LastSessionID / RunCounters cluster that every finishRun rewrites. It is
-// deliberately a SEPARATE type from Job's wire-config fields (Schedule /
-// Prompt / WorkDir / Notify*) so the runtime-state field set is enumerated
-// in exactly one place.
+// JobState is the runtime-mutable terminal-result half of the Job struct: the
+// LastRunAt / LastResult / LastError / LastErrorClass / LastSessionID /
+// RunCounters cluster that every finishRun rewrites. It is a SEPARATE type from
+// Job's wire-config fields so the runtime-state field set is enumerated in
+// exactly one place; capture (Job.snapshotResultState) and rollback (restore)
+// both route through it without changing the on-disk JSON shape (#764).
 //
-// R238-ARCH-13 (#764): Job today mixes wire schema + runtime state, so an
-// internal-only state addition mutates the on-disk schema. The full split
-// (Job config struct + JobState persisted separately) is needs-design — it
-// touches store.go marshal/unmarshal and every cross-package reader. This
-// type is the behaviour-preserving first slice: it gives the runtime-state
-// cluster a single named home (the issue's proposed name) that the capture
-// (Job.snapshotResultState) and rollback (restore) both route through,
-// without changing the on-disk JSON shape. R247-CR-14 (#586) introduced the
-// underlying snapshot to kill the duplicated inline anonymous-struct literal
-// between capture and rollback; naming it JobState ties that work to the
-// god-struct split tracker.
-//
-// restore re-applies the captured values to j; caller MUST hold s.mu so
-// the in-memory state stays serialised against concurrent readers.
+// restore re-applies the captured values to j; caller MUST hold s.mu.
 type JobState struct {
 	LastRunAt      time.Time
 	LastResult     string
@@ -731,19 +463,10 @@ func (p JobState) restore(j *Job) {
 	j.RunCounters = p.Counters
 }
 
-// snapshotResultState captures the runtime-mutable terminal-result state a
-// Job carries (the LastRunAt / LastResult / LastError / LastErrorClass /
-// LastSessionID / RunCounters cluster) into a JobState. Caller must hold
-// s.mu so the read is serialised against concurrent mutators.
-//
-// R249-ARCH-22 (#986) / R238-ARCH-13 (#764): Job mixes wire-config (Schedule
-// / Prompt / WorkDir) with this runtime-mutable state. Until the full
-// JobConfig/JobState split lands, this method is the single capture point for
-// the state cluster so the JobState field set is enumerated exactly once
-// (paired with restore) instead of being open-coded at the
-// recordTerminalResult capture site. Adding a new runtime-state field is then
-// a two-site edit on JobState + this method/restore pair rather than a
-// scattered hunt across mutation paths.
+// snapshotResultState captures the runtime-mutable terminal-result state into
+// a JobState. Caller must hold s.mu. Paired with restore so adding a
+// runtime-state field is a two-site edit rather than a hunt across mutation
+// paths.
 func (j *Job) snapshotResultState() JobState {
 	return JobState{
 		LastRunAt:      j.LastRunAt,
@@ -755,84 +478,37 @@ func (j *Job) snapshotResultState() JobState {
 	}
 }
 
-// recordTerminalResult persists the terminal result (LastResult /
-// LastError / LastErrorClass / Counters) for non-skipPersist paths and
-// returns the post-sanitised (result, errMsg) pair so finishRun can reuse
-// the same byte content in the CronRun history record. The two outputs
-// must remain byte-identical or the dashboard list would diverge from
-// runs/<jobID>/<run_id>.json on disk.
+// recordTerminalResult persists the terminal result (LastResult / LastError /
+// LastErrorClass / Counters) for non-skipPersist paths and returns the
+// post-sanitised (result, errMsg) pair so finishRun can reuse byte-identical
+// content in the CronRun history record.
 //
-// Returns ok=false in two failure modes:
-//   - target Job has been deleted between snapshot and recordResult (race
-//     with DeleteJobByID): caller should also skip the CronRun history
-//     record because writing it would create a runs/<jobID>/ subtree for
-//     a job that no longer exists in s.jobs.
-//   - persistJobsLocked / marshal failed and we rolled back Job fields
-//     in-memory: caller MUST also skip the CronRun history record so
-//     dashboard list view (reads Job fields) and timeline view (reads
-//     CronRun) don't diverge — they'd otherwise show contradictory state
-//     for the same run. R220-ARCH-2.
-//
-// R220-GO-1 / R230B-SEC-1 / R232-ARCH-2: previously a thin recordResultP0
-// wrapper existed for tests pinning the (j, result, errMsg, sessionID,
-// errClass, state) signature. No production caller used it; finishRun goes
-// direct. The wrapper was dead code and has been removed; tests assert on
-// outcomes (Job fields, CronRun summary), not wrapper presence. The
-// "double-track recordResult vs recordResultP0WithSanitised" smell flagged
-// by R230B-SEC-1 (missing RunCounters.addRun + LastErrorClass on the dead
-// path) and R232-ARCH-2 (sanitize-arg drift across the two paths) is
-// therefore moot — only this single P0 path remains, and persist_failure_test
-// (the last "test stub" caller) already invokes this function directly.
-// Do NOT reintroduce a thinner wrapper without first checking those TODOs.
-//
-// R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
-// to drop the "P0" review-tag prefix that lost meaning once the dead
-// recordResult path was deleted (R220-GO-1). The rollback state now lives
-// in JobState so a future "add a Last* field" diff lands once on the type
-// instead of three coupled edits.
+// Returns ok=false when the Job was deleted between snapshot and this call, or
+// when marshal/persist failed and the Job fields were rolled back in-memory.
+// In both cases the caller MUST also skip the CronRun history record so the
+// dashboard list (Job fields) and timeline (CronRun) never diverge.
 func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
-	// truncateWithSuffix (limits.go) is the single source of truth for the
-	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
-	// must produce byte-identical output so the skipPersist branch of
-	// finishRun and the disk record never disagree on visible content.
-	// R234-CR-1 consolidated three open-coded copies into the helper.
+	// truncateWithSuffix is the single source of truth for the rune trim +
+	// …[truncated] suffix; this path and sanitiseRunResult must stay
+	// byte-identical.
 	result = truncateWithSuffix(result, maxStoredResultRunes)
-	// R234-SEC-7 (#1006): scrub well-known secret-prefix patterns
-	// (sk-ant-, ghp_, AKIA, …) before the final SanitizeForLog so plaintext
-	// tokens in Claude output do not flow into Job.LastResult →
-	// cron_jobs.json or the dashboard WS broadcast. Mirrors the
-	// redactPathsInCronError path-redaction step that already runs on the
-	// errMsg branch — same ordering invariant: redact, THEN log-injection
-	// scrub, so a token's surrounding text still has its control bytes
-	// stripped.
+	// Order invariant on both branches: redact secrets (and paths for errMsg)
+	// THEN SanitizeForLog, so a token's surrounding control bytes are still
+	// stripped and no plaintext token reaches Job.LastResult / LastError →
+	// cron_jobs.json or the WS broadcast (#1006).
 	result = redactSecretsInResult(result)
-	// R090135-GO-2: scrub well-known secret-prefix patterns from the error
-	// message before path-redaction and SanitizeForLog, mirroring the result
-	// branch above. Without this, a token (sk-ant-/ghp_/AKIA/…) embedded in a
-	// session error string would survive into Job.LastError → cron_jobs.json.
 	errMsg = redactSecretsInResult(errMsg)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
-	// already-truncated result keeps the trailing marker intact;
-	// otherwise byte-level truncation could clip mid-suffix.
-	// R232-PERF-9.
+	// already-truncated result keeps its trailing marker intact.
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
 	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
-	// R20260604-GO-001: the critical section runs under a single
-	// `defer s.mu.Unlock()` inside an IIFE rather than three hand-written
-	// Unlock branches. The defer releases the lock on any exit path including
-	// panic. save() and the cache invalidation stay OUTSIDE the lock, so they
-	// are recorded into locals here and acted on after the section returns.
-	//
-	// R20260607-PERF-005 (#1923): the JSON encode no longer runs inside this
-	// write critical section. The lock now only mutates the Job fields and
-	// captures a detached value-copy snapshot (+ persist seq) via
-	// snapshotJobsForSaveLocked; json.Marshal moves to persistSnapshot below,
-	// off the lock, so a 50+ job encode no longer serialises the dashboard
-	// read path (ListJobs / ListAllJobsWithNextRun / PerChatJobCount) for the
-	// marshal duration on every cron tick. This finishes the half left open by
-	// #1340 (R20260527122801-PERF-2 moved the sort comparator but not marshal).
+	// The critical section runs under a single deferred Unlock inside an IIFE
+	// so any exit path (incl. panic) releases s.mu. Only the Job field mutation
+	// and a detached value-copy snapshot happen under the lock; json.Marshal
+	// runs in persistSnapshot OFF the lock so a large encode does not serialise
+	// the dashboard read path on every tick (#1923).
 	var (
 		save           func()
 		sessionChanged bool
@@ -859,11 +535,8 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 
 		snap = s.snapshotJobsForSaveLocked()
 		haveSnap = true
-		// R250-PERF-7: detect whether LastSessionID changed under the lock
-		// so we can invalidate the KnownSessionIDs TTL cache exactly when
-		// the persisted set has shifted. Comparing against the snapshot
-		// taken before the in-place write avoids redundant invalidation
-		// when the same session id repeats.
+		// Detect whether LastSessionID changed under the lock so the
+		// KnownSessionIDs TTL cache is invalidated exactly when the set shifted.
 		sessionChanged = sessionID != "" && sessionID != prev.LastSessionID
 	}()
 
@@ -871,13 +544,10 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		return result, errMsg, false
 	}
 
-	// Marshal OFF the lock (#1923). On marshal failure re-acquire s.mu and
-	// roll back the in-memory mutation so the live read path and the on-disk
-	// snapshot stay in sync — same contract persistJobsLocked enforced inline,
-	// only the encode moved out of the critical section. Marshal failure is an
-	// OOM / broken-schema (or injected-stub) event, so the brief window where
-	// the not-yet-persisted mutation is visible to readers before rollback is
-	// acceptable: finishRun gates cron_run_ended on this function's ok return.
+	// Marshal OFF the lock (#1923). On failure re-acquire s.mu and roll back the
+	// in-memory mutation so live reads and the on-disk snapshot stay in sync.
+	// The brief window where the unpersisted mutation is visible is acceptable:
+	// finishRun gates cron_run_ended on this function's ok return.
 	saveFn, perr := s.persistSnapshot(snap)
 	if perr != nil {
 		s.mu.Lock()
@@ -895,50 +565,27 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		s.invalidateKnownSessionsCache()
 	}
 	save()
-	// Phase D (RFC §3.5): the legacy s.onExecute hook fired here to
-	// drive the cron_result WS frame, which dashboard.js consumed only
-	// for an `announce` + list refetch — both already covered by the
-	// cron_run_ended frame. The hook + BroadcastCronResult + cronResultMsg
-	// were deleted; the announce moved to dashboard.js's cron_run_ended
-	// succeeded branch.
 	return result, errMsg, true
 }
 
 // redactAddrRe matches IPv4 address + optional port in error messages such as
-// "dial tcp 192.168.1.5:4012: connection refused". Hostnames are not matched
-// intentionally — they require a DNS lookup for detection; IP literals are
-// structurally identifiable without external context.
-// R20260603-SEC-1 / R20260603-SEC-4.
+// "dial tcp 192.168.1.5:4012: connection refused". Hostnames are not matched:
+// they would need a DNS lookup; IP literals are structurally identifiable.
 var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b`)
 
-// redactAddrIPv6Re matches bracketed IPv6 addresses + optional port in error
-// messages such as "dial tcp [2001:db8::1]:4012: connection refused".
-// Only bracket form is matched — bare IPv6 without brackets is ambiguous in
-// free-form text (colons appear in many other contexts). R20260604-GO-016.
-//
-// R20260607-GO-013: the pattern requires at least one colon inside the
-// brackets ([0-9a-fA-F]*:[0-9a-fA-F:]+) so non-address bracketed tokens
-// like [foo], [abc], or [1] are not over-redacted. A valid IPv6 literal
-// always contains at least one colon (the :: or x:y shorthand forms).
-//
-// R20260607-COR-008: the leading hex group is `*` (not `+`) so the `::`
-// compressed/loopback forms ([::1], [::]) still match — those have no hex
-// char before the first colon. The downside is that `[:]` (empty prefix +
-// a single colon) is a degenerate match that is NOT a valid IPv6 literal
-// (a real address needs either a hex digit or the `::` compression). To
-// avoid over-redacting non-address text like "flag [:]", redaction uses
-// ReplaceAllStringFunc + ipv6BracketIsAddr below: a bracket body is only
-// redacted when it contains at least one hex digit OR a `::` run.
+// redactAddrIPv6Re matches bracketed IPv6 addresses + optional port ("dial tcp
+// [2001:db8::1]:4012"). Only the bracket form is matched — bare IPv6 is
+// ambiguous in free-form text. At least one colon is required inside the
+// brackets so [foo] / [1] are not over-redacted; the leading hex group is `*`
+// so [::1] / [::] still match. That admits the degenerate `[:]`, which is why
+// redaction goes through ReplaceAllStringFunc + ipv6BracketIsAddr below.
 var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F]*:[0-9a-fA-F:]+\](:\d+)?`)
 
-// ipv6BracketIsAddr reports whether a string matched by redactAddrIPv6Re is a
-// plausible IPv6 literal rather than a degenerate token like "[:]" or "[a:b]"
-// (which contain a single colon and are not valid IPv6 addresses).
-// A valid IPv6 literal requires either a "::" compression run or at least two
-// colons (the minimum for any real IPv6 segment sequence, e.g. "::1" or
-// "a:b:c"). Single-colon forms like "[a:b]" look like host:port notation and
-// must not be over-redacted. The input is a full match including brackets and
-// optional :port suffix.
+// ipv6BracketIsAddr reports whether a redactAddrIPv6Re match is a plausible
+// IPv6 literal rather than a degenerate token like "[:]" or "[a:b]": it needs
+// either a "::" compression run or at least two colons. Single-colon forms
+// look like host:port and must not be over-redacted. The input is a full match
+// including brackets and optional :port suffix.
 func ipv6BracketIsAddr(match string) bool {
 	end := strings.IndexByte(match, ']')
 	if end < 0 {
@@ -948,8 +595,7 @@ func ipv6BracketIsAddr(match string) bool {
 	if strings.Contains(body, "::") {
 		return true
 	}
-	// Require at least 2 colons: minimum valid IPv6 segment count
-	// (e.g. "a:b:c" has 2 colons; single-colon "[a:b]" is not IPv6).
+	// Require at least 2 colons (e.g. "a:b:c"); single-colon "[a:b]" is not IPv6.
 	n := 0
 	for i := 0; i < len(body); i++ {
 		if body[i] == ':' {
@@ -962,13 +608,10 @@ func ipv6BracketIsAddr(match string) bool {
 	return false
 }
 
-// hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
-// contains at least one digit immediately followed (or preceded) by a dot
-// (necessary for dotted-quad IPv4), or a '[' character (bracket-form IPv6).
-// When this returns false the regex can be skipped entirely — common cron
-// error classes ("context deadline exceeded", "permission denied") never
-// contain digit-dot pairs or '[' so they take the zero-alloc return.
-// R20260603-SEC-1 / R20260603-SEC-4 / R20260604-GO-016.
+// hasAddrTrigger is a zero-alloc fast-path check: true only when s contains a
+// digit immediately followed by a dot (dotted-quad IPv4) or a '[' (bracket-form
+// IPv6). When false the regexes are skipped entirely — common cron error
+// classes ("context deadline exceeded", "permission denied") take this path.
 func hasAddrTrigger(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '[' {
@@ -999,20 +642,13 @@ func redactAddrInCronError(s string) string {
 }
 
 // redactPathsBuilderPool reuses strings.Builder scratch space across
-// redactPathsInCronError slow-path invocations. recordResultP0WithSanitised
-// is the hot caller (every cron tick + every TriggerNow). Empty / no-path
-// fast-path inputs do not touch the pool. R245-PERF-17 / #872.
-//
-// Note: strings.Builder.Reset zeroes the internal slice header but cannot
-// resize it; b.String() still allocates a fresh string from the buffer
-// bytes (Go's strings.Builder is value-only by API), so this pool only
-// elides the Builder + initial backing-slice alloc, not the final string
-// copy. That is sufficient — the final string copy is unavoidable for
-// any non-aliasing implementation.
+// redactPathsInCronError slow-path invocations (hot: every cron tick + every
+// TriggerNow). Empty / no-path fast-path inputs do not touch the pool. The pool
+// only elides the Builder + initial backing-slice alloc; b.String() still
+// copies, which is unavoidable for any non-aliasing implementation (#872).
 var redactPathsBuilderPool = sync.Pool{
 	New: func() any {
-		// 512B initial capacity: most cron error messages are small;
-		// long ones grow via Builder.Grow inside the call.
+		// 512B initial capacity: most cron error messages are small.
 		b := &strings.Builder{}
 		b.Grow(512)
 		return b
@@ -1025,102 +661,49 @@ var redactPathsBuilderPool = sync.Pool{
 // without recycling.
 const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 
-// redactPathsInCronError strips absolute filesystem paths from a cron
-// execution error message before persistence. session.GetOrCreate and
-// session.Send produce errors like "session error: workspace …/repo/x:
-// permission denied" that would otherwise enumerate the operator's
-// filesystem layout to every authenticated dashboard viewer and any
-// cron_jobs.json backup reader. We replace both POSIX and Windows-style
-// absolute paths with a literal "<path>" placeholder; error classification
-// (permission denied, no such file) stays intact because the surrounding
-// tokens aren't paths. R61-SEC-8.
-//
-// The implementation is a token-wise scan rather than a regex to avoid
-// pulling a regex compile onto every cron run: recordResultP0WithSanitised
-// is invoked on every execution and the regex cost would dominate the
-// redaction budget.
-//
-// SCOPE — UNC paths are out of scope. R239-GO-9 / R249-CR-8 (#952).
-// Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
-// `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
-// and the rare `//server/share` POSIX-style equivalent that some Windows
-// tools emit) are intentionally NOT matched: the leading `\\` would
-// require a peek-ahead second byte (`s[i+1]=='\\'`) which the current
-// isWin / isPosix branches don't gate, and a leading `//` looks
-// indistinguishable from an empty POSIX path token. naozhi runs on
-// Linux containers in production — UNC paths cannot appear in the
-// underlying CLI's error messages there. WSL or Windows-mount
-// deployments may surface UNC strings unredacted; redaction of those
-// forms is a future enhancement (would require a new branch matching
-// `\\` / `//` followed by a non-`/` non-`\` host segment).
-//
-// NEEDS-DESIGN — tracked at GitHub #952 so this deferred enhancement
-// carries the same issue-backed paper trail as the other cron NEEDS-DESIGN
-// items (R241-PERF-9 / #482 etc.), rather than living only as an inline
-// "future enhancement" comment with no tracker. R249-CR-8 (#952).
-// hasNoPathTrigger reports whether s contains none of the three bytes that
-// can begin a redactable path token: a POSIX slash, a Windows backslash, or
-// a tilde-home shorthand. R243-ARCH-18 (#850): the identical three-IndexByte
-// scan was previously inlined twice inside redactPathsInCronError (the
-// short-input fast-path and the post-truncate fast-path), so a future tweak
-// to the trigger-byte set risked desyncing the two gates. Hoisting it keeps
-// both call sites in lockstep and reads at the call site as the intent
-// ("no path-shaped bytes → nothing to redact"). Behaviour is byte-for-byte
-// identical to the prior inline conjunction.
+// hasNoPathTrigger reports whether s contains none of the three bytes that can
+// begin a redactable path token: a POSIX slash, a Windows backslash, or a
+// tilde-home shorthand. Shared by both fast-path gates in
+// redactPathsInCronError so the trigger-byte set cannot desync (#850); the scan
+// itself lives in osutil so sysession reuses the same policy (#983).
 func hasNoPathTrigger(s string) bool {
-	// R249-ARCH-17 (#983): the trigger-byte scan + the path-redaction loop
-	// (below) now live in osutil so sysession and other daemons reuse the
-	// same policy without copy-paste drift. The cron wrapper keeps its
-	// Builder pool + byte cap + fast-path return on top of the shared scan.
 	return osutil.HasNoPathTrigger(s)
 }
 
+// redactPathsInCronError strips absolute filesystem paths (POSIX `/abs`,
+// Windows `C:\…` / `C:/…`, home-relative `~/`) and IP:port literals from a cron
+// execution error message before persistence, so "session error: workspace
+// …/repo/x: permission denied" does not enumerate the operator's filesystem to
+// every dashboard viewer. Token-wise scan (no regex compile per run). UNC paths
+// (`\\server\share`) are intentionally out of scope — see #952.
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
-	// Hot fast-path: short error-classifier strings ("context deadline
-	// exceeded", "dispatcher queue full") with no path-trigger byte never
-	// need truncation OR the Builder pool — return them aliased. The 256B
-	// cap is a defensive ceiling so an unexpectedly long no-path input
-	// still falls through to the byte-cap branch below; common cron error
-	// classes fit comfortably under this. R250-PERF-12 / #1115.
-	// R20260603-SEC-1/SEC-4: IP:port redaction runs even on the fast path —
-	// "dial tcp 192.168.1.5:4012: connection refused" contains no slash so
-	// hasNoPathTrigger is true; without this the addr leaks through.
+	// Hot fast-path: short no-path-trigger strings skip truncation AND the
+	// Builder pool and are returned aliased (#1115). IP:port redaction still
+	// runs — "dial tcp 192.168.1.5:4012" has no slash so hasNoPathTrigger is
+	// true, and the addr would otherwise leak through.
 	if len(s) <= redactFastPathMaxLen && hasNoPathTrigger(s) {
 		return redactAddrInCronError(s)
 	}
-	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
-	// can fall mid-codepoint for multibyte runes (CJK error messages from the
-	// CLI), producing invalid UTF-8 that then poisons cron_jobs.json.
+	// Byte-level cap split on a rune boundary — naked s[:maxRedactErrLen] can
+	// fall mid-codepoint (CJK error messages), producing invalid UTF-8 that
+	// poisons cron_jobs.json.
 	if len(s) > maxRedactErrLen {
 		n := textutil.TruncateAtRuneBoundary(s, maxRedactErrLen)
 		s = s[:n] + "…"
 	}
-	// Fast path: if the string contains no POSIX slash, no Windows
-	// backslash, and no '~/' tilde-home shorthand, there is nothing
-	// path-shaped to redact — skip the Builder allocation. Still apply
-	// addr redaction for IP:port patterns. recordResult runs on every
-	// cron execution, and common error classes ("dispatcher queue full",
-	// "session error: context deadline exceeded") have no embedded paths.
-	// R62-PERF-3 + R234-SEC-9（~/ 用户目录形态补漏）。
-	// R20260603-SEC-1/SEC-4: addr redaction applied on this path too.
+	// No path-shaped bytes after truncation → skip the Builder; addr redaction
+	// still applies.
 	if hasNoPathTrigger(s) {
 		return redactAddrInCronError(s)
 	}
 	b := redactPathsBuilderPool.Get().(*strings.Builder)
-	// Important: strings.Builder.Reset() drops the internal byte slice
-	// entirely (sets it to nil), so we must Reset BEFORE Grow on the
-	// pooled instance — otherwise the prior call's residual bytes would
-	// prefix this call's output. The pool's New() pre-grows to 512B; the
-	// first Reset+Grow on a recycled builder reallocates if and only if
-	// len(s) exceeds the residual capacity (which is 0 post-Reset, so a
-	// fresh alloc happens here). The win is the *Builder header itself
-	// (24B) coming from the pool; the backing []byte still allocates per
-	// call. b.String() always allocates a fresh string regardless.
-	// Even so, eliminating the per-call *Builder header alloc closes the
-	// "double alloc" path called out in R245-PERF-17 / #872.
+	// Reset BEFORE Grow on the pooled instance: strings.Builder.Reset() drops
+	// the internal slice entirely, and without it the prior call's residual
+	// bytes would prefix this output. Only the *Builder header comes from the
+	// pool; the backing []byte and the final String() still allocate per call.
 	defer func() {
 		// Drop oversized buffers so a one-off near-maxRedactErrLen input
 		// does not pin memory for the process lifetime.
@@ -1132,14 +715,10 @@ func redactPathsInCronError(s string) string {
 	}()
 	b.Reset()
 	b.Grow(len(s))
-	// R249-ARCH-17 (#983): delegate the path-scan to the shared
-	// osutil.RedactAbsolutePathsInto. Writing into the pooled Builder keeps
-	// cron's per-run alloc profile (R245-PERF-17 / #872) — only the final
-	// String() copy allocates — while the detection policy (POSIX / Windows
-	// drive / ~/ home, bare-root pass-through, whitespace/`:` delimiters)
-	// lives in one cross-cutting place that sysession can reuse.
+	// Path detection policy (POSIX / Windows drive / ~/ home, bare-root
+	// pass-through, whitespace/`:` delimiters) lives in osutil so sysession can
+	// reuse it (#983); writing into the pooled Builder keeps cron's alloc profile.
 	osutil.RedactAbsolutePathsInto(b, s)
-	// R20260603-SEC-1 / R20260603-SEC-4: strip IP:port patterns that survive
-	// the path-redaction pass (they contain no slash/backslash/tilde trigger).
+	// Strip IP:port patterns that survive the path pass (no slash/backslash/tilde).
 	return redactAddrInCronError(b.String())
 }

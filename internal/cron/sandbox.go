@@ -16,20 +16,14 @@ import (
 	"github.com/naozhi/naozhi/internal/limits"
 )
 
-// runtimeSessionIDRe matches the production format produced by
-// sandboxRuntimeSessionID: "run-<lowercase-hex>-<decimal-unixnano>".
-// Used to validate RuntimeSessionID values read from operator-writable
-// disk files before passing them to StopSession. [R20260613-SEC-2 / #2065]
+// runtimeSessionIDRe matches the format produced by sandboxRuntimeSessionID:
+// "run-<lowercase-hex>-<decimal-unixnano>". Validates RuntimeSessionID values
+// read from operator-writable disk files before StopSession (#2065).
 var runtimeSessionIDRe = regexp.MustCompile(`^run-[0-9a-f]+-[0-9]+$`)
 
-// isValidRuntimeSessionID reports whether s matches the expected production
-// format of a sandbox runtime session id. Called before every StopSession
-// invocation whose session id was read from disk (sandbox_pending.go /
-// sandbox_replay.go). Invalid ids are logged and skipped.
-//
-// The length cap (128 bytes) is generous vs the ~40-char production value
-// ("run-<16-hex>-<19-digit-nano>") and rejects pathologically long strings
-// that could not be legitimate session ids.
+// isValidRuntimeSessionID reports whether s matches the production format of
+// a sandbox runtime session id; called before every StopSession whose id came
+// from disk. The 128-byte cap rejects pathologically long strings.
 func isValidRuntimeSessionID(s string) bool {
 	return len(s) <= 128 && runtimeSessionIDRe.MatchString(s)
 }
@@ -43,11 +37,10 @@ type SandboxJob struct {
 	Prompt string
 	// Model pins the CLI model inside the microVM ("" = image default).
 	Model string
-	// RuntimeSessionID is the platform session id for this run. Derived by
-	// cron (not the adapter) because the §6.5 pending record must hold it
-	// BEFORE the invoke is attempted — it is the only handle a restarted
-	// naozhi has to Stop an orphaned microVM. Unique per run (§4.1) and
-	// ≥33 chars (validation F3): "run-<cronRunID>-<unixnano>".
+	// RuntimeSessionID is the platform session id for this run. Derived by cron
+	// (not the adapter) because the pending record must hold it BEFORE the invoke
+	// — it is the only handle a restarted naozhi has to Stop an orphaned microVM.
+	// Unique per run and ≥33 chars: "run-<cronRunID>-<unixnano>".
 	RuntimeSessionID string
 }
 
@@ -59,11 +52,9 @@ func sandboxRuntimeSessionID(runID string, startedAt time.Time) string {
 	return fmt.Sprintf("run-%s-%d", runID, startedAt.UnixNano())
 }
 
-// Sandbox terminal states, mirroring agentcore.TerminalState wire values
-// (RFC §6.1). cron re-declares the strings instead of importing
-// internal/agentcore so the scheduler stays compile-time independent of
-// the AWS SDK — the wireup layer owns that edge (same reasoning as
-// SessionRouter / NotifySender seams in deps.go).
+// Sandbox terminal states, mirroring agentcore.TerminalState wire values.
+// cron re-declares the strings instead of importing internal/agentcore so the
+// scheduler stays compile-time independent of the AWS SDK.
 const (
 	SandboxStateSuccess         = "success"
 	SandboxStateFailedClean     = "failed-clean"
@@ -79,34 +70,27 @@ type SandboxOutcome struct {
 	ResultText string
 	// ErrMsg is the human-readable failure detail ("" on success).
 	ErrMsg string
-	// StopConfirmed reports whether the §6.2 rule-1 termination
-	// (StopRuntimeSession) was confirmed after a transport failure. Only
-	// meaningful when State == SandboxStateFailedTransport: false means
-	// the microVM's fate is UNKNOWN and any replay machinery must refuse
-	// to act on this run until a Stop succeeds.
+	// StopConfirmed reports whether StopRuntimeSession was confirmed after a
+	// transport failure. Only meaningful for SandboxStateFailedTransport: false
+	// means the microVM's fate is UNKNOWN and replay must refuse to act until a
+	// Stop succeeds.
 	StopConfirmed bool
-	// Meta is the per-run execution receipt (cost / memory peak / image /
-	// exit) surfaced into the run record (RFC §7.3/§7.5). Zero-valued
-	// fields render as "unknown" — a transport failure with no result
-	// event carries no cost, an old image carries no version. The adapter
-	// (wireup) populates this from agentcore.RunResult.
+	// Meta is the per-run execution receipt (cost / memory peak / image / exit)
+	// surfaced into the run record; zero-valued fields render as "unknown". The
+	// wireup adapter populates it from agentcore.RunResult.
 	Meta SandboxRunMeta
 }
 
-// SandboxRunMeta is the cloud-execution receipt for one sandbox run
-// (RFC §5.1 meta block). cron re-declares it (rather than importing an
-// agentcore type) so the scheduler stays compile-time independent of the
-// AWS SDK — the wireup adapter maps agentcore.RunResult → this struct.
-// Every field omitempty: a partial receipt (transport failure: cost/exit
-// unknown) persists only what it knows. NO secrets, NO AWS-internal IDs.
+// SandboxRunMeta is the cloud-execution receipt for one sandbox run. cron
+// re-declares it so the scheduler stays independent of the AWS SDK; the wireup
+// adapter maps agentcore.RunResult → this struct. Every field omitempty so a
+// partial receipt persists only what it knows. NO secrets, NO AWS-internal IDs.
 type SandboxRunMeta struct {
 	RuntimeARN   string `json:"runtime_arn,omitempty"`
 	ImageVersion string `json:"image_version,omitempty"`
-	// ExitStatus has NO omitempty: exit 0 is the meaningful "success"
-	// value, and a missing key would be indistinguishable from "exit
-	// unknown" (transport failure). The enclosing *SandboxRunMeta is
-	// itself omitempty, so local runs still carry no exit_status at all —
-	// only attested sandbox runs record it, and they record it always.
+	// ExitStatus has NO omitempty: exit 0 is the meaningful "success" value and a
+	// missing key would be indistinguishable from "exit unknown". The enclosing
+	// *SandboxRunMeta is itself omitempty, so local runs carry no exit_status.
 	ExitStatus      int     `json:"exit_status"`
 	CostUSD         float64 `json:"cost_usd,omitempty"`
 	DurationMS      int64   `json:"duration_ms,omitempty"`
@@ -121,33 +105,24 @@ func (m SandboxRunMeta) isZero() bool {
 }
 
 // SandboxRunner executes run-once jobs at the sandbox placement. The
-// production implementation (wireup) wraps agentcore.Client: payload
-// construction, the held event stream, terminal classification, and the
-// transport-failure Stop confirmation all live behind this seam. nil deps
-// (or a disabled config) leave the scheduler routing sandbox jobs to the
-// ErrClassSandboxUnavailable failure path.
+// production implementation (wireup) wraps agentcore.Client; nil deps route
+// sandbox jobs to the ErrClassSandboxUnavailable failure path.
 //
-// eventSink receives every decoded stream envelope as one raw JSON line,
-// in order, from the goroutine that owns the stream — the cron side
-// persists them (run-record seed, RFC §6.1 streaming-to-disk requirement)
-// without understanding the envelope schema. The cron-provided sink never
-// returns an error (write failures degrade to a logged no-op inside
-// sandboxEventSink — a naozhi-side disk fault must not look like a
-// transport break and Stop a healthy microVM); the error return exists
-// for the agentcore client's contract and future sinks that genuinely
-// cannot continue.
+// eventSink receives every decoded stream envelope as one raw JSON line, in
+// order, from the goroutine that owns the stream; cron persists them without
+// understanding the schema. The cron-provided sink never returns an error (a
+// naozhi-side disk fault must not look like a transport break and Stop a
+// healthy microVM); the error return exists for the agentcore client contract.
 type SandboxRunner interface {
 	RunJob(ctx context.Context, job SandboxJob, eventSink func(line []byte) error) (SandboxOutcome, error)
-	// StopSession terminates a runtime session by its platform id — the
-	// §6.2 rule-1 / §6.5 reconcile primitive. Idempotent server-side;
-	// callers treat an error as "fate unknown" and surface it.
+	// StopSession terminates a runtime session by its platform id. Idempotent
+	// server-side; callers treat an error as "fate unknown" and surface it.
 	StopSession(ctx context.Context, runtimeSessionID string) error
 }
 
-// sandboxMaxRunDuration is the Phase 1 wall-clock fence (RFC §6.2 rule 2):
-// the A1-a streaming connection caps at 60min, and the runtime's
-// maxLifetime is clamped to the same bound so a job cannot outlive a cut
-// stream by hours. The effective budget is min(execTimeout, this).
+// sandboxMaxRunDuration is the wall-clock fence: the streaming connection caps
+// at 60min and the runtime's maxLifetime is clamped to the same bound so a job
+// cannot outlive a cut stream. Effective budget is min(execTimeout, this).
 const sandboxMaxRunDuration = 60 * time.Minute
 
 // sandboxExecArgs carries the executeOpt-owned state into the sandbox
@@ -164,41 +139,30 @@ type sandboxExecArgs struct {
 	inflight  *runInflight
 	finalizer *runFinalizer
 	lg        *slog.Logger
-	// replayOf links this run to the original run it re-executes (RFC §7.3).
-	// "" for a normal scheduled/manual run; set by ReplaySandboxRun so the
-	// new run's record carries the replay chain. Threaded through to
-	// finishSandboxRun → finishRun → CronRun.ReplayOf.
+	// replayOf links this run to the original it re-executes; "" for a normal
+	// run. Set by ReplaySandboxRun, threaded to CronRun.ReplayOf.
 	replayOf string
 }
 
 // executeSandbox runs one cron job at the sandbox placement and routes the
-// outcome through the same finishRun terminal protocol as local runs. It
-// owns no session-router state: no GetOrCreate, no Reset, no stubs — the
-// microVM burns on completion, which is the whole point (RFC §3.3:
-// structural elimination of the cron session leak).
+// outcome through the same finishRun terminal protocol as local runs. It owns
+// no session-router state (no GetOrCreate / Reset / stubs): the microVM burns
+// on completion.
 //
-// §6.5 restart immunity: an in-flight record (sandboxpending/<run>.json,
-// see sandbox_pending.go) is written before the invoke and removed after
-// terminal state; startup reconcile Stops orphans and closes their run
-// records as failed-transport.
-//
-// Delete immunity (§6.2): DeleteJobByID of a job with an in-flight sandbox
-// run now Stops the microVM via stopSandboxRunsForJob (deleteJobPostCleanup),
-// using the runtime session id in the pending record. The run's own
-// goroutine still reaches finishRun, which no-ops the persist for the
-// now-deleted job via recordTerminalResult's jobs[id] re-check.
+// Restart immunity: a pending record (sandbox_pending.go) is written before
+// the invoke and removed after terminal state; startup reconcile Stops
+// orphans. Delete immunity: DeleteJobByID Stops the microVM via
+// stopSandboxRunsForJob; this goroutine still reaches finishRun, which no-ops
+// the persist for the deleted job.
 func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	a.lg.Info("cron job executing in sandbox", "prompt_len", len(a.prompt))
 
-	// Phase 1 guardrails (RFC §12): no workspace at sandbox placement —
-	// clone-on-boot is Phase 1.5 (B10-a). Reject at run time too (the
-	// dashboard validates on save) so a job edited into this shape by a
-	// non-dashboard caller fails loudly instead of running CC in an empty
-	// directory the operator thinks is their repo.
+	// No workspace at sandbox placement (clone-on-boot not implemented). Reject at
+	// run time too so a job edited into this shape by a non-dashboard caller fails
+	// loudly instead of running CC in an empty directory.
 	if a.snap.workDir != "" {
-		// ErrClassSandboxFailed (job-level misconfiguration), NOT
-		// Unavailable — the executor may be perfectly healthy; alerting
-		// keyed on sandbox_unavailable must mean "wire the config".
+		// SandboxFailed (job misconfiguration), NOT Unavailable: alerting on
+		// sandbox_unavailable must mean "wire the config".
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
 			"sandbox placement does not support work_dir (Phase 1; use placement=local)", nil)
 		return
@@ -218,11 +182,9 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 	ctx, cancel := context.WithTimeout(s.stopCtx, budget)
 	defer cancel()
 
-	// §6.5 in-flight record: persist {job, run, runtime session, started}
-	// BEFORE the invoke. If naozhi restarts mid-hold, startup reconcile
-	// finds this file, Stops the orphaned microVM, and closes the run.
-	// Best-effort: a write failure degrades to the pre-§6.5 behaviour
-	// (orphan bounded by maxLifetime) rather than failing the run.
+	// Pending record persisted BEFORE the invoke so a restart mid-hold can Stop the
+	// orphaned microVM and close the run. Best-effort: a write failure only loses
+	// restart immunity (orphan bounded by maxLifetime), it does not fail the run.
 	runtimeSID := sandboxRuntimeSessionID(a.runID, a.startedAt)
 	pendingPath := s.writeSandboxPending(sandboxPending{
 		JobID:            a.snap.jobID,
@@ -231,20 +193,15 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		StartedAtMS:      a.startedAt.UnixMilli(),
 	}, a.lg)
 
-	// §5.1/§5.2 input snapshot: persist the run's INPUT (content-addressed
-	// prompt + model) BEFORE the invoke so a replay re-injects the exact
-	// payload. Phase 1 has no injected secrets, so SecretRefs is empty; the
-	// image version is unknown until the run reports it (the meta frame), so
-	// it is "" here — replay falls back to the runtime's current image.
-	// Best-effort (logs on failure, never fails the run).
+	// Input snapshot (content-addressed prompt + model) persisted BEFORE the invoke
+	// so a replay re-injects the exact payload. No secrets are injected yet, and
+	// the image version is unknown until the run reports it. Best-effort.
 	s.writeSandboxSnapshot(a.snap.jobID, a.runID, a.prompt, a.model, "", nil, a.lg)
 
 	sink, closeSink := s.sandboxEventSink(a.snap.jobID, a.runID, a.lg)
-	// Panic-safe fd release (#2317): RunJob is an interface call into
-	// SDK/streaming code that can panic; the explicit closeSink() below is a
-	// plain statement that a panic would skip, leaking the event-log fd across
-	// the upstream recover. closeSink is idempotent (sync.Once), so this defer
-	// only fires when the ordered close did not run.
+	// RunJob can panic inside SDK/streaming code and skip the ordered closeSink()
+	// below, leaking the event-log fd; closeSink is idempotent so this defer is a
+	// safe fallback (#2317).
 	defer closeSink()
 	outcome, err := s.sandbox.RunJob(ctx, SandboxJob{
 		JobID:            a.snap.jobID,
@@ -253,14 +210,12 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		Model:            a.model,
 		RuntimeSessionID: runtimeSID,
 	}, sink)
-	// Close (flush) the event log BEFORE any finishRun below broadcasts the
-	// terminal frame — a dashboard client reacting to RunEnded must find the
-	// complete log on disk, not race a buffered tail (review PR-2b F1).
+	// Flush the event log BEFORE finishRun broadcasts the terminal frame so a
+	// dashboard client reacting to RunEnded finds the complete log on disk.
 	closeSink()
 	if err != nil {
-		// Pre-flight failure: the job never reached the platform (invalid
-		// payload — e.g. empty prompt). Permanent, not transport. The
-		// microVM was never created, so the pending handle is moot.
+		// Pre-flight failure: the job never reached the platform, so the pending
+		// handle is moot.
 		removeSandboxPending(pendingPath, a.lg)
 		s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, "",
@@ -268,10 +223,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		return
 	}
 
-	// Run-record receipt (RFC §7.3): meta the adapter filled from the
-	// agentcore result. A transport failure may carry only partial meta
-	// (no cost/exit) — still worth persisting what arrived. nil when the
-	// receipt is entirely empty so a degenerate run never grows a
+	// nil when the receipt is entirely empty so a degenerate run never grows a
 	// sandbox_meta key.
 	metaPtr := sandboxMetaPtr(outcome.Meta)
 
@@ -286,11 +238,8 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 		s.finishSandboxRun(a, RunStateFailed, ErrClassSandboxFailed, outcome.ResultText,
 			sanitiseRunErrMsg(outcome.ErrMsg), metaPtr)
 	default: // SandboxStateFailedTransport and any future unknown state: conservative.
-		// §6.2 containment: the runner already attempted StopRuntimeSession;
-		// surface whether the termination was confirmed. Phase 1 has no
-		// auto-replay, so "do not replay before Stop confirms" holds
-		// trivially — the flag is recorded for the Phase 3 confirmation
-		// queue and for operators reading the run history today.
+		// The runner already attempted StopRuntimeSession; record whether it was
+		// confirmed for the confirmation queue and operators reading history.
 		msg := "sandbox stream lost before terminal attestation"
 		if outcome.ErrMsg != "" {
 			msg = sanitiseRunErrMsg(outcome.ErrMsg)
@@ -301,29 +250,18 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 			s.clearSandboxPendingIndex(a.snap.jobID, pendingPath)
 			msg += " (microVM termination confirmed)"
 		} else {
-			// Stop unconfirmed: KEEP the pending file. The next startup's
-			// reconcile retries StopSession until it confirms — removing it
-			// here would permanently discard the §6.2 retry handle for a
-			// microVM whose fate is unknown (review §6.5 F2).
+			// Stop unconfirmed: KEEP the pending file so startup reconcile retries
+			// StopSession — removing it would discard the only retry handle for a microVM
+			// whose fate is unknown.
 			a.lg.Warn("cron sandbox: termination unconfirmed; pending record kept for startup reconcile",
 				"pending", pendingPath != "")
 			msg += " (microVM fate UNKNOWN — termination unconfirmed; check for side effects before re-running)"
 		}
-		// R20260613-CR-6 (#2059): align shutdown-cancel classification with the
-		// local path (scheduler_run.go). sandbox ctx = WithTimeout(s.stopCtx,
-		// budget), so scheduler Stop cancels s.stopCtx → ctx.Err()=Canceled.
-		// Treat that as RunStateCanceled with skipPersist=true (keep history
-		// clean — a graceful shutdown is not a transport failure) rather than
-		// recording a failed-transport run. DeadlineExceeded stays TimedOut.
-		//
-		// R20260613-LB-1 (#2081): the side-effecting human-confirmation-queue
-		// write below MUST stay inside the non-cancel branches. A run cancelled
-		// only by graceful shutdown is not a transport failure (it is recorded
-		// as RunStateCanceled with skipPersist above's sibling branch); enqueuing
-		// it for attention would leave the operator a phantom "needs confirm"
-		// entry that a later reconcileSandboxPending overwrites with orphaned —
-		// for a run whose history correctly reads Canceled. So only genuine
-		// transport failures (DeadlineExceeded / default) feed the queue.
+		// Shutdown cancel (s.stopCtx → ctx.Err()==Canceled) is RunStateCanceled with
+		// skipPersist, matching the local path — a graceful shutdown is not a
+		// transport failure (#2059). Only genuine transport failures (DeadlineExceeded
+		// / default) feed the human confirmation queue: a cancelled run enqueued for
+		// attention would leave a phantom "needs confirm" entry (#2081).
 		switch {
 		case errors.Is(ctx.Err(), context.Canceled):
 			s.finishSandboxRunSkipPersist(a, RunStateCanceled, ErrClassCanceled, outcome.ResultText,
@@ -339,39 +277,21 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 }
 
 // enqueueSandboxTransportAttention adds a side-effecting job's genuine
-// transport failure to the human confirmation queue.
+// transport failure to the human confirmation queue: the operator checks
+// whether the side effect already landed before confirm-done or replay. A
+// side-effect-free job never enters the queue. RuntimeSessionID is carried so
+// replay can Stop before re-running. Written regardless of StopConfirmed —
+// the side effect may have landed before the stream broke.
 //
-// §6.2 rule 3 + §7.4: a side-effecting job's transport failure must NOT
-// auto-replay — it enters the human confirmation queue (the operator checks
-// whether the side effect already landed before deciding to confirm-done or
-// replay). A side-effect-free job is safe to re-run freely, so it never enters
-// the queue (its failed-transport record still warns in history).
-// RuntimeSessionID is carried so the queue's replay action can satisfy §6.2
-// rule 1 (Stop before replay). The entry is written regardless of
-// StopConfirmed: the microVM may be dead, but the SIDE EFFECT may still have
-// landed before the stream broke, so a side-effecting job still needs a human
-// look.
-//
-// R20260613-LB-1 (#2081): callers MUST NOT invoke this for shutdown-cancel
-// (ctx.Err()==Canceled) runs — those are classified RunStateCanceled and kept
-// out of the queue, so this is only reached from the DeadlineExceeded/default
-// transport branches.
+// Callers MUST NOT invoke this for shutdown-cancel runs (#2081).
 func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeSID string) {
 	if !a.snap.sideEffects {
 		return
 	}
-	// R20260614-ARCH-1: a DeleteJobByID concurrent with this in-flight run can
-	// reach deleteJobPostCleanup (stopSandboxRunsForJob → deleteJobRuns →
-	// deleteJobAttention) while this goroutine is still blocked on the stream
-	// that delete just severed; we then walk the sandbox.go default/timeout
-	// branch into here AFTER deleteJobAttention already cleared the queue,
-	// writing a ghost record for a job that no longer exists. ListSandboxAttention
-	// only shape-validates the id (never job existence), so that record would
-	// surface a phantom queue card whose replay ErrJobNotFound's. Re-check
-	// s.jobs[id] under RLock (mirrors finishRun→recordTerminalResult's jobs[id]
-	// re-check) and skip if the job is gone. The reconcile/test attention writers
-	// stay on the unchecked writeSandboxAttention primitive: reconcile already
-	// gates on j!=nil, and the test seam stages records for synthetic ids.
+	// A concurrent DeleteJobByID may already have cleared this job's attention
+	// queue while this goroutine was blocked on the severed stream; writing now
+	// would leave a phantom queue card whose replay ErrJobNotFound's. Re-check
+	// s.jobs[id] (mirrors recordTerminalResult) and skip if the job is gone.
 	s.mu.RLock()
 	_, jobExists := s.jobs[a.snap.jobID]
 	s.mu.RUnlock()
@@ -410,12 +330,9 @@ func (s *Scheduler) finishSandboxRun(a sandboxExecArgs, state RunState, errClass
 	s.finishSandboxRunWith(a, state, errClass, result, errMsg, meta, false)
 }
 
-// finishSandboxRunSkipPersist is the shutdown-cancel variant (R20260613-CR-6 /
-// #2059): like finishSandboxRun but sets finishArgs.skipPersist so the canceled
-// run does not touch Job state (LastRunAt/LastResult) or grow a persisted
-// failure record — mirroring the local path's shutdown-cancel handling
-// (scheduler_run.go). The WS broadcast still fires so the dashboard sees the
-// terminal frame.
+// finishSandboxRunSkipPersist is the shutdown-cancel variant of
+// finishSandboxRun: skipPersist keeps the canceled run out of Job state and
+// run history, mirroring the local path; the WS broadcast still fires (#2059).
 func (s *Scheduler) finishSandboxRunSkipPersist(a sandboxExecArgs, state RunState, errClass ErrorClass, result, errMsg string, meta *SandboxRunMeta) {
 	s.finishSandboxRunWith(a, state, errClass, result, errMsg, meta, true)
 }
@@ -436,14 +353,9 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		a.lg.Info("cron sandbox run ended with non-failure terminal state",
 			"state", string(state), "err_class", string(errClass), "err", errMsg)
 	}
-	// #2173: no metrics here. finishRun → bumpRunStateMetrics(state, sandbox=true)
-	// is the single owner of every per-state counter, including
-	// CronSandboxRun{Failed,TimedOut}Total — see scheduler_callbacks.go. The
-	// state passed in already encodes the R20260613-GOLANG-002 split: a ctx
-	// deadline is RunStateTimedOut (→ CronSandboxRunTimedOutTotal, #2091) and
-	// only genuine RunStateFailed reaches CronSandboxRunFailedTotal, so a
-	// timed-out run is never counted twice — and the caller no longer has to
-	// remember that rule.
+	// No metrics here: finishRun → bumpRunStateMetrics(state, sandbox=true) is the
+	// single owner of every per-state counter, and the state already encodes the
+	// TimedOut-vs-Failed split so a timed-out run is never counted twice (#2173).
 	s.finishRun(finishArgs{
 		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
@@ -454,17 +366,15 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		replayOf:    a.replayOf,
 		sandbox:     true,
 	})
-	// R20260613-CR-6 (#2059): a shutdown-cancel is not a user-visible failure —
-	// mirror the local path (scheduler_run.go), which delivers no notice when
-	// the run is suppressed during shutdown.
+	// A shutdown-cancel is not a user-visible failure — no notice, mirroring the
+	// local path (#2059).
 	if state == RunStateCanceled {
 		return
 	}
 	notice := "执行失败，请稍后重试。"
 	if state == RunStateSucceeded {
-		// Same pipeline as the local success path (R234-SEC-1 +
-		// R20260531070014-ARCH-1): sanitise (truncate/redact) then localize
-		// API-error envelopes before anything reaches an IM channel.
+		// Same pipeline as the local success path: sanitise then localize API-error
+		// envelopes before anything reaches IM.
 		notice = localizeNotice(result)
 	} else if errClass == ErrClassSandboxTransport {
 		notice = "云沙箱连接中断，任务状态未知，请检查执行历史。"
@@ -473,16 +383,11 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 }
 
 // sandboxEventSink opens the per-run event log
-// (<store-dir>/sandbox_events/<jobID>/<runID>.ndjson) and returns a sink
-// writing one envelope per line, plus a closer. Streaming-to-disk is the
-// §6.1 partial-result requirement: when the stream breaks mid-job, the
-// events received so far are already durable. On open failure the sink
-// degrades to a no-op (the run is more valuable than its event log) with
-// one WARN.
-//
-// Phase 2's content-addressed run record (RFC §5) supersedes this layout;
-// the directory is deliberately separate from the runStore's runs/ tree so
-// the migration does not have to disentangle the two.
+// (<store-dir>/sandboxevents/<jobID>/<runID>.ndjson) and returns a sink
+// writing one envelope per line, plus a closer. Streaming to disk means the
+// events received before a mid-job stream break are already durable. On open
+// failure the sink degrades to a no-op with one WARN (the run is more valuable
+// than its event log). Deliberately separate from the runStore's runs/ tree.
 func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink func([]byte) error, closer func()) {
 	if s.storePath == "" {
 		return func([]byte) error { return nil }, func() {}
@@ -492,8 +397,8 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		lg.Warn("cron sandbox: event log dir create failed; events not persisted", "err", err)
 		return func([]byte) error { return nil }, func() {}
 	}
-	// runID is scheduler-generated hex (generateRunID), never user input,
-	// so it is path-safe by construction; join defensively anyway.
+	// runID is scheduler-generated hex, path-safe by construction; join
+	// defensively anyway.
 	f, err := os.OpenFile(filepath.Join(dir, runID+".ndjson"),
 		os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
@@ -501,32 +406,19 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		return func([]byte) error { return nil }, func() {}
 	}
 	w := bufio.NewWriterSize(f, 64*1024)
-	// Write failures degrade to a no-op sink (one WARN), matching the
-	// open-failure path above: a naozhi-side disk error must not abort a
-	// healthy run — propagating it would classify the run failed-transport
-	// and Stop a microVM whose stream is fine (review PR-2b F8). Per-line
-	// Flush keeps §6.1 crash durability: an abnormal process exit loses at
-	// most the line being written, not a 64KB buffered tail.
+	// Write failures degrade to a no-op sink (one WARN): a naozhi-side disk error
+	// must not abort a healthy run — propagating it would classify the run
+	// failed-transport and Stop a microVM whose stream is fine. Per-line Flush
+	// keeps crash durability to at most the line being written.
 	degraded := false
 	sink = func(line []byte) error {
 		if degraded {
 			return nil
 		}
-		// R20260613-ARCH-2 / #2083: the reader (SandboxRunEvents) caps a
-		// single NDJSON token at sandboxEventsMaxLineSize via bufio.Scanner.
-		// The SSE decoder shares that exact ceiling
-		// (agentcore.MaxEnvelopeLineBytes), so a line the decoder accepted is
-		// normally readable back. This guard is the last line of defence
-		// against any line that still reaches the cap (e.g. JSON re-encoding
-		// of an at-ceiling envelope): writing it would make the reader's
-		// scanner hit ErrTooLong and discard every subsequent line in the
-		// file — turning one oversized frame into a silent loss of ALL later
-		// events. Degrade gracefully instead: drop the oversized line with a
-		// WARN and keep writing subsequent lines.
-		// `line` here is the raw envelope without the trailing '\n' this sink
-		// appends. The `>=` (not `>`) keeps the written form (line + '\n')
-		// from exceeding the scanner's token max: when len(line) == cap we
-		// drop, so every written line is < cap and line+'\n' <= cap.
+		// The reader (SandboxRunEvents) caps a token at sandboxEventsMaxLineSize; a
+		// line reaching it would make the scanner hit ErrTooLong and drop every later
+		// event, so drop just the oversized line with a WARN instead (#2083). `>=`
+		// keeps line+'\n' <= cap.
 		if len(line) >= sandboxEventsMaxLineSize {
 			lg.Warn("cron sandbox: oversized event line dropped; will not be readable by scanner",
 				"len", len(line))
@@ -545,12 +437,9 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 		}
 		return nil
 	}
-	// R20260623-020028-LB-7 (#2317): the closer is the single fd-release path
-	// and callers invoke it as a plain statement (so the explicit flush can be
-	// ordered before the terminal RunEnded broadcast). A panic in RunJob would
-	// skip that statement and leak the *os.File. Make the body idempotent with
-	// sync.Once so callers can also `defer closeSink()` as a panic-safe
-	// fallback without double-closing the fd.
+	// Single fd-release path, idempotent via sync.Once so callers can order the
+	// explicit flush before the RunEnded broadcast AND `defer closeSink()` as a
+	// panic-safe fallback without double-closing (#2317).
 	var closeOnce sync.Once
 	closer = func() {
 		closeOnce.Do(func() {
@@ -566,23 +455,14 @@ func (s *Scheduler) sandboxEventSink(jobID, runID string, lg *slog.Logger) (sink
 }
 
 // SandboxRunEvents reads the persisted event log for one sandbox run
-// (sandboxevents/<jobID>/<runID>.ndjson, §6.1 streaming-to-disk) and returns
-// up to maxLines raw NDJSON lines (each one decoded-and-re-encoded JSON, no
-// trailing newline). The dashboard run-detail view (RFC §7.3) renders these
-// as the event stream — identical to a local session's message render.
+// (sandboxevents/<jobID>/<runID>.ndjson) and returns up to maxLines raw NDJSON
+// lines (no trailing newline) for the dashboard run-detail event stream.
 //
-// Returns (nil, nil) when the file does not exist (a local run, an
-// events-disabled deploy, or a run whose sink degraded on open) so the
-// caller renders an empty stream rather than an error. jobID/runID are
-// shape-validated by the caller (dashboard handler) before reaching here;
-// re-validated defensively to keep the path traversal-safe even on a
-// future internal caller.
-//
-// maxLines caps the response: a 60-minute run can emit tens of thousands of
-// frames, and the dashboard only needs a bounded tail-or-head. We keep the
-// FIRST maxLines (the run's opening — boot + early turns are the most useful
-// for "what happened / where did it break"); a truncated marker is appended
-// so the UI can show "… N more events".
+// Returns (nil, nil) when the file does not exist (local run, events disabled,
+// sink degraded on open) so the caller renders an empty stream. jobID/runID
+// are re-validated defensively for path safety. maxLines keeps the FIRST
+// maxLines (boot + early turns are the most useful for "where did it break");
+// the truncated flag lets the UI show "… N more events".
 func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byte, bool, error) {
 	if s == nil || s.storePath == "" {
 		return nil, false, nil
@@ -593,9 +473,9 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 	if maxLines <= 0 {
 		maxLines = sandboxEventsDefaultMax
 	}
-	// Bound concurrent reads (mirrors transcriptSem): a non-blocking acquire
-	// fails fast with ErrSandboxEventsBusy rather than letting a burst pin
-	// unbounded scanner buffers [R20260613-SEC-5 / #2066].
+	// Bound concurrent reads: a non-blocking acquire fails fast with
+	// ErrSandboxEventsBusy rather than letting a burst pin unbounded scanner
+	// buffers (#2066).
 	select {
 	case sandboxEventsSem <- struct{}{}:
 		defer func() { <-sandboxEventsSem }()
@@ -614,9 +494,8 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 
 	out := make([][]byte, 0, maxLines)
 	sc := bufio.NewScanner(f)
-	// Cap a single stream-json line at sandboxEventsMaxLineSize (~1 MB):
-	// large enough for a realistic tool-result frame, small enough that a
-	// concurrent burst cannot pin gigabytes of scanner buffers.
+	// Cap a single line at sandboxEventsMaxLineSize so a concurrent burst cannot
+	// pin gigabytes of scanner buffers.
 	sc.Buffer(make([]byte, 64*1024), sandboxEventsMaxLineSize)
 	truncated := false
 	for sc.Scan() {
@@ -627,10 +506,8 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 		cp := make([]byte, len(line))
 		copy(cp, line)
 		out = append(out, cp)
-		// Check the cap AFTER appending: a file with exactly maxLines valid
-		// lines must NOT report truncated. We only set the flag once we have
-		// actually accumulated maxLines AND a further valid line exists, so
-		// peek for the next valid line before declaring truncation.
+		// A file with exactly maxLines valid lines must NOT report truncated: peek
+		// for a further valid line first.
 		if len(out) >= maxLines {
 			if hasMoreValidJSON(sc) {
 				truncated = true
@@ -639,10 +516,8 @@ func (s *Scheduler) SandboxRunEvents(jobID, runID string, maxLines int) ([][]byt
 		}
 	}
 	if err := sc.Err(); err != nil {
-		// Return what we have plus the error; the caller logs + still renders
-		// the partial stream (a corrupt tail must not hide a healthy head).
-		// A read error mid-stream means the tail is missing → truncated, so
-		// the UI signals an incomplete stream rather than rendering it whole.
+		// Return the partial head plus the error; a missing tail means truncated, so
+		// the UI signals an incomplete stream.
 		return out, true, fmt.Errorf("cron sandbox: scan event log: %w", err)
 	}
 	return out, truncated, nil
@@ -668,29 +543,19 @@ func hasMoreValidJSON(sc *bufio.Scanner) bool {
 const sandboxEventsDefaultMax = 2000
 
 // sandboxEventsMaxLineSize caps a single NDJSON line on the sandbox event
-// wire. It must equal agentcore.MaxEnvelopeLineBytes — the single source of
-// truth shared with the SSE decoder (holdStream) — so the writer's accept
-// ceiling and this reader's scanner token limit can never drift. cron does
-// NOT import internal/agentcore (that would pull the AWS SDK into the cron
-// build graph, violating the isolation contract above [R202606-ARCH-1]);
-// instead both derive from the same leaf-package expression
-// limits.MaxStreamJSONLine + 64KiB. no_agentcore_import_test.go pins the
-// no-import edge.
-//
-// R20260613-214326-ARCH-1 (#2083): a previous split (16MB writer / 1MB
-// reader, R20260613-SEC-5 / #2066) let 1–16MB tool-result lines write but
-// never read — the scanner hit bufio.ErrTooLong and silently dropped that
-// line plus every later event. Reader-side memory is bounded by
-// sandboxEventsSemCap (concurrent-read semaphore), not by shrinking this cap
-// below the writer's.
+// wire. It must equal agentcore.MaxEnvelopeLineBytes (the SSE decoder's
+// ceiling) so the writer's accept ceiling and this reader's scanner token limit
+// never drift: a writer/reader split let lines write but never read back,
+// silently dropping every later event (#2083). cron cannot import
+// internal/agentcore (AWS SDK; no_agentcore_import_test.go pins the edge), so
+// both derive from limits.MaxStreamJSONLine + 64KiB. Reader memory is bounded
+// by sandboxEventsSemCap, not by shrinking this cap.
 const sandboxEventsMaxLineSize = limits.MaxStreamJSONLine + (64 << 10)
 
-// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads, mirroring the
-// dashboard transcript endpoint's transcriptSem (cap 8). Each in-flight read
-// holds up to maxLines×64KB output plus a scanner buffer; without this gate a
-// single authenticated client could fan out enough concurrent reads to exhaust
-// memory [R20260613-SEC-5 / #2066]. A non-blocking acquire fails fast rather
-// than parking goroutines.
+// sandboxEventsSemCap bounds concurrent SandboxRunEvents reads (mirrors the
+// dashboard transcriptSem). Each read holds up to maxLines×64KB plus a scanner
+// buffer; without the gate one authenticated client could exhaust memory
+// (#2066). Non-blocking acquire fails fast rather than parking goroutines.
 const sandboxEventsSemCap = 8
 
 // sandboxEventsSem limits concurrent SandboxRunEvents reads process-wide.
@@ -699,11 +564,9 @@ const sandboxEventsSemCap = 8
 // test binary.
 var sandboxEventsSem = make(chan struct{}, sandboxEventsSemCap)
 
-// deleteJobSandboxEvents removes a deleted job's sandboxevents subtree
-// (sandboxevents/<jobID>/). Best-effort: a missing tree is fine. A 60-minute
-// sandbox run can emit several MB; leaving this tree orphaned on job deletion is
-// a bounded but observable disk leak. Called from deleteJobRuns after the runs/
-// and runsnapshots/ subtrees are removed. R20260614-LOGIC-2.
+// deleteJobSandboxEvents removes a deleted job's sandboxevents subtree.
+// Best-effort: a missing tree is fine. A 60-minute run can emit several MB, so
+// leaving it orphaned would be an observable disk leak.
 func (s *Scheduler) deleteJobSandboxEvents(jobID string) {
 	if s.storePath == "" || !IsValidID(jobID) {
 		return

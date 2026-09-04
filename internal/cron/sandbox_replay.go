@@ -8,15 +8,11 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// ConfirmSandboxRun resolves a §7.4 queue entry as "operator confirmed the run
-// already completed" — the `确认已完成` action (RFC §7.4). It does NOT replay:
-// the operator has checked the side effect already landed (e.g. the PR was
-// pushed), so re-running would duplicate it. Removing the attention record is
-// the whole effect — the original CronRun stays failed-transport in history
-// (its fate was genuinely unknown to naozhi), but it no longer demands action.
-//
-// Idempotent: a run that is not in the queue (already resolved, never enqueued)
-// returns nil. The runID is shape-validated; an invalid id is the only error.
+// ConfirmSandboxRun resolves a queue entry as "operator confirmed the run
+// already completed" (确认已完成). It does NOT replay: the side effect already
+// landed, so re-running would duplicate it. Removing the attention record is
+// the whole effect — the original CronRun stays failed-transport in history.
+// Idempotent: a run not in the queue returns nil; an invalid id is the only error.
 func (s *Scheduler) ConfirmSandboxRun(runID string) error {
 	if !IsValidID(runID) {
 		return errInvalidAttentionID
@@ -29,37 +25,22 @@ func (s *Scheduler) ConfirmSandboxRun(runID string) error {
 }
 
 // ReplaySandboxRun re-executes a sandbox run from its persisted input snapshot
-// (RFC §7.3 「重放」 + §7.4 `确认未完成，重放`). It is the capstone of the §6.2
-// double-run containment: replaying a transport-failed run is ONLY safe after
-// the original microVM is confirmed dead, so this method embeds §6.2 rule 1
-// (StopSession-before-replay) as a precondition, not an afterthought.
-//
-// Flow:
-//
-//  1. Validate: job exists, is at placement=sandbox, snapshot exists.
-//  2. §6.2 rule 1 — if this run is in the attention queue with a runtime
-//     session id (transport/orphaned), StopSession FIRST. A failed Stop means
-//     the microVM's fate is still unknown → refuse (ErrStopUnconfirmed). The
-//     operator retries; StopSession is idempotent.
-//  3. Dispatch a fresh run-once microVM with the snapshot's payload (prompt +
-//     model), tagged replay_of=<origRunID> so the new CronRun links to the
-//     original. The job's CURRENT notify target / label are used (the run
-//     belongs to the live job), but the PAYLOAD is the snapshot's (§5.2 "replay
-//     re-injects the same input", immune to a since-edited Job.Prompt).
-//  4. Resolve the attention record (the incident is now actioned).
-//
-// Returns the new run's ID on success. The dispatch itself runs synchronously
-// up to CAS admission, then the microVM invoke runs in a goroutine registered
-// with triggerWG (same lifecycle as TriggerNow) so the HTTP handler returns
-// promptly and Stop() drains it.
+// (重放 / 确认未完成，重放). Replaying a transport-failed run is ONLY safe after
+// the original microVM is confirmed dead, so StopSession-before-replay is a
+// precondition: if the run is in the attention queue with a runtime session
+// id, a failed Stop refuses with ErrStopUnconfirmed (operator retries; Stop is
+// idempotent). The new run uses the job's CURRENT notify target / label but the
+// snapshot's PAYLOAD (prompt + model), tagged replay_of=<origRunID>, and the
+// attention record is resolved afterwards. Returns the new run's ID; dispatch
+// is synchronous up to CAS admission, then the invoke runs in a goroutine
+// registered with triggerWG so Stop() drains it.
 func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if !IsValidID(jobID) || !IsValidID(origRunID) {
 		return "", errInvalidAttentionID
 	}
 
-	// Gate Add-before-Wait against a concurrent Stop (mirrors TriggerNow's
-	// R20260610-085718-LB-7 reasoning): read s.stopped under the same RLock
-	// that snapshots the job so the registration cannot race the drain.
+	// Read s.stopped under the same RLock that snapshots the job so the triggerWG
+	// registration cannot race Stop's drain.
 	s.mu.RLock()
 	if s.stopped.Load() {
 		s.mu.RUnlock()
@@ -81,8 +62,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", ErrSandboxUnavailable
 	}
 
-	// Read the input snapshot — the payload to re-inject. No snapshot → no
-	// payload → cannot replay (§5.2).
+	// No snapshot → no payload → cannot replay.
 	man, found, err := s.SandboxRunSnapshotManifest(jobID, origRunID)
 	if err != nil {
 		return "", err
@@ -92,35 +72,22 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	}
 	prompt, perr := s.SandboxRunSnapshotPrompt(man.PromptHash)
 	if perr != nil {
-		// The manifest exists but the prompt blob is gone (GC'd / corrupt).
-		// Without the prompt there is nothing to inject.
+		// Manifest exists but the prompt blob is gone (GC'd / corrupt): nothing to inject.
 		return "", ErrNoSnapshot
 	}
 	if prompt == "" {
 		return "", ErrNoSnapshot
 	}
-	// R202606h-SEC-2 (#2319): the snapshot prompt blob was written by a PRIOR
-	// naozhi version, before the current containsCronUnsafe / validateCronPrompt
-	// allowlist (C0 / C1 / bidi / LS-PS) existed or with a looser version of it.
-	// The write-edge validation does not re-run on this read path, so a legacy
-	// snapshot can carry control / reordering runes straight into the microVM
-	// prompt. scheduler_finish.go's persistedPrompt scrub only cleans the
-	// on-disk run record, not the in-memory prompt that flows into the next
-	// executeSandbox. Scrub here so the replayed payload is sanitised before it
-	// is injected — same osutil.SanitizeForLog(MaxPromptBytes) call, idempotent
-	// on already-clean prompts.
+	// The blob may predate the current containsCronUnsafe / validateCronPrompt
+	// allowlist and write-edge validation does not re-run on reads, so scrub here
+	// before the payload is injected into the microVM (#2319). Idempotent on
+	// already-clean prompts.
 	prompt = osutil.SanitizeForLog(prompt, MaxPromptBytes)
 
-	// §6.2 rule 1: if the original is in the attention queue, the microVM may
-	// still be alive. StopSession FIRST; only a confirmed Stop unlocks replay.
-	//
-	// FAIL-CLOSED on a read error: a corrupt/torn attention file (writeSandbox-
-	// Attention is a plain WriteFile, so a crash mid-write leaves a truncated
-	// record) or a transient os.ReadFile fault means we CANNOT confirm the
-	// original microVM's fate. Proceeding would skip the Stop and risk the
-	// double-run the whole containment exists to prevent (review PR-6 H1), so
-	// refuse — same operator-retry semantics as a failed Stop (StopSession is
-	// idempotent; once the record reads cleanly the retry completes).
+	// If the original is in the attention queue the microVM may still be alive:
+	// StopSession FIRST. FAIL-CLOSED on a read error — a torn/corrupt attention
+	// file means the original's fate cannot be confirmed, and proceeding would skip
+	// the Stop and risk the double-run this containment exists to prevent.
 	rec, qok, qerr := s.getSandboxAttention(origRunID)
 	if qerr != nil {
 		slog.Error("cron sandbox: replay refused — attention record unreadable, microVM fate unknown",
@@ -128,10 +95,8 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		return "", ErrStopUnconfirmed
 	}
 	if qok && rec.RuntimeSessionID != "" {
-		// R20260613-SEC-2: validate RuntimeSessionID read from the attention
-		// record (operator-writable disk file) before passing to StopSession.
-		// Invalid format → refuse replay (same semantics as a failed Stop —
-		// ErrStopUnconfirmed — so the microVM fate stays conservatively unknown).
+		// RuntimeSessionID comes from an operator-writable file; an invalid format
+		// refuses replay (fate stays unknown).
 		if !isValidRuntimeSessionID(rec.RuntimeSessionID) {
 			slog.Error("cron sandbox: replay refused — attention record has invalid RuntimeSessionID format",
 				"job_id", jobID, "orig_run_id", origRunID, "runtime_session_id", rec.RuntimeSessionID)
@@ -148,16 +113,11 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 		slog.Info("cron sandbox: pre-replay Stop confirmed (§6.2 rule 1)", "job_id", jobID, "orig_run_id", origRunID)
 	}
 
-	// Register the replay goroutine with triggerWG before returning so a
-	// concurrent Stop() drains it (same contract as TriggerNow). The Add MUST
-	// happen under the s.stopped RLock: Stop() sets s.stopped before draining
-	// triggerWG via Wait(), so an Add outside the lock could land a positive
-	// delta from a zero counter concurrently with that Wait — the
-	// R20260610-085718-LB-7 (#2012) Add-before-Wait violation that lets the
-	// replay goroutine escape the drain barrier (review PR-6 H2). The earlier
-	// stopped check (under the snapshot RLock) is now stale — re-check here.
-	// Do NOT hold the lock across dispatchReplay: it calls snapshotJob, which
-	// re-acquires s.mu.RLock (writer-starvation risk).
+	// triggerWG.Add MUST happen under the s.stopped RLock: Stop() sets s.stopped
+	// before Wait(), so an Add outside the lock could land on a zero counter
+	// concurrently with the drain and let the goroutine escape (#2012). The
+	// earlier stopped check is stale by now — re-check. Do NOT hold the lock
+	// across dispatchReplay: it re-acquires s.mu.RLock via snapshotJob.
 	s.mu.RLock()
 	if s.stopped.Load() {
 		s.mu.RUnlock()
@@ -167,17 +127,14 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	s.mu.RUnlock()
 	newRunID, derr := s.dispatchReplay(jobCopy, prompt, man.Model, origRunID)
 	if derr != nil {
-		// CAS lost / generate failed: the goroutine was never spawned, so undo
-		// the registration we just added. dispatchReplay only returns an error
-		// on these pre-spawn failures; once it spawns it returns (runID, nil).
+		// Pre-spawn failure (CAS lost / generate failed): undo the registration; once
+		// spawned, the goroutine owns Done.
 		s.triggerWG.Done()
 		return "", derr
 	}
 
-	// The incident is actioned: drop the attention record. Best-effort — a
-	// leftover record would only re-surface a now-replayed run in the queue;
-	// the operator can confirm-dismiss it. Done AFTER dispatch so a dispatch
-	// failure leaves the record in place for a retry.
+	// The incident is actioned: drop the attention record. Best-effort, and done
+	// AFTER dispatch so a dispatch failure leaves the record for a retry.
 	if rerr := s.removeSandboxAttention(origRunID); rerr != nil {
 		slog.Warn("cron sandbox: replay dispatched but attention record removal failed", "orig_run_id", origRunID, "err", rerr)
 	}
@@ -185,22 +142,15 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 }
 
 // dispatchReplay drives one replay run through the same CAS-admission +
-// finalizer + gauge protocol as executeOpt, but injects the SNAPSHOT payload
-// (prompt/model) and tags the run replay_of=origRunID. The run goroutine body
-// executes inside the same runScaffold envelope executeOpt uses (finalizer +
-// gauge defers, completed-guarded panic recover), so executeSandbox's
-// finishRun (which calls finalize()) and the scaffold defer cooperate the
-// same way on both paths.
-//
+// finalizer + gauge protocol as executeOpt (via runScaffold), but injects the
+// SNAPSHOT payload (prompt/model) and tags the run replay_of=origRunID.
 // Returns (newRunID, nil) once the run goroutine is spawned; (–, err) on a
 // pre-spawn failure (CAS lost, run-id generation) so the caller can undo its
 // triggerWG.Add. The spawned goroutine owns the triggerWG.Done.
 func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (string, error) {
-	// Admission: the per-job CAS gate. A replay must not run concurrently with
-	// a scheduled tick / manual trigger / another replay of the same job — the
-	// same overlap invariant executeOpt enforces. execAcquireSlot emits the
-	// overlap-skip pair on loss, but for an operator-initiated replay we prefer
-	// a clean 409 over a phantom skip frame, so we take the gate directly.
+	// Per-job CAS gate: a replay must not overlap a tick / manual trigger / another
+	// replay. Taken directly (not via execAcquireSlot) so an operator-initiated
+	// replay gets a clean 409 instead of a phantom overlap-skip frame.
 	gate := s.jobGateLock(j.ID)
 	gate.Lock()
 	inflight := s.jobInflight(j.ID)
@@ -225,10 +175,8 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 		Trigger:   TriggerManual,
 	})
 
-	// Snapshot the job's CURRENT routing fields (notify target, label,
-	// placement) — the replay belongs to the live job. The PAYLOAD is the
-	// snapshot's, injected below; snap.prompt is only used for the run record's
-	// stored prompt, which we override to the replayed prompt for fidelity.
+	// Snapshot the job's CURRENT routing fields (notify target, label, placement);
+	// the PAYLOAD is the snapshot's, injected below.
 	snap := s.snapshotJob(j)
 	notifyTo := s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
 
@@ -252,22 +200,16 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 
 	go func() {
 		defer s.triggerWG.Done()
-		// R202606-ARCH-7 (#2174): the finalizer/gauge defers and the
-		// completed-guarded panic recover are owned by runScaffold (shared with
-		// executeOpt). onPanic runs only when executeSandbox panicked before
-		// reaching finishSandboxRun → emitRunEnded, and only AFTER the scaffold
-		// has finalized (finalize-before-broadcast, R20260614-032346-LB-replay /
-		// #2094).
+		// runScaffold owns the finalizer/gauge defers and the completed-guarded panic
+		// recover (shared with executeOpt); onPanic runs only after the scaffold has
+		// finalized (#2174, #2094).
 		runScaffold{
 			finalizer: finalizer,
 			jobID:     snap.jobID,
 			onPanic: func(any) {
-				// #2064: emitRunStarted fired synchronously in the caller frame
-				// above, so a panic that aborts executeSandbox BEFORE it reaches
-				// finishSandboxRun → emitRunEnded would leave subscribers with a
-				// started(queued) frame and no matching ended frame — the run
-				// hangs in "queued" forever. Close the lifecycle here so the
-				// dashboard timeline always pairs.
+				// emitRunStarted fired synchronously above, so a panic before
+				// finishSandboxRun → emitRunEnded would leave the run "queued" forever;
+				// close the lifecycle here (#2064).
 				s.emitRunEnded(RunEndedEvent{
 					JobID:      snap.jobID,
 					RunID:      runID,
@@ -278,13 +220,9 @@ func (s *Scheduler) dispatchReplay(j *Job, prompt, model, origRunID string) (str
 					ErrorClass: ErrClassSandboxFailed,
 					ErrorMsg:   "sandbox replay panicked before terminal record",
 				})
-				metrics.CronRunEndedTotal.Add(1) // R202606-ARCH-2: mirror recordTerminalResult:500; completed==false guarantees no double-count
-				// #2223: this panic path bypasses finishSandboxRunWith +
-				// finishRun → bumpRunStateMetrics, so it must bump the
-				// per-state + sandbox failure counters itself (mirrors the
-				// orphan branch in sandbox_pending.go). State is RunStateFailed
-				// by construction; without this CronRunFailedTotal /
-				// CronSandboxRunFailedTotal undercount vs CronRunEndedTotal.
+				metrics.CronRunEndedTotal.Add(1) // completed==false guarantees no double-count
+				// This path bypasses finishRun → bumpRunStateMetrics, so bump the per-state
+				// + sandbox failure counters itself or they undercount vs CronRunEndedTotal (#2223).
 				metrics.CronRunFailedTotal.Add(1)
 				metrics.CronSandboxRunFailedTotal.Add(1)
 			},

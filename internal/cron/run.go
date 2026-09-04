@@ -2,40 +2,16 @@ package cron
 
 import "time"
 
-// CronRun is the persistent record of a single cron job execution.
-// Lifecycle:
+// CronRun is the persistent record of a single cron job execution. It is
+// created in memory at executeOpt's CAS gate and written once by finishRun via
+// runStore.Append to runs/<jobID>/<run_id>.json on the terminal transition;
+// skipPersist runs (overlap_skipped / canceled / paused_concurrent) are not
+// persisted. GC trims to (keepCount AND keepWindow) per job.
 //
-//   - Created in-memory at executeOpt CAS gate (runInflight 持有 RunID/
-//     StartedAt/Phase/Trigger，但不写盘).
-//   - On terminal transition, finishRun calls runStore.Append to write
-//     a single <runs/<jobID>/<run_id>.json> file under storage root, and
-//     updates index.json. Skipped runs whose skipPersist=true do NOT
-//     persist (overlap_skipped / canceled / paused_concurrent) — see
-//     RFC §4.2 for the rationale (avoid noise, transient by definition).
-//   - List / detail handlers read it back via runStore.List / Get.
-//   - GC trims to (max 200 条 AND 30 天) per job.
-//
-// Field choices vs. Job:
-//
-//   - Prompt / WorkDir / Fresh are SNAPSHOT at execute time, not the
-//     current Job values. This prevents Prompt drift: a user editing
-//     Job.Prompt mid-history must still be able to see "what prompt
-//     produced run X's result".
-//   - SessionID is the Claude session_id this run produced. fresh=false
-//     mode: same value across many CronRuns (all sharing one JSONL).
-//     fresh=true mode: each CronRun has a unique SessionID linking to
-//     its own JSONL file.
-//   - Result is rune-truncated to 4K (matches recordResultP0 path); the
-//     full Send result text is not preserved (it lives only in the
-//     session's persistent event log + JSONL).
-//   - ErrorMsg is path-redacted + sanitized via the same pipeline that
-//     populates Job.LastError so dashboard rendering does not need a
-//     second sanitization step.
-//
-// Wire shape: every JSON tag has an explicit name. omitempty applies to
-// fields whose zero value is meaningless (Result for failures, ErrorMsg
-// for successes, EndedAt for the legacy "running" snapshot which is
-// never persisted but the field stays present for symmetric tooling).
+// Prompt / WorkDir / Fresh are SNAPSHOTS at execute time so editing Job.Prompt
+// never changes what a past run shows. SessionID is shared across runs when
+// fresh=false and unique per run when fresh=true. Result is rune-truncated;
+// ErrorMsg is already redacted + sanitized like Job.LastError.
 type CronRun struct {
 	RunID      string      `json:"run_id"`
 	JobID      string      `json:"job_id"`
@@ -59,26 +35,18 @@ type CronRun struct {
 	ErrorClass  ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string     `json:"error_msg,omitempty"`
 
-	// ReplayOf links a replay run to the original run it re-executed
-	// (agentcore-cloud-sandbox §7.3). Empty for original runs. The
-	// dashboard renders a source-chain badge from it, so it lives on both
-	// CronRun and CronRunSummary (the list view shows the chain too).
+	// ReplayOf links a replay run to the original it re-executed. Empty for
+	// original runs; also carried on CronRunSummary for the list-view badge.
 	ReplayOf string `json:"replay_of,omitempty"`
 
-	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs
-	// (RFC §5.1/§7.3): runtime arn, image version, exit status, cost,
-	// duration, peak memory. Pointer + omitempty so local runs persist NO
-	// sandbox_meta key (wire-read-safe: old readers skip it, and a local
-	// run's JSON is byte-identical to pre-Phase-2). The detail endpoint
-	// surfaces it; summary() deliberately drops it (list endpoints load
-	// 50 jobs × 5 recent runs — receipts would bloat the payload).
+	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs.
+	// Pointer + omitempty so local runs persist NO sandbox_meta key; summary()
+	// drops it to keep list payloads small.
 	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
 
-	// CostUSD is the per-run cost for LOCAL (non-sandbox) runs, captured from
-	// the CLI's cumulative total_cost_usd via SendResult.CostUSD
-	// (R202606e-ARCH-1 #2280). Sandbox runs carry cost in SandboxMeta instead
-	// and leave this 0. summary() prefers SandboxMeta.CostUSD when present and
-	// falls back to this field so per-job monthly aggregates count local runs.
+	// CostUSD is the per-run cost for LOCAL runs (CLI total_cost_usd); sandbox
+	// runs carry cost in SandboxMeta and leave this 0. summary() prefers
+	// SandboxMeta.CostUSD and falls back to this (#2280).
 	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
@@ -99,11 +67,9 @@ type CronRunSummary struct {
 	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
 	// dashboard draws a "replay of …" badge directly off the summary.
 	ReplayOf string `json:"replay_of,omitempty"`
-	// CostUSD is the per-run sandbox cost (from SandboxMeta.CostUSD), carried
-	// in the slim summary so the §7.5 per-run cost小字 + the per-job monthly
-	// aggregate (pure front-end sum over recent_runs) need no detail fetch.
-	// Just a float — the full receipt stays out of the summary. 0/omitted for
-	// local runs and for sandbox runs that produced no cost (transport fail).
+	// CostUSD is carried in the slim summary so the per-run cost and per-job
+	// monthly aggregate (front-end sum over recent_runs) need no detail fetch.
+	// 0/omitted for local runs and sandbox runs that produced no cost.
 	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
@@ -126,9 +92,8 @@ func (r *CronRun) summary() CronRunSummary {
 	if r.SandboxMeta != nil {
 		s.CostUSD = r.SandboxMeta.CostUSD
 	} else {
-		// R202606e-ARCH-1 (#2280): local runs have no SandboxMeta receipt;
-		// fall back to the run's own captured cost so the per-job monthly
-		// aggregate (front-end sum over recent_runs) counts local cron too.
+		// Local runs have no receipt; fall back to the captured cost so monthly
+		// aggregates count them (#2280).
 		s.CostUSD = r.CostUSD
 	}
 	return s

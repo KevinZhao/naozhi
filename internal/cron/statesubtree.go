@@ -9,16 +9,9 @@ import (
 )
 
 // stateSubtree resolves a sibling subtree of the cron store file
-// (<store-dir>/<parts...>). Returns "" when persistence is disabled
-// (store-less test fixtures skip the §6.x state machinery entirely), so
-// every caller can fold its "if s.storePath == ”" early-return into this
-// one helper.
-//
-// #2175 (DRY): five sandbox-state writers (sandboxpending, sandboxattention,
-// sandboxevents/<jobID>, runsnapshots, runsnapshots/blobs) previously
-// open-coded filepath.Join(filepath.Dir(s.storePath), …). Centralising the
-// derivation keeps them from drifting and gives the symlink guard (#2166) a
-// single MkdirAll chokepoint to wrap.
+// (<store-dir>/<parts...>). Returns "" when persistence is disabled so every
+// caller folds its storePath=="" early-return into this helper; all sandbox-
+// state writers derive their paths here so the symlink guard has one chokepoint.
 func (s *Scheduler) stateSubtree(parts ...string) string {
 	if s.storePath == "" {
 		return ""
@@ -27,23 +20,12 @@ func (s *Scheduler) stateSubtree(parts ...string) string {
 }
 
 // mkdirStateSubtree creates a state subtree (0700) under the cron store
-// directory and refuses it if ANY component below the store dir resolved to a
-// symlink or a non-directory.
-//
-// #2166: MkdirAll silently follows an existing symlink, so a planted
-// `<stateDir>/<subtree> → /elsewhere` would redirect every sandbox-state write
-// (pending reconcile handles, attention queue, event logs, replay snapshots)
-// into an attacker-chosen directory. A plain MkdirAll-then-Lstat only validates
-// the FINAL component, so a symlinked ANCESTOR (e.g. `sandboxevents` →
-// /elsewhere, with the per-job leaf created inside the target) slips through.
-// We instead create each level below the trusted store dir one segment at a
-// time with a non-following os.Mkdir, then Lstat that exact segment before
-// descending: Mkdir-then-Lstat (NOT Lstat-then-Mkdir) closes the TOCTOU window,
-// and Lstat does not follow the segment, so a symlink surfaces as
-// fs.ModeSymlink and we bail. The store dir itself is trusted (guarded at
-// store init / supplied by config), mirroring the runs/ root + per-job guard
-// precedent in runstore.go (newRunStore + ensureJobDir). Single-operator hosts
-// are low risk; multi-tenant deployments are not.
+// directory and refuses it if ANY component below the store dir is a symlink
+// or non-directory (#2166): MkdirAll follows an existing symlink, and a
+// final-component-only Lstat misses a symlinked ANCESTOR. Each level is
+// created with a non-following os.Mkdir then Lstat'd before descending;
+// Mkdir-then-Lstat (not Lstat-then-Mkdir) closes the TOCTOU window. The store
+// dir itself is trusted (config-supplied), mirroring runstore's root guard.
 func (s *Scheduler) mkdirStateSubtree(dir string) error {
 	base := filepath.Dir(s.storePath)
 	rel, err := filepath.Rel(base, dir)

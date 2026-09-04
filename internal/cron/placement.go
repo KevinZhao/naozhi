@@ -10,7 +10,7 @@ import "fmt"
 // would buy nothing.
 const (
 	// PlacementLocal runs the job on this host through the session router
-	// (the historical behaviour). The empty string means the same thing —
+	// (the default). The empty string means the same thing —
 	// jobs created before the field existed keep working unchanged.
 	PlacementLocal = "local"
 	// PlacementSandbox runs the job as a run-once AgentCore microVM job:

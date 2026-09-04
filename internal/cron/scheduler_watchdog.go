@@ -1,11 +1,7 @@
-// scheduler_watchdog.go: cron send deadline watchdog + error classification.
-//
-// Split out of scheduler_run.go (move-only, no behaviour change): the
-// deadline-driven interrupt machinery (abortResult / deadlineInterrupter /
-// runDeadlineWatchdog / sendWithWatchdog) plus classifyExecError. These have
-// no s.stopCtx code-reads and no finishRun transaction concerns — they are a
-// self-contained sub-machine the run path calls into. Methods/functions stay
-// in package cron so private fields remain accessible without exporting.
+// scheduler_watchdog.go: cron send deadline watchdog + error classification —
+// the deadline-driven interrupt machinery (abortResult / deadlineInterrupter /
+// runDeadlineWatchdog / sendWithWatchdog) plus classifyExecError. A
+// self-contained sub-machine the run path calls into; no s.stopCtx reads.
 
 package cron
 
@@ -21,30 +17,13 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// abortResult bundles the watchdog's exit signal: whether it actually
-// fired the interrupt (i.e. the ctx ended via DeadlineExceeded, not via
-// success-path Cancel) and what the InterruptViaControl outcome was when
-// it did. The fired flag is the discriminator the caller logs.
-//
-// outcome is the cron-local InterruptOutcome; the production adapter
-// in internal/wireup/cron_router_adapter.go casts session.InterruptOutcome
-// → cron.InterruptOutcome via a numeric cast, with an init() panic
-// pinning the ordinals.
-//
-// R238-ARCH-20 (#787) proposed renaming deadlineInterrupter →
-// RunInterrupter and switching abortResult to a fresh InterruptResult
-// enum to "break the dependency on session.InterruptOutcome". The
-// decoupling is already complete: the cron-local InterruptOutcome above
-// (defined in agent_opts.go) is the public type; cron does NOT import
-// session.InterruptOutcome anywhere in production code (the last
-// reverse import was eliminated by R20260527122801-ARCH-1, see the
-// banner in scheduler_session.go). The proposed rename is a cosmetic
-// preference rather than an architectural fix; deferring keeps the
-// type name aligned with the concept "deadline-driven interrupt"
-// across godoc / metrics / tests, and avoids a sweep across N test
-// files. The fired-vs-success ambiguity flagged in the issue is
-// addressed by abortResult.fired's godoc above (success path is
-// fired=false; only the watchdog firing sets fired=true).
+// abortResult bundles the watchdog's exit signal: fired reports whether the
+// interrupt actually ran (ctx ended via DeadlineExceeded, not success-path
+// Cancel — the success path is always fired=false) and outcome is the
+// InterruptViaControl result when it did. outcome is the cron-local
+// InterruptOutcome (agent_opts.go); internal/wireup/cron_router_adapter.go
+// casts session.InterruptOutcome → cron.InterruptOutcome numerically, with
+// an init() panic pinning the ordinals.
 type abortResult struct {
 	outcome InterruptOutcome
 	fired   bool
@@ -59,65 +38,33 @@ type deadlineInterrupter interface {
 	InterruptViaControl() InterruptOutcome
 }
 
-// watchdogInterruptTimeoutDefault caps how long runDeadlineWatchdog
-// will wait for InterruptViaControl to return before recording the
-// attempt as InterruptError and unblocking the caller. R236-GO-09 (#507):
-// pre-fix, a wedged session.InterruptViaControl (control_request channel
-// pinned by a stuck stdin write or a kernel-blocked syscall) would hold
-// the goroutine forever; the caller's `<-abortCh` then blocked forever
-// and finishRun was never invoked, leaving inflight.running=true so
-// every subsequent tick skipped the job until process restart. Bounding
-// the call at 3s lets finishRun fire on the recovery path so the next
-// tick has a chance to spawn a fresh session. The InterruptViaControl
-// call itself is not aborted (no underlying ctx) — it leaks until the
-// session teardown unblocks it, but the leak is bounded (per-run,
-// drained on session.Reset) and far less harmful than a permanently
-// stuck job.
+// watchdogInterruptTimeoutDefault caps how long runDeadlineWatchdog waits for
+// InterruptViaControl before recording InterruptError and unblocking the
+// caller (#507). Unbounded, a wedged control_request channel (stuck stdin
+// write) blocks `<-abortCh` forever, finishRun never runs, and
+// inflight.running=true makes every later tick skip the job until restart.
+// The call itself is not aborted (no underlying ctx); it leaks until session
+// teardown, bounded per-run and drained on session.Reset. The effective value
+// is per-Scheduler (watchdogInterruptTimeoutNanos, #1904).
 const watchdogInterruptTimeoutDefault = 3 * time.Second
-
-// R20260607-GO-4 (#1904): the effective interrupt-call timeout now lives on a
-// per-Scheduler atomic field (Scheduler.watchdogInterruptTimeoutNanos) rather
-// than a package-level var. This mirrors Scheduler.stopBudget (R249-CR-3 /
-// #947) and removes the t.Parallel() clobber where two tests each shortening a
-// global override bled into each other's watchdog read. runDeadlineWatchdog
-// now takes the timeout as a parameter (sendWithWatchdog passes the field via
-// s.watchdogInterruptTimeout()); tests inject per-instance via
-// setWatchdogInterruptTimeoutForScheduler, so timeout tests may finally run
-// t.Parallel().
 
 // watchdogParkedInterruptGoroutines is a LIVE gauge of inner
 // InterruptViaControl goroutines that outlived their watchdog after the
-// interrupt-call timeout fired and are still parked on a wedged stdin
-// write (R20260602-GO-005, #1632). It differs from
-// metrics.CronWatchdogInterruptTimeoutTotal, which only counts cumulative
-// timeout events: a persistent (non-fresh) cron job that never reaches
-// session.Reset can accumulate permanently-parked goroutines, and the
-// cumulative counter cannot distinguish "fired N times, all since
-// drained" from "N still leaked right now". This gauge is incremented
-// when the timeout branch parks the inner goroutine and decremented when
-// that goroutine eventually returns (if ever), so operators can alert on
-// a steadily rising live value rather than inferring it from process
-// goroutine growth. expvar registration is package-global; the var stays
-// in cron's file domain (no internal/metrics edit) since it observes a
-// cron-internal lifecycle.
+// interrupt-call timeout and are still parked on a wedged stdin write
+// (#1632). Unlike the cumulative metrics.CronWatchdogInterruptTimeoutTotal it
+// distinguishes "fired N times, all drained" from "N still leaked now": a
+// persistent (non-fresh) job that never reaches session.Reset accumulates
+// parked goroutines permanently. Incremented when the timeout branch parks
+// the goroutine, decremented when it eventually returns.
 var watchdogParkedInterruptGoroutines = expvar.NewInt("naozhi_cron_watchdog_parked_interrupt_goroutines")
 
-// abortChanPool recycles the buffer=1 abortResult channels that
-// runDeadlineWatchdog hands back to sendWithWatchdog. R20260607-PERF-001
-// (#1921): a 50-job @ 1Hz deployment allocated one `chan abortResult`
-// per tick (the steady-state path — the deadline-only `done` channel is
-// cold), 50 chan/s that the GC must reclaim. Pooling mirrors the package's
-// existing decodeSlotPool / marshalEntriesPool idiom.
-//
-// Reuse safety: the outer channel receives EXACTLY ONE send per run — the
-// AfterFunc callback (or the nil-guard pre-fill) — and sendWithWatchdog
-// either observes stop()==true (callback deregistered, NOT run, channel
-// stays empty) or drains the single value before returning. The inner
-// parked InterruptViaControl goroutine writes only to its own `done`
-// channel, never to this one, so a channel is provably empty + sender-free
-// by the time putAbortChan recycles it. putAbortChan additionally does a
-// non-blocking drain so a stale value can never bleed into the next user
-// even if a future caller forgets to drain.
+// abortChanPool recycles the buffer=1 abortResult channels runDeadlineWatchdog
+// hands to sendWithWatchdog (otherwise one alloc per tick, #1921). Reuse is
+// safe: the channel receives EXACTLY ONE send per run (the AfterFunc callback
+// or the nil-guard pre-fill) and sendWithWatchdog either observes stop()==true
+// (callback deregistered, channel stays empty) or drains that value before
+// returning; the parked InterruptViaControl goroutine writes only to its own
+// `done` channel. putAbortChan also drains non-blockingly as a safety net.
 var abortChanPool = sync.Pool{New: func() any { return make(chan abortResult, 1) }}
 
 // getAbortChan returns a clean buffer=1 abortResult channel from the pool.
@@ -142,80 +89,30 @@ func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
 	return time.Duration(s.watchdogInterruptTimeoutNanos.Load())
 }
 
-// runDeadlineWatchdog arranges for sess.InterruptViaControl to fire
-// exactly when ctx ends with DeadlineExceeded. The interrupt must run
-// concurrently with sess.Send, NOT after — Send's internal defer flips
-// Process.State Running→Ready the instant ctx fires, and
-// InterruptViaControl gates on State==StateRunning, so calling it
-// post-Send is dead code (returns ErrNoActiveTurn → outcome=no_turn).
+// runDeadlineWatchdog arranges for sess.InterruptViaControl to fire exactly
+// when ctx ends with DeadlineExceeded. It must run concurrently with sess.Send,
+// NOT after: Send's defer flips Process.State Running→Ready the instant ctx
+// fires and InterruptViaControl gates on StateRunning (post-Send = no-op).
+// context.AfterFunc keeps steady-state watchdog goroutines at ~0 (#492).
 //
-// Channel contract (R249-CR-27): the returned channel has buffer=1 and
-// is intentionally NOT closed. The publishing goroutine self-completes
-// thanks to buffer=1 — its single send never blocks, so it returns
-// regardless of whether the caller reads. The caller drains ch only to
-// observe the abort outcome (abort.fired / abort.outcome) for logging
-// and to ensure InterruptViaControl has finished before recording the
-// run state; failing to drain leaks the abortResult value, NOT the
-// goroutine, and is harmless for shutdown bookkeeping.
-//
-// On the success / non-deadline error path the caller cancels ctx
-// explicitly; the publishing callback observes ctx.Err()==Canceled,
-// skips InterruptViaControl, and returns abortResult{fired:false}.
-//
-// R247-GO-12 (#492): we use context.AfterFunc rather than spawning a
-// long-lived `<-ctx.Done()` goroutine. With per-tick CAS-protected runs,
-// a 50-job @ 1Hz deployment otherwise holds ~50 watchdog goroutines
-// concurrently for the duration of every Send (up to jobTimeout). With
-// AfterFunc the runtime only spawns a goroutine when ctx ends — briefly,
-// to invoke the callback — so the steady-state in-flight watchdog
-// goroutine count drops from O(in-flight runs) to ~0. The deadline /
-// cancel semantics are preserved exactly: the callback inspects
-// ctx.Err() the same way the goroutine used to.
-//
-// R20260603140013-GO-1 (#1705): returns context.AfterFunc's stop fn so
-// the caller can deregister the callback on the success / non-deadline
-// path BEFORE cancelling ctx. Without it, sendCancel() always ends ctx
-// with Canceled, the runtime still spawns the callback goroutine, and it
-// does a wasted chan send of a zero abortResult{} — one extra goroutine
-// spawn + chan send per successful cron Send (and 500 at once on a
-// 500-job shutdown burst). When stop() returns true the callback will
-// NOT run, so the caller MUST NOT block on the channel; stop() returning
-// false means the callback already fired (deadline path or a cancel that
-// raced the deadline) and a value is or will be on the channel. The nil-
-// guard fast path returns a no-op stop (callback already satisfied).
-// R20260607-PERF-001 (#1921): the channel is returned as a bidirectional
-// chan (not <-chan) solely so sendWithWatchdog can hand it back to
-// abortChanPool via putAbortChan after draining. Callers MUST treat it as
-// receive-only — the sole sender is this function's AfterFunc callback (or
-// the nil-guard pre-fill). Tests that only `<-ch` are unaffected.
-// timeout bounds the inner sess.InterruptViaControl call (R20260607-GO-4
-// #1904): it is the per-Scheduler watchdog interrupt timeout, passed in by the
-// caller rather than read from a package-level atomic so two t.Parallel()
-// tests with different overrides on different *Scheduler stay isolated. A
-// non-positive timeout falls back to watchdogInterruptTimeoutDefault so
-// direct test callers and any future call site cannot accidentally pass 0 and
-// fire the timeout branch instantly.
+// The channel is buffer=1, never closed, gets exactly one send, and must be
+// treated as receive-only (bidirectional only for pooling, #1921). stop is
+// AfterFunc's: true = callback will NOT run, so do not block on the channel;
+// false = a value is or will be there (#1705). timeout <= 0 → default (#1904).
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter, timeout time.Duration) (chan abortResult, func() bool) {
 	if timeout <= 0 {
 		timeout = watchdogInterruptTimeoutDefault
 	}
-	// R249-GO-3: defensive nil guard. A nil ctx would panic on
-	// context.AfterFunc; a nil sess would panic on InterruptViaControl
-	// when the deadline path fires. Both are caller bugs (production wires
-	// real values), but the cron run goroutine swallows panics via
-	// robfig/cron's recover chain elsewhere — here a panic would surface as
-	// "cron logger" Error noise without the run ever recording a result.
-	// Return a pre-completed channel so the caller's `<-abortCh` sees a
-	// zero abortResult and proceeds with normal finishRun bookkeeping.
-	// Buffer=1 with no close mirrors the success-path contract: the caller
-	// drains exactly once; an unclosed channel of buffer=1 with one send
-	// already buffered satisfies that without leaking a goroutine.
+	// Defensive nil guard: a nil ctx panics in context.AfterFunc, a nil sess
+	// in the deadline callback — caller bugs, but a panic here would surface
+	// as "cron logger" noise without the run recording a result. Return a
+	// pre-filled buffer=1 channel so the caller's drain sees a zero
+	// abortResult and proceeds with normal finishRun bookkeeping.
 	if ctx == nil || sess == nil {
 		ch := getAbortChan()
 		ch <- abortResult{}
-		// No callback was registered, so the result is already on ch:
-		// return a no-op stop reporting false (== "already satisfied, read
-		// the channel") so the caller's success-path drain still works.
+		// No callback registered: a no-op stop reporting false tells the
+		// caller "already satisfied, read the channel".
 		return ch, func() bool { return false }
 	}
 	ch := getAbortChan()
@@ -229,85 +126,51 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter, timeout 
 	return ch, stop
 }
 
-// fireBoundedInterrupt invokes sess.InterruptViaControl under a timeout
-// and returns the abortResult the caller should publish. It is shared by
-// runDeadlineWatchdog's AfterFunc callback (the normal deadline path) and
-// sendWithWatchdog's synchronous deadline-recovery branch (R20260612-GO-1
-// / #2021): when stopWatchdog() races the AfterFunc callback's goroutine
-// start and wins (stop()==true) on a deadline-exceeded ctx, the callback
-// never runs, so sendWithWatchdog must fire the interrupt itself rather
-// than synthesizing abortResult{fired:false} — the latter degrades the
-// deadline path to "interrupt silently skipped", the mirror of the #1705
-// pre-fix behaviour this very window reintroduced.
-//
-// R236-GO-09 (#507) / R247-GO-5 (#476) / R246-GO-6: InterruptViaControl
-// can block indefinitely when the protocol channel is wedged
-// (kernel-blocked stdin write, control_request never acked). Bound it so
-// the caller always observes a result and finishRun runs — otherwise
-// inflight.running stays true and every subsequent tick silently skips
-// the job AND the wrapper goroutine holds the abortCh slot past Stop's
-// stopBudget during scheduler shutdown (the systemd TimeoutStopSec
-// failure mode the R247-GO-5 anchor explicitly cited). The done channel
-// is buffered=1 so the inner goroutine never blocks on send: it returns
-// whenever InterruptViaControl finishes, even after the timeout branch
-// has already published an InterruptError outcome.
+// fireBoundedInterrupt invokes sess.InterruptViaControl under a timeout and
+// returns the abortResult to publish. Shared by runDeadlineWatchdog's
+// AfterFunc callback and sendWithWatchdog's synchronous deadline-recovery
+// branch (#2021: when stop() wins the race against the callback on an
+// already-expired ctx the callback never runs, so the caller fires the
+// interrupt itself instead of silently skipping it). InterruptViaControl can
+// block indefinitely on a wedged protocol channel (#507); bounding it keeps
+// finishRun running and the abortCh slot from outliving Stop's stopBudget.
+// done is buffered=1 so the inner goroutine never blocks on send.
 func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abortResult {
-	// A non-positive timeout falls back to the default so a zero-value
-	// Scheduler (tests) or any future caller cannot accidentally pass 0 and
-	// fire the timeout branch instantly via NewTimer(0). Mirrors the guard
-	// runDeadlineWatchdog applies before handing the timeout to its callback.
+	// timeout <= 0 falls back to the default so a zero-value Scheduler
+	// (tests) cannot fire the timeout branch instantly via NewTimer(0).
 	if timeout <= 0 {
 		timeout = watchdogInterruptTimeoutDefault
 	}
 	done := make(chan InterruptOutcome, 1)
-	// state coordinates the live leak-gauge accounting between this
-	// inner goroutine and the timeout branch below (R20260602-GO-005,
-	// #1632). It is a 3-state CAS race resolver:
-	//   0 = neither side has acted yet
-	//   1 = inner goroutine returned first (watchdog must NOT park it)
-	//   2 = watchdog fired first and parked the inner goroutine
-	//       (gauge incremented; inner goroutine must decrement on exit)
-	// Exactly one of the two CAS(0→1)/CAS(0→2) wins, so the gauge is
-	// incremented and later decremented at most once per park — no
-	// leak under any interleaving of "inner returns" vs "watchdog
-	// fires".
+	// state resolves the leak-gauge race between the inner goroutine and the
+	// timeout branch (#1632): 0 = neither acted, 1 = inner returned first
+	// (must NOT be counted as parked), 2 = watchdog fired first and parked it
+	// (gauge +1; inner decrements on exit). Exactly one CAS(0→1)/CAS(0→2)
+	// wins, so the gauge moves at most once per direction per park.
 	var state atomic.Int32
 	go func() {
 		outcome := sess.InterruptViaControl()
 		if !state.CompareAndSwap(0, 1) {
-			// Lost the race: watchdog already parked us (state==2) and
-			// incremented the gauge. We outlived the watchdog but the
-			// wedged write finally unblocked — undo the increment.
+			// Watchdog already parked us (state==2) and bumped the gauge;
+			// the wedged write finally unblocked — undo the increment.
 			watchdogParkedInterruptGoroutines.Add(-1)
 		}
 		done <- outcome
 	}()
-	// R20260527122801-GO-001: NewTimer + defer Stop mirrors
-	// scheduler.go:1337 — time.After leaks a *Timer slot until
-	// expiry on the success path.
+	// NewTimer + defer Stop: time.After would leak the timer slot until
+	// expiry on the fast path.
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	select {
 	case outcome := <-done:
 		return abortResult{outcome: outcome, fired: true}
 	case <-t.C:
-		// R20260527122801-SEC-3 (#1327): the inner goroutine above
-		// is still parked on InterruptViaControl and will outlive
-		// this watchdog goroutine until the wedged stdin write
-		// unblocks (typically on the next session.Reset; for non-
-		// fresh jobs that may never happen on its own). Surface the
-		// event via a metric + Warn log so operators can alert on
-		// rising deltas rather than discovering it via slow goroutine
-		// growth. The metric lives next to other cron counters in
-		// internal/metrics so the dashboard wireup is identical.
+		// The inner goroutine stays parked on InterruptViaControl until the
+		// wedged stdin write unblocks (typically the next session.Reset; for
+		// non-fresh jobs maybe never). Surface via counter + Warn (#1327).
 		metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
-		// R20260602-GO-005 (#1632): record the parked goroutine on a
-		// LIVE gauge so a persistent (never-reset) job's permanent
-		// leak is observable as a rising current count, not just a
-		// cumulative timeout total. CAS(0→2) only wins if the inner
-		// goroutine has not already returned; if it lost the race the
-		// goroutine is gone and there is nothing to count. The matching
-		// Add(-1) lives in the inner goroutine's lost-race branch.
+		// CAS(0→2) only wins if the inner goroutine has not yet returned;
+		// the matching Add(-1) is in its lost-race branch (#1632).
 		if state.CompareAndSwap(0, 2) {
 			watchdogParkedInterruptGoroutines.Add(1)
 		}
@@ -317,113 +180,68 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 	}
 }
 
-// sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
-// the SendResult, the watchdog abortResult, and the Send error in one
-// shot. R215-ARCH-P2-5 (#581) partial: factored out of executeOpt so
-// the four-step invariant — (1) start watchdog, (2) Send, (3)
-// sendCancel so the watchdog returns on the success path, (4) drain
-// abortCh BEFORE the next session.Reset to avoid the in-flight
-// interrupt write racing the next tick — lives in one named function
-// instead of inlined in a 569-line state machine where a future split
-// could accidentally reorder the cancel/drain pair.
+// sendWithWatchdog runs sess.Send under a deadline-watchdog and returns the
+// SendResult, the watchdog abortResult, and the Send error. It owns the
+// four-step invariant — (1) start watchdog, (2) Send, (3) sendCancel so the
+// watchdog returns on the success path, (4) drain abortCh BEFORE the next
+// session.Reset so an in-flight interrupt write cannot race the next tick.
 //
-// Caller contract:
-//   - sendCtx must be a context.WithTimeout / s.stopCtx-derived ctx.
-//     Watchdog uses ctx.Err() == DeadlineExceeded as its fire trigger;
-//     Background or any non-deadline ctx degrades to "interrupt never
-//     fires" silently.
-//   - sendCancel is called by this helper exactly once after Send
-//     returns; the caller's `defer sendCancel()` is therefore a no-op
-//     (cancelFunc is idempotent).
-//
-// R20260607-GO-4 (#1904): now a *Scheduler method so it can pass the
-// per-instance watchdog interrupt timeout to runDeadlineWatchdog instead of
-// the function reading a package-level atomic that t.Parallel() tests raced.
+// Caller contract: sendCtx must be a deadline-bearing ctx (the watchdog fires
+// on ctx.Err()==DeadlineExceeded; a Background ctx silently never fires), and
+// sendCancel is called here exactly once after Send returns (the caller's
+// `defer sendCancel()` is a harmless no-op). Method for the per-instance timeout (#1904).
 func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, sess Session, text string) (SendResult, abortResult, error) {
-	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
-	// runDeadlineWatchdog for the rationale (must fire BEFORE Send
-	// returns, otherwise Process.State has already flipped to Ready and
-	// InterruptViaControl returns ErrNoActiveTurn → no-op).
+	// Watchdog must fire BEFORE Send returns (see runDeadlineWatchdog),
+	// otherwise Process.State is already Ready and the interrupt is a no-op.
 	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, s.watchdogInterruptTimeout())
 
-	// Direct Send without sendWithBroadcast — cron jobs notify via the
-	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
-	// the cron_run_ended WS frame.
+	// Direct Send without sendWithBroadcast — cron jobs notify via the IM
+	// deliverNotice path and the cron_run_ended WS frame.
 	result, err := sess.Send(sendCtx, text)
 
-	// R20260603140013-GO-1 (#1705): deregister the AfterFunc callback
-	// before cancelling ctx. On the success / non-deadline-error path the
-	// deadline never fired, so stopWatchdog() returns true and the runtime
-	// never spawns the callback goroutine — we save a goroutine spawn +
-	// chan send per Send (×500 on a shutdown burst). When stop succeeds the
-	// callback will NOT run, so there is nothing to drain: synthesize the
-	// not-fired result the callback would have published. When it returns
-	// false the callback already fired (deadline path, or a cancel that
-	// raced the deadline) and a value is or will be on abortCh, so we still
-	// cancel + block on it to keep the original ordering guarantee (the
-	// in-flight InterruptViaControl must finish before the next
-	// session.Reset).
+	// Deregister the AfterFunc callback before cancelling ctx (#1705). On the
+	// success / non-deadline path the deadline never fired, stopWatchdog()
+	// returns true and no callback goroutine is spawned — nothing to drain.
+	// false means the callback already fired (deadline, or a cancel racing
+	// it) and a value is or will be on abortCh, so cancel + block on it.
 	if stopWatchdog() {
 		sendCancel()
-		// stop() == true: the AfterFunc callback will NOT run, so abortCh
-		// received no send and is clean — recycle it for the next tick.
+		// Callback will NOT run, so abortCh is clean — recycle it.
 		putAbortChan(abortCh)
-		// R20260612-GO-1 (#2021): stop()==true means "callback deregistered",
-		// NOT "deadline never fired". When Send returned because sendCtx hit
-		// its deadline but stopWatchdog() raced the AfterFunc callback's
-		// goroutine start and won, the deadline IS exceeded yet no interrupt
-		// was sent — synthesizing abortResult{fired:false} here degrades the
-		// deadline path to a silent no-interrupt (the mirror of the #1705
-		// pre-fix behaviour). Fire the interrupt synchronously so the
-		// in-flight CLI turn is still aborted and abort.fired reflects reality.
+		// stop()==true means "callback deregistered", NOT "deadline never
+		// fired": if Send returned on the deadline but stop() beat the
+		// callback goroutine's start, no interrupt was sent. Fire it
+		// synchronously so the CLI turn is still aborted and abort.fired
+		// reflects reality (#2021).
 		if errors.Is(sendCtx.Err(), context.DeadlineExceeded) {
 			return result, fireBoundedInterrupt(sess, s.watchdogInterruptTimeout()), err
 		}
 		return result, abortResult{}, err
 	}
 
-	// Cancel sendCtx so the watchdog returns promptly on the success /
-	// non-deadline error path; on the deadline path it's already done.
-	// Block on abortCh so the InterruptViaControl call (if any)
-	// completes before we record the run state — otherwise a fast cron
-	// tick could overlap the next session.Reset with the in-flight
-	// interrupt write.
+	// Cancel sendCtx so the watchdog returns promptly on the success path
+	// (on the deadline path it is already done), then block on abortCh so
+	// any InterruptViaControl call completes before the run state is
+	// recorded — a fast tick could otherwise overlap the next session.Reset
+	// with the in-flight interrupt write.
 	sendCancel()
 	abort := <-abortCh
-	// Drained exactly once above; recycle the now-empty channel. The inner
-	// InterruptViaControl goroutine (if the deadline fired) writes only to
-	// its own `done` channel, never to abortCh, so no late send can reach a
-	// recycled channel.
+	// Drained exactly once; the inner goroutine writes only to its own
+	// `done` channel, so no late send can reach the recycled channel.
 	putAbortChan(abortCh)
 	return result, abort, err
 }
 
-// classifyExecError maps an error from GetOrCreate or Send to
-// (RunState, ErrorClass) for finishRun. defaultClass distinguishes the
-// session-spawn path (ErrClassSessionError) from the send path
-// (ErrClassSendError); the helper unconditionally remaps the two
-// context-derived sentinels:
+// classifyExecError maps a GetOrCreate / Send error to (RunState, ErrorClass)
+// for finishRun. defaultClass distinguishes the spawn path
+// (ErrClassSessionError) from the send path (ErrClassSendError); the two
+// context sentinels are always remapped:
 //
 //   - context.DeadlineExceeded → (RunStateTimedOut, ErrClassDeadlineExceeded)
 //   - context.Canceled         → (RunStateCanceled, ErrClassCanceled)
 //
-// R241-ARCH-7: Canceled was historically handled by the caller via a
-// dedicated `if errors.Is(err, context.Canceled)` branch ahead of this
-// helper, so the state mapping was split across this site (DeadlineExceeded
-// only) and the two caller blocks (Canceled / default). Folding Canceled
-// into the helper keeps all (err → state, errClass) decisions in one
-// place. Callers still own the side-effects that DIFFER per class
-// (skipPersist=true for Canceled, operator-facing notice suppressed for
-// Canceled, abort.fired logging on the send path) — see executeOpt's
-// switch on errClass below for those policy choices.
-//
-// errors.Is order matters: context.Canceled wraps both genuine
-// cancellation AND the "parent ctx cancelled mid-DeadlineExceeded" race
-// where Send returns context.Canceled even though the deadline ticked
-// first. Checking DeadlineExceeded first preserves the historical
-// classification (deadline-exceeded WINS) so jobs that hit jobTimeout
-// during a graceful shutdown still record RunStateTimedOut rather than
-// RunStateCanceled. R230C-CR-7 (original) + R241-ARCH-7 (Canceled fold).
+// Order matters: a parent cancel racing DeadlineExceeded can make Send return
+// Canceled, so DeadlineExceeded is checked first (deadline WINS on shutdown).
 func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunStateTimedOut, ErrClassDeadlineExceeded

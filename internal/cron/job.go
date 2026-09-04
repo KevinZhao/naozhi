@@ -15,14 +15,10 @@ import (
 )
 
 // JobIMContext bundles the originating IM-channel coordinates a cron Job
-// inherits from the message that created it. Kept as a tiny local type
-// (not platform.IncomingMessage) so external callers don't have to import
-// the platform package just to construct a Job — and so adding a new IM
-// field to platform.IncomingMessage doesn't ripple into Job's wire schema.
-//
-// All fields are optional: dashboard-created jobs leave the whole struct
-// zero-value (the dashboard handler sets dashboard-specific Notify fields
-// directly on the returned Job).
+// inherits from the message that created it. Kept as a tiny local type (not
+// platform.IncomingMessage) so external callers don't import the platform
+// package to construct a Job. All fields are optional: dashboard-created jobs
+// leave it zero-value.
 type JobIMContext struct {
 	Platform  string
 	ChatID    string
@@ -31,23 +27,11 @@ type JobIMContext struct {
 }
 
 // JobInit bundles every operator-settable field a cron Job can carry at
-// creation time. It is the fuller input to NewJobFull, covering the
-// dashboard-only fields (Title / WorkDir / Notify* / FreshContext / Backend
-// / Paused) that the (schedule, prompt, JobIMContext) NewJob signature
-// cannot express.
-//
-// R250-CR-9 (#1142): NewJob's godoc historically claimed it was the single
-// construction choke point that protected every cross-package caller from a
-// cron.Job{} field rename. That invariant was not actually held — the
-// dashboard create handler bypassed NewJob and spelled out a multi-field
-// cron.Job{} literal directly because NewJob accepted none of the
-// dashboard-specific fields. JobInit + NewJobFull restore the invariant:
-// callers needing the richer field set have a constructor to route through
-// instead of an open-coded literal. Schedule/Prompt + the embedded
-// JobIMContext mirror NewJob so the two constructors stay in lockstep.
-//
+// creation time — the input to NewJobFull, covering the dashboard-only fields
+// (Title / WorkDir / Notify* / FreshContext / Backend / Paused) that NewJob's
+// (schedule, prompt, JobIMContext) signature cannot express (#1142).
 // All fields are optional; the zero value yields a Job equivalent to
-// NewJob(schedule, prompt, ctx) with empty schedule/prompt/context.
+// NewJob(schedule, prompt, ctx) with empty inputs.
 type JobInit struct {
 	Schedule string
 	Prompt   string
@@ -67,28 +51,19 @@ type JobInit struct {
 
 // NewJob constructs a Job ready to hand to Scheduler.AddJob from the
 // (schedule, prompt) pair plus the IM-channel context that originated it.
-// It is the narrow constructor for the dispatch / IM command path, which
-// only ever sets those fields; the dashboard path that also needs
-// Title / WorkDir / Notify* / FreshContext / Backend / Paused must use
-// NewJobFull so neither surface hand-rolls a cron.Job{} literal that a
-// field rename could silently break (R250-CR-9 / #1142).
+// The dashboard path that also needs Title / WorkDir / Notify* / FreshContext
+// / Backend / Paused must use NewJobFull so no surface hand-rolls a cron.Job{}
+// literal (#1142).
 //
-// CreatedAt is intentionally NOT stamped here: AddJob is the choke point
-// that owns Job persistence and needs a single coherent timestamp source.
-// Pre-stamping in NewJob would cause a tiny but real skew (LastRunAt
-// comparisons, missed-schedule detection) when the constructor is called
-// far ahead of AddJob.
+// CreatedAt is intentionally NOT stamped here: AddJob owns Job persistence
+// and needs a single coherent timestamp source.
 func NewJob(schedule, prompt string, ctx JobIMContext) *Job {
 	return NewJobFull(JobInit{Schedule: schedule, Prompt: prompt, IM: ctx})
 }
 
-// NewJobFull constructs a Job from the full JobInit field set so the
-// dashboard create handler (and any future surface needing the richer
-// fields) routes through a constructor instead of an open-coded
-// cron.Job{} literal. NewJob delegates here so both constructors share a
-// single field-mapping site — a Job field rename now lands in exactly one
-// place. CreatedAt is left zero for AddJob to stamp, mirroring NewJob.
-// R250-CR-9 (#1142).
+// NewJobFull constructs a Job from the full JobInit field set so every
+// surface routes through one field-mapping site (#1142). CreatedAt is left
+// zero for AddJob to stamp, mirroring NewJob.
 func NewJobFull(in JobInit) *Job {
 	return &Job{
 		Schedule:       in.Schedule,
@@ -110,15 +85,8 @@ func NewJobFull(in JobInit) *Job {
 	}
 }
 
-// cronEntryID is the cron-local name for robfig/cron's per-entry handle.
-// R249-ARCH-11 (#977): the third-party robfigcron.EntryID type name was
-// scattered across the Job field, the two list-snapshot pools, every
-// pause/resume/update rollback-snapshot local, and cronEntryGoneLocked.
-// Aliasing it to one declaration localises the robfig binding so a future
-// cron-engine swap (or wrapping the handle in a richer entry struct) touches
-// this single line instead of ~15 references. As a type alias it is
-// identical to robfigcron.EntryID, so the pool type-assertions and the
-// s.cron.Remove/Entry calls keep compiling unchanged.
+// cronEntryID is the cron-local alias for robfig/cron's per-entry handle so
+// a future cron-engine swap touches one declaration (#977).
 type cronEntryID = robfigcron.EntryID
 
 // Job represents a scheduled cron task.
@@ -134,45 +102,30 @@ type Job struct {
 	Paused    bool      `json:"paused"`
 
 	// Title 是人类可读的任务名称，用于卡片列表显示、搜索主 key、通知标题。
-	// 为空时 UI 自动回退到 Prompt 首行（见 jobTitleOrFallback），保持对旧
-	// cron_jobs.json 的向后兼容：JSON 反序列化后 Title == "" 不会破坏任何
-	// 渲染/搜索路径。上限 MaxCronTitleLen 字节。
-	// 引入背景：docs/rfc/cron-v2-polish.md §3.1。
+	// 为空时 UI 回退到 Prompt 首行（见 jobTitleOrFallback），兼容旧
+	// cron_jobs.json。上限 MaxCronTitleLen 字节。
 	Title string `json:"title,omitempty"`
 
 	// Optional working directory override for the CLI process.
 	WorkDir string `json:"work_dir,omitempty"`
 
 	// Backend pins the CLI backend (e.g. "claude" / "kiro") this job runs
-	// on. Empty = router default — old cron_jobs.json without this field
-	// deserialise to "" and continue routing through the operator's
-	// configured default, so there is zero migration work for existing
-	// installs. The Scheduler propagates this value to AgentOpts.Backend
-	// at execute time; validateBackend in the session router still gates
-	// shape-invalid input, and wrapperFor falls back to default for
-	// unknown but well-formed backend IDs.
-	// 引入背景：docs/rfc/multi-backend.md §9 Sprint 6c。
+	// Backend pins the CLI backend (e.g. "claude" / "kiro") this job runs on.
+	// Empty = router default, so old cron_jobs.json needs no migration. Propagated
+	// to AgentOpts.Backend at execute time; validateBackend still gates
+	// shape-invalid input and wrapperFor falls back for unknown IDs.
 	Backend string `json:"backend,omitempty"`
 
-	// Placement selects WHERE the job runs — the second axis of the
-	// flavor × placement model (docs/rfc/agentcore-cloud-sandbox.md §4.2).
-	// "" / "local" = this host via the session router (historical
-	// behaviour, zero migration for existing cron_jobs.json);
-	// "sandbox" = run-once AgentCore microVM (payload injection, held
-	// event stream, burn on completion — §3.1). validatePlacement gates
-	// every write path; executeOpt branches on it before touching the
-	// router. Phase 1 sandbox guardrails (≤60min, no local MCP, no
-	// workspace) are enforced by the sandbox executor, not here.
+	// Placement selects WHERE the job runs: "" / "local" = this host via the
+	// session router; "sandbox" = run-once AgentCore microVM. validatePlacement
+	// gates every write path; executeOpt branches on it before touching the
+	// router. Sandbox guardrails are enforced by the sandbox executor, not here.
 	Placement string `json:"placement,omitempty"`
 
 	// SideEffects declares that this job mutates external state (pushes a
-	// branch, opens a PR, sends a message…). Tri-state pointer like Notify:
-	// nil = legacy default (treated as false). It is the §6.2 double-run
-	// fence input: a sandbox run that ends failed-transport (microVM fate
-	// unknown) goes to the human confirmation queue instead of being
-	// silently eligible for auto-replay when SideEffects is true. Only
-	// meaningful for placement=sandbox today, but stored on every job so a
-	// future local-placement use can read it too.
+	// branch, opens a PR…). Tri-state like Notify: nil = legacy default (false).
+	// A sandbox run ending failed-transport (microVM fate unknown) goes to the
+	// human confirmation queue instead of auto-replay when this is true.
 	SideEffects *bool `json:"side_effects,omitempty"`
 
 	// Optional notification target for dashboard-created jobs.
@@ -181,87 +134,55 @@ type Job struct {
 	NotifyChatID   string `json:"notify_chat_id,omitempty"`
 
 	// Notify controls whether execution results are pushed to an IM channel
-	// after each run. Tri-state pointer so old jobs (nil) preserve legacy
-	// behavior: IM-created jobs reply to their source chat; dashboard-created
-	// jobs honor per-job NotifyPlatform/NotifyChatID if set.
-	// Explicit true/false lets dashboard users toggle delivery using the
-	// scheduler's notify_default target (or per-job override) without touching
-	// platform/chat fields.
+	// after each run. Tri-state pointer so old jobs (nil) keep legacy behaviour:
+	// IM-created jobs reply to their source chat; dashboard-created jobs honor
+	// per-job NotifyPlatform/NotifyChatID if set. Explicit true/false toggles
+	// delivery to the scheduler's notify_default target (or per-job override).
 	Notify *bool `json:"notify,omitempty"`
 
 	// FreshContext, when true, resets the cron session before each run so the
-	// CLI starts from a clean slate instead of inheriting the conversation
-	// history from previous executions. Default (false) preserves the existing
-	// behavior — session is long-lived and each run appends a new turn to the
-	// accumulated context. Fresh mode keeps per-run latency bounded when the
-	// job repeatedly does independent work (reviews, status scans, etc.).
+	// CLI starts from a clean slate; false keeps the session long-lived and each
+	// run appends a turn to the accumulated context.
 	FreshContext bool `json:"fresh_context,omitempty"`
 
 	// Last execution result, persisted across restarts. LastRunAt has no
-	// omitempty: encoding/json does not drop zero-value time.Time structs,
-	// so the tag was a lint-only hint that falsely implied zero-value
-	// omission. Dashboard code already checks LastRunAt.IsZero() before
-	// formatting, which handles the "never run" case.
+	// omitempty: encoding/json never drops a zero time.Time; callers check IsZero.
 	LastResult string    `json:"last_result,omitempty"`
 	LastRunAt  time.Time `json:"last_run_at"`
 	LastError  string    `json:"last_error,omitempty"`
 
-	// LastSessionID 是最近一次成功执行产生的 Claude session_id。持久化后
-	// 供 registerStub 注入到新创建的 cron stub 的 prevSessionIDs，让
-	// dashboard 点击 cron 侧边栏时 history.Source 能按这个 ID 从
-	// ~/.claude/projects 里加载 JSONL 历史。没有它的话 fresh_context=true
-	// 场景下每次 Reset 都会清掉 stub 的 chain IDs，stub 的事件面板
-	// 就永远是空的。仅 Send 成功路径写入；错误路径保留上一次的值。
+	// LastSessionID 是最近一次成功执行产生的 Claude session_id。registerStub
+	// 把它注入 cron stub 的 prevSessionIDs，让 dashboard 侧边栏能按此 ID 加载
+	// JSONL 历史；否则 fresh_context=true 下每次 Reset 后 stub 事件面板永远为空。
+	// 仅 Send 成功路径写入；错误路径保留上一次的值。
 	LastSessionID string `json:"last_session_id,omitempty"`
 
-	// LastErrorClass 是 LastError 的机器可读分类（见 ErrorClass 常量）。
-	// 与 LastError 同时写入：错误路径 ErrorClass 非空 + ErrorMsg 同步；成功
-	// 路径两者均清零。前端用它选图标/着色，不再 substring-grep LastError。
-	// 旧 cron_jobs.json 反序列化后为空串，前端 fallback 到 LastError 是否
-	// 非空判断"是否失败"——双向兼容。
-	// 引入背景：docs/rfc/cron-run-history.md §9。
+	// LastErrorClass 是 LastError 的机器可读分类（见 ErrorClass 常量），与
+	// LastError 同时写入/清零。旧 cron_jobs.json 反序列化后为空串，前端
+	// fallback 到 LastError 是否非空——双向兼容。
 	LastErrorClass ErrorClass `json:"last_error_class,omitempty"`
 
-	// RunCounters 是每个 job 的累计计数。落盘后 list API 直接读，避免每次
-	// 扫描 runs/<jobID>/ 目录。P0 阶段只维护 total/succeeded/failed/skipped/
-	// timed_out/canceled；avg_ms / p95_ms 在 P1 引入（EWMA + P²-quantile）。
-	// 旧 cron_jobs.json 反序列化为零值，与"从未跑过"不可区分——这是预期：
-	// 计数从首次 run 累积，不回填。
-	// 引入背景：docs/rfc/cron-run-history.md §3.2。
+	// RunCounters 是每个 job 的累计计数，落盘后 list API 直接读，避免扫描
+	// runs/<jobID>/。旧 cron_jobs.json 反序列化为零值，与"从未跑过"不可区分
+	// ——计数从首次 run 累积，不回填。
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
 	entryID cronEntryID // runtime only, not persisted
 
-	// cachedPeriod is the precomputed schedule period (Next-Next delta), populated
-	// once per registerJob alongside entryID. The hot jitter path (#664 / R242-PERF-2)
-	// previously called schedulePeriodFromSched(sched, time.Now()) on every cron tick,
-	// running 2× sched.Next per jittered job per fire. Period only changes when
-	// Schedule mutates (UpdateJob path re-registers and recomputes); cache it on
-	// the Job to skip the per-tick recompute. Zero = unknown / not yet registered;
-	// callers fall back to the live computation in that case so test fixtures
-	// (which never call registerJob) keep working.
+	// cachedPeriod is the schedule period (Next-Next delta) precomputed by
+	// registerJob so the hot jitter path skips 2× sched.Next per tick. Zero =
+	// not yet registered; callers fall back to the live computation (#664).
 	cachedPeriod time.Duration // runtime only, not persisted
 
-	// cachedSched is the parsed robfigcron.Schedule, populated alongside
-	// cachedPeriod by registerJob. Lets HasMissedScheduleCached (the cron-
-	// pkg helper exposed for dashboard handleList — R241-PERF-3 / #477)
-	// skip the cronParser.Parse regex on every 1Hz tick. nil = unknown /
-	// not yet registered; HasMissedScheduleCached falls back to the
-	// classic HasMissedSchedule path which re-parses on every call.
-	// Test fixtures that build Job by hand (without registerJob) keep
-	// working through that fallback.
+	// cachedSched is the parsed robfigcron.Schedule populated by registerJob so
+	// HasMissedScheduleCached skips cronParser.Parse on every 1Hz tick (#477).
+	// nil = not yet registered; callers fall back to the parse path.
 	cachedSched robfigcron.Schedule // runtime only, not persisted
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
-// 表达），只有进入持久化路径的 run 才会带 State。
-//
-// R20260527122801-ARCH-2 (#1317): 该类型现在是
-// runtelemetry.RunState 的 type alias，与 sysession 共享同一个 wire
-// vocabulary。emitRunStarted/emitRunEnded 内部从 cron.RunState 转
-// runtelemetry.RunState 的 cast 退化成 no-op；测试 / 调用方代码
-// 不需要改。新增 RunState 应加在 runtelemetry/state.go 单一来源处，
-// 这里通过 alias 自动继承。
+// 表达）。它是 runtelemetry.RunState 的 type alias，与 sysession 共享同一
+// wire vocabulary；新增 RunState 加在 runtelemetry/state.go 单一来源处 (#1317)。
 type RunState = runtelemetry.RunState
 
 const (
@@ -273,22 +194,16 @@ const (
 )
 
 // TriggerKind 标识 run 的触发来源。manual = TriggerNow，scheduled = robfig
-// tick，catchup 给未来 missed-schedule 重跑保留位（P3）。
-//
-// R20260527122801-ARCH-2 (#1317): 同 RunState 一样，本类型是
-// runtelemetry.TriggerKind 的 type alias。emit* 路径里的 cast 退
-// 化成 no-op；新 trigger value 加在 runtelemetry 单一来源处。
+// tick，catchup 给未来 missed-schedule 重跑保留位。runtelemetry.TriggerKind
+// 的 type alias；新 trigger value 加在 runtelemetry 单一来源处 (#1317)。
 type TriggerKind = runtelemetry.TriggerKind
 
 const (
 	TriggerScheduled = runtelemetry.TriggerScheduled
 	TriggerManual    = runtelemetry.TriggerManual
-	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
-	// not yet implemented). No production code emits it today; consumers
-	// should treat unknown trigger strings as forward-compatible.
-	// R235-CR-13: do NOT reference this value from production code paths
-	// until the missed-schedule replay design is settled — adding stray
-	// emit sites now would freeze a wire format that may still change.
+	// TriggerCatchup is reserved for the missed-schedule replay path (not yet
+	// implemented). No production code may emit it until that design is settled;
+	// consumers treat unknown trigger strings as forward-compatible.
 	TriggerCatchup = runtelemetry.TriggerCatchup
 )
 
@@ -310,88 +225,46 @@ const (
 	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
-	// ErrClassRouterMissing fires when executeOpt's hot-path self-defence
-	// short-circuits on a nil router (test fixtures or a misconfigured
-	// scheduler). Subscribers see a started→ended pair so dashboard
-	// "running" counters stay consistent. R20260527122801-CR-13 (#1323).
+	// ErrClassRouterMissing fires when executeOpt short-circuits on a nil router
+	// (test fixtures or a misconfigured scheduler); a started→ended pair is still
+	// emitted so dashboard "running" counters stay consistent (#1323).
 	ErrClassRouterMissing ErrorClass = "router_missing"
-	// ErrClassPausedConcurrent fires when the post-CAS recheck sees the
-	// job switched to Paused between the dispatch lookup and the inflight
-	// CAS. R040034-CR-1 (#1410): previously the recheck silently dropped
-	// the run with only a Debug log, leaving subscriber timelines with a
-	// gap in the 1-2µs cross-lock window. Now mirrors the router-missing
-	// precedent and emits a synthetic started→ended pair so dashboards
-	// see consistent lifecycle frames.
+	// ErrClassPausedConcurrent fires when the post-CAS recheck sees the job
+	// switched to Paused between the dispatch lookup and the inflight CAS; a
+	// synthetic started→ended pair keeps subscriber timelines gap-free (#1410).
 	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
-	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the
-	// job removed from s.jobs between the dispatch lookup and the
-	// inflight CAS. R040034-CR-1 (#1410): paired with PausedConcurrent so
-	// the two cross-lock-window outcomes are distinguishable on the wire.
+	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the job
+	// removed from s.jobs in the same cross-lock window (#1410).
 	ErrClassDeletedConcurrent ErrorClass = "deleted_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
 	ErrClassPanic ErrorClass = "panic"
-	// Sandbox placement classes (agentcore-cloud-sandbox RFC §6.1/§6.2).
-	// Wire values mirror runtelemetry.ErrClassCronSandbox* — see the
-	//三态 rationale there. Transport is the §6.2 double-run-risk state;
-	// the dashboard renders it as the red ☁️ badge (RFC §7.2).
+	// Sandbox placement classes; wire values mirror runtelemetry.ErrClassCronSandbox*.
+	// Transport is the double-run-risk state (microVM fate unknown).
 	ErrClassSandboxFailed      ErrorClass = "sandbox_failed"
 	ErrClassSandboxTransport   ErrorClass = "sandbox_transport"
 	ErrClassSandboxUnavailable ErrorClass = "sandbox_unavailable"
 )
 
 // hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是
-// 字符数）。固定 8 字节 → hex.EncodeToString → 16 hex 字符。想加宽时
-// 改这一个常量即可两侧同步，避免 ID 宽度漂移。
-//
-// R247-CR-17: 旧名 hexIDBytes 在 godoc 旁写"16-char hex"造成歧义——
-// "Bytes" 究竟是熵字节还是输出字符？改名 hexIDEntropyBytes 把语义钉死
-// 在熵源侧，调用点 make([]byte, hexIDEntropyBytes) 一眼可读。
-// R220-GO-2: 之前 generateID 与 generateRunID 各自定义 8，注释口口声声
-// "为将来扩展分离"但其实就是同源逻辑——把字节数提到常量后再保留两个
-// 公开名字以维持调用语义。
+// 字符数）：8 字节 → 16 hex 字符。想加宽时改这一个常量即可两侧同步。
 const hexIDEntropyBytes = 8
 
 // generateHexID 返回 hexIDEntropyBytes 个 crypto/rand 字节的小写 hex 表示。
-// crypto/rand 在 Linux 下来自 getrandom(2)，失败仅在内核 entropy 池不
-// 可用的极端场景；返回 error 让 caller 自行选择降级方式。
+// 失败返回 error 而非 panic：AddJob 把错误透传给 HTTP / IM caller，周期
+// tick 路径 log + 跳过该次执行，进程存活、下一 tick 自然恢复 (#706)。
 //
-// R242-CR-14 (#706): 历史实现 panic("crypto/rand unavailable: ...")，会从
-// AddJob 的 caller stack 一路炸到 dashboard handler / IM 入口；进程级
-// crash 远比"这一次 add/run 失败"破坏性大。改返 error 后：
-//   - AddJob 把错误透传给 HTTP / IM caller，请求层失败可重试；
-//   - 周期 tick 路径（executeOpt / emitOverlapSkipped）log + 跳过该次
-//     执行，保留进程存活、下一 tick 自然恢复。
-//
-// 实现细节：Go 1.26 起 `crypto/rand.Read` 在 reader 失败时直接调
-// runtime fatal（go.dev/issue/66821），调用方拿不到 error。所以这里
-// 改用 io.ReadFull(rand.Reader, b) 直接读底层 Reader —— 如此 Read
-// 的 err 才会原样返回给我们，给 fault-injection 测试以及未来生产环境
-// 真正的 entropy 不足故障都留下处理路径。
-//
-// CANONICAL-HEX-ID-PATTERN (R20260527122801-ARCH-7 / #1313): cron 是首个
-// 切到 io.ReadFull(rand.Reader, b) 的子系统。其它生成 hex ID 的
-// 子系统（internal/sysession/run.go、internal/server/dashboard_send.go、
-// internal/session/scratch.go 等）目前仍调用旧 rand.Read，Go 1.26 entropy
-// 不足时会 fatal 整个进程。下次共享重构应抽 osutil.GenerateHexID +
-// MustGenerateHexID 把所有点迁移到这个 pattern；在那之前，本函数是
-// shape 参考，修改时（输出宽度 / 错误格式）需通知其它子系统同步。
-//
-// 测试需要 panic 等价语义时用 mustGenerateHexID（test helper），别在
-// 生产路径 catch error 后 panic —— 那等于把这次重构反向回去。
+// 用 io.ReadFull(rand.Reader, b) 而非 rand.Read：Go 1.26 起 rand.Read 在
+// reader 失败时直接 runtime fatal（go.dev/issue/66821），调用方拿不到 error。
+// 其它子系统生成 hex ID 时应以本函数为 shape 参考 (#1313)。
+// 测试需要 panic 语义时用 mustGenerateHexID，别在生产路径 catch 后 panic。
 func generateHexID() (string, error) {
-	// R090135-PERF-007: hexIDEntropyBytes is a compile-time constant (= 8),
-	// so a fixed-size array can be declared on the stack. The previous
-	// make([]byte, hexIDEntropyBytes) forced a heap allocation on every call
-	// because io.ReadFull takes an interface (io.Reader) that the compiler
-	// cannot prove does not retain the slice. The array is passed as b[:] so
-	// the call signature is unchanged; the stack frame holds the 8 bytes.
+	// Fixed-size stack array: make([]byte, n) escaped to the heap because
+	// io.ReadFull takes an interface the compiler cannot prove non-retaining.
 	var b [hexIDEntropyBytes]byte
 	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
 		return "", fmt.Errorf("cron: crypto/rand unavailable: %w", err)
 	}
-	// R228-CR-9: hex.EncodeToString skips fmt's reflection path; matches
-	// textutil/uuid.go encoding style.
 	return hex.EncodeToString(b[:]), nil
 }
 
@@ -402,34 +275,13 @@ func generateRunID() (string, error) { return generateHexID() }
 // generateID 返回 cron Job.ID（16-char hex）。
 func generateID() (string, error) { return generateHexID() }
 
-// IsValidID reports whether s is a valid cron / cron-run identifier:
-// a non-empty lowercase hex string of at most 64 bytes. Currently job
-// and run IDs are generated as 16 hex chars; the 64-byte upper bound
-// is held in reserve for a future schema bump.
-//
-// Accepts (returns true):
-//   - "0123456789abcdef"               — canonical 16-char job/run ID
-//   - "abc123"                         — short lowercase hex
-//   - strings.Repeat("a", 64)          — at the 64-byte boundary
-//
-// Rejects (returns false):
-//   - ""                               — empty
-//   - "ABC123"                         — uppercase hex (lowercase only)
-//   - "abc-123" / "abc.tmp" / "abc~"   — non-hex chars (rejects temp
-//     files, backups, .DS_Store, etc. that may appear in runs/<jobID>/)
-//   - "../etc/passwd"                  — path traversal characters
-//   - strings.Repeat("a", 65)          — exceeds the 64-byte ceiling
-//
-// 在 store 入口（parse / list / append / detail handler）做边界校验，
-// 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
-// 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
-// R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
-// 私有的 generateRunID / generateID）+ R249-CR-23（补 Accepts/Rejects
-// 示例，明确大写 hex 一律拒绝）。
-//
-// R249-ARCH-26 (#990): co-located with generateID / generateRunID here in
-// job.go (the ID-spec home) rather than runstore.go — store / parse / HTTP
-// callers all consume it, so its home is the ID schema, not the run store.
+// IsValidID reports whether s is a valid cron / cron-run identifier: a
+// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are
+// 16 hex chars today; the 64-byte bound is reserved for a schema bump.
+// Uppercase hex, path characters and temp/backup suffixes are all rejected,
+// so store entry points (parse / list / append / detail handler) can filter
+// stray files under runs/<jobID>/ and HTTP handlers can reject bad IDs
+// before any disk IO. Lives in job.go as the ID-schema home (#990).
 func IsValidID(s string) bool {
 	if len(s) == 0 || len(s) > 64 {
 		return false
@@ -449,15 +301,9 @@ func IsValidID(s string) bool {
 const MaxCronTitleLen = 256
 
 // JobRunCounters is the per-Job cumulative counter Job persists alongside
-// LastRunAt / LastResult / LastError. Maintained on every finishRun (RFC
-// §3.2) so the dashboard list endpoint can show terminal-state tallies
-// without rescanning runs/<jobID>/. EWMA / P² latency aggregates landed
-// in P1; the byte schema here stays the same.
-//
-// R239-CR-7: relocated from runinflight.go (where it was misleadingly co-
-// located with the in-flight tracker) to sit next to the rest of Job's
-// wire schema. runinflight.go is for live tick state; this is durable
-// per-Job state.
+// LastRunAt / LastResult / LastError. Maintained on every finishRun so the
+// dashboard list endpoint shows terminal-state tallies without rescanning
+// runs/<jobID>/.
 type JobRunCounters struct {
 	Total     int64 `json:"total,omitempty"`
 	Succeeded int64 `json:"succeeded,omitempty"`
@@ -491,11 +337,7 @@ const titleFallbackRuneLimit = 60
 // jobTitleOrFallback 返回用于 UI 显示 / 搜索主 key 的人类可读名称：
 //  1. 如果 Job.Title 非空，直接返回（Trim 后）。
 //  2. 否则取 Prompt 的首个非空行，截断到 titleFallbackRuneLimit rune。
-//  3. 若 Prompt 也为空，返回空字符串——调用方（UI 层）自行决定占位符。
-//
-// 包内私有：当前唯一调用者是 cron 包自身（搜索/通知/侧边栏元数据），
-// 前端 dashboard 显示走 cron_jobs.json 的 title 字段并独立做 fallback；
-// 没有跨包消费者。R232-CR-9 把它从导出降回 unexported。
+//  3. 若 Prompt 也为空，返回空字符串——调用方自行决定占位符。
 func jobTitleOrFallback(j *Job) string {
 	if j == nil {
 		return ""
@@ -503,17 +345,13 @@ func jobTitleOrFallback(j *Job) string {
 	if t := strings.TrimSpace(j.Title); t != "" {
 		return t
 	}
-	// R222-CR-5: 抽到 textutil.FirstLine 共用 dispatch/cron 同语义（TrimSpace 后
-	// 跨任意数量空白行扫第一非空行），消除三处独立实现的字面 firstLine 漂移风险。
+	// textutil.FirstLine 与 dispatch 同语义（跨任意空白行取第一非空行）。
 	line := textutil.FirstLine(j.Prompt)
 	if line == "" {
 		return ""
 	}
-	// R228-CR-5: 改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 +
-	// 短路快路径（len ≤ maxRunes 时无需解码 UTF-8），消除 []rune(line) 的全
-	// 量 heap 分配。textutil 的 ASCII "..." 后缀与 cron 卡片的 U+2026 风格
-	// 不一致，所以本地补 "…"。靠返回 string 与原值 != 判断是否真发生截断
-	// 比再做一次 utf8.RuneCountInString(line) 便宜。
+	// TruncateRunesNoEllipsis 走 byte-level 快路径且不分配 []rune；textutil 的
+	// ASCII "..." 与卡片的 U+2026 风格不一致，所以本地补 "…"。
 	truncated := textutil.TruncateRunesNoEllipsis(line, titleFallbackRuneLimit)
 	if truncated != line {
 		return truncated + "…"
@@ -523,14 +361,8 @@ func jobTitleOrFallback(j *Job) string {
 
 // cronParseOptions is the single source of truth for the field set the cron
 // schedule grammar accepts: standard 5-field (Minute/Hour/Dom/Month/Dow) plus
-// @descriptors (@daily, @every 5m, …). Hoisted out of the cronParser var
-// initialiser (R249-ARCH-24 / #988) so the accepted-field bitmask is a named,
-// documented constant rather than a magic literal buried in a package-var
-// init — the field set is now stated once and any future widening (e.g.
-// adding robfigcron.Second) changes exactly this constant. A full move onto a
-// Scheduler field seeded from cfg still needs design (touches scheduler.go),
-// but this localises and names the binding as the first behaviour-preserving
-// step.
+// @descriptors (@daily, @every 5m, …). Widening (e.g. Second) changes exactly
+// this constant (#988).
 const cronParseOptions = robfigcron.Minute | robfigcron.Hour | robfigcron.Dom |
 	robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor
 
@@ -556,15 +388,10 @@ const (
 	missedScheduleSlackDen       = 2
 )
 
-// schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
-// 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
-// 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
-// 时返回 0，调用方自行决定 fallback。
-//
-// now 必须由调用方显式提供，保证和上层 HasMissedSchedule /
-// previousTickBefore 读取的"现在"完全同步——避免在 DST 切换或 NTP 校
-// 正瞬间两者跨越不同小时，导致 period 估成 23h/25h 而产生 missed 假
-// 判定。applyJitter 不在意这种纳秒级 skew，传 time.Now() 即可。
+// schedulePeriod 估算给定 cron 表达式在 now 附近的周期（sched.Next 两次外推）。
+// 无法解析 / 不等间隔（DST 切换窗口）时返回 0。now 必须由调用方显式提供，
+// 与 HasMissedSchedule / previousTickBefore 读取的"现在"完全同步，避免跨
+// 越 DST/NTP 校正瞬间把 period 估成 23h/25h 而误判 missed。
 func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
@@ -574,29 +401,11 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 }
 
 // previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
-// robfig/cron 只提供 Next()，没有 Prev()。这里用"从 now 回推 3 × period
-// 的窗口，在窗口内用 sched.Next(起点) 逼近最接近 now 的 tick"的办法：
-//
-//  1. 先估计 period（Next 两次）
-//  2. 起点 = now - 3 × period（保证至少覆盖一个完整周期）
-//  3. 起点不断 Next，直到下一次 Next 超过 now；此时当前 Next 即为"最后
-//     一次 ≤ now 的触发时刻"。
-//
-// 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
-// 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
-// 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
-//
-// R249-CR-10 (#954): 这是包内 unexported 的字符串入口帮助函数，唯一调用者是
-// missed_test.go——生产路径全部走 previousTickBeforeFromSched（HasMissedSchedule
-// 已 Parse 一次后复用 sched，避免重复正则）。保留它是为了让测试能用字符串
-// schedule 直测回推逻辑，并非有跨包消费者（unexported 不可能被其他包用）。
+// robfig/cron 只有 Next()：从 now - 3×period 起反复 Next 直到超过 now，
+// 上一个值即为答案。窗口乘 3 是给 DST / 月份 / 闰年这类非等间隔形态留裕量。
+// 无法解析的 schedule 返回零值 time。生产路径走 previousTickBeforeFromSched
+// 复用已 Parse 的 sched；本字符串入口仅供包内测试直测回推逻辑。
 func previousTickBefore(schedule string, now time.Time) time.Time {
-	// R246-PERF-4: previously this called schedulePeriod(schedule, now)
-	// which re-Parses the same expression we already parsed above.
-	// cronParser.Parse is the dominant cost in this hot path
-	// (HasMissedSchedule fans out across all jobs on every dashboard
-	// list / metrics tick); folding the two calls into one Parse + a
-	// FromSched helper is a free win.
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return time.Time{}
@@ -609,12 +418,7 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
-// 避免在 HasMissedSchedule 路径上重复 Parse。R238-PERF-2。
-//
-// R250-CR-6 (#1139): schedulePeriod 是包内 unexported 帮助函数（不是“公开
-// 签名”——没有跨包消费者）。当前唯一生产调用点是 applyJitter（scheduler_run.go
-// 的 entryID==0 fallback 路径），加上包内 jitter_test.go。保留它是因为字符串
-// 入口仍被 fallback 路径使用，并非“其他包测试有用”——旧注释的措辞已纠正。
+// 避免在 HasMissedSchedule 路径上重复 Parse。
 func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Duration {
 	first := sched.Next(now)
 	second := sched.Next(first)
@@ -622,9 +426,8 @@ func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Dura
 }
 
 // previousTickBeforeFromSched 同 previousTickBefore，但接受已解析的 sched +
-// 已知 period，避免在 HasMissedSchedule 路径上重复 Parse / 重复估算 period。
-// 上限守卫与 previousTickBefore 保持一致：previousTickMaxIter（1000）足以覆盖
-// 任何合法 cron schedule 在 3×period 窗口内的迭代次数。R238-PERF-2。
+// 已知 period。previousTickMaxIter 足以覆盖任何合法 schedule 在 3×period
+// 窗口内的迭代次数。
 func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration, now time.Time) time.Time {
 	if period <= 0 {
 		return time.Time{}
@@ -642,39 +445,22 @@ func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration
 	return prev
 }
 
-// HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期）。
-// 返回 (missed, prevExpectedAt)：prevExpectedAt 是"按 schedule 算上一次
-// 应该跑的时刻"，调用方可用来显示 "上次应跑于 …"。
-//
-// 判定规则：
+// HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期），
+// 返回 (missed, prevExpectedAt)。规则：
 //  1. schedule 无法解析 / period<=0 → 不算 missed（保守）。
-//  2. startedAt 不为零且 now - startedAt < 5 × period：刚启动的抑制窗口，
-//     避免刚 boot 时所有长周期 job 都被误判 missed。测试可以传
-//     time.Time{} 绕过。
-//  3. 从未跑过 (LastRunAt.IsZero)：若 now - CreatedAt > period 则判 missed
-//     （任务创建后本应至少跑过一次）。
-//  4. 跑过：若 prevExpectedAt - LastRunAt > period × 1.5 则判 missed
-//     （允许 50% 裕量应对 jitter + 轻微延迟）。
-//
-// 性能：单次 cronParser.Parse + 1×schedulePeriodFromSched + 1×previousTickBeforeFromSched，
-// 比走公开 schedulePeriod / previousTickBefore 路径少 2 次正则 Parse。R238-PERF-2。
-//
-// 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
+//  2. now - startedAt < missedScheduleSuppressFactor × period：刚启动抑制窗口；
+//     测试可传 time.Time{} 绕过。
+//  3. 从未跑过：now - CreatedAt > period × 1.5 则判 missed（paused 除外）。
+//  4. 跑过：prevExpectedAt - LastRunAt > period × 1.5 则判 missed（裕量应对
+//     jitter + 轻微延迟）。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	return hasMissedScheduleImpl(j, nil, 0, now, startedAt)
 }
 
 // HasMissedScheduleCached is the alloc-free variant of HasMissedSchedule for
-// the dashboard 1Hz handleList fanout (R241-PERF-3 / #477). When the caller
-// holds a *Job whose registerJob has run, j.cachedSched is non-nil and the
-// helper skips the cronParser.Parse regex (the dominant cost at 50 jobs/s).
-// Falls back to the parse path when the cache is cold (test fixtures, jobs
-// loaded via JSON without registerJob, transient registerJob failure) so
-// behaviour matches HasMissedSchedule on every input.
-//
-// The parse-saving optimisation is otherwise identical to HasMissedSchedule:
-// same suppression window, same period derivation, same prev-tick guard,
-// same return shape. Document changes there propagate here.
+// the dashboard 1Hz handleList fanout (#477): when registerJob has run,
+// j.cachedSched / j.cachedPeriod skip the cronParser.Parse regex. Falls back
+// to the parse path on a cold cache so behaviour matches HasMissedSchedule.
 func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
@@ -683,11 +469,8 @@ func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time)
 }
 
 // hasMissedScheduleImpl is the shared body of HasMissedSchedule and
-// HasMissedScheduleCached. cached, when non-nil, lets the caller skip the
-// regex parse; on cold cache the caller passes nil and we fall through to
-// cronParser.Parse so test fixtures keep working.
-// cachedPeriod, when >0, skips the 2x sched.Next call inside
-// schedulePeriodFromSched (R20260603040203-PERF-9); pass 0 to recompute.
+// HasMissedScheduleCached. cached (non-nil) skips the regex parse and
+// cachedPeriod (>0) skips the 2× sched.Next; zero values recompute.
 func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time.Duration, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
@@ -715,21 +498,15 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
-		// R20260609-COR-004 (#1979): a paused never-run job has had no fair
-		// chance to fire. The startedAt suppression above only covers the
-		// process-startup window, not a job that was created paused and only
-		// just resumed, so guard the never-run branch on Paused to avoid a
-		// spurious missed badge the instant such a job resumes.
+		// A paused never-run job has had no fair chance to fire; the startedAt
+		// suppression only covers process startup, not a job created paused and
+		// just resumed (#1979).
 		if j.Paused {
 			return false, time.Time{}
 		}
-		// R20260603140013-CR-5: never-run jobs must use the same slack factor as
-		// the already-run branch below. The bare `> period` threshold left no
-		// jitter headroom, so a healthy job whose first scheduled tick landed
-		// inside its jitter window (default up to 30s) was flagged as missed
-		// before it ever had a fair chance to fire. Mirror the already-run
-		// slack (period*missedScheduleSlackNum/missedScheduleSlackDen) so a
-		// period+jitter delay stays under the threshold.
+		// Never-run jobs use the same slack factor as the already-run branch:
+		// a bare `> period` threshold flagged a healthy job whose first tick landed
+		// inside its jitter window as missed.
 		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period*missedScheduleSlackNum/missedScheduleSlackDen {
 			return true, prev
 		}
@@ -741,17 +518,11 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 	return false, time.Time{}
 }
 
-// validateSchedule checks if the cron expression is valid and respects the minimum interval.
-//
-// loc is the timezone in which the schedule will eventually be evaluated by the
-// scheduler. R20260527122801-CR-7 (#1321): historically `time.Now()` (Local)
-// was used to seed the interval probe, while registerJob registers the entry
-// with WithLocation(s.location). On DST transitions or month-end "every N
-// months" forms the two reference frames disagree — a schedule could pass the
-// minCronInterval floor here but actually fire faster under cfg.Location.
-// Pass the scheduler's effective location so the validation seed and runtime
-// match. nil falls back to time.Local for the legacy free-standing path
-// (tests / pre-Scheduler bootstraps that don't have a location yet).
+// validateSchedule checks if the cron expression is valid and respects the
+// minimum interval. loc is the timezone the scheduler will evaluate the
+// schedule in (WithLocation); seeding the probe in the same frame keeps DST /
+// month-end forms from passing here but firing faster at runtime (#1321).
+// nil falls back to time.Local for callers without a location yet.
 func validateSchedule(schedule string, loc *time.Location) error {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
@@ -760,29 +531,15 @@ func validateSchedule(schedule string, loc *time.Location) error {
 	if loc == nil {
 		loc = time.Local
 	}
-	// Check that the interval between the first two runs is at least minCronInterval.
-	//
-	// R249-CR-22 (#965): seed the interval probe from a FIXED reference instant
-	// rather than time.Now(). With time.Now() the two-Next probe occasionally
-	// straddled a DST transition — e.g. a spring-forward run made a genuine
-	// every-5-minutes schedule appear ~1h apart (or a fall-back run inflated an
-	// hourly schedule), so the minCronInterval floor would mis-classify the
-	// interval depending on the wall-clock minute the operator happened to save
-	// the job. A fixed mid-January noon is DST-quiet in every IANA zone (no zone
-	// transitions occur at 2024-01-15 12:00 local), so the probe measures the
-	// schedule's intrinsic interval deterministically. Anchored in loc so the
-	// validation frame still matches the runtime WithLocation(loc) registration
-	// (#1321): the date is interpreted in the operator's timezone, only the
-	// instant is pinned away from transition boundaries.
+	// Probe from a FIXED DST-quiet instant (mid-January noon in loc) rather than
+	// time.Now(): a probe straddling a DST transition made a genuine 5-minute
+	// schedule look ~1h apart, or an hourly one inflated, depending on when the
+	// operator saved the job (#965).
 	ref := time.Date(2024, time.January, 15, 12, 0, 0, 0, loc)
 	first := sched.Next(ref)
 	second := sched.Next(first)
-	// R236-QA-07: drop the `interval > 0` guard. Previously a degenerate
-	// schedule whose second tick equaled (or preceded) the first — interval
-	// == 0 or negative — slipped past the floor and would fire as fast as
-	// the dispatcher could observe the tick. minCronInterval is a positive
-	// constant (5m) so `interval < minCronInterval` correctly rejects 0,
-	// negatives, and anything below the floor in one expression.
+	// No `interval > 0` guard: minCronInterval is positive, so this also rejects
+	// zero / negative intervals.
 	if interval := second.Sub(first); interval < minCronInterval {
 		return fmt.Errorf("interval %v is too short, minimum is %v", interval, minCronInterval)
 	}
