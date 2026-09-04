@@ -296,6 +296,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if appCtx.Err() != nil {
 				return // connector shutting down
 			}
+			// Empty AgentOpts by design: the remote node has no agents registry,
+			// so per-agent overrides (model / args / system_prompt, #2493) do
+			// not cross the node boundary on takeover.
 			if _, err := c.router.Takeover(appCtx, key, sessionID, cwd, session.AgentOpts{}); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
@@ -433,7 +436,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 				Exempt:    true,
 			}
 			if prompt := c.projMgr.EffectivePlannerPrompt(proj); prompt != "" {
-				opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+				opts.SystemPrompt = prompt // #2493: dedicated field, not ExtraArgs
 			}
 		}
 		if _, err := c.router.ResetAndRecreate(connCtx, plannerKey, opts); err != nil {

@@ -65,7 +65,7 @@ func spawnShimState(t *testing.T, r *Router, key, resumeID string, opts AgentOpt
 	if sp.Wrapper == nil {
 		t.Fatalf("no wrapper for backend %q", sp.BackendID)
 	}
-	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.Args)
+	spawnOpts := r.argvSpawnOptions(sp.Model, sp.Effort, r.cliDebugFileFor(key), sp.SystemPrompt, sp.Args)
 	spawnOpts.ResumeID = sp.ResumeID
 	overlay := sp.Overlay
 	spawnOpts.SpawnOverlay = &overlay

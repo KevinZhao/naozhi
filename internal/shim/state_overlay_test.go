@@ -22,6 +22,8 @@ func TestState_SpawnOverlay_RoundTrip(t *testing.T) {
 		CLIArgs: []string{"-p", "--model", "sonnet"},
 		SpawnOverlay: &SpawnOverlay{
 			Model: "sonnet", Effort: "max", ExtraArgs: []string{"--x", "1"}, AccessProfile: "work",
+			// #2493: multi-line prompt must survive JSON round-trip verbatim.
+			AppendSystemPrompt: "AGENT\n\n<selected_quote>\nq\n</selected_quote>",
 		},
 	}
 	if err := WriteStateFile(path, want); err != nil {
@@ -36,6 +38,7 @@ func TestState_SpawnOverlay_RoundTrip(t *testing.T) {
 	}
 	if got.SpawnOverlay.Model != "sonnet" || got.SpawnOverlay.Effort != "max" ||
 		got.SpawnOverlay.AccessProfile != "work" ||
+		got.SpawnOverlay.AppendSystemPrompt != want.SpawnOverlay.AppendSystemPrompt ||
 		!slices.Equal(got.SpawnOverlay.ExtraArgs, []string{"--x", "1"}) {
 		t.Errorf("SpawnOverlay = %+v, want %+v", *got.SpawnOverlay, *want.SpawnOverlay)
 	}

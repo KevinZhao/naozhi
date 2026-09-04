@@ -142,10 +142,9 @@ func legacyMerge(agents map[string]session.AgentOpts, binding session.ProjectBin
 				opts.Model = binding.PlannerModel
 			}
 			if binding.PlannerPrompt != "" {
-				opts.ExtraArgs = append(
-					opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
-					"--append-system-prompt", binding.PlannerPrompt,
-				)
+				// #2493: prompt layers into SystemPrompt (agent prompt
+				// first), never into ExtraArgs.
+				opts.SystemPrompt = session.JoinSystemPrompts(opts.SystemPrompt, binding.PlannerPrompt)
 			}
 		} else {
 			key = session.SessionKey(platform, chatType, chatID, agentID)

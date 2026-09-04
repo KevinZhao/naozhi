@@ -35,7 +35,11 @@ type AgentOpts struct {
 	// exists precisely so a background sweeper can run cheaper than an
 	// interactive planner. docs/rfc/kiro-effort-control.md
 	Effort string
-	Exempt bool
+	// SystemPrompt mirrors session.AgentOpts.SystemPrompt so a cron job
+	// inherits agents[<id>].system_prompt like any other session of that
+	// agent (#2493). Cron adds no layer of its own.
+	SystemPrompt string
+	Exempt       bool
 }
 
 // SessionStatus mirrors session.SessionStatus value-for-value. The

@@ -218,17 +218,59 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.MCPConfigFile != "" && !strings.HasPrefix(opts.MCPConfigFile, "-") && filepath.IsAbs(opts.MCPConfigFile) {
 		args = append(args, "--mcp-config", opts.MCPConfigFile)
 	}
+	// naozhi-owned system prompt (#2493). `--append-system-prompt` stays in
+	// deniedExtraFlags — this dedicated field is the escape hatch the denylist
+	// godoc prescribes, rendered OUTSIDE the ExtraArgs filter so the planner /
+	// scratch / agents[].system_prompt channels actually reach the CLI. Same
+	// leading-dash guard as the file-path fields above plus a NUL and byte-cap
+	// check (see SpawnOptions.AppendSystemPrompt); an invalid value is dropped
+	// whole and logged, never truncated.
+	if opts.AppendSystemPrompt != "" {
+		if reason := invalidAppendSystemPrompt(opts.AppendSystemPrompt); reason == "" {
+			args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
+		} else {
+			slog.Warn("cli: AppendSystemPrompt rejected by argv validator, spawning without it",
+				"reason", reason, "len", len(opts.AppendSystemPrompt))
+		}
+	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
+}
+
+// invalidAppendSystemPrompt returns "" when p may be emitted as the value of
+// `--append-system-prompt`, otherwise a short reason suitable for a log attr.
+// Callers have already sanitised at their own layer (SanitizeQuote,
+// sanitisePlannerPromptForSpawn, config validateSystemPrompt); this is the
+// argv-boundary backstop shared by every path, so a future caller that skips
+// its own check still cannot corrupt argv.
+func invalidAppendSystemPrompt(p string) string {
+	switch {
+	case strings.HasPrefix(p, "-"):
+		return "leading dash"
+	case strings.IndexByte(p, 0) >= 0:
+		return "NUL byte"
+	case len(p) > MaxAppendSystemPromptBytes:
+		return "exceeds byte cap"
+	}
+	return ""
 }
 
 // maxExtraArgsBytes caps the total byte length of opts.ExtraArgs joined. The
 // kernel's ARG_MAX is ~2 MiB on Linux; once argv+envp+padding crosses that,
 // exec returns E2BIG and the spawn fails opaquely. Realistic ExtraArgs payloads
-// (e.g. scratch session --append-system-prompt with 24 KiB quote +
-// project-level system prompts) stay well under 128 KiB. Drop the entire slice
-// rather than truncating mid-arg, since flag-value pairs cannot be safely cut.
+// (operator flags from cli.args / agents[].args) stay far under 128 KiB; the
+// system prompt no longer travels here (SpawnOptions.AppendSystemPrompt has
+// its own MaxAppendSystemPromptBytes budget). Drop the entire slice rather
+// than truncating mid-arg, since flag-value pairs cannot be safely cut.
 const maxExtraArgsBytes = 128 * 1024
+
+// IsDeniedExtraFlag reports whether a single argv token is one of the
+// deniedExtraFlags (bare `--name` or `--name=value` form) that BuildArgs
+// strips from SpawnOptions.ExtraArgs. Exported for the config loader so an
+// operator who writes such a flag under cli.args / cli.backends[].args /
+// agents[].args is told at load time — with the field path — instead of the
+// flag vanishing at spawn behind a generic per-spawn warning (#2493).
+func IsDeniedExtraFlag(arg string) bool { return isDeniedFlag(arg) }
 
 // capExtraArgsBytes guards against a runaway caller (or accumulated stacked
 // scratch contexts) producing an argv that exceeds ARG_MAX. After the byte cap
@@ -238,7 +280,7 @@ const maxExtraArgsBytes = 128 * 1024
 // mount attacker-supplied MCP servers, expand the file-read sandbox, or
 // disable the permission gate. The naozhi spawn pipeline already sets these
 // flags itself when needed (--dangerously-skip-permissions in BuildArgs,
-// --append-system-prompt by router/scratch via dedicated sites), so any
+// --append-system-prompt via SpawnOptions.AppendSystemPrompt), so any
 // occurrence inside ExtraArgs is by definition a duplicate or an injection.
 //
 // Returns the input unchanged when within the cap and free of disallowed
@@ -274,7 +316,7 @@ var deniedExtraFlags = map[string]struct{}{
 	"--mcp-config":                   {}, // loads attacker-controlled MCP server defs
 	"--add-dir":                      {}, // expands file-read sandbox
 	"--dangerously-skip-permissions": {}, // BuildArgs already controls this
-	"--append-system-prompt":         {}, // router/scratch own this site
+	"--append-system-prompt":         {}, // SpawnOptions.AppendSystemPrompt owns this site (#2493)
 	"--system-prompt":                {}, // hard override of system prompt
 	"--setting-sources":              {}, // BuildArgs pins "user" (load ~/.claude/settings.json)
 	"--settings":                     {}, // naozhi no longer injects a settings override file

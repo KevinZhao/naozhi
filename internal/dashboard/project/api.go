@@ -532,7 +532,7 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		// planner system prompt" rather than feeding control bytes /
 		// oversize argv into the CLI subprocess.
 		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
-			opts.ExtraArgs = []string{"--append-system-prompt", pp}
+			opts.SystemPrompt = pp // #2493: dedicated field, not ExtraArgs
 		}
 	}
 

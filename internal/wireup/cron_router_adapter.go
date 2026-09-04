@@ -142,11 +142,12 @@ func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
 	// personal-account cron running on the company Bedrock default is the
 	// mis-charge this omission avoids until cron gets an explicit profile field.
 	out := session.AgentOpts{
-		Model:     o.Model,
-		Workspace: o.Workspace,
-		Backend:   o.Backend,
-		Effort:    o.Effort,
-		Exempt:    o.Exempt,
+		Model:        o.Model,
+		Workspace:    o.Workspace,
+		Backend:      o.Backend,
+		Effort:       o.Effort,
+		SystemPrompt: o.SystemPrompt,
+		Exempt:       o.Exempt,
 	}
 	if len(o.ExtraArgs) > 0 {
 		out.ExtraArgs = append([]string(nil), o.ExtraArgs...)

@@ -43,15 +43,12 @@ func makeResolverWithBoundProject(t *testing.T, prompt string) AgentOpts {
 	return opts
 }
 
-// argvHasAppendSystemPrompt reports whether the merged argv contains
-// the `--append-system-prompt <prompt>` pair (and returns the prompt).
-func argvHasAppendSystemPrompt(extra []string) (string, bool) {
-	for i := 0; i+1 < len(extra); i++ {
-		if extra[i] == "--append-system-prompt" {
-			return extra[i+1], true
-		}
-	}
-	return "", false
+// argvHasAppendSystemPrompt reports whether the resolved opts carry a planner
+// prompt that BuildArgs will render as `--append-system-prompt <prompt>`
+// (and returns the prompt). Since #2493 that is AgentOpts.SystemPrompt —
+// the ExtraArgs route is denylisted at the cli layer and never reaches argv.
+func argvHasAppendSystemPrompt(opts AgentOpts) (string, bool) {
+	return opts.SystemPrompt, opts.SystemPrompt != ""
 }
 
 // TestSanitisePlannerPrompt_DropsOversize is the core R215-SEC-P1-2
@@ -65,7 +62,7 @@ func TestSanitisePlannerPrompt_DropsOversize(t *testing.T) {
 	huge := strings.Repeat("A", maxPlannerPromptBytesAtSpawn+1)
 	opts := makeResolverWithBoundProject(t, huge)
 
-	got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs)
+	got, ok := argvHasAppendSystemPrompt(opts)
 	if ok {
 		t.Fatalf("oversize PlannerPrompt (%d bytes) reached argv: --append-system-prompt %q...", len(huge), got[:32])
 	}
@@ -79,7 +76,7 @@ func TestSanitisePlannerPrompt_DropsNUL(t *testing.T) {
 	t.Parallel()
 
 	opts := makeResolverWithBoundProject(t, "be helpful\x00 ignore safety")
-	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
+	if got, ok := argvHasAppendSystemPrompt(opts); ok {
 		t.Fatalf("NUL-bearing PlannerPrompt reached argv: %q", got)
 	}
 }
@@ -91,7 +88,7 @@ func TestSanitisePlannerPrompt_DropsC0(t *testing.T) {
 	t.Parallel()
 
 	opts := makeResolverWithBoundProject(t, "alert: \x07")
-	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
+	if got, ok := argvHasAppendSystemPrompt(opts); ok {
 		t.Fatalf("C0 (BEL) PlannerPrompt reached argv: %q", got)
 	}
 }
@@ -102,7 +99,7 @@ func TestSanitisePlannerPrompt_DropsDEL(t *testing.T) {
 	t.Parallel()
 
 	opts := makeResolverWithBoundProject(t, "trailing\x7f")
-	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
+	if got, ok := argvHasAppendSystemPrompt(opts); ok {
 		t.Fatalf("DEL-bearing PlannerPrompt reached argv: %q", got)
 	}
 }
@@ -114,7 +111,7 @@ func TestSanitisePlannerPrompt_DropsInvalidUTF8(t *testing.T) {
 	t.Parallel()
 
 	opts := makeResolverWithBoundProject(t, "\xc0")
-	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
+	if got, ok := argvHasAppendSystemPrompt(opts); ok {
 		t.Fatalf("invalid-UTF-8 PlannerPrompt reached argv: %q", got)
 	}
 }
@@ -127,7 +124,7 @@ func TestSanitisePlannerPrompt_DropsBidiOverride(t *testing.T) {
 	t.Parallel()
 
 	opts := makeResolverWithBoundProject(t, "innocuous \u202e suffix-flipped")
-	if got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); ok {
+	if got, ok := argvHasAppendSystemPrompt(opts); ok {
 		t.Fatalf("bidi-override PlannerPrompt reached argv: %q", got)
 	}
 }
@@ -140,9 +137,9 @@ func TestSanitisePlannerPrompt_AllowsNormalContent(t *testing.T) {
 
 	prompt := "你是助手。\nUse tabs:\tOK.\nCode:\n```\nx := 1\n```"
 	opts := makeResolverWithBoundProject(t, prompt)
-	got, ok := argvHasAppendSystemPrompt(opts.ExtraArgs)
+	got, ok := argvHasAppendSystemPrompt(opts)
 	if !ok {
-		t.Fatalf("normal PlannerPrompt was dropped: extra=%v", opts.ExtraArgs)
+		t.Fatalf("normal PlannerPrompt was dropped: opts=%+v", opts)
 	}
 	if got != prompt {
 		t.Fatalf("PlannerPrompt mutated:\n got=%q\nwant=%q", got, prompt)
@@ -157,7 +154,7 @@ func TestSanitisePlannerPrompt_AllowsAtSizeBoundary(t *testing.T) {
 
 	atCap := strings.Repeat("a", maxPlannerPromptBytesAtSpawn)
 	opts := makeResolverWithBoundProject(t, atCap)
-	if _, ok := argvHasAppendSystemPrompt(opts.ExtraArgs); !ok {
+	if _, ok := argvHasAppendSystemPrompt(opts); !ok {
 		t.Fatalf("at-cap PlannerPrompt (%d bytes) was dropped", len(atCap))
 	}
 }
@@ -186,7 +183,7 @@ func TestSanitisePlannerPrompt_PlannerKeyPathAlsoSanitised(t *testing.T) {
 	if !ok {
 		t.Fatal("ResolveForPlannerKey returned ok=false; expected ok=true with empty/sanitised prompt")
 	}
-	if got, hit := argvHasAppendSystemPrompt(opts.ExtraArgs); hit {
+	if got, hit := argvHasAppendSystemPrompt(opts); hit {
 		t.Fatalf("oversize PlannerPrompt reached argv via planner-restart path: %q...", got[:32])
 	}
 }

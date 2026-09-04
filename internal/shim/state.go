@@ -89,6 +89,12 @@ type SpawnOverlay struct {
 	// at compare time, so the ID — not the model it resolved to — is what
 	// travels.
 	AccessProfile string `json:"access_profile,omitempty"`
+	// AppendSystemPrompt is the layered session.AgentOpts.SystemPrompt
+	// (agents[].system_prompt + planner prompt / scratch context) that the
+	// spawn rendered as `--append-system-prompt` (#2493). Recorded so the
+	// drift rebuild reproduces the same argv; without it every prompted
+	// session would be misread as drift on each restart (#2494 for prompts).
+	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
 }
 
 // EncodeSpawnOverlay serialises ov for the --spawn-overlay flag. Nil encodes

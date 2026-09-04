@@ -416,6 +416,9 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
 			Model:     agentOpts.Model,
 			ExtraArgs: agentOpts.ExtraArgs,
+			// #2493: carry the agent's standing system prompt so a taken-over
+			// session spawns with the same instructions as a fresh one.
+			SystemPrompt: agentOpts.SystemPrompt,
 		})
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)

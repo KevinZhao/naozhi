@@ -130,15 +130,18 @@ func TestScratchPool_OpenRegistersByKey(t *testing.T) {
 	if opts.Model != "opus" {
 		t.Errorf("model inheritance broken: %q", opts.Model)
 	}
-	if len(opts.ExtraArgs) < 2 {
-		t.Fatalf("ExtraArgs missing append-system-prompt: %v", opts.ExtraArgs)
+	// #2493: the quote rides in the dedicated SystemPrompt field, never in
+	// ExtraArgs (where --append-system-prompt is denylisted and stripped).
+	if opts.SystemPrompt == "" {
+		t.Fatalf("SystemPrompt missing scratch prompt: %+v", opts)
 	}
-	last := opts.ExtraArgs[len(opts.ExtraArgs)-2]
-	if last != "--append-system-prompt" {
-		t.Errorf("tail arg not append-system-prompt: %q", last)
-	}
-	if !strings.Contains(opts.ExtraArgs[len(opts.ExtraArgs)-1], "what does this mean?") {
+	if !strings.Contains(opts.SystemPrompt, "what does this mean?") {
 		t.Errorf("prompt body missing quote")
+	}
+	for _, a := range opts.ExtraArgs {
+		if a == "--append-system-prompt" {
+			t.Errorf("scratch prompt leaked into ExtraArgs (would be stripped by cli denylist): %v", opts.ExtraArgs)
+		}
 	}
 	if opts.Exempt {
 		t.Error("scratch opts should not be exempt")
@@ -422,7 +425,7 @@ func TestScratchPool_OpenInjectsContextBlock(t *testing.T) {
 	if sc.ContextTrunc {
 		t.Error("context should not be truncated under full budget")
 	}
-	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	prompt := sc.BaseOpts.SystemPrompt
 	if !strings.Contains(prompt, "<conversation_context>") {
 		t.Errorf("prompt missing <conversation_context> block: %q", prompt)
 	}
@@ -455,7 +458,7 @@ func TestScratchPool_OpenNoContext(t *testing.T) {
 	if sc.ContextTurns != 0 || sc.ContextTrunc {
 		t.Errorf("unexpected context metadata: turns=%d trunc=%v", sc.ContextTurns, sc.ContextTrunc)
 	}
-	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	prompt := sc.BaseOpts.SystemPrompt
 	if strings.Contains(prompt, "<conversation_context>") {
 		t.Errorf("empty context should skip the block, got %q", prompt)
 	}
@@ -482,7 +485,7 @@ func TestScratchPool_OpenContextSharesBudgetWithQuote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	prompt := sc.BaseOpts.SystemPrompt
 	if len(prompt) > MaxScratchContextBytes+512 { // +512 for wrapper + templates
 		t.Errorf("prompt length %d exceeds budget+overhead", len(prompt))
 	}

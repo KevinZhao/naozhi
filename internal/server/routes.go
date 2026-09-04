@@ -802,8 +802,7 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 					opts.Model = m
 				}
 				if prompt := projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-					opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
-						"--append-system-prompt", prompt)
+					opts.SystemPrompt = session.JoinSystemPrompts(opts.SystemPrompt, prompt) // #2493: layered, opts is a copy
 				}
 			}
 		}
