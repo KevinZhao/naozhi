@@ -112,9 +112,12 @@ const maxModelBytes = 128
 // (e.g. `--model -rce` could otherwise be parsed by the CLI as a separate flag).
 // `:` and `/` are allowed because AWS Bedrock model IDs and inference profile
 // ARNs use them (e.g. `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0`).
+// `[` `]` are allowed for the claude CLI's context-window suffix
+// (`…-fable-5-1[1m]`), which the CLI reports as the session's model and the
+// dashboard popover offers back (see tuningspec.modelNameRe).
 // R218-SEC-3 / R218B-SEC-3: keep the leading char gate strict; relaxing it to
 // allow `:` or `/` at the start would re-open the flag-injection surface.
-var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
+var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\[\]\-]*$`)
 
 // validateModel returns nil for empty (use router default) or any string
 // matching modelRe under the byte cap; otherwise returns ErrInvalidModel.
@@ -126,7 +129,7 @@ func validateModel(model string) error {
 		return fmt.Errorf("%w: exceeds %d bytes", ErrInvalidModel, maxModelBytes)
 	}
 	if !modelRe.MatchString(model) {
-		return fmt.Errorf("%w: must be alphanumeric with optional dots, colons, hyphens or underscores", ErrInvalidModel)
+		return fmt.Errorf("%w: must be alphanumeric with optional dots, colons, slashes, brackets, hyphens or underscores", ErrInvalidModel)
 	}
 	return nil
 }

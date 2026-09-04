@@ -96,8 +96,9 @@ const maxMemoryFileBytes = 2048
 // plannerModelRe restricts the model identifier to safe characters so a
 // crafted value cannot sneak extra CLI flags (e.g. " --dangerously-skip-permissions")
 // into the exec.Command argv for the planner CLI. Whitespace, dashes at the
-// start, and control characters are rejected.
-var plannerModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
+// start, and control characters are rejected. `[` `]` admit the claude
+// CLI's context-window suffix (`…-fable-5-1[1m]`), same as session.modelRe.
+var plannerModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\[\]\-]*$`)
 
 // ErrInvalidConfig is returned when ValidateConfig rejects untrusted input.
 // Callers should map it to an HTTP 400 or RPC client error.
