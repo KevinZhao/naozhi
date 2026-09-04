@@ -152,7 +152,7 @@
   {
     "method": "GET",
     "path": "/api/planner/stats",
-    "handler_type": "*Server"
+    "handler_type": "*planner.Handlers"
   },
   {
     "method": "GET",
@@ -307,22 +307,22 @@
   {
     "method": "GET",
     "path": "/api/system/daemons",
-    "handler_type": "*Server"
+    "handler_type": "*system.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/system/labels/clear-origin",
-    "handler_type": "*Server"
+    "handler_type": "*system.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/system/update",
-    "handler_type": "*Server"
+    "handler_type": "*system.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/system/update/apply",
-    "handler_type": "*Server"
+    "handler_type": "*system.Handlers"
   },
   {
     "method": "POST",

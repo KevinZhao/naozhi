@@ -296,6 +296,8 @@ var serverFieldType = map[string]string{
 	"memoryH":           "*memory.Handler",
 	"ccAssetsH":         "*extccassets.Handler",
 	"healthH":           "*HealthHandler",
+	"systemH":           "*system.Handlers",
+	"plannerH":          "*planner.Handlers",
 	"auth":              "*auth.Handlers",
 	"hub":               "*Hub",
 	"reverseNodeServer": "*node.ReverseServer",
